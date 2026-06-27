@@ -12,9 +12,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use support::{
-    free_tcp_port, temp_workspace, v8_runner_command, wait_for_file, write_shell_script_atomically,
-};
+use support::{free_tcp_port, temp_workspace, v8_runner_command, write_shell_script_atomically};
 
 fn write_script(path: &Path) {
     write_shell_script_atomically(path, "sleep 1");
@@ -28,11 +26,24 @@ fn write_logging_script(path: &Path, args_log: &Path) {
 }
 
 fn read_args_log(path: &Path) -> String {
-    assert!(
-        wait_for_file(path, Duration::from_secs(2)),
-        "args log exists"
-    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut previous = None;
+    while Instant::now() < deadline {
+        if let Ok(args) = fs::read_to_string(path) {
+            if previous.as_ref().is_some_and(|last| last == &args) {
+                return args;
+            }
+            previous = (!args.is_empty()).then_some(args);
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
     fs::read_to_string(path).expect("args log")
+}
+
+struct FakeHttpRequest {
+    method: String,
+    session_id: Option<String>,
+    body: Option<Value>,
 }
 
 fn start_fake_mcp_server(tools: &[&str]) -> (u16, JoinHandle<()>) {
@@ -69,20 +80,31 @@ fn start_fake_mcp_server(tools: &[&str]) -> (u16, JoinHandle<()>) {
             stream
                 .set_nonblocking(false)
                 .expect("fake MCP blocking stream");
-            let (http_method, request) = read_http_json_request(&mut stream);
-            if http_method == "DELETE" {
+            let http_request = read_http_json_request(&mut stream);
+            if http_request.method == "DELETE" {
+                assert_eq!(
+                    http_request.session_id.as_deref(),
+                    Some("fake-session"),
+                    "DELETE must reuse the initialized MCP session"
+                );
                 write!(stream, "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n",)
                     .expect("write delete response");
                 continue;
             }
-            let request = request.expect("json rpc body");
+            let request = http_request.body.expect("json rpc body");
             let method = request["method"].as_str().unwrap_or_default();
             let result = match method {
-                "initialize" => json!({
-                    "protocolVersion": "2025-11-25",
-                    "capabilities": {},
-                    "serverInfo": { "name": "fake-client-mcp", "version": "1" }
-                }),
+                "initialize" => {
+                    assert!(
+                        http_request.session_id.is_none(),
+                        "initialize must start without a previous MCP session"
+                    );
+                    json!({
+                        "protocolVersion": "2025-11-25",
+                        "capabilities": {},
+                        "serverInfo": { "name": "fake-client-mcp", "version": "1" }
+                    })
+                }
                 "tools/list" => json!({
                     "tools": tools.iter().map(|name| {
                         json!({
@@ -93,6 +115,11 @@ fn start_fake_mcp_server(tools: &[&str]) -> (u16, JoinHandle<()>) {
                     }).collect::<Vec<_>>()
                 }),
                 "notifications/initialized" => {
+                    assert_eq!(
+                        http_request.session_id.as_deref(),
+                        Some("fake-session"),
+                        "notifications/initialized must use the initialized MCP session"
+                    );
                     initialized_notification_seen = true;
                     write!(stream, "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n",)
                         .expect("write initialized response");
@@ -104,6 +131,11 @@ fn start_fake_mcp_server(tools: &[&str]) -> (u16, JoinHandle<()>) {
                 initialize_count += 1;
             }
             if method == "tools/list" {
+                assert_eq!(
+                    http_request.session_id.as_deref(),
+                    Some("fake-session"),
+                    "tools/list must use the initialized MCP session"
+                );
                 assert!(
                     initialized_notification_seen,
                     "tools/list must be requested after notifications/initialized"
@@ -137,7 +169,7 @@ fn start_fake_mcp_server(tools: &[&str]) -> (u16, JoinHandle<()>) {
     (port, handle)
 }
 
-fn read_http_json_request(stream: &mut TcpStream) -> (String, Option<Value>) {
+fn read_http_json_request(stream: &mut TcpStream) -> FakeHttpRequest {
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("read timeout");
@@ -147,7 +179,7 @@ fn read_http_json_request(stream: &mut TcpStream) -> (String, Option<Value>) {
         let read = stream.read(&mut buffer).expect("read request");
         assert!(read > 0, "request closed before body");
         bytes.extend_from_slice(&buffer[..read]);
-        if let Some((method, body_start, content_length)) = http_body_bounds(&bytes) {
+        if let Some((method, session_id, body_start, content_length)) = http_body_bounds(&bytes) {
             if bytes.len() >= body_start + content_length {
                 let body = if content_length == 0 {
                     None
@@ -157,13 +189,17 @@ fn read_http_json_request(stream: &mut TcpStream) -> (String, Option<Value>) {
                             .expect("request json"),
                     )
                 };
-                return (method, body);
+                return FakeHttpRequest {
+                    method,
+                    session_id,
+                    body,
+                };
             }
         }
     }
 }
 
-fn http_body_bounds(bytes: &[u8]) -> Option<(String, usize, usize)> {
+fn http_body_bounds(bytes: &[u8]) -> Option<(String, Option<String>, usize, usize)> {
     let header_end = bytes.windows(4).position(|window| window == b"\r\n\r\n")?;
     let headers = String::from_utf8_lossy(&bytes[..header_end]);
     let method = headers
@@ -172,13 +208,18 @@ fn http_body_bounds(bytes: &[u8]) -> Option<(String, usize, usize)> {
         .and_then(|line| line.split_whitespace().next())
         .unwrap_or_default()
         .to_owned();
+    let session_id = headers
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.eq_ignore_ascii_case("mcp-session-id"))
+        .map(|(_, value)| value.trim().to_owned());
     let content_length = headers
         .lines()
         .filter_map(|line| line.split_once(':'))
         .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
         .and_then(|(_, value)| value.trim().parse::<usize>().ok())
         .unwrap_or(0);
-    Some((method, header_end + 4, content_length))
+    Some((method, session_id, header_end + 4, content_length))
 }
 
 fn prepend_config(path: &Path, prefix: &str) {

@@ -325,9 +325,13 @@ mod tests {
 
     fn read_args_log(path: &Path) -> String {
         let deadline = Instant::now() + Duration::from_secs(2);
+        let mut previous = None;
         while Instant::now() < deadline {
             if let Ok(args) = fs::read_to_string(path) {
-                return args;
+                if previous.as_ref().is_some_and(|last| last == &args) {
+                    return args;
+                }
+                previous = (!args.is_empty()).then_some(args);
             }
             std::thread::sleep(Duration::from_millis(10));
         }

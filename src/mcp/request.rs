@@ -77,7 +77,7 @@ pub struct McpDumpConfigRequest {
 pub struct McpLaunchAppRequest {
     /// Raw utility alias from the MCP tool surface.
     #[schemars(
-        description = "Client type to launch. Supported aliases: mcp; thin-client, тонкий клиент, тонкий, thin client, thin, tc; thick-client, толстый клиент, толстый, thick client, thick; designer, конфигуратор, configurator."
+        description = "Client type to launch. Examples: mcp, client-mcp; thin-client, thin, tc; thick-client, thick; designer, configurator."
     )]
     pub utility_type: String,
     /// Optional client-side MCP scenario. Use `va` for Vanessa Automation MCP.
@@ -231,7 +231,7 @@ mod tests {
         let launch_json = serde_json::to_value(launch).expect("schema json");
         assert_eq!(
             launch_json["properties"]["utilityType"]["description"],
-            "Client type to launch. Supported aliases: mcp; thin-client, тонкий клиент, тонкий, thin client, thin, tc; thick-client, толстый клиент, толстый, thick client, thick; designer, конфигуратор, configurator."
+            "Client type to launch. Examples: mcp, client-mcp; thin-client, thin, tc; thick-client, thick; designer, configurator."
         );
         assert_eq!(
             launch_json["properties"]["waitReady"]["description"],

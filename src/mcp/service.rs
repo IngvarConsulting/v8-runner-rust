@@ -4,7 +4,6 @@ use std::time::Instant;
 
 use crate::command_envelope::{test_envelope, Envelope, EnvelopeError};
 use crate::config::model::AppConfig;
-use crate::domain::execution::ExecutionTimeouts;
 use crate::domain::runner::{
     ExecutionPolicy, LaunchClientModeRequest, LaunchOptions, RunnerKind, RunnerOutputFormat,
     RunnerProfile, ScenarioExecutionRequest,
@@ -28,10 +27,11 @@ use crate::support::adapter_input::{
 use crate::support::path::is_safe_path_segment;
 use crate::use_cases::context::{CommandName, ExecutionContext, ExecutionTransport};
 use crate::use_cases::request::{
-    BuildRequest, ClientMcpAddonRequest, ClientMcpMode, ClientMcpOptionsRequest,
-    DesignerClientScope, DesignerClientScopes, DesignerConfigCheck, DesignerConfigChecks,
-    DesignerConfigSyntaxRequest, DesignerModulesSyntaxRequest, DumpModeRequest, DumpRequest,
-    LaunchRequest, SyntaxRequest, SyntaxTargetRequest, TestRequest, TestScopeRequest,
+    effective_test_timeouts, BuildRequest, ClientMcpAddonRequest, ClientMcpMode,
+    ClientMcpOptionsRequest, DesignerClientScope, DesignerClientScopes, DesignerConfigCheck,
+    DesignerConfigChecks, DesignerConfigSyntaxRequest, DesignerModulesSyntaxRequest,
+    DumpModeRequest, DumpRequest, LaunchRequest, SyntaxRequest, SyntaxTargetRequest, TestRequest,
+    TestScopeRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult};
 
@@ -377,11 +377,11 @@ fn map_run_all_tests_request(
 fn reject_vanessa_run_all_options_for_yaxunit(
     request: &McpRunAllTestsRequest,
 ) -> Result<(), McpServiceError<McpCommandEnvelope>> {
-    if request.profile.is_some()
-        || !request.feature.is_empty()
-        || !request.filter_tag.is_empty()
-        || !request.ignore_tag.is_empty()
-        || !request.scenario_filter.is_empty()
+    if normalize_optional_string(request.profile.as_deref()).is_some()
+        || !normalize_string_list(&request.feature).is_empty()
+        || !normalize_string_list(&request.filter_tag).is_empty()
+        || !normalize_string_list(&request.ignore_tag).is_empty()
+        || !normalize_string_list(&request.scenario_filter).is_empty()
     {
         return Err(test_adapter_business_error(
             UseCaseError::new(
@@ -544,17 +544,6 @@ fn normalize_string_list(values: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn effective_test_timeouts(
-    legacy_total_seconds: u64,
-    runner_timeouts: &ExecutionTimeouts,
-) -> ExecutionTimeouts {
-    let mut timeouts = runner_timeouts.clone();
-    if timeouts.total_ms.is_none() {
-        timeouts.total_ms = Some(legacy_total_seconds.saturating_mul(1_000));
-    }
-    timeouts
-}
-
 fn map_launch_app_request(
     request: &McpLaunchAppRequest,
 ) -> Result<LaunchRequest, McpServiceError<McpCommandEnvelope>> {
@@ -579,10 +568,10 @@ fn map_launch_app_request(
         });
     }
 
-    if request.mcp_config.is_some()
+    if normalize_optional_string(request.mcp_config.as_deref()).is_some()
         || request.mcp_port.is_some()
-        || request.mode.is_some()
-        || request.mcp_scenario.is_some()
+        || normalize_optional_string(request.mode.as_deref()).is_some()
+        || normalize_optional_string(request.mcp_scenario.as_deref()).is_some()
         || request.wait_ready.unwrap_or(false)
     {
         let error = UseCaseError::new(
@@ -1359,6 +1348,34 @@ mod tests {
     }
 
     #[test]
+    fn run_all_tests_ignores_blank_vanessa_options_for_yaxunit() {
+        let config = sample_config();
+        let service = McpService::with_port(
+            &config,
+            StubPort::with_test_result(Ok(sample_test_result(true))),
+        );
+
+        let response = service
+            .run_all_tests(
+                McpCallContext::stdio(),
+                &McpRunAllTestsRequest {
+                    profile: Some(" ".to_owned()),
+                    feature: vec![" ".to_owned()],
+                    filter_tag: vec!["".to_owned()],
+                    ignore_tag: vec![" \t ".to_owned()],
+                    scenario_filter: vec![" ".to_owned()],
+                    ..McpRunAllTestsRequest::default()
+                },
+            )
+            .expect("blank Vanessa options are omitted");
+
+        assert!(response.ok);
+        let requests = service.port.test_requests.borrow();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].1.execution.profile.kind, RunnerKind::YaXUnit);
+    }
+
+    #[test]
     fn run_all_tests_maps_failure_payload_into_business_failure() {
         let mut result = sample_test_result(false);
         result
@@ -1907,6 +1924,40 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn launch_app_ignores_blank_mcp_string_options_for_non_mcp_utility() {
+        let config = sample_config();
+        let service = McpService::with_port(
+            &config,
+            StubPort::with_launch_result(Ok(LaunchResult {
+                ok: true,
+                mode: LaunchMode::Thin,
+                pid: Some(42),
+                binary: PathBuf::from("/opt/1cv8c"),
+                message: None,
+                mcp_readiness: None,
+            })),
+        );
+
+        let response = service
+            .launch_app(
+                McpCallContext::http(),
+                &McpLaunchAppRequest {
+                    utility_type: "thin".to_owned(),
+                    mcp_config: Some(" ".to_owned()),
+                    mode: Some("".to_owned()),
+                    mcp_scenario: Some(" \t ".to_owned()),
+                    ..McpLaunchAppRequest::default()
+                },
+            )
+            .expect("blank MCP string options are omitted");
+
+        assert!(response.ok);
+        let requests = service.port.launch_requests.borrow();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].1.target, LaunchTargetRequest::thin_client());
     }
 
     #[test]

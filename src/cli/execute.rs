@@ -25,8 +25,7 @@ use crate::domain::build::{BuildMode, BuildResult};
 use crate::domain::convert::{ConvertDirection, ConvertResult, ConvertScope};
 use crate::domain::dump::{DumpMode, DumpResult};
 use crate::domain::execution::{
-    ExecutionError, ExecutionInterruptionDetails, ExecutionOutcome, ExecutionStepStatus,
-    ExecutionTimeouts, StepResult,
+    ExecutionError, ExecutionInterruptionDetails, ExecutionOutcome, ExecutionStepStatus, StepResult,
 };
 use crate::domain::init::{InitResult, InitStep, InitStepStatus};
 use crate::domain::issue::{Issue, IssueSeverity};
@@ -63,12 +62,13 @@ use crate::use_cases::init_project;
 use crate::use_cases::launch_app;
 use crate::use_cases::load_artifact;
 use crate::use_cases::request::{
-    ArtifactsModeRequest, ArtifactsRequest, BuildRequest, ClientMcpAddonRequest, ClientMcpMode,
-    ClientMcpOptionsRequest, ConfigureExtensionsRequest, ConvertRequest, ConvertScopeRequest,
-    DesignerClientScope, DesignerClientScopes, DesignerConfigCheck, DesignerConfigChecks,
-    DesignerConfigSyntaxRequest, DesignerModulesSyntaxRequest, DumpRequest, InitRequest,
-    LaunchRequest, LoadRequest, SyntaxExtensionScope, SyntaxRequest, SyntaxTargetRequest,
-    TestRequest, TestScopeRequest, ToolsDownloadRequest,
+    effective_test_timeouts, ArtifactsModeRequest, ArtifactsRequest, BuildRequest,
+    ClientMcpAddonRequest, ClientMcpMode, ClientMcpOptionsRequest, ConfigureExtensionsRequest,
+    ConvertRequest, ConvertScopeRequest, DesignerClientScope, DesignerClientScopes,
+    DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest,
+    DesignerModulesSyntaxRequest, DumpRequest, InitRequest, LaunchRequest, LoadRequest,
+    SyntaxExtensionScope, SyntaxRequest, SyntaxTargetRequest, TestRequest, TestScopeRequest,
+    ToolsDownloadRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
@@ -1093,17 +1093,6 @@ fn validate_test_launch_options(args: &LaunchOptionsArgs) -> Result<(), UseCaseE
         ));
     }
     Ok(())
-}
-
-fn effective_test_timeouts(
-    legacy_total_seconds: u64,
-    runner_timeouts: &ExecutionTimeouts,
-) -> ExecutionTimeouts {
-    let mut timeouts = runner_timeouts.clone();
-    if timeouts.total_ms.is_none() {
-        timeouts.total_ms = Some(legacy_total_seconds.saturating_mul(1_000));
-    }
-    timeouts
 }
 
 fn cli_context(

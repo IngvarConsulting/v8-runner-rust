@@ -81,6 +81,17 @@ impl TestRequest {
     }
 }
 
+pub(crate) fn effective_test_timeouts(
+    legacy_total_seconds: u64,
+    runner_timeouts: &ExecutionTimeouts,
+) -> ExecutionTimeouts {
+    let mut timeouts = runner_timeouts.clone();
+    if timeouts.total_ms.is_none() {
+        timeouts.total_ms = Some(legacy_total_seconds.saturating_mul(1_000));
+    }
+    timeouts
+}
+
 /// Transport-neutral test scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TestScopeRequest {
