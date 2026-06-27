@@ -189,6 +189,8 @@ v8-runner test va --feature login --filter-tag @smoke
 - `test va` использует профиль из `tests.va.profile`; `--feature`, `--filter-tag`,
   `--ignore-tag` и `--scenario-filter` переопределяют соответствующие списки выбранного профиля
   только для текущего запуска.
+- Для функциональных `.feature`-сценариев и приемки используйте Vanessa Automation: CLI
+  `test va` или MCP `run_all_tests` с `runner=vanessa`, а не дефолтный YaXUnit-runner.
 - `--full` включает полный вывод успешных кейсов и расширенные stack traces.
 - `tests.*.timeouts.total_ms` остаётся активным пользовательским контрактом таймаутов.
 
@@ -290,6 +292,8 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--wait-ready] [FLAGS]
   и добавляет `/RunModeOrdinaryApplication`.
 - `launch mcp va` дополнительно запускает Vanessa Automation из `tools.va` через `/Execute <epf>`
   и передаёт `VAParams=<runtime params>` без `StartFeaturePlayer`.
+- Для интерактивной отладки и написания функциональных `.feature`-сценариев используйте
+  `launch mcp va --wait-ready`; голый `launch mcp` поднимает client MCP без Vanessa tools.
 - Любой управляемый runner payload для ключа `/C` передаётся как один аргумент
   `/C"<payload>"`: это касается `launch --c`, `launch mcp`, `test yaxunit` и `test va`.
 - Для `mcp` доступны typed flags `--mcp-config <FILE>` и `--mcp-port <PORT>`;
@@ -321,6 +325,10 @@ v8-runner mcp serve http
 - Business failures возвращаются внутри tool result payload.
 - Transport/internal failures остаются MCP-native.
 - Все tool calls разделяют `mcp.execution.max_concurrent_calls`.
+- Если пользователь просит функциональные `.feature`-сценарии, приемку или Vanessa Automation,
+  агент должен выбирать `run_all_tests` с `runner=vanessa` либо `launch_app` с
+  `utilityType=mcp`, `mcpScenario=va` и `waitReady=true`; bare `utilityType=mcp` не загружает
+  Vanessa.
 
 ### Опубликованные MCP tools
 

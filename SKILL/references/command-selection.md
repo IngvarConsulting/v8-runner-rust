@@ -81,10 +81,16 @@ Vanessa Automation:
 v8-runner test va
 ```
 
+Use Vanessa Automation for functional `.feature` acceptance scenarios: `v8-runner test va` for
+configured runs, MCP `run_all_tests` with `runner: "vanessa"` for agent-driven runs, or
+`launch mcp va --mcp-port <PORT> --wait-ready` for interactive debugging. If
+`tools.client_mcp.port` is configured, the explicit port can be omitted. Do not use bare
+`launch mcp` for these workflows.
+
 Interactive VA debugging and scenario authoring:
 
 ```bash
-v8-runner launch mcp va
+v8-runner launch mcp va --mcp-port <PORT> --wait-ready
 ```
 
 ## Extensions

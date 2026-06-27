@@ -6,6 +6,8 @@ mod build_progress;
 pub mod build_project;
 /// Syntax-check orchestration use case.
 pub mod check_syntax;
+/// Client-side MCP HTTP readiness probes.
+pub(in crate::use_cases) mod client_mcp_readiness;
 /// Config bootstrap use case.
 pub mod config_init;
 /// Extension properties orchestration use case.

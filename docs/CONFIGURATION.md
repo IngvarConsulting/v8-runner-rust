@@ -405,6 +405,9 @@ runtime identity и не добавляет отдельное поле конф
 
 `v8-runner test va --feature`, `--filter-tag`, `--ignore-tag` и `--scenario-filter`
 переопределяют соответствующие списки выбранного профиля только для текущего CLI-запуска.
+Для функциональных `.feature`-сценариев и приемки агенты должны использовать `test va` или MCP
+`run_all_tests` с `runner=vanessa`; дефолтный MCP `run_all_tests` без `runner=vanessa` запускает
+YaXUnit.
 По умолчанию `fail_fast: false`.
 Для `СписокТеговОтбор` и `СписокТеговИсключение` в runtime `VAParams` runner удаляет один
 ведущий `@`, если он указан в `profiles.<name>.filter_tags`, `profiles.<name>.ignore_tags`,
@@ -451,6 +454,9 @@ runtime identity и не добавляет отдельное поле конф
 если CLI не указал `--mcp-port`.
 `launch mcp --wait-ready` и MCP `launch_app` с `waitReady=true` используют этот порт для
 проверки `http://127.0.0.1:<port>/mcp`, если порт не передан явно.
+Для Vanessa Automation MCP используйте `launch mcp va --wait-ready` или MCP `launch_app` с
+`utilityType=mcp`, `mcpScenario=va` и `waitReady=true`; bare `launch mcp` проверяет только client
+MCP endpoint и не гарантирует наличие Vanessa tools.
 
 `extension` поддерживает:
 

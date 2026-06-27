@@ -776,6 +776,55 @@ fn launch_mcp_va_wait_ready_fails_when_vanessa_tools_are_missing() {
 }
 
 #[test]
+fn launch_mcp_wait_ready_returns_client_mcp_tools_without_vanessa_requirements() {
+    let (_dir, config_path, _install_dir, _work_path) = setup_project();
+    prepend_config(&config_path, "execution_timeout: 2500\n");
+    let (port, server) = start_fake_mcp_server(&["infobase_info", "query_info"]);
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "mcp",
+            "--mcp-port",
+            &port.to_string(),
+            "--wait-ready",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["data"]["mode"], "mcp");
+    assert_eq!(payload["data"]["mcp_readiness"]["ok"], true);
+    assert_eq!(
+        payload["data"]["mcp_readiness"]["url"],
+        format!("http://127.0.0.1:{port}/mcp")
+    );
+    assert_eq!(
+        payload["data"]["mcp_readiness"]["missing_tools"]
+            .as_array()
+            .expect("missing tools")
+            .len(),
+        0
+    );
+    let tools = payload["data"]["mcp_readiness"]["tools"]
+        .as_array()
+        .expect("tools");
+    assert!(tools.iter().any(|tool| tool == "infobase_info"));
+    assert!(tools.iter().any(|tool| tool == "query_info"));
+    server.join().expect("fake MCP server exits");
+}
+
+#[test]
 fn launch_mcp_wait_ready_fails_when_endpoint_never_starts() {
     let (_dir, config_path, _install_dir, _work_path) = setup_project();
     prepend_config(&config_path, "execution_timeout: 700\n");
