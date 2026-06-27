@@ -30,6 +30,10 @@ MCP предназначен для управляемого агентског�
 4. Добавление новой MCP tool-операции, удаление существующей tool-операции, переименование или изменение ее семантики считается изменением MCP public surface.
 5. Расширение MCP surface требует отдельного ADR или явного обновления этого ADR с описанием мотивации, DTO, бизнес-ошибок, ограничений исполнения и тестов.
 6. MCP request DTO используют собственную форму и не обязаны совпадать с CLI flags.
+   Для `launch_app` допустимое расширение в рамках текущего набора tools — явные поля client MCP:
+   `utilityType=mcp`, `mcpScenario`, `mode`, `mcpConfig`, `mcpPort`, `waitReady`.
+   Для `run_all_tests` допустимое расширение — выбор runner: `runner=yaxunit|vanessa` и Vanessa-поля
+   `profile`, `feature`, `filterTag`, `ignoreTag`, `scenarioFilter`.
 7. MCP command response payload в `structured_content` использует общий machine-readable command envelope с CLI `--json-message`: `ok`, `command`, `duration_ms`, `data`, `warnings`, `steps` и optional `error` для business failures. MCP protocol wrapping (`CallToolResult`, `isError`, transport/internal `ErrorData`) остается MCP-native.
 8. Внутри `data` MCP может временно сохранять command-specific compatibility fields или tool/scope identity, но это явная compatibility boundary, а не новый use-case/domain contract.
 

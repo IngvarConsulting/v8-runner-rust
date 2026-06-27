@@ -449,6 +449,8 @@ runtime identity и не добавляет отдельное поле конф
 
 `launch mcp` передаёт это значение как `mcpPort` внутри `/C"runMcp..."`
 если CLI не указал `--mcp-port`.
+`launch mcp --wait-ready` и MCP `launch_app` с `waitReady=true` используют этот порт для
+проверки `http://127.0.0.1:<port>/mcp`, если порт не передан явно.
 
 `extension` поддерживает:
 

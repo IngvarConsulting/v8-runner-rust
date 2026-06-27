@@ -98,10 +98,11 @@ v8-runner test va
 
 Команда сначала выполняет `build`, затем запускает полный набор YAxUnit-тестов.
 
-Для отладки и написания тестов Vanessa Automation запустите ее в режиме MCP
+Для отладки и написания тестов Vanessa Automation запустите ее в режиме MCP и, если агенту нужно
+сразу подключаться к endpoint, дождитесь готовности:
 
 ```bash
-v8-runner launch mcp va
+v8-runner launch mcp va --mcp-port 1550 --wait-ready
 ```
 
 ### Поднимите MCP transport (MCP-транспорт) для AI-агентов:

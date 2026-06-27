@@ -647,7 +647,7 @@ mod tests {
         ProcessRequest, ProcessRunner,
     };
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::thread;
     use std::time::Duration;
     use tempfile::tempdir;
@@ -763,25 +763,24 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn spawn_detects_immediate_exit_when_probe_is_requested() {
-        let dir = tempdir().expect("tempdir");
-        let script = dir.path().join("exit.sh");
-        write_script(&script, "exit 7");
+        let false_binary = PathBuf::from("/usr/bin/false");
+        assert!(false_binary.exists(), "/usr/bin/false must exist on Unix");
 
         let runner = ProcessExecutor;
         let err = runner
             .spawn(&ProcessRequest {
-                program: script,
+                program: false_binary,
                 args: vec![],
                 workdir: None,
                 stdout_log_path: None,
                 stderr_log_path: None,
-                startup_probe: Some(Duration::from_millis(50)),
+                startup_probe: Some(Duration::from_millis(250)),
             })
             .expect_err("expected early exit");
 
         assert!(matches!(
             err,
-            ProcessError::ExitedEarly { exit_code: 7, .. }
+            ProcessError::ExitedEarly { exit_code: 1, .. }
         ));
     }
 

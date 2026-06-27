@@ -20,6 +20,24 @@ pub struct McpRunAllTestsRequest {
     /// Optional full-report flag from the MCP tool surface.
     #[schemars(description = "Return the full test report instead of compact summary data.")]
     pub full: Option<bool>,
+    /// Test runner to execute. Defaults to `yaxunit`; use `vanessa` for Vanessa Automation.
+    #[schemars(description = "Test runner to execute: yaxunit or vanessa. Defaults to yaxunit.")]
+    pub runner: Option<String>,
+    /// Vanessa Automation profile override. When omitted, tests.va.profile is used.
+    #[schemars(description = "Vanessa Automation profile override for runner=vanessa.")]
+    pub profile: Option<String>,
+    /// Vanessa feature names from the selected profile to run.
+    #[schemars(description = "Vanessa feature names to run for runner=vanessa.")]
+    pub feature: Vec<String>,
+    /// Vanessa tag expressions to include.
+    #[schemars(description = "Vanessa tag expressions to include for runner=vanessa.")]
+    pub filter_tag: Vec<String>,
+    /// Vanessa tag expressions to exclude.
+    #[schemars(description = "Vanessa tag expressions to exclude for runner=vanessa.")]
+    pub ignore_tag: Vec<String>,
+    /// Vanessa scenario name filters.
+    #[schemars(description = "Vanessa scenario name filters for runner=vanessa.")]
+    pub scenario_filter: Vec<String>,
 }
 
 /// MCP request for `run_module_tests`.
@@ -54,14 +72,31 @@ pub struct McpDumpConfigRequest {
 }
 
 /// MCP request for `launch_app`.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct McpLaunchAppRequest {
     /// Raw utility alias from the MCP tool surface.
     #[schemars(
-        description = "Client type to launch. Supported aliases: thin-client, тонкий клиент, тонкий, thin client, thin, tc; thick-client, толстый клиент, толстый, thick client, thick; designer, конфигуратор, configurator."
+        description = "Client type to launch. Supported aliases: mcp; thin-client, тонкий клиент, тонкий, thin client, thin, tc; thick-client, толстый клиент, толстый, thick client, thick; designer, конфигуратор, configurator."
     )]
     pub utility_type: String,
+    /// Optional client-side MCP scenario. Use `va` for Vanessa Automation MCP.
+    #[schemars(description = "Optional client MCP scenario. Use va for Vanessa Automation.")]
+    pub mcp_scenario: Option<String>,
+    /// 1C client mode for `utilityType=mcp`: thin, thick, or ordinary. Defaults to thin.
+    #[schemars(description = "Client mode for utilityType=mcp: thin, thick, or ordinary.")]
+    pub mode: Option<String>,
+    /// Optional client MCP config path passed as runMcp=<FILE>.
+    #[schemars(description = "Optional client MCP config path passed as runMcp=<FILE>.")]
+    pub mcp_config: Option<String>,
+    /// Optional client MCP port override.
+    #[schemars(description = "Optional client MCP port override.")]
+    pub mcp_port: Option<u16>,
+    /// Wait until the client MCP endpoint responds to initialize and tools/list.
+    #[schemars(
+        description = "Wait until the client MCP endpoint responds to initialize and tools/list."
+    )]
+    pub wait_ready: Option<bool>,
 }
 
 /// MCP request for `check_syntax_edt`.
@@ -168,7 +203,8 @@ pub struct McpCheckSyntaxDesignerModulesRequest {
 #[cfg(test)]
 mod tests {
     use super::{
-        McpCheckSyntaxDesignerConfigRequest, McpLaunchAppRequest, McpRunModuleTestsRequest,
+        McpCheckSyntaxDesignerConfigRequest, McpLaunchAppRequest, McpRunAllTestsRequest,
+        McpRunModuleTestsRequest,
     };
 
     #[test]
@@ -180,12 +216,32 @@ mod tests {
             "Module name to execute tests for."
         );
 
+        let run_all = schemars::schema_for!(McpRunAllTestsRequest);
+        let run_all_json = serde_json::to_value(run_all).expect("schema json");
+        assert_eq!(
+            run_all_json["properties"]["runner"]["description"],
+            "Test runner to execute: yaxunit or vanessa. Defaults to yaxunit."
+        );
+        assert_eq!(
+            run_all_json["properties"]["scenarioFilter"]["description"],
+            "Vanessa scenario name filters for runner=vanessa."
+        );
+
         let launch = schemars::schema_for!(McpLaunchAppRequest);
         let launch_json = serde_json::to_value(launch).expect("schema json");
         assert_eq!(
             launch_json["properties"]["utilityType"]["description"],
-            "Client type to launch. Supported aliases: thin-client, тонкий клиент, тонкий, thin client, thin, tc; thick-client, толстый клиент, толстый, thick client, thick; designer, конфигуратор, configurator."
+            "Client type to launch. Supported aliases: mcp; thin-client, тонкий клиент, тонкий, thin client, thin, tc; thick-client, толстый клиент, толстый, thick client, thick; designer, конфигуратор, configurator."
         );
+        assert_eq!(
+            launch_json["properties"]["waitReady"]["description"],
+            "Wait until the client MCP endpoint responds to initialize and tools/list."
+        );
+        assert!(launch_json["required"]
+            .as_array()
+            .expect("required fields")
+            .iter()
+            .any(|field| field == "utilityType"));
 
         let syntax = schemars::schema_for!(McpCheckSyntaxDesignerConfigRequest);
         let syntax_json = serde_json::to_value(syntax).expect("schema json");

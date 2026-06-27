@@ -611,6 +611,7 @@ pub struct ClientMcpOptionsRequest {
     pub config_path: Option<String>,
     pub port: Option<u16>,
     pub addon: Option<ClientMcpAddonRequest>,
+    pub wait_ready: bool,
 }
 
 /// Transport-neutral request for the `launch` use case.

@@ -77,14 +77,14 @@ v8-runner init
   `v8-runner tools download client-mcp --sources` for source-backed setup. Omit
   `--sources` on `yaxunit` or `client-mcp` to download `.cfe` artifacts when
   `builder=DESIGNER`.
-- Vanessa Automation debugging or scenario authoring: use `v8-runner launch mcp va ...` to start the client MCP server with VA loaded.
+- Vanessa Automation debugging or scenario authoring: use `v8-runner launch mcp va --wait-ready ...` to start the client MCP server with VA loaded and verify the VA MCP tools before driving `.feature` workflows.
 - Extension properties need synchronization: use `v8-runner extensions` or `extensions --name <SOURCE_SET>`.
 - Infobase changes need to become Git-visible files: check `git status`, then run the relevant `v8-runner dump ...` command.
 - Source files need conversion between Designer and EDT: use `v8-runner convert`; this is CLI-only and does not use the infobase.
 - Existing `.cf` or `.cfe` artifacts need to be applied to an infobase: use `v8-runner load ...`.
 - Release artifacts need to be exported or external artifacts published: use `v8-runner make ...` or the `artifacts` alias.
 - Need a 1C UI session: use `v8-runner launch designer`, `launch thin`, `launch thick`, or `launch ordinary`.
-- Need onec-client-mcp-devkit launched inside 1C without VA authoring: use `v8-runner launch mcp ...`.
+- Need onec-client-mcp-devkit launched inside 1C without VA authoring: use `v8-runner launch mcp --wait-ready ...` when the caller needs a ready MCP endpoint; use bare `launch mcp` only for fire-and-forget startup.
 
 ## Guardrails
 

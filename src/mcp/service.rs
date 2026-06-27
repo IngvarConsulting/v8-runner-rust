@@ -4,7 +4,11 @@ use std::time::Instant;
 
 use crate::command_envelope::{test_envelope, Envelope, EnvelopeError};
 use crate::config::model::AppConfig;
-use crate::domain::runner::LaunchOptions;
+use crate::domain::execution::ExecutionTimeouts;
+use crate::domain::runner::{
+    ExecutionPolicy, LaunchClientModeRequest, LaunchOptions, RunnerKind, RunnerOutputFormat,
+    RunnerProfile, ScenarioExecutionRequest,
+};
 use crate::domain::syntax::SyntaxCheckResult;
 use crate::mcp::context::McpCallContext;
 use crate::mcp::error::{
@@ -21,14 +25,15 @@ use crate::support::adapter_input::{
     normalize_edt_projects, normalize_extension_scope, normalize_optional_string,
     normalize_required_string, parse_launch_target, parse_optional_dump_mode, LaunchModeAliases,
 };
+use crate::support::path::is_safe_path_segment;
 use crate::use_cases::context::{CommandName, ExecutionContext, ExecutionTransport};
 use crate::use_cases::request::{
-    BuildRequest, DesignerClientScope, DesignerClientScopes, DesignerConfigCheck,
-    DesignerConfigChecks, DesignerConfigSyntaxRequest, DesignerModulesSyntaxRequest,
-    DumpModeRequest, DumpRequest, LaunchRequest, SyntaxRequest, SyntaxTargetRequest, TestRequest,
-    TestScopeRequest,
+    BuildRequest, ClientMcpAddonRequest, ClientMcpMode, ClientMcpOptionsRequest,
+    DesignerClientScope, DesignerClientScopes, DesignerConfigCheck, DesignerConfigChecks,
+    DesignerConfigSyntaxRequest, DesignerModulesSyntaxRequest, DumpModeRequest, DumpRequest,
+    LaunchRequest, SyntaxRequest, SyntaxTargetRequest, TestRequest, TestScopeRequest,
 };
-use crate::use_cases::result::{UseCaseError, UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult};
 
 type McpCommandEnvelope = Envelope<Value>;
 
@@ -83,15 +88,11 @@ where
     ) -> McpServiceResult<McpCommandEnvelope> {
         let context = execution_context(call_context, CommandName::Test)
             .map_err(McpServiceError::Internal)?;
-        let use_case_request = TestRequest {
-            execution: TestRequest::default_execution(),
-            full: request.full.unwrap_or(false),
-            scope: TestScopeRequest::All,
-        };
+        let (effective_config, use_case_request) = map_run_all_tests_request(self.config, request)?;
 
         match self
             .port
-            .run_tests(&context, self.config, &use_case_request)
+            .run_tests(&context, &effective_config, &use_case_request)
         {
             Ok(result) => {
                 mcp_value_envelope(test_envelope(&result)).map_err(McpServiceError::Internal)
@@ -215,29 +216,7 @@ where
     ) -> McpServiceResult<McpCommandEnvelope> {
         let context = execution_context(call_context, CommandName::Launch)
             .map_err(McpServiceError::Internal)?;
-        let use_case_request = LaunchRequest {
-            target: parse_launch_target(
-                &request.utility_type,
-                "utility_type",
-                LaunchModeAliases::Mcp,
-            )
-            .map_err(|error| {
-                let message = error.message().to_owned();
-                let business_error = raw_value_business_error(&error, "utility_type");
-                McpServiceError::Business(McpBusinessFailure::new(
-                    business_error.clone(),
-                    adapter_error_envelope(
-                        CommandName::Launch,
-                        "launch_app",
-                        &message,
-                        business_error,
-                        json!({ "field": "utility_type" }),
-                    ),
-                ))
-            })?,
-            launch: LaunchOptions::default(),
-            client_mcp: None,
-        };
+        let use_case_request = map_launch_app_request(request)?;
         let started = Instant::now();
 
         match self
@@ -351,6 +330,381 @@ where
             )),
         }
     }
+}
+
+fn map_run_all_tests_request(
+    config: &AppConfig,
+    request: &McpRunAllTestsRequest,
+) -> Result<(AppConfig, TestRequest), McpServiceError<McpCommandEnvelope>> {
+    let runner = normalize_optional_string(request.runner.as_deref())
+        .unwrap_or_else(|| "yaxunit".to_owned())
+        .to_ascii_lowercase();
+    match runner.as_str() {
+        "yaxunit" | "yax-unit" => {
+            reject_vanessa_run_all_options_for_yaxunit(request)?;
+            Ok((
+                config.clone(),
+                TestRequest {
+                    execution: TestRequest::default_execution(),
+                    full: request.full.unwrap_or(false),
+                    scope: TestScopeRequest::All,
+                },
+            ))
+        }
+        "vanessa" | "va" => {
+            let effective_config = effective_vanessa_run_all_config(config, request)?;
+            let execution = build_vanessa_run_all_execution(&effective_config)?;
+            Ok((
+                effective_config,
+                TestRequest {
+                    execution,
+                    full: request.full.unwrap_or(false),
+                    scope: TestScopeRequest::All,
+                },
+            ))
+        }
+        other => Err(test_adapter_business_error(
+            UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                format!("unsupported test runner: {other}"),
+            ),
+            "run_all_tests",
+            "runner",
+        )),
+    }
+}
+
+fn reject_vanessa_run_all_options_for_yaxunit(
+    request: &McpRunAllTestsRequest,
+) -> Result<(), McpServiceError<McpCommandEnvelope>> {
+    if request.profile.is_some()
+        || !request.feature.is_empty()
+        || !request.filter_tag.is_empty()
+        || !request.ignore_tag.is_empty()
+        || !request.scenario_filter.is_empty()
+    {
+        return Err(test_adapter_business_error(
+            UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "profile, feature, filterTag, ignoreTag, and scenarioFilter are supported only when runner is vanessa",
+            ),
+            "run_all_tests",
+            "runner",
+        ));
+    }
+    Ok(())
+}
+
+fn effective_vanessa_run_all_config(
+    config: &AppConfig,
+    request: &McpRunAllTestsRequest,
+) -> Result<AppConfig, McpServiceError<McpCommandEnvelope>> {
+    let mut config = config.clone();
+    if let Some(profile) = normalize_optional_string(request.profile.as_deref()) {
+        config.tests.va.profile = Some(profile);
+    }
+
+    let features = normalize_string_list(&request.feature);
+    let filter_tags = normalize_string_list(&request.filter_tag);
+    let ignore_tags = normalize_string_list(&request.ignore_tag);
+    let scenario_filter = normalize_string_list(&request.scenario_filter);
+    if features.is_empty()
+        && filter_tags.is_empty()
+        && ignore_tags.is_empty()
+        && scenario_filter.is_empty()
+    {
+        return Ok(config);
+    }
+
+    let profile_id = config.tests.va.profile.clone().ok_or_else(|| {
+        test_adapter_business_error(
+            UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "tests.va.profile is not configured",
+            ),
+            "run_all_tests",
+            "profile",
+        )
+    })?;
+    let profile = config
+        .tests
+        .va
+        .profiles
+        .get_mut(&profile_id)
+        .ok_or_else(|| {
+            test_adapter_business_error(
+                UseCaseError::new(
+                    UseCaseErrorKind::Validation,
+                    format!("unknown Vanessa Automation profile '{profile_id}'"),
+                ),
+                "run_all_tests",
+                "profile",
+            )
+        })?;
+    if !features.is_empty() {
+        profile.features_to_run = features;
+    }
+    if !filter_tags.is_empty() {
+        profile.filter_tags = filter_tags;
+    }
+    if !ignore_tags.is_empty() {
+        profile.ignore_tags = ignore_tags;
+    }
+    if !scenario_filter.is_empty() {
+        profile.scenario_filter = scenario_filter;
+    }
+    Ok(config)
+}
+
+fn build_vanessa_run_all_execution(
+    config: &AppConfig,
+) -> Result<ScenarioExecutionRequest, McpServiceError<McpCommandEnvelope>> {
+    let profile_id = config.tests.va.profile.as_deref().ok_or_else(|| {
+        test_adapter_business_error(
+            UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "tests.va.profile is not configured",
+            ),
+            "run_all_tests",
+            "profile",
+        )
+    })?;
+    if !config.tests.va.profiles.contains_key(profile_id) {
+        return Err(test_adapter_business_error(
+            UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                format!("unknown Vanessa Automation profile '{profile_id}'"),
+            ),
+            "run_all_tests",
+            "profile",
+        ));
+    }
+    if !is_safe_path_segment(profile_id) {
+        return Err(test_adapter_business_error(
+            UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                format!("tests.va.profile contains unsafe path characters: {profile_id}"),
+            ),
+            "run_all_tests",
+            "profile",
+        ));
+    }
+    if config.tools.va.epf_path.is_none() {
+        return Err(test_adapter_business_error(
+            UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "tools.va.epf_path is not configured",
+            ),
+            "run_all_tests",
+            "runner",
+        ));
+    }
+    if config.tests.va.params_path.is_none() {
+        return Err(test_adapter_business_error(
+            UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "tests.va.params_path is not configured",
+            ),
+            "run_all_tests",
+            "runner",
+        ));
+    }
+
+    Ok(ScenarioExecutionRequest {
+        profile: RunnerProfile {
+            id: profile_id.to_owned(),
+            kind: RunnerKind::Vanessa,
+            output_formats: vec![
+                RunnerOutputFormat::JunitXml,
+                RunnerOutputFormat::PlainTextLog,
+            ],
+            backend_hint: Some("enterprise".to_owned()),
+        },
+        client_mode: Some(LaunchClientModeRequest::Thin),
+        timeouts: effective_test_timeouts(
+            config.tests.execution_timeout_seconds,
+            &config.tests.va.timeouts,
+        ),
+        policy: ExecutionPolicy {
+            retain_artifacts_on_failure: true,
+            retain_artifacts_on_success: false,
+        },
+        launch: LaunchOptions {
+            c: Some("StartFeaturePlayer;VAParams={params_path}".to_owned()),
+            execute: Some("{epf_path}".to_owned()),
+            ..LaunchOptions::default()
+        },
+    })
+}
+
+fn normalize_string_list(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .filter_map(|value| normalize_optional_string(Some(value.as_str())))
+        .collect()
+}
+
+fn effective_test_timeouts(
+    legacy_total_seconds: u64,
+    runner_timeouts: &ExecutionTimeouts,
+) -> ExecutionTimeouts {
+    let mut timeouts = runner_timeouts.clone();
+    if timeouts.total_ms.is_none() {
+        timeouts.total_ms = Some(legacy_total_seconds.saturating_mul(1_000));
+    }
+    timeouts
+}
+
+fn map_launch_app_request(
+    request: &McpLaunchAppRequest,
+) -> Result<LaunchRequest, McpServiceError<McpCommandEnvelope>> {
+    let utility_type = normalize_required_string(&request.utility_type, "utility_type")
+        .map_err(|error| launch_adapter_business_error(error, "utility_type"))?;
+    if utility_type.eq_ignore_ascii_case("mcp")
+        || utility_type.eq_ignore_ascii_case("client_mcp")
+        || utility_type.eq_ignore_ascii_case("client-mcp")
+    {
+        let mode = map_mcp_launch_mode(request.mode.as_deref())?;
+        let config_path = map_mcp_config_path(request.mcp_config.as_deref())?;
+        let port = map_mcp_port(request.mcp_port)?;
+        return Ok(LaunchRequest {
+            target: crate::use_cases::request::LaunchTargetRequest::client_mcp_with_mode(mode),
+            launch: LaunchOptions::default(),
+            client_mcp: Some(ClientMcpOptionsRequest {
+                config_path,
+                port,
+                addon: map_mcp_launch_addon(request.mcp_scenario.as_deref())?,
+                wait_ready: request.wait_ready.unwrap_or(false),
+            }),
+        });
+    }
+
+    if request.mcp_config.is_some()
+        || request.mcp_port.is_some()
+        || request.mode.is_some()
+        || request.mcp_scenario.is_some()
+        || request.wait_ready.unwrap_or(false)
+    {
+        let error = UseCaseError::new(
+            UseCaseErrorKind::Validation,
+            "mcpConfig, mcpPort, mode, mcpScenario, and waitReady are supported only when utilityType is mcp",
+        );
+        return Err(launch_adapter_business_error(error, "utility_type"));
+    }
+
+    let target = parse_launch_target(&utility_type, "utility_type", LaunchModeAliases::Mcp)
+        .map_err(|error| launch_adapter_business_error(error, "utility_type"))?;
+    Ok(LaunchRequest {
+        target,
+        launch: LaunchOptions::default(),
+        client_mcp: None,
+    })
+}
+
+fn map_mcp_config_path(
+    raw: Option<&str>,
+) -> Result<Option<String>, McpServiceError<McpCommandEnvelope>> {
+    let config_path = normalize_optional_string(raw);
+    if config_path
+        .as_deref()
+        .is_some_and(|path| path.contains(';'))
+    {
+        return Err(launch_adapter_business_error(
+            UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "mcpConfig must not contain ';' because the /C runMcp payload is semicolon-delimited",
+            ),
+            "mcpConfig",
+        ));
+    }
+    Ok(config_path)
+}
+
+fn map_mcp_port(port: Option<u16>) -> Result<Option<u16>, McpServiceError<McpCommandEnvelope>> {
+    if port == Some(0) {
+        return Err(launch_adapter_business_error(
+            UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "mcpPort must be greater than or equal to 1",
+            ),
+            "mcpPort",
+        ));
+    }
+    Ok(port)
+}
+
+fn map_mcp_launch_mode(
+    raw: Option<&str>,
+) -> Result<ClientMcpMode, McpServiceError<McpCommandEnvelope>> {
+    let mode = normalize_optional_string(raw)
+        .unwrap_or_else(|| "thin".to_owned())
+        .to_ascii_lowercase();
+    match mode.as_str() {
+        "thin" => Ok(ClientMcpMode::Thin),
+        "thick" => Ok(ClientMcpMode::Thick),
+        "ordinary" => Ok(ClientMcpMode::Ordinary),
+        other => Err(launch_adapter_business_error(
+            UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                format!("unsupported launch mode: {other}"),
+            ),
+            "mode",
+        )),
+    }
+}
+
+fn map_mcp_launch_addon(
+    raw: Option<&str>,
+) -> Result<Option<ClientMcpAddonRequest>, McpServiceError<McpCommandEnvelope>> {
+    let addon = normalize_optional_string(raw).map(|value| value.to_ascii_lowercase());
+    match addon.as_deref() {
+        Some("va") => Ok(Some(ClientMcpAddonRequest::VanessaAutomation)),
+        Some(other) => Err(launch_adapter_business_error(
+            UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                format!("unsupported launch mcpScenario: {other}"),
+            ),
+            "mcpScenario",
+        )),
+        None => Ok(None),
+    }
+}
+
+fn launch_adapter_business_error(
+    error: UseCaseError,
+    field: &'static str,
+) -> McpServiceError<McpCommandEnvelope> {
+    let message = error.message().to_owned();
+    let business_error = raw_value_business_error(&error, field);
+    McpServiceError::Business(McpBusinessFailure::new(
+        business_error.clone(),
+        adapter_error_envelope(
+            CommandName::Launch,
+            "launch_app",
+            &message,
+            business_error,
+            json!({ "field": field }),
+        ),
+    ))
+}
+
+fn test_adapter_business_error(
+    error: UseCaseError,
+    tool: &'static str,
+    field: &'static str,
+) -> McpServiceError<McpCommandEnvelope> {
+    let message = error.message().to_owned();
+    let business_error = McpBusinessError::from_use_case(&error);
+    McpServiceError::Business(McpBusinessFailure::new(
+        business_error.clone(),
+        adapter_error_envelope(
+            CommandName::Test,
+            tool,
+            &message,
+            business_error,
+            json!({ "field": field }),
+        ),
+    ))
 }
 
 fn execution_context(
@@ -651,6 +1005,7 @@ mod tests {
     use crate::domain::execution::{ExecutionStepKind, StepResult};
     use crate::domain::issue::{Issue, IssueSeverity, ModuleIssue};
     use crate::domain::launch::{LaunchMode, LaunchResult};
+    use crate::domain::runner::RunnerKind;
     use crate::domain::syntax::{SyntaxCheckResult, SyntaxCheckStatus, SyntaxIssueSummary};
     use crate::domain::test::{
         RetainedPaths, TestCase, TestOutputMode, TestReport, TestRunResult, TestStatus, TestSuite,
@@ -667,9 +1022,9 @@ mod tests {
     use crate::support::adapter_input::normalize_extension_scope;
     use crate::use_cases::context::{CommandName, ExecutionContext, ExecutionTransport};
     use crate::use_cases::request::{
-        BuildRequest, DesignerClientScope, DumpModeRequest, DumpRequest, LaunchRequest,
-        LaunchTargetRequest, SyntaxExtensionScope, SyntaxRequest, SyntaxTargetRequest, TestRequest,
-        TestScopeRequest,
+        BuildRequest, ClientMcpAddonRequest, ClientMcpMode, DesignerClientScope, DumpModeRequest,
+        DumpRequest, LaunchRequest, LaunchTargetRequest, SyntaxExtensionScope, SyntaxRequest,
+        SyntaxTargetRequest, TestRequest, TestScopeRequest,
     };
     use crate::use_cases::result::{UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult};
 
@@ -682,6 +1037,7 @@ mod tests {
         syntax_result: RefCell<Option<UseCaseResult<SyntaxCheckResult>>>,
         build_requests: RefCell<Vec<(ExecutionContext, BuildRequest)>>,
         test_requests: RefCell<Vec<(ExecutionContext, TestRequest)>>,
+        test_configs: RefCell<Vec<AppConfig>>,
         dump_requests: RefCell<Vec<(ExecutionContext, DumpRequest)>>,
         launch_requests: RefCell<Vec<(ExecutionContext, LaunchRequest)>>,
         syntax_requests: RefCell<Vec<(ExecutionContext, SyntaxRequest)>>,
@@ -743,12 +1099,13 @@ mod tests {
         fn run_tests(
             &self,
             context: &ExecutionContext,
-            _config: &AppConfig,
+            config: &AppConfig,
             request: &TestRequest,
         ) -> UseCaseResult<TestRunResult> {
             self.test_requests
                 .borrow_mut()
                 .push((context.clone(), request.clone()));
+            self.test_configs.borrow_mut().push(config.clone());
             self.test_result
                 .borrow_mut()
                 .take()
@@ -896,7 +1253,10 @@ mod tests {
         let response = service
             .run_all_tests(
                 McpCallContext::stdio(),
-                &McpRunAllTestsRequest { full: Some(true) },
+                &McpRunAllTestsRequest {
+                    full: Some(true),
+                    ..McpRunAllTestsRequest::default()
+                },
             )
             .expect("success");
 
@@ -910,6 +1270,92 @@ mod tests {
         let requests = service.port.test_requests.borrow();
         assert_eq!(requests[0].1.full, true);
         assert_eq!(requests[0].1.scope, TestScopeRequest::All);
+        assert_eq!(requests[0].1.execution.profile.kind, RunnerKind::YaXUnit);
+    }
+
+    #[test]
+    fn run_all_tests_maps_vanessa_request_with_profile_overrides() {
+        let port = StubPort::with_test_result(Ok(sample_test_result(true)));
+        let mut config = sample_config();
+        config.tools.va.epf_path = Some(PathBuf::from("/tmp/va.epf"));
+        config.tests.va.params_path = Some(PathBuf::from("/tmp/va.json"));
+        config.tests.va.profile = Some("smoke".to_owned());
+        config.tests.va.profiles.insert(
+            "acceptance".to_owned(),
+            crate::config::model::VanessaProfileConfig::default(),
+        );
+        let service = McpService::with_port(&config, port);
+
+        let response = service
+            .run_all_tests(
+                McpCallContext::stdio(),
+                &McpRunAllTestsRequest {
+                    full: Some(true),
+                    runner: Some("vanessa".to_owned()),
+                    profile: Some("acceptance".to_owned()),
+                    feature: vec!["login".to_owned(), " ".to_owned()],
+                    filter_tag: vec!["@smoke".to_owned()],
+                    ignore_tag: vec!["@draft".to_owned()],
+                    scenario_filter: vec!["Проверка логина".to_owned()],
+                },
+            )
+            .expect("success");
+
+        assert!(response.ok);
+        let requests = service.port.test_requests.borrow();
+        assert_eq!(requests[0].1.full, true);
+        assert_eq!(requests[0].1.scope, TestScopeRequest::All);
+        assert_eq!(requests[0].1.execution.profile.kind, RunnerKind::Vanessa);
+        assert_eq!(requests[0].1.execution.profile.id, "acceptance");
+        assert_eq!(
+            requests[0].1.execution.launch.c.as_deref(),
+            Some("StartFeaturePlayer;VAParams={params_path}")
+        );
+        assert_eq!(
+            requests[0].1.execution.launch.execute.as_deref(),
+            Some("{epf_path}")
+        );
+
+        let configs = service.port.test_configs.borrow();
+        let profile = configs[0]
+            .tests
+            .va
+            .profiles
+            .get("acceptance")
+            .expect("acceptance profile");
+        assert_eq!(profile.features_to_run, ["login"]);
+        assert_eq!(profile.filter_tags, ["@smoke"]);
+        assert_eq!(profile.ignore_tags, ["@draft"]);
+        assert_eq!(profile.scenario_filter, ["Проверка логина"]);
+    }
+
+    #[test]
+    fn run_all_tests_rejects_vanessa_options_for_yaxunit() {
+        let config = sample_config();
+        let service = McpService::with_port(
+            &config,
+            StubPort::with_test_result(Ok(sample_test_result(true))),
+        );
+
+        let error = service
+            .run_all_tests(
+                McpCallContext::stdio(),
+                &McpRunAllTestsRequest {
+                    profile: Some("smoke".to_owned()),
+                    ..McpRunAllTestsRequest::default()
+                },
+            )
+            .expect_err("expected validation failure");
+
+        match error {
+            McpServiceError::Business(failure) => {
+                assert_eq!(failure.error.code, McpErrorCode::InvalidArgument);
+                assert_eq!(failure.response.command, "test");
+                assert_eq!(failure.response.data["field"], "runner");
+                assert_eq!(service.port.test_requests.borrow().len(), 0);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
@@ -1358,6 +1804,7 @@ mod tests {
                 pid: Some(42),
                 binary: PathBuf::from("/opt/1cv8"),
                 message: None,
+                mcp_readiness: None,
             }));
             let config = sample_config();
             let service = McpService::with_port(&config, port);
@@ -1367,6 +1814,7 @@ mod tests {
                     McpCallContext::http(),
                     &McpLaunchAppRequest {
                         utility_type: alias.to_owned(),
+                        ..McpLaunchAppRequest::default()
                     },
                 )
                 .expect("success");
@@ -1375,6 +1823,167 @@ mod tests {
             assert_eq!(response.command, "launch");
             let requests = service.port.launch_requests.borrow();
             assert_eq!(requests[0].1.target, request_mode, "alias {alias}");
+        }
+    }
+
+    #[test]
+    fn launch_app_maps_client_mcp_vanessa_options() {
+        let port = StubPort::with_launch_result(Ok(LaunchResult {
+            ok: true,
+            mode: LaunchMode::Mcp,
+            pid: Some(42),
+            binary: PathBuf::from("/opt/1cv8"),
+            message: None,
+            mcp_readiness: None,
+        }));
+        let config = sample_config();
+        let service = McpService::with_port(&config, port);
+
+        let response = service
+            .launch_app(
+                McpCallContext::http(),
+                &McpLaunchAppRequest {
+                    utility_type: "mcp".to_owned(),
+                    mcp_scenario: Some("va".to_owned()),
+                    mode: Some("ordinary".to_owned()),
+                    mcp_config: Some("/tmp/mcp.json".to_owned()),
+                    mcp_port: Some(1550),
+                    wait_ready: Some(true),
+                },
+            )
+            .expect("success");
+
+        assert!(response.ok);
+        let requests = service.port.launch_requests.borrow();
+        assert_eq!(
+            requests[0].1.target,
+            LaunchTargetRequest::client_mcp_with_mode(ClientMcpMode::Ordinary)
+        );
+        assert_eq!(
+            requests[0].1.client_mcp.as_ref().expect("client mcp"),
+            &crate::use_cases::request::ClientMcpOptionsRequest {
+                config_path: Some("/tmp/mcp.json".to_owned()),
+                port: Some(1550),
+                addon: Some(ClientMcpAddonRequest::VanessaAutomation),
+                wait_ready: true,
+            }
+        );
+    }
+
+    #[test]
+    fn launch_app_rejects_mcp_options_for_non_mcp_utility() {
+        let config = sample_config();
+        let service = McpService::with_port(
+            &config,
+            StubPort::with_launch_result(Ok(LaunchResult {
+                ok: true,
+                mode: LaunchMode::Thin,
+                pid: Some(42),
+                binary: PathBuf::from("/opt/1cv8c"),
+                message: None,
+                mcp_readiness: None,
+            })),
+        );
+
+        let error = service
+            .launch_app(
+                McpCallContext::http(),
+                &McpLaunchAppRequest {
+                    utility_type: "thin".to_owned(),
+                    wait_ready: Some(true),
+                    ..McpLaunchAppRequest::default()
+                },
+            )
+            .expect_err("expected mcp-only option failure");
+
+        match error {
+            McpServiceError::Business(failure) => {
+                assert_eq!(failure.error.code, McpErrorCode::UnsupportedValue);
+                assert_eq!(
+                    failure.response.data["message"],
+                    "mcpConfig, mcpPort, mode, mcpScenario, and waitReady are supported only when utilityType is mcp"
+                );
+                assert_eq!(service.port.launch_requests.borrow().len(), 0);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn launch_app_rejects_semicolon_in_mcp_config_path() {
+        let config = sample_config();
+        let service = McpService::with_port(
+            &config,
+            StubPort::with_launch_result(Ok(LaunchResult {
+                ok: true,
+                mode: LaunchMode::Mcp,
+                pid: Some(42),
+                binary: PathBuf::from("/opt/1cv8"),
+                message: None,
+                mcp_readiness: None,
+            })),
+        );
+
+        let error = service
+            .launch_app(
+                McpCallContext::http(),
+                &McpLaunchAppRequest {
+                    utility_type: "mcp".to_owned(),
+                    mcp_config: Some("/tmp/mcp.json;debug=true".to_owned()),
+                    ..McpLaunchAppRequest::default()
+                },
+            )
+            .expect_err("expected mcp config validation failure");
+
+        match error {
+            McpServiceError::Business(failure) => {
+                assert_eq!(failure.error.code, McpErrorCode::UnsupportedValue);
+                assert_eq!(
+                    failure.response.data["message"],
+                    "mcpConfig must not contain ';' because the /C runMcp payload is semicolon-delimited"
+                );
+                assert_eq!(service.port.launch_requests.borrow().len(), 0);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn launch_app_rejects_zero_mcp_port() {
+        let config = sample_config();
+        let service = McpService::with_port(
+            &config,
+            StubPort::with_launch_result(Ok(LaunchResult {
+                ok: true,
+                mode: LaunchMode::Mcp,
+                pid: Some(42),
+                binary: PathBuf::from("/opt/1cv8"),
+                message: None,
+                mcp_readiness: None,
+            })),
+        );
+
+        let error = service
+            .launch_app(
+                McpCallContext::http(),
+                &McpLaunchAppRequest {
+                    utility_type: "mcp".to_owned(),
+                    mcp_port: Some(0),
+                    ..McpLaunchAppRequest::default()
+                },
+            )
+            .expect_err("expected mcp port validation failure");
+
+        match error {
+            McpServiceError::Business(failure) => {
+                assert_eq!(failure.error.code, McpErrorCode::UnsupportedValue);
+                assert_eq!(
+                    failure.response.data["message"],
+                    "mcpPort must be greater than or equal to 1"
+                );
+                assert_eq!(service.port.launch_requests.borrow().len(), 0);
+            }
+            other => panic!("unexpected error: {other:?}"),
         }
     }
 
@@ -1389,6 +1998,7 @@ mod tests {
                 pid: None,
                 binary: PathBuf::from("/opt/1cv8"),
                 message: None,
+                mcp_readiness: None,
             })),
         );
 
@@ -1397,6 +2007,7 @@ mod tests {
                 McpCallContext::stdio(),
                 &McpLaunchAppRequest {
                     utility_type: "   ".to_owned(),
+                    ..McpLaunchAppRequest::default()
                 },
             )
             .expect_err("expected failure");
@@ -1426,6 +2037,7 @@ mod tests {
                 pid: None,
                 binary: PathBuf::from("/opt/1cv8"),
                 message: None,
+                mcp_readiness: None,
             })),
         );
 
@@ -1434,6 +2046,7 @@ mod tests {
                 McpCallContext::stdio(),
                 &McpLaunchAppRequest {
                     utility_type: "unknown".to_owned(),
+                    ..McpLaunchAppRequest::default()
                 },
             )
             .expect_err("expected failure");

@@ -367,6 +367,10 @@ pub struct LaunchArgs {
     /// Port override for onec-client-mcp-devkit `/C"...;mcpPort=<PORT>"`
     #[arg(long = "mcp-port")]
     pub mcp_port: Option<u16>,
+
+    /// Wait until the client MCP HTTP endpoint is initialized and tools/list succeeds
+    #[arg(long = "wait-ready")]
+    pub wait_ready: bool,
 }
 
 #[derive(Args, Debug, Clone, Default, PartialEq, Eq)]
@@ -742,6 +746,7 @@ mod tests {
                 mcp_mode,
                 mcp_config,
                 mcp_port,
+                wait_ready,
             }) => {
                 assert_eq!(target, "ordinary");
                 assert_eq!(launch.c.as_deref(), Some("DoWork"));
@@ -753,6 +758,7 @@ mod tests {
                 assert_eq!(mcp_mode, None);
                 assert_eq!(mcp_config, None);
                 assert_eq!(mcp_port, None);
+                assert!(!wait_ready);
             }
             _ => panic!("unexpected command"),
         }
@@ -791,6 +797,7 @@ mod tests {
                 mcp_mode,
                 mcp_config,
                 mcp_port,
+                wait_ready,
             }) => {
                 assert_eq!(target, "designer");
                 assert_eq!(launch, LaunchOptionsArgs::default());
@@ -798,6 +805,7 @@ mod tests {
                 assert_eq!(mcp_mode, None);
                 assert_eq!(mcp_config, None);
                 assert_eq!(mcp_port, None);
+                assert!(!wait_ready);
             }
             _ => panic!("unexpected command"),
         }
@@ -816,6 +824,7 @@ mod tests {
             "mcp-conf.json",
             "--mcp-port",
             "9876",
+            "--wait-ready",
         ])
         .expect("parse launch");
 
@@ -827,6 +836,7 @@ mod tests {
                 mcp_mode,
                 mcp_config,
                 mcp_port,
+                wait_ready,
             }) => {
                 assert_eq!(target, "mcp");
                 assert_eq!(launch, LaunchOptionsArgs::default());
@@ -834,6 +844,7 @@ mod tests {
                 assert_eq!(mcp_mode.as_deref(), Some("ordinary"));
                 assert_eq!(mcp_config.as_deref(), Some("mcp-conf.json"));
                 assert_eq!(mcp_port, Some(9876));
+                assert!(wait_ready);
             }
             _ => panic!("unexpected command"),
         }

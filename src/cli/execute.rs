@@ -748,13 +748,29 @@ fn execute_launch(
             Err(failure) => {
                 let error = failure.error;
                 if presenter.is_json() {
-                    presenter.print_envelope(&failure_envelope(
-                        CommandName::Launch.as_str(),
-                        started.elapsed().as_millis() as u64,
-                        json!({ "message": error.message() }),
-                        &error,
-                    ));
+                    match failure.payload {
+                        Some(result) => presenter.print_envelope(&failure_envelope(
+                            CommandName::Launch.as_str(),
+                            started.elapsed().as_millis() as u64,
+                            result,
+                            &error,
+                        )),
+                        None => presenter.print_envelope(&failure_envelope(
+                            CommandName::Launch.as_str(),
+                            started.elapsed().as_millis() as u64,
+                            json!({ "message": error.message() }),
+                            &error,
+                        )),
+                    }
                 } else {
+                    if let Some(result) = failure.payload.as_ref() {
+                        render_launch_text_with_status(
+                            result,
+                            presenter,
+                            TimelineStatus::Failed,
+                            "Launch failed",
+                        );
+                    }
                     presenter.print_error(&error.to_string());
                 }
                 Err(error)
@@ -1300,10 +1316,11 @@ fn map_launch_request(args: &LaunchArgs) -> Result<LaunchRequest, UseCaseError> 
             || args.mcp_port.is_some()
             || args.mcp_mode.is_some()
             || args.mcp_scenario.is_some()
+            || args.wait_ready
         {
             return Err(UseCaseError::new(
                 UseCaseErrorKind::Validation,
-                "--mcp-config, --mcp-port, --mode, and MCP_SCENARIO are supported only for `launch mcp`",
+                "--mcp-config, --mcp-port, --mode, --wait-ready, and MCP_SCENARIO are supported only for `launch mcp`",
             ));
         }
         None
@@ -1393,6 +1410,7 @@ fn map_mcp_options(args: &LaunchArgs) -> Result<ClientMcpOptionsRequest, UseCase
         config_path: args.mcp_config.clone(),
         port: args.mcp_port,
         addon,
+        wait_ready: args.wait_ready,
     })
 }
 
@@ -2230,6 +2248,20 @@ fn render_syntax_status(status: SyntaxCheckStatus) -> &'static str {
 }
 
 fn render_launch_text(result: &LaunchResult, presenter: &Presenter) {
+    render_launch_text_with_status(
+        result,
+        presenter,
+        TimelineStatus::Succeeded,
+        "Launch completed successfully",
+    );
+}
+
+fn render_launch_text_with_status(
+    result: &LaunchResult,
+    presenter: &Presenter,
+    status: TimelineStatus,
+    label: &'static str,
+) {
     let mut details = vec![
         format!("mode: {}", render_launch_mode(&result.mode)),
         format!("binary: {}", result.binary.display()),
@@ -2244,12 +2276,23 @@ fn render_launch_text(result: &LaunchResult, presenter: &Presenter) {
     if let Some(pid) = result.pid {
         details.push(format!("pid: {pid}"));
     }
-    single_timeline(
-        presenter,
-        TimelineStatus::Succeeded,
-        "Launch completed successfully",
-        details,
-    );
+    if let Some(readiness) = &result.mcp_readiness {
+        details.push(format!("mcp endpoint: {}", readiness.url));
+        details.push(format!(
+            "mcp ready: {}",
+            if readiness.ok { "yes" } else { "no" }
+        ));
+        if !readiness.tools.is_empty() {
+            details.push(format!("mcp tools: {}", readiness.tools.join(", ")));
+        }
+        if !readiness.missing_tools.is_empty() {
+            details.push(format!(
+                "missing mcp tools: {}",
+                readiness.missing_tools.join(", ")
+            ));
+        }
+    }
+    single_timeline(presenter, status, label, details);
 }
 
 fn render_launch_mode(mode: &LaunchMode) -> &'static str {
@@ -2597,6 +2640,7 @@ mod tests {
                 },
                 mcp_config: None,
                 mcp_port: None,
+                wait_ready: false,
             })
             .expect("request"),
             LaunchRequest {
@@ -2620,6 +2664,7 @@ mod tests {
                 launch: LaunchOptionsArgs::default(),
                 mcp_config: None,
                 mcp_port: None,
+                wait_ready: false,
             })
             .expect("request")
             .target,
@@ -2633,6 +2678,7 @@ mod tests {
                 launch: LaunchOptionsArgs::default(),
                 mcp_config: None,
                 mcp_port: None,
+                wait_ready: false,
             })
             .expect("request")
             .target,
@@ -2646,6 +2692,7 @@ mod tests {
                 launch: LaunchOptionsArgs::default(),
                 mcp_config: Some("C:\\tmp\\mcp-conf.json".to_owned()),
                 mcp_port: Some(123),
+                wait_ready: true,
             })
             .expect("request"),
             LaunchRequest {
@@ -2662,6 +2709,7 @@ mod tests {
                     config_path: Some("C:\\tmp\\mcp-conf.json".to_owned()),
                     port: Some(123),
                     addon: Some(ClientMcpAddonRequest::VanessaAutomation),
+                    wait_ready: true,
                 }),
             }
         );
@@ -2723,6 +2771,7 @@ mod tests {
             launch: LaunchOptionsArgs::default(),
             mcp_config: None,
             mcp_port: None,
+            wait_ready: false,
         })
         .expect_err("launch mode should be rejected");
 
@@ -2965,6 +3014,7 @@ mod tests {
                 launch: LaunchOptionsArgs::default(),
                 mcp_config: None,
                 mcp_port: None,
+                wait_ready: false,
             }),
             None,
             &presenter,
