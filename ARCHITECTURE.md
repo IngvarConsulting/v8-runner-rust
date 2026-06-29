@@ -75,6 +75,7 @@ The typed config model now splits MCP knobs into active HTTP/session settings an
 - `mcp.http` defines the live HTTP listener and session behavior (`bind_address`, `path`, `stateful_sessions`, `max_sessions`, `idle_ttl_secs`).
 - `mcp.execution` defines shared admission/shutdown limits (`max_concurrent_calls`, `shutdown_grace_period_secs`) reused by both stdio and HTTP.
 - `tools.edt_cli` now also carries `startup_timeout_ms` and `command_timeout_ms`; the shared MCP EDT actor reuses these knobs for startup and bounded syntax execution.
+- `tools.client_mcp.wait_ready_timeout_ms` is the per-readiness wait budget for client MCP launch probing; when unset it falls back to the global `execution_timeout`, and the effective wait remains capped by the command deadline.
 
 This keeps the config surface stable while allowing both MCP transports to share the same execution/session infrastructure.
 Новые public config fields, `source-set` types и `infobase` subtrees должны обновлять typed model, validation, `config init`, примеры и архитектурную документацию синхронно по checklist из `spec/architecture/change-checklist.md`.

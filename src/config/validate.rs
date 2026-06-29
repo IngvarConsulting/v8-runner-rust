@@ -163,6 +163,9 @@ pub enum ConfigValidationError {
     #[error("tools.client_mcp.port must be greater than or equal to 1")]
     InvalidMcpClientPort,
 
+    #[error("tools.client_mcp.wait_ready_timeout_ms must be between 1 and 86400000 milliseconds")]
+    InvalidMcpClientWaitReadyTimeout,
+
     #[error("tools.client_mcp.extension.name must be a safe non-empty extension name: {0}")]
     InvalidToolExtensionName(String),
 
@@ -830,6 +833,15 @@ fn validate_mcp_config(config: &AppConfig) -> Result<(), ConfigValidationError> 
 
     if config.tools.client_mcp.port == Some(0) {
         return Err(ConfigValidationError::InvalidMcpClientPort);
+    }
+
+    if config
+        .tools
+        .client_mcp
+        .wait_ready_timeout_ms
+        .is_some_and(|timeout| !(1..=86_400_000).contains(&timeout))
+    {
+        return Err(ConfigValidationError::InvalidMcpClientWaitReadyTimeout);
     }
 
     Ok(())
@@ -2403,6 +2415,14 @@ mod tests {
         config.tools.client_mcp.port = Some(0);
         let err = validate(&config).expect_err("expected invalid MCP client port");
         assert!(matches!(err, ConfigValidationError::InvalidMcpClientPort));
+
+        config.tools.client_mcp.port = Some(1);
+        config.tools.client_mcp.wait_ready_timeout_ms = Some(0);
+        let err = validate(&config).expect_err("expected invalid MCP readiness timeout");
+        assert!(matches!(
+            err,
+            ConfigValidationError::InvalidMcpClientWaitReadyTimeout
+        ));
     }
 
     #[test]

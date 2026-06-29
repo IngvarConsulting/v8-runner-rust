@@ -75,52 +75,62 @@ pub fn execute(
     let location = utilities
         .locate(utility)
         .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
-    let process_args = build_launch_args(
-        client_mode,
-        &config.v8_connection(),
-        &additional_launch_keys,
-        &launch,
-    );
+    let process_request = ProcessRequest {
+        program: location.path.clone(),
+        args: build_launch_args(
+            client_mode,
+            &config.v8_connection(),
+            &additional_launch_keys,
+            &launch,
+        ),
+        workdir: None,
+        stdout_log_path: None,
+        stderr_log_path: None,
+        startup_probe: Some(LAUNCH_STARTUP_PROBE),
+    };
 
     debug!("[Запуск] Приложение: {}", mode_label(args.target));
     log_live_stage("launch: start", "[Launch] starting client process");
-    let spawned = utilities
-        .runner_for(utility)
-        .spawn(&ProcessRequest {
-            program: location.path.clone(),
-            args: process_args,
-            workdir: None,
-            stdout_log_path: None,
-            stderr_log_path: None,
-            startup_probe: Some(LAUNCH_STARTUP_PROBE),
-        })
-        .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+    let runner = utilities.runner_for(utility);
 
-    let mut result = LaunchResult {
-        ok: true,
-        mode,
-        pid: Some(spawned.pid),
-        binary: spawned.binary.clone(),
-        message: Some(launch_message(config, args, &spawned.binary, spawned.pid)),
-        mcp_readiness: None,
-    };
     if let Some(url) = readiness_url {
+        let managed = runner
+            .spawn_managed(&process_request)
+            .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+        let pid = managed.pid();
+        let binary = managed.binary().clone();
+        let mut result = LaunchResult {
+            ok: true,
+            mode,
+            pid: Some(pid),
+            binary: binary.clone(),
+            message: Some(launch_message(config, args, &binary, pid)),
+            mcp_readiness: None,
+        };
         let required_tools = required_mcp_tools(args);
-        match client_mcp_readiness::wait_for_readiness(context, &url, required_tools) {
+        match client_mcp_readiness::wait_for_readiness(
+            context,
+            &url,
+            required_tools,
+            config.client_mcp_wait_ready_timeout_duration(),
+        ) {
             Ok(readiness) => {
                 result.mcp_readiness = Some(readiness);
+                let _ = managed.detach();
+                return Ok(result);
             }
             Err(readiness) => {
                 let message = readiness
                     .message
                     .clone()
                     .unwrap_or_else(|| "MCP endpoint did not become ready".to_owned());
+                managed.terminate();
                 result.ok = false;
                 result.message = Some(format!(
-                    "Launched {} via {} (pid {}) but {message}",
+                    "Launched {} via {} (pid {}) but {message}; process terminated",
                     mode_label(args.target),
-                    spawned.binary.display(),
-                    spawned.pid
+                    binary.display(),
+                    pid
                 ));
                 result.mcp_readiness = Some(readiness);
                 return Err(UseCaseFailure::with_payload(
@@ -130,7 +140,19 @@ pub fn execute(
             }
         }
     }
-    Ok(result)
+
+    let spawned = runner
+        .spawn(&process_request)
+        .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+
+    Ok(LaunchResult {
+        ok: true,
+        mode,
+        pid: Some(spawned.pid),
+        binary: spawned.binary.clone(),
+        message: Some(launch_message(config, args, &spawned.binary, spawned.pid)),
+        mcp_readiness: None,
+    })
 }
 
 fn client_mcp_readiness_url(

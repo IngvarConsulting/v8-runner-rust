@@ -40,6 +40,17 @@ fn read_args_log(path: &Path) -> String {
     fs::read_to_string(path).expect("args log")
 }
 
+fn wait_for_file(path: &Path, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if path.exists() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    path.exists()
+}
+
 struct FakeHttpRequest {
     method: String,
     session_id: Option<String>,
@@ -225,6 +236,12 @@ fn http_body_bounds(bytes: &[u8]) -> Option<(String, Option<String>, usize, usiz
 fn prepend_config(path: &Path, prefix: &str) {
     let config = fs::read_to_string(path).expect("config");
     fs::write(path, format!("{prefix}{config}")).expect("config");
+}
+
+fn insert_client_mcp_config(path: &Path, body: &str) {
+    let config = fs::read_to_string(path).expect("config");
+    let replacement = format!("tools:\n  client_mcp:\n{body}  platform:");
+    fs::write(path, config.replace("tools:\n  platform:", &replacement)).expect("config");
 }
 
 fn write_config(
@@ -927,6 +944,71 @@ fn launch_mcp_wait_ready_text_failure_is_not_rendered_as_success() {
     assert!(stdout.contains("Launch failed"));
     assert!(!stdout.contains("Launch completed successfully"));
     assert!(String::from_utf8_lossy(&output.stderr).contains("runtime error"));
+}
+
+#[test]
+fn launch_mcp_wait_ready_terminates_process_on_readiness_failure() {
+    let marker = temp_workspace();
+    let started = marker.path().join("started");
+    let terminated = marker.path().join("terminated");
+    let script = format!(
+        "printf started > '{}'\ntrap 'printf terminated > \"{}\"; exit 0' TERM INT\nwhile true; do sleep 1; done",
+        started.display(),
+        terminated.display()
+    );
+    let (_dir, config_path, _install_dir, _work_path) = setup_project_with_thin_script(&script);
+    prepend_config(&config_path, "execution_timeout: 500\n");
+    let port = free_tcp_port();
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "mcp",
+            "--mcp-port",
+            &port.to_string(),
+            "--wait-ready",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!output.status.success());
+    assert!(started.exists(), "launch process should have started");
+    assert!(
+        wait_for_file(&terminated, Duration::from_secs(2)),
+        "wait-ready failure should terminate the launched client process"
+    );
+}
+
+#[test]
+fn launch_mcp_wait_ready_uses_configured_wait_timeout() {
+    let (_dir, config_path, _install_dir, _work_path) = setup_project();
+    prepend_config(&config_path, "execution_timeout: 5000\n");
+    insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 200\n");
+    let port = free_tcp_port();
+
+    let started = Instant::now();
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "mcp",
+            "--mcp-port",
+            &port.to_string(),
+            "--wait-ready",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!output.status.success());
+    assert!(
+        started.elapsed() < Duration::from_millis(1500),
+        "wait-ready should use tools.client_mcp.wait_ready_timeout_ms instead of the global execution_timeout"
+    );
 }
 
 #[test]

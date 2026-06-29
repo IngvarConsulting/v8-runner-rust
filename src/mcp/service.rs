@@ -547,8 +547,8 @@ fn normalize_string_list(values: &[String]) -> Vec<String> {
 fn map_launch_app_request(
     request: &McpLaunchAppRequest,
 ) -> Result<LaunchRequest, McpServiceError<McpCommandEnvelope>> {
-    let utility_type = normalize_required_string(&request.utility_type, "utility_type")
-        .map_err(|error| launch_adapter_business_error(error, "utility_type"))?;
+    let utility_type = normalize_required_string(&request.utility_type, "utilityType")
+        .map_err(|error| launch_adapter_business_error(error, "utilityType"))?;
     if utility_type.eq_ignore_ascii_case("mcp")
         || utility_type.eq_ignore_ascii_case("client_mcp")
         || utility_type.eq_ignore_ascii_case("client-mcp")
@@ -578,11 +578,11 @@ fn map_launch_app_request(
             UseCaseErrorKind::Validation,
             "mcpConfig, mcpPort, mode, mcpScenario, and waitReady are supported only when utilityType is mcp",
         );
-        return Err(launch_adapter_business_error(error, "utility_type"));
+        return Err(launch_adapter_business_error(error, "utilityType"));
     }
 
-    let target = parse_launch_target(&utility_type, "utility_type", LaunchModeAliases::Mcp)
-        .map_err(|error| launch_adapter_business_error(error, "utility_type"))?;
+    let target = parse_launch_target(&utility_type, "utilityType", LaunchModeAliases::Mcp)
+        .map_err(|error| launch_adapter_business_error(error, "utilityType"))?;
     Ok(LaunchRequest {
         target,
         launch: LaunchOptions::default(),
@@ -1920,6 +1920,7 @@ mod tests {
                     failure.response.data["message"],
                     "mcpConfig, mcpPort, mode, mcpScenario, and waitReady are supported only when utilityType is mcp"
                 );
+                assert_eq!(failure.response.data["field"], "utilityType");
                 assert_eq!(service.port.launch_requests.borrow().len(), 0);
             }
             other => panic!("unexpected error: {other:?}"),
@@ -2066,12 +2067,13 @@ mod tests {
         match error {
             McpServiceError::Business(failure) => {
                 assert_eq!(failure.error.code, McpErrorCode::InvalidArgument);
-                assert_eq!(failure.error.message, "utility_type must not be blank");
+                assert_eq!(failure.error.message, "utilityType must not be blank");
                 assert_eq!(
                     failure.response.data["message"],
-                    "utility_type must not be blank"
+                    "utilityType must not be blank"
                 );
                 assert_eq!(failure.response.data["tool"], "launch_app");
+                assert_eq!(failure.response.data["field"], "utilityType");
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -2107,8 +2109,9 @@ mod tests {
                 assert_eq!(failure.error.code, McpErrorCode::UnsupportedValue);
                 assert_eq!(
                     failure.response.data["message"],
-                    "unsupported launch utility_type: unknown"
+                    "unsupported launch utilityType: unknown"
                 );
+                assert_eq!(failure.response.data["field"], "utilityType");
             }
             other => panic!("unexpected error: {other:?}"),
         }

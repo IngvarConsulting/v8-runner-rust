@@ -34,6 +34,9 @@ tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "proc
 tokio-util = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
+[target.'cfg(windows)'.dependencies]
+process-wrap = { version = "9.1.0", default-features = false, features = ["std", "job-object", "creation-flags"] }
+
 [dev-dependencies]
 assert_cmd = "2"
 jsonschema = "0.33"

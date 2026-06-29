@@ -472,6 +472,12 @@ pub(super) fn enterprise_error_kind(
             None,
             ExecutionStatus::Failed,
         ),
+        EnterpriseError::Spawn(process_error @ ProcessError::ManagedSpawnUnsupported { .. }) => (
+            Some(TestErrorKind::EnterpriseSpawnFailed),
+            AppError::PlatformProcess(process_error),
+            None,
+            ExecutionStatus::Failed,
+        ),
         EnterpriseError::Spawn(process_error @ ProcessError::StartupCheckFailed { .. }) => (
             Some(TestErrorKind::EnterpriseStartupCheckFailed),
             AppError::PlatformProcess(process_error),

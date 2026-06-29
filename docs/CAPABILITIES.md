@@ -304,6 +304,9 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--wait-ready] [FLAGS]
   со списком tools. Для `launch mcp va --wait-ready` дополнительно проверяется наличие
   Vanessa tools: `load_features`, `open_feature_file`, `run_scenario`, `get_test_results`,
   `connect_test_client`.
+- Timeout ожидания задаётся `tools.client_mcp.wait_ready_timeout_ms`; если он не задан,
+  используется общий `execution_timeout`. Фактическое ожидание всё равно ограничено общим
+  command deadline, поэтому для более длинного ожидания нужно увеличить и `execution_timeout`.
 - Если настроено `tools.client_mcp.extension`, `launch mcp` не устанавливает и не обновляет его;
   подготовка выполняется командой `v8-runner build`.
 - `--mcp-config` не должен содержать `;`, потому что `/C` payload разделяется точкой с запятой.

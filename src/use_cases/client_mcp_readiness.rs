@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
 use reqwest::header::HeaderValue;
+use rmcp::model::ProtocolVersion;
 use serde_json::{json, Value};
 
 use crate::domain::launch::McpReadinessResult;
@@ -10,8 +11,10 @@ use crate::use_cases::context::{ExecutionContext, ExecutionInterruption};
 
 const MCP_READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MCP_READY_REQUEST_TIMEOUT: Duration = Duration::from_millis(300);
-const MCP_READY_DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+const MCP_READY_CLEANUP_TIMEOUT: Duration = Duration::from_millis(300);
 const MCP_ENDPOINT_PATH: &str = "/mcp";
+const MCP_PROTOCOL_VERSION_HEADER: &str = "MCP-Protocol-Version";
+const MCP_SESSION_ID_HEADER: &str = "Mcp-Session-Id";
 
 pub(in crate::use_cases) const VANESSA_MCP_TOOLS: &[&str] = &[
     "load_features",
@@ -23,6 +26,7 @@ pub(in crate::use_cases) const VANESSA_MCP_TOOLS: &[&str] = &[
 
 struct McpProbeSession {
     session_id: Option<HeaderValue>,
+    protocol_version: HeaderValue,
 }
 
 pub(in crate::use_cases) fn endpoint_url(port: u16) -> String {
@@ -33,14 +37,16 @@ pub(in crate::use_cases) fn wait_for_readiness(
     context: &ExecutionContext,
     url: &str,
     required_tools: &[&str],
+    readiness_timeout: Duration,
 ) -> Result<McpReadinessResult, McpReadinessResult> {
+    let readiness_timeout = readiness_timeout.max(Duration::from_millis(1));
     let timeout = context
         .remaining_budget()
         .filter(|budget| !budget.is_zero())
-        .unwrap_or(MCP_READY_DEFAULT_TIMEOUT);
+        .map(|budget| budget.min(readiness_timeout))
+        .unwrap_or(readiness_timeout);
     let deadline = Instant::now() + timeout;
     let client = Client::builder()
-        .timeout(MCP_READY_REQUEST_TIMEOUT)
         .build()
         .map_err(|error| readiness_failure(url, Vec::new(), required_tools, error.to_string()))?;
     let mut last_message = "MCP endpoint did not become ready".to_owned();
@@ -52,24 +58,18 @@ pub(in crate::use_cases) fn wait_for_readiness(
     let mut session: Option<McpProbeSession> = None;
 
     loop {
-        if Instant::now() >= deadline {
-            if let Some(session) = session.take() {
-                delete_mcp_session(&client, url, session.session_id.as_ref());
-            }
-            return Err(readiness_failure_with_missing(
-                url,
-                last_tools,
-                last_missing,
-                last_message,
-            ));
-        }
         if let Some(interruption) = context.interruption() {
             let message = format!(
                 "{} while waiting for MCP readiness",
                 interruption_message(context, interruption)
             );
             if let Some(session) = session.take() {
-                delete_mcp_session(&client, url, session.session_id.as_ref());
+                delete_mcp_session(
+                    &client,
+                    url,
+                    session.session_id.as_ref(),
+                    &session.protocol_version,
+                );
             }
             return Err(readiness_failure_with_missing(
                 url,
@@ -78,9 +78,24 @@ pub(in crate::use_cases) fn wait_for_readiness(
                 message,
             ));
         }
-
+        if Instant::now() >= deadline {
+            if let Some(session) = session.take() {
+                delete_mcp_session(
+                    &client,
+                    url,
+                    session.session_id.as_ref(),
+                    &session.protocol_version,
+                );
+            }
+            return Err(readiness_failure_with_missing(
+                url,
+                last_tools,
+                last_missing,
+                last_message,
+            ));
+        }
         if session.is_none() {
-            match initialize_mcp_session(&client, url) {
+            match initialize_mcp_session(&client, url, deadline) {
                 Ok(probe_session) => session = Some(probe_session),
                 Err(message) => {
                     last_message = format!("MCP endpoint did not become ready at {url}: {message}");
@@ -98,12 +113,17 @@ pub(in crate::use_cases) fn wait_for_readiness(
         let Some(active_session) = session.as_ref() else {
             continue;
         };
-        match list_mcp_tools(&client, url, active_session.session_id.as_ref()) {
+        match list_mcp_tools(&client, url, active_session, deadline) {
             Ok(tools) => {
                 let missing = missing_required_tools(&tools, required_tools);
                 if missing.is_empty() {
                     if let Some(session) = session.take() {
-                        delete_mcp_session(&client, url, session.session_id.as_ref());
+                        delete_mcp_session(
+                            &client,
+                            url,
+                            session.session_id.as_ref(),
+                            &session.protocol_version,
+                        );
                     }
                     return Ok(McpReadinessResult {
                         ok: true,
@@ -128,7 +148,12 @@ pub(in crate::use_cases) fn wait_for_readiness(
                     .map(|tool| (*tool).to_owned())
                     .collect();
                 if let Some(session) = session.take() {
-                    delete_mcp_session(&client, url, session.session_id.as_ref());
+                    delete_mcp_session(
+                        &client,
+                        url,
+                        session.session_id.as_ref(),
+                        &session.protocol_version,
+                    );
                 }
             }
         }
@@ -151,13 +176,17 @@ fn sleep_until_next_mcp_probe(deadline: Instant) {
     }
 }
 
-fn initialize_mcp_session(client: &Client, url: &str) -> Result<McpProbeSession, String> {
+fn initialize_mcp_session(
+    client: &Client,
+    url: &str,
+    deadline: Instant,
+) -> Result<McpProbeSession, String> {
     let initialize = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "initialize",
         "params": {
-            "protocolVersion": "2025-11-25",
+            "protocolVersion": ProtocolVersion::LATEST.as_str(),
             "capabilities": {},
             "clientInfo": {
                 "name": "v8-runner",
@@ -165,25 +194,45 @@ fn initialize_mcp_session(client: &Client, url: &str) -> Result<McpProbeSession,
             }
         }
     });
-    let (initialize_response, session_id) = post_json_rpc(client, url, &initialize, None)?;
+    let (initialize_response, session_id) =
+        post_json_rpc(client, url, &initialize, None, deadline)?;
     if initialize_response.get("error").is_some() {
-        delete_mcp_session(client, url, session_id.as_ref());
+        let protocol_version = latest_protocol_header();
+        delete_mcp_session(client, url, session_id.as_ref(), &protocol_version);
         return Err(format!(
             "initialize failed: {}",
             initialize_response["error"]
         ));
     }
-    if let Err(message) = send_mcp_initialized(client, url, session_id.as_ref()) {
-        delete_mcp_session(client, url, session_id.as_ref());
+    let protocol_version = match negotiated_protocol_version_header(&initialize_response) {
+        Ok(protocol_version) => protocol_version,
+        Err(message) => {
+            let protocol_version = latest_protocol_header();
+            delete_mcp_session(client, url, session_id.as_ref(), &protocol_version);
+            return Err(message);
+        }
+    };
+    let session = McpProbeSession {
+        session_id,
+        protocol_version,
+    };
+    if let Err(message) = send_mcp_initialized(client, url, &session, deadline) {
+        delete_mcp_session(
+            client,
+            url,
+            session.session_id.as_ref(),
+            &session.protocol_version,
+        );
         return Err(message);
     }
-    Ok(McpProbeSession { session_id })
+    Ok(session)
 }
 
 fn list_mcp_tools(
     client: &Client,
     url: &str,
-    session_id: Option<&HeaderValue>,
+    session: &McpProbeSession,
+    deadline: Instant,
 ) -> Result<Vec<String>, String> {
     let tools_list = json!({
         "jsonrpc": "2.0",
@@ -191,7 +240,7 @@ fn list_mcp_tools(
         "method": "tools/list",
         "params": {}
     });
-    let (tools_response, _) = post_json_rpc(client, url, &tools_list, session_id)?;
+    let (tools_response, _) = post_json_rpc(client, url, &tools_list, Some(session), deadline)?;
     if tools_response.get("error").is_some() {
         return Err(format!("tools/list failed: {}", tools_response["error"]));
     }
@@ -201,8 +250,10 @@ fn list_mcp_tools(
 fn send_mcp_initialized(
     client: &Client,
     url: &str,
-    session_id: Option<&HeaderValue>,
+    session: &McpProbeSession,
+    deadline: Instant,
 ) -> Result<(), String> {
+    let timeout = remaining_request_timeout(deadline)?;
     let initialized = json!({
         "jsonrpc": "2.0",
         "method": "notifications/initialized"
@@ -211,9 +262,14 @@ fn send_mcp_initialized(
         .post(url)
         .header("Accept", "application/json, text/event-stream")
         .header("Content-Type", "application/json")
+        .header(
+            MCP_PROTOCOL_VERSION_HEADER,
+            session.protocol_version.clone(),
+        )
+        .timeout(timeout)
         .json(&initialized);
-    if let Some(session_id) = session_id {
-        request = request.header("Mcp-Session-Id", session_id.clone());
+    if let Some(session_id) = &session.session_id {
+        request = request.header(MCP_SESSION_ID_HEADER, session_id.clone());
     }
     let response = request.send().map_err(|error| error.to_string())?;
     let status = response.status();
@@ -226,13 +282,20 @@ fn send_mcp_initialized(
     Ok(())
 }
 
-fn delete_mcp_session(client: &Client, url: &str, session_id: Option<&HeaderValue>) {
+fn delete_mcp_session(
+    client: &Client,
+    url: &str,
+    session_id: Option<&HeaderValue>,
+    protocol_version: &HeaderValue,
+) {
     let Some(session_id) = session_id else {
         return;
     };
     let _ = client
         .delete(url)
-        .header("Mcp-Session-Id", session_id.clone())
+        .header(MCP_SESSION_ID_HEADER, session_id.clone())
+        .header(MCP_PROTOCOL_VERSION_HEADER, protocol_version.clone())
+        .timeout(MCP_READY_CLEANUP_TIMEOUT)
         .send();
 }
 
@@ -240,19 +303,28 @@ fn post_json_rpc(
     client: &Client,
     url: &str,
     payload: &Value,
-    session_id: Option<&HeaderValue>,
+    session: Option<&McpProbeSession>,
+    deadline: Instant,
 ) -> Result<(Value, Option<HeaderValue>), String> {
+    let timeout = remaining_request_timeout(deadline)?;
     let mut request = client
         .post(url)
         .header("Accept", "application/json, text/event-stream")
         .header("Content-Type", "application/json")
+        .timeout(timeout)
         .json(payload);
-    if let Some(session_id) = session_id {
-        request = request.header("Mcp-Session-Id", session_id.clone());
+    if let Some(session) = session {
+        request = request.header(
+            MCP_PROTOCOL_VERSION_HEADER,
+            session.protocol_version.clone(),
+        );
+        if let Some(session_id) = &session.session_id {
+            request = request.header(MCP_SESSION_ID_HEADER, session_id.clone());
+        }
     }
     let response = request.send().map_err(|error| error.to_string())?;
     let status = response.status();
-    let response_session_id = response.headers().get("Mcp-Session-Id").cloned();
+    let response_session_id = response.headers().get(MCP_SESSION_ID_HEADER).cloned();
     let is_sse = response
         .headers()
         .get("Content-Type")
@@ -269,6 +341,29 @@ fn post_json_rpc(
         parse_json_or_sse(&body)?
     };
     Ok((value, response_session_id))
+}
+
+fn remaining_request_timeout(deadline: Instant) -> Result<Duration, String> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err("readiness deadline expired".to_owned());
+    }
+    Ok(remaining.min(MCP_READY_REQUEST_TIMEOUT))
+}
+
+fn negotiated_protocol_version_header(response: &Value) -> Result<HeaderValue, String> {
+    let protocol_version = response
+        .get("result")
+        .and_then(|result| result.get("protocolVersion"))
+        .and_then(Value::as_str)
+        .unwrap_or(ProtocolVersion::LATEST.as_str());
+    HeaderValue::from_str(protocol_version)
+        .map_err(|error| format!("invalid initialize protocolVersion: {error}"))
+}
+
+fn latest_protocol_header() -> HeaderValue {
+    HeaderValue::from_str(ProtocolVersion::LATEST.as_str())
+        .expect("SDK protocol version must be a valid HTTP header value")
 }
 
 fn parse_json_or_sse(body: &str) -> Result<Value, String> {
@@ -401,6 +496,148 @@ mod tests {
     use super::*;
 
     #[test]
+    fn command_deadline_interrupts_readiness_wait() {
+        let context = ExecutionContext::cli(CommandName::Launch)
+            .with_deadline(Some(Instant::now() - Duration::from_millis(1)));
+
+        let readiness =
+            wait_for_readiness(&context, &endpoint_url(1), &[], Duration::from_millis(500))
+                .expect_err("expected command timeout to interrupt readiness wait");
+
+        assert_eq!(
+            readiness.message.as_deref(),
+            Some("execution timeout expired before reaching a safe completion point while waiting for MCP readiness")
+        );
+    }
+
+    #[test]
+    fn readiness_deadline_caps_stalled_http_probe() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind fake MCP server");
+        let port = listener.local_addr().expect("local addr").port();
+        let release_connection = Arc::new(AtomicBool::new(false));
+        let server_release = Arc::clone(&release_connection);
+        let server = thread::spawn(move || {
+            let (_stream, _) = listener.accept().expect("accept stalled request");
+            while !server_release.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        let context = ExecutionContext::cli(CommandName::Launch)
+            .with_deadline(Some(Instant::now() + Duration::from_secs(5)));
+        let started = Instant::now();
+
+        let readiness = wait_for_readiness(
+            &context,
+            &endpoint_url(port),
+            &[],
+            Duration::from_millis(50),
+        )
+        .expect_err("expected stalled request to respect readiness deadline");
+
+        release_connection.store(true, Ordering::SeqCst);
+        server.join().expect("fake MCP server exits");
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "stalled HTTP probe should be capped by readiness deadline, got {:?}",
+            started.elapsed()
+        );
+        assert!(readiness
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("MCP endpoint did not become ready"));
+    }
+
+    #[test]
+    fn deletes_session_when_readiness_deadline_expires_after_session_started() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind fake MCP server");
+        let port = listener.local_addr().expect("local addr").port();
+        let deleted = Arc::new(AtomicBool::new(false));
+        let server_deleted = Arc::clone(&deleted);
+
+        let server = thread::spawn(move || {
+            listener
+                .set_nonblocking(true)
+                .expect("fake MCP nonblocking listener");
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let request = read_http_request(&mut stream);
+                        if request.starts_with("DELETE ") {
+                            assert_protocol_header(&request);
+                            assert_session_header(&request);
+                            server_deleted.store(true, Ordering::SeqCst);
+                            write_empty_response(&mut stream, "202 Accepted");
+                            break;
+                        }
+
+                        if request.contains("\"method\":\"initialize\"")
+                            || request.contains("\"method\": \"initialize\"")
+                        {
+                            write_json_response(
+                                &mut stream,
+                                "200 OK",
+                                Some("fake-session"),
+                                &json!({
+                                    "jsonrpc": "2.0",
+                                    "id": 1,
+                                    "result": {
+                                        "protocolVersion": "2025-06-18",
+                                        "capabilities": {},
+                                        "serverInfo": { "name": "fake-client-mcp", "version": "1" }
+                                    }
+                                }),
+                            );
+                        } else if request.contains("notifications/initialized") {
+                            write_empty_response(&mut stream, "202 Accepted");
+                        } else if request.contains("tools/list") {
+                            write_json_response(
+                                &mut stream,
+                                "200 OK",
+                                Some("fake-session"),
+                                &json!({
+                                    "jsonrpc": "2.0",
+                                    "id": 2,
+                                    "result": { "tools": [] }
+                                }),
+                            );
+                        } else {
+                            write_empty_response(&mut stream, "404 Not Found");
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() <= deadline,
+                            "fake MCP server timed out waiting for DELETE"
+                        );
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("fake MCP accept failed: {error}"),
+                }
+            }
+        });
+
+        let context = ExecutionContext::cli(CommandName::Launch)
+            .with_deadline(Some(Instant::now() + Duration::from_secs(5)));
+
+        let readiness = wait_for_readiness(
+            &context,
+            &endpoint_url(port),
+            &["load_features"],
+            Duration::from_millis(120),
+        );
+
+        assert!(readiness.is_err());
+        server.join().expect("fake MCP server exits");
+        assert!(
+            deleted.load(Ordering::SeqCst),
+            "client should delete initialized session after readiness timeout"
+        );
+    }
+
+    #[test]
     fn deletes_session_when_initialized_notification_fails() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind fake MCP server");
         let port = listener.local_addr().expect("local addr").port();
@@ -464,7 +701,12 @@ mod tests {
         let context = ExecutionContext::cli(CommandName::Launch)
             .with_deadline(Some(Instant::now() + Duration::from_millis(350)));
 
-        let readiness = wait_for_readiness(&context, &endpoint_url(port), &[]);
+        let readiness = wait_for_readiness(
+            &context,
+            &endpoint_url(port),
+            &[],
+            Duration::from_millis(350),
+        );
 
         assert!(readiness.is_err());
         server.join().expect("fake MCP server exits");
@@ -472,6 +714,91 @@ mod tests {
             deleted.load(Ordering::SeqCst),
             "client should delete initialized session after notification failure"
         );
+    }
+
+    #[test]
+    fn sends_negotiated_protocol_version_on_session_requests() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind fake MCP server");
+        let port = listener.local_addr().expect("local addr").port();
+
+        let server = thread::spawn(move || {
+            let mut saw_initialized = false;
+            let mut saw_tools = false;
+            let mut saw_delete = false;
+
+            while !saw_delete {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                let request = read_http_request(&mut stream);
+                if request.starts_with("DELETE ") {
+                    assert_protocol_header(&request);
+                    assert_session_header(&request);
+                    saw_delete = true;
+                    write_empty_response(&mut stream, "202 Accepted");
+                    continue;
+                }
+
+                if request.contains("\"method\":\"initialize\"")
+                    || request.contains("\"method\": \"initialize\"")
+                {
+                    assert!(
+                        request.contains("\"protocolVersion\":\"2025-06-18\"")
+                            || request.contains("\"protocolVersion\": \"2025-06-18\""),
+                        "initialize should advertise the SDK-supported protocol version: {request}"
+                    );
+                    write_json_response(
+                        &mut stream,
+                        "200 OK",
+                        Some("fake-session"),
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "result": {
+                                "protocolVersion": "2025-06-18",
+                                "capabilities": {},
+                                "serverInfo": { "name": "fake-client-mcp", "version": "1" }
+                            }
+                        }),
+                    );
+                } else if request.contains("notifications/initialized") {
+                    assert_protocol_header(&request);
+                    assert_session_header(&request);
+                    saw_initialized = true;
+                    write_empty_response(&mut stream, "202 Accepted");
+                } else if request.contains("tools/list") {
+                    assert_protocol_header(&request);
+                    assert_session_header(&request);
+                    saw_tools = true;
+                    write_json_response(
+                        &mut stream,
+                        "200 OK",
+                        Some("fake-session"),
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "id": 2,
+                            "result": { "tools": [] }
+                        }),
+                    );
+                } else {
+                    write_empty_response(&mut stream, "404 Not Found");
+                }
+            }
+
+            assert!(saw_initialized, "expected notifications/initialized");
+            assert!(saw_tools, "expected tools/list");
+        });
+
+        let context = ExecutionContext::cli(CommandName::Launch)
+            .with_deadline(Some(Instant::now() + Duration::from_millis(500)));
+
+        let readiness = wait_for_readiness(
+            &context,
+            &endpoint_url(port),
+            &[],
+            Duration::from_millis(500),
+        );
+
+        assert!(readiness.is_ok(), "{readiness:?}");
+        server.join().expect("fake MCP server exits");
     }
 
     fn read_http_request(stream: &mut TcpStream) -> String {
@@ -535,5 +862,23 @@ mod tests {
         )
         .expect("write headers");
         stream.write_all(&body).expect("write body");
+    }
+
+    fn assert_session_header(request: &str) {
+        assert!(
+            request
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("Mcp-Session-Id: fake-session")),
+            "request should include the initialized MCP session id: {request}"
+        );
+    }
+
+    fn assert_protocol_header(request: &str) {
+        assert!(
+            request
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("MCP-Protocol-Version: 2025-06-18")),
+            "request should include the negotiated MCP protocol version: {request}"
+        );
     }
 }

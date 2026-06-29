@@ -50,7 +50,7 @@ v8-runner launch mcp va --mcp-config <FILE>
 v8-runner launch mcp va --mcp-port <PORT> --wait-ready
 ```
 
-This starts the client-side MCP server in 1C and loads Vanessa Automation from `tools.va`. Prefer `--wait-ready` before an agent connects: it probes `/mcp`, runs MCP initialization, lists tools, and confirms VA tools such as `load_features`, `run_scenario`, and `get_test_results` are registered.
+This starts the client-side MCP server in 1C and loads Vanessa Automation from `tools.va`. Prefer `--wait-ready` before an agent connects: it probes `/mcp`, runs MCP initialization, lists tools, and confirms VA tools such as `load_features`, `run_scenario`, and `get_test_results` are registered. Tune that readiness wait with `tools.client_mcp.wait_ready_timeout_ms`; it falls back to `execution_timeout` and remains capped by the command deadline.
 
 For functional `.feature` acceptance work, use Vanessa Automation (`test va` or `launch mcp va --wait-ready`), not bare `launch mcp`.
 
