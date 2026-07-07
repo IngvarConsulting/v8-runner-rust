@@ -179,7 +179,7 @@ impl<'a> DesignerDsl<'a> {
         self.run(&args)
     }
 
-    /// `/DumpConfigToFiles <dir> [-Extension <name>] -updateConfigDumpInfo`
+    /// `/DumpConfigToFiles <dir> [-Extension <name>]`
     pub fn dump_config_to_files(
         &self,
         target_dir: &Path,
@@ -188,7 +188,23 @@ impl<'a> DesignerDsl<'a> {
         let mut args = self.base_args();
         args.push("/DumpConfigToFiles".to_owned());
         args.push(target_dir.display().to_string());
-        args.push("-updateConfigDumpInfo".to_owned());
+        if let Some(extension) = extension {
+            args.push("-Extension".to_owned());
+            args.push(extension.to_owned());
+        }
+        self.run(&args)
+    }
+
+    /// `/DumpConfigToFiles <dir> -update [-Extension <name>]`
+    pub fn dump_config_to_files_incremental(
+        &self,
+        target_dir: &Path,
+        extension: Option<&str>,
+    ) -> Result<PlatformCommandResult, DesignerError> {
+        let mut args = self.base_args();
+        args.push("/DumpConfigToFiles".to_owned());
+        args.push(target_dir.display().to_string());
+        args.push("-update".to_owned());
         if let Some(extension) = extension {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());
@@ -238,8 +254,7 @@ impl<'a> DesignerDsl<'a> {
         self.run(&args)
     }
 
-    /// `/DumpConfigToFiles <dir> -partial -listFile <list_file> -updateConfigDumpInfo`
-    /// `[-Extension <name>]`
+    /// `/DumpConfigToFiles <dir> -partial -listFile <list_file> [-Extension <name>]`
     pub fn dump_config_to_files_partial(
         &self,
         target_dir: &Path,
@@ -252,7 +267,6 @@ impl<'a> DesignerDsl<'a> {
         args.push("-partial".to_owned());
         args.push("-listFile".to_owned());
         args.push(list_file.display().to_string());
-        args.push("-updateConfigDumpInfo".to_owned());
         if let Some(extension) = extension {
             args.push("-Extension".to_owned());
             args.push(extension.to_owned());
@@ -441,7 +455,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn dump_config_to_files_requests_config_dump_info_update() {
+    fn dump_config_to_files_full_does_not_request_incremental_update() {
         let dir = tempdir().expect("tempdir");
         let script = dir.path().join("1cv8");
         let args_log = dir.path().join("args.log");
@@ -462,7 +476,37 @@ mod tests {
 
         let args = fs::read_to_string(args_log).expect("args log");
         assert!(args.contains("/DumpConfigToFiles"));
-        assert!(args.contains("-updateConfigDumpInfo"));
+        assert!(!args.contains("-update"));
+        assert!(!args.contains("-updateConfigDumpInfo"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dump_config_to_files_incremental_requests_update() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("1cv8");
+        let args_log = dir.path().join("args.log");
+        write_script(
+            &script,
+            &format!("printf '%s\n' \"$@\" > \"{}\"\nexit 0", args_log.display()),
+        );
+        let runner = ProcessExecutor;
+        let dsl = DesignerDsl::new(
+            script,
+            V8Connection::from_connection_string("File=/tmp/ib"),
+            &runner as &dyn ProcessRunner,
+            None,
+        );
+
+        dsl.dump_config_to_files_incremental(dir.path().join("out").as_path(), Some("ExtName"))
+            .expect("dump config incremental");
+
+        let args = fs::read_to_string(args_log).expect("args log");
+        assert!(args.contains("/DumpConfigToFiles"));
+        assert!(args.contains("-update"));
+        assert!(!args.contains("-updateConfigDumpInfo"));
+        assert!(args.contains("-Extension"));
+        assert!(args.contains("ExtName"));
     }
 
     #[cfg(unix)]
@@ -495,7 +539,7 @@ mod tests {
         assert!(args.contains("-partial"));
         assert!(args.contains("-listFile"));
         assert!(args.contains("objects.txt"));
-        assert!(args.contains("-updateConfigDumpInfo"));
+        assert!(!args.contains("-updateConfigDumpInfo"));
         assert!(args.contains("-Extension"));
         assert!(args.contains("ExtName"));
     }

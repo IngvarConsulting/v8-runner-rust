@@ -129,7 +129,7 @@ fn run_incremental_dump_designer(
         &resolved.source_set_name,
         "incremental",
     )?
-    .dump_config_to_files(
+    .dump_config_to_files_incremental(
         &resolved.platform_target_path,
         resolved.extension.as_deref(),
     )
@@ -1871,6 +1871,39 @@ exit 0"#,
         assert!(base.join("main").exists());
         let calls = fs::read_to_string(calls).expect("calls");
         assert!(calls.contains("/DumpConfigToFiles"));
+        assert!(calls.contains("-update"));
+        assert!(!calls.contains("-updateConfigDumpInfo"));
+    }
+
+    #[test]
+    fn dump_incremental_designer_extension_uses_update_and_extension_flag() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        write_dump_script(&script, &calls, None, 0);
+        let config = build_config(&base, &work, &script);
+
+        let result = run_dump(
+            &config,
+            &DumpArgs {
+                mode: DumpModeRequest::Incremental,
+                source_set: Some("ext".to_owned()),
+                extension: Some("ext".to_owned()),
+                objects: vec![],
+            },
+        )
+        .expect("dump");
+
+        assert!(result.ok);
+        let calls = fs::read_to_string(calls).expect("calls");
+        assert!(calls.contains("/DumpConfigToFiles"));
+        assert!(calls.contains("-update"));
+        assert!(!calls.contains("-updateConfigDumpInfo"));
+        assert!(calls.contains("-Extension"));
+        assert!(calls.contains("ext"));
     }
 
     #[test]
@@ -1974,6 +2007,7 @@ exit 0"#,
         assert!(calls.contains("/DumpConfigToFiles"));
         assert!(calls.contains("-partial"));
         assert!(calls.contains("-listFile"));
+        assert!(!calls.contains("-updateConfigDumpInfo"));
         assert_eq!(
             fs::read_to_string(captured_list).expect("captured list"),
             "Catalog.Items\nDocument.Order\n"
@@ -2416,6 +2450,48 @@ exit 0"#,
         let edt_calls = fs::read_to_string(edt_calls).expect("edt calls");
         assert_eq!(designer_calls.matches("/DumpConfigToFiles").count(), 2);
         assert!(designer_calls.contains("-partial"));
+        assert_eq!(edt_calls.matches("-command import").count(), 1);
+    }
+
+    #[test]
+    fn dump_incremental_edt_designer_bootstrap_is_full_then_follow_up_uses_update() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let designer = dir.path().join("1cv8");
+        let edt = dir.path().join("edt").join("1cedtcli");
+        let designer_calls = dir.path().join("designer-calls.log");
+        let edt_calls = dir.path().join("edt-calls.log");
+        create_edt_source_tree(&base);
+        write_designer_dump_script_for_edt(&designer, &designer_calls, None);
+        write_edt_import_script(&edt, &edt_calls);
+        let config = build_edt_config(&base, &work, &designer, &edt, BuilderBackend::Designer);
+
+        let result = run_dump(
+            &config,
+            &DumpArgs {
+                mode: DumpModeRequest::Incremental,
+                source_set: Some("main".to_owned()),
+                extension: None,
+                objects: vec![],
+            },
+        )
+        .expect("dump");
+
+        assert!(result.ok);
+        assert_native_edt_project(&base.join("main"));
+        let designer_calls = fs::read_to_string(designer_calls).expect("designer calls");
+        let dump_calls = designer_calls
+            .lines()
+            .filter(|line| line.contains("/DumpConfigToFiles"))
+            .collect::<Vec<_>>();
+        assert_eq!(dump_calls.len(), 2);
+        assert!(!dump_calls[0].contains("-update"));
+        assert!(!dump_calls[0].contains("-updateConfigDumpInfo"));
+        assert!(dump_calls[1].contains("-update"));
+        assert!(!dump_calls[1].contains("-updateConfigDumpInfo"));
+
+        let edt_calls = fs::read_to_string(edt_calls).expect("edt calls");
         assert_eq!(edt_calls.matches("-command import").count(), 1);
     }
 
