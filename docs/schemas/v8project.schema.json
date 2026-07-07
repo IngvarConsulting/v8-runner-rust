@@ -42,6 +42,16 @@
             "integer",
             "null"
           ]
+        },
+        "wait_ready_timeout_ms": {
+          "description": "Optional wait-ready timeout in milliseconds.",
+          "format": "uint64",
+          "maximum": 86400000,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "type": "object"

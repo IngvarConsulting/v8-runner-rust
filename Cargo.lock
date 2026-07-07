@@ -2362,6 +2362,7 @@ dependencies = [
  "jsonschema",
  "libc",
  "predicates",
+ "process-wrap",
  "quick-xml",
  "quote",
  "redb",

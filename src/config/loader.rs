@@ -1010,7 +1010,7 @@ mod tests {
         std::fs::write(
             &config_path,
             format!(
-                "workPath: {}\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: \"File=/tmp/ib\"\nmcp:\n  http:\n    bind_address: 127.0.0.1:4000\n    path: /custom-mcp\n    stateful_sessions: false\n    max_sessions: 12\n    idle_ttl_secs: 45\n  execution:\n    max_concurrent_calls: 3\n    shutdown_grace_period_secs: 9\ntools:\n  client_mcp:\n    port: 9874\n    extension:\n      name: client_mcp\n      source:\n        path: exts/client-mcp\n        format: DESIGNER\n  enterprise:\n    additional-launch-keys:\n      - /TESTMANAGER\n  edt_cli:\n    interactive-mode: true\n    startup_timeout_ms: 1234\n    command_timeout_ms: 5678\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: base/src\n",
+                "workPath: {}\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: \"File=/tmp/ib\"\nmcp:\n  http:\n    bind_address: 127.0.0.1:4000\n    path: /custom-mcp\n    stateful_sessions: false\n    max_sessions: 12\n    idle_ttl_secs: 45\n  execution:\n    max_concurrent_calls: 3\n    shutdown_grace_period_secs: 9\ntools:\n  client_mcp:\n    port: 9874\n    wait_ready_timeout_ms: 4321\n    extension:\n      name: client_mcp\n      source:\n        path: exts/client-mcp\n        format: DESIGNER\n  enterprise:\n    additional-launch-keys:\n      - /TESTMANAGER\n  edt_cli:\n    interactive-mode: true\n    startup_timeout_ms: 1234\n    command_timeout_ms: 5678\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: base/src\n",
                 work.display()
             ),
         )
@@ -1026,6 +1026,7 @@ mod tests {
         assert_eq!(config.mcp.execution.max_concurrent_calls, 3);
         assert_eq!(config.mcp.execution.shutdown_grace_period_secs, 9);
         assert_eq!(config.tools.client_mcp.port, Some(9874));
+        assert_eq!(config.tools.client_mcp.wait_ready_timeout_ms, Some(4321));
         assert_eq!(
             config.tools.enterprise.additional_launch_keys,
             vec!["/TESTMANAGER".to_owned()]

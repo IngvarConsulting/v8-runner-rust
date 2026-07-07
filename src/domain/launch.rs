@@ -15,6 +15,24 @@ pub struct LaunchResult {
     pub binary: PathBuf,
     /// Human-readable launch summary.
     pub message: Option<String>,
+    /// Client-side MCP endpoint readiness details when readiness was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_readiness: Option<McpReadinessResult>,
+}
+
+/// Result of probing a client-side MCP endpoint after launch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpReadinessResult {
+    /// `true` when initialize and tools/list succeeded and required tools were present.
+    pub ok: bool,
+    /// Probed HTTP endpoint URL.
+    pub url: String,
+    /// Tool names returned by `tools/list`.
+    pub tools: Vec<String>,
+    /// Required tool names that were not returned by `tools/list`.
+    pub missing_tools: Vec<String>,
+    /// Human-readable readiness summary.
+    pub message: Option<String>,
 }
 
 /// Supported application launch modes.

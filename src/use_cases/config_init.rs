@@ -868,6 +868,14 @@ fn render_config(
             "    version: '{}'\n",
             escape_yaml(platform_version)
         ));
+        yaml.push_str("  # client_mcp:\n");
+        yaml.push_str("  #   # Also capped by execution_timeout / command deadline.\n");
+        yaml.push_str("  #   wait_ready_timeout_ms: 300000\n");
+    } else {
+        yaml.push_str("# tools:\n");
+        yaml.push_str("#   client_mcp:\n");
+        yaml.push_str("#     # Also capped by execution_timeout / command deadline.\n");
+        yaml.push_str("#     wait_ready_timeout_ms: 300000\n");
     }
     yaml.push_str("build:\n");
     yaml.push_str("  partialLoadThreshold: 20\n");

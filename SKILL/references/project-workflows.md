@@ -126,11 +126,13 @@ Launch onec-client-mcp-devkit through the supported `launch mcp` surface instead
 v8-runner launch mcp
 v8-runner launch mcp --mode thin --mcp-port <PORT>
 v8-runner launch mcp --mcp-config <FILE>
+v8-runner launch mcp --mcp-port <PORT> --wait-ready
 ```
 
 For ordinary direct launches, typed launch flags include `--c`, `--execute`, `--use-privileged-mode`, `--output`, and repeatable `--raw-key`.
 
 For `launch mcp`, use `--mcp-config` and `--mcp-port`; do not pass `/C` through `--c`.
+Use `--wait-ready` when a following agent or tool needs the client MCP HTTP endpoint to be initialized and able to return `tools/list`.
 
 `launch mcp` and `launch mcp va` do not install or update `tools.client_mcp.extension`; run `v8-runner build` first when that extension may be missing or stale.
 

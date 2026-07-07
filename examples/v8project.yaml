@@ -59,6 +59,7 @@ tools:
       - /TESTMANAGER
   client_mcp:
     port: 9874
+    wait_ready_timeout_ms: 300000
     # Tool extension is prepared by `v8-runner build`, not by `launch mcp`.
     # extension:
     #   name: client_mcp

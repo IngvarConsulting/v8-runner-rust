@@ -93,6 +93,7 @@ fn config_init_creates_yaml_with_detected_designer_sources() {
     assert!(config.contains("workPath: 'build'"));
     assert!(config.contains("infobase:"));
     assert!(config.contains("  connection: 'File=build/ib'"));
+    assert!(config.contains("#     wait_ready_timeout_ms: 300000"));
     assert!(config.contains("path: 'src/configuration'"));
     assert!(config.contains("name: 'SalesAddon'"));
     assert!(config.contains("type: EXTENSION"));

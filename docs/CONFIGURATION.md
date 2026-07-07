@@ -405,6 +405,9 @@ runtime identity и не добавляет отдельное поле конф
 
 `v8-runner test va --feature`, `--filter-tag`, `--ignore-tag` и `--scenario-filter`
 переопределяют соответствующие списки выбранного профиля только для текущего CLI-запуска.
+Для функциональных `.feature`-сценариев и приемки агенты должны использовать `test va` или MCP
+`run_all_tests` с `runner=vanessa`; дефолтный MCP `run_all_tests` без `runner=vanessa` запускает
+YaXUnit.
 По умолчанию `fail_fast: false`.
 Для `СписокТеговОтбор` и `СписокТеговИсключение` в runtime `VAParams` runner удаляет один
 ведущий `@`, если он указан в `profiles.<name>.filter_tags`, `profiles.<name>.ignore_tags`,
@@ -445,10 +448,22 @@ runtime identity и не добавляет отдельное поле конф
 Поддержанные поля:
 
 - `port`, опциональный порт клиентского MCP-сервера onec-client-mcp-devkit.
+- `wait_ready_timeout_ms`, опциональный timeout для `launch mcp --wait-ready` и MCP
+  `launch_app.waitReady` в миллисекундах; если не задан, используется `execution_timeout`.
+  Эффективное ожидание дополнительно ограничено общим command deadline, поэтому значение больше
+  `execution_timeout` требует увеличить и глобальный `execution_timeout`.
 - `extension`, опциональное tool extension для клиентского MCP-сервера.
 
 `launch mcp` передаёт это значение как `mcpPort` внутри `/C"runMcp..."`
 если CLI не указал `--mcp-port`.
+`launch mcp --wait-ready` и MCP `launch_app` с `waitReady=true` используют этот порт для
+проверки `http://127.0.0.1:<port>/mcp`, если порт не передан явно.
+Ожидание готовности ограничивается `tools.client_mcp.wait_ready_timeout_ms`; без этой настройки
+используется общий `execution_timeout`. Общий command deadline остаётся верхней границей для
+readiness probing.
+Для Vanessa Automation MCP используйте `launch mcp va --wait-ready` или MCP `launch_app` с
+`utilityType=mcp`, `mcpScenario=va` и `waitReady=true`; bare `launch mcp` проверяет только client
+MCP endpoint и не гарантирует наличие Vanessa tools.
 
 `extension` поддерживает:
 
