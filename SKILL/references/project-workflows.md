@@ -23,6 +23,16 @@ v8-runner config init --format edt
 v8-runner config init --builder IBCMD
 ```
 
+Create a new project from an existing infobase when the infobase is the current source of truth:
+
+```bash
+v8-runner bootstrap --connection "File=/path/to/ib" --platform-version 8.3.27
+```
+
+`bootstrap` creates config/local overlay/gitignore, dumps the main configuration to
+`src/configuration`, and stores credentials only in `v8project.local.yaml` when `--user` or
+`--password` is passed. It does not auto-discover extensions.
+
 Initialize generated runtime state only when the file infobase or EDT workspace needs to be created:
 
 ```bash

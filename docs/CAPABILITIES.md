@@ -21,6 +21,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | Сценарий | Поддерживаемые комбинации | Примечания |
 | --- | --- | --- |
 | `version` | Работает без существующего конфига | Печатает имя приложения и версию; с `--json-message` возвращает JSON envelope |
+| `bootstrap` | Работает без существующего конфига | Создаёт проект из существующей ИБ: config, local overlay, `.gitignore`, `src/configuration` |
 | `config init` | Работает без существующего конфига | Создаёт `v8project.yaml`, sibling `v8project.local.yaml`, `.gitignore` entry, autodetect-ит supported `source-set` и aggregate external roots |
 | `tools download <tool>` | CLI-only загрузка latest releases | Загружает выбранный YAxUnit, Vanessa Automation single или onec-client-mcp-devkit; обновляет local overlay для Vanessa/client MCP и при `yaxunit --sources` добавляет YAxUnit как `source-set` `tests` |
 | `init` | `format=DESIGNER` + `builder=DESIGNER` | Создаёт файловую ИБ через Designer; server connection остаётся manual prerequisite |
@@ -95,6 +96,20 @@ v8-runner config init [--force] [--output <FILE>] [--connection <CONNECTION>] [-
 - Для external roots создаёт aggregate `source-set` только при однородной классификации каталога.
 - Не пишет synthetic `CONFIGURATION`: отсутствие конфигурационного source-set это validation error.
 - Для `--builder IBCMD` найденные external roots считаются validation error.
+
+### `bootstrap`
+
+```bash
+v8-runner bootstrap --connection <CONNECTION> --platform-version <VERSION> [--project-dir <DIR>] [--source-dir <DIR>] [--user <USER>] [--password <PASSWORD>] [--platform-path <PATH>] [--force]
+```
+
+- Работает до загрузки `v8project.yaml` и предназначен для пустого project directory.
+- Создаёт `v8project.yaml`, schema-modelined `v8project.local.yaml`, `.gitignore` entry и
+  `source-set main` типа `CONFIGURATION`.
+- Выгружает основную конфигурацию из указанной ИБ в `src/configuration` через Designer full dump.
+- `--connection` не должен содержать embedded credentials; используйте `--user` и `--password`.
+  Эти значения пишутся только в `v8project.local.yaml`.
+- Не обнаруживает и не выгружает расширения автоматически.
 
 ### `init`
 

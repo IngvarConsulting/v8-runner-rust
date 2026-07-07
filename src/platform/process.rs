@@ -836,8 +836,15 @@ fn render_command(request: &ProcessRequest) -> String {
 
 fn is_sensitive_flag(arg: &str) -> bool {
     const FLAGS: &[&str] = &[
+        "/N",
+        "-N",
         "/P",
         "-P",
+        "--user",
+        "--database-user",
+        "--db-user",
+        "--target-database-user",
+        "--target-db-user",
         "--password",
         "--database-password",
         "--db-pwd",
@@ -850,8 +857,15 @@ fn is_sensitive_flag(arg: &str) -> bool {
 
 fn split_sensitive_assignment(arg: &str) -> Option<(&str, &str)> {
     const FLAGS: &[&str] = &[
+        "/N",
+        "-N",
         "/P",
         "-P",
+        "--user",
+        "--database-user",
+        "--db-user",
+        "--target-database-user",
+        "--target-db-user",
         "--password",
         "--database-password",
         "--db-pwd",
@@ -942,8 +956,11 @@ mod tests {
             args: vec![
                 "--user".to_owned(),
                 "admin".to_owned(),
+                "/N".to_owned(),
+                "operator".to_owned(),
                 "/p".to_owned(),
                 "secret".to_owned(),
+                "--database-user=postgres".to_owned(),
                 "--DATABASE-password=pg-secret".to_owned(),
                 "-p=legacy-secret".to_owned(),
                 "--target-db-pwd".to_owned(),
@@ -955,10 +972,16 @@ mod tests {
             startup_probe: None,
         });
 
+        assert!(rendered.contains("--user ***"));
+        assert!(rendered.contains("/N ***"));
         assert!(rendered.contains("/p ***"));
+        assert!(rendered.contains("--database-user=***"));
         assert!(rendered.contains("--DATABASE-password=***"));
         assert!(rendered.contains("-p=***"));
         assert!(rendered.contains("--target-db-pwd ***"));
+        assert!(!rendered.contains("admin"));
+        assert!(!rendered.contains("operator"));
+        assert!(!rendered.contains("postgres"));
         assert!(!rendered.contains("secret"));
         assert!(!rendered.contains("pg-secret"));
         assert!(!rendered.contains("legacy-secret"));

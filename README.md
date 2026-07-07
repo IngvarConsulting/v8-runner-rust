@@ -45,6 +45,19 @@ overlay в `.gitignore`, если он еще не указан.
 Machine-local пути, credentials и настройки инструментов можно вынести в `v8project.local.yaml`
 рядом с основным конфигом. Этот файл применяется автоматически и должен оставаться вне Git.
 
+### Или создайте проект из существующей информационной базы:
+
+```bash
+v8-runner bootstrap \
+  --connection "File=/path/to/ib" \
+  --platform-version 8.3.27
+```
+
+Команда создает `v8project.yaml`, локальный overlay, `.gitignore` и выгружает основную
+конфигурацию в `src/configuration`. Credentials передавайте через `--user` и `--password`; они
+попадают только в `v8project.local.yaml`. Автоматическое обнаружение расширений этим bootstrap
+slice не выполняется.
+
 ### Загрузите тестовые и MCP-инструменты:
 
 ```bash
@@ -125,7 +138,7 @@ v8-runner mcp serve stdio
 
 | Зона | Команды | Что делает |
 | --- | --- | --- |
-| Project setup (настройка проекта) | `config init`, `tools download`, `init`, `extensions`, `build` | Создает config, скачивает инструменты, готовит ИБ, обновляет расширения и загружает исходники |
+| Project setup (настройка проекта) | `bootstrap`, `config init`, `tools download`, `init`, `extensions`, `build` | Создает проект/config, скачивает инструменты, готовит ИБ, обновляет расширения и загружает исходники |
 | Verification (проверка) | `syntax`, `test` | Запускает syntax checks, YAxUnit и Vanessa Automation |
 | File materialization (материализация файлов) | `dump`, `convert`, `load`, `make`, `artifacts` | Выгружает, конвертирует, загружает и публикует `.cf`, `.cfe`, `.epf`, `.erf` |
 | Direct launch (прямой запуск) | `launch <designer|thin|thick|ordinary>`, `launch mcp [va]` | Запускает 1C clients (клиенты 1С), Designer и MCP/Vanessa сценарии |
