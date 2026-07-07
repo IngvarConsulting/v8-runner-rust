@@ -7,6 +7,7 @@ use crate::platform::process::{ProcessExecutionPolicy, ProcessInterruptionSafety
 /// Identifies the logical command being executed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandName {
+    Bootstrap,
     ToolsDownload,
     Init,
     Extensions,
@@ -24,6 +25,7 @@ impl CommandName {
     /// Returns the stable command label used in logs and CLI envelopes.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Bootstrap => "bootstrap",
             Self::ToolsDownload => "tools download",
             Self::Init => "init",
             Self::Extensions => "extensions",

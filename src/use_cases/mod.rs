@@ -1,5 +1,7 @@
 /// Artifact export orchestration use case.
 pub mod artifacts;
+/// Bootstrap project from an existing infobase.
+pub mod bootstrap_project;
 /// Shared build timeline progress vocabulary.
 mod build_progress;
 /// Build orchestration use case.

@@ -7,12 +7,16 @@ Choose commands by user intent, not by listing every CLI surface.
 Use these when a project is missing `v8project.yaml` or generated runtime state:
 
 ```bash
+v8-runner bootstrap --connection "File=/path/to/ib" --platform-version 8.3.27
 v8-runner config init
 v8-runner config init --connection "File=build/ib"
 v8-runner config init --format edt
 v8-runner config init --builder IBCMD
 v8-runner init
 ```
+
+Use `bootstrap` when an existing infobase is the source of truth and source files need to be
+materialized. Use `config init` when supported source files are already present.
 
 Inspect `v8project.yaml` after `config init` and before commands that create or mutate infobases, workspaces, or source files.
 

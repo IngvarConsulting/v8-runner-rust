@@ -22,7 +22,7 @@ Use the available `v8-runner` binary directly. If it is not on `PATH`, ask for t
 
 `v8project.yaml` is the default project config name. A sibling `v8project.local.yaml` is loaded automatically for machine-local paths, credentials, tools, tests, and MCP settings. Do not pass `--config v8project.yaml` unless the user explicitly wants a non-default command shape or the active config path differs from the default; never pass `v8project.local.yaml` as `--config`.
 
-Generated `v8project.yaml` files include a `yaml-language-server` modeline that points to the published `master` JSON Schema artifact. `config init` also creates sibling `v8project.local.yaml` with the local overlay schema modeline and adds it to `.gitignore` when needed.
+Generated `v8project.yaml` files include a `yaml-language-server` modeline that points to the published `master` JSON Schema artifact. `config init` and `bootstrap` also create sibling `v8project.local.yaml` with the local overlay schema modeline and add it to `.gitignore` when needed.
 
 Use JSON output only when another tool, script, or final answer needs structured results:
 
@@ -47,10 +47,11 @@ Useful global flags:
 ## First Pass
 
 1. Check whether `v8project.yaml` exists in the 1C project root.
-2. If it is missing, run the narrowest `v8-runner config init ...` command that fits the project shape.
-3. Inspect generated `v8project.yaml` and keep machine-local overrides in generated `v8project.local.yaml`.
-4. Run `v8-runner init` only when the file infobase or EDT workspace needs to be created.
-5. Run the narrowest validation command that answers the user's goal.
+2. If it is missing and source files already exist, run the narrowest `v8-runner config init ...` command that fits the project shape.
+3. If it is missing and the current source of truth is an existing infobase, run `v8-runner bootstrap --connection <CONNECTION> --platform-version <VERSION>`.
+4. Inspect generated `v8project.yaml` and keep machine-local overrides in generated `v8project.local.yaml`.
+5. Run `v8-runner init` only when the file infobase or EDT workspace needs to be created.
+6. Run the narrowest validation command that answers the user's goal.
 
 Useful bootstrap commands:
 
@@ -59,6 +60,7 @@ v8-runner config init
 v8-runner config init --connection "File=build/ib"
 v8-runner config init --format edt
 v8-runner config init --builder IBCMD
+v8-runner bootstrap --connection "File=/path/to/ib" --platform-version 8.3.27
 v8-runner tools download yaxunit --sources
 v8-runner tools download vanessa
 v8-runner tools download client-mcp --sources
