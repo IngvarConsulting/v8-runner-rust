@@ -166,7 +166,7 @@ impl PartialDumpSelector {
             ));
         }
 
-        let mut parts = requested.split(|character| matches!(character, ':' | '.'));
+        let mut parts = requested.split([':', '.']);
         let Some(root_type) = parts.next() else {
             return Err(AppError::Validation(
                 "partial dump object must use exactly one ':' or '.' separator".to_owned(),
