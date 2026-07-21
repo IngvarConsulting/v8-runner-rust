@@ -67,6 +67,19 @@ fn build_help_exposes_source_set_selector() {
 }
 
 #[test]
+fn dump_help_clarifies_object_selector_compatibility() {
+    let output = v8_runner_command()
+        .args(["dump", "--help"])
+        .output()
+        .expect("run command");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("canonical TYPE:NAME selectors"));
+    assert!(stdout.contains("legacy TYPE.NAME selectors are accepted for compatibility"));
+}
+
+#[test]
 fn tools_download_help_exposes_tool_commands() {
     let output = v8_runner_command()
         .args(["tools", "download", "--help"])

@@ -327,7 +327,7 @@ pub struct DumpArgs {
     #[arg(long)]
     pub extension: Option<String>,
 
-    /// Objects for partial dump (TYPE:NAME)
+    /// Objects for partial dump. Use canonical TYPE:NAME selectors; legacy TYPE.NAME selectors are accepted for compatibility.
     #[arg(long = "object")]
     pub objects: Vec<String>,
 }
