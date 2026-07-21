@@ -6,7 +6,7 @@ On Windows, `std::process::Command` starts children with handle inheritance enab
 
 ## Boundary
 
-Before spawning either a detached or managed-detached child on Windows, the process runner clears `HANDLE_FLAG_INHERIT` on the handles returned by `GetStdHandle` for stdin, stdout, and stderr. Null and invalid standard handles are ignored. Query or update failures for otherwise valid handles fail the spawn through the existing typed `ProcessError::SpawnFailed` path.
+Before spawning either a detached or managed-detached child on Windows, the process runner clears `HANDLE_FLAG_INHERIT` directly on the handles returned by `GetStdHandle` for stdin, stdout, and stderr. Clearing an already-clear flag is idempotent and avoids a query/update race. Null handles, `INVALID_HANDLE_VALUE`, and stale handles reported as `ERROR_INVALID_HANDLE` are ignored. Other update failures fail the spawn through the existing typed `ProcessError::SpawnFailed` path.
 
 The change is permanent and idempotent. It does not close the handles or affect the runner's own I/O. Avoiding a temporary clear/restore window also avoids a process-wide concurrency race. Rust continues to create the explicit inheritable NUL handles required by the detached child.
 

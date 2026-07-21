@@ -23,7 +23,7 @@
 - Modify: `Cargo.lock`
 - Modify: `src/platform/process.rs`
 
-1. Add the target-specific `windows-sys` features needed for `GetStdHandle`, `GetHandleInformation`, and `SetHandleInformation`.
+1. Add the target-specific `windows-sys` features needed for `GetStdHandle` and `SetHandleInformation`.
 2. Implement null/invalid-handle filtering and fail-closed error propagation for valid handles.
 3. Invoke isolation for both detached modes before every spawn attempt; keep captured execution unchanged.
 4. Run focused process tests and Windows-target compilation when available.

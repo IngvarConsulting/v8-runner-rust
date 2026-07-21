@@ -9,6 +9,8 @@ use tracing::{debug, warn};
 
 const EXECUTABLE_BUSY_MAX_RETRIES: usize = 5;
 const EXECUTABLE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(10);
+#[cfg(any(windows, test))]
+const WINDOWS_ERROR_INVALID_HANDLE: i32 = 6;
 
 /// Request for launching an external utility.
 #[derive(Debug, Clone)]
@@ -498,7 +500,7 @@ fn spawn_command(
 #[cfg(windows)]
 fn isolate_inherited_standard_handles() -> std::io::Result<()> {
     use windows_sys::Win32::Foundation::{
-        GetHandleInformation, SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+        SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::System::Console::{
         GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
@@ -511,20 +513,22 @@ fn isolate_inherited_standard_handles() -> std::io::Result<()> {
             continue;
         }
 
-        let mut flags = 0;
-        // SAFETY: `handle` was returned by GetStdHandle and `flags` is writable for the call.
-        if unsafe { GetHandleInformation(handle, &mut flags) } == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        if flags & HANDLE_FLAG_INHERIT != 0 {
-            // SAFETY: the valid standard handle remains owned by the process; this only clears a flag.
-            if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
-                return Err(std::io::Error::last_os_error());
+        // SAFETY: the standard handle remains owned by the process; this only clears a flag.
+        if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
+            let error = std::io::Error::last_os_error();
+            if is_invalid_standard_handle_error(&error) {
+                continue;
             }
+            return Err(error);
         }
     }
 
     Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn is_invalid_standard_handle_error(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(WINDOWS_ERROR_INVALID_HANDLE)
 }
 
 #[cfg(not(windows))]
@@ -933,9 +937,9 @@ fn split_sensitive_assignment(arg: &str) -> Option<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        render_command, ProcessError, ProcessExecutionPolicy, ProcessExecutor,
-        ProcessInterruptionAction, ProcessInterruptionReason, ProcessInterruptionSafety,
-        ProcessIoMode, ProcessRequest, ProcessRunner,
+        is_invalid_standard_handle_error, render_command, ProcessError, ProcessExecutionPolicy,
+        ProcessExecutor, ProcessInterruptionAction, ProcessInterruptionReason,
+        ProcessInterruptionSafety, ProcessIoMode, ProcessRequest, ProcessRunner,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -943,6 +947,15 @@ mod tests {
     use std::time::Duration;
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn classifies_windows_invalid_handle_errors() {
+        let invalid_handle = std::io::Error::from_raw_os_error(6);
+        let access_denied = std::io::Error::from_raw_os_error(5);
+
+        assert!(is_invalid_standard_handle_error(&invalid_handle));
+        assert!(!is_invalid_standard_handle_error(&access_denied));
+    }
 
     #[test]
     fn detached_modes_require_standard_handle_isolation() {
@@ -1186,13 +1199,25 @@ mod tests {
         let eof_before_cleanup = eof_receiver.recv_timeout(Duration::from_secs(2));
         let detached_child_was_alive = process_exists(detached_pid);
 
-        terminate_windows_process_tree_for_test(detached_pid);
-        let helper_status = helper.wait().expect("wait for test helper");
-        let _ = reader.join();
+        let cleanup_status = terminate_windows_process_tree_for_test(detached_pid);
+        let eof_after_cleanup = if eof_before_cleanup.is_err() {
+            Some(eof_receiver.recv_timeout(Duration::from_secs(2)))
+        } else {
+            None
+        };
+        let helper_status = wait_for_test_child_exit(&mut helper, Duration::from_secs(2));
+        if matches!(&helper_status, Ok(None)) {
+            let _ = helper.kill();
+        }
+        drop(reader);
 
         assert!(
-            helper_status.success(),
-            "test helper must exit successfully: {helper_status}"
+            matches!(&cleanup_status, Ok(status) if status.success()),
+            "detached process tree cleanup must succeed: {cleanup_status:?}"
+        );
+        assert!(
+            matches!(&helper_status, Ok(Some(status)) if status.success()),
+            "test helper must exit successfully within the deadline: {helper_status:?}"
         );
         assert!(
             detached_child_was_alive,
@@ -1200,7 +1225,7 @@ mod tests {
         );
         assert!(
             matches!(eof_before_cleanup, Ok(Ok(_))),
-            "redirected stdout did not reach EOF before detached child cleanup: {eof_before_cleanup:?}"
+            "redirected stdout did not reach EOF before detached child cleanup: {eof_before_cleanup:?}; post-cleanup result: {eof_after_cleanup:?}"
         );
     }
 
@@ -1240,8 +1265,10 @@ mod tests {
         let child_pid = read_pid(&child_pid_path);
         managed.terminate();
         if !wait_for_process_exit(child_pid, Duration::from_secs(2)) {
-            terminate_windows_process_tree_for_test(child_pid);
-            panic!("managed termination should terminate Windows job child {child_pid}");
+            let cleanup = terminate_windows_process_tree_for_test(child_pid);
+            panic!(
+                "managed termination should terminate Windows job child {child_pid}; fallback cleanup: {cleanup:?}"
+            );
         }
     }
 
@@ -1285,8 +1312,10 @@ mod tests {
         assert!(matches!(err, ProcessError::ExitedEarly { .. }));
         let child_pid = read_pid(&child_pid_path);
         if !wait_for_process_exit(child_pid, Duration::from_secs(2)) {
-            terminate_windows_process_tree_for_test(child_pid);
-            panic!("managed startup failure should terminate Windows job child {child_pid}");
+            let cleanup = terminate_windows_process_tree_for_test(child_pid);
+            panic!(
+                "managed startup failure should terminate Windows job child {child_pid}; fallback cleanup: {cleanup:?}"
+            );
         }
     }
 
@@ -1495,13 +1524,30 @@ mod tests {
     }
 
     #[cfg(windows)]
-    fn terminate_windows_process_tree_for_test(pid: u32) {
-        let _ = std::process::Command::new("taskkill")
+    fn wait_for_test_child_exit(
+        child: &mut std::process::Child,
+        timeout: Duration,
+    ) -> std::io::Result<Option<std::process::ExitStatus>> {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if let Some(status) = child.try_wait()? {
+                return Ok(Some(status));
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        child.try_wait()
+    }
+
+    #[cfg(windows)]
+    fn terminate_windows_process_tree_for_test(
+        pid: u32,
+    ) -> std::io::Result<std::process::ExitStatus> {
+        std::process::Command::new("taskkill")
             .args(["/T", "/F", "/PID", &pid.to_string()])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status();
+            .status()
     }
 
     #[cfg(windows)]
