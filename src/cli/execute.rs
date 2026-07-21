@@ -1079,6 +1079,12 @@ fn map_test_launch_options(args: &LaunchOptionsArgs) -> Result<LaunchOptions, Us
 }
 
 fn validate_test_launch_options(args: &LaunchOptionsArgs) -> Result<(), UseCaseError> {
+    if args.wait_for_exit || args.wait_timeout_ms.is_some() || args.stderr_output.is_some() {
+        return Err(UseCaseError::new(
+            UseCaseErrorKind::Validation,
+            "--wait-for-exit, --wait-timeout-ms, and --stderr-output are supported only for direct `launch thin`",
+        ));
+    }
     if args.c.is_some() || args.execute.is_some() || args.output.is_some() {
         return Err(UseCaseError::new(
             UseCaseErrorKind::Validation,
