@@ -5,7 +5,8 @@ use std::time::Instant;
 use tempfile::NamedTempFile;
 
 use crate::config::model::{AppConfig, BuilderBackend, SourceSetPurpose};
-use crate::domain::dump::{DumpMode, DumpResult};
+use crate::domain::dump::{DumpMode, DumpResult, DumpSelectorResult};
+use crate::domain::partial_dump_selector::PartialDumpSelector;
 use crate::platform::designer::DesignerDsl;
 use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl, IbcmdError};
 use crate::platform::process::ProcessRunner;
@@ -263,7 +264,7 @@ pub(super) fn dump_publication_warning(
 pub(super) fn validate_dump_objects(
     mode: &DumpMode,
     objects: &[String],
-) -> Result<Option<Vec<String>>, AppError> {
+) -> Result<Option<Vec<PartialDumpSelector>>, AppError> {
     match mode {
         DumpMode::Partial => normalize_partial_objects(objects).map(Some),
         _ if !objects.is_empty() => Err(AppError::Validation(
@@ -273,52 +274,33 @@ pub(super) fn validate_dump_objects(
     }
 }
 
-fn normalize_partial_objects(objects: &[String]) -> Result<Vec<String>, AppError> {
+fn normalize_partial_objects(objects: &[String]) -> Result<Vec<PartialDumpSelector>, AppError> {
     if objects.is_empty() {
         return Err(AppError::Validation(
             super::PARTIAL_OBJECTS_REQUIRED_ERROR.to_owned(),
         ));
     }
 
-    let mut normalized = Vec::with_capacity(objects.len());
-    for object in objects {
-        if object.chars().any(char::is_control) {
-            return Err(AppError::Validation(
-                super::PARTIAL_OBJECT_CONTROL_ERROR.to_owned(),
-            ));
-        }
-        let object = object.trim();
-        if object.is_empty() {
-            return Err(AppError::Validation(
-                super::PARTIAL_OBJECT_BLANK_ERROR.to_owned(),
-            ));
-        }
-        normalized.push(object.to_owned());
-    }
-
-    if normalized.is_empty() {
-        return Err(AppError::Validation(
-            super::PARTIAL_OBJECTS_REQUIRED_ERROR.to_owned(),
-        ));
-    }
-
-    Ok(normalized)
+    objects
+        .iter()
+        .map(|object| PartialDumpSelector::parse(object))
+        .collect()
 }
 
 pub(super) fn create_dump_object_list_file(
     work_path: &Path,
-    objects: &[String],
+    objects: &[PartialDumpSelector],
 ) -> Result<NamedTempFile, AppError> {
     create_dump_object_list_file_with(work_path, objects, write_partial_object_list)
 }
 
 pub(super) fn create_dump_object_list_file_with<F>(
     work_path: &Path,
-    objects: &[String],
+    objects: &[PartialDumpSelector],
     write_list: F,
 ) -> Result<NamedTempFile, AppError>
 where
-    F: FnOnce(&mut NamedTempFile, &[String]) -> std::io::Result<()>,
+    F: FnOnce(&mut NamedTempFile, &[PartialDumpSelector]) -> std::io::Result<()>,
 {
     let mut list_file = dump_object_list_file(work_path).map_err(|error| {
         AppError::Runtime(format!("failed to create partial dump list: {error}"))
@@ -331,12 +313,12 @@ where
 
 fn write_partial_object_list(
     list_file: &mut NamedTempFile,
-    objects: &[String],
+    objects: &[PartialDumpSelector],
 ) -> std::io::Result<()> {
     let writer = list_file.as_file_mut();
     writer.set_len(0)?;
     for object in objects {
-        writeln!(writer, "{object}")?;
+        writeln!(writer, "{}", object.normalized())?;
     }
     writer.flush()
 }
@@ -383,6 +365,7 @@ pub(super) fn empty_result(
     started: Instant,
     source_set: Option<String>,
     extension: Option<String>,
+    selectors: Option<Vec<DumpSelectorResult>>,
     target_path: Option<PathBuf>,
     message: Option<String>,
 ) -> DumpResult {
@@ -390,6 +373,7 @@ pub(super) fn empty_result(
         ok: false,
         source_set,
         extension,
+        selectors,
         mode,
         target_path: target_path.unwrap_or_default(),
         platform_log_path: None,

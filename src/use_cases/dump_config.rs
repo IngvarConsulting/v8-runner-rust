@@ -3,7 +3,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::config::model::{AppConfig, BuilderBackend, SourceFormat, SourceSetPurpose};
-use crate::domain::dump::{DumpMode, DumpResult};
+use crate::domain::dump::{DumpMode, DumpResult, DumpSelectorResult};
+use crate::domain::partial_dump_selector::PartialDumpSelector;
+#[cfg(test)]
+use crate::domain::partial_dump_selector::{
+    PARTIAL_OBJECT_BLANK_ERROR, PARTIAL_OBJECT_CONTROL_ERROR,
+};
 use crate::platform::designer::DesignerDsl;
 use crate::platform::edt::EdtDsl;
 use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
@@ -49,9 +54,6 @@ use crate::use_cases::source_inventory::SourceSetInventory;
 const DUMP_COMMAND: &str = crate::use_cases::context::CommandName::Dump.as_str();
 const SUPPORTED_DUMP_ERROR: &str = "dump currently supports only builder=DESIGNER or IBCMD";
 const PARTIAL_OBJECTS_REQUIRED_ERROR: &str = "partial dump requires at least one object";
-const PARTIAL_OBJECT_BLANK_ERROR: &str = "partial dump objects must not be blank";
-const PARTIAL_OBJECT_CONTROL_ERROR: &str =
-    "partial dump objects must not contain control characters";
 const NON_PARTIAL_OBJECTS_ERROR: &str = "dump objects are supported only for mode 'partial'";
 const ORPHAN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const DUMP_BACKUP_PREFIX: &str = ".dump-backup";
@@ -275,7 +277,7 @@ fn run_partial_dump_designer(
     resolved: &ResolvedDumpTarget,
     binary: &Path,
     runner: &dyn ProcessRunner,
-    objects: &[String],
+    objects: &[PartialDumpSelector],
 ) -> Result<(PlatformCommandResult, Option<String>), AppError> {
     debug!(
         source_set = resolved.source_set_name.as_str(),
@@ -315,7 +317,7 @@ fn run_partial_dump_ibcmd(
     resolved: &ResolvedDumpTarget,
     binary: &Path,
     runner: &dyn ProcessRunner,
-    _objects: &[String],
+    _objects: &[PartialDumpSelector],
 ) -> Result<(PlatformCommandResult, Option<String>), AppError> {
     let warning = ibcmd_partial_warning(resolved);
     match run_incremental_dump_ibcmd(context, config, resolved, binary, runner) {
@@ -392,7 +394,7 @@ fn run_partial_dump_edt_designer(
     edt_binary: &Path,
     runner: &dyn ProcessRunner,
     edt_runner: &dyn ProcessRunner,
-    objects: &[String],
+    objects: &[PartialDumpSelector],
 ) -> Result<(PlatformCommandResult, Option<String>), AppError> {
     let bootstrap_message = ensure_edt_platform_target_seeded(
         context,
@@ -483,7 +485,7 @@ fn run_partial_dump_edt_ibcmd(
     edt_binary: &Path,
     runner: &dyn ProcessRunner,
     edt_runner: &dyn ProcessRunner,
-    objects: &[String],
+    objects: &[PartialDumpSelector],
 ) -> Result<(PlatformCommandResult, Option<String>), AppError> {
     let bootstrap_message = ensure_edt_platform_target_seeded(
         context,
@@ -963,7 +965,8 @@ mod tests {
         AppConfig, BuildConfig, BuilderBackend, PlatformToolConfig, SourceFormat, SourceSetConfig,
         SourceSetPurpose, TestsConfig, ToolsConfig,
     };
-    use crate::domain::dump::DumpMode;
+    use crate::domain::dump::{DumpMode, DumpSelectorResult};
+    use crate::domain::partial_dump_selector::PartialDumpSelector;
     use crate::platform::process::{
         ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessResult, ProcessRunner,
         SpawnResult,
@@ -1481,6 +1484,30 @@ exit 0"#,
     }
 
     #[test]
+    fn partial_rejects_unknown_selector_before_running_designer() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(dir.path());
+        write_script(&script, &format!("touch '{}'", calls.display()));
+        let config = build_config(dir.path(), &dir.path().join("work"), &script);
+
+        let failure = run_dump(
+            &config,
+            &DumpArgs {
+                mode: DumpModeRequest::Partial,
+                source_set: None,
+                extension: None,
+                objects: vec!["Unknown:Items".to_owned()],
+            },
+        )
+        .expect_err("failure");
+
+        assert_eq!(failure.error.kind(), UseCaseErrorKind::Validation);
+        assert!(!calls.exists());
+    }
+
+    #[test]
     fn partial_rejects_leading_or_trailing_control_characters_after_trim() {
         let dir = tempdir().expect("tempdir");
         let script = dir.path().join("1cv8");
@@ -1942,12 +1969,9 @@ exit 0"#,
         fs::create_dir_all(&partial_root).expect("temp");
         fs::write(partial_root.join("partial-lists"), "not a dir").expect("sentinel");
 
-        let error = create_dump_object_list_file_with(
-            &work,
-            &["Catalog.Items".to_owned()],
-            |_file, _objects| Ok(()),
-        )
-        .expect_err("expected failure");
+        let objects = [PartialDumpSelector::parse("Catalog.Items").expect("selector")];
+        let error = create_dump_object_list_file_with(&work, &objects, |_file, _objects| Ok(()))
+            .expect_err("expected failure");
 
         assert!(matches!(error, AppError::Runtime(_)));
         assert!(partial_list_paths(&work).is_empty());
@@ -1958,11 +1982,10 @@ exit 0"#,
         let dir = tempdir().expect("tempdir");
         let work = dir.path().join("work");
 
-        let error = create_dump_object_list_file_with(
-            &work,
-            &["Catalog.Items".to_owned()],
-            |_file, _objects| Err(std::io::Error::other("boom")),
-        )
+        let objects = [PartialDumpSelector::parse("Catalog.Items").expect("selector")];
+        let error = create_dump_object_list_file_with(&work, &objects, |_file, _objects| {
+            Err(std::io::Error::other("boom"))
+        })
         .expect_err("expected failure");
 
         assert!(matches!(error, AppError::Runtime(_)));
@@ -1995,13 +2018,27 @@ exit 0"#,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
-                objects: vec!["  Catalog.Items  ".to_owned(), "Document.Order".to_owned()],
+                objects: vec!["Catalog:Items".to_owned(), "Document:Order".to_owned()],
             },
         )
         .expect("dump");
 
         assert!(result.ok);
         assert_eq!(result.mode, DumpMode::Partial);
+        let expected_selectors = [
+            DumpSelectorResult {
+                requested: "Catalog:Items".to_owned(),
+                normalized: "Catalog.Items".to_owned(),
+            },
+            DumpSelectorResult {
+                requested: "Document:Order".to_owned(),
+                normalized: "Document.Order".to_owned(),
+            },
+        ];
+        assert_eq!(
+            result.selectors.as_deref(),
+            Some(expected_selectors.as_slice())
+        );
         assert!(base.join("main").exists());
         let calls = fs::read_to_string(calls).expect("calls");
         assert!(calls.contains("/DumpConfigToFiles"));
@@ -2634,6 +2671,7 @@ exit 0"#,
         let edt_runner = TestProcessRunner::default();
         let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump)
             .with_cancellation(cancellation);
+        let objects = [PartialDumpSelector::parse("Catalog.Items").expect("selector")];
 
         let error = super::run_partial_dump_edt_designer(
             &context,
@@ -2643,7 +2681,7 @@ exit 0"#,
             &edt,
             &dump_runner,
             &edt_runner,
-            &["Catalogs.Items".to_owned()],
+            &objects,
         )
         .expect_err("interrupted after bootstrap");
 
@@ -2717,6 +2755,7 @@ exit 0"#,
         let edt_runner = TestProcessRunner::default();
         let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump)
             .with_cancellation(cancellation);
+        let objects = [PartialDumpSelector::parse("Catalog.Items").expect("selector")];
 
         let error = super::run_partial_dump_edt_ibcmd(
             &context,
@@ -2726,7 +2765,7 @@ exit 0"#,
             &edt,
             &dump_runner,
             &edt_runner,
-            &["Catalogs.Items".to_owned()],
+            &objects,
         )
         .expect_err("interrupted after bootstrap");
 
@@ -3096,6 +3135,7 @@ exit 0"#,
             ok: true,
             source_set: Some("main".to_owned()),
             extension: Some("ext".to_owned()),
+            selectors: None,
             mode: DumpMode::Incremental,
             target_path: PathBuf::from("/tmp/main"),
             platform_log_path: Some(PathBuf::from("/tmp/platform.log")),
