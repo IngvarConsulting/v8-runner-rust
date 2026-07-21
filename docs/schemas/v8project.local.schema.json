@@ -411,6 +411,11 @@
             "null"
           ]
         },
+        "strict": {
+          "default": false,
+          "description": "Require platform utility resolution to stay within the configured path.",
+          "type": "boolean"
+        },
         "version": {
           "description": "Platform version requirement used for discovery.",
           "type": [

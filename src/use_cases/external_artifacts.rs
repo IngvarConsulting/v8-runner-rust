@@ -339,6 +339,7 @@ mod tests {
             tools: ToolsConfig {
                 platform: crate::config::model::PlatformToolConfig {
                     path: Some(platform.to_path_buf()),
+                    strict: false,
                     version: None,
                 },
                 edt_cli: crate::config::model::EdtCliConfig {

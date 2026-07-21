@@ -308,6 +308,7 @@ mod tests {
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: Some(ibcmd_path.to_path_buf()),
+                    strict: false,
                     version: None,
                 },
                 ..ToolsConfig::default()

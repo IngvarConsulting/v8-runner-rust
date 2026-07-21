@@ -26,6 +26,7 @@ pub fn main_config_schema_json() -> Value {
     let mut schema = serde_json::to_value(schema_for!(MainConfigSchema)).expect("schema json");
     set_schema_id(&mut schema, &main_config_schema_url());
     add_tool_extension_schema_constraints(&mut schema);
+    add_platform_schema_constraints(&mut schema);
     add_numeric_runtime_bounds(&mut schema);
     schema
 }
@@ -110,6 +111,29 @@ fn add_tool_extension_schema_constraints(schema: &mut Value) {
         &["PartialToolExtensionSchema"],
         &["source", "artifact"],
     );
+}
+
+fn add_platform_schema_constraints(schema: &mut Value) {
+    let Some(object) = schema_object_mut(schema, &["PlatformToolSchema"]) else {
+        return;
+    };
+    let all_of = object
+        .entry("allOf")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .expect("schema allOf array");
+    all_of.push(json!({
+        "if": {
+            "properties": { "strict": { "const": true } },
+            "required": ["strict"]
+        },
+        "then": {
+            "allOf": [
+                { "required": ["path"] },
+                { "properties": { "path": { "not": { "type": "null" } } } }
+            ]
+        }
+    }));
 }
 
 fn reject_multiple_non_null_properties(schema: &mut Value, def_path: &[&str], names: &[&str]) {
@@ -629,6 +653,9 @@ struct PlatformToolSchema {
     /// Platform binary, installation `bin` directory, or platform root discovery hint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     path: Option<PathBuf>,
+    /// Require platform utility resolution to stay within the configured path.
+    #[serde(default)]
+    strict: bool,
     /// Platform version requirement used for discovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     version: Option<String>,
@@ -1249,6 +1276,57 @@ mod tests {
 
         assert_schema_valid(&main_config_schema_json(), &config);
         assert_config_loader_ok(&config);
+    }
+
+    #[test]
+    fn platform_strict_schema_requires_path_and_accepts_false_without_path() {
+        let strict_without_path = format!(
+            "{}tools:\n  platform:\n    strict: true\n",
+            minimal_project_config_without_base_path()
+        );
+        let strict_with_null_path = format!(
+            "{}tools:\n  platform:\n    path: null\n    strict: true\n",
+            minimal_project_config_without_base_path()
+        );
+        let non_strict_without_path = format!(
+            "{}tools:\n  platform:\n    strict: false\n",
+            minimal_project_config_without_base_path()
+        );
+
+        assert_schema_invalid(&main_config_schema_json(), &strict_without_path);
+        assert_schema_invalid(&main_config_schema_json(), &strict_with_null_path);
+        assert_schema_valid(&main_config_schema_json(), &non_strict_without_path);
+    }
+
+    #[test]
+    fn local_schema_accepts_strict_platform_override_when_main_config_supplies_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
+        let config_path = dir.path().join("v8project.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "{}tools:\n  platform:\n    path: platform/bin\n",
+                minimal_project_config_without_base_path()
+            ),
+        )
+        .expect("config");
+        let overlay = "tools:\n  platform:\n    strict: true\n";
+        std::fs::write(dir.path().join("v8project.local.yaml"), overlay).expect("overlay");
+
+        assert_schema_valid(&local_config_schema_json(), overlay);
+
+        let config = load_config(config_path.to_str(), None).expect("load merged config");
+        assert!(config.tools.platform.strict);
+        assert_eq!(
+            config.tools.platform.path.as_deref(),
+            Some(
+                std::fs::canonicalize(dir.path())
+                    .expect("canonical config dir")
+                    .join("platform/bin")
+                    .as_path()
+            )
+        );
     }
 
     #[test]

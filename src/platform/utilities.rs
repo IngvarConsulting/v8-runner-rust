@@ -125,6 +125,7 @@ mod tests {
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: platform_path,
+                    strict: false,
                     version: platform_version.map(str::to_owned),
                 },
                 ..ToolsConfig::default()

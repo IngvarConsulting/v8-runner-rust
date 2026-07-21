@@ -1276,6 +1276,7 @@ exit 0"#,
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: Some(platform_path.to_path_buf()),
+                    strict: false,
                     version: None,
                 },
                 ..ToolsConfig::default()

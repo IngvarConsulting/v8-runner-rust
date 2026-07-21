@@ -1122,6 +1122,7 @@ mod tests {
             tools: ToolsConfig {
                 platform: crate::config::model::PlatformToolConfig {
                     path: Some(platform_path.to_path_buf()),
+                    strict: false,
                     version: None,
                 },
                 enterprise: Default::default(),

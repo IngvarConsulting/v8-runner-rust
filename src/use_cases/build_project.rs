@@ -918,6 +918,7 @@ mod tests {
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: Some(platform_path.to_path_buf()),
+                    strict: false,
                     version: None,
                 },
                 ..ToolsConfig::default()
@@ -958,6 +959,7 @@ mod tests {
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: Some(platform_path.to_path_buf()),
+                    strict: false,
                     version: None,
                 },
                 enterprise: Default::default(),

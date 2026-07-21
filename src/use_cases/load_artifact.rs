@@ -969,6 +969,7 @@ mod tests {
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: Some(binary.to_path_buf()),
+                    strict: false,
                     version: None,
                 },
                 enterprise: Default::default(),

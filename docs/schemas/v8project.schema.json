@@ -285,6 +285,38 @@
     },
     "PlatformToolSchema": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "strict": {
+                "const": true
+              }
+            },
+            "required": [
+              "strict"
+            ]
+          },
+          "then": {
+            "allOf": [
+              {
+                "required": [
+                  "path"
+                ]
+              },
+              {
+                "properties": {
+                  "path": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
       "properties": {
         "path": {
           "description": "Platform binary, installation `bin` directory, or platform root discovery hint.",
@@ -292,6 +324,11 @@
             "string",
             "null"
           ]
+        },
+        "strict": {
+          "default": false,
+          "description": "Require platform utility resolution to stay within the configured path.",
+          "type": "boolean"
         },
         "version": {
           "description": "Platform version requirement used for discovery.",
