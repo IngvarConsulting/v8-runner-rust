@@ -60,7 +60,7 @@ pub enum Command {
     Build(BuildArgs),
     /// Apply built release artifacts to the infobase
     Load(LoadArgs),
-    /// Build first, then run YaXUnit or Vanessa Automation tests
+    /// Run YaXUnit or Vanessa Automation tests, building first by default
     Test(TestArgs),
     /// Dump infobase state back to project files
     Dump(DumpArgs),
@@ -245,6 +245,10 @@ pub struct ExtensionsArgs {
 pub struct TestArgs {
     #[arg(long, global = true)]
     pub full: bool,
+
+    /// Run tests against the configured prepared infobase without building sources first
+    #[arg(long, global = true)]
+    pub no_build: bool,
 
     /// Client mode used for enterprise launch during test execution
     #[arg(long = "client-mode", value_parser = ["designer", "thin", "thick", "ordinary"])]

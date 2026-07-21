@@ -103,13 +103,25 @@ v8-runner syntax designer-modules --server
 v8-runner test yaxunit all
 ```
 
+Для уже подготовленной файловой или серверной ИБ можно явно пропустить build:
+
+```bash
+v8-runner test --no-build yaxunit all
+```
+
+Для файловой ИБ этот режим до запуска 1С проверяет наличие `1Cv8.1CD`.
+Проверка конфигурации не требует наличия project source-set: нужны только настройки ИБ,
+платформы и выбранного test engine. Для server connection отдельный portable preflight без
+запуска платформы пока недоступен, поэтому соединение проверяет сам test engine.
+
 ### Или тесты Vanessa Automation:
 
 ```bash
 v8-runner test va
 ```
 
-Команда сначала выполняет `build`, затем запускает настроенный профиль Vanessa Automation.
+По умолчанию команда сначала выполняет `build`, затем запускает настроенный профиль Vanessa
+Automation. Для подготовленной ИБ используйте `v8-runner test --no-build va`.
 
 Для отладки и написания тестов Vanessa Automation запустите ее в режиме MCP и, если агенту нужно
 сразу подключаться к endpoint, дождитесь готовности:

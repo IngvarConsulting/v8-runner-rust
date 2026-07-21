@@ -30,8 +30,8 @@ use crate::use_cases::request::{
     effective_test_timeouts, BuildRequest, ClientMcpAddonRequest, ClientMcpMode,
     ClientMcpOptionsRequest, DesignerClientScope, DesignerClientScopes, DesignerConfigCheck,
     DesignerConfigChecks, DesignerConfigSyntaxRequest, DesignerModulesSyntaxRequest,
-    DumpModeRequest, DumpRequest, LaunchRequest, SyntaxRequest, SyntaxTargetRequest, TestRequest,
-    TestScopeRequest,
+    DumpModeRequest, DumpRequest, LaunchRequest, SyntaxRequest, SyntaxTargetRequest,
+    TestBuildPolicy, TestRequest, TestScopeRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult};
 
@@ -131,6 +131,7 @@ where
         let use_case_request = TestRequest {
             execution: TestRequest::default_execution(),
             full: request.full.unwrap_or(false),
+            build_policy: TestBuildPolicy::BuildFirst,
             scope: TestScopeRequest::Module { name: module_name },
         };
 
@@ -347,6 +348,7 @@ fn map_run_all_tests_request(
                 TestRequest {
                     execution: TestRequest::default_execution(),
                     full: request.full.unwrap_or(false),
+                    build_policy: TestBuildPolicy::BuildFirst,
                     scope: TestScopeRequest::All,
                 },
             ))
@@ -359,6 +361,7 @@ fn map_run_all_tests_request(
                 TestRequest {
                     execution,
                     full: request.full.unwrap_or(false),
+                    build_policy: TestBuildPolicy::BuildFirst,
                     scope: TestScopeRequest::All,
                 },
             ))

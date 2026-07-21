@@ -5,7 +5,9 @@ use crate::config::model::AppConfig;
 use crate::config::schema::{
     validate_local_overlay_schema_boundary, validate_main_config_schema_boundary,
 };
-use crate::config::validate::{validate, validate_tools_download_bootstrap, ConfigValidationError};
+use crate::config::validate::{
+    validate, validate_prepared_test, validate_tools_download_bootstrap, ConfigValidationError,
+};
 use crate::support::path::normalize_windows_verbatim_path;
 
 pub const DEFAULT_CONFIG_FILE_NAME: &str = "v8project.yaml";
@@ -59,8 +61,20 @@ pub fn load_config_for_tools_download(
     )
 }
 
+pub fn load_config_for_prepared_test(
+    config_path: Option<&str>,
+    workdir_override: Option<&str>,
+) -> Result<AppConfig, ConfigLoadError> {
+    load_config_with_mode(
+        config_path,
+        workdir_override,
+        ConfigValidationMode::PreparedTest,
+    )
+}
+
 enum ConfigValidationMode {
     Full,
+    PreparedTest,
     ToolsDownload,
 }
 
@@ -103,6 +117,7 @@ fn load_config_with_mode(
 
     match validation_mode {
         ConfigValidationMode::Full => validate(&config)?,
+        ConfigValidationMode::PreparedTest => validate_prepared_test(&config)?,
         ConfigValidationMode::ToolsDownload => validate_tools_download_bootstrap(&config)?,
     }
     Ok(config)
