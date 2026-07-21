@@ -330,6 +330,9 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--wait-ready] [FLAGS]
   `--raw-key` не может задавать `/C`, `/Execute` или `/Out`.
 - Для `designer`/`thin`/`thick`/`ordinary` дополнительные typed flags: `--c`, `--execute`, `--use-privileged-mode`, `--output`,
   повторяемый `--raw-key`.
+- JSON-результат именно `launch` содержит legacy `binary` и `platform_resolution` с canonical
+  `path`, `version` (или `null`), `source` (`explicit`, `default-root` или `path`) и
+  `installation_root`. Это не общий metadata contract для остальных команд.
 
 ### `mcp serve`
 

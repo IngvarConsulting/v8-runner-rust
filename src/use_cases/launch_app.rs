@@ -2,12 +2,14 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::config::model::AppConfig;
-use crate::domain::launch::{LaunchMode, LaunchResult};
+use crate::domain::launch::{
+    LaunchMode, LaunchResult, PlatformResolution, PlatformResolutionSource,
+};
 use crate::domain::runner::LaunchOptions;
 use crate::platform::enterprise::{
     build_launch_args, normalize_launch_payload_path, LaunchClientMode,
 };
-use crate::platform::locator::UtilityType;
+use crate::platform::locator::{ResolutionSource, UtilityLocation, UtilityType, UtilityVersion};
 use crate::platform::process::ProcessRequest;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
@@ -75,6 +77,7 @@ pub fn execute(
     let location = utilities
         .locate(utility)
         .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+    let platform_resolution = platform_resolution(&location);
     let process_request = ProcessRequest {
         program: location.path.clone(),
         args: build_launch_args(
@@ -104,6 +107,7 @@ pub fn execute(
             mode,
             pid: Some(pid),
             binary: binary.clone(),
+            platform_resolution: platform_resolution.clone(),
             message: Some(launch_message(config, args, &binary, pid)),
             mcp_readiness: None,
         };
@@ -150,9 +154,35 @@ pub fn execute(
         mode,
         pid: Some(spawned.pid),
         binary: spawned.binary.clone(),
+        platform_resolution,
         message: Some(launch_message(config, args, &spawned.binary, spawned.pid)),
         mcp_readiness: None,
     })
+}
+
+fn platform_resolution(location: &UtilityLocation) -> PlatformResolution {
+    PlatformResolution {
+        path: location.path.clone(),
+        version: location.version.as_ref().map(utility_version_string),
+        source: match location.source {
+            ResolutionSource::Explicit => PlatformResolutionSource::Explicit,
+            ResolutionSource::DefaultRoot => PlatformResolutionSource::DefaultRoot,
+            ResolutionSource::Path => PlatformResolutionSource::Path,
+        },
+        installation_root: location.installation_root.clone(),
+    }
+}
+
+fn utility_version_string(version: &UtilityVersion) -> String {
+    match version {
+        UtilityVersion::Platform(version) => version.to_string(),
+        UtilityVersion::Edt(version) => version
+            .parts
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join("."),
+    }
 }
 
 fn client_mcp_readiness_url(
@@ -312,12 +342,13 @@ fn build_client_mcp_payload(
 
 #[cfg(test)]
 mod tests {
-    use super::execute;
+    use super::{execute, platform_resolution};
     use crate::config::model::{
         AppConfig, BuildConfig, BuilderBackend, EnterpriseToolConfig, PlatformToolConfig,
         SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig, ToolExtensionArtifactConfig,
         ToolExtensionConfig, ToolExtensionInput, ToolsConfig,
     };
+    use crate::platform::locator::{ResolutionSource, UtilityLocation, UtilityType};
     use crate::use_cases::context::{CommandName, ExecutionContext};
     use crate::use_cases::request::{
         ClientMcpMode, ClientMcpOptionsRequest, LaunchRequest, LaunchTargetRequest,
@@ -358,6 +389,27 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         fs::read_to_string(path).expect("args log")
+    }
+
+    #[test]
+    fn launch_resolution_serializes_all_sources_and_unknown_version_as_null() {
+        for (source, expected_source) in [
+            (ResolutionSource::Explicit, "explicit"),
+            (ResolutionSource::DefaultRoot, "default-root"),
+            (ResolutionSource::Path, "path"),
+        ] {
+            let resolution = platform_resolution(&UtilityLocation {
+                utility: UtilityType::V8,
+                path: PathBuf::from("/opt/1cv8/bin/1cv8"),
+                version: None,
+                source,
+                installation_root: PathBuf::from("/opt/1cv8"),
+            });
+            let json = serde_json::to_value(resolution).expect("resolution JSON");
+
+            assert_eq!(json["source"], expected_source);
+            assert!(json["version"].is_null());
+        }
     }
 
     fn sample_config(base_path: &Path, work_path: &Path, platform_path: &Path) -> AppConfig {

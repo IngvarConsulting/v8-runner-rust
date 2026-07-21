@@ -151,6 +151,7 @@ tools:
     epf_path: /path/to/vanessa.epf
   platform:
     path: /opt/1cv8/x86_64
+    strict: true
     version: 8.3.27.1859
   enterprise:
     additional-launch-keys:
@@ -508,6 +509,21 @@ source-set build, а `launch mcp` и `launch mcp va` расширение не �
 - на каталог `bin`;
 - на корень установки с версиями.
 
+Относительный путь нормализуется относительно каталога primary `v8project.yaml`.
+
+### `tools.platform.strict`
+
+- Тип: boolean
+- Обязателен: нет
+- По умолчанию: `false`
+
+При `strict: true` поле `tools.platform.path` обязательно. Поиск ограничивается указанной
+установкой: отсутствующая utility, неизвестная версия при заданном `tools.platform.version` или
+несовпадение версии завершают команду ошибкой без fallback к default roots или `PATH`.
+Первая найденная platform utility фиксирует один canonical installation root; последующие
+`1cv8`, `1cv8c` и `ibcmd` выбираются только из этого root. При `strict: false` сохранён legacy
+порядок: explicit path, default roots, затем `PATH`.
+
 ### `tools.platform.version`
 
 - Тип: строка
@@ -519,6 +535,9 @@ source-set build, а `launch mcp` и `launch mcp va` расширение не �
 - `8.3.27.1859`: требуется точное совпадение;
 - `8.3.20`: выбирается максимальная найденная сборка `8.3.20.*`;
 - `8.3`: выбирается максимальная найденная версия `8.3.*.*`.
+
+В strict mode version requirement не допускает неизвестную версию: такая установка отклоняется
+вместо fallback.
 
 ## `tools.enterprise`
 

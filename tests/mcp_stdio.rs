@@ -37,6 +37,28 @@ fn assert_envelope_business_failure(payload: &Value, command: &str) {
     assert!(payload["error"]["message"].is_string());
 }
 
+fn assert_launch_platform_resolution(data: &Value) {
+    let binary = data["binary"].as_str().expect("launch binary");
+    let resolution = &data["platform_resolution"];
+    let path = resolution["path"].as_str().expect("resolution path");
+    let installation_root = resolution["installation_root"]
+        .as_str()
+        .expect("resolution installation root");
+
+    assert_eq!(path, binary);
+    assert!(Path::new(path).is_absolute());
+    assert!(resolution["version"].is_null());
+    assert_eq!(resolution["source"], "explicit");
+    assert_eq!(
+        Path::new(path)
+            .parent()
+            .and_then(Path::parent)
+            .expect("installation root from binary path")
+            .to_string_lossy(),
+        installation_root
+    );
+}
+
 fn run_cli_json(config_path: &Path, args: &[&str]) -> Value {
     let (success, payload) = run_cli_json_with_status(config_path, args);
     assert!(success, "CLI command should succeed: {args:?}");
@@ -1139,6 +1161,8 @@ async fn mcp_stdio_launch_app_returns_success_for_thin_client() {
     let payload: Value = response.structured_content.expect("structured payload");
     assert_envelope_success(&payload, "launch");
     assert_eq!(payload["data"]["ok"], true);
+    assert_launch_platform_resolution(&payload["data"]);
+    wait_for_invocation_count(&enterprise_calls_log, 1).await;
     assert!(!fs::read_to_string(enterprise_calls_log)
         .expect("enterprise calls")
         .contains("RunUnitTests="));

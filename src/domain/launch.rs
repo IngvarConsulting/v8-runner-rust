@@ -13,11 +13,38 @@ pub struct LaunchResult {
     pub pid: Option<u32>,
     /// Selected binary path used to spawn the process.
     pub binary: PathBuf,
+    /// Canonical platform installation metadata for the selected binary.
+    pub platform_resolution: PlatformResolution,
     /// Human-readable launch summary.
     pub message: Option<String>,
     /// Client-side MCP endpoint readiness details when readiness was requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_readiness: Option<McpReadinessResult>,
+}
+
+/// Canonical platform installation metadata exposed by `launch` JSON results.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlatformResolution {
+    /// Absolute canonical path to the selected executable.
+    pub path: PathBuf,
+    /// Platform version inferred from the canonical installation path, when known.
+    pub version: Option<String>,
+    /// Discovery source used for the selected executable.
+    pub source: PlatformResolutionSource,
+    /// Absolute canonical root shared by platform utilities from this installation.
+    pub installation_root: PathBuf,
+}
+
+/// Typed discovery sources exposed by `launch` resolution metadata.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PlatformResolutionSource {
+    /// The configured utility or installation hint.
+    Explicit,
+    /// An operating-system-specific default installation root.
+    DefaultRoot,
+    /// A directory captured from `PATH` when the locator was created.
+    Path,
 }
 
 /// Result of probing a client-side MCP endpoint after launch.

@@ -244,6 +244,24 @@ fn insert_client_mcp_config(path: &Path, body: &str) {
     fs::write(path, config.replace("tools:\n  platform:", &replacement)).expect("config");
 }
 
+fn set_client_mcp_wait_ready_timeout(path: &Path, timeout_ms: u64) {
+    let config = fs::read_to_string(path).expect("config");
+    let client_mcp = "  client_mcp:\n    port: 9874\n";
+    let replacement = format!("{client_mcp}    wait_ready_timeout_ms: {timeout_ms}\n");
+    assert!(
+        config.contains(client_mcp),
+        "expected configured client_mcp port"
+    );
+    fs::write(path, config.replace(client_mcp, &replacement)).expect("config");
+}
+
+fn canonical_path_string(path: &Path) -> String {
+    fs::canonicalize(path)
+        .expect("canonical path")
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn write_config(
     path: &Path,
     _base_path: &Path,
@@ -412,7 +430,7 @@ fn launch_json_returns_pid_and_selected_binary() {
     assert_eq!(data["mode"], "thin");
     assert_eq!(
         data["binary"].as_str().expect("binary"),
-        install_dir.join("bin").join("1cv8c").to_string_lossy()
+        canonical_path_string(&install_dir.join("bin").join("1cv8c"))
     );
     assert!(data["pid"].as_u64().expect("pid") > 0);
 }
@@ -472,7 +490,7 @@ fn launch_designer_accepts_positional_mode() {
     assert_eq!(payload["data"]["mode"], "designer");
     assert_eq!(
         payload["data"]["binary"].as_str().expect("binary"),
-        install_dir.join("bin").join("1cv8").to_string_lossy()
+        canonical_path_string(&install_dir.join("bin").join("1cv8"))
     );
 }
 
@@ -494,13 +512,14 @@ fn launch_thick_uses_v8_binary() {
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(
         payload["data"]["binary"].as_str().expect("binary"),
-        install_dir.join("bin").join("1cv8").to_string_lossy()
+        canonical_path_string(&install_dir.join("bin").join("1cv8"))
     );
 }
 
 #[test]
-fn launch_uses_versioned_root_hint() {
+fn launch_json_exposes_platform_resolution_metadata() {
     let (_dir, config_path, version_dir, _work_path) = setup_versioned_project();
+    let canonical_version_dir = fs::canonicalize(&version_dir).expect("canonical version dir");
     let output = v8_runner_command()
         .args([
             "--config",
@@ -516,7 +535,30 @@ fn launch_uses_versioned_root_hint() {
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(
         payload["data"]["binary"].as_str().expect("binary"),
-        version_dir.join("bin").join("1cv8c").to_string_lossy()
+        canonical_version_dir
+            .join("bin")
+            .join("1cv8c")
+            .to_string_lossy()
+    );
+    assert_eq!(
+        payload["data"]["platform_resolution"]["path"]
+            .as_str()
+            .expect("resolution path"),
+        canonical_version_dir
+            .join("bin")
+            .join("1cv8c")
+            .to_string_lossy()
+    );
+    assert_eq!(
+        payload["data"]["platform_resolution"]["version"],
+        "8.3.25.1234"
+    );
+    assert_eq!(payload["data"]["platform_resolution"]["source"], "explicit");
+    assert_eq!(
+        payload["data"]["platform_resolution"]["installation_root"]
+            .as_str()
+            .expect("installation root"),
+        canonical_version_dir.to_string_lossy()
     );
 }
 
@@ -665,7 +707,7 @@ fn launch_mcp_va_builds_payload_from_configured_port_and_ordinary_mode() {
     assert_eq!(payload["data"]["mode"], "mcp");
     assert_eq!(
         payload["data"]["binary"].as_str().expect("binary"),
-        install_dir.join("bin").join("1cv8").to_string_lossy()
+        canonical_path_string(&install_dir.join("bin").join("1cv8"))
     );
 
     let args = read_args_log(&args_log);
@@ -797,7 +839,8 @@ fn launch_mcp_va_wait_ready_returns_registered_vanessa_tools() {
 #[test]
 fn launch_mcp_va_wait_ready_fails_when_vanessa_tools_are_missing() {
     let (_dir, config_path, install_dir, args_log) = setup_mcp_va_project();
-    prepend_config(&config_path, "execution_timeout: 700\n");
+    prepend_config(&config_path, "execution_timeout: 2500\n");
+    set_client_mcp_wait_ready_timeout(&config_path, 700);
     let (port, server) = start_fake_mcp_server(&["infobase_info"]);
     write_logging_script(&install_dir.join("bin").join("1cv8"), &args_log);
 
@@ -885,7 +928,8 @@ fn launch_mcp_wait_ready_returns_client_mcp_tools_without_vanessa_requirements()
 #[test]
 fn launch_mcp_wait_ready_fails_when_endpoint_never_starts() {
     let (_dir, config_path, _install_dir, _work_path) = setup_project();
-    prepend_config(&config_path, "execution_timeout: 700\n");
+    prepend_config(&config_path, "execution_timeout: 2500\n");
+    insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 700\n");
     let port = free_tcp_port();
 
     let output = v8_runner_command()
