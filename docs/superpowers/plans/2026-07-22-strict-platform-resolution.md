@@ -8,20 +8,20 @@
 
 **Tech Stack:** Rust, serde, schemars, clap integration tests, existing locator and launch contracts.
 
-### Task 1: Configuration and path normalization
+## Task 1: Configuration and path normalization
 
 - [ ] Add failing model/schema/loader tests for strict and relative platform paths.
 - [ ] Add `PlatformToolConfig.strict`, schema fields, strict-without-path validation, and path normalization.
 - [ ] Regenerate both checked-in schemas and run focused config tests.
 
-### Task 2: Typed strict locator
+## Task 2: Typed strict locator
 
 - [ ] Add failing locator tests for no fallback, exact/prefix mismatch, unknown version, and sibling consistency.
 - [ ] Add typed policy/source/errors and source-aware candidates.
 - [ ] Bind strict resolution to one canonical installation root and capture PATH roots once.
 - [ ] Run the complete locator and utilities suites.
 
-### Task 3: JSON and documentation
+## Task 3: JSON and documentation
 
 - [ ] Add a failing launch JSON test for path/version/source/root metadata.
 - [ ] Extend LaunchResult and mapping without removing the existing binary field.
