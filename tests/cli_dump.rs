@@ -226,7 +226,7 @@ fn setup_edt_project() -> (
 
 #[test]
 fn dump_ibcmd_full_json_success() {
-    let (_dir, config_path, _binary_path, _work_path, base_path, calls_log) = setup_project();
+    let (_dir, config_path, _binary_path, work_path, base_path, calls_log) = setup_project();
 
     let output = v8_runner_command()
         .args([
@@ -247,6 +247,10 @@ fn dump_ibcmd_full_json_success() {
     assert_eq!(payload["ok"], true);
     let calls = fs::read_to_string(calls_log).expect("calls");
     assert!(calls.contains("--force"));
+    assert!(calls.contains(&format!(
+        "infobase --data {}",
+        work_path.join("ibcmd-data").display()
+    )));
     assert!(base_path.join("main").exists());
 }
 

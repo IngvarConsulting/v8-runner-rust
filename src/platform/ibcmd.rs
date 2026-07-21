@@ -171,6 +171,7 @@ pub struct IbcmdDsl<'a> {
     connection: IbcmdConnection,
     runner: &'a dyn ProcessRunner,
     execution_policy: ProcessExecutionPolicy,
+    data_path: Option<PathBuf>,
 }
 
 impl<'a> IbcmdDsl<'a> {
@@ -185,7 +186,14 @@ impl<'a> IbcmdDsl<'a> {
             connection,
             runner,
             execution_policy: ProcessExecutionPolicy::default(),
+            data_path: None,
         }
+    }
+
+    /// Uses an isolated standalone-server data directory for every IBCMD call.
+    pub fn with_data_path(mut self, data_path: PathBuf) -> Self {
+        self.data_path = Some(data_path);
+        self
     }
 
     /// Overrides the shared execution policy for process-level cancellation and deadlines.
@@ -340,12 +348,17 @@ impl<'a> IbcmdDsl<'a> {
     }
 
     fn run(&self, args: &[String]) -> Result<PlatformCommandResult, IbcmdError> {
+        let mut args_with_data = args.to_vec();
+        if let Some(data_path) = &self.data_path {
+            args_with_data.insert(1, data_path.display().to_string());
+            args_with_data.insert(1, "--data".to_owned());
+        }
         let process = self
             .runner
             .run_with_policy(
                 &ProcessRequest {
                     program: self.binary.clone(),
-                    args: args.to_vec(),
+                    args: args_with_data,
                     workdir: None,
                     stdout_log_path: None,
                     stderr_log_path: None,

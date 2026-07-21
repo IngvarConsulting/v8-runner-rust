@@ -224,11 +224,19 @@ pub(super) fn build_ibcmd_dsl<'a>(
 ) -> Result<IbcmdDsl<'a>, AppError> {
     let connection = IbcmdConnection::from_infobase(&config.infobase).map_err(map_ibcmd_error)?;
 
-    Ok(
-        IbcmdDsl::new(binary.to_path_buf(), connection, runner).with_execution_policy(
+    let data_path = config.work_path.join("ibcmd-data");
+    std::fs::create_dir_all(&data_path).map_err(|error| {
+        AppError::Runtime(format!(
+            "failed to create IBCMD standalone-server data directory '{}': {error}",
+            data_path.display()
+        ))
+    })?;
+
+    Ok(IbcmdDsl::new(binary.to_path_buf(), connection, runner)
+        .with_data_path(data_path)
+        .with_execution_policy(
             context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-        ),
-    )
+        ))
 }
 
 pub(super) fn map_ibcmd_error(error: IbcmdError) -> AppError {
