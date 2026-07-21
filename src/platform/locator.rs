@@ -641,8 +641,7 @@ fn explicit_direct_candidates(
         let target_name = utility.executable_name();
         let file_name_matches = hint
             .file_name()
-            .and_then(|name| name.to_str())
-            .map(|name| name == target_name)
+            .map(|name| executable_component_matches(name, target_name))
             .unwrap_or(false);
 
         let path = if file_name_matches {
@@ -851,10 +850,11 @@ fn absolutize_relative_path_root(root: PathBuf, current_dir: &Path) -> Option<Pa
     }
 
     let absolute = if let Some(root_drive) = disk_prefix(&root) {
-        if disk_prefix(current_dir) != Some(root_drive) {
-            return None;
+        if disk_prefix(current_dir) == Some(root_drive) {
+            current_dir.join(root.components().skip(1).collect::<PathBuf>())
+        } else {
+            std::path::absolute(root).ok()?
         }
-        current_dir.join(root.components().skip(1).collect::<PathBuf>())
     } else {
         current_dir.join(root)
     };
@@ -1049,8 +1049,7 @@ fn strict_candidate_boundary(hint: &Path) -> PathBuf {
     if hint.is_file()
         || canonical
             .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name == "bin")
+            .is_some_and(|name| executable_component_matches(name, "bin"))
     {
         installation_root_for_executable(&canonical)
     } else {
@@ -1060,9 +1059,27 @@ fn strict_candidate_boundary(hint: &Path) -> PathBuf {
 
 fn installation_root_for_executable(path: &Path) -> PathBuf {
     let parent = path.parent().unwrap_or(path);
-    match parent.file_name().and_then(|name| name.to_str()) {
-        Some("bin" | "1cedt") => parent.parent().unwrap_or(parent).to_path_buf(),
-        Some(_) | None => parent.to_path_buf(),
+    let is_utility_directory = parent.file_name().is_some_and(|name| {
+        executable_component_matches(name, "bin") || executable_component_matches(name, "1cedt")
+    });
+    if is_utility_directory {
+        parent.parent().unwrap_or(parent).to_path_buf()
+    } else {
+        parent.to_path_buf()
+    }
+}
+
+fn executable_component_matches(actual: &std::ffi::OsStr, expected: &str) -> bool {
+    #[cfg(windows)]
+    {
+        actual
+            .to_str()
+            .is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
+    }
+
+    #[cfg(not(windows))]
+    {
+        actual == std::ffi::OsStr::new(expected)
     }
 }
 
@@ -1600,15 +1617,47 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_drive_relative_path_component_uses_same_drive_captured_directory() {
+    fn windows_drive_relative_path_components_use_captured_drive_directories() {
         let captured = PathBuf::from(r"C:\captured\current-directory");
+        let other_drive = PathBuf::from(r"D:other");
+        let resolved_other_drive = std::path::absolute(&other_drive)
+            .expect("Windows resolves a drive-relative path using that drive's current directory");
 
         assert_eq!(
-            normalize_path_roots(
-                vec![PathBuf::from(r"C:tools"), PathBuf::from(r"D:other")],
-                &captured,
-            ),
-            vec![captured.join("tools")]
+            normalize_path_roots(vec![PathBuf::from(r"C:tools"), other_drive], &captured),
+            vec![captured.join("tools"), resolved_other_drive]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_executable_hint_identity_is_ascii_case_insensitive() {
+        let dir = tempdir().expect("tempdir");
+        let hint = dir.path().join("1CV8.EXE");
+        touch_executable(&hint);
+
+        let candidates = super::explicit_direct_candidates(
+            &hint,
+            UtilityType::V8,
+            super::FileHintSiblingResolution::Lexical,
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, canonical(&hint));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_installation_root_layout_components_are_ascii_case_insensitive() {
+        let version_root = PathBuf::from(r"C:\Program Files\1cv8\8.3.25.1234");
+
+        assert_eq!(
+            super::installation_root_for_executable(&version_root.join(r"BIN\1CV8.EXE")),
+            version_root
+        );
+        assert_eq!(
+            super::installation_root_for_executable(&version_root.join(r"1CEDT\1CEDTCLI.EXE")),
+            version_root
         );
     }
 

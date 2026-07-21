@@ -26,7 +26,6 @@ pub fn main_config_schema_json() -> Value {
     let mut schema = serde_json::to_value(schema_for!(MainConfigSchema)).expect("schema json");
     set_schema_id(&mut schema, &main_config_schema_url());
     add_tool_extension_schema_constraints(&mut schema);
-    add_platform_schema_constraints(&mut schema);
     add_numeric_runtime_bounds(&mut schema);
     schema
 }
@@ -111,29 +110,6 @@ fn add_tool_extension_schema_constraints(schema: &mut Value) {
         &["PartialToolExtensionSchema"],
         &["source", "artifact"],
     );
-}
-
-fn add_platform_schema_constraints(schema: &mut Value) {
-    let Some(object) = schema_object_mut(schema, &["PlatformToolSchema"]) else {
-        return;
-    };
-    let all_of = object
-        .entry("allOf")
-        .or_insert_with(|| Value::Array(Vec::new()))
-        .as_array_mut()
-        .expect("schema allOf array");
-    all_of.push(json!({
-        "if": {
-            "properties": { "strict": { "const": true } },
-            "required": ["strict"]
-        },
-        "then": {
-            "allOf": [
-                { "required": ["path"] },
-                { "properties": { "path": { "not": { "type": "null" } } } }
-            ]
-        }
-    }));
 }
 
 fn reject_multiple_non_null_properties(schema: &mut Value, def_path: &[&str], names: &[&str]) {
@@ -1279,7 +1255,7 @@ mod tests {
     }
 
     #[test]
-    fn platform_strict_schema_requires_path_and_accepts_false_without_path() {
+    fn platform_strict_main_schema_allows_path_to_come_from_local_overlay() {
         let strict_without_path = format!(
             "{}tools:\n  platform:\n    strict: true\n",
             minimal_project_config_without_base_path()
@@ -1293,8 +1269,8 @@ mod tests {
             minimal_project_config_without_base_path()
         );
 
-        assert_schema_invalid(&main_config_schema_json(), &strict_without_path);
-        assert_schema_invalid(&main_config_schema_json(), &strict_with_null_path);
+        assert_schema_valid(&main_config_schema_json(), &strict_without_path);
+        assert_schema_valid(&main_config_schema_json(), &strict_with_null_path);
         assert_schema_valid(&main_config_schema_json(), &non_strict_without_path);
     }
 
@@ -1314,6 +1290,35 @@ mod tests {
         let overlay = "tools:\n  platform:\n    strict: true\n";
         std::fs::write(dir.path().join("v8project.local.yaml"), overlay).expect("overlay");
 
+        assert_schema_valid(&local_config_schema_json(), overlay);
+
+        let config = load_config(config_path.to_str(), None).expect("load merged config");
+        assert!(config.tools.platform.strict);
+        assert_eq!(
+            config.tools.platform.path.as_deref(),
+            Some(
+                std::fs::canonicalize(dir.path())
+                    .expect("canonical config dir")
+                    .join("platform/bin")
+                    .as_path()
+            )
+        );
+    }
+
+    #[test]
+    fn local_schema_can_supply_path_for_strict_primary_platform_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
+        let config_path = dir.path().join("v8project.yaml");
+        let primary = format!(
+            "{}tools:\n  platform:\n    strict: true\n",
+            minimal_project_config_without_base_path()
+        );
+        std::fs::write(&config_path, &primary).expect("config");
+        let overlay = "tools:\n  platform:\n    path: platform/bin\n";
+        std::fs::write(dir.path().join("v8project.local.yaml"), overlay).expect("overlay");
+
+        assert_schema_valid(&main_config_schema_json(), &primary);
         assert_schema_valid(&local_config_schema_json(), overlay);
 
         let config = load_config(config_path.to_str(), None).expect("load merged config");

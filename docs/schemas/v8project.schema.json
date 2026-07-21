@@ -285,38 +285,6 @@
     },
     "PlatformToolSchema": {
       "additionalProperties": false,
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "strict": {
-                "const": true
-              }
-            },
-            "required": [
-              "strict"
-            ]
-          },
-          "then": {
-            "allOf": [
-              {
-                "required": [
-                  "path"
-                ]
-              },
-              {
-                "properties": {
-                  "path": {
-                    "not": {
-                      "type": "null"
-                    }
-                  }
-                }
-              }
-            ]
-          }
-        }
-      ],
       "properties": {
         "path": {
           "description": "Platform binary, installation `bin` directory, or platform root discovery hint.",

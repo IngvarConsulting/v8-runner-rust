@@ -14,7 +14,7 @@ Version requirements retain the existing semantics: four components are exact; t
 
 ## Installation consistency
 
-The first successfully resolved platform utility binds the locator to its canonical installation root. Later resolution of `1cv8`, `1cv8c`, or `ibcmd` uses only a direct or `bin` sibling below that root. A sibling elsewhere in default roots or PATH is rejected.
+In strict mode, the first successfully resolved platform utility binds the locator to its canonical installation root. Later resolution of `1cv8`, `1cv8c`, or `ibcmd` uses only a direct or `bin` sibling below that root. A sibling elsewhere in default roots or PATH is rejected.
 
 Each location carries a typed resolution source (`explicit`, `default-root`, or `path`), an absolute canonical executable path, inferred version, and canonical installation root.
 
