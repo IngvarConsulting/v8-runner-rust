@@ -1822,7 +1822,7 @@ mod tests {
                 mode: result_mode,
                 pid: Some(42),
                 binary: PathBuf::from("/opt/1cv8"),
-                platform_resolution: sample_platform_resolution(),
+                platform_resolution: sample_platform_resolution("/opt/1cv8"),
                 message: None,
                 mcp_readiness: None,
             }));
@@ -1853,7 +1853,7 @@ mod tests {
             mode: LaunchMode::Mcp,
             pid: Some(42),
             binary: PathBuf::from("/opt/1cv8"),
-            platform_resolution: sample_platform_resolution(),
+            platform_resolution: sample_platform_resolution("/opt/1cv8"),
             message: None,
             mcp_readiness: None,
         }));
@@ -1901,7 +1901,7 @@ mod tests {
                 mode: LaunchMode::Thin,
                 pid: Some(42),
                 binary: PathBuf::from("/opt/1cv8c"),
-                platform_resolution: sample_platform_resolution(),
+                platform_resolution: sample_platform_resolution("/opt/1cv8c"),
                 message: None,
                 mcp_readiness: None,
             })),
@@ -1942,7 +1942,7 @@ mod tests {
                 mode: LaunchMode::Thin,
                 pid: Some(42),
                 binary: PathBuf::from("/opt/1cv8c"),
-                platform_resolution: sample_platform_resolution(),
+                platform_resolution: sample_platform_resolution("/opt/1cv8c"),
                 message: None,
                 mcp_readiness: None,
             })),
@@ -1977,7 +1977,7 @@ mod tests {
                 mode: LaunchMode::Mcp,
                 pid: Some(42),
                 binary: PathBuf::from("/opt/1cv8"),
-                platform_resolution: sample_platform_resolution(),
+                platform_resolution: sample_platform_resolution("/opt/1cv8"),
                 message: None,
                 mcp_readiness: None,
             })),
@@ -2017,7 +2017,7 @@ mod tests {
                 mode: LaunchMode::Mcp,
                 pid: Some(42),
                 binary: PathBuf::from("/opt/1cv8"),
-                platform_resolution: sample_platform_resolution(),
+                platform_resolution: sample_platform_resolution("/opt/1cv8"),
                 message: None,
                 mcp_readiness: None,
             })),
@@ -2057,7 +2057,7 @@ mod tests {
                 mode: LaunchMode::Designer,
                 pid: None,
                 binary: PathBuf::from("/opt/1cv8"),
-                platform_resolution: sample_platform_resolution(),
+                platform_resolution: sample_platform_resolution("/opt/1cv8"),
                 message: None,
                 mcp_readiness: None,
             })),
@@ -2098,7 +2098,7 @@ mod tests {
                 mode: LaunchMode::Designer,
                 pid: None,
                 binary: PathBuf::from("/opt/1cv8"),
-                platform_resolution: sample_platform_resolution(),
+                platform_resolution: sample_platform_resolution("/opt/1cv8"),
                 message: None,
                 mcp_readiness: None,
             })),
@@ -2529,9 +2529,9 @@ mod tests {
         }
     }
 
-    fn sample_platform_resolution() -> PlatformResolution {
+    fn sample_platform_resolution(path: &str) -> PlatformResolution {
         PlatformResolution {
-            path: PathBuf::from("/opt/1cv8"),
+            path: PathBuf::from(path),
             version: Some("8.3.25.1234".to_owned()),
             source: PlatformResolutionSource::Explicit,
             installation_root: PathBuf::from("/opt"),
