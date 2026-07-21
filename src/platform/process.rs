@@ -355,6 +355,12 @@ enum ProcessIoMode {
     Captured,
 }
 
+impl ProcessIoMode {
+    const fn requires_standard_handle_isolation(self) -> bool {
+        matches!(self, Self::Detached | Self::ManagedDetached)
+    }
+}
+
 struct SpawnedChild {
     child: ChildHandle,
 }
@@ -458,6 +464,12 @@ fn spawn_command(
     rendered_command: &str,
 ) -> Result<SpawnedChild, ProcessError> {
     for attempt in 0..=EXECUTABLE_BUSY_MAX_RETRIES {
+        if io_mode.requires_standard_handle_isolation() {
+            isolate_inherited_standard_handles().map_err(|source| ProcessError::SpawnFailed {
+                cmd: rendered_command.to_owned(),
+                source,
+            })?;
+        }
         let cmd = build_command(request, io_mode);
         match spawn_child(cmd, io_mode) {
             Ok(child) => return Ok(SpawnedChild { child }),
@@ -481,6 +493,43 @@ fn spawn_command(
     }
 
     unreachable!("spawn loop must return on success or final error");
+}
+
+#[cfg(windows)]
+fn isolate_inherited_standard_handles() -> std::io::Result<()> {
+    use windows_sys::Win32::Foundation::{
+        GetHandleInformation, SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+
+    for standard_handle in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: `standard_handle` is one of the three constants accepted by GetStdHandle.
+        let handle = unsafe { GetStdHandle(standard_handle) };
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            continue;
+        }
+
+        let mut flags = 0;
+        // SAFETY: `handle` was returned by GetStdHandle and `flags` is writable for the call.
+        if unsafe { GetHandleInformation(handle, &mut flags) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if flags & HANDLE_FLAG_INHERIT != 0 {
+            // SAFETY: the valid standard handle remains owned by the process; this only clears a flag.
+            if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn isolate_inherited_standard_handles() -> std::io::Result<()> {
+    Ok(())
 }
 
 fn spawn_child(mut cmd: Command, io_mode: ProcessIoMode) -> std::io::Result<ChildHandle> {
@@ -886,7 +935,7 @@ mod tests {
     use super::{
         render_command, ProcessError, ProcessExecutionPolicy, ProcessExecutor,
         ProcessInterruptionAction, ProcessInterruptionReason, ProcessInterruptionSafety,
-        ProcessRequest, ProcessRunner,
+        ProcessIoMode, ProcessRequest, ProcessRunner,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -894,6 +943,13 @@ mod tests {
     use std::time::Duration;
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn detached_modes_require_standard_handle_isolation() {
+        assert!(ProcessIoMode::Detached.requires_standard_handle_isolation());
+        assert!(ProcessIoMode::ManagedDetached.requires_standard_handle_isolation());
+        assert!(!ProcessIoMode::Captured.requires_standard_handle_isolation());
+    }
 
     #[cfg(unix)]
     fn make_executable(path: &Path) {
@@ -1073,6 +1129,79 @@ mod tests {
             }
             panic!("managed startup failure should terminate process group child {child_pid}");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn detached_child_does_not_hold_redirected_stdout_open() {
+        const HELPER_ENV: &str = "V8_RUNNER_WINDOWS_STDIO_ISOLATION_HELPER";
+        const PID_FILE_ENV: &str = "V8_RUNNER_WINDOWS_STDIO_ISOLATION_PID_FILE";
+        const TEST_NAME: &str =
+            "platform::process::tests::detached_child_does_not_hold_redirected_stdout_open";
+
+        if std::env::var_os(HELPER_ENV).is_some() {
+            let pid_file = PathBuf::from(
+                std::env::var_os(PID_FILE_ENV).expect("helper PID file environment variable"),
+            );
+            let result = ProcessExecutor
+                .spawn(&ProcessRequest {
+                    program: PathBuf::from("powershell.exe"),
+                    args: vec![
+                        "-NoProfile".to_owned(),
+                        "-Command".to_owned(),
+                        "Start-Sleep -Seconds 30".to_owned(),
+                    ],
+                    workdir: None,
+                    stdout_log_path: None,
+                    stderr_log_path: None,
+                    startup_probe: None,
+                })
+                .expect("spawn detached helper child");
+            fs::write(pid_file, result.pid.to_string()).expect("write detached child PID");
+            return;
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let pid_file = dir.path().join("detached-child.pid");
+        let mut helper = std::process::Command::new(
+            std::env::current_exe().expect("current unit-test executable"),
+        )
+        .args(["--exact", TEST_NAME, "--nocapture"])
+        .env(HELPER_ENV, "1")
+        .env(PID_FILE_ENV, &pid_file)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn test helper");
+        let mut stdout = helper.stdout.take().expect("helper stdout pipe");
+        let (eof_sender, eof_receiver) = std::sync::mpsc::channel();
+        let reader = thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = std::io::Read::read_to_end(&mut stdout, &mut bytes).map(|_| bytes);
+            let _ = eof_sender.send(result);
+        });
+
+        let detached_pid = read_pid(&pid_file);
+        let eof_before_cleanup = eof_receiver.recv_timeout(Duration::from_secs(2));
+        let detached_child_was_alive = process_exists(detached_pid);
+
+        terminate_windows_process_tree_for_test(detached_pid);
+        let helper_status = helper.wait().expect("wait for test helper");
+        let _ = reader.join();
+
+        assert!(
+            helper_status.success(),
+            "test helper must exit successfully: {helper_status}"
+        );
+        assert!(
+            detached_child_was_alive,
+            "detached child must still be alive when stdout reaches EOF"
+        );
+        assert!(
+            matches!(eof_before_cleanup, Ok(Ok(_))),
+            "redirected stdout did not reach EOF before detached child cleanup: {eof_before_cleanup:?}"
+        );
     }
 
     #[cfg(windows)]
