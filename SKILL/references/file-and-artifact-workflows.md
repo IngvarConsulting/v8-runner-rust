@@ -17,7 +17,7 @@ Supported modes:
 ```bash
 v8-runner dump --mode full
 v8-runner dump --mode incremental
-v8-runner dump --mode partial --object <TYPE:NAME>
+v8-runner dump --mode partial --object Catalog:Items
 ```
 
 Useful selectors:
@@ -28,6 +28,12 @@ v8-runner dump --mode incremental --extension <EXTENSION>
 ```
 
 `partial` requires at least one `--object`. With `builder=IBCMD`, object-scoped partial dump degrades to incremental dump with a warning.
+
+Use `TYPE:NAME` as the canonical partial selector form, for example `Catalog:Items`.
+The dotted `TYPE.NAME` form remains compatible. The Designer list and JSON
+`data.selectors[*].normalized` use `TYPE.NAME`; JSON `data.selectors[*].requested`
+preserves the submitted selector. Before Designer starts, invalid root types, empty names,
+extra separators, and control characters are rejected.
 
 For `format=EDT`, dump uses an internal Designer snapshot under `workPath/designer/<sourceSetName>`, then imports the result into the EDT target.
 
