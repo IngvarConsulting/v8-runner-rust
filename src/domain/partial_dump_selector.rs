@@ -14,18 +14,25 @@ pub enum MetadataRootType {
     Catalog,
     ChartOfAccounts,
     ChartOfCalculationTypes,
+    ChartOfCharacteristicTypes,
+    CommandGroup,
     CommonAttribute,
     CommonCommand,
     CommonForm,
     CommonModule,
+    CommonPicture,
+    CommonTemplate,
+    Configuration,
     Constant,
     DataProcessor,
     DefinedType,
     Document,
     DocumentJournal,
+    DocumentNumerator,
     Enum,
     EventSubscription,
     ExchangePlan,
+    ExternalDataSource,
     FilterCriterion,
     FunctionalOption,
     FunctionalOptionsParameter,
@@ -38,10 +45,13 @@ pub enum MetadataRootType {
     ScheduledJob,
     Sequence,
     SessionParameter,
+    SettingsStorage,
     Style,
+    StyleItem,
     Subsystem,
     Task,
     WebService,
+    WebSocketClient,
     WSReference,
     XDTOPackage,
 }
@@ -57,18 +67,25 @@ impl MetadataRootType {
             "Catalog" => Ok(Self::Catalog),
             "ChartOfAccounts" => Ok(Self::ChartOfAccounts),
             "ChartOfCalculationTypes" => Ok(Self::ChartOfCalculationTypes),
+            "ChartOfCharacteristicTypes" => Ok(Self::ChartOfCharacteristicTypes),
+            "CommandGroup" => Ok(Self::CommandGroup),
             "CommonAttribute" => Ok(Self::CommonAttribute),
             "CommonCommand" => Ok(Self::CommonCommand),
             "CommonForm" => Ok(Self::CommonForm),
             "CommonModule" => Ok(Self::CommonModule),
+            "CommonPicture" => Ok(Self::CommonPicture),
+            "CommonTemplate" => Ok(Self::CommonTemplate),
+            "Configuration" => Ok(Self::Configuration),
             "Constant" => Ok(Self::Constant),
             "DataProcessor" => Ok(Self::DataProcessor),
             "DefinedType" => Ok(Self::DefinedType),
             "Document" => Ok(Self::Document),
             "DocumentJournal" => Ok(Self::DocumentJournal),
+            "DocumentNumerator" => Ok(Self::DocumentNumerator),
             "Enum" => Ok(Self::Enum),
             "EventSubscription" => Ok(Self::EventSubscription),
             "ExchangePlan" => Ok(Self::ExchangePlan),
+            "ExternalDataSource" => Ok(Self::ExternalDataSource),
             "FilterCriterion" => Ok(Self::FilterCriterion),
             "FunctionalOption" => Ok(Self::FunctionalOption),
             "FunctionalOptionsParameter" => Ok(Self::FunctionalOptionsParameter),
@@ -81,10 +98,13 @@ impl MetadataRootType {
             "ScheduledJob" => Ok(Self::ScheduledJob),
             "Sequence" => Ok(Self::Sequence),
             "SessionParameter" => Ok(Self::SessionParameter),
+            "SettingsStorage" => Ok(Self::SettingsStorage),
             "Style" => Ok(Self::Style),
+            "StyleItem" => Ok(Self::StyleItem),
             "Subsystem" => Ok(Self::Subsystem),
             "Task" => Ok(Self::Task),
             "WebService" => Ok(Self::WebService),
+            "WebSocketClient" => Ok(Self::WebSocketClient),
             "WSReference" => Ok(Self::WSReference),
             "XDTOPackage" => Ok(Self::XDTOPackage),
             _ => Err(AppError::Validation(format!(
@@ -103,18 +123,25 @@ impl MetadataRootType {
             Self::Catalog => "Catalog",
             Self::ChartOfAccounts => "ChartOfAccounts",
             Self::ChartOfCalculationTypes => "ChartOfCalculationTypes",
+            Self::ChartOfCharacteristicTypes => "ChartOfCharacteristicTypes",
+            Self::CommandGroup => "CommandGroup",
             Self::CommonAttribute => "CommonAttribute",
             Self::CommonCommand => "CommonCommand",
             Self::CommonForm => "CommonForm",
             Self::CommonModule => "CommonModule",
+            Self::CommonPicture => "CommonPicture",
+            Self::CommonTemplate => "CommonTemplate",
+            Self::Configuration => "Configuration",
             Self::Constant => "Constant",
             Self::DataProcessor => "DataProcessor",
             Self::DefinedType => "DefinedType",
             Self::Document => "Document",
             Self::DocumentJournal => "DocumentJournal",
+            Self::DocumentNumerator => "DocumentNumerator",
             Self::Enum => "Enum",
             Self::EventSubscription => "EventSubscription",
             Self::ExchangePlan => "ExchangePlan",
+            Self::ExternalDataSource => "ExternalDataSource",
             Self::FilterCriterion => "FilterCriterion",
             Self::FunctionalOption => "FunctionalOption",
             Self::FunctionalOptionsParameter => "FunctionalOptionsParameter",
@@ -127,10 +154,13 @@ impl MetadataRootType {
             Self::ScheduledJob => "ScheduledJob",
             Self::Sequence => "Sequence",
             Self::SessionParameter => "SessionParameter",
+            Self::SettingsStorage => "SettingsStorage",
             Self::Style => "Style",
+            Self::StyleItem => "StyleItem",
             Self::Subsystem => "Subsystem",
             Self::Task => "Task",
             Self::WebService => "WebService",
+            Self::WebSocketClient => "WebSocketClient",
             Self::WSReference => "WSReference",
             Self::XDTOPackage => "XDTOPackage",
         }
@@ -217,6 +247,45 @@ mod tests {
 
         assert_eq!(selector.requested(), "Catalog.Items");
         assert_eq!(selector.normalized(), "Catalog.Items");
+    }
+
+    #[test]
+    fn partial_dump_selector_accepts_fixture_metadata_root_types() {
+        for (requested, normalized) in [
+            (
+                "ChartOfCharacteristicTypes:ПланВидовХарактеристик1",
+                "ChartOfCharacteristicTypes.ПланВидовХарактеристик1",
+            ),
+            ("CommandGroup:ГруппаКоманд1", "CommandGroup.ГруппаКоманд1"),
+            (
+                "CommonPicture:ОбщаяКартинка1",
+                "CommonPicture.ОбщаяКартинка1",
+            ),
+            ("CommonTemplate:Макет", "CommonTemplate.Макет"),
+            ("Configuration:Конфигурация", "Configuration.Конфигурация"),
+            (
+                "DocumentNumerator:НумераторДокументов1",
+                "DocumentNumerator.НумераторДокументов1",
+            ),
+            (
+                "ExternalDataSource:ВнешнийИсточникДанных1",
+                "ExternalDataSource.ВнешнийИсточникДанных1",
+            ),
+            (
+                "SettingsStorage:ХранилищеНастроек1",
+                "SettingsStorage.ХранилищеНастроек1",
+            ),
+            ("StyleItem:ЭлементСтиля1", "StyleItem.ЭлементСтиля1"),
+            (
+                "WebSocketClient:WebSocketКлиент1",
+                "WebSocketClient.WebSocketКлиент1",
+            ),
+        ] {
+            let selector = PartialDumpSelector::parse(requested).expect("fixture selector");
+
+            assert_eq!(selector.requested(), requested);
+            assert_eq!(selector.normalized(), normalized);
+        }
     }
 
     #[test]

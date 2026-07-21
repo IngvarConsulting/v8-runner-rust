@@ -267,10 +267,10 @@ pub(super) fn validate_dump_objects(
 ) -> Result<Option<Vec<PartialDumpSelector>>, AppError> {
     match mode {
         DumpMode::Partial => normalize_partial_objects(objects).map(Some),
-        _ if !objects.is_empty() => Err(AppError::Validation(
+        DumpMode::Full | DumpMode::Incremental if !objects.is_empty() => Err(AppError::Validation(
             super::NON_PARTIAL_OBJECTS_ERROR.to_owned(),
         )),
-        _ => Ok(None),
+        DumpMode::Full | DumpMode::Incremental => Ok(None),
     }
 }
 
