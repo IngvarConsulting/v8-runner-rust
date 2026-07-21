@@ -294,6 +294,12 @@ struct PinnedPlatformInstallation {
     source: ResolutionSource,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileHintSiblingResolution {
+    Lexical,
+    CanonicalInstallation,
+}
+
 /// Stateful utility locator with per-instance cache.
 pub struct Locator {
     platform_hint: Option<PathBuf>,
@@ -330,8 +336,8 @@ impl Locator {
         let cache_key = (utility, self.version_requirement_string(utility));
 
         if let Some(cached) = self.cache.get(&cache_key).cloned() {
-            if is_valid_executable(&cached.path) {
-                return Ok(cached);
+            if let Some(revalidated) = self.revalidate_cached_location(utility, &cached) {
+                return Ok(revalidated);
             }
             self.cache.remove(&cache_key);
         }
@@ -343,6 +349,59 @@ impl Locator {
         };
         self.cache.insert(cache_key, selected.clone());
         Ok(selected)
+    }
+
+    fn revalidate_cached_location(
+        &self,
+        utility: UtilityType,
+        cached: &UtilityLocation,
+    ) -> Option<UtilityLocation> {
+        if cached.utility != utility {
+            return None;
+        }
+
+        let candidate = Candidate {
+            path: cached.path.clone(),
+            version: cached.version.clone(),
+            source: cached.source,
+        };
+        let current = match (utility, self.platform_policy, self.pinned_platform.as_ref()) {
+            (
+                UtilityType::V8 | UtilityType::V8C | UtilityType::Ibcmd,
+                PlatformResolutionPolicy::Strict,
+                Some(pinned),
+            ) => select_pinned_candidate(
+                utility,
+                vec![candidate],
+                self.platform_version.as_ref(),
+                &pinned.root,
+            ),
+            (
+                UtilityType::V8 | UtilityType::V8C | UtilityType::Ibcmd,
+                PlatformResolutionPolicy::Strict,
+                None,
+            ) => {
+                let boundary = self.platform_hint.as_deref().map(strict_candidate_boundary);
+                select_candidate(
+                    utility,
+                    vec![candidate],
+                    self.platform_version.as_ref(),
+                    boundary.as_deref(),
+                )
+            }
+            (
+                UtilityType::V8 | UtilityType::V8C | UtilityType::Ibcmd,
+                PlatformResolutionPolicy::Fallback,
+                Some(_) | None,
+            ) => select_candidate(utility, vec![candidate], None, None),
+            (
+                UtilityType::EdtCli,
+                PlatformResolutionPolicy::Fallback | PlatformResolutionPolicy::Strict,
+                Some(_) | None,
+            ) => select_edt_candidate(vec![candidate], utility, None),
+        }?;
+
+        (current == *cached).then_some(current)
     }
 
     #[cfg(test)]
@@ -425,7 +484,18 @@ impl Locator {
         let direct_explicit_candidates = self
             .platform_hint
             .as_deref()
-            .map(|hint| explicit_direct_candidates(hint, utility))
+            .map(|hint| {
+                explicit_direct_candidates(
+                    hint,
+                    utility,
+                    match self.platform_policy {
+                        PlatformResolutionPolicy::Fallback => FileHintSiblingResolution::Lexical,
+                        PlatformResolutionPolicy::Strict => {
+                            FileHintSiblingResolution::CanonicalInstallation
+                        }
+                    },
+                )
+            })
             .unwrap_or_default();
         let strict_boundary = match self.platform_policy {
             PlatformResolutionPolicy::Fallback => None,
@@ -433,19 +503,6 @@ impl Locator {
                 self.platform_hint.as_deref().map(strict_candidate_boundary)
             }
         };
-        if let Some(location) = select_candidate(
-            utility,
-            direct_explicit_candidates.clone(),
-            match self.platform_policy {
-                PlatformResolutionPolicy::Fallback => None,
-                PlatformResolutionPolicy::Strict => self.platform_version.as_ref(),
-            },
-            strict_boundary.as_deref(),
-        ) {
-            self.pin_platform(&location);
-            return Ok(location);
-        }
-
         let versioned_explicit_candidates = self
             .platform_hint
             .as_deref()
@@ -458,26 +515,43 @@ impl Locator {
                 )
             })
             .unwrap_or_default();
-        if let Some(location) = select_candidate(
-            utility,
-            versioned_explicit_candidates.clone(),
-            self.platform_version.as_ref(),
-            strict_boundary.as_deref(),
-        ) {
-            self.pin_platform(&location);
-            return Ok(location);
-        }
 
-        if self.platform_policy == PlatformResolutionPolicy::Strict {
-            let mut explicit_candidates = direct_explicit_candidates;
-            explicit_candidates.extend(versioned_explicit_candidates);
-            return Err(strict_resolution_error(
-                utility,
-                self.platform_hint.as_deref(),
-                explicit_candidates,
-                self.platform_version.as_ref(),
-                strict_boundary.as_deref(),
-            ));
+        match self.platform_policy {
+            PlatformResolutionPolicy::Strict => {
+                let mut explicit_candidates = direct_explicit_candidates;
+                explicit_candidates.extend(versioned_explicit_candidates);
+                if let Some(location) = select_candidate(
+                    utility,
+                    explicit_candidates.clone(),
+                    self.platform_version.as_ref(),
+                    strict_boundary.as_deref(),
+                ) {
+                    self.pin_platform(&location);
+                    return Ok(location);
+                }
+                return Err(strict_resolution_error(
+                    utility,
+                    self.platform_hint.as_deref(),
+                    explicit_candidates,
+                    self.platform_version.as_ref(),
+                    strict_boundary.as_deref(),
+                ));
+            }
+            PlatformResolutionPolicy::Fallback => {
+                if let Some(location) =
+                    select_candidate(utility, direct_explicit_candidates, None, None)
+                {
+                    return Ok(location);
+                }
+                if let Some(location) = select_candidate(
+                    utility,
+                    versioned_explicit_candidates,
+                    self.platform_version.as_ref(),
+                    None,
+                ) {
+                    return Ok(location);
+                }
+            }
         }
 
         let mut candidates = platform_candidates_any_version(
@@ -506,42 +580,33 @@ impl Locator {
         let direct_explicit = self
             .edt_hint
             .as_deref()
-            .map(|hint| explicit_direct_candidates(hint, utility))
+            .map(|hint| {
+                explicit_direct_candidates(hint, utility, FileHintSiblingResolution::Lexical)
+            })
             .unwrap_or_default();
-        if let Some(location) = select_edt_candidate(direct_explicit, utility) {
+        if let Some(location) = select_edt_candidate(direct_explicit, utility, None) {
             return Ok(location);
         }
 
-        let versioned_explicit = match (self.edt_hint.as_ref(), self.edt_version.as_ref()) {
-            (Some(hint), Some(required)) if hint.is_dir() => edt_candidates_for_version(
-                utility,
-                required,
-                std::slice::from_ref(hint),
-                ResolutionSource::Explicit,
-            ),
-            (Some(hint), None) if hint.is_dir() => edt_candidates_any_version(
+        let versioned_explicit = match self.edt_hint.as_ref() {
+            Some(hint) if hint.is_dir() => edt_candidates_any_version(
                 utility,
                 std::slice::from_ref(hint),
                 ResolutionSource::Explicit,
             ),
-            (Some(_) | None, Some(_) | None) => Vec::new(),
+            Some(_) | None => Vec::new(),
         };
-        if let Some(location) = select_edt_candidate(versioned_explicit, utility) {
+        if let Some(location) =
+            select_edt_candidate(versioned_explicit, utility, self.edt_version.as_ref())
+        {
             return Ok(location);
         }
 
-        let mut candidates = if let Some(required) = self.edt_version.as_ref() {
-            edt_candidates_for_version(
-                utility,
-                required,
-                &self.edt_roots,
-                ResolutionSource::DefaultRoot,
-            )
-        } else {
-            edt_candidates_any_version(utility, &self.edt_roots, ResolutionSource::DefaultRoot)
-        };
+        let mut candidates =
+            edt_candidates_any_version(utility, &self.edt_roots, ResolutionSource::DefaultRoot);
         candidates.extend(path_candidates(utility, &self.path_roots));
-        select_edt_candidate(candidates, utility).ok_or(LocatorError::NotFound(utility))
+        select_edt_candidate(candidates, utility, self.edt_version.as_ref())
+            .ok_or(LocatorError::NotFound(utility))
     }
 }
 
@@ -566,7 +631,11 @@ fn compare_versions(
     }
 }
 
-fn explicit_direct_candidates(hint: &Path, utility: UtilityType) -> Vec<Candidate> {
+fn explicit_direct_candidates(
+    hint: &Path,
+    utility: UtilityType,
+    sibling_resolution: FileHintSiblingResolution,
+) -> Vec<Candidate> {
     if hint.is_file() {
         let canonical_hint = canonical_boundary(hint);
         let target_name = utility.executable_name();
@@ -579,7 +648,11 @@ fn explicit_direct_candidates(hint: &Path, utility: UtilityType) -> Vec<Candidat
         let path = if file_name_matches {
             canonical_hint
         } else {
-            match canonical_hint.parent() {
+            let sibling_base = match sibling_resolution {
+                FileHintSiblingResolution::Lexical => hint,
+                FileHintSiblingResolution::CanonicalInstallation => canonical_hint.as_path(),
+            };
+            match sibling_base.parent() {
                 Some(parent) => parent.join(target_name),
                 None => return Vec::new(),
             }
@@ -701,23 +774,6 @@ fn edt_candidates_any_version(
     candidates
 }
 
-fn edt_candidates_for_version(
-    utility: UtilityType,
-    required: &EdtVersion,
-    roots: &[PathBuf],
-    source: ResolutionSource,
-) -> Vec<Candidate> {
-    edt_candidates_any_version(utility, roots, source)
-        .into_iter()
-        .filter(|candidate| {
-            matches!(
-                candidate.version.as_ref(),
-                Some(UtilityVersion::Edt(version)) if edt_version_matches(required, version)
-            )
-        })
-        .collect()
-}
-
 fn edt_version_matches(required: &EdtVersion, candidate: &EdtVersion) -> bool {
     if required.parts.is_empty() {
         return false;
@@ -746,21 +802,64 @@ fn captured_path_roots() -> Vec<PathBuf> {
     let roots = std::env::var_os("PATH")
         .map(|paths| std::env::split_paths(&paths).collect())
         .unwrap_or_default();
-    let current_dir = std::env::current_dir().unwrap_or_default();
-    normalize_path_roots(roots, &current_dir)
+    match std::env::current_dir() {
+        Ok(current_dir) => normalize_path_roots(roots, &current_dir),
+        Err(_) => roots
+            .into_iter()
+            .filter(|root| root.is_absolute())
+            .collect(),
+    }
 }
 
 fn normalize_path_roots(roots: Vec<PathBuf>, current_dir: &Path) -> Vec<PathBuf> {
     roots
         .into_iter()
-        .map(|root| {
-            if root.as_os_str().is_empty() {
-                current_dir.to_path_buf()
+        .filter_map(|root| {
+            if root.is_absolute() {
+                Some(root)
             } else {
-                root
+                absolutize_relative_path_root(root, current_dir)
             }
         })
         .collect()
+}
+
+#[cfg(not(windows))]
+fn absolutize_relative_path_root(root: PathBuf, current_dir: &Path) -> Option<PathBuf> {
+    Some(current_dir.join(root))
+}
+
+#[cfg(windows)]
+fn absolutize_relative_path_root(root: PathBuf, current_dir: &Path) -> Option<PathBuf> {
+    use std::path::{Component, Prefix};
+
+    fn disk_prefix(path: &Path) -> Option<u8> {
+        match path.components().next() {
+            Some(Component::Prefix(prefix)) => match prefix.kind() {
+                Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => {
+                    Some(drive.to_ascii_uppercase())
+                }
+                Prefix::Verbatim(_)
+                | Prefix::UNC(_, _)
+                | Prefix::DeviceNS(_)
+                | Prefix::VerbatimUNC(_, _) => None,
+            },
+            Some(Component::RootDir | Component::CurDir | Component::ParentDir)
+            | Some(Component::Normal(_))
+            | None => None,
+        }
+    }
+
+    let absolute = if let Some(root_drive) = disk_prefix(&root) {
+        if disk_prefix(current_dir) != Some(root_drive) {
+            return None;
+        }
+        current_dir.join(root.components().skip(1).collect::<PathBuf>())
+    } else {
+        current_dir.join(root)
+    };
+
+    absolute.is_absolute().then_some(absolute)
 }
 
 fn pinned_platform_candidates(
@@ -823,10 +922,34 @@ fn choose_candidate(
 fn select_edt_candidate(
     candidates: Vec<Candidate>,
     utility: UtilityType,
+    required: Option<&EdtVersion>,
 ) -> Option<UtilityLocation> {
     choose_candidate(
         utility,
-        canonical_candidates(utility, candidates, None),
+        canonical_candidates(utility, candidates, None)
+            .into_iter()
+            .filter(
+                |candidate| match (required, candidate.source, candidate.version.as_ref()) {
+                    (
+                        None,
+                        ResolutionSource::Explicit
+                        | ResolutionSource::DefaultRoot
+                        | ResolutionSource::Path,
+                        _,
+                    ) => true,
+                    (Some(_), ResolutionSource::Path, _) => true,
+                    (
+                        Some(required),
+                        ResolutionSource::Explicit | ResolutionSource::DefaultRoot,
+                        Some(UtilityVersion::Edt(version)),
+                    ) => edt_version_matches(required, version),
+                    (
+                        Some(_),
+                        ResolutionSource::Explicit | ResolutionSource::DefaultRoot,
+                        Some(UtilityVersion::Platform(_)) | None,
+                    ) => false,
+                },
+            ),
         None,
     )
 }
@@ -852,9 +975,7 @@ fn canonical_candidates(
             }) {
                 return None;
             }
-            if utility.is_platform() {
-                candidate.version = infer_version(utility, &path);
-            }
+            candidate.version = infer_version(utility, &path);
             Some(CanonicalCandidate {
                 path,
                 version: candidate.version,
@@ -946,26 +1067,15 @@ fn installation_root_for_executable(path: &Path) -> PathBuf {
 }
 
 fn infer_version(utility: UtilityType, path: &Path) -> Option<UtilityVersion> {
-    let component_strings: Vec<String> = path
-        .ancestors()
-        .flat_map(|ancestor| {
-            ancestor
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_owned)
-        })
-        .collect();
-
-    if utility.is_platform() {
-        component_strings
-            .iter()
-            .find_map(|value| PlatformVersion::parse_strict(value))
-            .map(UtilityVersion::Platform)
-    } else {
-        component_strings
-            .iter()
-            .find_map(|value| EdtVersion::parse_lenient(value))
-            .map(UtilityVersion::Edt)
+    let installation_root = installation_root_for_executable(path);
+    let version_text = installation_root.file_name().and_then(|name| name.to_str());
+    match utility {
+        UtilityType::V8 | UtilityType::V8C | UtilityType::Ibcmd => version_text
+            .and_then(PlatformVersion::parse_strict)
+            .map(UtilityVersion::Platform),
+        UtilityType::EdtCli => version_text
+            .and_then(EdtVersion::parse_lenient)
+            .map(UtilityVersion::Edt),
     }
 }
 
@@ -1195,6 +1305,31 @@ mod tests {
     }
 
     #[test]
+    fn strict_resolution_does_not_infer_version_from_outer_ancestor() {
+        let dir = tempdir().expect("tempdir");
+        let installation = dir
+            .path()
+            .join("8.3.25.1234")
+            .join("unversioned-installation");
+        let binary = installation
+            .join("bin")
+            .join(UtilityType::V8.executable_name());
+        touch_executable(&binary);
+        let mut locator = strict_locator(installation, Some("8.3.25.1234"), vec![], vec![]);
+
+        assert_eq!(
+            locator
+                .locate(UtilityType::V8)
+                .expect_err("outer ancestor must not define installation version"),
+            LocatorError::UnknownVersion {
+                utility: UtilityType::V8,
+                path: canonical(&binary),
+                required: PlatformVersionRequirement::parse("8.3.25.1234").expect("requirement"),
+            }
+        );
+    }
+
+    #[test]
     fn strict_resolution_selects_highest_version_and_reports_explicit_source() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path().join("platform");
@@ -1217,6 +1352,31 @@ mod tests {
                     .and_then(Path::parent)
                     .expect("installation root")
             )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strict_prefix_selects_highest_across_direct_and_versioned_candidates() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("platform");
+        let lower =
+            touch_versioned_platform_executable(&root, "8.3.25.1000", UtilityType::V8, true);
+        let higher =
+            touch_versioned_platform_executable(&root, "8.3.25.9999", UtilityType::V8, true);
+        let direct_alias = root.join("bin").join(UtilityType::V8.executable_name());
+        fs::create_dir_all(direct_alias.parent().expect("direct parent")).expect("direct parent");
+        std::os::unix::fs::symlink(&lower, &direct_alias).expect("direct alias");
+        let mut locator = strict_locator(root, Some("8.3.25"), vec![], vec![]);
+
+        let location = locator.locate(UtilityType::V8).expect("highest candidate");
+
+        assert_eq!(location.path, canonical(&higher));
+        assert_eq!(
+            location.version,
+            Some(UtilityVersion::Platform(
+                PlatformVersion::parse_strict("8.3.25.9999").expect("version")
+            ))
         );
     }
 
@@ -1369,6 +1529,38 @@ mod tests {
         assert_eq!(location.source, ResolutionSource::Explicit);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn strict_cache_rejects_executable_replaced_by_outbound_symlink() {
+        let dir = tempdir().expect("tempdir");
+        let installation = dir.path().join("platform").join("8.3.25.1234");
+        let binary = installation
+            .join("bin")
+            .join(UtilityType::V8.executable_name());
+        touch_executable(&binary);
+        let mut locator = strict_locator(installation.clone(), Some("8.3.25.1234"), vec![], vec![]);
+        let first = locator.locate(UtilityType::V8).expect("initial location");
+        let outside = dir
+            .path()
+            .join("outside")
+            .join("8.3.25.1234")
+            .join("bin")
+            .join(UtilityType::V8.executable_name());
+        touch_executable(&outside);
+        fs::remove_file(&binary).expect("replace cached executable");
+        std::os::unix::fs::symlink(&outside, &binary).expect("outbound symlink");
+
+        assert_eq!(
+            locator
+                .locate(UtilityType::V8)
+                .expect_err("cached path must be revalidated"),
+            LocatorError::MissingSibling {
+                utility: UtilityType::V8,
+                installation_root: first.installation_root,
+            }
+        );
+    }
+
     #[test]
     fn empty_path_component_is_captured_as_current_directory() {
         let current = PathBuf::from("/captured/current-directory");
@@ -1379,6 +1571,44 @@ mod tests {
                 &current,
             ),
             vec![current, PathBuf::from("/configured/bin")]
+        );
+    }
+
+    #[test]
+    fn relative_path_components_are_absolutized_against_captured_current_directory() {
+        #[cfg(windows)]
+        let captured = PathBuf::from(r"C:\captured\current-directory");
+        #[cfg(windows)]
+        let absolute = PathBuf::from(r"C:\absolute\bin");
+        #[cfg(not(windows))]
+        let captured = PathBuf::from("/captured/current-directory");
+        #[cfg(not(windows))]
+        let absolute = PathBuf::from("/absolute/bin");
+
+        assert_eq!(
+            normalize_path_roots(
+                vec![
+                    PathBuf::from("relative/bin"),
+                    PathBuf::from("."),
+                    absolute.clone(),
+                ],
+                &captured,
+            ),
+            vec![captured.join("relative/bin"), captured, absolute]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_drive_relative_path_component_uses_same_drive_captured_directory() {
+        let captured = PathBuf::from(r"C:\captured\current-directory");
+
+        assert_eq!(
+            normalize_path_roots(
+                vec![PathBuf::from(r"C:tools"), PathBuf::from(r"D:other")],
+                &captured,
+            ),
+            vec![captured.join("tools")]
         );
     }
 
@@ -1538,6 +1768,32 @@ mod tests {
             locator.locate(UtilityType::V8).expect("aliased V8").path,
             canonical(&actual)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fallback_file_symlink_hint_resolves_lexical_sibling() {
+        let dir = tempdir().expect("tempdir");
+        let actual_v8 = dir
+            .path()
+            .join("actual")
+            .join("bin")
+            .join(UtilityType::V8.executable_name());
+        touch_executable(&actual_v8);
+        let aliases = dir.path().join("aliases");
+        fs::create_dir_all(&aliases).expect("aliases");
+        let hint = aliases.join(UtilityType::V8.executable_name());
+        let lexical_v8c = aliases.join(UtilityType::V8C.executable_name());
+        std::os::unix::fs::symlink(&actual_v8, &hint).expect("V8 alias");
+        touch_executable(&lexical_v8c);
+        let mut locator = Locator::with_roots(Some(hint), None, None, None, vec![], vec![]);
+
+        let location = locator
+            .locate(UtilityType::V8C)
+            .expect("lexical fallback sibling");
+
+        assert_eq!(location.path, canonical(&lexical_v8c));
+        assert_eq!(location.source, ResolutionSource::Explicit);
     }
 
     #[cfg(unix)]
@@ -1839,6 +2095,66 @@ mod tests {
             locator.locate(UtilityType::EdtCli).expect("locate").path,
             canonical(&wanted)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn edt_version_requirement_rejects_canonical_symlink_mismatch() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("edt");
+        let actual = dir.path().join("actual").join("1c-edt-2024.1.0+10-x86_64");
+        let binary = actual
+            .join("1cedt")
+            .join(UtilityType::EdtCli.executable_name());
+        touch_executable(&binary);
+        fs::create_dir_all(&root).expect("EDT root");
+        std::os::unix::fs::symlink(&actual, root.join("1c-edt-2025.2.3+30-x86_64"))
+            .expect("version alias");
+        let mut locator = Locator::with_roots(
+            None,
+            None,
+            None,
+            EdtVersion::parse_lenient("2025.2.3"),
+            vec![],
+            vec![root],
+        );
+
+        assert_eq!(
+            locator
+                .locate(UtilityType::EdtCli)
+                .expect_err("canonical EDT version mismatch"),
+            LocatorError::NotFound(UtilityType::EdtCli)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn edt_version_requirement_accepts_matching_canonical_symlink_target() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("edt");
+        let actual = dir.path().join("actual").join("1c-edt-2025.2.3+30-x86_64");
+        let binary = actual
+            .join("1cedt")
+            .join(UtilityType::EdtCli.executable_name());
+        touch_executable(&binary);
+        fs::create_dir_all(&root).expect("EDT root");
+        std::os::unix::fs::symlink(&actual, root.join("1c-edt-2024.1.0+10-x86_64"))
+            .expect("version alias");
+        let mut locator = Locator::with_roots(
+            None,
+            None,
+            None,
+            EdtVersion::parse_lenient("2025.2.3"),
+            vec![],
+            vec![root],
+        );
+
+        let location = locator
+            .locate(UtilityType::EdtCli)
+            .expect("canonical EDT version match");
+
+        assert_eq!(location.path, canonical(&binary));
+        assert!(matches!(location.version, Some(UtilityVersion::Edt(_))));
     }
 
     #[cfg(unix)]
