@@ -182,11 +182,11 @@ impl PartialDumpSelector {
             ));
         }
 
-        let requested = requested.trim();
-        if requested.is_empty() {
+        let trimmed = requested.trim();
+        if trimmed.is_empty() {
             return Err(AppError::Validation(PARTIAL_OBJECT_BLANK_ERROR.to_owned()));
         }
-        let separator_count = requested
+        let separator_count = trimmed
             .chars()
             .filter(|character| matches!(character, ':' | '.'))
             .count();
@@ -196,7 +196,7 @@ impl PartialDumpSelector {
             ));
         }
 
-        let mut parts = requested.split([':', '.']);
+        let mut parts = trimmed.split([':', '.']);
         let Some(root_type) = parts.next() else {
             return Err(AppError::Validation(
                 "partial dump object must use exactly one ':' or '.' separator".to_owned(),
@@ -238,6 +238,14 @@ mod tests {
         let selector = PartialDumpSelector::parse("Catalog:Items").expect("selector");
 
         assert_eq!(selector.requested(), "Catalog:Items");
+        assert_eq!(selector.normalized(), "Catalog.Items");
+    }
+
+    #[test]
+    fn partial_dump_selector_preserves_outer_whitespace_in_requested_value() {
+        let selector = PartialDumpSelector::parse("  Catalog:Items  ").expect("selector");
+
+        assert_eq!(selector.requested(), "  Catalog:Items  ");
         assert_eq!(selector.normalized(), "Catalog.Items");
     }
 

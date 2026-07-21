@@ -509,7 +509,7 @@ fn dump_designer_partial_json_normalizes_colon_selector_and_reports_both_forms()
             "--mode",
             "partial",
             "--object",
-            "Catalog:Items",
+            "  Catalog:Items  ",
         ])
         .output()
         .expect("run command");
@@ -522,7 +522,7 @@ fn dump_designer_partial_json_normalizes_colon_selector_and_reports_both_forms()
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(
         payload["data"]["selectors"][0]["requested"],
-        "Catalog:Items"
+        "  Catalog:Items  "
     );
     assert_eq!(
         payload["data"]["selectors"][0]["normalized"],
