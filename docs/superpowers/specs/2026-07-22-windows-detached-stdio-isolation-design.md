@@ -21,4 +21,3 @@ Captured execution is unchanged. Its explicitly created pipe handles remain avai
 ## Verification
 
 A Windows-only regression runs a subprocess of the test binary with stdout redirected to a pipe. That helper launches a sleeping detached child through `ProcessExecutor` and exits. The outer reader must observe EOF while the returned child PID is still alive, then terminate only that child tree. Cross-platform tests assert that both detached modes select the isolation boundary and captured mode does not.
-
