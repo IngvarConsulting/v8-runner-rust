@@ -1012,6 +1012,211 @@ fn launch_mcp_wait_ready_uses_configured_wait_timeout() {
 }
 
 #[test]
+fn thin_external_epf_wait_returns_structured_exit_and_artifacts() {
+    let (_dir, config_path, _install_dir, work_path) =
+        setup_project_with_thin_script("printf client-stderr >&2\nexit 7");
+    let epf = work_path.join("runtime-check.epf");
+    let output = work_path.join("runtime.out");
+    let stderr = work_path.join("runtime.stderr");
+    fs::write(&epf, "epf").expect("epf");
+
+    let command_output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "thin",
+            "--execute",
+            &epf.display().to_string(),
+            "--output",
+            &output.display().to_string(),
+            "--stderr-output",
+            &stderr.display().to_string(),
+            "--wait-for-exit",
+            "--wait-timeout-ms",
+            "1000",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(
+        command_output.status.success(),
+        "status={:?}\\nstdout={}\\nstderr={}",
+        command_output.status.code(),
+        String::from_utf8_lossy(&command_output.stdout),
+        String::from_utf8_lossy(&command_output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&command_output.stdout).expect("json");
+    let wait = &payload["data"]["external_epf_wait"];
+    assert!(wait["pid"].as_u64().is_some());
+    assert_eq!(wait["execute_path"], epf.display().to_string());
+    assert_eq!(wait["exit_code"], 7);
+    assert_eq!(wait["timed_out"], false);
+    assert_eq!(wait["output_path"], output.display().to_string());
+    assert_eq!(wait["stderr_path"], stderr.display().to_string());
+    assert_eq!(
+        fs::read_to_string(stderr).expect("captured stderr"),
+        "client-stderr"
+    );
+}
+
+#[test]
+fn thin_external_epf_wait_timeout_terminates_client_group() {
+    let marker = temp_workspace();
+    let descendant_pid = marker.path().join("descendant.pid");
+    let script = format!(
+        "sleep 30 &\nprintf '%s' $! > '{}'\nwait",
+        descendant_pid.display()
+    );
+    let (_dir, config_path, _install_dir, work_path) = setup_project_with_thin_script(&script);
+    let epf = work_path.join("runtime-check.epf");
+    let output = work_path.join("runtime.out");
+    let stderr = work_path.join("runtime.stderr");
+    fs::write(&epf, "epf").expect("epf");
+
+    let command_output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "thin",
+            "--execute",
+            &epf.display().to_string(),
+            "--output",
+            &output.display().to_string(),
+            "--stderr-output",
+            &stderr.display().to_string(),
+            "--wait-for-exit",
+            "--wait-timeout-ms",
+            "2000",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(command_output.status.success());
+    let payload: Value = serde_json::from_slice(&command_output.stdout).expect("json");
+    assert_eq!(payload["data"]["external_epf_wait"]["timed_out"], true);
+    assert!(wait_for_file(&descendant_pid, Duration::from_secs(2)));
+    let pid = fs::read_to_string(descendant_pid).expect("descendant pid");
+    assert!(
+        !std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("probe descendant")
+            .success(),
+        "timeout must terminate the entire client process group"
+    );
+}
+
+#[test]
+fn thin_external_epf_wait_rejects_normalized_raw_reserved_key_before_spawn() {
+    let marker = temp_workspace();
+    let started = marker.path().join("started");
+    let script = format!("printf started > '{}'\nsleep 1", started.display());
+    let (_dir, config_path, _install_dir, work_path) = setup_project_with_thin_script(&script);
+    let epf = work_path.join("runtime-check.epf");
+    fs::write(&epf, "epf").expect("epf");
+
+    let command_output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "thin",
+            "--execute",
+            &epf.display().to_string(),
+            "--output",
+            "/tmp/runtime.out",
+            "--stderr-output",
+            "/tmp/runtime.stderr",
+            "--wait-for-exit",
+            "--wait-timeout-ms",
+            "100",
+            "--raw-key",
+            "//Out=/tmp/override.out",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!command_output.status.success());
+    assert!(
+        !started.exists(),
+        "validation must happen before client spawn"
+    );
+    assert!(String::from_utf8_lossy(&command_output.stdout)
+        .contains("does not support raw /C, /Execute, or /Out"));
+}
+
+#[test]
+fn thin_external_epf_wait_rejects_whitespace_raw_execute_alias_before_spawn() {
+    let marker = temp_workspace();
+    let started = marker.path().join("started");
+    let script = format!("printf started > '{}'\nsleep 1", started.display());
+    let (_dir, config_path, _install_dir, work_path) = setup_project_with_thin_script(&script);
+    let epf = work_path.join("runtime-check.epf");
+    fs::write(&epf, "epf").expect("epf");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "thin",
+            "--execute",
+            &epf.display().to_string(),
+            "--output",
+            "/tmp/runtime.out",
+            "--stderr-output",
+            "/tmp/runtime.stderr",
+            "--wait-for-exit",
+            "--wait-timeout-ms",
+            "100",
+            "--raw-key",
+            "/Execute alternate.epf",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!output.status.success());
+    assert!(
+        !started.exists(),
+        "validation must happen before client spawn"
+    );
+}
+
+#[test]
+fn launch_mcp_rejects_external_epf_wait_flags() {
+    let (_dir, config_path, _install_dir, _work_path) = setup_project();
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "mcp",
+            "--wait-for-exit",
+            "--wait-timeout-ms",
+            "100",
+            "--stderr-output",
+            "/tmp/runtime.stderr",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("supported only for direct `launch thin`")
+    );
+}
+
+#[test]
 fn launch_mcp_va_does_not_duplicate_explicit_testmanager_raw_key() {
     let (_dir, config_path, _install_dir, args_log) =
         setup_mcp_va_project_with_options("work", &["/TESTMANAGER"]);

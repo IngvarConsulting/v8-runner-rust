@@ -426,6 +426,15 @@ pub struct LaunchOptionsArgs {
     /// User-provided `/Out` path allowed only for direct launch
     #[arg(long)]
     pub output: Option<String>,
+    /// Capture client stderr to this path while waiting for an external EPF to exit
+    #[arg(long = "stderr-output")]
+    pub stderr_output: Option<String>,
+    /// Wait for a direct external EPF launch to exit
+    #[arg(long = "wait-for-exit")]
+    pub wait_for_exit: bool,
+    /// Maximum wait time in milliseconds for --wait-for-exit
+    #[arg(long = "wait-timeout-ms")]
+    pub wait_timeout_ms: Option<u64>,
     /// Additional raw launch arguments appended after typed launch keys
     #[arg(long = "raw-key")]
     pub raw_keys: Vec<String>,
@@ -748,6 +757,9 @@ mod tests {
                         execute: None,
                         use_privileged_mode: true,
                         output: None,
+                        stderr_output: None,
+                        wait_for_exit: false,
+                        wait_timeout_ms: None,
                         raw_keys: vec!["/WA-".to_owned()],
                     }
                 );

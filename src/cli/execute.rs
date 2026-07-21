@@ -34,8 +34,8 @@ use crate::domain::load::{
     CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
 };
 use crate::domain::runner::{
-    ExecutionPolicy, LaunchClientModeRequest, LaunchOptions, RunnerKind, RunnerOutputFormat,
-    RunnerProfile,
+    ExecutionPolicy, ExternalEpfWaitOptions, LaunchClientModeRequest, LaunchOptions, RunnerKind,
+    RunnerOutputFormat, RunnerProfile,
 };
 use crate::domain::syntax::{SyntaxCheckResult, SyntaxCheckStatus};
 use crate::domain::test::{RetainedPaths, TestReport, TestRunResult, TestStatus, TestTarget};
@@ -1074,6 +1074,7 @@ fn map_test_launch_options(args: &LaunchOptionsArgs) -> Result<LaunchOptions, Us
         out: None,
         internal_out: None,
         raw_args: args.raw_keys.clone(),
+        external_epf_wait: None,
     })
 }
 
@@ -1329,9 +1330,52 @@ fn map_direct_launch_options(
     is_client_mcp: bool,
 ) -> Result<LaunchOptions, UseCaseError> {
     if is_client_mcp {
+        if args.wait_for_exit || args.wait_timeout_ms.is_some() || args.stderr_output.is_some() {
+            return Err(UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "--wait-for-exit, --wait-timeout-ms, and --stderr-output are supported only for direct `launch thin`",
+            ));
+        }
         return map_mcp_launch_options(args);
     }
     let _ = target;
+    let external_epf_wait = match (
+        args.wait_for_exit,
+        args.wait_timeout_ms,
+        &args.stderr_output,
+    ) {
+        (false, None, None) => None,
+        (false, _, _) => {
+            return Err(UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "--wait-timeout-ms and --stderr-output require --wait-for-exit",
+            ));
+        }
+        (true, Some(timeout_ms), Some(stderr_output)) => {
+            if timeout_ms == 0 {
+                return Err(UseCaseError::new(
+                    UseCaseErrorKind::Validation,
+                    "--wait-timeout-ms must be greater than or equal to 1",
+                ));
+            }
+            Some(ExternalEpfWaitOptions {
+                timeout_ms,
+                stderr_output: stderr_output.clone(),
+            })
+        }
+        (true, None, _) => {
+            return Err(UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "--wait-for-exit requires --wait-timeout-ms",
+            ));
+        }
+        (true, _, None) => {
+            return Err(UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "--wait-for-exit requires --stderr-output",
+            ));
+        }
+    };
     Ok(LaunchOptions {
         c: args.c.clone(),
         execute: args.execute.clone(),
@@ -1339,6 +1383,7 @@ fn map_direct_launch_options(
         out: args.output.clone(),
         internal_out: None,
         raw_args: args.raw_keys.clone(),
+        external_epf_wait,
     })
 }
 
@@ -1367,6 +1412,7 @@ fn map_mcp_launch_options(args: &LaunchOptionsArgs) -> Result<LaunchOptions, Use
         out: args.output.clone(),
         internal_out: None,
         raw_args: args.raw_keys.clone(),
+        external_epf_wait: None,
     })
 }
 
@@ -2627,6 +2673,9 @@ mod tests {
                     execute: Some("tool.epf".to_owned()),
                     use_privileged_mode: true,
                     output: Some("launch.log".to_owned()),
+                    stderr_output: None,
+                    wait_for_exit: false,
+                    wait_timeout_ms: None,
                     raw_keys: vec!["/WA-".to_owned(), "/DisplayAllFunctions".to_owned()],
                 },
                 mcp_config: None,
@@ -2643,6 +2692,7 @@ mod tests {
                     out: Some("launch.log".to_owned()),
                     internal_out: None,
                     raw_args: vec!["/WA-".to_owned(), "/DisplayAllFunctions".to_owned()],
+                    external_epf_wait: None,
                 },
                 client_mcp: None,
             }
@@ -2695,6 +2745,7 @@ mod tests {
                     out: None,
                     internal_out: None,
                     raw_args: Vec::new(),
+                    external_epf_wait: None,
                 },
                 client_mcp: Some(ClientMcpOptionsRequest {
                     config_path: Some("C:\\tmp\\mcp-conf.json".to_owned()),

@@ -53,6 +53,7 @@ pub struct SpawnResult {
 pub struct ManagedSpawnResult {
     result: SpawnResult,
     child: Option<SpawnedChild>,
+    rendered_command: String,
 }
 
 impl ManagedSpawnResult {
@@ -80,6 +81,66 @@ impl ManagedSpawnResult {
             let _ = spawned.child.wait();
         }
     }
+
+    /// Waits for a managed client and guarantees process-group cleanup at timeout.
+    pub fn wait_for_exit(
+        mut self,
+        policy: &ProcessExecutionPolicy,
+    ) -> Result<ManagedProcessOutcome, ProcessError> {
+        let mut spawned = self
+            .child
+            .take()
+            .ok_or_else(|| ProcessError::StartupCheckFailed {
+                cmd: self.rendered_command.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "managed child missing",
+                ),
+            })?;
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(status) =
+                spawned
+                    .child
+                    .try_wait()
+                    .map_err(|source| ProcessError::StartupCheckFailed {
+                        cmd: self.rendered_command.clone(),
+                        source,
+                    })?
+            {
+                return Ok(ManagedProcessOutcome {
+                    exit_code: Some(status.code().unwrap_or(-1)),
+                    timed_out: false,
+                });
+            }
+            if policy.cancellation.is_cancelled() {
+                terminate_child_group_gracefully(&mut spawned, policy.graceful_shutdown_timeout);
+                let _ = spawned.child.wait();
+                return Err(ProcessError::Cancelled {
+                    cmd: self.rendered_command.clone(),
+                });
+            }
+            if policy
+                .timeout
+                .is_some_and(|timeout| started.elapsed() >= timeout)
+            {
+                terminate_child_group_gracefully(&mut spawned, policy.graceful_shutdown_timeout);
+                let _ = spawned.child.wait();
+                return Ok(ManagedProcessOutcome {
+                    exit_code: None,
+                    timed_out: true,
+                });
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+/// Terminal state returned by an explicitly managed wait boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManagedProcessOutcome {
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
 }
 
 impl Drop for ManagedSpawnResult {
@@ -221,6 +282,16 @@ pub trait ProcessRunner {
             cmd: render_command(request),
         })
     }
+
+    /// Starts a managed child with stderr redirected to the supplied request path.
+    fn spawn_managed_for_wait(
+        &self,
+        request: &ProcessRequest,
+    ) -> Result<ManagedSpawnResult, ProcessError> {
+        Err(ProcessError::ManagedSpawnUnsupported {
+            cmd: render_command(request),
+        })
+    }
 }
 
 /// Standard subprocess runner backed by `std::process::Command`.
@@ -287,6 +358,23 @@ impl ProcessRunner for ProcessExecutor {
                 binary: request.program.clone(),
             },
             child: Some(spawned),
+            rendered_command,
+        })
+    }
+
+    fn spawn_managed_for_wait(
+        &self,
+        request: &ProcessRequest,
+    ) -> Result<ManagedSpawnResult, ProcessError> {
+        let rendered_command = render_command(request);
+        let spawned = spawn_checked_child(request, ProcessIoMode::ManagedWait, &rendered_command)?;
+        Ok(ManagedSpawnResult {
+            result: SpawnResult {
+                pid: spawned.child.id(),
+                binary: request.program.clone(),
+            },
+            child: Some(spawned),
+            rendered_command,
         })
     }
 }
@@ -352,6 +440,7 @@ impl ProcessExecutor {
 enum ProcessIoMode {
     Detached,
     ManagedDetached,
+    ManagedWait,
     Captured,
 }
 
@@ -390,6 +479,7 @@ impl ChildHandle {
         }
     }
 
+    #[cfg(not(unix))]
     fn start_kill(&mut self) -> std::io::Result<()> {
         match self {
             Self::Standard(child) => child.kill(),
@@ -458,7 +548,7 @@ fn spawn_command(
     rendered_command: &str,
 ) -> Result<SpawnedChild, ProcessError> {
     for attempt in 0..=EXECUTABLE_BUSY_MAX_RETRIES {
-        let cmd = build_command(request, io_mode);
+        let cmd = build_command(request, io_mode, rendered_command)?;
         match spawn_child(cmd, io_mode) {
             Ok(child) => return Ok(SpawnedChild { child }),
             Err(source) if is_executable_busy(&source) && attempt < EXECUTABLE_BUSY_MAX_RETRIES => {
@@ -486,7 +576,10 @@ fn spawn_command(
 fn spawn_child(mut cmd: Command, io_mode: ProcessIoMode) -> std::io::Result<ChildHandle> {
     #[cfg(windows)]
     {
-        if matches!(io_mode, ProcessIoMode::ManagedDetached) {
+        if matches!(
+            io_mode,
+            ProcessIoMode::ManagedDetached | ProcessIoMode::ManagedWait
+        ) {
             use process_wrap::std::{CommandWrap, JobObject};
 
             let mut wrapped = CommandWrap::from(cmd);
@@ -499,7 +592,11 @@ fn spawn_child(mut cmd: Command, io_mode: ProcessIoMode) -> std::io::Result<Chil
     cmd.spawn().map(ChildHandle::Standard)
 }
 
-fn build_command(request: &ProcessRequest, io_mode: ProcessIoMode) -> Command {
+fn build_command(
+    request: &ProcessRequest,
+    io_mode: ProcessIoMode,
+    rendered_command: &str,
+) -> Result<Command, ProcessError> {
     let mut cmd = Command::new(&request.program);
     cmd.args(&request.args);
     if let Some(workdir) = &request.workdir {
@@ -516,13 +613,35 @@ fn build_command(request: &ProcessRequest, io_mode: ProcessIoMode) -> Command {
             cmd.stderr(Stdio::null());
             set_child_process_group(&mut cmd);
         }
+        ProcessIoMode::ManagedWait => {
+            cmd.stdout(Stdio::null());
+            let path =
+                request
+                    .stderr_log_path
+                    .as_ref()
+                    .ok_or_else(|| ProcessError::StderrLogIo {
+                        path: PathBuf::new(),
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "stderr log path is required",
+                        ),
+                    })?;
+            let stderr =
+                std::fs::File::create(path).map_err(|source| ProcessError::StderrLogIo {
+                    path: path.clone(),
+                    source,
+                })?;
+            cmd.stderr(Stdio::from(stderr));
+            set_child_process_group(&mut cmd);
+        }
         ProcessIoMode::Captured => {
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
             set_child_process_group(&mut cmd);
         }
     }
-    cmd
+    let _ = rendered_command;
+    Ok(cmd)
 }
 
 fn set_child_process_group(cmd: &mut Command) {
@@ -840,6 +959,7 @@ fn is_sensitive_flag(arg: &str) -> bool {
         "-N",
         "/P",
         "-P",
+        "/IBConnectionString",
         "--user",
         "--database-user",
         "--db-user",
@@ -986,6 +1106,27 @@ mod tests {
         assert!(!rendered.contains("pg-secret"));
         assert!(!rendered.contains("legacy-secret"));
         assert!(!rendered.contains("target-secret"));
+    }
+
+    #[test]
+    fn render_command_masks_composite_infobase_credentials() {
+        let request = ProcessRequest {
+            program: PathBuf::from("1cv8c"),
+            args: vec![
+                "/IBConnectionString".to_owned(),
+                "Srvr=host;Ref=base;Usr=alice;Pwd=secret".to_owned(),
+            ],
+            workdir: None,
+            stdout_log_path: None,
+            stderr_log_path: None,
+            startup_probe: None,
+        };
+
+        let rendered = render_command(&request);
+
+        assert!(rendered.contains("/IBConnectionString ***"));
+        assert!(!rendered.contains("alice"));
+        assert!(!rendered.contains("secret"));
     }
 
     #[cfg(unix)]
