@@ -126,6 +126,32 @@ const IGNORED_DIRS: &[&str] = &[
 ];
 const IGNORED_FILES: &[&str] = &["ConfigDumpInfo.xml"];
 
+/// Whether a normalized relative path belongs to the repository-private inventory policy.
+pub(crate) fn is_always_ignored_relative_path(path: &Path) -> bool {
+    let mut components = path.components().peekable();
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            return true;
+        };
+        let text = name.to_string_lossy();
+        if components.peek().is_some()
+            && IGNORED_DIRS
+                .iter()
+                .any(|ignored| text.eq_ignore_ascii_case(ignored))
+        {
+            return true;
+        }
+        if components.peek().is_none()
+            && IGNORED_FILES
+                .iter()
+                .any(|ignored| text.eq_ignore_ascii_case(ignored))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Coarse filesystem mtime guard (2 seconds).
 pub const COARSE_MARGIN_NS: u64 = 2_000_000_000;
 

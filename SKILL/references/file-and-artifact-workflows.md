@@ -31,6 +31,14 @@ v8-runner dump --mode incremental --extension <EXTENSION>
 
 For `format=EDT`, dump uses an internal Designer snapshot under `workPath/designer/<sourceSetName>`, then imports the result into the EDT target.
 
+Dump safety and recovery rules:
+
+- each infobase/source-set identity owns private shadows and generation-scoped baselines under `workPath`; never reuse them across infobases;
+- incremental and partial dump require a valid matching baseline and private `ConfigDumpInfo.xml`; missing or corrupt state promotes that one operation to a full dump;
+- the receipt is an exact manifest delta: `requested` records every add/modify/delete and `processed`, `skipped`, or `conflicted` records its outcome with byte hashes;
+- a three-way conflict publishes no project-source files or new private generation;
+- full, incremental, and partial modes all use recoverable manifest publication. On interruption, restart recovery either completes the exact dump transaction or restores the previous managed file state without treating an unrelated same-numbered generation as success.
+
 ## Convert
 
 `convert` is repo-aware file conversion between Designer and EDT source formats.
@@ -85,4 +93,4 @@ Behavior:
 - external data processors and reports publish `.epf` / `.erf` into the output directory;
 - `builder=DESIGNER` is required.
 
-Full dump and package/external artifact publication use staged publication with backup/rollback semantics. Incremental and partial dump are non-atomic update modes.
+Package and external-artifact publication uses staged backup/rollback semantics. Every dump mode uses journaled, manifest-scoped source publication and private-state recovery.

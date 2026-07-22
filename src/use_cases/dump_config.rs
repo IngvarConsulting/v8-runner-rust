@@ -1,9 +1,14 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::change_detection::analyzer::{ManagedInventory, PreparedFileState, PreparedStateUpdate};
+use crate::change_detection::hash_storage::{HashStorage, ObservedHashStorage};
 use crate::config::model::{AppConfig, BuilderBackend, SourceFormat, SourceSetPurpose};
 use crate::domain::dump::{DumpMode, DumpResult};
+use crate::domain::runtime_state::{BaselineRole, DumpTransactionId, StateGeneration};
+use crate::domain::source_set::SourceSetContext;
 use crate::platform::designer::DesignerDsl;
 use crate::platform::edt::EdtDsl;
 use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
@@ -43,7 +48,21 @@ use super::staged_publication::cleanup_staging_path;
 use super::staged_publication::{interruption_before_publish, StagedPublication};
 #[cfg(test)]
 use crate::support::fs::metadata_sidecar_path;
+use crate::use_cases::dump_execution::{EffectiveWriteScope, ShadowObservation};
+use crate::use_cases::dump_shadow::{
+    inspect_baseline, managed_manifest, BaselineInspection, DumpShadow, EffectiveDumpMode,
+};
+use crate::use_cases::runtime_state::{
+    commit_dump_state_with_lock, lock_designer_state, recover_designer_state_with_lock,
+    DumpStateCommitRequest,
+};
+use crate::use_cases::shadow_merge::{
+    plan_manifest_merge, FileVersion, ManifestMergePlan, MergeAction,
+};
 use crate::use_cases::source_inventory::SourceSetInventory;
+use crate::use_cases::source_publication::{
+    recover_publication, ObservedStateGeneration, PublicationRequest, TargetIdentity,
+};
 
 #[cfg(test)]
 const DUMP_COMMAND: &str = crate::use_cases::context::CommandName::Dump.as_str();
@@ -86,6 +105,8 @@ struct ResolvedDumpTarget {
     platform_target_identity: String,
     lock_path: PathBuf,
     edt_base_project_name: Option<String>,
+    configured_source_context: SourceSetContext,
+    platform_designer_context: SourceSetContext,
 }
 
 #[cfg(test)]
@@ -884,21 +905,28 @@ fn resolve_target(config: &AppConfig, args: &DumpArgs) -> Result<ResolvedDumpTar
         }
     };
 
-    let target_path = inventory.source_path(source_set);
-    let platform_target_path = if config.format == SourceFormat::Edt {
-        inventory
-            .designer_context(&source_set.name)
-            .ok_or_else(|| {
-                AppError::Runtime(format!(
-                    "missing designer runtime context for source-set '{}'",
-                    source_set.name
-                ))
-            })?
-            .path()
-            .to_path_buf()
-    } else {
-        target_path.clone()
-    };
+    let configured_source_context = match config.format {
+        SourceFormat::Designer => inventory.designer_context(&source_set.name),
+        SourceFormat::Edt => inventory.edt_context(&source_set.name),
+    }
+    .cloned()
+    .ok_or_else(|| {
+        AppError::Runtime(format!(
+            "missing configured runtime context for source-set '{}'",
+            source_set.name
+        ))
+    })?;
+    let platform_designer_context = inventory
+        .designer_context(&source_set.name)
+        .cloned()
+        .ok_or_else(|| {
+            AppError::Runtime(format!(
+                "missing designer runtime context for source-set '{}'",
+                source_set.name
+            ))
+        })?;
+    let target_path = configured_source_context.path().to_path_buf();
+    let platform_target_path = platform_designer_context.path().to_path_buf();
     let canonical_target_path = nearest_existing_canonical_path(&target_path).map_err(|error| {
         AppError::Runtime(format!("failed to canonicalize target path: {error}"))
     })?;
@@ -946,11 +974,14 @@ fn resolve_target(config: &AppConfig, args: &DumpArgs) -> Result<ResolvedDumpTar
         platform_target_identity,
         lock_path,
         edt_base_project_name,
+        configured_source_context,
+        platform_designer_context,
     })
 }
 
 #[cfg(test)]
 mod tests {
+    use super::coordinator::set_before_source_publication_hook;
     use super::{
         build_designer_dsl, cleanup_orphan_dirs, cleanup_staging_on_interruption,
         create_dump_object_list_file_with, finalize_edt_dump, metadata_sidecar_path,
@@ -964,6 +995,11 @@ mod tests {
         SourceSetPurpose, TestsConfig, ToolsConfig,
     };
     use crate::domain::dump::DumpMode;
+    use crate::domain::runtime_state::{
+        BaselineRole, InfobaseIdentity, LogicalSourceRole, RuntimeSourceDescriptor,
+        RuntimeSourceIdentityInputs, RuntimeStateLayout, StateGeneration,
+    };
+    use crate::domain::source_set::SourceSetContext;
     use crate::platform::process::{
         ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessResult, ProcessRunner,
         SpawnResult,
@@ -1007,6 +1043,41 @@ mod tests {
         make_executable(path);
     }
 
+    fn test_source_context(root: &Path) -> SourceSetContext {
+        let identity = InfobaseIdentity::normalize(&crate::config::model::InfobaseConfig::file(
+            format!("File={}", root.join("ib").display()),
+        ))
+        .expect("identity");
+        let layout = RuntimeStateLayout::new(root.join("runtime"), identity).expect("layout");
+        let descriptor = RuntimeSourceDescriptor::new(RuntimeSourceIdentityInputs {
+            configured_source_identity: Path::new("source"),
+            source_root: root,
+            purpose: SourceSetPurpose::Configuration,
+            format: SourceFormat::Designer,
+            backend: BuilderBackend::Designer,
+            logical_role: LogicalSourceRole::DesignerSource,
+        })
+        .expect("descriptor");
+        SourceSetContext::new(
+            "main",
+            root.to_path_buf(),
+            layout.source_state("main", &descriptor),
+        )
+    }
+
+    fn bootstrap_dump(config: &AppConfig, source_set: &str, extension: Option<&str>) {
+        run_dump(
+            config,
+            &DumpArgs {
+                mode: DumpModeRequest::Full,
+                source_set: Some(source_set.to_owned()),
+                extension: extension.map(str::to_owned),
+                objects: vec![],
+            },
+        )
+        .expect("bootstrap dump");
+    }
+
     fn write_dump_script(path: &Path, calls_log: &Path, fail_pattern: Option<&str>, sleep_ms: u64) {
         let pattern_branch = fail_pattern
             .map(|pattern| {
@@ -1022,7 +1093,7 @@ mod tests {
             format!("sleep {}", sleep_ms as f64 / 1000.0)
         };
         let body = format!(
-            "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$out\" ]; then printf 'designer log for %s\\n' \"$args\" > \"$out\"; fi\nprintf '%s\\n' \"$args\" >> \"{}\"\n{}\n{}\nmkdir -p \"$(printf '%s' \"$args\" | awk '{{print $NF}}')\"\nexit 0",
+            "args=\"$*\"\nout=\"\"\ntarget=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"/DumpConfigToFiles\" ]; then target=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$out\" ]; then printf 'designer log for %s\\n' \"$args\" > \"$out\"; fi\nprintf '%s\\n' \"$args\" >> \"{}\"\n{}\n{}\nmkdir -p \"$target\"\nprintf '<ConfigDumpInfo version=\"2.17\"><Metadata id=\"private-id\" configVersion=\"7\"/></ConfigDumpInfo>\\n' > \"$target/ConfigDumpInfo.xml\"\nexit 0",
             calls_log.display(),
             sleep_branch,
             pattern_branch
@@ -1050,7 +1121,7 @@ mod tests {
             format!("sleep {}", sleep_ms as f64 / 1000.0)
         };
         let body = format!(
-            "args=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\n{}\n{}\nmkdir -p \"$(printf '%s' \"$args\" | awk '{{print $NF}}')\"\nexit 0",
+            "args=\"$*\"\ntarget=\"$(printf '%s' \"$args\" | awk '{{print $NF}}')\"\nprintf '%s\\n' \"$args\" >> \"{}\"\n{}\n{}\nmkdir -p \"$target\"\nprintf '<ConfigDumpInfo version=\"2.17\"><Metadata id=\"private-id\" configVersion=\"7\"/></ConfigDumpInfo>\\n' > \"$target/ConfigDumpInfo.xml\"\nexit 0",
             calls_log.display(),
             sleep_branch,
             pattern_branch
@@ -1072,7 +1143,7 @@ mod tests {
             })
             .unwrap_or_default();
         let body = format!(
-            "args=\"$*\"\nout=\"\"\ntarget=\"\"\nextension_name=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"/DumpConfigToFiles\" ]; then target=\"$arg\"; fi\n  if [ \"$prev\" = \"-Extension\" ]; then extension_name=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$out\" ]; then printf 'designer log for %s\\n' \"$args\" > \"$out\"; fi\nprintf '%s\\n' \"$args\" >> \"{}\"\n{}\nmkdir -p \"$target\"\nif [ -n \"$extension_name\" ]; then\n  config_xml='<Configuration><Properties><Name>ExtensionProject</Name></Properties><ConfigurationExtensionPurpose>Extension</ConfigurationExtensionPurpose></Configuration>'\nelse\n  config_xml='<Configuration><Properties><Name>BaseProject</Name></Properties></Configuration>'\nfi\nprintf '%s\\n' \"$config_xml\" > \"$target/Configuration.xml\"\nif printf '%s' \"$args\" | grep -F -q -- '-partial'; then\n  printf '<Partial />\\n' > \"$target/PartialOnly.xml\"\nfi\nexit 0",
+            "args=\"$*\"\nout=\"\"\ntarget=\"\"\nextension_name=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"/DumpConfigToFiles\" ]; then target=\"$arg\"; fi\n  if [ \"$prev\" = \"-Extension\" ]; then extension_name=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$out\" ]; then printf 'designer log for %s\\n' \"$args\" > \"$out\"; fi\nprintf '%s\\n' \"$args\" >> \"{}\"\n{}\nmkdir -p \"$target\"\nif [ -n \"$extension_name\" ]; then\n  config_xml='<Configuration><Properties><Name>ExtensionProject</Name></Properties><ConfigurationExtensionPurpose>Extension</ConfigurationExtensionPurpose></Configuration>'\nelse\n  config_xml='<Configuration><Properties><Name>BaseProject</Name></Properties></Configuration>'\nfi\nprintf '%s\\n' \"$config_xml\" > \"$target/Configuration.xml\"\nprintf '<ConfigDumpInfo version=\"2.17\"><Metadata id=\"private-id\" configVersion=\"7\"/></ConfigDumpInfo>\\n' > \"$target/ConfigDumpInfo.xml\"\nif printf '%s' \"$args\" | grep -F -q -- '-partial'; then\n  printf '<Partial />\\n' > \"$target/PartialOnly.xml\"\nfi\nexit 0",
             calls_log.display(),
             pattern_branch
         );
@@ -1089,7 +1160,7 @@ mod tests {
             })
             .unwrap_or_default();
         let body = format!(
-            "args=\"$*\"\ntarget=\"$(printf '%s' \"$args\" | awk '{{print $NF}}')\"\nextension_name=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"-Extension\" ]; then extension_name=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"{}\"\n{}\nmkdir -p \"$target\"\nif [ -n \"$extension_name\" ]; then\n  printf '<Configuration><Properties><Name>ExtensionProject</Name></Properties><ConfigurationExtensionPurpose>Extension</ConfigurationExtensionPurpose></Configuration>\\n' > \"$target/Configuration.xml\"\nelse\n  printf '<Configuration><Properties><Name>BaseProject</Name></Properties></Configuration>\\n' > \"$target/Configuration.xml\"\nfi\nexit 0",
+            "args=\"$*\"\ntarget=\"$(printf '%s' \"$args\" | awk '{{print $NF}}')\"\nextension_name=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"-Extension\" ]; then extension_name=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"{}\"\n{}\nmkdir -p \"$target\"\nif [ -n \"$extension_name\" ]; then\n  printf '<Configuration><Properties><Name>ExtensionProject</Name></Properties><ConfigurationExtensionPurpose>Extension</ConfigurationExtensionPurpose></Configuration>\\n' > \"$target/Configuration.xml\"\nelse\n  printf '<Configuration><Properties><Name>BaseProject</Name></Properties></Configuration>\\n' > \"$target/Configuration.xml\"\nfi\nprintf '<ConfigDumpInfo version=\"2.17\"><Metadata id=\"private-id\" configVersion=\"7\"/></ConfigDumpInfo>\\n' > \"$target/ConfigDumpInfo.xml\"\nexit 0",
             calls_log.display(),
             pattern_branch
         );
@@ -1647,6 +1718,8 @@ exit 0"#,
             platform_target_identity: "id".to_owned(),
             lock_path: dir.path().join(".lock"),
             edt_base_project_name: None,
+            configured_source_context: test_source_context(dir.path()),
+            platform_designer_context: test_source_context(dir.path()),
         };
 
         let error = validate_publish_target(&resolved).expect_err("expected invalid");
@@ -1698,6 +1771,8 @@ exit 0"#,
             platform_target_identity: identity.clone(),
             lock_path: target.parent().expect("parent").join(".lock"),
             edt_base_project_name: None,
+            configured_source_context: test_source_context(dir.path()),
+            platform_designer_context: test_source_context(dir.path()),
         };
 
         cleanup_orphan_dirs(&resolved).expect("cleanup");
@@ -1736,6 +1811,8 @@ exit 0"#,
             platform_target_identity: identity.clone(),
             lock_path: target.parent().expect("parent").join(".lock"),
             edt_base_project_name: None,
+            configured_source_context: test_source_context(dir.path()),
+            platform_designer_context: test_source_context(dir.path()),
         };
 
         cleanup_orphan_dirs(&resolved).expect("cleanup");
@@ -1769,6 +1846,8 @@ exit 0"#,
             platform_target_identity: identity.clone(),
             lock_path: target.parent().expect("parent").join(".lock"),
             edt_base_project_name: None,
+            configured_source_context: test_source_context(dir.path()),
+            platform_designer_context: test_source_context(dir.path()),
         };
 
         cleanup_orphan_dirs(&resolved).expect("cleanup");
@@ -1810,6 +1889,8 @@ exit 0"#,
             platform_target_identity: identity.clone(),
             lock_path: target.parent().expect("parent").join(".lock"),
             edt_base_project_name: None,
+            configured_source_context: test_source_context(dir.path()),
+            platform_designer_context: test_source_context(dir.path()),
         };
 
         cleanup_orphan_dirs(&resolved).expect("cleanup");
@@ -1845,7 +1926,7 @@ exit 0"#,
     }
 
     #[test]
-    fn dump_incremental_creates_missing_target_dir() {
+    fn dump_incremental_without_baseline_runs_one_effective_full_shadow_dump() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
@@ -1871,8 +1952,271 @@ exit 0"#,
         assert!(base.join("main").exists());
         let calls = fs::read_to_string(calls).expect("calls");
         assert!(calls.contains("/DumpConfigToFiles"));
-        assert!(calls.contains("-update"));
-        assert!(!calls.contains("-updateConfigDumpInfo"));
+        assert!(!calls.split_whitespace().any(|arg| arg == "-update"));
+        assert!(calls.contains("-updateConfigDumpInfo"));
+    }
+
+    #[test]
+    fn retained_local_dump_path_remains_visible_to_next_build_analysis() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        fs::remove_dir_all(base.join("main")).expect("remove target");
+        write_script(
+            &script,
+            &format!(
+                "args=\"$*\"\ntarget=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/DumpConfigToFiles\" ]; then target=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"{}\"\nmkdir -p \"$target\"\nif ! printf ' %s ' \"$args\" | grep -q -- ' -update '; then printf 'baseline' > \"$target/Managed.txt\"; fi\nprintf '<ConfigDumpInfo version=\"2.17\"><Metadata id=\"private-id\" configVersion=\"7\"/></ConfigDumpInfo>\\n' > \"$target/ConfigDumpInfo.xml\"\nexit 0",
+                calls.display()
+            ),
+        );
+        let config = build_config(&base, &work, &script);
+        bootstrap_dump(&config, "main", None);
+        fs::write(base.join("main/Managed.txt"), "local").expect("local edit");
+
+        let result = run_dump(
+            &config,
+            &DumpArgs {
+                mode: DumpModeRequest::Incremental,
+                source_set: Some("main".to_owned()),
+                extension: None,
+                objects: vec![],
+            },
+        )
+        .expect("retained-local dump");
+
+        assert!(result.ok);
+        assert_eq!(
+            fs::read_to_string(base.join("main/Managed.txt")).expect("retained"),
+            "local"
+        );
+        let context = resolve_target(
+            &config,
+            &DumpArgs {
+                mode: DumpModeRequest::Incremental,
+                source_set: Some("main".to_owned()),
+                extension: None,
+                objects: vec![],
+            },
+        )
+        .expect("resolved")
+        .configured_source_context;
+        let analysis =
+            crate::change_detection::analyzer::managed_inventory(&context).expect("next analysis");
+        assert_eq!(
+            analysis
+                .requested
+                .iter()
+                .map(|change| change.rel_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Managed.txt"]
+        );
+    }
+
+    #[test]
+    fn unchanged_private_shadow_rewrite_is_reported_as_processed_and_skipped() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        fs::remove_dir_all(base.join("main")).expect("remove target");
+        write_script(
+            &script,
+            &format!(
+                "args=\"$*\"\ntarget=\"\"\nprev=\"\"\nfor arg in \"$@\"; do if [ \"$prev\" = \"/DumpConfigToFiles\" ]; then target=\"$arg\"; fi; prev=\"$arg\"; done\nprintf '%s\\n' \"$args\" >> \"{}\"\nmkdir -p \"$target\"\nprintf 'stable' > \"$target/Stable.txt\"\nprintf '<ConfigDumpInfo version=\"2.17\"><Metadata id=\"private-id\" configVersion=\"7\"/></ConfigDumpInfo>\\n' > \"$target/ConfigDumpInfo.xml\"\nexit 0",
+                calls.display()
+            ),
+        );
+        let config = build_config(&base, &work, &script);
+        bootstrap_dump(&config, "main", None);
+
+        let result = run_dump(
+            &config,
+            &DumpArgs {
+                mode: DumpModeRequest::Incremental,
+                source_set: Some("main".to_owned()),
+                extension: None,
+                objects: vec![],
+            },
+        )
+        .expect("incremental rewrite");
+
+        let receipt = serde_json::to_value(result.receipt).expect("receipt");
+        assert_eq!(receipt["processed"][0]["path"], "Stable.txt");
+        assert_eq!(receipt["skipped"][0]["path"], "Stable.txt");
+        assert_eq!(receipt["processed"][0], receipt["skipped"][0]);
+    }
+
+    #[test]
+    fn state_commit_failure_rolls_back_source_and_returns_exact_failed_receipt() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        fs::remove_dir_all(base.join("main")).expect("remove target");
+        write_script(
+            &script,
+            &format!(
+                "args=\"$*\"\ntarget=\"\"\nprev=\"\"\nfor arg in \"$@\"; do if [ \"$prev\" = \"/DumpConfigToFiles\" ]; then target=\"$arg\"; fi; prev=\"$arg\"; done\nprintf '%s\\n' \"$args\" >> \"{}\"\nmkdir -p \"$target\"\nprintf 'new' > \"$target/New.txt\"\nexit 0",
+                calls.display()
+            ),
+        );
+        let config = build_config(&base, &work, &script);
+
+        let failure = run_dump(
+            &config,
+            &DumpArgs {
+                mode: DumpModeRequest::Full,
+                source_set: Some("main".to_owned()),
+                extension: None,
+                objects: vec![],
+            },
+        )
+        .expect_err("missing private CDFI");
+
+        let receipt =
+            serde_json::to_value(&failure.payload.expect("payload").receipt).expect("receipt");
+        assert_eq!(receipt["status"], "failed");
+        assert_eq!(receipt["requested"][0]["path"], "New.txt");
+        assert_eq!(receipt["processed"], serde_json::json!([]));
+        assert!(!base.join("main/New.txt").exists());
+    }
+
+    #[test]
+    fn cancellation_immediately_before_source_apply_keeps_source_and_state_unchanged() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        fs::remove_dir_all(base.join("main")).expect("remove target");
+        write_dump_script(&script, &calls, None, 0);
+        let config = build_config(&base, &work, &script);
+        bootstrap_dump(&config, "main", None);
+        write_script(
+            &script,
+            &format!(
+                "args=\"$*\"\ntarget=\"\"\nprev=\"\"\nfor arg in \"$@\"; do if [ \"$prev\" = \"/DumpConfigToFiles\" ]; then target=\"$arg\"; fi; prev=\"$arg\"; done\nprintf '%s\\n' \"$args\" >> \"{}\"\nmkdir -p \"$target\"\nprintf 'new' > \"$target/New.txt\"\nprintf '<ConfigDumpInfo version=\"2.17\"><Metadata id=\"private-id\" configVersion=\"8\"/></ConfigDumpInfo>\\n' > \"$target/ConfigDumpInfo.xml\"\nexit 0",
+                calls.display()
+            ),
+        );
+        let cancellation = CancellationToken::new();
+        set_before_source_publication_hook({
+            let cancellation = cancellation.clone();
+            move || cancellation.cancel()
+        });
+        let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump)
+            .with_cancellation(cancellation);
+
+        let failure = super::run_dump_with_context(
+            &context,
+            &config,
+            &DumpArgs {
+                mode: DumpModeRequest::Full,
+                source_set: Some("main".to_owned()),
+                extension: None,
+                objects: vec![],
+            },
+        )
+        .expect_err("cancelled before source apply");
+
+        let receipt =
+            serde_json::to_value(&failure.payload.expect("payload").receipt).expect("receipt");
+        assert_eq!(receipt["status"], "failed");
+        assert_eq!(receipt["requested"][0]["path"], "New.txt");
+        assert_eq!(receipt["processed"], serde_json::json!([]));
+        assert!(!base.join("main/New.txt").exists());
+        let resolved = resolve_target(
+            &config,
+            &DumpArgs {
+                mode: DumpModeRequest::Full,
+                source_set: Some("main".to_owned()),
+                extension: None,
+                objects: vec![],
+            },
+        )
+        .expect("resolved");
+        assert_eq!(
+            crate::change_detection::hash_storage::HashStorage::new(
+                resolved.configured_source_context.storage_path()
+            )
+            .current_generation()
+            .expect("generation"),
+            1
+        );
+    }
+
+    #[test]
+    fn restart_recovers_pending_source_publication_before_inventory() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        fs::remove_dir_all(base.join("main")).expect("remove target");
+        fs::create_dir_all(base.join("main")).expect("empty target");
+        write_dump_script(&script, &calls, None, 0);
+        let config = build_config(&base, &work, &script);
+        let resolved = resolve_target(
+            &config,
+            &DumpArgs {
+                mode: DumpModeRequest::Full,
+                source_set: Some("main".to_owned()),
+                extension: None,
+                objects: vec![],
+            },
+        )
+        .expect("resolved");
+        let proposed = dir.path().join("proposed");
+        fs::create_dir(&proposed).expect("proposed");
+        fs::write(proposed.join("Rogue.txt"), "pending").expect("rogue");
+        let dump =
+            crate::use_cases::dump_shadow::managed_manifest(&proposed, &[]).expect("dump manifest");
+        let plan = crate::use_cases::shadow_merge::plan_manifest_merge(
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+            &dump,
+        );
+        let transaction = resolved
+            .configured_source_context
+            .transactions_dir()
+            .join("source-publication");
+        fs::create_dir_all(transaction.parent().expect("transactions"))
+            .expect("transactions directory");
+        let pending = crate::use_cases::source_publication::PublicationRequest::builder(
+            resolved.configured_source_context.path(),
+            &proposed,
+            &plan,
+        )
+        .transaction_root(&transaction)
+        .generation(1)
+        .target_identity(crate::use_cases::source_publication::TargetIdentity::new(
+            resolved.target_identity.clone(),
+        ))
+        .dump_transaction_id(crate::domain::runtime_state::DumpTransactionId::new())
+        .prepare()
+        .expect("prepare pending")
+        .apply()
+        .expect("apply pending");
+        drop(pending);
+        assert!(base.join("main/Rogue.txt").exists());
+
+        bootstrap_dump(&config, "main", None);
+
+        assert!(!base.join("main/Rogue.txt").exists());
+        let analysis = crate::change_detection::analyzer::managed_inventory(
+            &resolved.configured_source_context,
+        )
+        .expect("post-recovery inventory");
+        assert!(analysis.requested.is_empty());
     }
 
     #[test]
@@ -1885,6 +2229,9 @@ exit 0"#,
         create_source_tree(&base);
         write_dump_script(&script, &calls, None, 0);
         let config = build_config(&base, &work, &script);
+        fs::remove_dir_all(base.join("ext")).expect("remove extension");
+        bootstrap_dump(&config, "ext", Some("ext"));
+        fs::write(&calls, "").expect("clear calls");
 
         let result = run_dump(
             &config,
@@ -1900,8 +2247,8 @@ exit 0"#,
         assert!(result.ok);
         let calls = fs::read_to_string(calls).expect("calls");
         assert!(calls.contains("/DumpConfigToFiles"));
-        assert!(calls.contains("-update"));
-        assert!(!calls.contains("-updateConfigDumpInfo"));
+        assert!(calls.split_whitespace().any(|arg| arg == "-update"));
+        assert!(calls.contains("-updateConfigDumpInfo"));
         assert!(calls.contains("-Extension"));
         assert!(calls.contains("ext"));
     }
@@ -1981,13 +2328,15 @@ exit 0"#,
         write_script(
             &script,
             &format!(
-                "args=\"$*\"\nout=\"\"\nlist=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"-listFile\" ]; then list=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$out\" ]; then printf 'designer log for %s\\n' \"$args\" > \"$out\"; fi\nif [ -n \"$list\" ]; then cp \"$list\" \"{}\"; fi\nprintf '%s\\n' \"$args\" >> \"{}\"\nexit 0",
+                "args=\"$*\"\nout=\"\"\nlist=\"\"\ntarget=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"-listFile\" ]; then list=\"$arg\"; fi\n  if [ \"$prev\" = \"/DumpConfigToFiles\" ]; then target=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$out\" ]; then printf 'designer log for %s\\n' \"$args\" > \"$out\"; fi\nif [ -n \"$list\" ]; then cp \"$list\" \"{}\"; fi\nprintf '%s\\n' \"$args\" >> \"{}\"\nmkdir -p \"$target\"\nprintf '<ConfigDumpInfo version=\"2.17\"><Metadata id=\"private-id\" configVersion=\"7\"/></ConfigDumpInfo>\\n' > \"$target/ConfigDumpInfo.xml\"\nexit 0",
                 captured_list.display(),
                 calls.display(),
             ),
         );
         let config = build_config(&base, &work, &script);
         fs::remove_dir_all(base.join("main")).expect("remove target");
+        bootstrap_dump(&config, "main", None);
+        fs::write(&calls, "").expect("clear calls");
 
         let result = run_dump(
             &config,
@@ -2007,7 +2356,7 @@ exit 0"#,
         assert!(calls.contains("/DumpConfigToFiles"));
         assert!(calls.contains("-partial"));
         assert!(calls.contains("-listFile"));
-        assert!(!calls.contains("-updateConfigDumpInfo"));
+        assert!(calls.contains("-updateConfigDumpInfo"));
         assert_eq!(
             fs::read_to_string(captured_list).expect("captured list"),
             "Catalog.Items\nDocument.Order\n"
@@ -2025,6 +2374,9 @@ exit 0"#,
         create_source_tree(&base);
         write_dump_script(&script, &calls, None, 0);
         let config = build_config(&base, &work, &script);
+        fs::remove_dir_all(base.join("ext")).expect("remove extension");
+        bootstrap_dump(&config, "ext", Some("ext"));
+        fs::write(&calls, "").expect("clear calls");
 
         let result = run_dump(
             &config,
@@ -2054,6 +2406,9 @@ exit 0"#,
         create_source_tree(&base);
         write_dump_script(&script, &calls, Some("-partial"), 0);
         let config = build_config(&base, &work, &script);
+        fs::remove_dir_all(base.join("main")).expect("remove target");
+        bootstrap_dump(&config, "main", None);
+        fs::write(&calls, "").expect("clear calls");
 
         let failure = run_dump(
             &config,
@@ -2081,6 +2436,9 @@ exit 0"#,
         create_source_tree(&base);
         write_ibcmd_dump_script(&script, &calls, None, 0);
         let config = build_config_with_builder(&base, &work, &script, BuilderBackend::Ibcmd);
+        fs::remove_dir_all(base.join("main")).expect("remove target");
+        bootstrap_dump(&config, "main", None);
+        fs::write(&calls, "").expect("clear calls");
 
         let result = run_dump(
             &config,
@@ -2114,6 +2472,9 @@ exit 0"#,
         create_source_tree(&base);
         write_ibcmd_dump_script(&script, &calls, None, 0);
         let config = build_config_with_builder(&base, &work, &script, BuilderBackend::Ibcmd);
+        fs::remove_dir_all(base.join("ext")).expect("remove extension");
+        bootstrap_dump(&config, "ext", Some("ext"));
+        fs::write(&calls, "").expect("clear calls");
 
         let result = run_dump(
             &config,
@@ -2148,6 +2509,9 @@ exit 0"#,
         create_source_tree(&base);
         write_ibcmd_dump_script(&script, &calls, Some("--sync"), 0);
         let config = build_config_with_builder(&base, &work, &script, BuilderBackend::Ibcmd);
+        fs::remove_dir_all(base.join("main")).expect("remove target");
+        bootstrap_dump(&config, "main", None);
+        fs::write(&calls, "").expect("clear calls");
 
         let failure = run_dump(
             &config,
@@ -2198,6 +2562,11 @@ exit 0"#,
         .expect_err("failure");
 
         assert_eq!(failure.error.kind(), UseCaseErrorKind::Platform);
+        let receipt =
+            serde_json::to_value(&failure.payload.expect("payload").receipt).expect("receipt");
+        assert_eq!(receipt["status"], "failed");
+        assert_eq!(receipt["requested"], serde_json::json!([]));
+        assert_eq!(receipt["processed"], serde_json::json!([]));
         assert_eq!(
             fs::read_to_string(base.join("main").join("old.txt")).expect("old"),
             "keep me"
@@ -2205,7 +2574,7 @@ exit 0"#,
     }
 
     #[test]
-    fn dump_full_success_replaces_old_target() {
+    fn dump_full_without_baseline_conflicts_and_preserves_old_target() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
@@ -2216,7 +2585,7 @@ exit 0"#,
         let config = build_config(&base, &work, &script);
         fs::write(base.join("main").join("old.txt"), "old").expect("old");
 
-        let result = run_dump(
+        let failure = run_dump(
             &config,
             &DumpArgs {
                 mode: DumpModeRequest::Full,
@@ -2225,14 +2594,18 @@ exit 0"#,
                 objects: vec![],
             },
         )
-        .expect("dump");
+        .expect_err("conflict");
 
-        assert!(result.ok);
-        assert!(!base.join("main").join("old.txt").exists());
+        assert_eq!(
+            serde_json::to_value(&failure.payload.expect("payload").receipt).expect("receipt")
+                ["status"],
+            "conflict"
+        );
+        assert!(base.join("main").join("old.txt").exists());
     }
 
     #[test]
-    fn ibcmd_dump_full_uses_staging_dir_and_atomic_publish() {
+    fn ibcmd_dump_full_uses_private_staging_and_preserves_conflicted_source() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
@@ -2243,7 +2616,7 @@ exit 0"#,
         let config = build_config_with_builder(&base, &work, &script, BuilderBackend::Ibcmd);
         fs::write(base.join("main").join("old.txt"), "old").expect("old");
 
-        let result = run_dump(
+        let failure = run_dump(
             &config,
             &DumpArgs {
                 mode: DumpModeRequest::Full,
@@ -2252,13 +2625,17 @@ exit 0"#,
                 objects: vec![],
             },
         )
-        .expect("dump");
+        .expect_err("conflict");
 
         let calls = fs::read_to_string(calls).expect("calls");
-        assert!(result.ok);
+        assert_eq!(
+            serde_json::to_value(&failure.payload.expect("payload").receipt).expect("receipt")
+                ["status"],
+            "conflict"
+        );
         assert!(calls.contains("--force"));
         assert!(calls.contains(".dump-stage-"));
-        assert!(!base.join("main").join("old.txt").exists());
+        assert!(base.join("main").join("old.txt").exists());
     }
 
     #[test]
@@ -2278,7 +2655,7 @@ exit 0"#,
         )
         .with_credentials(Some("Admin".to_owned()), Some("secret".to_owned()));
 
-        let result = run_dump(
+        let failure = run_dump(
             &config,
             &DumpArgs {
                 mode: DumpModeRequest::Full,
@@ -2287,9 +2664,13 @@ exit 0"#,
                 objects: vec![],
             },
         )
-        .expect("dump");
+        .expect_err("bootstrap conflict");
 
-        assert!(result.ok);
+        assert_eq!(
+            serde_json::to_value(&failure.payload.expect("payload").receipt).expect("receipt")
+                ["status"],
+            "conflict"
+        );
         let calls = fs::read_to_string(calls).expect("calls");
         assert!(calls.contains("--dbms PostgreSQL"));
         assert!(calls.contains("--database-server localhost"));
@@ -2331,7 +2712,7 @@ exit 0"#,
     }
 
     #[test]
-    fn ibcmd_dump_incremental_uses_sync_against_resolved_target() {
+    fn ibcmd_dump_incremental_uses_sync_against_private_shadow() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
@@ -2341,6 +2722,8 @@ exit 0"#,
         write_ibcmd_dump_script(&script, &calls, None, 0);
         let config = build_config_with_builder(&base, &work, &script, BuilderBackend::Ibcmd);
         fs::remove_dir_all(base.join("main")).expect("remove target");
+        bootstrap_dump(&config, "main", None);
+        fs::write(&calls, "").expect("clear calls");
 
         let result = run_dump(
             &config,
@@ -2356,11 +2739,12 @@ exit 0"#,
         assert!(result.ok);
         let calls = fs::read_to_string(calls).expect("calls");
         assert!(calls.contains("--sync"));
-        assert!(calls.contains(base.join("main").display().to_string().as_str()));
+        assert!(!calls.contains(base.join("main").display().to_string().as_str()));
+        assert!(calls.contains("dump-shadow-"));
     }
 
     #[test]
-    fn dump_full_edt_designer_updates_designer_mirror_and_publishes_edt_target() {
+    fn dump_full_edt_designer_bootstrap_conflict_preserves_source_and_unmanaged_entries() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
@@ -2373,8 +2757,10 @@ exit 0"#,
         write_edt_import_script(&edt, &edt_calls);
         let config = build_edt_config(&base, &work, &designer, &edt, BuilderBackend::Designer);
         fs::write(base.join("main").join("stale.txt"), "stale").expect("stale");
+        fs::create_dir_all(base.join("main/.git")).expect("git metadata");
+        fs::write(base.join("main/.git/keep"), "unmanaged").expect("unmanaged marker");
 
-        let result = run_dump(
+        let failure = run_dump(
             &config,
             &DumpArgs {
                 mode: DumpModeRequest::Full,
@@ -2383,13 +2769,21 @@ exit 0"#,
                 objects: vec![],
             },
         )
-        .expect("dump");
+        .expect_err("bootstrap conflict");
+        let result = failure.payload.expect("conflict payload");
 
-        assert!(result.ok);
-        assert_eq!(result.target_path, base.join("main"));
+        assert!(!result.ok);
+        assert_eq!(
+            serde_json::to_value(&result.receipt).expect("receipt")["status"],
+            "conflict"
+        );
         assert_native_edt_project(&base.join("main"));
-        assert!(!base.join("main").join("stale.txt").exists());
-        assert!(work
+        assert!(base.join("main").join("stale.txt").exists());
+        assert_eq!(
+            fs::read_to_string(base.join("main/.git/keep")).expect("unmanaged marker"),
+            "unmanaged"
+        );
+        assert!(!work
             .join("designer")
             .join("main")
             .join("Configuration.xml")
@@ -2397,13 +2791,13 @@ exit 0"#,
 
         let designer_calls = fs::read_to_string(designer_calls).expect("designer calls");
         let edt_calls = fs::read_to_string(edt_calls).expect("edt calls");
-        assert!(designer_calls.contains(work.join("designer").display().to_string().as_str()));
-        assert!(edt_calls.contains(work.join("designer/main").display().to_string().as_str()));
+        assert!(!designer_calls.contains(work.join("designer/main").display().to_string().as_str()));
+        assert!(!edt_calls.contains(work.join("designer/main").display().to_string().as_str()));
         assert!(edt_calls.contains(work.join("edt-workspace").display().to_string().as_str()));
     }
 
     #[test]
-    fn dump_partial_edt_designer_bootstraps_missing_or_invalid_designer_snapshot() {
+    fn dump_partial_edt_designer_bootstrap_runs_one_effective_full_shadow_dump() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
@@ -2435,26 +2829,21 @@ exit 0"#,
 
         assert!(result.ok);
         assert_native_edt_project(&base.join("main"));
-        assert!(work
+        assert!(!work
             .join("designer")
             .join("main")
             .join("Configuration.xml")
             .exists());
-        assert!(work
-            .join("designer")
-            .join("main")
-            .join("PartialOnly.xml")
-            .exists());
-
+        assert!(work.join("designer/main/BrokenMirror.xml").exists());
         let designer_calls = fs::read_to_string(designer_calls).expect("designer calls");
         let edt_calls = fs::read_to_string(edt_calls).expect("edt calls");
-        assert_eq!(designer_calls.matches("/DumpConfigToFiles").count(), 2);
-        assert!(designer_calls.contains("-partial"));
+        assert_eq!(designer_calls.matches("/DumpConfigToFiles").count(), 1);
+        assert!(!designer_calls.contains("-partial"));
         assert_eq!(edt_calls.matches("-command import").count(), 1);
     }
 
     #[test]
-    fn dump_incremental_edt_designer_bootstrap_is_full_then_follow_up_uses_update() {
+    fn dump_incremental_edt_designer_bootstrap_runs_one_effective_full_shadow_dump() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
@@ -2485,14 +2874,46 @@ exit 0"#,
             .lines()
             .filter(|line| line.contains("/DumpConfigToFiles"))
             .collect::<Vec<_>>();
-        assert_eq!(dump_calls.len(), 2);
-        assert!(!dump_calls[0].contains("-update"));
-        assert!(!dump_calls[0].contains("-updateConfigDumpInfo"));
-        assert!(dump_calls[1].contains("-update"));
-        assert!(!dump_calls[1].contains("-updateConfigDumpInfo"));
+        assert_eq!(dump_calls.len(), 1);
+        assert!(!dump_calls[0].split_whitespace().any(|arg| arg == "-update"));
+        assert!(dump_calls[0].contains("-updateConfigDumpInfo"));
 
         let edt_calls = fs::read_to_string(edt_calls).expect("edt calls");
         assert_eq!(edt_calls.matches("-command import").count(), 1);
+    }
+
+    #[test]
+    fn edt_incremental_promotes_to_full_when_configured_baseline_is_corrupt() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let designer = dir.path().join("1cv8");
+        let edt = dir.path().join("edt/1cedtcli");
+        let designer_calls = dir.path().join("designer-calls.log");
+        let edt_calls = dir.path().join("edt-calls.log");
+        create_edt_source_tree(&base);
+        write_designer_dump_script_for_edt(&designer, &designer_calls, None);
+        write_edt_import_script(&edt, &edt_calls);
+        let config = build_edt_config(&base, &work, &designer, &edt, BuilderBackend::Designer);
+        let args = DumpArgs {
+            mode: DumpModeRequest::Incremental,
+            source_set: Some("main".to_owned()),
+            extension: None,
+            objects: vec![],
+        };
+        run_dump(&config, &args).expect("bootstrap");
+        let resolved = resolve_target(&config, &args).expect("resolved");
+        let configured = resolved
+            .configured_source_context
+            .baseline(BaselineRole::ConfiguredSource, StateGeneration::new(1));
+        fs::write(configured.path().join("manifest.json"), b"corrupt").expect("corrupt baseline");
+        fs::write(&designer_calls, "").expect("clear calls");
+
+        run_dump(&config, &args).expect("promoted full");
+
+        let calls = fs::read_to_string(designer_calls).expect("calls");
+        assert_eq!(calls.matches("/DumpConfigToFiles").count(), 1);
+        assert!(!calls.split_whitespace().any(|arg| arg == "-update"));
     }
 
     #[test]
@@ -2556,7 +2977,7 @@ exit 0"#,
 
         assert!(result.ok);
         assert!(base.join("main").join(".project").exists());
-        assert!(work
+        assert!(!work
             .join("designer")
             .join("main")
             .join("Configuration.xml")
@@ -2565,8 +2986,8 @@ exit 0"#,
         let ibcmd_calls = fs::read_to_string(ibcmd_calls).expect("ibcmd calls");
         let edt_calls = fs::read_to_string(edt_calls).expect("edt calls");
         assert!(ibcmd_calls.contains("--force"));
-        assert!(ibcmd_calls.contains(work.join("designer").display().to_string().as_str()));
-        assert!(edt_calls.contains(work.join("designer/main").display().to_string().as_str()));
+        assert!(!ibcmd_calls.contains(work.join("designer/main").display().to_string().as_str()));
+        assert!(!edt_calls.contains(work.join("designer/main").display().to_string().as_str()));
     }
 
     #[test]

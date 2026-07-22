@@ -8,3 +8,5 @@ pub mod path;
 pub mod source_descriptor;
 pub mod temp;
 pub mod time;
+#[cfg(windows)]
+pub(crate) mod windows_fs;

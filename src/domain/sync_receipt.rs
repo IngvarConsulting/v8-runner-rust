@@ -192,13 +192,24 @@ impl SyncReceipt {
         let skipped = unique("skipped", skipped)?;
         let conflicted = unique("conflicted", conflicted)?;
 
-        let mut outcomes = BTreeSet::new();
-        for target in processed
+        let processed_by_path = processed
             .iter()
-            .chain(skipped.iter())
-            .chain(conflicted.iter())
-        {
-            if !outcomes.insert(target.path()) {
+            .map(|target| (target.path(), target))
+            .collect::<BTreeMap<_, _>>();
+        for target in &skipped {
+            if processed_by_path
+                .get(target.path())
+                .is_some_and(|processed| status != SyncStatus::Applied || *processed != target)
+            {
+                return Err(SyncReceiptError::OverlappingOutcome(target.path.clone()));
+            }
+        }
+        let conflicted_paths = conflicted
+            .iter()
+            .map(SyncTarget::path)
+            .collect::<BTreeSet<_>>();
+        for target in processed.iter().chain(skipped.iter()) {
+            if conflicted_paths.contains(target.path()) {
                 return Err(SyncReceiptError::OverlappingOutcome(target.path.clone()));
             }
         }
@@ -332,9 +343,21 @@ mod tests {
         );
         let changed = SyncTarget::new("a.xml", Some(PRE.to_owned()), None).expect("changed");
         assert!(SyncReceipt::applied(vec![target("a.xml")], vec![changed], vec![]).is_err());
-        assert!(
-            SyncReceipt::applied(vec![], vec![target("a.xml")], vec![target("a.xml")]).is_err()
+        let orthogonal = SyncReceipt::applied(
+            vec![target("a.xml")],
+            vec![target("a.xml")],
+            vec![target("a.xml")],
+        )
+        .expect("processed and retained-local evidence may overlap");
+        let json = serde_json::to_value(&orthogonal).expect("serialize overlap");
+        assert_eq!(json["processed"][0], json["skipped"][0]);
+        assert_eq!(
+            serde_json::from_value::<SyncReceipt>(json).expect("round trip overlap"),
+            orthogonal
         );
+
+        let changed = SyncTarget::new("a.xml", Some(PRE.to_owned()), None).expect("changed");
+        assert!(SyncReceipt::applied(vec![], vec![target("a.xml")], vec![changed]).is_err());
     }
 
     #[test]

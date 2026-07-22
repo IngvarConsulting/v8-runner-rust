@@ -32,11 +32,11 @@ v8-runner --json-message build
 
 Use text output for direct human diagnostics.
 
-For JSON build results, use each step's `receipt` as the exact source-sync audit record:
-`requested` is the raw add/modify/delete delta, `processed` is the successfully applied closure,
-and `preHash`/`postHash` are SHA-256 values (`null` denotes the absent side of an add/delete).
-Failed or cancelled steps keep the original `requested` delta and leave outcome lists empty.
-Dump receipts currently describe terminal structure only and do not yet inventory dumped files.
+For JSON build and dump results, use each step's `receipt` as the exact source-sync audit record.
+`requested` is the byte-exact add/modify/delete delta; `processed`, `skipped`, and `conflicted`
+partition its terminal outcome. `preHash`/`postHash` are SHA-256 values, with `null` denoting
+the absent side of an add/delete. Failed or cancelled steps keep the original `requested` delta
+and leave outcome lists empty.
 
 Use `v8-runner version` or `v8-runner --version` to check the installed application version; it does not require `v8project.yaml`.
 

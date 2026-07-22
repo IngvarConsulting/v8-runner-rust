@@ -20,18 +20,97 @@ thread_local! {
     static BEFORE_REDB_ROLLBACK_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
     static FORCE_REDB_PUBLISH_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static DUMP_COMMIT_CRASH_PHASE: std::cell::Cell<Option<DumpCommitCrashPhase>> =
+        const { std::cell::Cell::new(None) };
+    static FAIL_DUMP_COMMIT_AFTER_REDB: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static BEFORE_BASELINE_DESTRUCTIVE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 use crate::change_detection::analyzer::PreparedStateUpdate;
 use crate::change_detection::hash_storage::{
     HashStorage, ObservedStorageState, StorageError, StoredFileState,
 };
+use crate::domain::runtime_state::{BaselineRole, DumpTransactionId, StateGeneration};
 use crate::domain::source_set::SourceSetContext;
 use crate::support::fs::{acquire_advisory_lock, AdvisoryLockGuard};
+use crate::use_cases::dump_shadow::{
+    inspect_baseline_path, stage_complete_baseline, BaselineInspection, DumpShadowError,
+};
 
 pub(crate) struct DesignerStateLock {
     path: PathBuf,
     _guard: AdvisoryLockGuard,
+}
+
+/// Complete private artifacts committed by a successful dump operation.
+///
+/// The `SourceSetContext` passed to [`commit_dump_state_with_lock`] is the sole
+/// owner of every artifact in this request. For EDT this is the configured EDT
+/// context: its observation, configured-source baseline, optional intermediate
+/// Designer baseline and private CDFI deliberately share one generation. The
+/// generated Designer build context is not a second dump-state owner.
+pub(crate) struct DumpStateCommitRequest<'a> {
+    prepared: &'a PreparedStateUpdate,
+    configured_source_root: &'a Path,
+    edt_platform_designer_root: Option<&'a Path>,
+    produced_cdfi: &'a Path,
+    transaction_id: DumpTransactionId,
+}
+
+impl<'a> DumpStateCommitRequest<'a> {
+    pub(crate) fn new(
+        prepared: &'a PreparedStateUpdate,
+        configured_source_root: &'a Path,
+        produced_cdfi: &'a Path,
+    ) -> Self {
+        Self {
+            prepared,
+            configured_source_root,
+            edt_platform_designer_root: None,
+            produced_cdfi,
+            transaction_id: DumpTransactionId::new(),
+        }
+    }
+
+    pub(crate) const fn with_edt_platform_designer(mut self, root: &'a Path) -> Self {
+        self.edt_platform_designer_root = Some(root);
+        self
+    }
+
+    pub(crate) fn with_transaction_id(mut self, transaction_id: DumpTransactionId) -> Self {
+        self.transaction_id = transaction_id;
+        self
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DumpCommitCrashPhase {
+    AfterBaselines,
+    AfterCdfi,
+    AfterRedb,
+    AfterBaselineMarkerRemoval,
+}
+
+#[cfg(test)]
+fn set_dump_commit_crash_phase(phase: DumpCommitCrashPhase) {
+    DUMP_COMMIT_CRASH_PHASE.with(|slot| slot.set(Some(phase)));
+}
+
+#[cfg(test)]
+fn fail_next_dump_commit_after_redb() {
+    FAIL_DUMP_COMMIT_AFTER_REDB.with(|slot| slot.set(true));
+}
+
+#[cfg(test)]
+fn inject_dump_crash(phase: DumpCommitCrashPhase) -> Result<(), RuntimeStateError> {
+    if DUMP_COMMIT_CRASH_PHASE.with(|slot| slot.get() == Some(phase)) {
+        DUMP_COMMIT_CRASH_PHASE.with(|slot| slot.set(None));
+        Err(RuntimeStateError::InjectedDumpCrash(phase))
+    } else {
+        Ok(())
+    }
 }
 
 pub(crate) fn lock_designer_state(
@@ -111,12 +190,23 @@ pub(crate) enum RuntimeStateError {
     GenerationOverflow,
     #[error("storage state changed before publication at '{path}'")]
     StorageObservationChanged { path: PathBuf },
+    #[error("failed to prepare private dump baseline: {0}")]
+    DumpShadow(Box<DumpShadowError>),
+    #[cfg(test)]
+    #[error("injected dump-state crash after {0:?}")]
+    InjectedDumpCrash(DumpCommitCrashPhase),
     #[error("runtime-state publication failed ({publication}); rollback also failed ({rollback}); journal retained at '{journal}'")]
     PublicationAndRollback {
         publication: Box<RuntimeStateError>,
         rollback: Box<RuntimeStateError>,
         journal: PathBuf,
     },
+}
+
+impl From<DumpShadowError> for RuntimeStateError {
+    fn from(error: DumpShadowError) -> Self {
+        Self::DumpShadow(Box::new(error))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -128,15 +218,50 @@ enum JournalStatus {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StateJournal {
     status: JournalStatus,
+    #[serde(default)]
+    generation: u64,
     redb_existed: bool,
     cdfi_existed: bool,
     redb_staged: FileFingerprint,
     cdfi_staged: FileFingerprint,
+    #[serde(default)]
+    baselines: Vec<JournalBaseline>,
+    #[serde(default)]
+    dump_transaction_id: Option<DumpTransactionId>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+enum JournalBaselineRole {
+    ConfiguredSource,
+    EdtPlatformDesigner,
+}
+
+impl JournalBaselineRole {
+    const fn domain(self) -> BaselineRole {
+        match self {
+            Self::ConfiguredSource => BaselineRole::ConfiguredSource,
+            Self::EdtPlatformDesigner => BaselineRole::EdtPlatformDesigner,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JournalBaseline {
+    role: JournalBaselineRole,
+    staged_name: String,
+    ownership_token: String,
+    manifest_fingerprint: FileFingerprint,
+    #[serde(default)]
+    directory_identity: Option<FileIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct FileFingerprint {
     len: u64,
     sha256: String,
@@ -150,6 +275,7 @@ impl FileFingerprint {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct FileIdentity {
     volume: u64,
     index: u64,
@@ -160,6 +286,7 @@ const STAGED_REDB: &str = "new-hash-storage.redb";
 const STAGED_CDFI: &str = "new-ConfigDumpInfo.xml";
 const BACKUP_REDB: &str = "old-hash-storage.redb";
 const BACKUP_CDFI: &str = "old-ConfigDumpInfo.xml";
+const BASELINE_OWNERSHIP_FILE: &str = ".runtime-state-transaction";
 const FULL_REBUILD_MARKER: &str = "full-rebuild-required";
 
 pub(crate) fn designer_full_rebuild_required(
@@ -428,7 +555,7 @@ pub(crate) fn commit_designer_state_with_lock(
         .join(format!("state-{}", Uuid::new_v4()));
     fs::create_dir(&transaction)?;
     sync_directory(&context.transactions_dir())?;
-    let result = publish_state_transaction(context, prepared, &produced, &transaction);
+    let result = publish_state_transaction(context, prepared, &produced, &[], None, &transaction);
     if let Err(publication) = result {
         return match recover_one_transaction(context, &transaction) {
             Ok(()) => Err(publication),
@@ -439,7 +566,96 @@ pub(crate) fn commit_designer_state_with_lock(
             }),
         };
     }
+    result?;
     clear_full_rebuild_marker(context)
+}
+
+pub(crate) fn commit_dump_state_with_lock(
+    context: &SourceSetContext,
+    lock: &DesignerStateLock,
+    request: DumpStateCommitRequest<'_>,
+) -> Result<StateGeneration, RuntimeStateError> {
+    validate_lock(context, lock)?;
+    let produced = match inspect_private_cdfi(request.produced_cdfi)? {
+        PrivateCdfiState::Valid(cdfi) => cdfi,
+        PrivateCdfiState::Missing => {
+            return Err(RuntimeStateError::InvalidProducedCdfi {
+                path: request.produced_cdfi.to_path_buf(),
+                reason: "platform did not produce ConfigDumpInfo.xml".to_owned(),
+            })
+        }
+        PrivateCdfiState::Corrupt(reason) => {
+            return Err(RuntimeStateError::InvalidProducedCdfi {
+                path: request.produced_cdfi.to_path_buf(),
+                reason,
+            })
+        }
+    };
+    recover_designer_state_with_lock(context, lock)?;
+    verify_storage_observation(context, &request.prepared.observed_storage)?;
+    let next_generation = request
+        .prepared
+        .observed_storage
+        .generation()
+        .checked_add(1)
+        .ok_or(RuntimeStateError::GenerationOverflow)?;
+
+    ensure_directory_synced(&context.transactions_dir())?;
+    let transaction = context
+        .transactions_dir()
+        .join(format!("state-{}", Uuid::new_v4()));
+    fs::create_dir(&transaction)?;
+    sync_directory(&context.transactions_dir())?;
+    let mut baselines = vec![BaselineInput {
+        role: JournalBaselineRole::ConfiguredSource,
+        root: request.configured_source_root,
+    }];
+    if let Some(root) = request.edt_platform_designer_root {
+        baselines.push(BaselineInput {
+            role: JournalBaselineRole::EdtPlatformDesigner,
+            root,
+        });
+    }
+    let result = publish_state_transaction(
+        context,
+        request.prepared,
+        &produced,
+        &baselines,
+        Some(&request.transaction_id),
+        &transaction,
+    );
+    if let Err(publication) = result {
+        #[cfg(test)]
+        if matches!(publication, RuntimeStateError::InjectedDumpCrash(_)) {
+            return Err(publication);
+        }
+        return match recover_one_transaction(context, &transaction) {
+            Ok(())
+                if HashStorage::new(context.storage_path())
+                    .current_generation()
+                    .is_ok_and(|generation| generation == next_generation)
+                    && HashStorage::new(context.storage_path())
+                        .current_dump_transaction_id()
+                        .is_ok_and(|transaction_id| {
+                            transaction_id.as_ref() == Some(&request.transaction_id)
+                        }) =>
+            {
+                Ok(StateGeneration::new(next_generation))
+            }
+            Ok(()) => Err(publication),
+            Err(rollback) => Err(RuntimeStateError::PublicationAndRollback {
+                publication: Box::new(publication),
+                rollback: Box::new(rollback),
+                journal: transaction,
+            }),
+        };
+    }
+    result
+}
+
+struct BaselineInput<'a> {
+    role: JournalBaselineRole,
+    root: &'a Path,
 }
 
 pub(crate) fn cleanup_orphan_designer_transactions(
@@ -537,8 +753,10 @@ fn publish_state_transaction(
     context: &SourceSetContext,
     prepared: &PreparedStateUpdate,
     cdfi: &ValidatedCdfi,
+    baselines: &[BaselineInput<'_>],
+    dump_transaction_id: Option<&DumpTransactionId>,
     transaction: &Path,
-) -> Result<(), RuntimeStateError> {
+) -> Result<StateGeneration, RuntimeStateError> {
     let snapshot: HashMap<String, StoredFileState> = prepared
         .snapshot
         .iter()
@@ -557,39 +775,80 @@ fn publish_state_transaction(
         .generation()
         .checked_add(1)
         .ok_or(RuntimeStateError::GenerationOverflow)?;
-    HashStorage::create_replacement(
-        transaction.join(STAGED_REDB),
-        &snapshot,
-        prepared.scan_started_at,
-        next_generation,
-    )?;
+    if let Some(transaction_id) = dump_transaction_id {
+        HashStorage::create_dump_replacement(
+            transaction.join(STAGED_REDB),
+            &snapshot,
+            prepared.scan_started_at,
+            next_generation,
+            transaction_id,
+        )?;
+    } else {
+        HashStorage::create_replacement(
+            transaction.join(STAGED_REDB),
+            &snapshot,
+            prepared.scan_started_at,
+            next_generation,
+        )?;
+    }
     write_synced_file(&transaction.join(STAGED_CDFI), cdfi.bytes())?;
+    let mut journal_baselines = Vec::with_capacity(baselines.len());
+    for baseline in baselines {
+        let staged_name = match baseline.role {
+            JournalBaselineRole::ConfiguredSource => "new-baseline-configured-source",
+            JournalBaselineRole::EdtPlatformDesigner => "new-baseline-edt-platform-designer",
+        };
+        let staged = transaction.join(staged_name);
+        stage_complete_baseline(baseline.root, &[], &staged)?;
+        let manifest_fingerprint = file_fingerprint(&staged.join("manifest.json"))?;
+        let ownership_token = Uuid::new_v4().to_string();
+        write_synced_file(
+            &staged.join(BASELINE_OWNERSHIP_FILE),
+            ownership_token.as_bytes(),
+        )?;
+        journal_baselines.push(JournalBaseline {
+            role: baseline.role,
+            staged_name: staged_name.to_owned(),
+            ownership_token,
+            manifest_fingerprint,
+            directory_identity: opened_file_identity(&fs::File::open(&staged)?)?,
+        });
+    }
     let redb_staged = file_fingerprint(&transaction.join(STAGED_REDB))?;
     let cdfi_staged = file_fingerprint(&transaction.join(STAGED_CDFI))?;
 
     let redb_target = context.storage_path();
     let cdfi_target = context.private_cdfi_path();
     let cdfi_existed = backup_regular_file(&cdfi_target, &transaction.join(BACKUP_CDFI))?;
-    if requires_storage_claim(&prepared.observed_storage) {
+    if baselines.is_empty() && requires_storage_claim(&prepared.observed_storage) {
         write_journal(
             transaction,
             &StateJournal {
                 status: JournalStatus::ClaimingRecoverable,
+                generation: next_generation,
                 redb_existed: true,
                 cdfi_existed,
                 redb_staged: redb_staged.clone(),
                 cdfi_staged: cdfi_staged.clone(),
+                baselines: journal_baselines.clone(),
+                dump_transaction_id: dump_transaction_id.cloned(),
             },
         )?;
     }
-    let redb_existed = prepare_redb_backup(
-        &redb_target,
-        &transaction.join(BACKUP_REDB),
-        &transaction.join(STAGED_REDB),
-        &prepared.observed_storage,
-    )?;
+    let redb_existed = if baselines.is_empty() {
+        prepare_redb_backup(
+            &redb_target,
+            &transaction.join(BACKUP_REDB),
+            &transaction.join(STAGED_REDB),
+            &prepared.observed_storage,
+        )?
+    } else {
+        let existed = backup_regular_file(&redb_target, &transaction.join(BACKUP_REDB))?;
+        verify_storage_observation(context, &prepared.observed_storage)?;
+        existed
+    };
     #[cfg(test)]
-    if requires_storage_claim(&prepared.observed_storage) {
+    if baselines.is_empty() && requires_storage_claim(&prepared.observed_storage) {
         AFTER_REDB_CLAIM_HOOK.with(|cell| {
             if let Some(hook) = cell.borrow_mut().take() {
                 hook();
@@ -597,28 +856,34 @@ fn publish_state_transaction(
         });
     }
     // Close the staging/backup TOCTOU window before the first live-file mutation.
-    if !requires_storage_claim(&prepared.observed_storage) {
+    if baselines.is_empty() && !requires_storage_claim(&prepared.observed_storage) {
         verify_storage_observation(context, &prepared.observed_storage)?;
     }
     write_journal(
         transaction,
         &StateJournal {
             status: JournalStatus::Prepared,
+            generation: next_generation,
             redb_existed,
             cdfi_existed,
             redb_staged: redb_staged.clone(),
             cdfi_staged: cdfi_staged.clone(),
+            baselines: journal_baselines.clone(),
+            dump_transaction_id: dump_transaction_id.cloned(),
         },
     )?;
-    if requires_storage_claim(&prepared.observed_storage) {
-        publish_absent_file(&transaction.join(STAGED_REDB), &redb_target)?;
-    } else {
-        publish_observed_file(
-            &transaction.join(STAGED_REDB),
-            &redb_target,
-            &transaction.join(BACKUP_REDB),
-            redb_existed,
+
+    for baseline in &journal_baselines {
+        publish_baseline(
+            context,
+            StateGeneration::new(next_generation),
+            transaction,
+            baseline,
         )?;
+    }
+    #[cfg(test)]
+    if !baselines.is_empty() {
+        inject_dump_crash(DumpCommitCrashPhase::AfterBaselines)?;
     }
     publish_observed_file(
         &transaction.join(STAGED_CDFI),
@@ -626,17 +891,49 @@ fn publish_state_transaction(
         &transaction.join(BACKUP_CDFI),
         cdfi_existed,
     )?;
+    #[cfg(test)]
+    if !baselines.is_empty() {
+        inject_dump_crash(DumpCommitCrashPhase::AfterCdfi)?;
+    }
+    if baselines.is_empty() && requires_storage_claim(&prepared.observed_storage) {
+        publish_absent_file(&transaction.join(STAGED_REDB), &redb_target)?;
+    } else {
+        // For dump commits redb stays at the old generation until this final CAS publication.
+        publish_observed_file(
+            &transaction.join(STAGED_REDB),
+            &redb_target,
+            &transaction.join(BACKUP_REDB),
+            redb_existed,
+        )?;
+    }
     if let Some(state_dir) = redb_target.parent() {
         sync_directory(state_dir)?;
     }
+    #[cfg(test)]
+    if !baselines.is_empty() {
+        inject_dump_crash(DumpCommitCrashPhase::AfterRedb)?;
+        if FAIL_DUMP_COMMIT_AFTER_REDB.with(|slot| slot.replace(false)) {
+            return Err(RuntimeStateError::TransactionIo(std::io::Error::other(
+                "forced post-redb finalization failure",
+            )));
+        }
+    }
+    remove_baseline_ownership_markers(
+        context,
+        StateGeneration::new(next_generation),
+        &journal_baselines,
+    )?;
     write_journal(
         transaction,
         &StateJournal {
             status: JournalStatus::Committed,
+            generation: next_generation,
             redb_existed,
             cdfi_existed,
             redb_staged,
             cdfi_staged,
+            baselines: journal_baselines,
+            dump_transaction_id: dump_transaction_id.cloned(),
         },
     )?;
     // Publication is committed at this point. Cleanup is deliberately best-effort;
@@ -645,7 +942,7 @@ fn publish_state_transaction(
     if let Some(parent) = transaction.parent() {
         sync_directory(parent)?;
     }
-    Ok(())
+    Ok(StateGeneration::new(next_generation))
 }
 
 fn requires_storage_claim(observation: &ObservedStorageState) -> bool {
@@ -655,6 +952,318 @@ fn requires_storage_claim(observation: &ObservedStorageState) -> bool {
             | ObservedStorageState::Initialized { .. }
             | ObservedStorageState::Recoverable { .. }
     )
+}
+
+fn publish_baseline(
+    context: &SourceSetContext,
+    generation: StateGeneration,
+    transaction: &Path,
+    baseline: &JournalBaseline,
+) -> Result<(), RuntimeStateError> {
+    let staged = transaction.join(&baseline.staged_name);
+    let target = context.baseline(baseline.role.domain(), generation);
+    let parent = target
+        .path()
+        .parent()
+        .ok_or_else(|| RuntimeStateError::InvalidJournal {
+            path: target.path().to_path_buf(),
+            reason: "baseline target has no parent".to_owned(),
+        })?;
+    ensure_directory_synced(parent)?;
+    rename_directory_no_replace(&staged, target.path())?;
+    sync_rename_parents(&staged, target.path())
+}
+
+#[cfg(target_os = "macos")]
+fn rename_directory_no_replace(source: &Path, target: &Path) -> Result<(), RuntimeStateError> {
+    rename_directory_with_flags(source, target, libc::RENAME_EXCL)
+}
+
+#[cfg(target_os = "linux")]
+fn rename_directory_no_replace(source: &Path, target: &Path) -> Result<(), RuntimeStateError> {
+    rename_directory_with_flags(source, target, libc::RENAME_NOREPLACE)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn rename_directory_with_flags(
+    source: &Path,
+    target: &Path,
+    flags: libc::c_uint,
+) -> Result<(), RuntimeStateError> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let source_c = CString::new(source.as_os_str().as_bytes()).map_err(|_| {
+        RuntimeStateError::InvalidJournal {
+            path: source.to_path_buf(),
+            reason: "staged baseline path contains NUL".to_owned(),
+        }
+    })?;
+    let target_c = CString::new(target.as_os_str().as_bytes()).map_err(|_| {
+        RuntimeStateError::InvalidJournal {
+            path: target.to_path_buf(),
+            reason: "baseline target path contains NUL".to_owned(),
+        }
+    })?;
+    #[cfg(target_os = "macos")]
+    // SAFETY: both values are NUL-free C strings valid for the duration of the syscall.
+    let result = unsafe {
+        libc::renameatx_np(
+            libc::AT_FDCWD,
+            source_c.as_ptr(),
+            libc::AT_FDCWD,
+            target_c.as_ptr(),
+            flags,
+        )
+    };
+    #[cfg(target_os = "linux")]
+    // SAFETY: both values are NUL-free C strings valid for the duration of the syscall.
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            source_c.as_ptr(),
+            libc::AT_FDCWD,
+            target_c.as_ptr(),
+            flags,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        let source_error = std::io::Error::last_os_error();
+        if matches!(
+            source_error.kind(),
+            ErrorKind::AlreadyExists | ErrorKind::DirectoryNotEmpty
+        ) {
+            Err(RuntimeStateError::StorageObservationChanged {
+                path: target.to_path_buf(),
+            })
+        } else {
+            Err(runtime_io("publish staged baseline", target, source_error))
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn rename_directory_no_replace(source: &Path, target: &Path) -> Result<(), RuntimeStateError> {
+    if target.try_exists()? {
+        return Err(RuntimeStateError::StorageObservationChanged {
+            path: target.to_path_buf(),
+        });
+    }
+    fs::rename(source, target).map_err(|error| runtime_io("publish staged baseline", target, error))
+}
+
+enum BaselineOwnership {
+    Owned,
+    Missing,
+    Foreign,
+}
+
+fn baseline_manifest_matches(
+    path: &Path,
+    expected: &FileFingerprint,
+) -> Result<bool, RuntimeStateError> {
+    match file_fingerprint(&path.join("manifest.json")) {
+        Ok(actual) => Ok(actual == *expected),
+        Err(RuntimeStateError::TransactionIo(error)) if error.kind() == ErrorKind::NotFound => {
+            Ok(false)
+        }
+        Err(RuntimeStateError::Io { source, .. }) if source.kind() == ErrorKind::NotFound => {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn baseline_ownership(
+    path: &Path,
+    expected_token: &str,
+) -> Result<BaselineOwnership, RuntimeStateError> {
+    let marker = path.join(BASELINE_OWNERSHIP_FILE);
+    match fs::read(&marker) {
+        Ok(bytes) if bytes == expected_token.as_bytes() => Ok(BaselineOwnership::Owned),
+        Ok(_) => Ok(BaselineOwnership::Foreign),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(BaselineOwnership::Missing),
+        Err(error) => Err(runtime_io("read baseline ownership marker", &marker, error)),
+    }
+}
+
+fn baseline_tree_matches(
+    target: &Path,
+    baseline: &JournalBaseline,
+    marker_present: bool,
+) -> Result<bool, RuntimeStateError> {
+    let actual_identity = opened_file_identity(&fs::File::open(target)?)?;
+    if baseline.directory_identity.is_none() || actual_identity != baseline.directory_identity {
+        return Ok(false);
+    }
+    let mut root_entries = fs::read_dir(target)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<Vec<_>, _>>()?;
+    root_entries.sort();
+    let mut expected_entries = vec![
+        std::ffi::OsString::from("files"),
+        std::ffi::OsString::from("manifest.json"),
+    ];
+    if marker_present {
+        expected_entries.push(std::ffi::OsString::from(BASELINE_OWNERSHIP_FILE));
+        expected_entries.sort();
+    }
+    if root_entries != expected_entries
+        || !baseline_manifest_matches(target, &baseline.manifest_fingerprint)?
+    {
+        return Ok(false);
+    }
+    Ok(matches!(
+        inspect_baseline_path(target)?,
+        BaselineInspection::Valid(_)
+    ))
+}
+
+fn baseline_directory_identity_matches(
+    target: &Path,
+    baseline: &JournalBaseline,
+) -> Result<bool, RuntimeStateError> {
+    let actual = opened_file_identity(&fs::File::open(target)?)?;
+    Ok(baseline.directory_identity.is_some() && actual == baseline.directory_identity)
+}
+
+fn remove_baseline_ownership_markers(
+    context: &SourceSetContext,
+    generation: StateGeneration,
+    baselines: &[JournalBaseline],
+) -> Result<(), RuntimeStateError> {
+    for baseline in baselines {
+        let target = context.baseline(baseline.role.domain(), generation);
+        finalize_baseline_marker(target.path(), baseline)?;
+    }
+    Ok(())
+}
+
+fn finalize_baseline_marker(
+    target: &Path,
+    baseline: &JournalBaseline,
+) -> Result<(), RuntimeStateError> {
+    let claim = target.with_file_name(format!(".baseline-finalize-{}", baseline.ownership_token));
+    let working = if claim.try_exists()? {
+        if target.try_exists()? {
+            return Err(RuntimeStateError::InvalidJournal {
+                path: target.to_path_buf(),
+                reason: "foreign baseline appeared while finalization was claimed".to_owned(),
+            });
+        }
+        claim.as_path()
+    } else {
+        match baseline_ownership(target, &baseline.ownership_token)? {
+            BaselineOwnership::Missing
+                if target.is_dir() && baseline_tree_matches(target, baseline, false)? =>
+            {
+                return Ok(())
+            }
+            BaselineOwnership::Owned => {
+                rename_directory_no_replace(target, &claim)?;
+                claim.as_path()
+            }
+            BaselineOwnership::Missing | BaselineOwnership::Foreign => {
+                return Err(RuntimeStateError::InvalidJournal {
+                    path: target.to_path_buf(),
+                    reason: "published baseline ownership changed before commit".to_owned(),
+                })
+            }
+        }
+    };
+    match baseline_ownership(working, &baseline.ownership_token)? {
+        BaselineOwnership::Owned if baseline_tree_matches(working, baseline, true)? => {
+            fs::remove_file(working.join(BASELINE_OWNERSHIP_FILE))?;
+            sync_directory(working)?;
+            #[cfg(test)]
+            inject_dump_crash(DumpCommitCrashPhase::AfterBaselineMarkerRemoval)?;
+        }
+        BaselineOwnership::Missing if baseline_tree_matches(working, baseline, false)? => {}
+        BaselineOwnership::Owned | BaselineOwnership::Missing | BaselineOwnership::Foreign => {
+            if !target.try_exists()? {
+                rename_directory_no_replace(working, target)?;
+            }
+            return Err(RuntimeStateError::InvalidJournal {
+                path: target.to_path_buf(),
+                reason: "published baseline content or identity changed before commit".to_owned(),
+            });
+        }
+    }
+    rename_directory_no_replace(working, target)
+}
+
+fn rollback_baselines(
+    context: &SourceSetContext,
+    generation: StateGeneration,
+    baselines: &[JournalBaseline],
+) -> Result<(), RuntimeStateError> {
+    for baseline in baselines {
+        let target = context.baseline(baseline.role.domain(), generation);
+        let claim = target
+            .path()
+            .with_file_name(format!(".baseline-rollback-{}", baseline.ownership_token));
+        if claim.try_exists()? {
+            if !baseline_directory_identity_matches(&claim, baseline)? {
+                return Err(RuntimeStateError::InvalidJournal {
+                    path: claim,
+                    reason: "foreign claimed baseline prevents safe rollback".to_owned(),
+                });
+            }
+            fs::remove_dir_all(&claim)?;
+            if let Some(parent) = claim.parent() {
+                sync_directory(parent)?;
+            }
+            continue;
+        }
+        match fs::symlink_metadata(target.path()) {
+            Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
+                match baseline_ownership(target.path(), &baseline.ownership_token)? {
+                    BaselineOwnership::Owned
+                        if baseline_tree_matches(target.path(), baseline, true)? => {}
+                    BaselineOwnership::Owned => {
+                        return Err(RuntimeStateError::InvalidJournal {
+                            path: target.path().to_path_buf(),
+                            reason: "foreign baseline content prevents safe rollback".to_owned(),
+                        })
+                    }
+                    BaselineOwnership::Missing | BaselineOwnership::Foreign => {
+                        return Err(RuntimeStateError::InvalidJournal {
+                            path: target.path().to_path_buf(),
+                            reason: "foreign baseline prevents safe rollback".to_owned(),
+                        })
+                    }
+                }
+                rename_directory_no_replace(target.path(), &claim)?;
+                if !baseline_tree_matches(&claim, baseline, true)? {
+                    rename_directory_no_replace(&claim, target.path())?;
+                    return Err(RuntimeStateError::InvalidJournal {
+                        path: target.path().to_path_buf(),
+                        reason: "foreign baseline content prevents safe rollback".to_owned(),
+                    });
+                }
+                #[cfg(test)]
+                BEFORE_BASELINE_DESTRUCTIVE_HOOK.with(|slot| {
+                    if let Some(hook) = slot.borrow_mut().take() {
+                        hook();
+                    }
+                });
+                fs::remove_dir_all(&claim)?;
+                if let Some(parent) = claim.parent() {
+                    sync_directory(parent)?;
+                }
+            }
+            Ok(_) => {
+                return Err(RuntimeStateError::InvalidJournal {
+                    path: target.path().to_path_buf(),
+                    reason: "foreign non-directory baseline prevents safe rollback".to_owned(),
+                })
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(RuntimeStateError::TransactionIo(error)),
+        }
+    }
+    Ok(())
 }
 
 fn prepare_redb_backup(
@@ -903,6 +1512,75 @@ fn write_journal(transaction: &Path, journal: &StateJournal) -> Result<(), Runti
     Ok(())
 }
 
+fn validate_state_journal(
+    journal: &StateJournal,
+    journal_path: &Path,
+) -> Result<(), RuntimeStateError> {
+    let invalid = |reason: &str| RuntimeStateError::InvalidJournal {
+        path: journal_path.to_path_buf(),
+        reason: reason.to_owned(),
+    };
+    if journal.generation == 0 {
+        return Err(invalid("generation must be nonzero"));
+    }
+    for (label, fingerprint) in [
+        ("redb", &journal.redb_staged),
+        ("cdfi", &journal.cdfi_staged),
+    ] {
+        validate_journal_fingerprint(fingerprint)
+            .map_err(|reason| invalid(&format!("invalid {label} fingerprint: {reason}")))?;
+    }
+    if journal.status == JournalStatus::ClaimingRecoverable && !journal.baselines.is_empty() {
+        return Err(invalid(
+            "recoverable-claim journal cannot contain dump baselines",
+        ));
+    }
+    if journal.baselines.is_empty() != journal.dump_transaction_id.is_none() {
+        return Err(invalid(
+            "dump transaction id must exist exactly for journals with dump baselines",
+        ));
+    }
+    let mut roles = std::collections::BTreeSet::new();
+    for baseline in &journal.baselines {
+        if !roles.insert(baseline.role) {
+            return Err(invalid("baseline roles must be unique"));
+        }
+        let expected_name = match baseline.role {
+            JournalBaselineRole::ConfiguredSource => "new-baseline-configured-source",
+            JournalBaselineRole::EdtPlatformDesigner => "new-baseline-edt-platform-designer",
+        };
+        if baseline.staged_name != expected_name {
+            return Err(invalid("baseline staged name does not match its role"));
+        }
+        let mut components = Path::new(&baseline.ownership_token).components();
+        if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+            || components.next().is_some()
+            || !Uuid::parse_str(&baseline.ownership_token)
+                .is_ok_and(|uuid| uuid.hyphenated().to_string() == baseline.ownership_token)
+        {
+            return Err(invalid(
+                "baseline ownership token must be one canonical UUID component",
+            ));
+        }
+        validate_journal_fingerprint(&baseline.manifest_fingerprint).map_err(|reason| {
+            invalid(&format!("invalid baseline manifest fingerprint: {reason}"))
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_journal_fingerprint(fingerprint: &FileFingerprint) -> Result<(), &'static str> {
+    if fingerprint.sha256.len() != 64
+        || !fingerprint
+            .sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err("SHA-256 must be 64 lowercase hexadecimal characters");
+    }
+    Ok(())
+}
+
 fn recover_one_transaction(
     context: &SourceSetContext,
     transaction: &Path,
@@ -921,9 +1599,30 @@ fn recover_one_transaction(
     };
     let journal: StateJournal =
         serde_json::from_slice(&bytes).map_err(|error| RuntimeStateError::InvalidJournal {
-            path: journal_path,
+            path: journal_path.clone(),
             reason: error.to_string(),
         })?;
+    validate_state_journal(&journal, &journal_path)?;
+    let generation = StateGeneration::new(journal.generation);
+    let matching_generation_visible = journal.generation != 0
+        && HashStorage::new(context.storage_path())
+            .current_generation()
+            .is_ok_and(|actual| actual == journal.generation);
+    let matching_dump_transaction = match &journal.dump_transaction_id {
+        Some(expected) => HashStorage::new(context.storage_path())
+            .current_dump_transaction_id()
+            .is_ok_and(|actual| actual.as_ref() == Some(expected)),
+        None => true,
+    };
+    let generation_visible = matching_generation_visible
+        && matching_dump_transaction
+        && same_file_identity(&context.storage_path(), &transaction.join(STAGED_REDB))?;
+    if matching_generation_visible && !generation_visible {
+        return Err(RuntimeStateError::InvalidJournal {
+            path: context.storage_path(),
+            reason: "foreign hash storage uses the pending generation".to_owned(),
+        });
+    }
     match journal.status {
         JournalStatus::ClaimingRecoverable => restore_transaction_target(
             &context.storage_path(),
@@ -932,6 +1631,15 @@ fn recover_one_transaction(
             true,
             &journal.redb_staged,
         )?,
+        JournalStatus::Prepared if generation_visible => {
+            if !same_file_identity(&context.private_cdfi_path(), &transaction.join(STAGED_CDFI))? {
+                return Err(RuntimeStateError::InvalidJournal {
+                    path: context.private_cdfi_path(),
+                    reason: "foreign CDFI prevents visible-generation recovery".to_owned(),
+                });
+            }
+            remove_baseline_ownership_markers(context, generation, &journal.baselines)?;
+        }
         JournalStatus::Prepared => {
             #[cfg(test)]
             BEFORE_REDB_ROLLBACK_HOOK.with(|cell| {
@@ -953,8 +1661,14 @@ fn recover_one_transaction(
                 journal.cdfi_existed,
                 &journal.cdfi_staged,
             )?;
+            rollback_baselines(context, generation, &journal.baselines)?;
         }
-        JournalStatus::Committed => {}
+        JournalStatus::Committed => {
+            for baseline in &journal.baselines {
+                let target = context.baseline(baseline.role.domain(), generation);
+                finalize_baseline_marker(target.path(), baseline)?;
+            }
+        }
     }
     fs::remove_dir_all(transaction)?;
     if let Some(parent) = transaction.parent() {
@@ -1132,19 +1846,21 @@ fn sync_directory(_path: &Path) -> Result<(), RuntimeStateError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        commit_designer_state, file_fingerprint, inspect_private_cdfi, lock_designer_state,
-        prepare_redb_backup, recover_designer_state, transaction_original_claim_path,
-        JournalStatus, PrivateCdfiState, StateJournal, AFTER_REDB_CLAIM_HOOK, BACKUP_CDFI,
-        BACKUP_REDB, BEFORE_REDB_CLAIM_HOOK, BEFORE_REDB_ROLLBACK_HOOK, FORCE_REDB_PUBLISH_FAILURE,
-        JOURNAL_FILE, STAGED_CDFI, STAGED_REDB,
+        commit_designer_state, commit_dump_state_with_lock, fail_next_dump_commit_after_redb,
+        file_fingerprint, inspect_private_cdfi, lock_designer_state, prepare_redb_backup,
+        recover_designer_state, set_dump_commit_crash_phase, transaction_original_claim_path,
+        DumpCommitCrashPhase, DumpStateCommitRequest, JournalStatus, PrivateCdfiState,
+        StateJournal, AFTER_REDB_CLAIM_HOOK, BACKUP_CDFI, BACKUP_REDB, BASELINE_OWNERSHIP_FILE,
+        BEFORE_BASELINE_DESTRUCTIVE_HOOK, BEFORE_REDB_CLAIM_HOOK, BEFORE_REDB_ROLLBACK_HOOK,
+        FORCE_REDB_PUBLISH_FAILURE, JOURNAL_FILE, STAGED_CDFI, STAGED_REDB,
     };
     use crate::change_detection::analyzer::{PreparedFileState, PreparedStateUpdate};
     use crate::change_detection::hash_storage::ObservedStorageState;
     use crate::change_detection::hash_storage::{HashStorage, StoredFileState};
     use crate::config::model::{BuilderBackend, InfobaseConfig, SourceFormat, SourceSetPurpose};
     use crate::domain::runtime_state::{
-        InfobaseIdentity, LogicalSourceRole, RuntimeSourceDescriptor, RuntimeSourceIdentityInputs,
-        RuntimeStateLayout,
+        BaselineRole, DumpTransactionId, InfobaseIdentity, LogicalSourceRole,
+        RuntimeSourceDescriptor, RuntimeSourceIdentityInputs, RuntimeStateLayout, StateGeneration,
     };
     use crate::domain::source_set::SourceSetContext;
     use std::collections::HashMap;
@@ -1153,6 +1869,7 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
     use tempfile::tempdir;
+    use uuid::Uuid;
 
     const VALID: &str = r#"<?xml version="1.0"?><ConfigDumpInfo version="2.17"><Metadata id="abc" configVersion="42"/></ConfigDumpInfo>"#;
 
@@ -1163,12 +1880,15 @@ mod tests {
     ) -> StateJournal {
         StateJournal {
             status: JournalStatus::Prepared,
+            generation: 99,
             redb_existed,
             cdfi_existed,
             redb_staged: file_fingerprint(&transaction.join(STAGED_REDB))
                 .expect("staged redb fingerprint"),
             cdfi_staged: file_fingerprint(&transaction.join(STAGED_CDFI))
                 .expect("staged CDFI fingerprint"),
+            baselines: Vec::new(),
+            dump_transaction_id: None,
         }
     }
 
@@ -1377,6 +2097,549 @@ mod tests {
                 generation: observed_generation,
             },
         }
+    }
+
+    fn dump_roots(root: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let configured = root.join("configured-shadow");
+        let edt = root.join("edt-platform-shadow");
+        fs::create_dir_all(&configured).expect("configured shadow");
+        fs::create_dir_all(&edt).expect("EDT platform shadow");
+        fs::write(configured.join("Configuration.xml"), b"configured-v2").expect("configured file");
+        fs::write(configured.join("ConfigDumpInfo.xml"), b"must be excluded")
+            .expect("configured CDFI sentinel");
+        fs::write(edt.join("Configuration.xml"), b"edt-platform-v2").expect("EDT file");
+        (configured, edt)
+    }
+
+    fn malicious_baseline_journal(
+        transaction: &Path,
+        staged_name: String,
+        ownership_token: String,
+    ) -> StateJournal {
+        fs::write(transaction.join(STAGED_REDB), b"staged-redb").expect("staged redb");
+        fs::write(transaction.join(STAGED_CDFI), b"staged-cdfi").expect("staged cdfi");
+        let mut journal = prepared_journal(transaction, false, false);
+        journal.generation = 2;
+        journal.baselines.push(super::JournalBaseline {
+            role: super::JournalBaselineRole::ConfiguredSource,
+            staged_name,
+            ownership_token,
+            manifest_fingerprint: file_fingerprint(&transaction.join(STAGED_CDFI))
+                .expect("fingerprint"),
+            directory_identity: None,
+        });
+        journal
+    }
+
+    #[test]
+    fn recovery_rejects_unbounded_baseline_journal_fields_before_mutation() {
+        for (staged_name, ownership_token) in [
+            (
+                "/tmp/v8-runner-external-baseline".to_owned(),
+                Uuid::new_v4().to_string(),
+            ),
+            (
+                "../external-baseline".to_owned(),
+                Uuid::new_v4().to_string(),
+            ),
+            (
+                "new-baseline-configured-source".to_owned(),
+                "../external-token".to_owned(),
+            ),
+        ] {
+            let dir = tempdir().expect("tempdir");
+            let context = context(dir.path());
+            let transaction = context.transactions_dir().join("state-malicious");
+            fs::create_dir_all(&transaction).expect("transaction");
+            let sentinel = dir.path().join("external-sentinel");
+            fs::write(&sentinel, b"preserve").expect("sentinel");
+            let journal = malicious_baseline_journal(&transaction, staged_name, ownership_token);
+            fs::write(
+                transaction.join(JOURNAL_FILE),
+                serde_json::to_vec(&journal).expect("journal"),
+            )
+            .expect("write journal");
+
+            recover_designer_state(&context).expect_err("invalid journal must fail closed");
+
+            assert_eq!(fs::read(&sentinel).expect("sentinel"), b"preserve");
+            assert!(transaction.exists());
+        }
+    }
+
+    #[test]
+    fn recovery_rejects_unknown_journal_fields_before_mutation() {
+        let dir = tempdir().expect("tempdir");
+        let context = context(dir.path());
+        let transaction = context.transactions_dir().join("state-unknown-field");
+        fs::create_dir_all(&transaction).expect("transaction");
+        fs::write(transaction.join(STAGED_REDB), b"staged-redb").expect("staged redb");
+        fs::write(transaction.join(STAGED_CDFI), b"staged-cdfi").expect("staged cdfi");
+        let mut value = serde_json::to_value(prepared_journal(&transaction, false, false))
+            .expect("journal value");
+        value
+            .as_object_mut()
+            .expect("journal object")
+            .insert("unknown".to_owned(), serde_json::json!(true));
+        fs::write(
+            transaction.join(JOURNAL_FILE),
+            serde_json::to_vec(&value).expect("journal"),
+        )
+        .expect("write journal");
+
+        recover_designer_state(&context).expect_err("unknown field must fail closed");
+
+        assert!(transaction.exists());
+    }
+
+    #[test]
+    fn dump_commit_publishes_both_baselines_cdfi_and_observation_as_one_generation() {
+        let dir = tempdir().expect("tempdir");
+        let context = context(dir.path());
+        seed_state(&context, VALID);
+        let produced = dir.path().join("produced.xml");
+        let next = r#"<ConfigDumpInfo version="2.17"><Metadata id="dump" configVersion="2"/></ConfigDumpInfo>"#;
+        fs::write(&produced, next).expect("produced CDFI");
+        let (configured, edt) = dump_roots(dir.path());
+        let lock = lock_designer_state(&context).expect("lock");
+        let transaction_id = DumpTransactionId::new();
+
+        let generation = commit_dump_state_with_lock(
+            &context,
+            &lock,
+            DumpStateCommitRequest::new(&prepared(1), &configured, &produced)
+                .with_edt_platform_designer(&edt)
+                .with_transaction_id(transaction_id.clone()),
+        )
+        .expect("dump state commit");
+
+        assert_eq!(generation, StateGeneration::new(2));
+        assert_eq!(
+            HashStorage::new(context.storage_path())
+                .current_dump_transaction_id()
+                .expect("dump transaction"),
+            Some(transaction_id)
+        );
+        assert_eq!(
+            HashStorage::new(context.storage_path())
+                .current_generation()
+                .expect("generation"),
+            2
+        );
+        assert_eq!(
+            fs::read_to_string(context.private_cdfi_path()).unwrap(),
+            next
+        );
+        for role in [
+            BaselineRole::ConfiguredSource,
+            BaselineRole::EdtPlatformDesigner,
+        ] {
+            let baseline = context.baseline(role, generation);
+            assert!(baseline.path().join("manifest.json").is_file());
+            assert!(!baseline.path().join("files/ConfigDumpInfo.xml").exists());
+        }
+    }
+
+    #[test]
+    fn dump_commit_returns_visible_generation_after_forward_recovery() {
+        let dir = tempdir().expect("tempdir");
+        let context = context(dir.path());
+        seed_state(&context, VALID);
+        let produced = dir.path().join("produced.xml");
+        fs::write(
+            &produced,
+            r#"<ConfigDumpInfo version="2.17"><Metadata id="recovered" configVersion="2"/></ConfigDumpInfo>"#,
+        )
+        .expect("produced CDFI");
+        let (configured, edt) = dump_roots(dir.path());
+        let lock = lock_designer_state(&context).expect("lock");
+        fail_next_dump_commit_after_redb();
+
+        let generation = commit_dump_state_with_lock(
+            &context,
+            &lock,
+            DumpStateCommitRequest::new(&prepared(1), &configured, &produced)
+                .with_edt_platform_designer(&edt),
+        )
+        .expect("forward recovery made the next generation coherent");
+
+        assert_eq!(generation, StateGeneration::new(2));
+        assert_eq!(
+            HashStorage::new(context.storage_path())
+                .current_generation()
+                .expect("visible generation"),
+            2
+        );
+    }
+
+    #[test]
+    fn dump_commit_recovery_never_exposes_a_mixed_generation() {
+        for phase in [
+            DumpCommitCrashPhase::AfterBaselines,
+            DumpCommitCrashPhase::AfterCdfi,
+            DumpCommitCrashPhase::AfterRedb,
+        ] {
+            let dir = tempdir().expect("tempdir");
+            let context = context(dir.path());
+            seed_state(&context, VALID);
+            let produced = dir.path().join("produced.xml");
+            fs::write(
+                &produced,
+                r#"<ConfigDumpInfo version="2.17"><Metadata id="crash" configVersion="2"/></ConfigDumpInfo>"#,
+            )
+            .expect("produced CDFI");
+            let (configured, edt) = dump_roots(dir.path());
+            let lock = lock_designer_state(&context).expect("lock");
+            set_dump_commit_crash_phase(phase);
+
+            commit_dump_state_with_lock(
+                &context,
+                &lock,
+                DumpStateCommitRequest::new(&prepared(1), &configured, &produced)
+                    .with_edt_platform_designer(&edt),
+            )
+            .expect_err("injected crash");
+            drop(lock);
+            recover_designer_state(&context).expect("restart recovery");
+
+            let observed = HashStorage::new(context.storage_path())
+                .current_generation()
+                .expect("generation after recovery");
+            let next = StateGeneration::new(2);
+            if phase == DumpCommitCrashPhase::AfterRedb {
+                assert_eq!(observed, 2);
+                assert!(context
+                    .baseline(BaselineRole::ConfiguredSource, next)
+                    .path()
+                    .is_dir());
+                assert!(context
+                    .baseline(BaselineRole::EdtPlatformDesigner, next)
+                    .path()
+                    .is_dir());
+                assert!(fs::read_to_string(context.private_cdfi_path())
+                    .expect("new CDFI")
+                    .contains("id=\"crash\""));
+            } else {
+                assert_eq!(observed, 1);
+                assert!(!context
+                    .baseline(BaselineRole::ConfiguredSource, next)
+                    .path()
+                    .exists());
+                assert!(!context
+                    .baseline(BaselineRole::EdtPlatformDesigner, next)
+                    .path()
+                    .exists());
+                assert_eq!(
+                    fs::read_to_string(context.private_cdfi_path()).unwrap(),
+                    VALID
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dump_commit_redb_failure_rolls_back_all_previously_published_artifacts() {
+        let dir = tempdir().expect("tempdir");
+        let context = context(dir.path());
+        seed_state(&context, VALID);
+        let produced = dir.path().join("produced.xml");
+        fs::write(
+            &produced,
+            r#"<ConfigDumpInfo version="2.17"><Metadata id="failed" configVersion="2"/></ConfigDumpInfo>"#,
+        )
+        .expect("produced CDFI");
+        let (configured, edt) = dump_roots(dir.path());
+        let lock = lock_designer_state(&context).expect("lock");
+        FORCE_REDB_PUBLISH_FAILURE.with(|forced| forced.set(true));
+
+        commit_dump_state_with_lock(
+            &context,
+            &lock,
+            DumpStateCommitRequest::new(&prepared(1), &configured, &produced)
+                .with_edt_platform_designer(&edt),
+        )
+        .expect_err("forced redb failure");
+
+        assert_eq!(
+            HashStorage::new(context.storage_path())
+                .current_generation()
+                .expect("old generation"),
+            1
+        );
+        assert_eq!(
+            fs::read_to_string(context.private_cdfi_path()).unwrap(),
+            VALID
+        );
+        let next = StateGeneration::new(2);
+        assert!(!context
+            .baseline(BaselineRole::ConfiguredSource, next)
+            .path()
+            .exists());
+        assert!(!context
+            .baseline(BaselineRole::EdtPlatformDesigner, next)
+            .path()
+            .exists());
+    }
+
+    #[test]
+    fn recovery_never_deletes_a_foreign_baseline() {
+        let dir = tempdir().expect("tempdir");
+        let context = context(dir.path());
+        seed_state(&context, VALID);
+        let produced = dir.path().join("produced.xml");
+        fs::write(
+            &produced,
+            r#"<ConfigDumpInfo version="2.17"><Metadata id="foreign" configVersion="2"/></ConfigDumpInfo>"#,
+        )
+        .expect("produced CDFI");
+        let (configured, _) = dump_roots(dir.path());
+        let lock = lock_designer_state(&context).expect("lock");
+        set_dump_commit_crash_phase(DumpCommitCrashPhase::AfterBaselines);
+        commit_dump_state_with_lock(
+            &context,
+            &lock,
+            DumpStateCommitRequest::new(&prepared(1), &configured, &produced),
+        )
+        .expect_err("injected crash");
+        drop(lock);
+        let baseline = context.baseline(BaselineRole::ConfiguredSource, StateGeneration::new(2));
+        fs::write(
+            baseline.path().join(BASELINE_OWNERSHIP_FILE),
+            b"foreign-owner",
+        )
+        .expect("replace ownership marker");
+
+        recover_designer_state(&context).expect_err("foreign baseline blocks rollback");
+
+        assert!(baseline.path().is_dir());
+        assert_eq!(
+            fs::read(baseline.path().join(BASELINE_OWNERSHIP_FILE)).unwrap(),
+            b"foreign-owner"
+        );
+        assert_eq!(
+            HashStorage::new(context.storage_path())
+                .current_generation()
+                .expect("old generation"),
+            1
+        );
+    }
+
+    #[test]
+    fn recovery_never_deletes_foreign_content_added_to_an_owned_baseline() {
+        let dir = tempdir().expect("tempdir");
+        let context = context(dir.path());
+        seed_state(&context, VALID);
+        let produced = dir.path().join("produced.xml");
+        fs::write(&produced, VALID).expect("produced CDFI");
+        let (configured, _) = dump_roots(dir.path());
+        let lock = lock_designer_state(&context).expect("lock");
+        set_dump_commit_crash_phase(DumpCommitCrashPhase::AfterBaselines);
+        commit_dump_state_with_lock(
+            &context,
+            &lock,
+            DumpStateCommitRequest::new(&prepared(1), &configured, &produced),
+        )
+        .expect_err("injected crash");
+        drop(lock);
+        let baseline = context.baseline(BaselineRole::ConfiguredSource, StateGeneration::new(2));
+        fs::write(baseline.path().join("foreign.txt"), b"foreign").expect("foreign file");
+
+        recover_designer_state(&context).expect_err("foreign baseline content blocks rollback");
+
+        assert_eq!(
+            fs::read(baseline.path().join("foreign.txt")).unwrap(),
+            b"foreign"
+        );
+        assert!(baseline.path().is_dir());
+    }
+
+    #[test]
+    fn recovery_never_deletes_an_owned_baseline_with_modified_managed_content() {
+        let dir = tempdir().expect("tempdir");
+        let context = context(dir.path());
+        seed_state(&context, VALID);
+        let produced = dir.path().join("produced.xml");
+        fs::write(&produced, VALID).expect("produced CDFI");
+        let (configured, _) = dump_roots(dir.path());
+        let lock = lock_designer_state(&context).expect("lock");
+        set_dump_commit_crash_phase(DumpCommitCrashPhase::AfterBaselines);
+        commit_dump_state_with_lock(
+            &context,
+            &lock,
+            DumpStateCommitRequest::new(&prepared(1), &configured, &produced),
+        )
+        .expect_err("injected crash");
+        drop(lock);
+        let baseline = context.baseline(BaselineRole::ConfiguredSource, StateGeneration::new(2));
+        let managed = baseline.path().join("files/Configuration.xml");
+        fs::write(&managed, b"foreign").expect("modify managed baseline file");
+
+        recover_designer_state(&context).expect_err("modified baseline blocks rollback");
+
+        assert_eq!(fs::read(managed).unwrap(), b"foreign");
+        assert!(baseline.path().is_dir());
+    }
+
+    #[test]
+    fn recovery_never_deletes_a_replaced_baseline_with_a_copied_marker() {
+        let dir = tempdir().expect("tempdir");
+        let context = context(dir.path());
+        seed_state(&context, VALID);
+        let produced = dir.path().join("produced.xml");
+        fs::write(&produced, VALID).expect("produced CDFI");
+        let (configured, _) = dump_roots(dir.path());
+        let lock = lock_designer_state(&context).expect("lock");
+        set_dump_commit_crash_phase(DumpCommitCrashPhase::AfterBaselines);
+        commit_dump_state_with_lock(
+            &context,
+            &lock,
+            DumpStateCommitRequest::new(&prepared(1), &configured, &produced),
+        )
+        .expect_err("injected crash");
+        drop(lock);
+        let baseline = context.baseline(BaselineRole::ConfiguredSource, StateGeneration::new(2));
+        let displaced = baseline.path().with_extension("displaced");
+        fs::rename(baseline.path(), &displaced).expect("displace owned baseline");
+        fs::create_dir_all(baseline.path().join("files")).expect("replacement baseline");
+        for relative in [
+            "manifest.json",
+            "files/Configuration.xml",
+            BASELINE_OWNERSHIP_FILE,
+        ] {
+            fs::copy(displaced.join(relative), baseline.path().join(relative))
+                .expect("copy baseline artifact");
+        }
+
+        recover_designer_state(&context).expect_err("replaced baseline blocks rollback");
+
+        assert!(baseline.path().is_dir());
+        assert!(baseline.path().join("files/Configuration.xml").is_file());
+    }
+
+    #[test]
+    fn rollback_claims_owned_baseline_before_a_foreign_replacement_can_appear() {
+        let dir = tempdir().expect("tempdir");
+        let context = context(dir.path());
+        seed_state(&context, VALID);
+        let produced = dir.path().join("produced.xml");
+        fs::write(&produced, VALID).expect("produced CDFI");
+        let (configured, _) = dump_roots(dir.path());
+        let lock = lock_designer_state(&context).expect("lock");
+        set_dump_commit_crash_phase(DumpCommitCrashPhase::AfterBaselines);
+        commit_dump_state_with_lock(
+            &context,
+            &lock,
+            DumpStateCommitRequest::new(&prepared(1), &configured, &produced),
+        )
+        .expect_err("injected crash");
+        drop(lock);
+        let baseline = context.baseline(BaselineRole::ConfiguredSource, StateGeneration::new(2));
+        let target = baseline.path().to_path_buf();
+        let displaced = target.with_extension("hook-displaced");
+        BEFORE_BASELINE_DESTRUCTIVE_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                if target.exists() {
+                    fs::rename(&target, displaced).expect("displace checked baseline");
+                }
+                fs::create_dir_all(&target).expect("foreign replacement");
+                fs::write(target.join("foreign.txt"), b"foreign").expect("foreign content");
+            }));
+        });
+
+        recover_designer_state(&context).expect("owned claim rollback");
+
+        assert_eq!(
+            fs::read(baseline.path().join("foreign.txt")).unwrap(),
+            b"foreign"
+        );
+    }
+
+    #[test]
+    fn recovery_finishes_baseline_marker_removal_after_crash() {
+        let dir = tempdir().expect("tempdir");
+        let context = context(dir.path());
+        seed_state(&context, VALID);
+        let produced = dir.path().join("produced.xml");
+        fs::write(&produced, VALID).expect("produced CDFI");
+        let (configured, _) = dump_roots(dir.path());
+        let lock = lock_designer_state(&context).expect("lock");
+        set_dump_commit_crash_phase(DumpCommitCrashPhase::AfterBaselineMarkerRemoval);
+
+        commit_dump_state_with_lock(
+            &context,
+            &lock,
+            DumpStateCommitRequest::new(&prepared(1), &configured, &produced),
+        )
+        .expect_err("injected marker-removal crash");
+        drop(lock);
+        recover_designer_state(&context).expect("restart recovery");
+
+        let baseline = context.baseline(BaselineRole::ConfiguredSource, StateGeneration::new(2));
+        assert!(baseline.path().is_dir());
+        assert!(!baseline.path().join(BASELINE_OWNERSHIP_FILE).exists());
+    }
+
+    #[test]
+    fn recovery_finishes_partially_removed_owned_rollback_claim() {
+        let dir = tempdir().expect("tempdir");
+        let context = context(dir.path());
+        seed_state(&context, VALID);
+        let produced = dir.path().join("produced.xml");
+        fs::write(&produced, VALID).expect("produced CDFI");
+        let (configured, _) = dump_roots(dir.path());
+        let lock = lock_designer_state(&context).expect("lock");
+        set_dump_commit_crash_phase(DumpCommitCrashPhase::AfterBaselines);
+        commit_dump_state_with_lock(
+            &context,
+            &lock,
+            DumpStateCommitRequest::new(&prepared(1), &configured, &produced),
+        )
+        .expect_err("injected baseline crash");
+        drop(lock);
+        let baseline = context.baseline(BaselineRole::ConfiguredSource, StateGeneration::new(2));
+        let token = String::from_utf8(
+            fs::read(baseline.path().join(BASELINE_OWNERSHIP_FILE)).expect("ownership token"),
+        )
+        .expect("utf8 token");
+        let claim = baseline
+            .path()
+            .with_file_name(format!(".baseline-rollback-{token}"));
+        fs::rename(baseline.path(), &claim).expect("persist rollback claim");
+        fs::remove_file(claim.join("files/Configuration.xml")).expect("partial cleanup");
+
+        recover_designer_state(&context).expect("resume partial rollback cleanup");
+
+        assert!(!claim.exists());
+        assert!(!baseline.path().exists());
+    }
+
+    #[test]
+    fn dump_commit_does_not_replace_an_empty_foreign_baseline_directory() {
+        let dir = tempdir().expect("tempdir");
+        let context = context(dir.path());
+        seed_state(&context, VALID);
+        let produced = dir.path().join("produced.xml");
+        fs::write(&produced, VALID).expect("produced CDFI");
+        let (configured, _) = dump_roots(dir.path());
+        let foreign = context.baseline(BaselineRole::ConfiguredSource, StateGeneration::new(2));
+        fs::create_dir_all(foreign.path()).expect("empty foreign baseline");
+        let lock = lock_designer_state(&context).expect("lock");
+
+        commit_dump_state_with_lock(
+            &context,
+            &lock,
+            DumpStateCommitRequest::new(&prepared(1), &configured, &produced),
+        )
+        .expect_err("foreign target must reject publication");
+
+        assert!(foreign.path().is_dir());
+        assert_eq!(fs::read_dir(foreign.path()).unwrap().count(), 0);
+        assert_eq!(
+            HashStorage::new(context.storage_path())
+                .current_generation()
+                .expect("old generation"),
+            1
+        );
     }
 
     #[test]

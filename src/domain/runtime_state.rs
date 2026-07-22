@@ -1,6 +1,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -9,6 +10,58 @@ use crate::support::connection_args::split_v8_arg_string;
 use crate::support::path::nearest_existing_canonical_path;
 
 const STATE_NAMESPACE: &str = "v8-runner/runtime-state/v1";
+
+/// Durable identity tying one source publication to its exact runtime-state commit.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct DumpTransactionId(String);
+
+impl DumpTransactionId {
+    pub(crate) fn new() -> Self {
+        Self(uuid::Uuid::new_v4().hyphenated().to_string())
+    }
+
+    pub(crate) fn from_u128(value: u128) -> Self {
+        Self(uuid::Uuid::from_u128(value).hyphenated().to_string())
+    }
+
+    pub(crate) fn as_u128(&self) -> u128 {
+        uuid::Uuid::parse_str(&self.0)
+            .expect("DumpTransactionId invariant")
+            .as_u128()
+    }
+}
+
+impl fmt::Display for DumpTransactionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl Serialize for DumpTransactionId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for DumpTransactionId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let uuid = uuid::Uuid::parse_str(&value).map_err(serde::de::Error::custom)?;
+        let canonical = uuid.hyphenated().to_string();
+        if canonical != value {
+            return Err(serde::de::Error::custom(
+                "dump transaction id must be a canonical UUID",
+            ));
+        }
+        Ok(Self(canonical))
+    }
+}
 
 /// A normalized, secret-free identity of one target infobase.
 #[derive(Clone, PartialEq, Eq)]
@@ -322,15 +375,22 @@ impl RuntimeSourceState {
     }
 
     #[allow(dead_code)] // Typed handle intentionally lands before its persistence implementation.
-    pub fn ib_baseline(&self, generation: StateGeneration) -> IbBaseline {
+    pub fn baseline(&self, role: BaselineRole, generation: StateGeneration) -> IbBaseline {
         IbBaseline {
             path: self
                 .state_dir
                 .join("generations")
                 .join(generation.value.to_string())
-                .join("ib-baseline"),
+                .join("ib-baseline")
+                .join(role.label()),
             generation,
+            role,
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn ib_baseline(&self, generation: StateGeneration) -> IbBaseline {
+        self.baseline(BaselineRole::ConfiguredSource, generation)
     }
 
     #[allow(dead_code)] // Typed handle intentionally lands before its persistence implementation.
@@ -353,6 +413,24 @@ pub struct StateGeneration {
     value: u64,
 }
 
+/// Semantic origin of a complete private baseline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaselineRole {
+    /// The platform dump corresponding to the configured source tree.
+    ConfiguredSource,
+    /// The intermediate Designer tree produced for an EDT source set.
+    EdtPlatformDesigner,
+}
+
+impl BaselineRole {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ConfiguredSource => "configured-source",
+            Self::EdtPlatformDesigner => "edt-platform-designer",
+        }
+    }
+}
+
 impl StateGeneration {
     #[allow(dead_code)]
     pub const fn new(value: u64) -> Self {
@@ -371,6 +449,7 @@ impl StateGeneration {
 pub struct IbBaseline {
     path: PathBuf,
     generation: StateGeneration,
+    role: BaselineRole,
 }
 
 impl IbBaseline {
@@ -382,6 +461,11 @@ impl IbBaseline {
     #[allow(dead_code)]
     pub const fn generation(&self) -> StateGeneration {
         self.generation
+    }
+
+    #[cfg(test)]
+    pub const fn role(&self) -> BaselineRole {
+        self.role
     }
 }
 
@@ -557,8 +641,8 @@ fn sanitize_source_set(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        InfobaseIdentity, LogicalSourceRole, RuntimeSourceDescriptor, RuntimeSourceIdentityInputs,
-        RuntimeStateLayout, StateGeneration,
+        BaselineRole, InfobaseIdentity, LogicalSourceRole, RuntimeSourceDescriptor,
+        RuntimeSourceIdentityInputs, RuntimeStateLayout, StateGeneration,
     };
     use crate::config::model::{
         BuilderBackend, InfobaseConfig, InfobaseDbmsConfig, SourceFormat, SourceSetPurpose,
@@ -1090,5 +1174,37 @@ mod tests {
         assert_ne!(baseline_path(&baseline), observation_path(&observation));
         assert!(baseline.path().starts_with(state.state_dir()));
         assert!(observation.path().starts_with(state.state_dir()));
+    }
+
+    #[test]
+    fn baseline_roles_are_distinct_within_one_generation() {
+        let dir = tempdir().expect("tempdir");
+        let layout = RuntimeStateLayout::new(
+            dir.path().join("work"),
+            InfobaseIdentity::normalize(&file_infobase(format!(
+                "File={}",
+                dir.path().join("ib").display()
+            )))
+            .expect("identity"),
+        )
+        .expect("layout");
+        let descriptor = RuntimeSourceDescriptor::new(RuntimeSourceIdentityInputs {
+            configured_source_identity: Path::new("source"),
+            source_root: &dir.path().join("source"),
+            purpose: SourceSetPurpose::Configuration,
+            format: SourceFormat::Edt,
+            backend: BuilderBackend::Designer,
+            logical_role: LogicalSourceRole::EdtSource,
+        })
+        .expect("descriptor");
+        let state = layout.source_state("main", &descriptor);
+        let generation = StateGeneration::new(5);
+        let configured = state.baseline(BaselineRole::ConfiguredSource, generation);
+        let platform = state.baseline(BaselineRole::EdtPlatformDesigner, generation);
+
+        assert_eq!(configured.role(), BaselineRole::ConfiguredSource);
+        assert_eq!(platform.role(), BaselineRole::EdtPlatformDesigner);
+        assert_ne!(configured.path(), platform.path());
+        assert_eq!(configured.generation(), platform.generation());
     }
 }

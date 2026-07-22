@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::domain::runtime_state::DumpTransactionId;
+
 #[cfg(test)]
 thread_local! {
     static BEFORE_RECOVERY_CLAIM_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
@@ -35,6 +37,8 @@ pub const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 pub const META_KEY_WATERMARK: &str = "watermark";
 /// Metadata key storing optimistic-lock generation.
 pub const META_KEY_GENERATION: &str = "generation";
+const META_KEY_DUMP_TRANSACTION_HI: &str = "dump_transaction_hi";
+const META_KEY_DUMP_TRANSACTION_LO: &str = "dump_transaction_lo";
 
 /// Persisted state for one file entry inside the storage snapshot.
 #[derive(Debug, Clone)]
@@ -434,6 +438,10 @@ impl HashStorage {
                 .map_err(|e| map_storage_error(&self.path, "write watermark", e))?;
             meta.insert(META_KEY_GENERATION, expected_generation + 1)
                 .map_err(|e| map_storage_error(&self.path, "write generation", e))?;
+            meta.remove(META_KEY_DUMP_TRANSACTION_HI)
+                .map_err(|e| map_storage_error(&self.path, "clear dump transaction", e))?;
+            meta.remove(META_KEY_DUMP_TRANSACTION_LO)
+                .map_err(|e| map_storage_error(&self.path, "clear dump transaction", e))?;
         }
 
         tx.commit().map_err(|e| map_commit_error(&self.path, e))?;
@@ -449,6 +457,32 @@ impl HashStorage {
         snapshot: &HashMap<String, StoredFileState>,
         watermark: u64,
         generation: u64,
+    ) -> Result<(), StorageError> {
+        Self::create_replacement_with_dump_transaction(path, snapshot, watermark, generation, None)
+    }
+
+    pub(crate) fn create_dump_replacement(
+        path: PathBuf,
+        snapshot: &HashMap<String, StoredFileState>,
+        watermark: u64,
+        generation: u64,
+        transaction_id: &DumpTransactionId,
+    ) -> Result<(), StorageError> {
+        Self::create_replacement_with_dump_transaction(
+            path,
+            snapshot,
+            watermark,
+            generation,
+            Some(transaction_id),
+        )
+    }
+
+    fn create_replacement_with_dump_transaction(
+        path: PathBuf,
+        snapshot: &HashMap<String, StoredFileState>,
+        watermark: u64,
+        generation: u64,
+        dump_transaction_id: Option<&DumpTransactionId>,
     ) -> Result<(), StorageError> {
         let storage = Self::new(path);
         storage.ensure_parent_dir()?;
@@ -474,6 +508,19 @@ impl HashStorage {
             metadata
                 .insert(META_KEY_GENERATION, generation)
                 .map_err(|error| map_storage_error(&storage.path, "write generation", error))?;
+            if let Some(transaction_id) = dump_transaction_id {
+                let value = transaction_id.as_u128();
+                metadata
+                    .insert(META_KEY_DUMP_TRANSACTION_HI, (value >> 64) as u64)
+                    .map_err(|error| {
+                        map_storage_error(&storage.path, "write dump transaction", error)
+                    })?;
+                metadata
+                    .insert(META_KEY_DUMP_TRANSACTION_LO, value as u64)
+                    .map_err(|error| {
+                        map_storage_error(&storage.path, "write dump transaction", error)
+                    })?;
+            }
         }
         transaction
             .commit()
@@ -486,6 +533,42 @@ impl HashStorage {
             HashStorageLoad::MissingPath | HashStorageLoad::ExistingUninitialized => 0,
             HashStorageLoad::Initialized(snapshot) => snapshot.generation,
         })
+    }
+
+    pub(crate) fn current_dump_transaction_id(
+        &self,
+    ) -> Result<Option<DumpTransactionId>, StorageError> {
+        let database = match Database::open(&self.path) {
+            Ok(database) => database,
+            Err(_error) if !self.path.exists() => return Ok(None),
+            Err(error) => return Err(map_database_error(&self.path, error)),
+        };
+        let transaction = database
+            .begin_read()
+            .map_err(|error| map_tx_error(&self.path, error, "begin dump transaction read"))?;
+        let metadata = match transaction.open_table(META) {
+            Ok(metadata) => metadata,
+            Err(TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(error) => return Err(map_table_error(&self.path, error)),
+        };
+        let high = metadata
+            .get(META_KEY_DUMP_TRANSACTION_HI)
+            .map_err(|error| map_storage_error(&self.path, "read dump transaction", error))?
+            .map(|value| value.value());
+        let low = metadata
+            .get(META_KEY_DUMP_TRANSACTION_LO)
+            .map_err(|error| map_storage_error(&self.path, "read dump transaction", error))?
+            .map(|value| value.value());
+        match (high, low) {
+            (None, None) => Ok(None),
+            (Some(high), Some(low)) => Ok(Some(DumpTransactionId::from_u128(
+                (u128::from(high) << 64) | u128::from(low),
+            ))),
+            _ => Err(StorageError::Recoverable {
+                path: self.path.clone(),
+                reason: "dump transaction metadata is incomplete".to_owned(),
+            }),
+        }
     }
 
     /// Read the optimistic-lock generation even when snapshot tables are recoverably incomplete.

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::domain::runtime_state::RuntimeSourceState;
+use crate::domain::runtime_state::{BaselineRole, IbBaseline, RuntimeSourceState, StateGeneration};
 
 /// Runtime context for one logical source-set.
 #[derive(Debug, Clone)]
@@ -60,6 +60,11 @@ impl SourceSetContext {
     /// Private platform-owned `ConfigDumpInfo.xml` for this source view.
     pub(crate) fn private_cdfi_path(&self) -> PathBuf {
         self.runtime_state.private_cdfi_path()
+    }
+
+    /// Complete private baseline for a semantic role and state generation.
+    pub(crate) fn baseline(&self, role: BaselineRole, generation: StateGeneration) -> IbBaseline {
+        self.runtime_state.baseline(role, generation)
     }
 
     /// Owned transaction directory for this source view.
