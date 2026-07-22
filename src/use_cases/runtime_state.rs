@@ -292,11 +292,7 @@ const FULL_REBUILD_MARKER: &str = "full-rebuild-required";
 pub(crate) fn designer_full_rebuild_required(
     context: &SourceSetContext,
 ) -> Result<bool, RuntimeStateError> {
-    context
-        .transactions_dir()
-        .parent()
-        .map(|state_dir| state_dir.join(FULL_REBUILD_MARKER))
-        .unwrap_or_else(|| context.transactions_dir().join(FULL_REBUILD_MARKER))
+    full_rebuild_marker_path(context)
         .try_exists()
         .map_err(RuntimeStateError::TransactionIo)
 }
@@ -304,11 +300,7 @@ pub(crate) fn designer_full_rebuild_required(
 pub(crate) fn require_designer_full_rebuild(
     context: &SourceSetContext,
 ) -> Result<(), RuntimeStateError> {
-    let marker = context
-        .transactions_dir()
-        .parent()
-        .map(|state_dir| state_dir.join(FULL_REBUILD_MARKER))
-        .unwrap_or_else(|| context.transactions_dir().join(FULL_REBUILD_MARKER));
+    let marker = full_rebuild_marker_path(context);
     if let Some(parent) = marker.parent() {
         ensure_directory_synced(parent)?;
     }
@@ -683,11 +675,7 @@ pub(crate) fn cleanup_orphan_designer_transactions(
 }
 
 fn clear_full_rebuild_marker(context: &SourceSetContext) -> Result<(), RuntimeStateError> {
-    let marker = context
-        .transactions_dir()
-        .parent()
-        .map(|state_dir| state_dir.join(FULL_REBUILD_MARKER))
-        .unwrap_or_else(|| context.transactions_dir().join(FULL_REBUILD_MARKER));
+    let marker = full_rebuild_marker_path(context);
     match fs::remove_file(&marker) {
         Ok(()) => {
             if let Some(parent) = marker.parent() {
@@ -698,6 +686,14 @@ fn clear_full_rebuild_marker(context: &SourceSetContext) -> Result<(), RuntimeSt
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
         Err(error) => Err(RuntimeStateError::TransactionIo(error)),
     }
+}
+
+fn full_rebuild_marker_path(context: &SourceSetContext) -> PathBuf {
+    context
+        .transactions_dir()
+        .parent()
+        .map(|state_dir| state_dir.join(FULL_REBUILD_MARKER))
+        .unwrap_or_else(|| context.transactions_dir().join(FULL_REBUILD_MARKER))
 }
 
 fn verify_storage_observation(
@@ -1604,14 +1600,19 @@ fn recover_one_transaction(
         })?;
     validate_state_journal(&journal, &journal_path)?;
     let generation = StateGeneration::new(journal.generation);
-    let matching_generation_visible = journal.generation != 0
-        && HashStorage::new(context.storage_path())
-            .current_generation()
-            .is_ok_and(|actual| actual == journal.generation);
+    let matching_generation_visible = if journal.generation == 0 {
+        false
+    } else {
+        recovery_observation_matches(
+            HashStorage::new(context.storage_path()).current_generation(),
+            |actual| actual == journal.generation,
+        )?
+    };
     let matching_dump_transaction = match &journal.dump_transaction_id {
-        Some(expected) => HashStorage::new(context.storage_path())
-            .current_dump_transaction_id()
-            .is_ok_and(|actual| actual.as_ref() == Some(expected)),
+        Some(expected) => recovery_observation_matches(
+            HashStorage::new(context.storage_path()).current_dump_transaction_id(),
+            |actual| actual.as_ref() == Some(expected),
+        )?,
         None => true,
     };
     let generation_visible = matching_generation_visible
@@ -1675,6 +1676,17 @@ fn recover_one_transaction(
         sync_directory(parent)?;
     }
     Ok(())
+}
+
+fn recovery_observation_matches<T>(
+    observation: Result<T, StorageError>,
+    predicate: impl FnOnce(T) -> bool,
+) -> Result<bool, RuntimeStateError> {
+    match observation {
+        Ok(value) => Ok(predicate(value)),
+        Err(error) if error.is_recoverable() => Ok(false),
+        Err(error) => Err(RuntimeStateError::Storage(error)),
+    }
 }
 
 fn restore_transaction_target(
@@ -1850,9 +1862,10 @@ mod tests {
         file_fingerprint, inspect_private_cdfi, lock_designer_state, prepare_redb_backup,
         recover_designer_state, set_dump_commit_crash_phase, transaction_original_claim_path,
         DumpCommitCrashPhase, DumpStateCommitRequest, JournalStatus, PrivateCdfiState,
-        StateJournal, AFTER_REDB_CLAIM_HOOK, BACKUP_CDFI, BACKUP_REDB, BASELINE_OWNERSHIP_FILE,
-        BEFORE_BASELINE_DESTRUCTIVE_HOOK, BEFORE_REDB_CLAIM_HOOK, BEFORE_REDB_ROLLBACK_HOOK,
-        FORCE_REDB_PUBLISH_FAILURE, JOURNAL_FILE, STAGED_CDFI, STAGED_REDB,
+        RuntimeStateError, StateJournal, AFTER_REDB_CLAIM_HOOK, BACKUP_CDFI, BACKUP_REDB,
+        BASELINE_OWNERSHIP_FILE, BEFORE_BASELINE_DESTRUCTIVE_HOOK, BEFORE_REDB_CLAIM_HOOK,
+        BEFORE_REDB_ROLLBACK_HOOK, FORCE_REDB_PUBLISH_FAILURE, JOURNAL_FILE, STAGED_CDFI,
+        STAGED_REDB,
     };
     use crate::change_detection::analyzer::{PreparedFileState, PreparedStateUpdate};
     use crate::change_detection::hash_storage::ObservedStorageState;
@@ -2897,6 +2910,37 @@ mod tests {
             old_cdfi
         );
         assert!(!transaction.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_preserves_journal_when_storage_lookup_hard_fails() {
+        let dir = tempdir().expect("tempdir");
+        let context = context(dir.path());
+        let transaction = context.transactions_dir().join("state-hard-lookup");
+        fs::create_dir_all(&transaction).expect("transaction");
+        fs::write(transaction.join(STAGED_REDB), b"staged-redb").expect("staged redb");
+        fs::write(transaction.join(STAGED_CDFI), b"staged-cdfi").expect("staged cdfi");
+        fs::write(
+            transaction.join(JOURNAL_FILE),
+            serde_json::to_vec(&prepared_journal(&transaction, false, false)).expect("journal"),
+        )
+        .expect("journal file");
+        std::os::unix::fs::symlink(context.storage_path(), context.storage_path())
+            .expect("self symlink");
+
+        let error = recover_designer_state(&context).expect_err("hard lookup must fail closed");
+
+        assert!(matches!(
+            error,
+            RuntimeStateError::Storage(
+                crate::change_detection::hash_storage::StorageError::Hard { .. }
+            )
+        ));
+        assert!(transaction.exists());
+        assert!(transaction.join(JOURNAL_FILE).exists());
+        assert!(transaction.join(STAGED_REDB).exists());
+        assert!(transaction.join(STAGED_CDFI).exists());
     }
 
     #[test]

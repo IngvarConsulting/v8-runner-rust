@@ -540,8 +540,11 @@ impl HashStorage {
     ) -> Result<Option<DumpTransactionId>, StorageError> {
         let database = match Database::open(&self.path) {
             Ok(database) => database,
-            Err(_error) if !self.path.exists() => return Ok(None),
-            Err(error) => return Err(map_database_error(&self.path, error)),
+            Err(database_error) => match self.path.try_exists() {
+                Ok(false) => return Ok(None),
+                Ok(true) => return Err(map_database_error(&self.path, database_error)),
+                Err(error) => return Err(map_filesystem_lookup_error(&self.path, error)),
+            },
         };
         let transaction = database
             .begin_read()
@@ -1243,6 +1246,19 @@ mod tests {
 
         assert!(matches!(
             HashStorage::new(path).load_state(),
+            Err(StorageError::Hard { .. })
+        ));
+    }
+
+    #[test]
+    fn dump_transaction_lookup_errors_are_hard_instead_of_missing() {
+        let dir = tempdir().expect("tempdir");
+        let parent_file = dir.path().join("not-a-directory");
+        fs::write(&parent_file, b"file").expect("parent file");
+        let path = parent_file.join("state.redb");
+
+        assert!(matches!(
+            HashStorage::new(path).current_dump_transaction_id(),
             Err(StorageError::Hard { .. })
         ));
     }

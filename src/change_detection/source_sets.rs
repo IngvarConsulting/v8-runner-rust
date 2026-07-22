@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::config::model::{AppConfig, SourceFormat};
+use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig};
 use crate::domain::runtime_state::{
     InfobaseIdentity, LogicalSourceRole, RuntimeSourceDescriptor, RuntimeSourceIdentityInputs,
     RuntimeStateError, RuntimeStateLayout,
@@ -47,17 +47,7 @@ impl<'a> SourceSetsService<'a> {
                     } else {
                         base_path.join(&ss.path)
                     };
-                    let descriptor = RuntimeSourceDescriptor::new(RuntimeSourceIdentityInputs {
-                        configured_source_identity: &ss.path,
-                        source_root: &path,
-                        purpose: ss.purpose,
-                        format: self.config.format,
-                        backend: self.config.builder,
-                        logical_role: LogicalSourceRole::DesignerSource,
-                    })?;
-                    let state = self.state_layout.source_state(&ss.name, &descriptor);
-                    Ok(SourceSetContext::new(&ss.name, path, state)
-                        .with_excluded_roots(vec![work_path.clone()]))
+                    self.build_context(ss, path, LogicalSourceRole::DesignerSource, &work_path)
                 })
                 .collect(),
 
@@ -68,17 +58,7 @@ impl<'a> SourceSetsService<'a> {
                 .map(|ss| {
                     // Generated Designer copy lives at workPath/designer/<name>/
                     let path = work_path.join("designer").join(&ss.name);
-                    let descriptor = RuntimeSourceDescriptor::new(RuntimeSourceIdentityInputs {
-                        configured_source_identity: &ss.path,
-                        source_root: &path,
-                        purpose: ss.purpose,
-                        format: self.config.format,
-                        backend: self.config.builder,
-                        logical_role: LogicalSourceRole::DesignerSource,
-                    })?;
-                    let state = self.state_layout.source_state(&ss.name, &descriptor);
-                    Ok(SourceSetContext::new(&ss.name, path, state)
-                        .with_excluded_roots(vec![work_path.clone()]))
+                    self.build_context(ss, path, LogicalSourceRole::DesignerSource, &work_path)
                 })
                 .collect(),
         }
@@ -100,19 +80,31 @@ impl<'a> SourceSetsService<'a> {
                 } else {
                     base_path.join(&ss.path)
                 };
-                let descriptor = RuntimeSourceDescriptor::new(RuntimeSourceIdentityInputs {
-                    configured_source_identity: &ss.path,
-                    source_root: &path,
-                    purpose: ss.purpose,
-                    format: self.config.format,
-                    backend: self.config.builder,
-                    logical_role: LogicalSourceRole::EdtSource,
-                })?;
-                let state = self.state_layout.source_state(&ss.name, &descriptor);
-                Ok(SourceSetContext::new(&ss.name, path, state)
-                    .with_excluded_roots(vec![work_path.clone()]))
+                self.build_context(ss, path, LogicalSourceRole::EdtSource, &work_path)
             })
             .collect()
+    }
+
+    fn build_context(
+        &self,
+        source_set: &SourceSetConfig,
+        source_root: PathBuf,
+        logical_role: LogicalSourceRole,
+        work_path: &Path,
+    ) -> Result<SourceSetContext, RuntimeStateError> {
+        let descriptor = RuntimeSourceDescriptor::new(RuntimeSourceIdentityInputs {
+            configured_source_identity: &source_set.path,
+            source_root: &source_root,
+            purpose: source_set.purpose,
+            format: self.config.format,
+            backend: self.config.builder,
+            logical_role,
+        })?;
+        let state = self
+            .state_layout
+            .source_state(&source_set.name, &descriptor);
+        Ok(SourceSetContext::new(&source_set.name, source_root, state)
+            .with_excluded_roots(vec![work_path.to_path_buf()]))
     }
 }
 

@@ -62,8 +62,17 @@ impl DesignerSourceTransaction {
         sync_directory(transactions_dir)?;
         let canonical_source_root = fs::canonicalize(source_root)
             .map_err(|error| file_io("canonicalize source root", source_root, error))?;
-        let policy = SourceInventoryPolicy::new(source_root, excluded_roots)?;
-        for entry in WalkDir::new(source_root)
+        let canonical_excluded_roots = excluded_roots
+            .iter()
+            .map(|excluded| {
+                excluded
+                    .strip_prefix(source_root)
+                    .map(|relative| canonical_source_root.join(relative))
+                    .unwrap_or_else(|_| excluded.clone())
+            })
+            .collect::<Vec<_>>();
+        let policy = SourceInventoryPolicy::new(&canonical_source_root, &canonical_excluded_roots)?;
+        for entry in WalkDir::new(&canonical_source_root)
             .follow_links(false)
             .into_iter()
             .filter_entry(|entry| {
@@ -74,13 +83,13 @@ impl DesignerSourceTransaction {
             if !entry.file_type().is_file() || !policy.includes_file(entry.path()) {
                 continue;
             }
-            let relative = portable_relative_path(source_root, entry.path())?;
+            let relative = portable_relative_path(&canonical_source_root, entry.path())?;
             let target = load_root.join(&relative);
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
             }
             copy_regular_no_follow(
-                source_root,
+                &canonical_source_root,
                 &canonical_source_root,
                 Path::new(&relative),
                 entry.path(),
@@ -109,26 +118,13 @@ impl DesignerSourceTransaction {
         &self,
         prepared: &PreparedStateUpdate,
     ) -> Result<(), SourceTransactionError> {
-        let scan =
-            crate::change_detection::scanner::scan(&self.load_root, None, &HashSet::new(), &[])?;
-        let actual: HashMap<&str, &str> = scan
-            .candidates
-            .iter()
-            .map(|file| (file.rel_path.as_str(), file.hash.as_str()))
-            .collect();
-        let planned: HashMap<&str, &str> = prepared
-            .snapshot
-            .iter()
-            .map(|file| (file.rel_path.as_str(), file.hash.as_str()))
-            .collect();
-        if actual == planned {
-            Ok(())
-        } else {
+        if let Some((planned, actual)) = snapshot_mismatch_counts(&self.load_root, &[], prepared)? {
             Err(SourceTransactionError::SnapshotMismatch(format!(
                 "planned {} file(s), staged {} file(s)",
-                planned.len(),
-                actual.len()
+                planned, actual
             )))
+        } else {
+            Ok(())
         }
     }
 
@@ -147,6 +143,25 @@ pub(crate) fn verify_source_snapshot(
     excluded_roots: &[PathBuf],
     prepared: &PreparedStateUpdate,
 ) -> Result<(), SourceTransactionError> {
+    if let Some((planned, actual)) =
+        snapshot_mismatch_counts(source_root, excluded_roots, prepared)?
+    {
+        Err(SourceTransactionError::SnapshotMismatch(format!(
+            "planned {} file(s), observed {} file(s) in '{}'",
+            planned,
+            actual,
+            source_root.display()
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn snapshot_mismatch_counts(
+    source_root: &Path,
+    excluded_roots: &[PathBuf],
+    prepared: &PreparedStateUpdate,
+) -> Result<Option<(usize, usize)>, SourceTransactionError> {
     let scan =
         crate::change_detection::scanner::scan(source_root, None, &HashSet::new(), excluded_roots)?;
     let actual = scan
@@ -159,16 +174,7 @@ pub(crate) fn verify_source_snapshot(
         .iter()
         .map(|file| (file.rel_path.as_str(), file.hash.as_str()))
         .collect::<HashMap<_, _>>();
-    if actual == planned {
-        Ok(())
-    } else {
-        Err(SourceTransactionError::SnapshotMismatch(format!(
-            "planned {} file(s), observed {} file(s) in '{}'",
-            planned.len(),
-            actual.len(),
-            source_root.display()
-        )))
-    }
+    Ok((actual != planned).then_some((planned.len(), actual.len())))
 }
 
 fn copy_regular_no_follow(
@@ -690,6 +696,40 @@ mod tests {
         .expect("transaction");
         assert!(!transaction.load_root().join("file-link.xml").exists());
         assert!(!transaction.load_root().join("dir-link").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accepts_symlinked_source_root_without_following_nested_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().expect("tempdir");
+        let physical_source = dir.path().join("physical-source");
+        let source_link = dir.path().join("source-link");
+        let outside = dir.path().join("outside.xml");
+        let excluded = physical_source.join("excluded");
+        fs::create_dir_all(&physical_source).expect("physical source");
+        fs::create_dir_all(&excluded).expect("excluded source");
+        fs::write(physical_source.join("Configuration.xml"), b"config").expect("source file");
+        fs::write(excluded.join("secret.xml"), b"secret").expect("excluded file");
+        fs::write(&outside, b"outside").expect("outside file");
+        symlink(&outside, physical_source.join("outside-link.xml")).expect("nested symlink");
+        symlink(&physical_source, &source_link).expect("source root symlink");
+
+        let transaction = DesignerSourceTransaction::create(
+            &source_link,
+            &[source_link.join("excluded")],
+            &dir.path().join("transactions"),
+            CdfiSeed::None,
+        )
+        .expect("symlinked source root");
+
+        assert_eq!(
+            fs::read(transaction.load_root().join("Configuration.xml")).expect("staged source"),
+            b"config"
+        );
+        assert!(!transaction.load_root().join("excluded").exists());
+        assert!(!transaction.load_root().join("outside-link.xml").exists());
     }
 
     #[cfg(unix)]

@@ -179,7 +179,7 @@ impl<'a> DesignerDsl<'a> {
         self.run(&args)
     }
 
-    /// `/DumpConfigToFiles <dir> [-Extension <name>]`
+    /// `/DumpConfigToFiles <dir> -updateConfigDumpInfo [-Extension <name>]`
     pub fn dump_config_to_files(
         &self,
         target_dir: &Path,
@@ -196,7 +196,7 @@ impl<'a> DesignerDsl<'a> {
         self.run(&args)
     }
 
-    /// `/DumpConfigToFiles <dir> -update [-Extension <name>]`
+    /// `/DumpConfigToFiles <dir> -update -updateConfigDumpInfo [-Extension <name>]`
     pub fn dump_config_to_files_incremental(
         &self,
         target_dir: &Path,
@@ -256,7 +256,8 @@ impl<'a> DesignerDsl<'a> {
         self.run(&args)
     }
 
-    /// `/DumpConfigToFiles <dir> -partial -listFile <list_file> [-Extension <name>]`
+    /// `/DumpConfigToFiles <dir> -partial -listFile <list_file> -updateConfigDumpInfo
+    /// [-Extension <name>]`
     pub fn dump_config_to_files_partial(
         &self,
         target_dir: &Path,

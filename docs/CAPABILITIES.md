@@ -26,14 +26,14 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `tools download <tool>` | CLI-only загрузка latest releases | Загружает выбранный YAxUnit, Vanessa Automation single или onec-client-mcp-devkit; обновляет local overlay для Vanessa/client MCP и при `yaxunit --sources` добавляет YAxUnit как `source-set` `tests` |
 | `init` | `format=DESIGNER` + `builder=DESIGNER` | Создаёт файловую ИБ через Designer; server connection остаётся manual prerequisite |
 | `init` | `format=DESIGNER` + `builder=IBCMD` | Выполняет `ensure` файловой или серверной ИБ через `ibcmd infobase create` |
-| `init` | `format=EDT` + `builder=DESIGNER|IBCMD` | Готовит ИБ по правилам builder и импортирует EDT workspace |
+| `init` | `format=EDT` + `builder=DESIGNER\|IBCMD` | Готовит ИБ по правилам builder и импортирует EDT workspace |
 | `extensions` | `format=DESIGNER` или `format=EDT` | Обновляет свойства extension `source-set` |
-| `build` | `format=DESIGNER` + `builder=DESIGNER|IBCMD` | Выполняет incremental/full загрузку в ИБ |
-| `build` | `format=EDT` + `builder=DESIGNER|IBCMD` | Экспортирует изменённые EDT `source-set`, затем грузит generated Designer output |
+| `build` | `format=DESIGNER` + `builder=DESIGNER\|IBCMD` | Выполняет incremental/full загрузку в ИБ |
+| `build` | `format=EDT` + `builder=DESIGNER\|IBCMD` | Экспортирует изменённые EDT `source-set`, затем грузит generated Designer output |
 | `test` | Та же матрица, что и у `build` | Всегда сначала запускает `build` |
 | `dump` | `format=DESIGNER` + `builder=DESIGNER` | Полная, инкрементальная или object-scoped partial выгрузка |
 | `dump` | `format=DESIGNER` + `builder=IBCMD` | Полная и инкрементальная выгрузка; `partial` деградирует в incremental с warning |
-| `dump` | `format=EDT` + `builder=DESIGNER|IBCMD` | Reverse sync через private Designer/configured-source shadows и EDT import |
+| `dump` | `format=EDT` + `builder=DESIGNER\|IBCMD` | Reverse sync через private Designer/configured-source shadows и EDT import |
 | `convert` | CLI-only repo-aware конвертация текущих `source-set` | Не использует `builder` и не требует ИБ |
 | `load` | `format=DESIGNER` + `builder=DESIGNER` | Загрузка `.cf` / `.cfe` артефактов в ИБ |
 | `make` / `artifacts` | `format=DESIGNER` + `builder=DESIGNER` | Экспорт `.cf` / `.cfe` и публикация `.epf` / `.erf` |

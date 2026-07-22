@@ -1,3 +1,5 @@
+use crate::support::connection_args::split_v8_arg_string;
+
 /// Parsed V8 connection and optional authentication parameters.
 #[derive(Debug, Clone)]
 pub struct V8Connection {
@@ -133,4 +135,3 @@ mod tests {
         assert_eq!(connection.file_path(), Some("/tmp/ib"));
     }
 }
-use crate::support::connection_args::split_v8_arg_string;
