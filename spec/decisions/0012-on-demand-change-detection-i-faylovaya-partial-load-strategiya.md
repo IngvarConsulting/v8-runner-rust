@@ -3,6 +3,10 @@
 - Статус: `accepted`
 - Дата: `2026-04-20`
 
+> Уточнено [ADR-0023](0023-izolirovat-runtime-state-po-infobase-i-ispolzovat-private-shadow.md):
+> snapshots хранятся в versioned per-IB layout, а отсутствие scoped state означает
+> full bootstrap, а не пустой успешный snapshot.
+
 ## Контекст
 
 `v8-runner` должен ускорять повторные build/load сценарии, но не имеет права выполнять неполную загрузку, если нет уверенности в корректности набора изменённых файлов.

@@ -3,6 +3,10 @@
 - Статус: `accepted`
 - Дата: `2026-04-20`
 
+> Уточнено [ADR-0023](0023-izolirovat-runtime-state-po-infobase-i-ispolzovat-private-shadow.md):
+> runtime state теперь дополнительно изолируется по ИБ и source identity; старый
+> `workPath/hash-storages` не является целевым layout.
+
 ## Контекст
 
 `v8-runner` выполняет операции над основной конфигурацией, расширениями, EDT-проектами и сгенерированными Designer-файлами.
