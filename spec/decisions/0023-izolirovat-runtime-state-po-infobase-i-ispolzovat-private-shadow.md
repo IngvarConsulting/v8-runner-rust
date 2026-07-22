@@ -26,9 +26,15 @@ Runtime state хранится только под:
 workPath/ib-state/v1/<infobase-fingerprint>/<source-set>-<context-fingerprint>/
   hash-storage.redb
   ConfigDumpInfo.xml
-  baseline/
+  generations/<generation>/
+    ib-baseline/<role>/
   transactions/
+  runtime-state.lock
 ```
+
+`SourceObservation` логически входит в ту же generation, но физически хранится в
+`hash-storage.redb`; отдельный `source-observation/` каталог зарезервирован типовой моделью и
+сейчас не материализуется.
 
 `infobase-fingerprint` — SHA-256 от нормализованной, не содержащей секретов identity.
 Ее строит один fallible typed normalizer, а тип identity реализует `Debug` только через
@@ -82,8 +88,9 @@ retry способен скрыть ошибку исходников. Стар�
 
 Full, incremental и partial dump выполняются только в private shadow. При отсутствии
 baseline incremental/partial request повышается до full shadow dump. Для каждого файла
-отсутствующий `B` безопасно разрешает только создание нового target или convergence;
-существующий отличающийся `S` считается конфликтом.
+отсутствующий `B` безопасно разрешает создание нового target (`S` отсутствует) или
+convergence (`S == D`). Комбинация `B=absent, S=present, D=absent` является конфликтом:
+runner не удаляет локальный файл, которым ещё не владел baseline.
 
 Для обратной публикации сравниваются последний успешный baseline `B`, текущий source
 `S` и новый shadow `D` по каждому файлу:
@@ -109,6 +116,12 @@ Publication работает по manifest только управляемых �
 4. commit marker пишется только после всех actions и повторной проверки; cleanup
    выполняется отдельно и идемпотентно.
 
+Source-publication journal и private state commit связывает один канонический UUID
+`DumpTransactionId`. Restart recovery считает state видимым и может завершить publication
+вперёд только при точном совпадении пары `(generation, transaction id)`. Совпавший номер
+generation с другим token не доказывает успех этой dump-транзакции и приводит к rollback
+управляемых source changes.
+
 Это recoverable source-set transaction: процессный сбой не оставляет неопределимое
 состояние, а следующий запуск обязан завершить rollback до анализа. Она не заявляет
 недостижимую multi-file filesystem atomicity в момент аварийного завершения процесса.
@@ -132,11 +145,18 @@ Publication работает по manifest только управляемых �
 противоречивые комбинации. `failed`/cancelled и `conflict` всегда имеют пустой
 `processed`; `applied` не имеет `conflicted`; `skipped` не имеет `processed`.
 
+Эти списки являются независимыми audit dimensions, а не строгим partition. Для
+`applied` одна и та же запись с одинаковыми hashes может одновременно находиться в
+`processed` и `skipped`, если файл входил в effective platform scope, но B/S/D merge сохранил
+локальную версию или обнаружил no-op. Для full effective scope включает полный managed D и
+baseline deletions; для incremental/partial `processed` строится по наблюдаемым записям private
+shadow. Другие overlap и несовпадающие hashes отклоняются.
+
 Списки имеют смысл:
 
 - `requested` — исходно обнаруженная пользовательская дельта;
-- `processed` — точный набор файлов, успешно обработанный платформой, включая
-  расширенный closure partial operation;
+- `processed` — точный effective scope: полный managed result для full либо наблюдаемый write-set
+  private shadow для incremental/partial, включая неизменные переписанные файлы;
 - `skipped` — файлы, намеренно сохраненные/no-op;
 - `conflicted` — файлы, заблокировавшие публикацию.
 
@@ -146,7 +166,8 @@ successfully applied source observation, `postHash` — requested/staged content
 `preHash` — source перед операцией, `postHash` — proposed shadow content; поэтому conflict
 также наблюдаем без публикации. Add имеет `preHash=null`, delete — `postHash=null`, а
 неизменный файл partial closure — одинаковые hashes. Failed/cancelled operation хранит
-дельту только в `requested`, не объявляет файлы processed и не продвигает state.
+дельту только в `requested`, если она уже была вычислена, не объявляет файлы processed и не
+продвигает state; при более раннем failure все списки могут быть пустыми.
 
 ### Два независимых состояния и их commit
 
@@ -159,7 +180,8 @@ successfully applied source observation, `postHash` — requested/staged content
 при conflict не продвигается ничего. CDFI, baseline manifest/files и redb snapshot
 готовятся в private state transaction и коммитятся с journal/recovery generation.
 Безопасный порядок делает новое состояние видимым только после source publication;
-незавершенный state journal восстанавливается до следующего planning pass.
+после state commit source journal помечается видимым точной парой `(generation,
+DumpTransactionId)`. Незавершенный state journal восстанавливается до следующего planning pass.
 
 ## Последствия
 
@@ -175,13 +197,14 @@ successfully applied source observation, `postHash` — requested/staged content
 
 ## Верификация
 
-- [ ] A build -> repeat skip; B build -> full; return to A -> skip; restart сохраняет результат.
-- [ ] Credentials не влияют на fingerprint и не встречаются в диагностике.
-- [ ] Missing/corrupt private CDFI всегда дает full bootstrap.
-- [ ] Designer build failure не создает и не изменяет source `ConfigDumpInfo.xml`.
-- [ ] Build receipt различает requested/processed/skipped/conflicted с raw hashes.
-- [ ] Incremental/partial dump при конфликте не изменяет ни одного source-файла.
-- [ ] Scanner и private copy исключают CDFI, symlinks и вложенный custom `workPath`.
-- [ ] Crash recovery откатывает manifest publication, не затрагивая unmanaged entries.
+- [x] A build -> repeat skip; B build -> full; return to A -> skip; restart сохраняет результат.
+- [x] Credentials не влияют на fingerprint и не встречаются в диагностике.
+- [x] Missing/corrupt private CDFI всегда дает full bootstrap.
+- [x] Designer build failure не создает и не изменяет source `ConfigDumpInfo.xml`.
+- [x] Build receipt различает requested/processed/skipped/conflicted с raw hashes и допустимый processed/skipped overlap.
+- [ ] Отдельные orchestration-тесты incremental/partial dump подтверждают, что conflict не изменяет ни одного source-файла; общая B/S/D и manifest-механика уже покрыта unit-тестами.
+- [x] Scanner и private copy исключают CDFI, symlinks и вложенный custom `workPath`.
+- [x] Crash recovery требует exact transaction token и не затрагивает unmanaged entries.
+- [ ] `windows-latest` contract CI подтверждает Windows-specific claim/replace/remove semantics; локальная Unix-проверка не заменяет этот gate.
 - [ ] Disposable real file-IB acceptance подтверждает lifecycle private CDFI; без нее PR
       не объявляет задачу закрытой.

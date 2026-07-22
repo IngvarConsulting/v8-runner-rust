@@ -29,15 +29,19 @@ v8-runner dump --mode incremental --extension <EXTENSION>
 
 `partial` requires at least one `--object`. With `builder=IBCMD`, object-scoped partial dump degrades to incremental dump with a warning.
 
-For `format=EDT`, dump uses an internal Designer snapshot under `workPath/designer/<sourceSetName>`, then imports the result into the EDT target.
+For `format=EDT`, dump uses private platform and configured-source shadows inside the scoped
+`ib-state/v1` transaction. The platform never writes the project source or
+`workPath/designer/<sourceSetName>` as its dump target.
 
 Dump safety and recovery rules:
 
-- each infobase/source-set identity owns private shadows and generation-scoped baselines under `workPath`; never reuse them across infobases;
+- each infobase/source-set identity owns private shadows and generation-scoped baselines under `workPath/ib-state/v1`; fingerprints are opaque and state must never be reused across infobases;
+- legacy `workPath/hash-storages` is deliberately not migrated; missing scoped state means full bootstrap, never an unchanged result;
 - incremental and partial dump require a valid matching baseline and private `ConfigDumpInfo.xml`; missing or corrupt state promotes that one operation to a full dump;
-- the receipt is an exact manifest delta: `requested` records every add/modify/delete and `processed`, `skipped`, or `conflicted` records its outcome with byte hashes;
+- receipt lists are exact but independent audit dimensions: an applied target may be both `processed` and `skipped` when platform work occurred but publication retained/no-op'd it;
 - a three-way conflict publishes no project-source files or new private generation;
-- full, incremental, and partial modes all use recoverable manifest publication. On interruption, restart recovery either completes the exact dump transaction or restores the previous managed file state without treating an unrelated same-numbered generation as success.
+- `B=absent, S=present, D=absent` is a conflict; runner never deletes a local file absent from its baseline;
+- full, incremental, and partial modes all use recoverable manifest publication. Forward recovery requires the exact `(generation, UUID transaction token)`; otherwise it restores the previous managed file state.
 
 ## Convert
 
