@@ -14,6 +14,7 @@ use crate::domain::runtime_state::{
     RuntimeStateLayout,
 };
 use crate::domain::source_set::SourceSetContext;
+use crate::domain::sync_receipt::{SyncReceipt, SyncTarget};
 use crate::platform::designer::DesignerDsl;
 use crate::platform::edt::EdtDsl;
 use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
@@ -60,15 +61,7 @@ pub(crate) fn prepare_client_mcp_extension(
     let Some(extension) = client_mcp_extension(config) else {
         return Ok(None);
     };
-    prepare_extension(context, config, extension, full_rebuild)
-        .map(Some)
-        .map_err(|error| {
-            let message = error.to_string();
-            ToolExtensionFailure {
-                step: failed_build_step(extension, message),
-                error,
-            }
-        })
+    prepare_extension(context, config, extension, full_rebuild).map(Some)
 }
 
 fn prepare_extension(
@@ -76,11 +69,11 @@ fn prepare_extension(
     config: &AppConfig,
     extension: &ToolExtensionConfig,
     full_rebuild: bool,
-) -> Result<BuildStep, AppError> {
+) -> Result<BuildStep, ToolExtensionFailure> {
     let started = Instant::now();
 
     if let Some(error) = interruption_before_safe_point(context, extension, "tool extension load") {
-        return Err(error);
+        return Err(tool_extension_failure(extension, error, vec![]));
     }
 
     let mut utilities = PlatformUtilities::from_config(config);
@@ -95,7 +88,8 @@ fn prepare_extension(
             full_rebuild,
         ),
         ToolExtensionInput::Artifact(artifact) => {
-            prepare_artifact_extension(context, config, extension, &artifact.path, &mut utilities)?;
+            prepare_artifact_extension(context, config, extension, &artifact.path, &mut utilities)
+                .map_err(|error| tool_extension_failure(extension, error, vec![]))?;
             Ok(successful_build_step(
                 extension,
                 format!("prepared extension '{}' from .cfe artifact", extension.name),
@@ -113,30 +107,51 @@ fn prepare_source_extension(
     utilities: &mut PlatformUtilities,
     started: Instant,
     full_rebuild: bool,
-) -> Result<BuildStep, AppError> {
-    let source_context = tool_extension_source_context(config, extension, source)?;
+) -> Result<BuildStep, ToolExtensionFailure> {
+    let source_context = tool_extension_source_context(config, extension, source)
+        .map_err(|error| tool_extension_failure(extension, error, vec![]))?;
     if full_rebuild {
-        prepare_source_extension_full(context, config, extension, source, utilities)?;
-        commit_tool_extension_full_rescan(&source_context, true)?;
-        return Ok(successful_build_step(
+        let (requested, processed, prepared) = full_inventory_receipt(&source_context)
+            .map_err(|error| tool_extension_failure(extension, error, vec![]))?;
+        let receipt = applied_receipt(requested.clone(), processed)
+            .map_err(|error| tool_extension_failure(extension, error, requested.clone()))?;
+        prepare_source_extension_full(context, config, extension, source, utilities)
+            .map_err(|error| tool_extension_failure(extension, error, requested.clone()))?;
+        commit_tool_extension_full_observation(&source_context, &prepared, true)
+            .map_err(|error| tool_extension_failure(extension, error, requested.clone()))?;
+        return Ok(successful_build_step_with_receipt(
             extension,
             format!("prepared extension '{}' from sources", extension.name),
             started.elapsed().as_millis() as u64,
+            receipt,
         ));
     }
 
     let outcome = match analyzer::analyze_context(&source_context).outcome {
         Ok(outcome) => outcome,
         Err(_error) if storage_needs_recovery(&source_context) => {
-            prepare_source_extension_full(context, config, extension, source, utilities)?;
-            commit_tool_extension_full_rescan(&source_context, true)?;
-            return Ok(successful_build_step(
+            let (requested, processed, prepared) = full_inventory_receipt(&source_context)
+                .map_err(|error| tool_extension_failure(extension, error, vec![]))?;
+            let receipt = applied_receipt(requested.clone(), processed)
+                .map_err(|error| tool_extension_failure(extension, error, requested.clone()))?;
+            prepare_source_extension_full(context, config, extension, source, utilities)
+                .map_err(|error| tool_extension_failure(extension, error, requested.clone()))?;
+            commit_tool_extension_full_observation(&source_context, &prepared, true)
+                .map_err(|error| tool_extension_failure(extension, error, requested.clone()))?;
+            return Ok(successful_build_step_with_receipt(
                 extension,
                 format!("prepared extension '{}' from sources", extension.name),
                 started.elapsed().as_millis() as u64,
+                receipt,
             ));
         }
-        Err(error) => return Err(AppError::Runtime(error.to_string())),
+        Err(error) => {
+            return Err(tool_extension_failure(
+                extension,
+                AppError::Runtime(error.to_string()),
+                vec![],
+            ))
+        }
     };
 
     match outcome {
@@ -146,22 +161,36 @@ fn prepare_source_extension(
             started.elapsed().as_millis() as u64,
         )),
         AnalysisOutcome::Bootstrap | AnalysisOutcome::Fallback => {
-            prepare_source_extension_full(context, config, extension, source, utilities)?;
-            commit_tool_extension_full_rescan(&source_context, false)?;
-            Ok(successful_build_step(
+            let (requested, processed, prepared) = full_inventory_receipt(&source_context)
+                .map_err(|error| tool_extension_failure(extension, error, vec![]))?;
+            let receipt = applied_receipt(requested.clone(), processed)
+                .map_err(|error| tool_extension_failure(extension, error, requested.clone()))?;
+            prepare_source_extension_full(context, config, extension, source, utilities)
+                .map_err(|error| tool_extension_failure(extension, error, requested.clone()))?;
+            commit_tool_extension_full_observation(&source_context, &prepared, false)
+                .map_err(|error| tool_extension_failure(extension, error, requested.clone()))?;
+            Ok(successful_build_step_with_receipt(
                 extension,
                 format!("prepared extension '{}' from sources", extension.name),
                 started.elapsed().as_millis() as u64,
+                receipt,
             ))
         }
-        AnalysisOutcome::Changes { prepared, .. } => {
-            prepare_source_extension_full(context, config, extension, source, utilities)?;
+        AnalysisOutcome::Changes { changes, prepared } => {
+            let (requested, processed) = change_receipt(&changes, &prepared)
+                .map_err(|error| tool_extension_failure(extension, error, vec![]))?;
+            let receipt = applied_receipt(requested.clone(), processed)
+                .map_err(|error| tool_extension_failure(extension, error, requested.clone()))?;
+            prepare_source_extension_full(context, config, extension, source, utilities)
+                .map_err(|error| tool_extension_failure(extension, error, requested.clone()))?;
             analyzer::commit_success(&source_context, &prepared)
-                .map_err(|error| AppError::Runtime(error.to_string()))?;
-            Ok(successful_build_step(
+                .map_err(|error| AppError::Runtime(error.to_string()))
+                .map_err(|error| tool_extension_failure(extension, error, requested.clone()))?;
+            Ok(successful_build_step_with_receipt(
                 extension,
                 format!("prepared extension '{}' from sources", extension.name),
                 started.elapsed().as_millis() as u64,
+                receipt,
             ))
         }
     }
@@ -208,11 +237,10 @@ pub(crate) fn tool_extension_source_context(
         logical_role: LogicalSourceRole::ToolExtension,
     })?;
     let state = layout.source_state(&format!("tool-{}", extension.name), &descriptor);
-    Ok(SourceSetContext::new(
-        format!("tool:{}", extension.name),
-        source_path,
-        state,
-    ))
+    Ok(
+        SourceSetContext::new(format!("tool:{}", extension.name), source_path, state)
+            .with_excluded_roots(vec![absolutize_path(&config.work_path)?]),
+    )
 }
 
 fn absolutize_path(path: &Path) -> Result<PathBuf, AppError> {
@@ -238,25 +266,13 @@ fn extension_stage_detail(executor: &str, action: &str, extension: &ToolExtensio
     format!("[{executor}] {action} расширения {}", extension.name)
 }
 
-fn commit_tool_extension_full_rescan(
+fn commit_tool_extension_full_observation(
     context: &SourceSetContext,
+    prepared: &analyzer::PreparedStateUpdate,
     recover_storage: bool,
 ) -> Result<(), AppError> {
-    match analyzer::rescan_and_commit_full(context) {
-        Ok(()) => Ok(()),
-        Err(_error) if recover_storage && storage_needs_recovery(context) => {
-            let storage_path = context.storage_path();
-            remove_storage_path(&storage_path).map_err(|remove_error| {
-                AppError::Runtime(format!(
-                    "failed to remove corrupt storage '{}': {remove_error}",
-                    storage_path.display()
-                ))
-            })?;
-            analyzer::rescan_and_commit_full(context)
-                .map_err(|retry_error| AppError::Runtime(retry_error.to_string()))
-        }
-        Err(error) => Err(AppError::Runtime(error.to_string())),
-    }
+    analyzer::commit_full_observation(context, prepared, recover_storage)
+        .map_err(|error| AppError::Runtime(error.to_string()))
 }
 
 fn storage_needs_recovery(context: &SourceSetContext) -> bool {
@@ -267,19 +283,6 @@ fn storage_needs_recovery(context: &SourceSetContext) -> bool {
             reason.contains("invalid data") || reason.contains("corrupt")
         }
         Err(StorageError::ConcurrentStateModified { .. }) | Ok(_) => false,
-    }
-}
-
-fn remove_storage_path(path: &Path) -> std::io::Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-
-    let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.is_dir() {
-        std::fs::remove_dir_all(path)
-    } else {
-        std::fs::remove_file(path)
     }
 }
 
@@ -647,7 +650,19 @@ fn successful_build_step(
         ok: true,
         message: Some(message),
         duration_ms,
+        receipt: crate::domain::sync_receipt::SyncReceipt::empty_applied(),
     }
+}
+
+fn successful_build_step_with_receipt(
+    extension: &ToolExtensionConfig,
+    message: String,
+    duration_ms: u64,
+    receipt: SyncReceipt,
+) -> BuildStep {
+    let mut step = successful_build_step(extension, message, duration_ms);
+    step.receipt = receipt;
+    step
 }
 
 fn skipped_build_step(
@@ -661,17 +676,149 @@ fn skipped_build_step(
         ok: true,
         message: Some(message),
         duration_ms,
+        receipt: crate::domain::sync_receipt::SyncReceipt::empty_skipped(),
     }
 }
 
-fn failed_build_step(extension: &ToolExtensionConfig, message: String) -> BuildStep {
+fn failed_build_step(
+    extension: &ToolExtensionConfig,
+    message: String,
+    receipt: SyncReceipt,
+) -> BuildStep {
     BuildStep {
         source_set: format!("tool:{}", extension.name),
         mode: BuildMode::Full,
         ok: false,
         message: Some(message),
         duration_ms: 0,
+        receipt,
     }
+}
+
+fn applied_receipt(
+    requested: Vec<SyncTarget>,
+    processed: Vec<SyncTarget>,
+) -> Result<SyncReceipt, AppError> {
+    SyncReceipt::applied(requested, processed, vec![])
+        .map_err(|error| AppError::Runtime(error.to_string()))
+}
+
+fn tool_extension_failure(
+    extension: &ToolExtensionConfig,
+    error: AppError,
+    requested: Vec<SyncTarget>,
+) -> ToolExtensionFailure {
+    let (error, receipt) = match SyncReceipt::failed(requested) {
+        Ok(receipt) => (error, receipt),
+        Err(receipt_error) => {
+            let combined = AppError::Runtime(format!(
+                "{error}; failed to construct exact failure receipt: {receipt_error}"
+            ));
+            (combined, SyncReceipt::empty_failed())
+        }
+    };
+    ToolExtensionFailure {
+        step: failed_build_step(extension, error.to_string(), receipt),
+        error,
+    }
+}
+
+fn full_inventory_receipt(
+    context: &SourceSetContext,
+) -> Result<
+    (
+        Vec<SyncTarget>,
+        Vec<SyncTarget>,
+        analyzer::PreparedStateUpdate,
+    ),
+    AppError,
+> {
+    let inventory = analyzer::managed_inventory(context)
+        .map_err(|error| AppError::Runtime(error.to_string()))?;
+    let requested = inventory
+        .requested
+        .iter()
+        .map(|change| {
+            SyncTarget::new(
+                &change.rel_path,
+                change.pre_hash.clone(),
+                change.post_hash.clone(),
+            )
+            .map_err(|error| AppError::Runtime(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let requested_by_path = unique_tool_target_index(&requested)?;
+    let mut processed = inventory
+        .current
+        .into_iter()
+        .map(|file| {
+            let pre_hash = match requested_by_path.get(file.rel_path.as_str()) {
+                Some(target) => target.pre_hash().map(str::to_owned),
+                None => Some(file.hash.clone()),
+            };
+            SyncTarget::new(file.rel_path, pre_hash, Some(file.hash))
+                .map_err(|error| AppError::Runtime(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    processed.extend(
+        requested
+            .iter()
+            .filter(|target| target.post_hash().is_none())
+            .cloned(),
+    );
+    Ok((requested, processed, inventory.prepared))
+}
+
+fn change_receipt(
+    changes: &[analyzer::FileChange],
+    prepared: &analyzer::PreparedStateUpdate,
+) -> Result<(Vec<SyncTarget>, Vec<SyncTarget>), AppError> {
+    let requested = changes
+        .iter()
+        .map(|change| {
+            SyncTarget::new(
+                &change.rel_path,
+                change.pre_hash.clone(),
+                change.post_hash.clone(),
+            )
+            .map_err(|error| AppError::Runtime(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let requested_by_path = unique_tool_target_index(&requested)?;
+    let mut processed = prepared
+        .snapshot
+        .iter()
+        .map(|file| {
+            let pre_hash = match requested_by_path.get(file.rel_path.as_str()) {
+                Some(target) => target.pre_hash().map(str::to_owned),
+                None => Some(file.hash.clone()),
+            };
+            SyncTarget::new(&file.rel_path, pre_hash, Some(file.hash.clone()))
+                .map_err(|error| AppError::Runtime(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    processed.extend(
+        requested
+            .iter()
+            .filter(|target| target.post_hash().is_none())
+            .cloned(),
+    );
+    Ok((requested, processed))
+}
+
+fn unique_tool_target_index(
+    targets: &[SyncTarget],
+) -> Result<std::collections::HashMap<&str, &SyncTarget>, AppError> {
+    let mut by_path = std::collections::HashMap::with_capacity(targets.len());
+    for target in targets {
+        if by_path.insert(target.path(), target).is_some() {
+            return Err(AppError::Runtime(format!(
+                "duplicate normalized path '{}' in tool extension inventory",
+                target.path()
+            )));
+        }
+    }
+    Ok(by_path)
 }
 
 fn recreate_directory(path: &Path) -> std::io::Result<()> {

@@ -364,6 +364,7 @@ pub(super) fn run_dump_with_context(
             platform_log_path: platform_result.platform_log_path,
             duration_ms: started.elapsed().as_millis() as u64,
             message: cleanup_message.or_else(|| Some("dump completed successfully".to_owned())),
+            receipt: crate::domain::sync_receipt::SyncReceipt::empty_applied(),
         }),
         Err(error) => {
             let message = error.to_string();
@@ -378,6 +379,7 @@ pub(super) fn run_dump_with_context(
                     platform_log_path: None,
                     duration_ms: started.elapsed().as_millis() as u64,
                     message: Some(message),
+                    receipt: crate::domain::sync_receipt::SyncReceipt::empty_failed(),
                 },
             ))
         }

@@ -37,10 +37,12 @@ mod helpers;
 
 pub(crate) use self::helpers::ensure_platform_success;
 use self::helpers::{
-    build_designer_dsl, build_ibcmd_dsl, commit_step_state, deferred_interruption_warning,
-    extension_name, fail_from_source_set_index, interruption_before_safe_point, map_ibcmd_error,
-    merge_step_message, plan_configurator_load_step, plan_edt_export_step,
-    plan_generated_designer_load_step, push_build_step, remove_storage_path, StepCommit, StepPlan,
+    attach_failed_plan_receipt, attach_failed_receipt, build_designer_dsl, build_ibcmd_dsl,
+    commit_step_state, deferred_interruption_warning, extension_name, fail_from_source_set_index,
+    interruption_before_safe_point, map_ibcmd_error, merge_step_message,
+    plan_configurator_load_step, plan_edt_export_step, plan_generated_designer_load_step,
+    push_build_step, push_build_step_with_receipt, receipt_after_success, remove_storage_path,
+    StepCommit, StepPlan,
 };
 
 #[cfg(test)]
@@ -701,7 +703,11 @@ fn execute_source_set_step_ibcmd(
 
 #[cfg(test)]
 mod tests {
+    use super::helpers::{
+        commit_step_state, plan_configurator_load_step, receipt_after_success, StepPlan,
+    };
     use super::{run_build, BUILD_COMMAND};
+    use crate::change_detection::analyzer::{self, AnalysisOutcome};
     use crate::change_detection::hash_storage::{HashStorage, FILES_MTIME};
     use crate::change_detection::source_sets::SourceSetsService;
     use crate::config::model::{
@@ -1039,6 +1045,16 @@ mod tests {
             .error
             .message()
             .contains("before entering build load for source-set 'main' safe point"));
+        let payload = failure.payload.expect("cancelled build payload");
+        let receipt = serde_json::to_value(&payload.steps[0].receipt).expect("receipt");
+        assert_eq!(receipt["status"], "failed");
+        assert!(!receipt["requested"]
+            .as_array()
+            .expect("requested")
+            .is_empty());
+        assert_eq!(receipt["processed"], serde_json::json!([]));
+        assert_eq!(receipt["skipped"], serde_json::json!([]));
+        assert_eq!(receipt["conflicted"], serde_json::json!([]));
         assert!(
             !calls_log.exists()
                 || fs::read_to_string(&calls_log)
@@ -1101,6 +1117,14 @@ mod tests {
             .error
             .message()
             .contains("before entering ibcmd apply for source-set 'main' safe point"));
+        let payload = failure.payload.expect("cancelled ibcmd payload");
+        let receipt = serde_json::to_value(&payload.steps[0].receipt).expect("receipt");
+        assert_eq!(receipt["status"], "failed");
+        assert!(!receipt["requested"]
+            .as_array()
+            .expect("requested")
+            .is_empty());
+        assert_eq!(receipt["processed"], serde_json::json!([]));
         let calls = fs::read_to_string(&calls_log).expect("calls");
         assert!(calls.contains("config import"));
         assert!(!calls.contains("config apply"));
@@ -1289,6 +1313,16 @@ mod tests {
         let export_root = &export_roots[0];
 
         assert!(result.ok);
+        let receipt = serde_json::to_value(&result.steps[0].receipt).expect("receipt");
+        assert_eq!(receipt["status"], "applied");
+        assert!(!receipt["requested"]
+            .as_array()
+            .expect("requested")
+            .is_empty());
+        assert!(!receipt["processed"]
+            .as_array()
+            .expect("processed")
+            .is_empty());
         assert!(result.steps.iter().any(|step| {
             step.source_set == "processors" && matches!(step.mode, BuildMode::EdtExport) && step.ok
         }));
@@ -1406,6 +1440,16 @@ mod tests {
         let result = run_build(&config, &build_args(true)).expect("build");
 
         assert!(result.ok);
+        let receipt = serde_json::to_value(&result.steps[0].receipt).expect("receipt");
+        assert_eq!(receipt["status"], "applied");
+        assert!(!receipt["requested"]
+            .as_array()
+            .expect("requested")
+            .is_empty());
+        assert!(!receipt["processed"]
+            .as_array()
+            .expect("processed")
+            .is_empty());
         let calls_text = fs::read_to_string(&calls).expect("calls");
         assert!(calls_text.contains("config import"));
         assert!(calls_text.contains("config apply"));
@@ -1628,6 +1672,18 @@ mod tests {
         assert!(second.steps.iter().any(|step| {
             step.source_set == "tool:client_mcp" && matches!(step.mode, BuildMode::Full) && step.ok
         }));
+        let tool_step = second
+            .steps
+            .iter()
+            .find(|step| step.source_set == "tool:client_mcp")
+            .expect("tool step");
+        let receipt = serde_json::to_value(&tool_step.receipt).expect("receipt");
+        assert_eq!(receipt["status"], "applied");
+        assert_eq!(receipt["requested"].as_array().expect("requested").len(), 1);
+        assert!(!receipt["processed"]
+            .as_array()
+            .expect("processed")
+            .is_empty());
         assert!(edt_calls_text.contains("--project-name client-mcp-project"));
         assert!(edt_calls_text.contains("tool-extensions/client_mcp"));
         assert!(designer_calls_text.contains("tool-extensions/client_mcp"));
@@ -1736,6 +1792,16 @@ mod tests {
         let failure = run_build(&config, &build_args(false)).expect_err("failed export");
 
         assert!(failure.error.message().contains("tool extension"));
+        let payload = failure.payload.expect("tool failure payload");
+        let tool_step = payload
+            .steps
+            .iter()
+            .find(|step| step.source_set == "tool:client_mcp")
+            .expect("tool step");
+        let receipt = serde_json::to_value(&tool_step.receipt).expect("receipt");
+        assert_eq!(receipt["status"], "failed");
+        assert_eq!(receipt["requested"].as_array().expect("requested").len(), 1);
+        assert_eq!(receipt["processed"], serde_json::json!([]));
         assert_eq!(
             tool_extension_storage_generation(&config, &tool_source, "client_mcp"),
             1
@@ -1997,6 +2063,18 @@ mod tests {
             .steps
             .iter()
             .any(|step| matches!(step.mode, BuildMode::EdtExport) && step.ok));
+        let export_step = result
+            .steps
+            .iter()
+            .find(|step| matches!(step.mode, BuildMode::EdtExport))
+            .expect("export step");
+        let receipt = serde_json::to_value(&export_step.receipt).expect("receipt");
+        assert_eq!(receipt["status"], "applied");
+        assert_eq!(receipt["requested"].as_array().expect("requested").len(), 1);
+        assert!(!receipt["processed"]
+            .as_array()
+            .expect("processed")
+            .is_empty());
         assert!(result.steps.iter().any(|step| {
             step.source_set == "main" && matches!(step.mode, BuildMode::Full) && step.ok
         }));
@@ -2362,9 +2440,30 @@ mod tests {
         assert!(!result.ok);
         assert!(matches!(result.steps[0].mode, BuildMode::EdtExport));
         assert!(result.steps[0].ok);
-        assert!(result.steps.iter().any(|step| {
-            step.source_set == "client_mcp" && matches!(step.mode, BuildMode::Full) && !step.ok
-        }));
+        let export_receipt =
+            serde_json::to_value(&result.steps[0].receipt).expect("export receipt");
+        assert_eq!(export_receipt["status"], "applied");
+        assert_eq!(
+            export_receipt["requested"]
+                .as_array()
+                .expect("requested")
+                .len(),
+            1
+        );
+        let failed_step = result
+            .steps
+            .iter()
+            .find(|step| {
+                step.source_set == "client_mcp" && matches!(step.mode, BuildMode::Full) && !step.ok
+            })
+            .expect("failed downstream step");
+        let failed_receipt = serde_json::to_value(&failed_step.receipt).expect("failed receipt");
+        assert_eq!(failed_receipt["status"], "failed");
+        assert!(!failed_receipt["requested"]
+            .as_array()
+            .expect("requested")
+            .is_empty());
+        assert_eq!(failed_receipt["processed"], serde_json::json!([]));
         assert!(!result.steps.iter().any(|step| {
             step.source_set == "client_mcp" && matches!(step.mode, BuildMode::Partial { .. })
         }));
@@ -2507,6 +2606,10 @@ mod tests {
         assert!(!result.ok);
         assert!(matches!(result.steps[0].mode, BuildMode::EdtExport));
         assert!(!result.steps[0].ok);
+        let receipt = serde_json::to_value(&result.steps[0].receipt).expect("receipt");
+        assert_eq!(receipt["status"], "failed");
+        assert_eq!(receipt["requested"].as_array().expect("requested").len(), 1);
+        assert_eq!(receipt["processed"], serde_json::json!([]));
         assert!(!designer_calls.exists());
     }
 
@@ -2674,6 +2777,24 @@ mod tests {
 
         assert!(matches!(result.steps[0].mode, BuildMode::Partial { .. }));
         assert!(result.steps[0].ok);
+        let receipt = serde_json::to_value(&result.steps[0].receipt).expect("receipt");
+        assert_eq!(receipt["status"], "applied");
+        assert_eq!(receipt["requested"].as_array().expect("requested").len(), 1);
+        assert_eq!(
+            receipt["requested"][0]["path"],
+            "Catalogs.Items/ObjectModule.bsl"
+        );
+        assert_ne!(
+            receipt["requested"][0]["preHash"],
+            receipt["requested"][0]["postHash"]
+        );
+        let descriptor = receipt["processed"]
+            .as_array()
+            .expect("processed")
+            .iter()
+            .find(|target| target["path"] == "Catalogs.Items/ObjectModule.xml")
+            .expect("closure descriptor");
+        assert_eq!(descriptor["preHash"], descriptor["postHash"]);
         assert!(calls_text.contains("/LoadConfigFromFiles"));
         assert!(calls_text.contains("-partial"));
         assert!(calls_text.contains("/UpdateDBCfg"));
@@ -2682,6 +2803,103 @@ mod tests {
 
         let rerun = run_build(&config, &build_args(false)).expect("rerun");
         assert!(matches!(rerun.steps[0].mode, BuildMode::Skipped));
+        let skipped = serde_json::to_value(&rerun.steps[0].receipt).expect("receipt");
+        assert_eq!(skipped["status"], "skipped");
+        assert_eq!(skipped["processed"], serde_json::json!([]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_load_receipt_keeps_deleted_target_with_absent_post_hash() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        write_designer_script(&script, &calls, None);
+        let config = build_config(
+            &base,
+            &work,
+            &script,
+            20,
+            SourceFormat::Designer,
+            BuilderBackend::Designer,
+        );
+        prime_snapshots(&config);
+        fs::remove_file(
+            base.join("main")
+                .join("Catalogs.Items")
+                .join("ObjectModule.bsl"),
+        )
+        .expect("delete module");
+
+        let result = run_build(&config, &build_args(false)).expect("build");
+        let receipt = serde_json::to_value(&result.steps[0].receipt).expect("receipt");
+        let deleted = receipt["processed"]
+            .as_array()
+            .expect("processed")
+            .iter()
+            .find(|target| target["path"] == "Catalogs.Items/ObjectModule.bsl")
+            .expect("deleted target");
+
+        assert!(matches!(result.steps[0].mode, BuildMode::Full));
+        assert!(deleted["preHash"].is_string());
+        assert!(deleted["postHash"].is_null());
+    }
+
+    #[test]
+    fn full_plan_commits_exact_pre_platform_observation_and_detects_later_edit() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let script = dir.path().join("1cv8");
+        create_source_tree(&base);
+        let config = build_config(
+            &base,
+            &work,
+            &script,
+            20,
+            SourceFormat::Designer,
+            BuilderBackend::Designer,
+        );
+        let source_set = &config.source_sets[0];
+        let context = SourceSetsService::new(&config)
+            .expect("service")
+            .designer_contexts()
+            .expect("contexts")
+            .into_iter()
+            .find(|candidate| candidate.name() == source_set.name)
+            .expect("context");
+
+        let plan =
+            plan_configurator_load_step(source_set, &context, true, None, 20).expect("full plan");
+        let receipt = serde_json::to_value(receipt_after_success(&plan)).expect("receipt");
+        let observed = receipt["processed"]
+            .as_array()
+            .expect("processed")
+            .iter()
+            .find(|target| target["path"] == ".project")
+            .expect("project target")["postHash"]
+            .as_str()
+            .expect("post hash")
+            .to_owned();
+
+        fs::write(base.join("main").join(".project"), "edited after planning")
+            .expect("concurrent edit");
+        let StepPlan::Execute { commit, .. } = &plan else {
+            panic!("full plan must execute");
+        };
+        commit_step_state(source_set, &context, commit).expect("commit observation");
+
+        let stored = HashStorage::new(context.storage_path())
+            .load_snapshot()
+            .expect("snapshot");
+        assert_eq!(stored.entries[".project"].hash, observed);
+        assert!(matches!(
+            analyzer::analyze_context(&context).outcome,
+            Ok(AnalysisOutcome::Changes { .. })
+        ));
     }
 
     #[cfg(unix)]
@@ -3098,6 +3316,19 @@ mod tests {
 
         assert!(result.steps[0].ok);
         assert!(!result.steps[1].ok);
+        let applied = serde_json::to_value(&result.steps[0].receipt).expect("applied receipt");
+        let failed = serde_json::to_value(&result.steps[1].receipt).expect("failed receipt");
+        assert_eq!(applied["status"], "applied");
+        assert!(!applied["processed"]
+            .as_array()
+            .expect("processed")
+            .is_empty());
+        assert_eq!(failed["status"], "failed");
+        assert!(!failed["requested"]
+            .as_array()
+            .expect("requested")
+            .is_empty());
+        assert_eq!(failed["processed"], serde_json::json!([]));
         assert!(result.steps[1]
             .message
             .as_deref()
@@ -3119,6 +3350,7 @@ mod tests {
                     ok: true,
                     message: Some("forced full rebuild".to_owned()),
                     duration_ms: 1,
+                    receipt: Default::default(),
                 },
                 crate::domain::build::BuildStep {
                     source_set: "ext".to_owned(),
@@ -3126,6 +3358,7 @@ mod tests {
                     ok: false,
                     message: Some("aborted after previous failure".to_owned()),
                     duration_ms: 0,
+                    receipt: Default::default(),
                 },
             ],
             duration_ms: 42,

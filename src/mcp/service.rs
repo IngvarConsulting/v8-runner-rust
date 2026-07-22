@@ -1157,6 +1157,7 @@ mod tests {
                 ok: true,
                 message: Some("loaded".to_owned()),
                 duration_ms: 17,
+                receipt: crate::domain::sync_receipt::SyncReceipt::empty_applied(),
             }],
             duration_ms: 42,
         }));
@@ -1178,6 +1179,7 @@ mod tests {
         assert_eq!(response.duration_ms, 42);
         assert_eq!(response.data["ok"], true);
         assert_eq!(response.data["steps"][0]["mode"], "full");
+        assert_eq!(response.data["steps"][0]["receipt"]["status"], "applied");
         let requests = service.port.build_requests.borrow();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].0.command(), CommandName::Build);
@@ -1198,6 +1200,7 @@ mod tests {
                     ok: false,
                     message: Some("broken".to_owned()),
                     duration_ms: 9,
+                    receipt: crate::domain::sync_receipt::SyncReceipt::empty_failed(),
                 }],
                 duration_ms: 19,
             },
@@ -1216,6 +1219,10 @@ mod tests {
                 assert_eq!(failure.response.command, "build");
                 assert_eq!(failure.response.duration_ms, 19);
                 assert_eq!(failure.response.data["steps"][0]["ok"], false);
+                assert_eq!(
+                    failure.response.data["steps"][0]["receipt"]["status"],
+                    "failed"
+                );
                 assert_eq!(
                     failure
                         .response
@@ -1486,6 +1493,7 @@ mod tests {
             platform_log_path: None,
             duration_ms: 33,
             message: None,
+            receipt: crate::domain::sync_receipt::SyncReceipt::empty_applied(),
         }));
         let config = sample_config();
         let service = McpService::with_port(&config, port);
@@ -1504,6 +1512,7 @@ mod tests {
         assert!(response.ok);
         assert_eq!(response.command, "dump");
         assert_eq!(response.data["mode"], "INCREMENTAL");
+        assert_eq!(response.data["receipt"]["status"], "applied");
         let requests = service.port.dump_requests.borrow();
         assert_eq!(requests[0].1.mode, DumpModeRequest::Incremental);
         assert_eq!(requests[0].1.extension, None);
@@ -1526,6 +1535,7 @@ mod tests {
                     platform_log_path: None,
                     duration_ms: 3,
                     message: Some("dump failed".to_owned()),
+                    receipt: crate::domain::sync_receipt::SyncReceipt::empty_failed(),
                 },
             ))),
         );
@@ -1548,6 +1558,7 @@ mod tests {
                 assert_eq!(failure.response.command, "dump");
                 assert_eq!(failure.response.data["mode"], "INCREMENTAL");
                 assert_eq!(failure.response.data["message"], "dump failed");
+                assert_eq!(failure.response.data["receipt"]["status"], "failed");
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -1602,6 +1613,7 @@ mod tests {
                 platform_log_path: None,
                 duration_ms: 1,
                 message: None,
+                receipt: Default::default(),
             })),
         );
 
@@ -1652,6 +1664,7 @@ mod tests {
                 "IBCMD does not support object-scoped partial dump; ran incremental export for source-set 'main' instead"
                     .to_owned(),
             ),
+            receipt: Default::default(),
         }));
         let config = sample_config();
         let service = McpService::with_port(&config, port);
@@ -1700,6 +1713,7 @@ mod tests {
                         "IBCMD does not support object-scoped partial dump; export failed"
                             .to_owned(),
                     ),
+                    receipt: Default::default(),
                 },
             ))),
         );

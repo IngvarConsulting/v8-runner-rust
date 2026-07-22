@@ -56,7 +56,8 @@ impl<'a> SourceSetsService<'a> {
                         logical_role: LogicalSourceRole::DesignerSource,
                     })?;
                     let state = self.state_layout.source_state(&ss.name, &descriptor);
-                    Ok(SourceSetContext::new(&ss.name, path, state))
+                    Ok(SourceSetContext::new(&ss.name, path, state)
+                        .with_excluded_roots(vec![work_path.clone()]))
                 })
                 .collect(),
 
@@ -76,7 +77,8 @@ impl<'a> SourceSetsService<'a> {
                         logical_role: LogicalSourceRole::DesignerSource,
                     })?;
                     let state = self.state_layout.source_state(&ss.name, &descriptor);
-                    Ok(SourceSetContext::new(&ss.name, path, state))
+                    Ok(SourceSetContext::new(&ss.name, path, state)
+                        .with_excluded_roots(vec![work_path.clone()]))
                 })
                 .collect(),
         }
@@ -88,6 +90,7 @@ impl<'a> SourceSetsService<'a> {
             return Ok(vec![]);
         }
         let base_path = absolutize_path(&self.config.base_path)?;
+        let work_path = absolutize_path(&self.config.work_path)?;
         self.config
             .source_sets
             .iter()
@@ -106,7 +109,8 @@ impl<'a> SourceSetsService<'a> {
                     logical_role: LogicalSourceRole::EdtSource,
                 })?;
                 let state = self.state_layout.source_state(&ss.name, &descriptor);
-                Ok(SourceSetContext::new(&ss.name, path, state))
+                Ok(SourceSetContext::new(&ss.name, path, state)
+                    .with_excluded_roots(vec![work_path.clone()]))
             })
             .collect()
     }

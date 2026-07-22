@@ -248,6 +248,21 @@ impl HashStorage {
         })
     }
 
+    /// Read the optimistic-lock generation even when snapshot tables are recoverably incomplete.
+    pub fn recoverable_generation(&self) -> Result<u64, StorageError> {
+        let database =
+            Database::open(&self.path).map_err(|error| map_database_error(&self.path, error))?;
+        let transaction = database
+            .begin_read()
+            .map_err(|error| map_tx_error(&self.path, error, "begin recovery read"))?;
+        let meta = match transaction.open_table(META) {
+            Ok(table) => Some(table),
+            Err(TableError::TableDoesNotExist(_)) => None,
+            Err(error) => return Err(map_table_error(&self.path, error)),
+        };
+        read_generation(meta.as_ref(), &self.path)
+    }
+
     /// Replace a corrupt or missing storage file with a fresh snapshot.
     pub fn recover_and_commit_snapshot(
         &self,
@@ -353,10 +368,7 @@ fn map_database_error(path: &Path, err: DatabaseError) -> StorageError {
             path: path.to_path_buf(),
             reason: "previous I/O error in database".to_owned(),
         },
-        DatabaseError::Storage(RedbStorageError::Io(e)) => StorageError::Hard {
-            path: path.to_path_buf(),
-            reason: format!("I/O error: {e}"),
-        },
+        DatabaseError::Storage(RedbStorageError::Io(e)) => map_io_error(path, "I/O error", e),
         DatabaseError::DatabaseAlreadyOpen => StorageError::Hard {
             path: path.to_path_buf(),
             reason: "database is already open".to_owned(),
@@ -370,10 +382,7 @@ fn map_database_error(path: &Path, err: DatabaseError) -> StorageError {
 
 fn map_table_error(path: &Path, err: TableError) -> StorageError {
     match err {
-        TableError::Storage(RedbStorageError::Io(e)) => StorageError::Hard {
-            path: path.to_path_buf(),
-            reason: format!("table I/O error: {e}"),
-        },
+        TableError::Storage(RedbStorageError::Io(e)) => map_io_error(path, "table I/O error", e),
         TableError::Storage(RedbStorageError::Corrupted(msg)) => StorageError::Recoverable {
             path: path.to_path_buf(),
             reason: msg,
@@ -387,10 +396,7 @@ fn map_table_error(path: &Path, err: TableError) -> StorageError {
 
 fn map_tx_error(path: &Path, err: TransactionError, context: &str) -> StorageError {
     match err {
-        TransactionError::Storage(RedbStorageError::Io(e)) => StorageError::Hard {
-            path: path.to_path_buf(),
-            reason: format!("{context}: {e}"),
-        },
+        TransactionError::Storage(RedbStorageError::Io(e)) => map_io_error(path, context, e),
         other => StorageError::Recoverable {
             path: path.to_path_buf(),
             reason: format!("{context}: {other}"),
@@ -400,14 +406,26 @@ fn map_tx_error(path: &Path, err: TransactionError, context: &str) -> StorageErr
 
 fn map_storage_error(path: &Path, context: &str, err: RedbStorageError) -> StorageError {
     match err {
-        RedbStorageError::Io(error) => StorageError::Hard {
-            path: path.to_path_buf(),
-            reason: format!("{context}: {error}"),
-        },
+        RedbStorageError::Io(error) => map_io_error(path, context, error),
         other => StorageError::Recoverable {
             path: path.to_path_buf(),
             reason: format!("{context}: {other}"),
         },
+    }
+}
+
+fn map_io_error(path: &Path, context: &str, error: std::io::Error) -> StorageError {
+    let reason = format!("{context}: {error}");
+    if error.kind() == std::io::ErrorKind::InvalidData {
+        StorageError::Recoverable {
+            path: path.to_path_buf(),
+            reason,
+        }
+    } else {
+        StorageError::Hard {
+            path: path.to_path_buf(),
+            reason,
+        }
     }
 }
 

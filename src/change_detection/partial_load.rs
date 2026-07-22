@@ -297,7 +297,10 @@ mod tests {
         let decision = decide(
             &[FileChange {
                 path: module.clone(),
+                rel_path: "Catalogs.Items/ObjectModule.bsl".to_owned(),
                 kind: ChangeKind::Modified,
+                pre_hash: Some("old".to_owned()),
+                post_hash: Some("new".to_owned()),
             }],
             root,
             DEFAULT_PARTIAL_LOAD_THRESHOLD,
@@ -324,7 +327,10 @@ mod tests {
         let decision = decide(
             &[FileChange {
                 path: module.clone(),
+                rel_path: "Catalogs/Items/Forms/ItemForm/Ext/Form/Module.bsl".to_owned(),
                 kind: ChangeKind::Modified,
+                pre_hash: Some("old".to_owned()),
+                post_hash: Some("new".to_owned()),
             }],
             root,
             DEFAULT_PARTIAL_LOAD_THRESHOLD,
@@ -348,7 +354,10 @@ mod tests {
         let decision = decide(
             &[FileChange {
                 path: directory,
+                rel_path: "CommonModules".to_owned(),
                 kind: ChangeKind::Modified,
+                pre_hash: Some("old".to_owned()),
+                post_hash: Some("new".to_owned()),
             }],
             root,
             DEFAULT_PARTIAL_LOAD_THRESHOLD,
@@ -367,7 +376,10 @@ mod tests {
         let decision = decide(
             &[FileChange {
                 path: config_xml,
+                rel_path: "Configuration.xml".to_owned(),
                 kind: ChangeKind::Modified,
+                pre_hash: Some("old".to_owned()),
+                post_hash: Some("new".to_owned()),
             }],
             root,
             DEFAULT_PARTIAL_LOAD_THRESHOLD,
@@ -385,7 +397,10 @@ mod tests {
         let decision = decide(
             &[FileChange {
                 path: removed,
+                rel_path: "Catalogs.Items/ObjectModule.bsl".to_owned(),
                 kind: ChangeKind::Deleted,
+                pre_hash: Some("old".to_owned()),
+                post_hash: None,
             }],
             root,
             DEFAULT_PARTIAL_LOAD_THRESHOLD,
@@ -405,8 +420,11 @@ mod tests {
             std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
             std::fs::write(&path, "module").expect("write");
             changes.push(FileChange {
+                rel_path: format!("CommonModules/Module{index}.bsl"),
                 path,
                 kind: ChangeKind::Modified,
+                pre_hash: Some("old".to_owned()),
+                post_hash: Some("new".to_owned()),
             });
         }
 
@@ -433,7 +451,10 @@ mod tests {
         let decision = decide(
             &[FileChange {
                 path: link_dir.join("ObjectModule.bsl"),
+                rel_path: "Catalogs.Items/ObjectModule.bsl".to_owned(),
                 kind: ChangeKind::Modified,
+                pre_hash: Some("old".to_owned()),
+                post_hash: Some("new".to_owned()),
             }],
             &root,
             DEFAULT_PARTIAL_LOAD_THRESHOLD,

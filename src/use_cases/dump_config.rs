@@ -3101,6 +3101,7 @@ exit 0"#,
             platform_log_path: Some(PathBuf::from("/tmp/platform.log")),
             duration_ms: 5,
             message: Some("ok".to_owned()),
+            receipt: Default::default(),
         };
 
         let json = serde_json::to_value(result).expect("json");

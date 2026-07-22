@@ -11,6 +11,7 @@ pub struct SourceSetContext {
     path: PathBuf,
     /// Already resolved, versioned runtime state for this source view.
     runtime_state: RuntimeSourceState,
+    excluded_roots: Vec<PathBuf>,
 }
 
 impl SourceSetContext {
@@ -25,7 +26,13 @@ impl SourceSetContext {
             name: name.into(),
             path,
             runtime_state,
+            excluded_roots: Vec::new(),
         }
+    }
+
+    pub fn with_excluded_roots(mut self, excluded_roots: Vec<PathBuf>) -> Self {
+        self.excluded_roots = excluded_roots;
+        self
     }
 
     pub fn name(&self) -> &str {
@@ -34,6 +41,10 @@ impl SourceSetContext {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn excluded_roots(&self) -> &[PathBuf] {
+        &self.excluded_roots
     }
 
     #[cfg(test)]
