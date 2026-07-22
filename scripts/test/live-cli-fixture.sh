@@ -201,6 +201,36 @@ raise SystemExit(f"build output does not contain step for '{source_set}'")
 PY
 }
 
+assert_json_step_partial() {
+    local json_path="$1"
+    local source_set="$2"
+    python3 - "$json_path" "$source_set" <<'PY'
+import json
+import sys
+
+json_path, source_set = sys.argv[1], sys.argv[2]
+with open(json_path, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+
+steps = payload.get("data", {}).get("steps", [])
+for step in steps:
+    if step.get("source_set") != source_set:
+        continue
+    mode = step.get("mode")
+    partial = mode.get("partial") if isinstance(mode, dict) else None
+    file_count = partial.get("file_count") if isinstance(partial, dict) else None
+    if step.get("ok") is not True:
+        raise SystemExit(f"partial build step for '{source_set}' is not successful: {step}")
+    if not isinstance(file_count, int) or file_count < 1:
+        raise SystemExit(
+            f"build step for '{source_set}' is not partial with a positive file count: {step}"
+        )
+    raise SystemExit(0)
+
+raise SystemExit(f"build output does not contain step for '{source_set}'")
+PY
+}
+
 assert_json_command_ok() {
     local json_path="$1"
     local expected_command="$2"
@@ -587,6 +617,18 @@ print_stage "build incremental no-op"
 run_cli_json_to_file "$incremental_build_json" build
 assert_json_step_ok "$incremental_build_json" "$CONFIGURATION_SOURCE_SET_NAME"
 assert_json_step_ok "$incremental_build_json" "$EXTENSION_SOURCE_SET_NAME"
+
+partial_source="$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH/CommonModules/ОбщийМодуль1/Ext/Module.bsl"
+assert_file_exists "$partial_source"
+printf '\n// issue-40 partial-load BOM smoke\n' >> "$partial_source"
+
+partial_build_json="$OUTPUT_ROOT/json/build-partial.json"
+print_stage "build partial after Cyrillic source change"
+run_cli_json_to_file \
+    "$partial_build_json" \
+    build --source-set "$CONFIGURATION_SOURCE_SET_NAME"
+assert_json_step_ok "$partial_build_json" "$CONFIGURATION_SOURCE_SET_NAME"
+assert_json_step_partial "$partial_build_json" "$CONFIGURATION_SOURCE_SET_NAME"
 
 extensions_json="$OUTPUT_ROOT/json/extensions.json"
 print_stage "extensions properties"
