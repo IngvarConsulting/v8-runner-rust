@@ -30,7 +30,8 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `extensions` | `format=DESIGNER` или `format=EDT` | Обновляет свойства extension `source-set` |
 | `build` | `format=DESIGNER` + `builder=DESIGNER|IBCMD` | Выполняет incremental/full загрузку в ИБ |
 | `build` | `format=EDT` + `builder=DESIGNER|IBCMD` | Экспортирует изменённые EDT `source-set`, затем грузит generated Designer output |
-| `test` | Та же матрица, что и у `build` | По умолчанию запускает `build`; `--no-build` использует подготовленную ИБ |
+| `test` | Та же матрица, что и у `build` | По умолчанию запускает `build` |
+| `test --no-build` | Подготовленная file/server ИБ; source-set и build tooling не требуются | Запускает выбранный test engine без build |
 | `dump` | `format=DESIGNER` + `builder=DESIGNER` | Полная, инкрементальная или object-scoped partial выгрузка |
 | `dump` | `format=DESIGNER` + `builder=IBCMD` | Полная и инкрементальная выгрузка; `partial` деградирует в incremental с warning |
 | `dump` | `format=EDT` + `builder=DESIGNER|IBCMD` | Reverse sync из ИБ через internal Designer snapshot и EDT import |

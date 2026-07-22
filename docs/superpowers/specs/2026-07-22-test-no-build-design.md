@@ -6,7 +6,7 @@ Allow CLI users to run YaXUnit or Vanessa Automation against a prepared infobase
 
 ## Contract
 
-`v8-runner test --no-build yaxunit all` and `v8-runner test --no-build va` select a typed `BuildPolicy::Skip`. The default remains `BuildPolicy::BuildFirst`. MCP requests keep the default and do not expose the new CLI-only option.
+`v8-runner test --no-build yaxunit all` and `v8-runner test --no-build va` select a typed `TestBuildPolicy::Skip`. The default remains `TestBuildPolicy::BuildFirst`. MCP requests keep the default and do not expose the new CLI-only option.
 
 The result keeps a `build` execution step. In skip mode that step has status `skipped` and a stable message stating that the caller explicitly skipped the prerequisite.
 

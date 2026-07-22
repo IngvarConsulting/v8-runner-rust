@@ -993,11 +993,13 @@ fn test_va_builds_vanessa_command_and_overlay() {
 fn test_va_no_build_skips_build_for_prepared_file_infobase() {
     let (dir, config_path, build_calls, test_calls, _captured_params) =
         setup_va_project(JUNIT_SMOKE_REPORT_FIXTURE, &[]);
-    configure_file_infobase(
-        &config_path,
-        &dir.path().join("prepared-va-ib"),
-        FileInfobaseState::Prepared,
-    );
+    let infobase_path = dir.path().join("prepared-va-ib");
+    configure_file_infobase(&config_path, &infobase_path, FileInfobaseState::Prepared);
+    let database_path = infobase_path.join("1Cv8.1CD");
+    let database_before = fs::read(&database_path).expect("database contents before test");
+    let modified_before = fs::metadata(&database_path)
+        .and_then(|metadata| metadata.modified())
+        .expect("database timestamp before test");
 
     let output = v8_runner_command()
         .args([
@@ -1023,6 +1025,16 @@ fn test_va_no_build_skips_build_for_prepared_file_infobase() {
         "no-build must not invoke Designer build"
     );
     assert!(test_calls.exists(), "Vanessa test engine must still run");
+    assert_eq!(
+        fs::read(&database_path).expect("database contents after test"),
+        database_before
+    );
+    assert_eq!(
+        fs::metadata(&database_path)
+            .and_then(|metadata| metadata.modified())
+            .expect("database timestamp after test"),
+        modified_before
+    );
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert!(payload["steps"]
         .as_array()

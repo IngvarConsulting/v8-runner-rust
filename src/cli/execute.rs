@@ -2453,7 +2453,7 @@ mod tests {
     use crate::use_cases::request::{
         ArtifactsModeRequest, ClientMcpAddonRequest, ClientMcpMode, ClientMcpOptionsRequest,
         DesignerClientScope, DesignerConfigCheck, DumpModeRequest, LaunchRequest,
-        LaunchTargetRequest, SyntaxTargetRequest, TestScopeRequest,
+        LaunchTargetRequest, SyntaxTargetRequest, TestBuildPolicy, TestScopeRequest,
     };
     use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
     use crate::use_cases::workspace_lock::workspace_lock_path;
@@ -2482,12 +2482,34 @@ mod tests {
         .expect("request");
 
         assert!(request.full);
+        assert_eq!(request.build_policy, TestBuildPolicy::BuildFirst);
         assert_eq!(
             request.scope,
             TestScopeRequest::Module {
                 name: "ModuleA".to_owned()
             }
         );
+    }
+
+    #[test]
+    fn maps_no_build_yaxunit_request() {
+        let work = tempdir().expect("tempdir");
+        let config = sample_config(work.path());
+        let request = map_test_request(
+            &config,
+            &TestArgs {
+                full: false,
+                no_build: true,
+                client_mode: None,
+                launch: LaunchOptionsArgs::default(),
+                runner: TestRunner::Yaxunit(TestYaxunitArgs {
+                    scope: TestScope::All,
+                }),
+            },
+        )
+        .expect("request");
+
+        assert_eq!(request.build_policy, TestBuildPolicy::Skip);
     }
 
     #[test]
@@ -2556,8 +2578,23 @@ mod tests {
 
         assert_eq!(request.execution.profile.kind, RunnerKind::Vanessa);
         assert_eq!(request.execution.profile.id, "smoke");
+        assert_eq!(request.build_policy, TestBuildPolicy::BuildFirst);
         assert_eq!(request.scope, TestScopeRequest::All);
         assert_eq!(request.execution.timeouts.total_ms, Some(300_000));
+
+        let no_build_request = map_test_request(
+            &config,
+            &TestArgs {
+                full: false,
+                no_build: true,
+                client_mode: None,
+                launch: LaunchOptionsArgs::default(),
+                runner: TestRunner::Va(TestVaArgs::default()),
+            },
+        )
+        .expect("no-build request");
+
+        assert_eq!(no_build_request.build_policy, TestBuildPolicy::Skip);
     }
 
     #[test]

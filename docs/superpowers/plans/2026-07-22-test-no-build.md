@@ -27,7 +27,7 @@
 - Test: `tests/cli_help.rs`
 
 **Interfaces:**
-- Produces: `BuildPolicy::{BuildFirst, Skip}` and `TestRequest.build_policy`.
+- Produces: `TestBuildPolicy::{BuildFirst, Skip}` and `TestRequest.build_policy`.
 
 - [ ] Add a failing help test for `test --no-build`.
 - [ ] Run the focused help test and confirm it fails because the flag is absent.
