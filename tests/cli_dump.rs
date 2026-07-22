@@ -581,6 +581,63 @@ fn dump_json_conflict_preserves_local_file_and_runtime_state() {
 }
 
 #[test]
+fn dump_json_incremental_and_partial_conflicts_preserve_source_and_runtime_state() {
+    for (mode, objects) in [
+        ("incremental", Vec::<&str>::new()),
+        ("partial", vec!["--object", "Catalog.Items"]),
+    ] {
+        let (_dir, config_path, _binary_path, work_path, base_path, calls_log) = setup_project();
+        bootstrap_full(&config_path);
+        fs::write(&calls_log, []).expect("clear calls");
+        let local_path = base_path.join("main/old.txt");
+        fs::write(&local_path, "old").expect("local file");
+        let state_before = snapshot_runtime_generations(&work_path);
+
+        let mut args = vec![
+            "--config",
+            config_path.to_str().expect("config path"),
+            "--json-message",
+            "dump",
+            "--mode",
+            mode,
+            "--source-set",
+            "main",
+        ];
+        args.extend(objects);
+        let output = v8_runner_command()
+            .args(args)
+            .output()
+            .expect("run command");
+
+        assert!(!output.status.success(), "{mode} dump must conflict");
+        assert_eq!(output.status.code(), Some(3), "unexpected {mode} exit code");
+        let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+        let receipt = &payload["data"]["receipt"];
+        assert_eq!(payload["data"]["mode"], mode.to_uppercase());
+        assert_eq!(receipt["status"], "conflict");
+        assert_eq!(receipt["processed"], serde_json::json!([]));
+        assert_eq!(receipt["requested"], receipt["conflicted"]);
+        assert_eq!(receipt["requested"][0]["path"], "old.txt");
+        assert_eq!(
+            fs::read(&local_path).expect("local file after conflict"),
+            b"old",
+            "{mode} dump changed local source"
+        );
+        assert_eq!(
+            snapshot_runtime_generations(&work_path),
+            state_before,
+            "{mode} dump advanced runtime state after conflict"
+        );
+        assert!(
+            fs::read_to_string(&calls_log)
+                .expect("calls")
+                .contains("--sync"),
+            "{mode} dump did not exercise the incremental shadow branch"
+        );
+    }
+}
+
+#[test]
 fn dump_ibcmd_full_server_connection_passes_dbms_and_infobase_credentials() {
     let (_dir, config_path, _binary_path, _work_path, _base_path, calls_log) = setup_project();
     write_config_with_infobase(
