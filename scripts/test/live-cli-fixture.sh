@@ -217,11 +217,11 @@ for step in steps:
     if step.get("source_set") != source_set:
         continue
     mode = step.get("mode")
-    partial = mode.get("partial") if isinstance(mode, dict) else None
+    partial = mode.get("partial") if isinstance(mode, dict) and set(mode) == {"partial"} else None
     file_count = partial.get("file_count") if isinstance(partial, dict) else None
     if step.get("ok") is not True:
         raise SystemExit(f"partial build step for '{source_set}' is not successful: {step}")
-    if not isinstance(file_count, int) or file_count < 1:
+    if type(file_count) is not int or file_count < 1:
         raise SystemExit(
             f"build step for '{source_set}' is not partial with a positive file count: {step}"
         )
