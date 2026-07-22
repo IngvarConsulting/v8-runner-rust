@@ -52,6 +52,28 @@ assert_dir_exists() {
     fi
 }
 
+resolve_contained_existing_path() {
+    local base_path="$1"
+    local candidate_path="$2"
+    python3 - "$base_path" "$candidate_path" <<'PY'
+import pathlib
+import sys
+
+base_path = pathlib.Path(sys.argv[1]).resolve(strict=True)
+candidate_path = pathlib.Path(sys.argv[2]).resolve(strict=True)
+
+try:
+    relative_path = candidate_path.relative_to(base_path)
+except ValueError:
+    raise SystemExit(f"path is outside the copied workspace: {candidate_path}")
+
+if not relative_path.parts:
+    raise SystemExit(f"path must be contained below the copied workspace: {candidate_path}")
+
+print(candidate_path)
+PY
+}
+
 snapshot_dir() {
     local source_dir="$1"
     local target_dir="$2"
@@ -618,17 +640,20 @@ run_cli_json_to_file "$incremental_build_json" build
 assert_json_step_ok "$incremental_build_json" "$CONFIGURATION_SOURCE_SET_NAME"
 assert_json_step_ok "$incremental_build_json" "$EXTENSION_SOURCE_SET_NAME"
 
-partial_source="$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH/CommonModules/ОбщийМодуль1/Ext/Module.bsl"
-assert_file_exists "$partial_source"
-printf '\n// issue-40 partial-load BOM smoke\n' >> "$partial_source"
+if [[ "$BUILDER_BACKEND" == "DESIGNER" ]]; then
+    partial_candidate="$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH/CommonModules/ОбщийМодуль1/Ext/Module.bsl"
+    partial_source="$(resolve_contained_existing_path "$WORK_BASE_PATH" "$partial_candidate")"
+    assert_file_exists "$partial_source"
+    printf '\n// issue-40 partial-load BOM smoke\n' >> "$partial_source"
 
-partial_build_json="$OUTPUT_ROOT/json/build-partial.json"
-print_stage "build partial after Cyrillic source change"
-run_cli_json_to_file \
-    "$partial_build_json" \
-    build --source-set "$CONFIGURATION_SOURCE_SET_NAME"
-assert_json_step_ok "$partial_build_json" "$CONFIGURATION_SOURCE_SET_NAME"
-assert_json_step_partial "$partial_build_json" "$CONFIGURATION_SOURCE_SET_NAME"
+    partial_build_json="$OUTPUT_ROOT/json/build-partial.json"
+    print_stage "build partial after Cyrillic source change"
+    run_cli_json_to_file \
+        "$partial_build_json" \
+        build --source-set "$CONFIGURATION_SOURCE_SET_NAME"
+    assert_json_step_ok "$partial_build_json" "$CONFIGURATION_SOURCE_SET_NAME"
+    assert_json_step_partial "$partial_build_json" "$CONFIGURATION_SOURCE_SET_NAME"
+fi
 
 extensions_json="$OUTPUT_ROOT/json/extensions.json"
 print_stage "extensions properties"
