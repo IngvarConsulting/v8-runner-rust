@@ -298,8 +298,13 @@ fn prepare_source_extension_full(
             commit,
         ),
         SourceFormat::Edt => {
-            let exported =
-                export_edt_source_extension(context, config, extension, &source.path, utilities)?;
+            let exported = export_edt_source_extension(
+                context,
+                config,
+                extension,
+                commit.context.path(),
+                utilities,
+            )?;
             prepare_source_extension_for_backend(
                 context, config, extension, &exported, utilities, commit,
             )
