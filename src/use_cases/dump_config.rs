@@ -826,7 +826,7 @@ fn cleanup_staging_on_interruption(staging_dir: &Path, error: AppError) -> AppEr
 }
 
 fn resolve_target(config: &AppConfig, args: &DumpArgs) -> Result<ResolvedDumpTarget, AppError> {
-    let inventory = SourceSetInventory::new(config);
+    let inventory = SourceSetInventory::new(config).map_err(AppError::from)?;
 
     let (source_set, extension) = match (args.source_set.as_deref(), args.extension.as_deref()) {
         (Some(source_set_name), None) => {

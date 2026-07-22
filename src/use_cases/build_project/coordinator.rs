@@ -12,7 +12,16 @@ pub(super) fn run_build_designer(
     );
 
     let started = Instant::now();
-    let inventory = SourceSetInventory::new(config);
+    let inventory = SourceSetInventory::new(config).map_err(|error| {
+        BuildExecutionFailure::with_payload(
+            AppError::from(error),
+            BuildResult {
+                ok: false,
+                steps: vec![],
+                duration_ms: started.elapsed().as_millis() as u64,
+            },
+        )
+    })?;
     let ordered_source_sets =
         match selected_ordered_source_sets(&inventory, args.source_set.as_deref()) {
             Ok(source_sets) => source_sets,
@@ -219,7 +228,16 @@ pub(super) fn run_build_ibcmd(
     );
 
     let started = Instant::now();
-    let inventory = SourceSetInventory::new(config);
+    let inventory = SourceSetInventory::new(config).map_err(|error| {
+        BuildExecutionFailure::with_payload(
+            AppError::from(error),
+            BuildResult {
+                ok: false,
+                steps: vec![],
+                duration_ms: started.elapsed().as_millis() as u64,
+            },
+        )
+    })?;
     let ordered_source_sets =
         match selected_ordered_source_sets(&inventory, args.source_set.as_deref()) {
             Ok(source_sets) => source_sets,
@@ -400,7 +418,16 @@ pub(super) fn run_build_edt(
     }
 
     let started = Instant::now();
-    let inventory = SourceSetInventory::new(config);
+    let inventory = SourceSetInventory::new(config).map_err(|error| {
+        BuildExecutionFailure::with_payload(
+            AppError::from(error),
+            BuildResult {
+                ok: false,
+                steps: vec![],
+                duration_ms: started.elapsed().as_millis() as u64,
+            },
+        )
+    })?;
     let ordered_source_sets =
         match selected_ordered_source_sets(&inventory, args.source_set.as_deref()) {
             Ok(source_sets) => source_sets,
@@ -582,12 +609,9 @@ pub(super) fn run_build_edt(
                 Ok(descriptors) => {
                     match &edt_stage {
                         StepPlan::Execute { commit, .. } => {
-                            if let Err(app_error) = commit_step_state(
-                                source_set,
-                                &edt_context,
-                                &config.work_path,
-                                commit,
-                            ) {
+                            if let Err(app_error) =
+                                commit_step_state(source_set, &edt_context, commit)
+                            {
                                 let result = fail_from_source_set_index(
                                     started,
                                     steps,
@@ -780,9 +804,7 @@ pub(super) fn run_build_edt(
                         return Err(BuildExecutionFailure::with_payload(error, result));
                     }
                 };
-                if let Err(app_error) =
-                    commit_step_state(source_set, &edt_context, &config.work_path, &commit)
-                {
+                if let Err(app_error) = commit_step_state(source_set, &edt_context, &commit) {
                     let result = fail_from_source_set_index(
                         started,
                         steps,
@@ -812,7 +834,6 @@ pub(super) fn run_build_edt(
             args.full_rebuild,
             edt_stage_skipped,
             config.build.partial_load_threshold,
-            &config.work_path,
         ) {
             Ok(plan) => plan,
             Err(error) => {

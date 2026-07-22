@@ -1,6 +1,6 @@
 use redb::{
-    Database, DatabaseError, ReadableTable, StorageError as RedbStorageError, TableDefinition,
-    TableError, TransactionError,
+    CommitError, Database, DatabaseError, ReadableTable, StorageError as RedbStorageError,
+    TableDefinition, TableError, TransactionError,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -30,6 +30,13 @@ pub struct StorageSnapshot {
     pub entries: HashMap<String, StoredFileState>,
     pub watermark: Option<u64>,
     pub generation: u64,
+}
+
+/// Distinguishes a never-initialized scoped storage from a committed snapshot.
+#[derive(Debug, Clone)]
+pub enum HashStorageLoad {
+    Missing,
+    Initialized(StorageSnapshot),
 }
 
 /// Storage-layer failures split into recoverable and hard categories.
@@ -73,12 +80,21 @@ impl HashStorage {
         &self.path
     }
 
-    /// Load the current snapshot from storage.
-    pub fn load_snapshot(&self) -> Result<StorageSnapshot, StorageError> {
-        if !self.path.exists() {
-            return Ok(StorageSnapshot::default());
+    /// Load typed initialization state without a separate filesystem existence check.
+    pub fn load_state(&self) -> Result<HashStorageLoad, StorageError> {
+        match self.path.try_exists() {
+            Ok(false) => return Ok(HashStorageLoad::Missing),
+            Ok(true) => {}
+            Err(error) => return Err(map_filesystem_lookup_error(&self.path, error)),
         }
-        let db = Database::open(&self.path).map_err(|e| map_database_error(&self.path, e))?;
+        let db = match Database::open(&self.path) {
+            Ok(database) => database,
+            Err(database_error) => match self.path.try_exists() {
+                Ok(false) => return Ok(HashStorageLoad::Missing),
+                Ok(true) => return Err(map_database_error(&self.path, database_error)),
+                Err(error) => return Err(map_filesystem_lookup_error(&self.path, error)),
+            },
+        };
         let tx = db
             .begin_read()
             .map_err(|e| map_tx_error(&self.path, e, "begin read"))?;
@@ -103,11 +119,14 @@ impl HashStorage {
         let hash_exists = hash_tbl.is_some();
         if !mtime_exists || !hash_exists {
             if !mtime_exists && !hash_exists {
-                return Ok(StorageSnapshot {
-                    entries: HashMap::new(),
-                    watermark: read_watermark(meta_tbl.as_ref(), &self.path)?,
-                    generation: read_generation(meta_tbl.as_ref(), &self.path)?,
-                });
+                return if meta_tbl.is_none() {
+                    Ok(HashStorageLoad::Missing)
+                } else {
+                    Err(StorageError::Recoverable {
+                        path: self.path.clone(),
+                        reason: "metadata exists without snapshot tables".to_owned(),
+                    })
+                };
             }
             return Err(StorageError::Recoverable {
                 path: self.path.clone(),
@@ -158,11 +177,19 @@ impl HashStorage {
             }
         }
 
-        Ok(StorageSnapshot {
+        Ok(HashStorageLoad::Initialized(StorageSnapshot {
             entries,
             watermark: read_watermark(meta_tbl.as_ref(), &self.path)?,
             generation: read_generation(meta_tbl.as_ref(), &self.path)?,
-        })
+        }))
+    }
+
+    #[cfg(test)]
+    pub fn load_snapshot(&self) -> Result<StorageSnapshot, StorageError> {
+        match self.load_state()? {
+            HashStorageLoad::Missing => Ok(StorageSnapshot::default()),
+            HashStorageLoad::Initialized(snapshot) => Ok(snapshot),
+        }
     }
 
     /// Persist a full snapshot if the caller still owns the expected generation.
@@ -209,14 +236,16 @@ impl HashStorage {
                 .map_err(|e| map_storage_error(&self.path, "write generation", e))?;
         }
 
-        tx.commit()
-            .map_err(|e| map_storage_error(&self.path, "commit transaction", e))?;
+        tx.commit().map_err(|e| map_commit_error(&self.path, e))?;
         Ok(())
     }
 
     /// Read the current optimistic-lock generation.
     pub fn current_generation(&self) -> Result<u64, StorageError> {
-        Ok(self.load_snapshot()?.generation)
+        Ok(match self.load_state()? {
+            HashStorageLoad::Missing => 0,
+            HashStorageLoad::Initialized(snapshot) => snapshot.generation,
+        })
     }
 
     /// Replace a corrupt or missing storage file with a fresh snapshot.
@@ -225,7 +254,11 @@ impl HashStorage {
         snapshot: &HashMap<String, StoredFileState>,
         watermark: u64,
     ) -> Result<(), StorageError> {
-        if self.path.exists() {
+        if self
+            .path
+            .try_exists()
+            .map_err(|error| map_filesystem_lookup_error(&self.path, error))?
+        {
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::SystemTime::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -258,10 +291,7 @@ fn read_watermark(
         return Ok(None);
     };
     meta.get(META_KEY_WATERMARK)
-        .map_err(|e| StorageError::Recoverable {
-            path: path.to_path_buf(),
-            reason: format!("read watermark: {e}"),
-        })
+        .map_err(|e| map_storage_error(path, "read watermark", e))
         .map(|opt| opt.map(|v| v.value()))
 }
 
@@ -273,10 +303,7 @@ fn read_generation(
         return Ok(0);
     };
     meta.get(META_KEY_GENERATION)
-        .map_err(|e| StorageError::Recoverable {
-            path: path.to_path_buf(),
-            reason: format!("read generation: {e}"),
-        })
+        .map_err(|e| map_storage_error(path, "read generation", e))
         .map(|opt| opt.map(|v| v.value()).unwrap_or(0))
 }
 
@@ -371,9 +398,91 @@ fn map_tx_error(path: &Path, err: TransactionError, context: &str) -> StorageErr
     }
 }
 
-fn map_storage_error(path: &Path, context: &str, err: impl std::fmt::Display) -> StorageError {
-    StorageError::Recoverable {
+fn map_storage_error(path: &Path, context: &str, err: RedbStorageError) -> StorageError {
+    match err {
+        RedbStorageError::Io(error) => StorageError::Hard {
+            path: path.to_path_buf(),
+            reason: format!("{context}: {error}"),
+        },
+        other => StorageError::Recoverable {
+            path: path.to_path_buf(),
+            reason: format!("{context}: {other}"),
+        },
+    }
+}
+
+fn map_commit_error(path: &Path, error: CommitError) -> StorageError {
+    match error {
+        CommitError::Storage(error) => map_storage_error(path, "commit transaction", error),
+        other => StorageError::Recoverable {
+            path: path.to_path_buf(),
+            reason: format!("commit transaction: {other}"),
+        },
+    }
+}
+
+fn map_filesystem_lookup_error(path: &Path, error: std::io::Error) -> StorageError {
+    StorageError::Hard {
         path: path.to_path_buf(),
-        reason: format!("{context}: {err}"),
+        reason: format!("failed to inspect storage path: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HashStorage, HashStorageLoad, StorageError, META, META_KEY_GENERATION};
+    use redb::Database;
+    use tempfile::tempdir;
+
+    #[test]
+    fn missing_file_has_typed_missing_state() {
+        let dir = tempdir().expect("tempdir");
+        let storage = HashStorage::new(dir.path().join("missing.redb"));
+
+        assert!(matches!(storage.load_state(), Ok(HashStorageLoad::Missing)));
+    }
+
+    #[test]
+    fn existing_empty_database_has_typed_missing_state() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("empty.redb");
+        Database::create(&path).expect("empty database");
+
+        assert!(matches!(
+            HashStorage::new(path).load_state(),
+            Ok(HashStorageLoad::Missing)
+        ));
+    }
+
+    #[test]
+    fn metadata_without_snapshot_tables_is_recoverable() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("metadata-only.redb");
+        let database = Database::create(&path).expect("database");
+        let write = database.begin_write().expect("write");
+        {
+            let mut meta = write.open_table(META).expect("meta");
+            meta.insert(META_KEY_GENERATION, 1).expect("generation");
+        }
+        write.commit().expect("commit");
+        drop(database);
+
+        assert!(matches!(
+            HashStorage::new(path).load_state(),
+            Err(StorageError::Recoverable { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_lookup_errors_are_hard_instead_of_missing() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("loop.redb");
+        std::os::unix::fs::symlink(&path, &path).expect("self symlink");
+
+        assert!(matches!(
+            HashStorage::new(path).load_state(),
+            Err(StorageError::Hard { .. })
+        ));
     }
 }

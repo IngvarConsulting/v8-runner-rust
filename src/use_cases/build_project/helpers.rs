@@ -104,7 +104,7 @@ pub(super) fn plan_edt_export_step(
                 ok: true,
             })
         }
-        AnalysisOutcome::Fallback => {
+        AnalysisOutcome::Bootstrap | AnalysisOutcome::Fallback => {
             debug!(
                 source_set = source_set.name.as_str(),
                 "edt change analysis result: fallback to full export/load after recoverable issue"
@@ -143,7 +143,6 @@ pub(super) fn plan_generated_designer_load_step(
     full_rebuild: bool,
     edt_stage_skipped: bool,
     partial_load_threshold: usize,
-    work_path: &Path,
 ) -> Result<StepPlan, analyzer::ChangeDetectionError> {
     if edt_stage_skipped && !designer_context.path().exists() {
         return Ok(StepPlan::Skip {
@@ -163,7 +162,7 @@ pub(super) fn plan_generated_designer_load_step(
         });
     }
 
-    let outcome = analyzer::analyze_context(designer_context, work_path).outcome?;
+    let outcome = analyzer::analyze_context(designer_context).outcome?;
     Ok(plan_generated_designer_load_from_analysis(
         source_set,
         designer_context.path(),
@@ -190,7 +189,7 @@ fn plan_configurator_load_from_analysis(
                 ok: true,
             }
         }
-        AnalysisOutcome::Fallback => {
+        AnalysisOutcome::Bootstrap | AnalysisOutcome::Fallback => {
             debug!(
                 source_set = source_set.name.as_str(),
                 "change analysis result: fallback to full load after recoverable issue"
@@ -243,7 +242,7 @@ fn plan_generated_designer_load_from_analysis(
                 ok: true,
             }
         }
-        AnalysisOutcome::Fallback => {
+        AnalysisOutcome::Bootstrap | AnalysisOutcome::Fallback => {
             debug!(
                 source_set = source_set.name.as_str(),
                 "generated designer change analysis result: fallback to full load after recoverable issue"
@@ -410,20 +409,19 @@ pub(super) fn push_build_step(
 
 pub(super) fn commit_full_rescan(
     context: &SourceSetContext,
-    work_path: &Path,
     recover_storage: bool,
 ) -> Result<(), AppError> {
-    match analyzer::rescan_and_commit_full(context, work_path) {
+    match analyzer::rescan_and_commit_full(context) {
         Ok(()) => Ok(()),
-        Err(_error) if recover_storage && storage_needs_recovery(context, work_path) => {
-            let storage_path = context.storage_path(work_path);
+        Err(_error) if recover_storage && storage_needs_recovery(context) => {
+            let storage_path = context.storage_path();
             remove_storage_path(&storage_path).map_err(|remove_error| {
                 AppError::Runtime(format!(
                     "failed to remove corrupt storage '{}': {remove_error}",
                     storage_path.display()
                 ))
             })?;
-            analyzer::rescan_and_commit_full(context, work_path)
+            analyzer::rescan_and_commit_full(context)
                 .map_err(|retry_error| AppError::Runtime(retry_error.to_string()))
         }
         Err(error) => Err(AppError::Runtime(error.to_string())),
@@ -433,7 +431,6 @@ pub(super) fn commit_full_rescan(
 pub(super) fn commit_step_state(
     source_set: &SourceSetConfig,
     context: &SourceSetContext,
-    work_path: &Path,
     commit: &StepCommit,
 ) -> Result<(), AppError> {
     match commit {
@@ -442,7 +439,7 @@ pub(super) fn commit_step_state(
                 source_set = source_set.name.as_str(),
                 "committing prepared change-detection state"
             );
-            analyzer::commit_success(context, work_path, prepared)
+            analyzer::commit_success(context, prepared)
                 .map_err(|error| AppError::Runtime(error.to_string()))
         }
         StepCommit::RescanFull { recover_storage } => {
@@ -450,13 +447,13 @@ pub(super) fn commit_step_state(
                 source_set = source_set.name.as_str(),
                 recover_storage, "rescanning source-set state after full build"
             );
-            commit_full_rescan(context, work_path, *recover_storage)
+            commit_full_rescan(context, *recover_storage)
         }
     }
 }
 
-fn storage_needs_recovery(context: &SourceSetContext, work_path: &Path) -> bool {
-    match HashStorage::new(context.storage_path(work_path)).current_generation() {
+fn storage_needs_recovery(context: &SourceSetContext) -> bool {
+    match HashStorage::new(context.storage_path()).current_generation() {
         Err(StorageError::Recoverable { .. }) => true,
         Err(StorageError::Hard { reason, .. }) => {
             let reason = reason.to_ascii_lowercase();

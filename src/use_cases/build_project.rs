@@ -541,7 +541,7 @@ fn execute_source_set_step(
     .map_err(AppError::from)?;
     ensure_platform_success("update_db_cfg", source_set, &update_result)?;
 
-    commit_step_state(source_set, commit_context, &config.work_path, commit)?;
+    commit_step_state(source_set, commit_context, commit)?;
 
     Ok([
         deferred_interruption_warning("load", &load_result),
@@ -688,7 +688,7 @@ fn execute_source_set_step_ibcmd(
         .map_err(map_ibcmd_error)?;
     ensure_platform_success("apply", source_set, &apply_result)?;
 
-    commit_step_state(source_set, commit_context, &config.work_path, commit)?;
+    commit_step_state(source_set, commit_context, commit)?;
 
     Ok([
         deferred_interruption_warning("ibcmd_import", &load_result),
@@ -710,7 +710,6 @@ mod tests {
         ToolExtensionInput, ToolExtensionSourceConfig, ToolsConfig,
     };
     use crate::domain::build::BuildMode;
-    use crate::domain::source_set::SourceSetContext;
     use crate::use_cases::context::{CommandName, ExecutionContext};
     use crate::use_cases::request::BuildRequest as BuildArgs;
     use crate::use_cases::result::UseCaseErrorKind;
@@ -978,6 +977,31 @@ mod tests {
             full_rebuild,
             source_set: None,
         }
+    }
+
+    #[test]
+    fn malformed_designer_connection_returns_structured_validation_failure_without_unwinding() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = build_config(
+            dir.path(),
+            &dir.path().join("work"),
+            &dir.path().join("1cv8"),
+            20,
+            SourceFormat::Designer,
+            BuilderBackend::Designer,
+        );
+        config.infobase.connection = "/Unsupported secret-value".to_owned();
+
+        let result = std::panic::catch_unwind(|| run_build(&config, &build_args(false)));
+
+        assert!(result.is_ok(), "build boundary must not unwind");
+        let failure = result
+            .expect("no unwind")
+            .expect_err("malformed connection must fail");
+        assert_eq!(failure.error.kind(), UseCaseErrorKind::Validation);
+        let payload = failure.payload.expect("structured build payload");
+        assert!(!payload.ok);
+        assert!(payload.steps.is_empty());
     }
 
     #[cfg(unix)]
@@ -1273,29 +1297,30 @@ mod tests {
     }
 
     fn prime_snapshots(config: &AppConfig) {
-        let service = SourceSetsService::new(config);
-        for context in service.designer_contexts() {
-            crate::change_detection::analyzer::rescan_and_commit_full(&context, &config.work_path)
+        let service = SourceSetsService::new(config).expect("service");
+        for context in service.designer_contexts().expect("contexts") {
+            crate::change_detection::analyzer::rescan_and_commit_full(&context)
                 .expect("prime snapshot");
         }
     }
 
     fn prime_edt_snapshots(config: &AppConfig) {
-        let service = SourceSetsService::new(config);
-        for context in service.edt_contexts() {
-            crate::change_detection::analyzer::rescan_and_commit_full(&context, &config.work_path)
+        let service = SourceSetsService::new(config).expect("service");
+        for context in service.edt_contexts().expect("contexts") {
+            crate::change_detection::analyzer::rescan_and_commit_full(&context)
                 .expect("prime edt snapshot");
         }
     }
 
     fn storage_generation(config: &AppConfig, source_set_name: &str) -> u64 {
-        let service = SourceSetsService::new(config);
+        let service = SourceSetsService::new(config).expect("service");
         let context = service
             .designer_contexts()
+            .expect("contexts")
             .into_iter()
             .find(|context| context.name() == source_set_name)
             .expect("context");
-        HashStorage::new(context.storage_path(&config.work_path))
+        HashStorage::new(context.storage_path())
             .load_snapshot()
             .expect("snapshot")
             .generation
@@ -1318,16 +1343,25 @@ mod tests {
         source_path: &Path,
         extension_name: &str,
     ) -> PathBuf {
-        let context = SourceSetContext::new(
-            format!("tool:{extension_name}"),
-            source_path.to_path_buf(),
-            format!("tool-{extension_name}-source"),
-        );
-        context.storage_path(&config.work_path)
+        let extension = config
+            .tools
+            .client_mcp
+            .extension
+            .as_ref()
+            .filter(|extension| extension.name == extension_name)
+            .expect("configured tool extension");
+        let source = extension.source().expect("source tool extension");
+        let context = crate::use_cases::tool_extension::tool_extension_source_context(
+            config, extension, source,
+        )
+        .expect("tool extension context");
+        assert_eq!(context.path(), source_path);
+        context.storage_path()
     }
 
     fn write_recoverable_tool_extension_storage(path: &Path) {
         remove_file_if_exists(path);
+        std::fs::create_dir_all(path.parent().expect("storage parent")).expect("storage parent");
         let db = redb::Database::create(path).expect("create recoverable storage");
         let tx = db.begin_write().expect("begin recoverable storage write");
         {
@@ -1338,13 +1372,14 @@ mod tests {
     }
 
     fn edt_storage_generation(config: &AppConfig, source_set_name: &str) -> u64 {
-        let service = SourceSetsService::new(config);
+        let service = SourceSetsService::new(config).expect("service");
         let context = service
             .edt_contexts()
+            .expect("contexts")
             .into_iter()
             .find(|context| context.name() == source_set_name)
             .expect("edt context");
-        HashStorage::new(context.storage_path(&config.work_path))
+        HashStorage::new(context.storage_path())
             .load_snapshot()
             .expect("snapshot")
             .generation
@@ -2315,11 +2350,13 @@ mod tests {
             .payload
             .expect("build failures should preserve a structured payload");
         let designer_storage_path = SourceSetsService::new(&config)
+            .expect("service")
             .designer_contexts()
+            .expect("contexts")
             .into_iter()
             .find(|context| context.name() == "client_mcp")
             .expect("designer context")
-            .storage_path(&config.work_path);
+            .storage_path();
         let designer_calls_text = fs::read_to_string(&designer_calls).expect("designer calls");
 
         assert!(!result.ok);
@@ -2555,11 +2592,13 @@ mod tests {
             .payload
             .expect("build failures should preserve a structured payload");
         let designer_storage_path = SourceSetsService::new(&config)
+            .expect("service")
             .designer_contexts()
+            .expect("contexts")
             .into_iter()
             .find(|context| context.name() == "main")
             .expect("designer context")
-            .storage_path(&config.work_path);
+            .storage_path();
 
         assert!(!result.ok);
         assert!(matches!(result.steps[0].mode, BuildMode::EdtExport));
@@ -2826,13 +2865,14 @@ mod tests {
         );
         prime_snapshots(&config);
 
-        let service = SourceSetsService::new(&config);
+        let service = SourceSetsService::new(&config).expect("service");
         let main_context = service
             .designer_contexts()
+            .expect("contexts")
             .into_iter()
             .find(|context| context.name() == "main")
             .expect("main context");
-        fs::write(main_context.storage_path(&config.work_path), "corrupt").expect("corrupt main");
+        fs::write(main_context.storage_path(), "corrupt").expect("corrupt main");
         fs::write(
             base.join("ext").join("CommonModules").join("Module.bsl"),
             "procedure Test()\n  // ext changed\nendprocedure",
@@ -2962,9 +3002,9 @@ mod tests {
         );
         prime_snapshots(&config);
 
-        let service = SourceSetsService::new(&config);
-        for context in service.designer_contexts() {
-            let storage_path = context.storage_path(&config.work_path);
+        let service = SourceSetsService::new(&config).expect("service");
+        for context in service.designer_contexts().expect("contexts") {
+            let storage_path = context.storage_path();
             fs::write(storage_path, "corrupt").expect("corrupt storage");
         }
 
@@ -2999,13 +3039,14 @@ mod tests {
         );
         prime_snapshots(&config);
 
-        let service = SourceSetsService::new(&config);
+        let service = SourceSetsService::new(&config).expect("service");
         let main_context = service
             .designer_contexts()
+            .expect("contexts")
             .into_iter()
             .find(|context| context.name() == "main")
             .expect("main context");
-        let storage_path = main_context.storage_path(&config.work_path);
+        let storage_path = main_context.storage_path();
         std::fs::remove_file(&storage_path).expect("remove storage file");
         std::fs::create_dir_all(&storage_path).expect("replace with directory");
 

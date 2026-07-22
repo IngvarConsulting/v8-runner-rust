@@ -9,6 +9,10 @@ use crate::config::model::{
     ToolExtensionSourceConfig,
 };
 use crate::domain::build::{BuildMode, BuildStep};
+use crate::domain::runtime_state::{
+    InfobaseIdentity, LogicalSourceRole, RuntimeSourceDescriptor, RuntimeSourceIdentityInputs,
+    RuntimeStateLayout,
+};
 use crate::domain::source_set::SourceSetContext;
 use crate::platform::designer::DesignerDsl;
 use crate::platform::edt::EdtDsl;
@@ -113,7 +117,7 @@ fn prepare_source_extension(
     let source_context = tool_extension_source_context(config, extension, source)?;
     if full_rebuild {
         prepare_source_extension_full(context, config, extension, source, utilities)?;
-        commit_tool_extension_full_rescan(&source_context, &config.work_path, true)?;
+        commit_tool_extension_full_rescan(&source_context, true)?;
         return Ok(successful_build_step(
             extension,
             format!("prepared extension '{}' from sources", extension.name),
@@ -121,11 +125,11 @@ fn prepare_source_extension(
         ));
     }
 
-    let outcome = match analyzer::analyze_context(&source_context, &config.work_path).outcome {
+    let outcome = match analyzer::analyze_context(&source_context).outcome {
         Ok(outcome) => outcome,
-        Err(error) if storage_needs_recovery(&source_context, &config.work_path) => {
+        Err(_error) if storage_needs_recovery(&source_context) => {
             prepare_source_extension_full(context, config, extension, source, utilities)?;
-            commit_tool_extension_full_rescan(&source_context, &config.work_path, true)?;
+            commit_tool_extension_full_rescan(&source_context, true)?;
             return Ok(successful_build_step(
                 extension,
                 format!("prepared extension '{}' from sources", extension.name),
@@ -141,9 +145,9 @@ fn prepare_source_extension(
             "no changes".to_owned(),
             started.elapsed().as_millis() as u64,
         )),
-        AnalysisOutcome::Fallback => {
+        AnalysisOutcome::Bootstrap | AnalysisOutcome::Fallback => {
             prepare_source_extension_full(context, config, extension, source, utilities)?;
-            commit_tool_extension_full_rescan(&source_context, &config.work_path, false)?;
+            commit_tool_extension_full_rescan(&source_context, false)?;
             Ok(successful_build_step(
                 extension,
                 format!("prepared extension '{}' from sources", extension.name),
@@ -152,7 +156,7 @@ fn prepare_source_extension(
         }
         AnalysisOutcome::Changes { prepared, .. } => {
             prepare_source_extension_full(context, config, extension, source, utilities)?;
-            analyzer::commit_success(&source_context, &config.work_path, &prepared)
+            analyzer::commit_success(&source_context, &prepared)
                 .map_err(|error| AppError::Runtime(error.to_string()))?;
             Ok(successful_build_step(
                 extension,
@@ -182,7 +186,7 @@ fn prepare_source_extension_full(
     }
 }
 
-fn tool_extension_source_context(
+pub(crate) fn tool_extension_source_context(
     config: &AppConfig,
     extension: &ToolExtensionConfig,
     source: &ToolExtensionSourceConfig,
@@ -193,10 +197,21 @@ fn tool_extension_source_context(
     } else {
         base_path.join(&source.path)
     };
+    let identity = InfobaseIdentity::normalize(&config.infobase)?;
+    let layout = RuntimeStateLayout::new(&config.work_path, identity)?;
+    let descriptor = RuntimeSourceDescriptor::new(RuntimeSourceIdentityInputs {
+        configured_source_identity: &source.path,
+        source_root: &source_path,
+        purpose: crate::config::model::SourceSetPurpose::Extension,
+        format: source.format.unwrap_or(config.format),
+        backend: config.builder,
+        logical_role: LogicalSourceRole::ToolExtension,
+    })?;
+    let state = layout.source_state(&format!("tool-{}", extension.name), &descriptor);
     Ok(SourceSetContext::new(
         format!("tool:{}", extension.name),
         source_path,
-        format!("tool-{}-source", extension.name),
+        state,
     ))
 }
 
@@ -225,28 +240,27 @@ fn extension_stage_detail(executor: &str, action: &str, extension: &ToolExtensio
 
 fn commit_tool_extension_full_rescan(
     context: &SourceSetContext,
-    work_path: &Path,
     recover_storage: bool,
 ) -> Result<(), AppError> {
-    match analyzer::rescan_and_commit_full(context, work_path) {
+    match analyzer::rescan_and_commit_full(context) {
         Ok(()) => Ok(()),
-        Err(_error) if recover_storage && storage_needs_recovery(context, work_path) => {
-            let storage_path = context.storage_path(work_path);
+        Err(_error) if recover_storage && storage_needs_recovery(context) => {
+            let storage_path = context.storage_path();
             remove_storage_path(&storage_path).map_err(|remove_error| {
                 AppError::Runtime(format!(
                     "failed to remove corrupt storage '{}': {remove_error}",
                     storage_path.display()
                 ))
             })?;
-            analyzer::rescan_and_commit_full(context, work_path)
+            analyzer::rescan_and_commit_full(context)
                 .map_err(|retry_error| AppError::Runtime(retry_error.to_string()))
         }
         Err(error) => Err(AppError::Runtime(error.to_string())),
     }
 }
 
-fn storage_needs_recovery(context: &SourceSetContext, work_path: &Path) -> bool {
-    match HashStorage::new(context.storage_path(work_path)).current_generation() {
+fn storage_needs_recovery(context: &SourceSetContext) -> bool {
+    match HashStorage::new(context.storage_path()).current_generation() {
         Err(StorageError::Recoverable { .. }) => true,
         Err(StorageError::Hard { reason, .. }) => {
             let reason = reason.to_ascii_lowercase();

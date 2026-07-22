@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
 
-use crate::change_detection::analyzer::{self, ContextAnalysis};
 use crate::config::model::{AppConfig, SourceFormat};
+use crate::domain::runtime_state::{
+    InfobaseIdentity, LogicalSourceRole, RuntimeSourceDescriptor, RuntimeSourceIdentityInputs,
+    RuntimeStateError, RuntimeStateLayout,
+};
 use crate::domain::source_set::SourceSetContext;
 
 /// Builds the list of [`SourceSetContext`] instances for the given config.
@@ -11,11 +14,17 @@ use crate::domain::source_set::SourceSetContext;
 ///   and a generated Designer copy under `workPath/designer/<name>/`.
 pub struct SourceSetsService<'a> {
     config: &'a AppConfig,
+    state_layout: RuntimeStateLayout,
 }
 
 impl<'a> SourceSetsService<'a> {
-    pub fn new(config: &'a AppConfig) -> Self {
-        Self { config }
+    pub fn new(config: &'a AppConfig) -> Result<Self, RuntimeStateError> {
+        let identity = InfobaseIdentity::normalize(&config.infobase)?;
+        let state_layout = RuntimeStateLayout::new(&config.work_path, identity)?;
+        Ok(Self {
+            config,
+            state_layout,
+        })
     }
 
     /// Return all Designer-format contexts that should be scanned and built.
@@ -23,9 +32,9 @@ impl<'a> SourceSetsService<'a> {
     /// In `DESIGNER` mode this is simply each source-set resolved against the project base path.
     /// In `EDT` mode (Wave 2) this returns the generated Designer copies in
     /// `workPath/designer`.
-    pub fn designer_contexts(&self) -> Vec<SourceSetContext> {
-        let base_path = absolutize_path(&self.config.base_path);
-        let work_path = absolutize_path(&self.config.work_path);
+    pub fn designer_contexts(&self) -> Result<Vec<SourceSetContext>, RuntimeStateError> {
+        let base_path = absolutize_path(&self.config.base_path)?;
+        let work_path = absolutize_path(&self.config.work_path)?;
 
         match self.config.format {
             SourceFormat::Designer => self
@@ -38,7 +47,16 @@ impl<'a> SourceSetsService<'a> {
                     } else {
                         base_path.join(&ss.path)
                     };
-                    SourceSetContext::new(&ss.name, path, format!("designer-{}", ss.name))
+                    let descriptor = RuntimeSourceDescriptor::new(RuntimeSourceIdentityInputs {
+                        configured_source_identity: &ss.path,
+                        source_root: &path,
+                        purpose: ss.purpose,
+                        format: self.config.format,
+                        backend: self.config.builder,
+                        logical_role: LogicalSourceRole::DesignerSource,
+                    })?;
+                    let state = self.state_layout.source_state(&ss.name, &descriptor);
+                    Ok(SourceSetContext::new(&ss.name, path, state))
                 })
                 .collect(),
 
@@ -49,18 +67,27 @@ impl<'a> SourceSetsService<'a> {
                 .map(|ss| {
                     // Generated Designer copy lives at workPath/designer/<name>/
                     let path = work_path.join("designer").join(&ss.name);
-                    SourceSetContext::new(&ss.name, path, format!("designer-{}", ss.name))
+                    let descriptor = RuntimeSourceDescriptor::new(RuntimeSourceIdentityInputs {
+                        configured_source_identity: &ss.path,
+                        source_root: &path,
+                        purpose: ss.purpose,
+                        format: self.config.format,
+                        backend: self.config.builder,
+                        logical_role: LogicalSourceRole::DesignerSource,
+                    })?;
+                    let state = self.state_layout.source_state(&ss.name, &descriptor);
+                    Ok(SourceSetContext::new(&ss.name, path, state))
                 })
                 .collect(),
         }
     }
 
     /// Return EDT source-set contexts (only meaningful in `EDT` format).
-    pub fn edt_contexts(&self) -> Vec<SourceSetContext> {
+    pub fn edt_contexts(&self) -> Result<Vec<SourceSetContext>, RuntimeStateError> {
         if self.config.format != SourceFormat::Edt {
-            return vec![];
+            return Ok(vec![]);
         }
-        let base_path = absolutize_path(&self.config.base_path);
+        let base_path = absolutize_path(&self.config.base_path)?;
         self.config
             .source_sets
             .iter()
@@ -70,24 +97,27 @@ impl<'a> SourceSetsService<'a> {
                 } else {
                     base_path.join(&ss.path)
                 };
-                SourceSetContext::new(&ss.name, path, format!("edt-{}", ss.name))
+                let descriptor = RuntimeSourceDescriptor::new(RuntimeSourceIdentityInputs {
+                    configured_source_identity: &ss.path,
+                    source_root: &path,
+                    purpose: ss.purpose,
+                    format: self.config.format,
+                    backend: self.config.builder,
+                    logical_role: LogicalSourceRole::EdtSource,
+                })?;
+                let state = self.state_layout.source_state(&ss.name, &descriptor);
+                Ok(SourceSetContext::new(&ss.name, path, state))
             })
             .collect()
     }
-    /// Analyze all provided contexts and return context-tagged outcomes.
-    pub fn analyze_contexts(&self, contexts: &[SourceSetContext]) -> Vec<ContextAnalysis> {
-        analyzer::analyze_contexts(contexts, &self.config.work_path)
-    }
 }
 
-fn absolutize_path(path: &Path) -> PathBuf {
+fn absolutize_path(path: &Path) -> Result<PathBuf, RuntimeStateError> {
     if path.is_absolute() {
-        return path.to_path_buf();
+        return Ok(path.to_path_buf());
     }
 
-    std::env::current_dir()
-        .expect("failed to resolve current working directory")
-        .join(path)
+    Ok(std::env::current_dir()?.join(path))
 }
 
 #[cfg(test)]
@@ -119,8 +149,8 @@ mod tests {
             tests: TestsConfig::default(),
         };
 
-        let service = SourceSetsService::new(&config);
-        let contexts = service.designer_contexts();
+        let service = SourceSetsService::new(&config).expect("service");
+        let contexts = service.designer_contexts().expect("contexts");
 
         assert_eq!(contexts.len(), 1);
         assert!(contexts[0].path().is_absolute());
@@ -147,8 +177,8 @@ mod tests {
             tests: TestsConfig::default(),
         };
 
-        let service = SourceSetsService::new(&config);
-        let contexts = service.designer_contexts();
+        let service = SourceSetsService::new(&config).expect("service");
+        let contexts = service.designer_contexts().expect("contexts");
 
         assert_eq!(contexts.len(), 1);
         assert!(contexts[0]

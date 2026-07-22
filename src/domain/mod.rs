@@ -26,6 +26,8 @@ pub mod launch;
 pub mod load;
 /// Shared runner models.
 pub mod runner;
+/// Versioned runtime-state identity and path models.
+pub mod runtime_state;
 /// Source set domain models.
 pub mod source_set;
 /// Syntax-check domain models.

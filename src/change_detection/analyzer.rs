@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::change_detection::hash_storage::{HashStorage, StorageError, StoredFileState};
+use crate::change_detection::hash_storage::{
+    HashStorage, HashStorageLoad, StorageError, StoredFileState,
+};
 use crate::change_detection::scanner::{self, ScanError};
 use crate::domain::source_set::SourceSetContext;
 
@@ -41,6 +43,8 @@ pub struct PreparedStateUpdate {
 /// Result of analyzing one source-set against its persisted snapshot.
 #[derive(Debug, Clone)]
 pub enum AnalysisOutcome {
+    /// No scoped state exists yet; callers must perform a full bootstrap.
+    Bootstrap,
     NoChanges,
     Changes {
         changes: Vec<FileChange>,
@@ -76,10 +80,16 @@ pub enum ChangeDetectionError {
 }
 
 /// Analyze one source-set context and produce either concrete changes or a safe fallback.
-pub fn analyze_context(context: &SourceSetContext, work_path: &Path) -> ContextAnalysis {
-    let storage = HashStorage::new(context.storage_path(work_path));
-    let snapshot = match storage.load_snapshot() {
-        Ok(snapshot) => snapshot,
+pub fn analyze_context(context: &SourceSetContext) -> ContextAnalysis {
+    let storage = HashStorage::new(context.storage_path());
+    let snapshot = match storage.load_state() {
+        Ok(HashStorageLoad::Missing) => {
+            return ContextAnalysis {
+                context: context.clone(),
+                outcome: Ok(AnalysisOutcome::Bootstrap),
+            }
+        }
+        Ok(HashStorageLoad::Initialized(snapshot)) => snapshot,
         Err(e) => {
             if e.is_recoverable() {
                 tracing::warn!(
@@ -146,20 +156,16 @@ pub fn analyze_context(context: &SourceSetContext, work_path: &Path) -> ContextA
 }
 
 /// Analyze multiple source-set contexts using the same work directory.
-pub fn analyze_contexts(contexts: &[SourceSetContext], work_path: &Path) -> Vec<ContextAnalysis> {
-    contexts
-        .iter()
-        .map(|ctx| analyze_context(ctx, work_path))
-        .collect()
+pub fn analyze_contexts(contexts: &[SourceSetContext]) -> Vec<ContextAnalysis> {
+    contexts.iter().map(analyze_context).collect()
 }
 
 /// Persist a prepared snapshot after the corresponding build/load step succeeded.
 pub fn commit_success(
     context: &SourceSetContext,
-    work_path: &Path,
     prepared: &PreparedStateUpdate,
 ) -> Result<(), ChangeDetectionError> {
-    let storage = HashStorage::new(context.storage_path(work_path));
+    let storage = HashStorage::new(context.storage_path());
     let snapshot = to_storage_snapshot(&prepared.snapshot);
     storage
         .commit_snapshot(
@@ -171,11 +177,8 @@ pub fn commit_success(
 }
 
 /// Re-scan the source-set from scratch and replace the stored snapshot.
-pub fn rescan_and_commit_full(
-    context: &SourceSetContext,
-    work_path: &Path,
-) -> Result<(), ChangeDetectionError> {
-    let storage = HashStorage::new(context.storage_path(work_path));
+pub fn rescan_and_commit_full(context: &SourceSetContext) -> Result<(), ChangeDetectionError> {
+    let storage = HashStorage::new(context.storage_path());
     let current_generation = match storage.current_generation() {
         Ok(generation) => generation,
         Err(e) if e.is_recoverable() => {
@@ -382,10 +385,117 @@ fn map_scan_error(context: &SourceSetContext, err: ScanError) -> ChangeDetection
 
 #[cfg(test)]
 mod tests {
-    use super::{rescan_and_commit_full, ChangeDetectionError, ChangeKind, FileChange};
+    use super::{
+        analyze_context, rescan_and_commit_full, AnalysisOutcome, ChangeDetectionError, ChangeKind,
+        FileChange,
+    };
+    use crate::change_detection::hash_storage::{META, META_KEY_GENERATION};
     use crate::change_detection::partial_load::decide;
+    use crate::config::model::{BuilderBackend, InfobaseConfig, SourceFormat, SourceSetPurpose};
+    use crate::domain::runtime_state::{
+        InfobaseIdentity, LogicalSourceRole, RuntimeSourceDescriptor, RuntimeSourceIdentityInputs,
+        RuntimeStateLayout,
+    };
     use crate::domain::source_set::SourceSetContext;
+    use std::path::Path;
     use tempfile::tempdir;
+
+    fn test_context(state_root: &Path, source_root: &Path) -> SourceSetContext {
+        let identity = InfobaseIdentity::normalize(&InfobaseConfig::file(format!(
+            "File={}",
+            state_root.join("ib").display()
+        )))
+        .expect("identity");
+        let layout = RuntimeStateLayout::new(state_root.join("work"), identity).expect("layout");
+        let descriptor = RuntimeSourceDescriptor::new(RuntimeSourceIdentityInputs {
+            configured_source_identity: Path::new("src"),
+            source_root,
+            purpose: SourceSetPurpose::Configuration,
+            format: SourceFormat::Designer,
+            backend: BuilderBackend::Designer,
+            logical_role: LogicalSourceRole::DesignerSource,
+        })
+        .expect("descriptor");
+        SourceSetContext::new(
+            "main",
+            source_root.to_path_buf(),
+            layout.source_state("main", &descriptor),
+        )
+    }
+
+    #[test]
+    fn missing_scoped_storage_requires_bootstrap_even_for_empty_source() {
+        let dir = tempdir().expect("tempdir");
+        let source_root = dir.path().join("src");
+        std::fs::create_dir(&source_root).expect("source");
+        let context = test_context(dir.path(), &source_root);
+
+        let analysis = analyze_context(&context);
+
+        assert!(matches!(analysis.outcome, Ok(AnalysisOutcome::Bootstrap)));
+        assert!(!context.storage_path().exists());
+    }
+
+    #[test]
+    fn existing_empty_scoped_database_requires_bootstrap() {
+        let dir = tempdir().expect("tempdir");
+        let source_root = dir.path().join("src");
+        std::fs::create_dir(&source_root).expect("source");
+        let context = test_context(dir.path(), &source_root);
+        std::fs::create_dir_all(context.storage_path().parent().expect("storage parent"))
+            .expect("storage parent");
+        redb::Database::create(context.storage_path()).expect("empty database");
+
+        assert!(matches!(
+            analyze_context(&context).outcome,
+            Ok(AnalysisOutcome::Bootstrap)
+        ));
+    }
+
+    #[test]
+    fn metadata_only_storage_falls_back_and_can_be_recovered() {
+        let dir = tempdir().expect("tempdir");
+        let source_root = dir.path().join("src");
+        std::fs::create_dir(&source_root).expect("source");
+        std::fs::write(source_root.join("Configuration.xml"), "<xml />").expect("config");
+        let context = test_context(dir.path(), &source_root);
+        std::fs::create_dir_all(context.storage_path().parent().expect("storage parent"))
+            .expect("storage parent");
+        let database = redb::Database::create(context.storage_path()).expect("database");
+        let write = database.begin_write().expect("write");
+        {
+            let mut meta = write.open_table(META).expect("meta");
+            meta.insert(META_KEY_GENERATION, 1).expect("generation");
+        }
+        write.commit().expect("commit");
+        drop(database);
+
+        assert!(matches!(
+            analyze_context(&context).outcome,
+            Ok(AnalysisOutcome::Fallback)
+        ));
+        rescan_and_commit_full(&context).expect("recover storage");
+        assert!(matches!(
+            analyze_context(&context).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+    }
+
+    #[test]
+    fn directory_at_scoped_storage_path_is_a_hard_error_not_bootstrap() {
+        let dir = tempdir().expect("tempdir");
+        let source_root = dir.path().join("src");
+        std::fs::create_dir(&source_root).expect("source");
+        let context = test_context(dir.path(), &source_root);
+        std::fs::create_dir_all(context.storage_path()).expect("invalid storage directory");
+
+        let analysis = analyze_context(&context);
+
+        assert!(matches!(
+            analysis.outcome,
+            Err(ChangeDetectionError::StorageHard { .. })
+        ));
+    }
 
     #[test]
     fn partial_load_contract_stays_compatible_with_file_change() {
@@ -415,15 +525,13 @@ mod tests {
     fn hard_storage_errors_stay_hard_during_full_rescan() {
         let dir = tempdir().expect("tempdir");
         let source_root = dir.path().join("src");
-        let work_path = dir.path().join("work");
         std::fs::create_dir_all(&source_root).expect("source");
         std::fs::write(source_root.join("Configuration.xml"), "<xml />").expect("config");
 
-        let storage_path = work_path.join("hash-storages").join("designer-main.redb");
+        let context = test_context(dir.path(), &source_root);
+        let storage_path = context.storage_path();
         std::fs::create_dir_all(&storage_path).expect("storage dir");
-
-        let context = SourceSetContext::new("main", source_root, "designer-main");
-        let error = rescan_and_commit_full(&context, &work_path).expect_err("expected hard error");
+        let error = rescan_and_commit_full(&context).expect_err("expected hard error");
 
         assert!(matches!(error, ChangeDetectionError::StorageHard { .. }));
     }
