@@ -56,6 +56,24 @@ impl SourceSetContext {
     pub fn storage_path(&self) -> PathBuf {
         self.runtime_state.hash_storage_path()
     }
+
+    /// Private platform-owned `ConfigDumpInfo.xml` for this source view.
+    pub(crate) fn private_cdfi_path(&self) -> PathBuf {
+        self.runtime_state.private_cdfi_path()
+    }
+
+    /// Owned transaction directory for this source view.
+    pub(crate) fn transactions_dir(&self) -> PathBuf {
+        self.runtime_state.transactions_dir()
+    }
+
+    /// Per-source lock serializing recovery, staging and runtime-state publication.
+    pub(crate) fn state_lock_path(&self) -> PathBuf {
+        self.transactions_dir()
+            .parent()
+            .map(|state_dir| state_dir.join("runtime-state.lock"))
+            .unwrap_or_else(|| self.transactions_dir().join("runtime-state.lock"))
+    }
 }
 
 #[cfg(test)]

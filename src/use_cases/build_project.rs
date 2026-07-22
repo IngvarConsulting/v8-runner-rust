@@ -27,7 +27,14 @@ use crate::use_cases::external_artifacts::{
 };
 use crate::use_cases::request::BuildRequest as BuildArgs;
 use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
+use crate::use_cases::runtime_state::{
+    cleanup_orphan_designer_transactions, commit_designer_state_with_lock,
+    designer_full_rebuild_required, inspect_private_cdfi, lock_designer_state,
+    recover_designer_state, recover_designer_state_with_lock, require_designer_full_rebuild,
+    PrivateCdfiState, ValidatedCdfi,
+};
 use crate::use_cases::source_inventory::SourceSetInventory;
+use crate::use_cases::source_transaction::{CdfiSeed, DesignerSourceTransaction};
 use crate::use_cases::tool_extension;
 use tempfile::NamedTempFile;
 use tracing::debug;
@@ -51,6 +58,57 @@ const SUPPORTED_DESIGNER_BUILD_ERROR: &str =
     "build currently supports only builder=DESIGNER or IBCMD with format=DESIGNER";
 const SUPPORTED_EDT_BUILD_ERROR: &str =
     "build with format=EDT currently supports only builder=DESIGNER or IBCMD";
+
+#[derive(Debug, Clone)]
+enum DesignerCdfiPlan {
+    ForcedUnseeded,
+    Seeded(ValidatedCdfi),
+    IbcmdNormal,
+    IbcmdFull,
+}
+
+impl DesignerCdfiPlan {
+    const fn forces_full_rebuild(&self) -> bool {
+        matches!(self, Self::ForcedUnseeded | Self::IbcmdFull)
+    }
+}
+
+fn resolve_designer_cdfi_plan(
+    context: &SourceSetContext,
+    explicit_full_rebuild: bool,
+) -> Result<DesignerCdfiPlan, AppError> {
+    let state_lock =
+        lock_designer_state(context).map_err(|error| AppError::Runtime(error.to_string()))?;
+    recover_designer_state_with_lock(context, &state_lock)
+        .map_err(|error| AppError::Runtime(error.to_string()))?;
+    cleanup_orphan_designer_transactions(context, &state_lock)
+        .map_err(|error| AppError::Runtime(error.to_string()))?;
+    if explicit_full_rebuild {
+        return Ok(DesignerCdfiPlan::ForcedUnseeded);
+    }
+    if designer_full_rebuild_required(context)
+        .map_err(|error| AppError::Runtime(error.to_string()))?
+    {
+        debug!(
+            source_set = context.name(),
+            "previous Designer result was ambiguous; forcing an unseeded full load"
+        );
+        return Ok(DesignerCdfiPlan::ForcedUnseeded);
+    }
+    match inspect_private_cdfi(&context.private_cdfi_path())
+        .map_err(|error| AppError::Runtime(error.to_string()))?
+    {
+        PrivateCdfiState::Valid(cdfi) => Ok(DesignerCdfiPlan::Seeded(cdfi)),
+        PrivateCdfiState::Missing => Ok(DesignerCdfiPlan::ForcedUnseeded),
+        PrivateCdfiState::Corrupt(reason) => {
+            debug!(
+                source_set = context.name(),
+                reason, "private CDFI is invalid; forcing an unseeded full Designer load"
+            );
+            Ok(DesignerCdfiPlan::ForcedUnseeded)
+        }
+    }
+}
 
 pub fn execute(
     context: &ExecutionContext,
@@ -430,6 +488,7 @@ fn execute_source_set_step(
     step_index: usize,
     partial_paths: Option<&[PathBuf]>,
     commit: &StepCommit,
+    cdfi_plan: &DesignerCdfiPlan,
 ) -> Result<Vec<String>, AppError> {
     if let Some(error) = interruption_before_safe_point(
         context,
@@ -454,6 +513,42 @@ fn execute_source_set_step(
             TimelineStageStatus::Running,
         );
     }
+    let state_lock = lock_designer_state(commit_context)
+        .map_err(|error| AppError::Runtime(error.to_string()))?;
+    recover_designer_state_with_lock(commit_context, &state_lock)
+        .map_err(|error| AppError::Runtime(error.to_string()))?;
+    if let DesignerCdfiPlan::Seeded(expected) = cdfi_plan {
+        let current = inspect_private_cdfi(&commit_context.private_cdfi_path())
+            .map_err(|error| AppError::Runtime(error.to_string()))?;
+        if !matches!(current, PrivateCdfiState::Valid(ref actual) if actual.bytes() == expected.bytes())
+        {
+            return Err(AppError::Runtime(format!(
+                "private CDFI changed before Designer staging for source-set '{}'",
+                commit_context.name()
+            )));
+        }
+    }
+    cleanup_orphan_designer_transactions(commit_context, &state_lock)
+        .map_err(|error| AppError::Runtime(error.to_string()))?;
+    let cdfi_seed = match cdfi_plan {
+        DesignerCdfiPlan::ForcedUnseeded => CdfiSeed::None,
+        DesignerCdfiPlan::Seeded(cdfi) => CdfiSeed::Validated(cdfi),
+        DesignerCdfiPlan::IbcmdNormal | DesignerCdfiPlan::IbcmdFull => {
+            return Err(AppError::Runtime(
+                "IBCMD CDFI plan cannot execute a Designer load".to_owned(),
+            ));
+        }
+    };
+    let source_transaction = DesignerSourceTransaction::create(
+        load_context.path(),
+        load_context.excluded_roots(),
+        &commit_context.transactions_dir(),
+        cdfi_seed,
+    )
+    .map_err(|error| AppError::Runtime(error.to_string()))?;
+    source_transaction
+        .verify_snapshot(commit.prepared_state())
+        .map_err(|error| AppError::Runtime(error.to_string()))?;
     let load_result = if let Some(paths) = partial_paths {
         let list_file = partial_list_file(&config.work_path).map_err(|error| {
             AppError::Runtime(format!("failed to create partial list file: {error}"))
@@ -475,8 +570,16 @@ fn execute_source_set_step(
                 return Err(attach_partial_load_list_path(error, partial_list));
             }
         };
+        if let Some(error) = interruption_before_safe_point(
+            context,
+            format!("Designer load for source-set '{}'", source_set.name),
+        ) {
+            return Err(error);
+        }
+        require_designer_full_rebuild(commit_context)
+            .map_err(|error| AppError::Runtime(error.to_string()))?;
         let load_result = designer_dsl.load_config_from_files_partial(
-            load_context.path(),
+            source_transaction.load_root(),
             list_file.path(),
             extension_name(source_set),
         );
@@ -497,7 +600,7 @@ fn execute_source_set_step(
             }
         }
     } else {
-        build_designer_dsl(
+        let designer_dsl = build_designer_dsl(
             context,
             config,
             binary,
@@ -506,9 +609,18 @@ fn execute_source_set_step(
             step_index,
             "load",
             InterruptionSafetyClass::CriticalNonAbortable,
-        )?
-        .load_config_from_files_full(load_context.path(), extension_name(source_set))
-        .map_err(AppError::from)?
+        )?;
+        if let Some(error) = interruption_before_safe_point(
+            context,
+            format!("Designer load for source-set '{}'", source_set.name),
+        ) {
+            return Err(error);
+        }
+        require_designer_full_rebuild(commit_context)
+            .map_err(|error| AppError::Runtime(error.to_string()))?;
+        designer_dsl
+            .load_config_from_files_full(source_transaction.load_root(), extension_name(source_set))
+            .map_err(AppError::from)?
     };
     ensure_platform_success("load", source_set, &load_result)?;
 
@@ -543,7 +655,17 @@ fn execute_source_set_step(
     .map_err(AppError::from)?;
     ensure_platform_success("update_db_cfg", source_set, &update_result)?;
 
-    commit_step_state(source_set, commit_context, commit)?;
+    let prepared = commit.prepared_state();
+    commit_designer_state_with_lock(
+        commit_context,
+        &state_lock,
+        prepared,
+        &source_transaction.load_root().join("ConfigDumpInfo.xml"),
+    )
+    .map_err(|error| AppError::Runtime(error.to_string()))?;
+    source_transaction
+        .close()
+        .map_err(|error| AppError::Runtime(error.to_string()))?;
 
     Ok([
         deferred_interruption_warning("load", &load_result),
@@ -747,7 +869,7 @@ mod tests {
             })
             .unwrap_or_default();
         let body = format!(
-            "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$out\" ]; then printf 'designer log for %s\\n' \"$args\" > \"$out\"; fi\nprintf '%s\\n' \"$args\" >> \"{}\"\n{}\nexit 0",
+            "args=\"$*\"\nout=\"\"\nload_root=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"/LoadConfigFromFiles\" ]; then load_root=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$out\" ]; then printf 'designer log for %s\\n' \"$args\" > \"$out\"; fi\nseeded=no\nif [ -n \"$load_root\" ] && [ -f \"$load_root/ConfigDumpInfo.xml\" ]; then seeded=yes; fi\nprintf '%s seeded=%s\\n' \"$args\" \"$seeded\" >> \"{}\"\n{}\nif [ -n \"$load_root\" ]; then printf '%s\\n' '<ConfigDumpInfo version=\"2.17\"><Metadata id=\"fake-id\" configVersion=\"1\"/></ConfigDumpInfo>' > \"$load_root/ConfigDumpInfo.xml\"; fi\nexit 0",
             calls_log.display(),
             pattern_branch
         );
@@ -1335,6 +1457,14 @@ mod tests {
         for context in service.designer_contexts().expect("contexts") {
             crate::change_detection::analyzer::rescan_and_commit_full(&context)
                 .expect("prime snapshot");
+            if let Some(parent) = context.private_cdfi_path().parent() {
+                fs::create_dir_all(parent).expect("private state dir");
+            }
+            fs::write(
+                context.private_cdfi_path(),
+                r#"<ConfigDumpInfo version="2.17"><Metadata id="prime-id" configVersion="1"/></ConfigDumpInfo>"#,
+            )
+            .expect("prime private CDFI");
         }
     }
 
@@ -1558,7 +1688,8 @@ mod tests {
         let designer_calls_text = fs::read_to_string(&designer_calls).expect("designer calls");
         assert!(edt_calls_text.contains("--project-name client-mcp-project"));
         assert!(edt_calls_text.contains("tool-extensions/client_mcp"));
-        assert!(designer_calls_text.contains("tool-extensions/client_mcp"));
+        assert!(designer_calls_text.contains("/ib-state/v1/"));
+        assert!(designer_calls_text.contains("/transactions/designer-build-"));
         assert!(designer_calls_text.contains("-Extension client_mcp"));
     }
 
@@ -1686,7 +1817,8 @@ mod tests {
             .is_empty());
         assert!(edt_calls_text.contains("--project-name client-mcp-project"));
         assert!(edt_calls_text.contains("tool-extensions/client_mcp"));
-        assert!(designer_calls_text.contains("tool-extensions/client_mcp"));
+        assert!(designer_calls_text.contains("/ib-state/v1/"));
+        assert!(designer_calls_text.contains("/transactions/designer-build-"));
         assert!(designer_calls_text.contains("-Extension client_mcp"));
         assert_eq!(
             tool_extension_storage_generation(&config, &tool_source, "client_mcp"),
@@ -1733,7 +1865,8 @@ mod tests {
         assert!(rebuild.ok);
         assert!(edt_calls_text.contains("--project-name client-mcp-project"));
         assert!(edt_calls_text.contains("tool-extensions/client_mcp"));
-        assert!(designer_calls_text.contains("tool-extensions/client_mcp"));
+        assert!(designer_calls_text.contains("/ib-state/v1/"));
+        assert!(designer_calls_text.contains("/transactions/designer-build-"));
         assert!(designer_calls_text.contains("-Extension client_mcp"));
         assert_eq!(
             tool_extension_storage_generation(&config, &tool_source, "client_mcp"),
@@ -2081,7 +2214,9 @@ mod tests {
         assert!(edt_calls_text.contains("export --project-name main"));
         assert!(designer_calls_text.contains("/LoadConfigFromFiles"));
         assert!(!designer_calls_text.contains("-partial"));
-        assert!(designer_calls_text.contains(
+        assert!(designer_calls_text.contains("/ib-state/v1/"));
+        assert!(designer_calls_text.contains("/transactions/designer-build-"));
+        assert!(!designer_calls_text.contains(
             work.join("designer")
                 .join("main")
                 .display()
@@ -2742,6 +2877,230 @@ mod tests {
             .iter()
             .all(|step| matches!(step.mode, BuildMode::Skipped) && step.ok));
         assert!(!calls.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn designer_build_uses_private_stage_and_preserves_source_cdfi() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        let source_cdfi = base.join("main/ConfigDumpInfo.xml");
+        fs::write(&source_cdfi, b"user-owned sentinel").expect("source CDFI");
+        let source_before = fs::read(&source_cdfi).expect("source before");
+        write_designer_script(&script, &calls, None);
+        let config = build_config(
+            &base,
+            &work,
+            &script,
+            20,
+            SourceFormat::Designer,
+            BuilderBackend::Designer,
+        );
+        prime_snapshots(&config);
+
+        let result = run_build(&config, &build_args(true)).expect("build");
+        let calls = fs::read_to_string(calls).expect("calls");
+        let main_context = SourceSetsService::new(&config)
+            .expect("service")
+            .designer_contexts()
+            .expect("contexts")
+            .into_iter()
+            .find(|context| context.name() == "main")
+            .expect("main context");
+
+        assert!(result.ok);
+        assert!(calls.contains("/ib-state/v1/"));
+        assert!(calls.contains("/transactions/designer-build-"));
+        assert!(calls.contains("seeded=no"));
+        assert!(!calls.contains(base.join("main").display().to_string().as_str()));
+        assert_eq!(fs::read(source_cdfi).expect("source after"), source_before);
+        assert!(matches!(
+            crate::use_cases::runtime_state::inspect_private_cdfi(
+                &main_context.private_cdfi_path()
+            )
+            .expect("private CDFI"),
+            crate::use_cases::runtime_state::PrivateCdfiState::Valid(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_or_corrupt_private_cdfi_forces_full_designer_load() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        write_designer_script(&script, &calls, None);
+        let config = build_config(
+            &base,
+            &work,
+            &script,
+            20,
+            SourceFormat::Designer,
+            BuilderBackend::Designer,
+        );
+        prime_snapshots(&config);
+        let main_context = SourceSetsService::new(&config)
+            .expect("service")
+            .designer_contexts()
+            .expect("contexts")
+            .into_iter()
+            .find(|context| context.name() == "main")
+            .expect("main context");
+
+        fs::remove_file(main_context.private_cdfi_path()).expect("remove CDFI");
+        let first = run_build(&config, &build_args(false)).expect("missing CDFI build");
+        assert!(matches!(first.steps[0].mode, BuildMode::Full));
+        assert!(!fs::read_to_string(&calls)
+            .expect("first calls")
+            .contains("-partial"));
+
+        fs::write(main_context.private_cdfi_path(), "<broken>").expect("corrupt CDFI");
+        remove_file_if_exists(&calls);
+        let second = run_build(&config, &build_args(false)).expect("corrupt CDFI build");
+        assert!(matches!(second.steps[0].mode, BuildMode::Full));
+        assert!(!fs::read_to_string(calls)
+            .expect("second calls")
+            .contains("-partial"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn seeded_designer_failure_is_not_retried_and_preserves_private_state() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        write_designer_script(&script, &calls, Some("/LoadConfigFromFiles"));
+        let config = build_config(
+            &base,
+            &work,
+            &script,
+            20,
+            SourceFormat::Designer,
+            BuilderBackend::Designer,
+        );
+        prime_snapshots(&config);
+        let main_context = SourceSetsService::new(&config)
+            .expect("service")
+            .designer_contexts()
+            .expect("contexts")
+            .into_iter()
+            .find(|context| context.name() == "main")
+            .expect("main context");
+        let old_cdfi = fs::read(main_context.private_cdfi_path()).expect("old CDFI");
+        let old_generation = storage_generation(&config, "main");
+        fs::write(base.join("main/Catalogs.Items/ObjectModule.bsl"), "changed")
+            .expect("change source");
+
+        let error = run_build(&config, &build_args(false)).expect_err("load failure");
+        let calls_text = fs::read_to_string(&calls).expect("calls");
+
+        assert!(error.error.message().contains("load"));
+        assert_eq!(calls_text.matches("/LoadConfigFromFiles").count(), 1);
+        assert!(calls_text.contains("-partial"));
+        assert!(calls_text.contains("seeded=yes"));
+        assert_eq!(
+            fs::read(main_context.private_cdfi_path()).expect("preserved CDFI"),
+            old_cdfi
+        );
+        assert_eq!(storage_generation(&config, "main"), old_generation);
+
+        write_designer_script(&script, &calls, None);
+        remove_file_if_exists(&calls);
+        let recovery = run_build(&config, &build_args(false)).expect("safe recovery build");
+        let recovery_calls = fs::read_to_string(calls).expect("recovery calls");
+        assert!(matches!(recovery.steps[0].mode, BuildMode::Full));
+        assert!(recovery_calls.contains("seeded=no"));
+        assert!(!recovery_calls.contains("-partial"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn designer_load_is_not_started_when_in_progress_marker_cannot_be_persisted() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        write_designer_script(&script, &calls, None);
+        let config = build_config(
+            &base,
+            &work,
+            &script,
+            20,
+            SourceFormat::Designer,
+            BuilderBackend::Designer,
+        );
+        prime_snapshots(&config);
+        let main_context = SourceSetsService::new(&config)
+            .expect("service")
+            .designer_contexts()
+            .expect("contexts")
+            .into_iter()
+            .find(|context| context.name() == "main")
+            .expect("main context");
+        let marker = main_context
+            .transactions_dir()
+            .parent()
+            .expect("state dir")
+            .join("full-rebuild-required");
+        fs::create_dir(&marker).expect("blocking marker directory");
+        fs::write(base.join("main/Catalogs.Items/ObjectModule.bsl"), "changed")
+            .expect("change source");
+        remove_file_if_exists(&calls);
+
+        let _failure = run_build(&config, &build_args(false)).expect_err("marker failure");
+
+        assert!(
+            !calls.exists(),
+            "Designer must not start before marker fsync"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_explicit_full_load_forces_next_normal_load_unseeded() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        write_designer_script(&script, &calls, Some("/LoadConfigFromFiles"));
+        let config = build_config(
+            &base,
+            &work,
+            &script,
+            20,
+            SourceFormat::Designer,
+            BuilderBackend::Designer,
+        );
+        prime_snapshots(&config);
+        fs::write(base.join("main/Catalogs.Items/ObjectModule.bsl"), "changed")
+            .expect("change source");
+
+        run_build(&config, &build_args(true)).expect_err("explicit full load failure");
+        assert!(fs::read_to_string(&calls)
+            .expect("failed calls")
+            .contains("seeded=no"));
+
+        write_designer_script(&script, &calls, None);
+        remove_file_if_exists(&calls);
+        let recovery = run_build(&config, &build_args(false)).expect("normal recovery");
+        let recovery_calls = fs::read_to_string(&calls).expect("recovery calls");
+        assert!(matches!(recovery.steps[0].mode, BuildMode::Full));
+        assert!(recovery_calls.contains("seeded=no"));
+        assert!(!recovery_calls.contains("-partial"));
     }
 
     #[cfg(unix)]

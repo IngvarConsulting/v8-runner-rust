@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::change_detection::hash_storage::{
-    HashStorage, HashStorageLoad, StorageError, StoredFileState,
+    HashStorage, HashStorageLoad, ObservedHashStorage, ObservedStorageState, StorageError,
+    StoredFileState,
 };
 use crate::change_detection::scanner::{self, ScanError};
 use crate::domain::source_set::SourceSetContext;
@@ -40,7 +41,7 @@ pub struct PreparedFileState {
 pub struct PreparedStateUpdate {
     pub snapshot: Vec<PreparedFileState>,
     pub scan_started_at: u64,
-    pub observed_generation: u64,
+    pub observed_storage: ObservedStorageState,
 }
 
 /// Deterministic current managed inventory plus its delta against persisted observation.
@@ -84,12 +85,12 @@ pub enum ChangeDetectionError {
         reason: String,
     },
 
-    #[error("concurrent state modification for source-set '{source_set}' at '{storage_path}': expected generation {expected}, found {actual}")]
+    #[error("concurrent state modification for source-set '{source_set}' at '{storage_path}': expected generation {expected}, found {actual:?}")]
     ConcurrentStateModified {
         source_set: String,
         storage_path: PathBuf,
         expected: u64,
-        actual: u64,
+        actual: Option<u64>,
     },
 }
 
@@ -97,7 +98,7 @@ pub enum ChangeDetectionError {
 pub fn analyze_context(context: &SourceSetContext) -> ContextAnalysis {
     let storage = HashStorage::new(context.storage_path());
     let snapshot = match storage.load_state() {
-        Ok(HashStorageLoad::Missing) => {
+        Ok(HashStorageLoad::MissingPath | HashStorageLoad::ExistingUninitialized) => {
             return ContextAnalysis {
                 context: context.clone(),
                 outcome: Ok(AnalysisOutcome::Bootstrap),
@@ -178,20 +179,20 @@ pub fn managed_inventory(
     context: &SourceSetContext,
 ) -> Result<ManagedInventory, ChangeDetectionError> {
     let storage = HashStorage::new(context.storage_path());
-    let (stored, observed_generation) = match storage.load_state() {
-        Ok(HashStorageLoad::Missing) => (HashMap::new(), 0),
-        Ok(HashStorageLoad::Initialized(snapshot)) => (snapshot.entries, snapshot.generation),
-        Err(error) if error.is_recoverable() => {
-            let generation = match storage.recoverable_generation() {
-                Ok(generation) => generation,
-                Err(recovery_error) if recovery_error.is_recoverable() => 0,
-                Err(recovery_error) => {
-                    return Err(map_storage_hard(context, storage.path(), recovery_error))
-                }
-            };
-            (HashMap::new(), generation)
+    let (stored, observed_storage) = match storage
+        .observe_state()
+        .map_err(|error| map_storage_hard(context, storage.path(), error))?
+    {
+        ObservedHashStorage::MissingPath => (HashMap::new(), ObservedStorageState::MissingPath),
+        ObservedHashStorage::ExistingUninitialized(observation)
+        | ObservedHashStorage::Recoverable(observation) => (HashMap::new(), observation),
+        ObservedHashStorage::Initialized(snapshot) => {
+            let generation = snapshot.generation;
+            (
+                snapshot.entries,
+                ObservedStorageState::Initialized { generation },
+            )
         }
-        Err(error) => return Err(map_storage_hard(context, storage.path(), error)),
     };
     let scan = scanner::scan(
         context.path(),
@@ -219,7 +220,7 @@ pub fn managed_inventory(
     let prepared = PreparedStateUpdate {
         snapshot: current.clone(),
         scan_started_at: scan.scan_started_at,
-        observed_generation,
+        observed_storage,
     };
     Ok(ManagedInventory {
         requested,
@@ -232,37 +233,16 @@ pub fn managed_inventory(
 pub fn commit_full_observation(
     context: &SourceSetContext,
     prepared: &PreparedStateUpdate,
-    recover_storage: bool,
 ) -> Result<(), ChangeDetectionError> {
     let storage = HashStorage::new(context.storage_path());
     let snapshot = to_storage_snapshot(&prepared.snapshot);
-    match storage.commit_snapshot(
-        &snapshot,
-        prepared.scan_started_at,
-        prepared.observed_generation,
-    ) {
-        Ok(()) => Ok(()),
-        Err(error)
-            if error.is_recoverable()
-                || (recover_storage && storage_error_needs_recovery(&error)) =>
-        {
-            storage
-                .recover_and_commit_snapshot(&snapshot, prepared.scan_started_at)
-                .map_err(|retry| map_commit_error(context, storage.path(), retry))
-        }
-        Err(error) => Err(map_commit_error(context, storage.path(), error)),
-    }
-}
-
-fn storage_error_needs_recovery(error: &StorageError) -> bool {
-    match error {
-        StorageError::Recoverable { .. } => true,
-        StorageError::Hard { reason, .. } => {
-            let reason = reason.to_ascii_lowercase();
-            reason.contains("invalid data") || reason.contains("corrupt")
-        }
-        StorageError::ConcurrentStateModified { .. } => false,
-    }
+    storage
+        .commit_observed_snapshot(
+            &snapshot,
+            prepared.scan_started_at,
+            &prepared.observed_storage,
+        )
+        .map_err(|error| map_commit_error(context, storage.path(), error))
 }
 
 /// Persist a prepared snapshot after the corresponding build/load step succeeded.
@@ -276,7 +256,7 @@ pub fn commit_success(
         .commit_snapshot(
             &snapshot,
             prepared.scan_started_at,
-            prepared.observed_generation,
+            prepared.observed_storage.generation(),
         )
         .map_err(|e| map_commit_error(context, storage.path(), e))
 }
@@ -289,8 +269,11 @@ pub fn rescan_and_commit_full(context: &SourceSetContext) -> Result<(), ChangeDe
         Ok(generation) => generation,
         Err(e) if e.is_recoverable() => {
             let full = full_snapshot(context, &StorageSnapshotInputs::empty())?;
+            let observed = storage
+                .recoverable_observation()
+                .map_err(|err| map_commit_error(context, storage.path(), err))?;
             return storage
-                .recover_and_commit_snapshot(&full.snapshot, full.scan_started_at)
+                .commit_observed_snapshot(&full.snapshot, full.scan_started_at, &observed)
                 .map_err(|err| map_commit_error(context, storage.path(), err));
         }
         Err(e) => return Err(map_storage_hard(context, storage.path(), e)),
@@ -410,7 +393,9 @@ fn build_prepared_state(
     PreparedStateUpdate {
         snapshot,
         scan_started_at: scan.scan_started_at,
-        observed_generation,
+        observed_storage: ObservedStorageState::Initialized {
+            generation: observed_generation,
+        },
     }
 }
 
@@ -788,7 +773,7 @@ mod tests {
         let stale = managed_inventory(&context).expect("observation").prepared;
         rescan_and_commit_full(&context).expect("concurrent commit");
 
-        let error = commit_full_observation(&context, &stale, true).expect_err("stale commit");
+        let error = commit_full_observation(&context, &stale).expect_err("stale commit");
         assert!(matches!(
             error,
             ChangeDetectionError::ConcurrentStateModified { .. }
@@ -815,7 +800,7 @@ mod tests {
 
         let observation = managed_inventory(&context).expect("recoverable observation");
         assert_eq!(observation.requested.len(), 1);
-        commit_full_observation(&context, &observation.prepared, false).expect("recover commit");
+        commit_full_observation(&context, &observation.prepared).expect("recover commit");
         assert!(matches!(
             analyze_context(&context).outcome,
             Ok(AnalysisOutcome::NoChanges)

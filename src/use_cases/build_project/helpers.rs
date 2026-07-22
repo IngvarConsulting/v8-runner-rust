@@ -26,10 +26,15 @@ pub(super) type AnalysisByName =
 
 pub(super) enum StepCommit {
     Prepared(PreparedStateUpdate),
-    FullObservation {
-        prepared: PreparedStateUpdate,
-        recover_storage: bool,
-    },
+    FullObservation(PreparedStateUpdate),
+}
+
+impl StepCommit {
+    pub(super) fn prepared_state(&self) -> &PreparedStateUpdate {
+        match self {
+            Self::Prepared(prepared) | Self::FullObservation(prepared) => prepared,
+        }
+    }
 }
 
 pub(super) enum StepPlan {
@@ -242,10 +247,7 @@ pub(super) fn plan_configurator_load_step(
             mode: BuildMode::Full,
             message: "forced full rebuild".to_owned(),
             partial_paths: None,
-            commit: StepCommit::FullObservation {
-                prepared,
-                recover_storage: true,
-            },
+            commit: StepCommit::FullObservation(prepared),
             receipt,
         });
     }
@@ -274,10 +276,7 @@ pub(super) fn plan_edt_export_step(
             mode: BuildMode::EdtExport,
             message: "forced EDT export (--full-rebuild)".to_owned(),
             partial_paths: None,
-            commit: StepCommit::FullObservation {
-                prepared,
-                recover_storage: true,
-            },
+            commit: StepCommit::FullObservation(prepared),
             receipt,
         });
     }
@@ -316,10 +315,7 @@ pub(super) fn plan_edt_export_step(
                 message: "fallback to EDT export after recoverable change-detection issue"
                     .to_owned(),
                 partial_paths: None,
-                commit: StepCommit::FullObservation {
-                    prepared,
-                    recover_storage: false,
-                },
+                commit: StepCommit::FullObservation(prepared),
                 receipt,
             })
         }
@@ -364,10 +360,7 @@ pub(super) fn plan_generated_designer_load_step(
             mode: BuildMode::Full,
             message: "full load from EDT export (--full-rebuild)".to_owned(),
             partial_paths: None,
-            commit: StepCommit::FullObservation {
-                prepared,
-                recover_storage: true,
-            },
+            commit: StepCommit::FullObservation(prepared),
             receipt,
         });
     }
@@ -417,10 +410,7 @@ fn plan_configurator_load_from_analysis(
                 message: "fallback to full load after recoverable change-detection issue"
                     .to_owned(),
                 partial_paths: None,
-                commit: StepCommit::FullObservation {
-                    prepared,
-                    recover_storage: false,
-                },
+                commit: StepCommit::FullObservation(prepared),
                 receipt,
             })
         }
@@ -474,10 +464,7 @@ fn plan_generated_designer_load_from_analysis(
                 message: "fallback to full load after recoverable change-detection issue"
                     .to_owned(),
                 partial_paths: None,
-                commit: StepCommit::FullObservation {
-                    prepared,
-                    recover_storage: false,
-                },
+                commit: StepCommit::FullObservation(prepared),
                 receipt,
             })
         }
@@ -705,9 +692,8 @@ pub(super) fn attach_failed_plan_receipt(
 pub(super) fn commit_full_observation(
     context: &SourceSetContext,
     prepared: &PreparedStateUpdate,
-    recover_storage: bool,
 ) -> Result<(), AppError> {
-    analyzer::commit_full_observation(context, prepared, recover_storage)
+    analyzer::commit_full_observation(context, prepared)
         .map_err(|error| AppError::Runtime(error.to_string()))
 }
 
@@ -725,15 +711,12 @@ pub(super) fn commit_step_state(
             analyzer::commit_success(context, prepared)
                 .map_err(|error| AppError::Runtime(error.to_string()))
         }
-        StepCommit::FullObservation {
-            prepared,
-            recover_storage,
-        } => {
+        StepCommit::FullObservation(prepared) => {
             debug!(
                 source_set = source_set.name.as_str(),
-                recover_storage, "committing pre-build full source observation"
+                "committing pre-build full source observation"
             );
-            commit_full_observation(context, prepared, *recover_storage)
+            commit_full_observation(context, prepared)
         }
     }
 }

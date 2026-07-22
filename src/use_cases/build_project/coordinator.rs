@@ -39,6 +39,19 @@ pub(super) fn run_build_designer(
     let selected_designer_contexts =
         designer_contexts_for_source_sets(&inventory, &ordered_source_sets);
 
+    for source_context in &selected_designer_contexts {
+        recover_designer_state(source_context).map_err(|error| {
+            BuildExecutionFailure::with_payload(
+                AppError::Runtime(error.to_string()),
+                BuildResult {
+                    ok: false,
+                    steps: vec![],
+                    duration_ms: started.elapsed().as_millis() as u64,
+                },
+            )
+        })?;
+    }
+
     let analysis_by_name = if args.full_rebuild {
         None
     } else {
@@ -92,10 +105,26 @@ pub(super) fn run_build_designer(
             continue;
         }
 
+        let cdfi_plan = match resolve_designer_cdfi_plan(&source_context, args.full_rebuild) {
+            Ok(plan) => plan,
+            Err(error) => {
+                let result = fail_from_source_set_index(
+                    started,
+                    steps,
+                    &ordered_source_sets,
+                    index,
+                    source_set,
+                    BuildMode::Skipped,
+                    error.to_string(),
+                );
+                return Err(BuildExecutionFailure::with_payload(error, result));
+            }
+        };
+        let effective_full_rebuild = cdfi_plan.forces_full_rebuild();
         let plan = match plan_configurator_load_step(
             source_set,
             &source_context,
-            args.full_rebuild,
+            effective_full_rebuild,
             analysis_by_name.as_ref(),
             config.build.partial_load_threshold,
         ) {
@@ -191,6 +220,7 @@ pub(super) fn run_build_designer(
                     index,
                     partial_paths.as_deref(),
                     &commit,
+                    &cdfi_plan,
                 ) {
                     Ok(warnings) => push_build_step_with_receipt(
                         &mut steps,
@@ -888,10 +918,32 @@ pub(super) fn run_build_edt(
             }
         }
 
+        let designer_cdfi_plan = if config.builder == BuilderBackend::Designer {
+            match resolve_designer_cdfi_plan(&designer_context, args.full_rebuild) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    let result = fail_from_source_set_index(
+                        started,
+                        steps,
+                        &ordered_source_sets,
+                        index,
+                        source_set,
+                        BuildMode::Skipped,
+                        error.to_string(),
+                    );
+                    return Err(BuildExecutionFailure::with_payload(error, result));
+                }
+            }
+        } else if args.full_rebuild {
+            DesignerCdfiPlan::IbcmdFull
+        } else {
+            DesignerCdfiPlan::IbcmdNormal
+        };
+        let designer_effective_full_rebuild = designer_cdfi_plan.forces_full_rebuild();
         let designer_stage = match plan_generated_designer_load_step(
             source_set,
             &designer_context,
-            args.full_rebuild,
+            designer_effective_full_rebuild,
             edt_stage_skipped,
             config.build.partial_load_threshold,
         ) {
@@ -980,6 +1032,7 @@ pub(super) fn run_build_edt(
                             index,
                             partial_paths.as_deref(),
                             &commit,
+                            &designer_cdfi_plan,
                         )
                     }
                     BuilderBackend::Ibcmd => {
