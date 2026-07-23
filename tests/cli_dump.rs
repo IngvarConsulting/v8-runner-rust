@@ -36,6 +36,14 @@ fn write_designer_dump_script_for_edt(path: &Path, calls_log: &Path) {
     write_script(path, &body);
 }
 
+fn write_designer_partial_dump_script(path: &Path, captured_list: &Path) {
+    let body = format!(
+        "list_file=\"\"\ntarget=\"\"\nprevious=\"\"\nfor argument in \"$@\"; do\n  if [ \"$previous\" = \"-listFile\" ]; then list_file=\"$argument\"; fi\n  if [ \"$previous\" = \"/DumpConfigToFiles\" ]; then target=\"$argument\"; fi\n  previous=\"$argument\"\ndone\ncp \"$list_file\" \"{}\"\nmkdir -p \"$target\"\nprintf '<Configuration />\\n' > \"$target/Configuration.xml\"\nexit 0",
+        captured_list.display()
+    );
+    write_script(path, &body);
+}
+
 fn write_edt_import_script(path: &Path, calls_log: &Path) {
     let body = format!(
         r#"args="$*"
@@ -169,6 +177,16 @@ fn assert_ibcmd_data_path(calls: &str, work_path: &Path) {
         )),
         "expected isolated IBCMD data path in calls:\n{calls}"
     );
+}
+
+fn write_designer_config(path: &Path, work_path: &Path, platform_path: &Path) {
+    let config = format!(
+        "workPath: '{}'\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
+        work_path.display(),
+        platform_path.display(),
+    );
+
+    fs::write(path, config).expect("config");
 }
 
 fn write_edt_dump_config(
@@ -482,6 +500,47 @@ fn dump_ibcmd_partial_failure_keeps_partial_mode_and_warning() {
         .as_str()
         .expect("message")
         .contains("dump failed for source-set 'main' with exit code 17"));
+}
+
+#[test]
+fn dump_designer_partial_json_normalizes_colon_selector_and_reports_both_forms() {
+    let (_dir, config_path, binary_path, work_path, _base_path, _calls_log) = setup_project();
+    let designer_binary = binary_path.with_file_name("1cv8");
+    let captured_list = config_path
+        .parent()
+        .expect("project directory")
+        .join("partial-list.txt");
+    write_designer_partial_dump_script(&designer_binary, &captured_list);
+    write_designer_config(&config_path, &work_path, &designer_binary);
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "dump",
+            "--mode",
+            "partial",
+            "--object",
+            "  Catalog:Items  ",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(output.status.success());
+    assert_eq!(
+        fs::read_to_string(captured_list).expect("captured selector list"),
+        "Catalog.Items\n"
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(
+        payload["data"]["selectors"][0]["requested"],
+        "  Catalog:Items  "
+    );
+    assert_eq!(
+        payload["data"]["selectors"][0]["normalized"],
+        "Catalog.Items"
+    );
 }
 
 #[test]
