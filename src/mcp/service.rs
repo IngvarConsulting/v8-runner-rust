@@ -1827,6 +1827,7 @@ mod tests {
                 binary: PathBuf::from("/opt/1cv8"),
                 message: None,
                 mcp_readiness: None,
+                external_epf_wait: None,
             }));
             let config = sample_config();
             let service = McpService::with_port(&config, port);
@@ -1857,6 +1858,7 @@ mod tests {
             binary: PathBuf::from("/opt/1cv8"),
             message: None,
             mcp_readiness: None,
+            external_epf_wait: None,
         }));
         let config = sample_config();
         let service = McpService::with_port(&config, port);
@@ -1904,6 +1906,7 @@ mod tests {
                 binary: PathBuf::from("/opt/1cv8c"),
                 message: None,
                 mcp_readiness: None,
+                external_epf_wait: None,
             })),
         );
 
@@ -1944,6 +1947,7 @@ mod tests {
                 binary: PathBuf::from("/opt/1cv8c"),
                 message: None,
                 mcp_readiness: None,
+                external_epf_wait: None,
             })),
         );
 
@@ -1978,6 +1982,7 @@ mod tests {
                 binary: PathBuf::from("/opt/1cv8"),
                 message: None,
                 mcp_readiness: None,
+                external_epf_wait: None,
             })),
         );
 
@@ -2017,6 +2022,7 @@ mod tests {
                 binary: PathBuf::from("/opt/1cv8"),
                 message: None,
                 mcp_readiness: None,
+                external_epf_wait: None,
             })),
         );
 
@@ -2056,6 +2062,7 @@ mod tests {
                 binary: PathBuf::from("/opt/1cv8"),
                 message: None,
                 mcp_readiness: None,
+                external_epf_wait: None,
             })),
         );
 
@@ -2096,6 +2103,7 @@ mod tests {
                 binary: PathBuf::from("/opt/1cv8"),
                 message: None,
                 mcp_readiness: None,
+                external_epf_wait: None,
             })),
         );
 

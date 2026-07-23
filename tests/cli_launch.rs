@@ -240,8 +240,18 @@ fn prepend_config(path: &Path, prefix: &str) {
 
 fn insert_client_mcp_config(path: &Path, body: &str) {
     let config = fs::read_to_string(path).expect("config");
-    let replacement = format!("tools:\n  client_mcp:\n{body}  platform:");
-    fs::write(path, config.replace("tools:\n  platform:", &replacement)).expect("config");
+    let updated = if config.contains("tools:\n  client_mcp:\n") {
+        config.replace(
+            "tools:\n  client_mcp:\n",
+            &format!("tools:\n  client_mcp:\n{body}"),
+        )
+    } else {
+        config.replace(
+            "tools:\n  platform:",
+            &format!("tools:\n  client_mcp:\n{body}  platform:"),
+        )
+    };
+    fs::write(path, updated).expect("config");
 }
 
 fn write_config(
@@ -797,7 +807,8 @@ fn launch_mcp_va_wait_ready_returns_registered_vanessa_tools() {
 #[test]
 fn launch_mcp_va_wait_ready_fails_when_vanessa_tools_are_missing() {
     let (_dir, config_path, install_dir, args_log) = setup_mcp_va_project();
-    prepend_config(&config_path, "execution_timeout: 700\n");
+    prepend_config(&config_path, "execution_timeout: 1500\n");
+    insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 700\n");
     let (port, server) = start_fake_mcp_server(&["infobase_info"]);
     write_logging_script(&install_dir.join("bin").join("1cv8"), &args_log);
 
@@ -886,6 +897,7 @@ fn launch_mcp_wait_ready_returns_client_mcp_tools_without_vanessa_requirements()
 fn launch_mcp_wait_ready_fails_when_endpoint_never_starts() {
     let (_dir, config_path, _install_dir, _work_path) = setup_project();
     prepend_config(&config_path, "execution_timeout: 700\n");
+    insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 200\n");
     let port = free_tcp_port();
 
     let output = v8_runner_command()
@@ -1008,6 +1020,257 @@ fn launch_mcp_wait_ready_uses_configured_wait_timeout() {
     assert!(
         started.elapsed() < Duration::from_millis(1500),
         "wait-ready should use tools.client_mcp.wait_ready_timeout_ms instead of the global execution_timeout"
+    );
+}
+
+#[test]
+fn thin_external_epf_wait_returns_structured_exit_and_artifacts() {
+    let (_dir, config_path, _install_dir, work_path) =
+        setup_project_with_thin_script("printf client-stderr >&2\nexit 7");
+    let epf = work_path.join("runtime-check.epf");
+    let output = work_path.join("runtime.out");
+    let stderr = work_path.join("runtime.stderr");
+    fs::write(&epf, "epf").expect("epf");
+
+    let command_output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "thin",
+            "--execute",
+            &epf.display().to_string(),
+            "--output",
+            &output.display().to_string(),
+            "--stderr-output",
+            &stderr.display().to_string(),
+            "--wait-for-exit",
+            "--wait-timeout-ms",
+            "1000",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(
+        command_output.status.success(),
+        "status={:?}\\nstdout={}\\nstderr={}",
+        command_output.status.code(),
+        String::from_utf8_lossy(&command_output.stdout),
+        String::from_utf8_lossy(&command_output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&command_output.stdout).expect("json");
+    let wait = &payload["data"]["external_epf_wait"];
+    assert!(wait["pid"].as_u64().is_some());
+    assert_eq!(wait["execute_path"], epf.display().to_string());
+    assert_eq!(wait["exit_code"], 7);
+    assert_eq!(wait["timed_out"], false);
+    assert_eq!(wait["output_path"], output.display().to_string());
+    assert_eq!(wait["stderr_path"], stderr.display().to_string());
+    assert_eq!(
+        fs::read_to_string(stderr).expect("captured stderr"),
+        "client-stderr"
+    );
+}
+
+#[test]
+fn thin_external_epf_wait_timeout_terminates_client_group() {
+    let marker = temp_workspace();
+    let descendant_pid = marker.path().join("descendant.pid");
+    let script = format!(
+        "sleep 30 &\nprintf '%s' $! > '{}'\nwait",
+        descendant_pid.display()
+    );
+    let (_dir, config_path, _install_dir, work_path) = setup_project_with_thin_script(&script);
+    let epf = work_path.join("runtime-check.epf");
+    let output = work_path.join("runtime.out");
+    let stderr = work_path.join("runtime.stderr");
+    fs::write(&epf, "epf").expect("epf");
+
+    let command_output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "thin",
+            "--execute",
+            &epf.display().to_string(),
+            "--output",
+            &output.display().to_string(),
+            "--stderr-output",
+            &stderr.display().to_string(),
+            "--wait-for-exit",
+            "--wait-timeout-ms",
+            "2000",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!command_output.status.success());
+    let payload: Value = serde_json::from_slice(&command_output.stdout).expect("json");
+    assert_eq!(payload["ok"], false);
+    assert_eq!(payload["error"]["kind"], "runtime");
+    assert_eq!(payload["data"]["external_epf_wait"]["timed_out"], true);
+    assert!(wait_for_file(&descendant_pid, Duration::from_secs(2)));
+    let pid = fs::read_to_string(descendant_pid).expect("descendant pid");
+    assert!(
+        !std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("probe descendant")
+            .success(),
+        "timeout must terminate the entire client process group"
+    );
+}
+
+#[test]
+fn thin_external_epf_wait_timeout_overrides_execution_timeout() {
+    let (_dir, config_path, _install_dir, work_path) = setup_project_with_thin_script("sleep 5");
+    prepend_config(&config_path, "execution_timeout: 100\n");
+    let epf = work_path.join("runtime-check.epf");
+    let output = work_path.join("runtime.out");
+    let stderr = work_path.join("runtime.stderr");
+    fs::write(&epf, "epf").expect("epf");
+
+    let started = Instant::now();
+    let command_output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "thin",
+            "--execute",
+            &epf.display().to_string(),
+            "--output",
+            &output.display().to_string(),
+            "--stderr-output",
+            &stderr.display().to_string(),
+            "--wait-for-exit",
+            "--wait-timeout-ms",
+            "800",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!command_output.status.success());
+    assert!(
+        started.elapsed() >= Duration::from_millis(650),
+        "wait timeout must not be shortened by execution_timeout; elapsed={:?}",
+        started.elapsed()
+    );
+    let payload: Value = serde_json::from_slice(&command_output.stdout).expect("json");
+    assert_eq!(payload["data"]["external_epf_wait"]["timed_out"], true);
+    assert!(payload["data"]["message"]
+        .as_str()
+        .expect("message")
+        .contains("800ms"));
+}
+
+#[test]
+fn thin_external_epf_wait_rejects_normalized_raw_reserved_key_before_spawn() {
+    let marker = temp_workspace();
+    let started = marker.path().join("started");
+    let script = format!("printf started > '{}'\nsleep 1", started.display());
+    let (_dir, config_path, _install_dir, work_path) = setup_project_with_thin_script(&script);
+    let epf = work_path.join("runtime-check.epf");
+    fs::write(&epf, "epf").expect("epf");
+
+    let command_output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "thin",
+            "--execute",
+            &epf.display().to_string(),
+            "--output",
+            "/tmp/runtime.out",
+            "--stderr-output",
+            "/tmp/runtime.stderr",
+            "--wait-for-exit",
+            "--wait-timeout-ms",
+            "100",
+            "--raw-key",
+            "//Out=/tmp/override.out",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!command_output.status.success());
+    assert!(
+        !started.exists(),
+        "validation must happen before client spawn"
+    );
+    assert!(String::from_utf8_lossy(&command_output.stdout)
+        .contains("does not support raw /C, /Execute, or /Out"));
+}
+
+#[test]
+fn thin_external_epf_wait_rejects_whitespace_raw_execute_alias_before_spawn() {
+    let marker = temp_workspace();
+    let started = marker.path().join("started");
+    let script = format!("printf started > '{}'\nsleep 1", started.display());
+    let (_dir, config_path, _install_dir, work_path) = setup_project_with_thin_script(&script);
+    let epf = work_path.join("runtime-check.epf");
+    fs::write(&epf, "epf").expect("epf");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "thin",
+            "--execute",
+            &epf.display().to_string(),
+            "--output",
+            "/tmp/runtime.out",
+            "--stderr-output",
+            "/tmp/runtime.stderr",
+            "--wait-for-exit",
+            "--wait-timeout-ms",
+            "100",
+            "--raw-key",
+            "/Execute alternate.epf",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!output.status.success());
+    assert!(
+        !started.exists(),
+        "validation must happen before client spawn"
+    );
+}
+
+#[test]
+fn launch_mcp_rejects_external_epf_wait_flags() {
+    let (_dir, config_path, _install_dir, _work_path) = setup_project();
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "mcp",
+            "--wait-for-exit",
+            "--wait-timeout-ms",
+            "100",
+            "--stderr-output",
+            "/tmp/runtime.stderr",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("supported only for direct `launch thin`")
     );
 }
 

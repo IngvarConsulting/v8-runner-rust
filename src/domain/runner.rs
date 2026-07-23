@@ -17,6 +17,15 @@ pub struct LaunchOptions {
     pub internal_out: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub raw_args: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_epf_wait: Option<ExternalEpfWaitOptions>,
+}
+
+/// Opt-in bounded observation settings for a direct external EPF launch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExternalEpfWaitOptions {
+    pub timeout_ms: u64,
+    pub stderr_output: String,
 }
 
 impl LaunchOptions {
