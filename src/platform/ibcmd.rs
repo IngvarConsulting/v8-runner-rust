@@ -615,6 +615,42 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn config_export_full_with_data_path_builds_expected_args() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("ibcmd");
+        let args_log = dir.path().join("args.log");
+        let data_path = dir.path().join("ibcmd-data");
+        write_script(
+            &script,
+            &format!("printf '%s\\n' \"$@\" > \"{}\"\nexit 0", args_log.display()),
+        );
+        let runner = ProcessExecutor;
+        let conn = file_connection("File=/ib");
+        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner)
+            .with_data_path(data_path.clone());
+
+        dsl.config_export_full(dir.path(), None).expect("export");
+
+        let args = fs::read_to_string(args_log).expect("args");
+        let args = args.lines().map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "infobase".to_owned(),
+                "--data".to_owned(),
+                data_path.display().to_string(),
+                "--db-path".to_owned(),
+                "/ib".to_owned(),
+                "config".to_owned(),
+                "export".to_owned(),
+                "--force".to_owned(),
+                dir.path().display().to_string(),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn config_export_full_repeatedly_executes_fresh_script_without_etxtbsy() {
         for _ in 0..32 {
             let dir = tempdir().expect("tempdir");

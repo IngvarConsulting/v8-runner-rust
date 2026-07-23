@@ -368,6 +368,7 @@ v8-runner mcp serve http
 - `workPath/hash-storages/`: persisted change-detection state.
 - `workPath/edt-workspace/`: общий EDT workspace для `init`.
 - `workPath/convert/edt-workspace/`: отдельный EDT workspace для `convert`.
+- `workPath/ibcmd-data/`: изолированный standalone-server data directory для IBCMD dump; это runtime state `v8-runner`, его можно удалить, когда нет активных CLI/MCP команд проекта.
 - `workPath/logs/platform/`: platform logs.
 - `workPath/logs/mcp/actions.log`: MCP action log.
 - `workPath/temp/`: временные run artifacts и диагностические файлы.
