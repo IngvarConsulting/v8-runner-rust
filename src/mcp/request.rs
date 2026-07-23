@@ -68,7 +68,7 @@ pub struct McpDumpConfigRequest {
     /// Requested object list for partial dump.
     #[serde(default)]
     #[schemars(
-        description = "Metadata objects for PARTIAL dumps. Use canonical TYPE:NAME selectors (for example Catalog:Items); legacy TYPE.NAME selectors are accepted for compatibility. Selectors are validated before the platform is started."
+        description = "Metadata objects for PARTIAL dumps. Use canonical TYPE:NAME selectors (for example Catalog:Items); legacy TYPE.NAME selectors are accepted for compatibility. Selector syntax is validated before the platform is started."
     )]
     pub objects: Vec<String>,
 }
@@ -249,7 +249,7 @@ mod tests {
         let dump_json = serde_json::to_value(dump).expect("schema json");
         assert_eq!(
             dump_json["properties"]["objects"]["description"],
-            "Metadata objects for PARTIAL dumps. Use canonical TYPE:NAME selectors (for example Catalog:Items); legacy TYPE.NAME selectors are accepted for compatibility. Selectors are validated before the platform is started."
+            "Metadata objects for PARTIAL dumps. Use canonical TYPE:NAME selectors (for example Catalog:Items); legacy TYPE.NAME selectors are accepted for compatibility. Selector syntax is validated before the platform is started."
         );
 
         let syntax = schemars::schema_for!(McpCheckSyntaxDesignerConfigRequest);

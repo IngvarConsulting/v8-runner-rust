@@ -248,8 +248,10 @@ v8-runner dump --mode <full|incremental|partial> [--source-set <NAME>] [--extens
   совместимости принимается и `TYPE.NAME`. Переданный селектор сохраняется в JSON как
   `data.selectors[*].requested`, а в списке Designer и как
   `data.selectors[*].normalized` используется нормализованный `TYPE.NAME`.
-- До запуска Designer CLI отклоняет неизвестный корневой тип metadata, пустое имя,
-  лишние разделители и управляющие символы в `--object`.
+- До запуска платформы CLI валидирует синтаксис селектора: непустые `TYPE` и `NAME`,
+  ровно один разделитель `:` или `.`, без управляющих символов. В `builder=DESIGNER`
+  существование metadata root type проверяет Designer; `builder=IBCMD` не использует object list,
+  потому что деградирует в incremental.
 - `builder=DESIGNER` поддерживает true object-scoped partial.
 - `builder=IBCMD` не умеет object-scoped partial; запрос деградирует в incremental с warning.
 - `format=EDT` использует internal Designer snapshot под `workPath/designer/<sourceSetName>`,

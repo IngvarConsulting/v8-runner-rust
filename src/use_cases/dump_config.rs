@@ -1484,7 +1484,7 @@ exit 0"#,
     }
 
     #[test]
-    fn partial_rejects_unknown_selector_before_running_designer() {
+    fn partial_accepts_future_root_type_before_running_designer() {
         let dir = tempdir().expect("tempdir");
         let script = dir.path().join("1cv8");
         let calls = dir.path().join("calls.log");
@@ -1492,7 +1492,7 @@ exit 0"#,
         write_script(&script, &format!("touch '{}'", calls.display()));
         let config = build_config(dir.path(), &dir.path().join("work"), &script);
 
-        let failure = run_dump(
+        let result = run_dump(
             &config,
             &DumpArgs {
                 mode: DumpModeRequest::Partial,
@@ -1501,10 +1501,18 @@ exit 0"#,
                 objects: vec!["Unknown:Items".to_owned()],
             },
         )
-        .expect_err("failure");
+        .expect("dump");
 
-        assert_eq!(failure.error.kind(), UseCaseErrorKind::Validation);
-        assert!(!calls.exists());
+        assert!(result.ok);
+        let expected_selectors = [DumpSelectorResult {
+            requested: "Unknown:Items".to_owned(),
+            normalized: "Unknown.Items".to_owned(),
+        }];
+        assert_eq!(
+            result.selectors.as_deref(),
+            Some(expected_selectors.as_slice())
+        );
+        assert!(calls.exists());
     }
 
     #[test]
@@ -2139,6 +2147,48 @@ exit 0"#,
             .contains("IBCMD does not support object-scoped partial dump"));
         let calls = fs::read_to_string(calls).expect("calls");
         assert!(calls.contains("--sync"));
+    }
+
+    #[test]
+    fn dump_partial_ibcmd_accepts_future_root_type_and_degrades_to_incremental() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let script = dir.path().join("ibcmd");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        write_ibcmd_dump_script(&script, &calls, None, 0);
+        let config = build_config_with_builder(&base, &work, &script, BuilderBackend::Ibcmd);
+
+        let result = run_dump(
+            &config,
+            &DumpArgs {
+                mode: DumpModeRequest::Partial,
+                source_set: Some("main".to_owned()),
+                extension: None,
+                objects: vec!["FutureRoot:Items".to_owned()],
+            },
+        )
+        .expect("dump");
+
+        assert!(result.ok);
+        assert_eq!(result.mode, DumpMode::Partial);
+        assert!(result
+            .message
+            .as_deref()
+            .expect("warning")
+            .contains("IBCMD does not support object-scoped partial dump"));
+        let expected_selectors = [DumpSelectorResult {
+            requested: "FutureRoot:Items".to_owned(),
+            normalized: "FutureRoot.Items".to_owned(),
+        }];
+        assert_eq!(
+            result.selectors.as_deref(),
+            Some(expected_selectors.as_slice())
+        );
+        let calls = fs::read_to_string(calls).expect("calls");
+        assert!(calls.contains("--sync"));
+        assert!(!calls.contains("FutureRoot.Items"));
     }
 
     #[test]
