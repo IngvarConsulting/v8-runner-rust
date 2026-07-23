@@ -930,35 +930,18 @@ fn terminate_windows_process_tree(pid: u32) {
 }
 
 fn render_command(request: &ProcessRequest) -> String {
-    enum NextRedaction {
-        SensitiveValue,
-        InfobaseConnectionString,
-    }
-
     let mut parts = Vec::with_capacity(request.args.len() + 1);
     parts.push(request.program.display().to_string());
-    let mut next_redaction = None;
+    let mut skip_next = false;
     for arg in &request.args {
-        if let Some(redaction) = next_redaction.take() {
-            match redaction {
-                NextRedaction::SensitiveValue => parts.push("***".to_owned()),
-                NextRedaction::InfobaseConnectionString => {
-                    parts.push(redact_infobase_connection_string(arg));
-                }
-            }
+        if skip_next {
+            parts.push("***".to_owned());
+            skip_next = false;
         } else if is_sensitive_flag(arg) {
             parts.push(arg.clone());
-            next_redaction = Some(NextRedaction::SensitiveValue);
-        } else if is_infobase_connection_string_flag(arg) {
-            parts.push(arg.clone());
-            next_redaction = Some(NextRedaction::InfobaseConnectionString);
+            skip_next = true;
         } else if let Some((key, _)) = split_sensitive_assignment(arg) {
             parts.push(format!("{key}=***"));
-        } else if let Some((prefix, value)) = split_infobase_connection_string_inline(arg) {
-            parts.push(format!(
-                "{prefix}{}",
-                redact_infobase_connection_string(value)
-            ));
         } else {
             parts.push(arg.clone());
         }
@@ -987,28 +970,6 @@ fn is_sensitive_flag(arg: &str) -> bool {
     FLAGS.iter().any(|flag| arg.eq_ignore_ascii_case(flag))
 }
 
-fn is_infobase_connection_string_flag(arg: &str) -> bool {
-    arg.eq_ignore_ascii_case("/IBConnectionString")
-        || arg.eq_ignore_ascii_case("-IBConnectionString")
-}
-
-fn split_infobase_connection_string_inline(arg: &str) -> Option<(&str, &str)> {
-    const FLAGS: &[&str] = &["/IBConnectionString", "-IBConnectionString"];
-
-    FLAGS.iter().find_map(|flag| {
-        let flag_len = flag.len();
-        if arg.len() <= flag_len || !arg[..flag_len].eq_ignore_ascii_case(flag) {
-            return None;
-        }
-        let value_start = if arg.as_bytes().get(flag_len) == Some(&b'=') {
-            flag_len + 1
-        } else {
-            flag_len
-        };
-        Some((&arg[..value_start], &arg[value_start..]))
-    })
-}
-
 fn split_sensitive_assignment(arg: &str) -> Option<(&str, &str)> {
     const FLAGS: &[&str] = &[
         "/N",
@@ -1033,47 +994,6 @@ fn split_sensitive_assignment(arg: &str) -> Option<(&str, &str)> {
     } else {
         None
     }
-}
-
-fn redact_infobase_connection_string(value: &str) -> String {
-    let mut redacted = String::with_capacity(value.len());
-    let mut offset = 0;
-    for segment in split_connection_string_segments(value) {
-        if offset > 0 {
-            redacted.push(';');
-        }
-        offset += segment.len() + 1;
-        let Some((key, _)) = segment.split_once('=') else {
-            redacted.push_str(segment);
-            continue;
-        };
-        let normalized_key = key.trim().to_ascii_lowercase();
-        if matches!(normalized_key.as_str(), "usr" | "pwd") {
-            redacted.push_str(key);
-            redacted.push_str("=***");
-        } else {
-            redacted.push_str(segment);
-        }
-    }
-    redacted
-}
-
-fn split_connection_string_segments(value: &str) -> Vec<&str> {
-    let mut segments = Vec::new();
-    let mut start = 0;
-    let mut in_quotes = false;
-    for (index, ch) in value.char_indices() {
-        match ch {
-            '"' => in_quotes = !in_quotes,
-            ';' if !in_quotes => {
-                segments.push(&value[start..index]);
-                start = index + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    segments.push(&value[start..]);
-    segments
 }
 
 #[cfg(test)]
@@ -1189,25 +1109,6 @@ mod tests {
             program: PathBuf::from("1cv8c"),
             args: vec![
                 "/IBConnectionString".to_owned(),
-                "Srvr=host;Ref=base".to_owned(),
-            ],
-            workdir: None,
-            stdout_log_path: None,
-            stderr_log_path: None,
-            startup_probe: None,
-        };
-
-        let rendered = render_command(&request);
-
-        assert!(rendered.contains("/IBConnectionString Srvr=host;Ref=base"));
-    }
-
-    #[test]
-    fn render_command_masks_credentials_inside_infobase_connection_string() {
-        let request = ProcessRequest {
-            program: PathBuf::from("1cv8c"),
-            args: vec![
-                "/IBConnectionString".to_owned(),
                 "Srvr=host;Ref=base;Usr=alice;Pwd=secret".to_owned(),
             ],
             workdir: None,
@@ -1218,13 +1119,11 @@ mod tests {
 
         let rendered = render_command(&request);
 
-        assert!(rendered.contains("/IBConnectionString Srvr=host;Ref=base;Usr=***;Pwd=***"));
-        assert!(!rendered.contains("alice"));
-        assert!(!rendered.contains("secret"));
+        assert!(rendered.contains("/IBConnectionString Srvr=host;Ref=base;Usr=alice;Pwd=secret"));
     }
 
     #[test]
-    fn render_command_masks_credentials_inside_infobase_connection_assignment() {
+    fn render_command_keeps_infobase_connection_string_assignment_visible() {
         let request = ProcessRequest {
             program: PathBuf::from("1cv8c"),
             args: vec!["/IBConnectionString=File=/tmp/ib;usr=alice;PWD=secret".to_owned()],
@@ -1236,13 +1135,11 @@ mod tests {
 
         let rendered = render_command(&request);
 
-        assert!(rendered.contains("/IBConnectionString=File=/tmp/ib;usr=***;PWD=***"));
-        assert!(!rendered.contains("alice"));
-        assert!(!rendered.contains("secret"));
+        assert!(rendered.contains("/IBConnectionString=File=/tmp/ib;usr=alice;PWD=secret"));
     }
 
     #[test]
-    fn render_command_masks_credentials_inside_combined_infobase_connection_token() {
+    fn render_command_keeps_combined_infobase_connection_token_visible() {
         let request = ProcessRequest {
             program: PathBuf::from("1cv8c"),
             args: vec!["/IBConnectionStringSrvr=host;Ref=base;Usr=alice;Pwd=secret".to_owned()],
@@ -1254,13 +1151,11 @@ mod tests {
 
         let rendered = render_command(&request);
 
-        assert!(rendered.contains("/IBConnectionStringSrvr=host;Ref=base;Usr=***;Pwd=***"));
-        assert!(!rendered.contains("alice"));
-        assert!(!rendered.contains("secret"));
+        assert!(rendered.contains("/IBConnectionStringSrvr=host;Ref=base;Usr=alice;Pwd=secret"));
     }
 
     #[test]
-    fn render_command_masks_quoted_semicolons_inside_infobase_credentials() {
+    fn render_command_keeps_quoted_infobase_connection_values_visible() {
         let request = ProcessRequest {
             program: PathBuf::from("1cv8c"),
             args: vec![
@@ -1275,10 +1170,8 @@ mod tests {
 
         let rendered = render_command(&request);
 
-        assert!(rendered.contains("/IBConnectionString File=/tmp/ib;Usr=***;Pwd=***;Ref=base"));
-        assert!(!rendered.contains("alice"));
-        assert!(!rendered.contains("sec"));
-        assert!(!rendered.contains("ret"));
+        assert!(rendered
+            .contains("/IBConnectionString File=/tmp/ib;Usr=alice;Pwd=\"sec;ret\";Ref=base"));
     }
 
     #[cfg(unix)]
