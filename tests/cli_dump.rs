@@ -169,6 +169,14 @@ fn setup_project() -> (
     )
 }
 
+fn assert_ibcmd_data_path(calls: &str, work_path: &Path) {
+    let expected_fragment = format!("infobase --data {}", work_path.join("ibcmd-data").display());
+    assert!(
+        calls.contains(&expected_fragment),
+        "expected isolated IBCMD data path fragment: {expected_fragment}"
+    );
+}
+
 fn write_designer_config(path: &Path, work_path: &Path, platform_path: &Path) {
     let config = format!(
         "workPath: '{}'\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
@@ -244,7 +252,7 @@ fn setup_edt_project() -> (
 
 #[test]
 fn dump_ibcmd_full_json_success() {
-    let (_dir, config_path, _binary_path, _work_path, base_path, calls_log) = setup_project();
+    let (_dir, config_path, _binary_path, work_path, base_path, calls_log) = setup_project();
 
     let output = v8_runner_command()
         .args([
@@ -265,6 +273,7 @@ fn dump_ibcmd_full_json_success() {
     assert_eq!(payload["ok"], true);
     let calls = fs::read_to_string(calls_log).expect("calls");
     assert!(calls.contains("--force"));
+    assert_ibcmd_data_path(&calls, &work_path);
     assert!(base_path.join("main").exists());
 }
 
@@ -368,7 +377,7 @@ fn dump_text_success_is_compact_and_keeps_output_visible() {
 
 #[test]
 fn dump_ibcmd_incremental_json_success() {
-    let (_dir, config_path, _binary_path, _work_path, base_path, calls_log) = setup_project();
+    let (_dir, config_path, _binary_path, work_path, base_path, calls_log) = setup_project();
     fs::remove_dir_all(base_path.join("main")).expect("remove target");
 
     let output = v8_runner_command()
@@ -390,12 +399,13 @@ fn dump_ibcmd_incremental_json_success() {
     assert_eq!(payload["ok"], true);
     let calls = fs::read_to_string(calls_log).expect("calls");
     assert!(calls.contains("--sync"));
+    assert_ibcmd_data_path(&calls, &work_path);
     assert!(calls.contains(base_path.join("main").display().to_string().as_str()));
 }
 
 #[test]
 fn dump_ibcmd_partial_json_success_uses_degraded_fallback() {
-    let (_dir, config_path, _binary_path, _work_path, _base_path, calls_log) = setup_project();
+    let (_dir, config_path, _binary_path, work_path, _base_path, calls_log) = setup_project();
 
     let output = v8_runner_command()
         .args([
@@ -424,6 +434,7 @@ fn dump_ibcmd_partial_json_success_uses_degraded_fallback() {
         .contains("IBCMD does not support object-scoped partial dump"));
     let calls = fs::read_to_string(calls_log).expect("calls");
     assert!(calls.contains("--sync"));
+    assert_ibcmd_data_path(&calls, &work_path);
 }
 
 #[test]
@@ -558,7 +569,7 @@ fn dump_text_failure_shows_error_message() {
 
 #[test]
 fn dump_ibcmd_full_server_connection_passes_dbms_and_infobase_credentials() {
-    let (_dir, config_path, _binary_path, _work_path, _base_path, calls_log) = setup_project();
+    let (_dir, config_path, _binary_path, work_path, _base_path, calls_log) = setup_project();
     write_config_with_infobase(
         &config_path,
         &config_path.parent().expect("dir").join("project"),
@@ -586,4 +597,5 @@ fn dump_ibcmd_full_server_connection_passes_dbms_and_infobase_credentials() {
     assert!(calls.contains("--dbms PostgreSQL --database-server localhost --database-name maindb"));
     assert!(calls.contains("--user Admin --password secret"));
     assert!(calls.contains("--database-user postgres --database-password pg-secret"));
+    assert_ibcmd_data_path(&calls, &work_path);
 }
