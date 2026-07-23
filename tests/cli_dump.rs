@@ -170,12 +170,10 @@ fn setup_project() -> (
 }
 
 fn assert_ibcmd_data_path(calls: &str, work_path: &Path) {
+    let expected_fragment = format!("infobase --data {}", work_path.join("ibcmd-data").display());
     assert!(
-        calls.contains(&format!(
-            "infobase --data {}",
-            work_path.join("ibcmd-data").display()
-        )),
-        "expected isolated IBCMD data path in calls:\n{calls}"
+        calls.contains(&expected_fragment),
+        "expected isolated IBCMD data path fragment: {expected_fragment}"
     );
 }
 
