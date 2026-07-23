@@ -240,8 +240,18 @@ fn prepend_config(path: &Path, prefix: &str) {
 
 fn insert_client_mcp_config(path: &Path, body: &str) {
     let config = fs::read_to_string(path).expect("config");
-    let replacement = format!("tools:\n  client_mcp:\n{body}  platform:");
-    fs::write(path, config.replace("tools:\n  platform:", &replacement)).expect("config");
+    let updated = if config.contains("tools:\n  client_mcp:\n") {
+        config.replace(
+            "tools:\n  client_mcp:\n",
+            &format!("tools:\n  client_mcp:\n{body}"),
+        )
+    } else {
+        config.replace(
+            "tools:\n  platform:",
+            &format!("tools:\n  client_mcp:\n{body}  platform:"),
+        )
+    };
+    fs::write(path, updated).expect("config");
 }
 
 fn write_config(
@@ -797,7 +807,8 @@ fn launch_mcp_va_wait_ready_returns_registered_vanessa_tools() {
 #[test]
 fn launch_mcp_va_wait_ready_fails_when_vanessa_tools_are_missing() {
     let (_dir, config_path, install_dir, args_log) = setup_mcp_va_project();
-    prepend_config(&config_path, "execution_timeout: 700\n");
+    prepend_config(&config_path, "execution_timeout: 1500\n");
+    insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 700\n");
     let (port, server) = start_fake_mcp_server(&["infobase_info"]);
     write_logging_script(&install_dir.join("bin").join("1cv8"), &args_log);
 
@@ -886,6 +897,7 @@ fn launch_mcp_wait_ready_returns_client_mcp_tools_without_vanessa_requirements()
 fn launch_mcp_wait_ready_fails_when_endpoint_never_starts() {
     let (_dir, config_path, _install_dir, _work_path) = setup_project();
     prepend_config(&config_path, "execution_timeout: 700\n");
+    insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 200\n");
     let port = free_tcp_port();
 
     let output = v8_runner_command()
@@ -1095,8 +1107,10 @@ fn thin_external_epf_wait_timeout_terminates_client_group() {
         .output()
         .expect("run command");
 
-    assert!(command_output.status.success());
+    assert!(!command_output.status.success());
     let payload: Value = serde_json::from_slice(&command_output.stdout).expect("json");
+    assert_eq!(payload["ok"], false);
+    assert_eq!(payload["error"]["kind"], "runtime");
     assert_eq!(payload["data"]["external_epf_wait"]["timed_out"], true);
     assert!(wait_for_file(&descendant_pid, Duration::from_secs(2)));
     let pid = fs::read_to_string(descendant_pid).expect("descendant pid");
@@ -1110,6 +1124,50 @@ fn thin_external_epf_wait_timeout_terminates_client_group() {
             .success(),
         "timeout must terminate the entire client process group"
     );
+}
+
+#[test]
+fn thin_external_epf_wait_timeout_overrides_execution_timeout() {
+    let (_dir, config_path, _install_dir, work_path) = setup_project_with_thin_script("sleep 5");
+    prepend_config(&config_path, "execution_timeout: 100\n");
+    let epf = work_path.join("runtime-check.epf");
+    let output = work_path.join("runtime.out");
+    let stderr = work_path.join("runtime.stderr");
+    fs::write(&epf, "epf").expect("epf");
+
+    let started = Instant::now();
+    let command_output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "thin",
+            "--execute",
+            &epf.display().to_string(),
+            "--output",
+            &output.display().to_string(),
+            "--stderr-output",
+            &stderr.display().to_string(),
+            "--wait-for-exit",
+            "--wait-timeout-ms",
+            "800",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!command_output.status.success());
+    assert!(
+        started.elapsed() >= Duration::from_millis(650),
+        "wait timeout must not be shortened by execution_timeout; elapsed={:?}",
+        started.elapsed()
+    );
+    let payload: Value = serde_json::from_slice(&command_output.stdout).expect("json");
+    assert_eq!(payload["data"]["external_epf_wait"]["timed_out"], true);
+    assert!(payload["data"]["message"]
+        .as_str()
+        .expect("message")
+        .contains("800ms"));
 }
 
 #[test]

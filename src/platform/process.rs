@@ -56,6 +56,13 @@ pub struct ManagedSpawnResult {
     rendered_command: String,
 }
 
+/// Managed spawn lifecycle behaviour used by current callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedSpawnMode {
+    Detached,
+    Wait,
+}
+
 impl ManagedSpawnResult {
     /// Operating system process identifier.
     pub fn pid(&self) -> u32 {
@@ -277,17 +284,12 @@ pub trait ProcessRunner {
     fn spawn(&self, request: &ProcessRequest) -> Result<SpawnResult, ProcessError>;
 
     /// Start a process and keep a handle until the caller detaches or terminates it.
-    fn spawn_managed(&self, request: &ProcessRequest) -> Result<ManagedSpawnResult, ProcessError> {
-        Err(ProcessError::ManagedSpawnUnsupported {
-            cmd: render_command(request),
-        })
-    }
-
-    /// Starts a managed child with stderr redirected to the supplied request path.
-    fn spawn_managed_for_wait(
+    fn spawn_managed(
         &self,
         request: &ProcessRequest,
+        mode: ManagedSpawnMode,
     ) -> Result<ManagedSpawnResult, ProcessError> {
+        let _ = mode;
         Err(ProcessError::ManagedSpawnUnsupported {
             cmd: render_command(request),
         })
@@ -338,14 +340,21 @@ impl ProcessRunner for ProcessExecutor {
         })
     }
 
-    fn spawn_managed(&self, request: &ProcessRequest) -> Result<ManagedSpawnResult, ProcessError> {
+    fn spawn_managed(
+        &self,
+        request: &ProcessRequest,
+        mode: ManagedSpawnMode,
+    ) -> Result<ManagedSpawnResult, ProcessError> {
         let rendered_command = render_command(request);
         debug!(
             command = rendered_command.as_str(),
             "spawning managed process"
         );
-        let spawned =
-            spawn_checked_child(request, ProcessIoMode::ManagedDetached, &rendered_command)?;
+        let io_mode = match mode {
+            ManagedSpawnMode::Detached => ProcessIoMode::ManagedDetached,
+            ManagedSpawnMode::Wait => ProcessIoMode::ManagedWait,
+        };
+        let spawned = spawn_checked_child(request, io_mode, &rendered_command)?;
         let pid = spawned.child.id();
 
         debug!(
@@ -355,22 +364,6 @@ impl ProcessRunner for ProcessExecutor {
         Ok(ManagedSpawnResult {
             result: SpawnResult {
                 pid,
-                binary: request.program.clone(),
-            },
-            child: Some(spawned),
-            rendered_command,
-        })
-    }
-
-    fn spawn_managed_for_wait(
-        &self,
-        request: &ProcessRequest,
-    ) -> Result<ManagedSpawnResult, ProcessError> {
-        let rendered_command = render_command(request);
-        let spawned = spawn_checked_child(request, ProcessIoMode::ManagedWait, &rendered_command)?;
-        Ok(ManagedSpawnResult {
-            result: SpawnResult {
-                pid: spawned.child.id(),
                 binary: request.program.clone(),
             },
             child: Some(spawned),
@@ -528,7 +521,10 @@ fn spawn_checked_child(
                 exit_code = status.code().unwrap_or(-1),
                 "process exited during startup probe"
             );
-            if matches!(io_mode, ProcessIoMode::ManagedDetached) {
+            if matches!(
+                io_mode,
+                ProcessIoMode::ManagedDetached | ProcessIoMode::ManagedWait
+            ) {
                 terminate_child_group_gracefully(&mut spawned, Duration::from_millis(250));
                 let _ = spawned.child.wait();
             }
@@ -934,18 +930,35 @@ fn terminate_windows_process_tree(pid: u32) {
 }
 
 fn render_command(request: &ProcessRequest) -> String {
+    enum NextRedaction {
+        SensitiveValue,
+        InfobaseConnectionString,
+    }
+
     let mut parts = Vec::with_capacity(request.args.len() + 1);
     parts.push(request.program.display().to_string());
-    let mut skip_next = false;
+    let mut next_redaction = None;
     for arg in &request.args {
-        if skip_next {
-            parts.push("***".to_owned());
-            skip_next = false;
+        if let Some(redaction) = next_redaction.take() {
+            match redaction {
+                NextRedaction::SensitiveValue => parts.push("***".to_owned()),
+                NextRedaction::InfobaseConnectionString => {
+                    parts.push(redact_infobase_connection_string(arg));
+                }
+            }
         } else if is_sensitive_flag(arg) {
             parts.push(arg.clone());
-            skip_next = true;
+            next_redaction = Some(NextRedaction::SensitiveValue);
+        } else if is_infobase_connection_string_flag(arg) {
+            parts.push(arg.clone());
+            next_redaction = Some(NextRedaction::InfobaseConnectionString);
         } else if let Some((key, _)) = split_sensitive_assignment(arg) {
             parts.push(format!("{key}=***"));
+        } else if let Some((prefix, value)) = split_infobase_connection_string_inline(arg) {
+            parts.push(format!(
+                "{prefix}{}",
+                redact_infobase_connection_string(value)
+            ));
         } else {
             parts.push(arg.clone());
         }
@@ -959,7 +972,6 @@ fn is_sensitive_flag(arg: &str) -> bool {
         "-N",
         "/P",
         "-P",
-        "/IBConnectionString",
         "--user",
         "--database-user",
         "--db-user",
@@ -973,6 +985,28 @@ fn is_sensitive_flag(arg: &str) -> bool {
     ];
 
     FLAGS.iter().any(|flag| arg.eq_ignore_ascii_case(flag))
+}
+
+fn is_infobase_connection_string_flag(arg: &str) -> bool {
+    arg.eq_ignore_ascii_case("/IBConnectionString")
+        || arg.eq_ignore_ascii_case("-IBConnectionString")
+}
+
+fn split_infobase_connection_string_inline(arg: &str) -> Option<(&str, &str)> {
+    const FLAGS: &[&str] = &["/IBConnectionString", "-IBConnectionString"];
+
+    FLAGS.iter().find_map(|flag| {
+        let flag_len = flag.len();
+        if arg.len() <= flag_len || !arg[..flag_len].eq_ignore_ascii_case(flag) {
+            return None;
+        }
+        let value_start = if arg.as_bytes().get(flag_len) == Some(&b'=') {
+            flag_len + 1
+        } else {
+            flag_len
+        };
+        Some((&arg[..value_start], &arg[value_start..]))
+    })
 }
 
 fn split_sensitive_assignment(arg: &str) -> Option<(&str, &str)> {
@@ -1001,10 +1035,51 @@ fn split_sensitive_assignment(arg: &str) -> Option<(&str, &str)> {
     }
 }
 
+fn redact_infobase_connection_string(value: &str) -> String {
+    let mut redacted = String::with_capacity(value.len());
+    let mut offset = 0;
+    for segment in split_connection_string_segments(value) {
+        if offset > 0 {
+            redacted.push(';');
+        }
+        offset += segment.len() + 1;
+        let Some((key, _)) = segment.split_once('=') else {
+            redacted.push_str(segment);
+            continue;
+        };
+        let normalized_key = key.trim().to_ascii_lowercase();
+        if matches!(normalized_key.as_str(), "usr" | "pwd") {
+            redacted.push_str(key);
+            redacted.push_str("=***");
+        } else {
+            redacted.push_str(segment);
+        }
+    }
+    redacted
+}
+
+fn split_connection_string_segments(value: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut in_quotes = false;
+    for (index, ch) in value.char_indices() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            ';' if !in_quotes => {
+                segments.push(&value[start..index]);
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    segments.push(&value[start..]);
+    segments
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        render_command, ProcessError, ProcessExecutionPolicy, ProcessExecutor,
+        render_command, ManagedSpawnMode, ProcessError, ProcessExecutionPolicy, ProcessExecutor,
         ProcessInterruptionAction, ProcessInterruptionReason, ProcessInterruptionSafety,
         ProcessRequest, ProcessRunner,
     };
@@ -1109,7 +1184,26 @@ mod tests {
     }
 
     #[test]
-    fn render_command_masks_composite_infobase_credentials() {
+    fn render_command_keeps_infobase_connection_string_visible() {
+        let request = ProcessRequest {
+            program: PathBuf::from("1cv8c"),
+            args: vec![
+                "/IBConnectionString".to_owned(),
+                "Srvr=host;Ref=base".to_owned(),
+            ],
+            workdir: None,
+            stdout_log_path: None,
+            stderr_log_path: None,
+            startup_probe: None,
+        };
+
+        let rendered = render_command(&request);
+
+        assert!(rendered.contains("/IBConnectionString Srvr=host;Ref=base"));
+    }
+
+    #[test]
+    fn render_command_masks_credentials_inside_infobase_connection_string() {
         let request = ProcessRequest {
             program: PathBuf::from("1cv8c"),
             args: vec![
@@ -1124,9 +1218,67 @@ mod tests {
 
         let rendered = render_command(&request);
 
-        assert!(rendered.contains("/IBConnectionString ***"));
+        assert!(rendered.contains("/IBConnectionString Srvr=host;Ref=base;Usr=***;Pwd=***"));
         assert!(!rendered.contains("alice"));
         assert!(!rendered.contains("secret"));
+    }
+
+    #[test]
+    fn render_command_masks_credentials_inside_infobase_connection_assignment() {
+        let request = ProcessRequest {
+            program: PathBuf::from("1cv8c"),
+            args: vec!["/IBConnectionString=File=/tmp/ib;usr=alice;PWD=secret".to_owned()],
+            workdir: None,
+            stdout_log_path: None,
+            stderr_log_path: None,
+            startup_probe: None,
+        };
+
+        let rendered = render_command(&request);
+
+        assert!(rendered.contains("/IBConnectionString=File=/tmp/ib;usr=***;PWD=***"));
+        assert!(!rendered.contains("alice"));
+        assert!(!rendered.contains("secret"));
+    }
+
+    #[test]
+    fn render_command_masks_credentials_inside_combined_infobase_connection_token() {
+        let request = ProcessRequest {
+            program: PathBuf::from("1cv8c"),
+            args: vec!["/IBConnectionStringSrvr=host;Ref=base;Usr=alice;Pwd=secret".to_owned()],
+            workdir: None,
+            stdout_log_path: None,
+            stderr_log_path: None,
+            startup_probe: None,
+        };
+
+        let rendered = render_command(&request);
+
+        assert!(rendered.contains("/IBConnectionStringSrvr=host;Ref=base;Usr=***;Pwd=***"));
+        assert!(!rendered.contains("alice"));
+        assert!(!rendered.contains("secret"));
+    }
+
+    #[test]
+    fn render_command_masks_quoted_semicolons_inside_infobase_credentials() {
+        let request = ProcessRequest {
+            program: PathBuf::from("1cv8c"),
+            args: vec![
+                "/IBConnectionString".to_owned(),
+                "File=/tmp/ib;Usr=alice;Pwd=\"sec;ret\";Ref=base".to_owned(),
+            ],
+            workdir: None,
+            stdout_log_path: None,
+            stderr_log_path: None,
+            startup_probe: None,
+        };
+
+        let rendered = render_command(&request);
+
+        assert!(rendered.contains("/IBConnectionString File=/tmp/ib;Usr=***;Pwd=***;Ref=base"));
+        assert!(!rendered.contains("alice"));
+        assert!(!rendered.contains("sec"));
+        assert!(!rendered.contains("ret"));
     }
 
     #[cfg(unix)]
@@ -1191,14 +1343,17 @@ mod tests {
         );
 
         let runner = ProcessExecutor;
-        let err = match runner.spawn_managed(&ProcessRequest {
-            program: script,
-            args: vec![],
-            workdir: None,
-            stdout_log_path: None,
-            stderr_log_path: None,
-            startup_probe: Some(Duration::from_millis(100)),
-        }) {
+        let err = match runner.spawn_managed(
+            &ProcessRequest {
+                program: script,
+                args: vec![],
+                workdir: None,
+                stdout_log_path: None,
+                stderr_log_path: None,
+                startup_probe: Some(Duration::from_millis(100)),
+            },
+            ManagedSpawnMode::Detached,
+        ) {
             Ok(managed) => {
                 managed.terminate();
                 panic!("expected managed startup probe to detect early exit");
@@ -1233,20 +1388,23 @@ mod tests {
 
         let runner = ProcessExecutor;
         let managed = runner
-            .spawn_managed(&ProcessRequest {
-                program: PathBuf::from("powershell.exe"),
-                args: vec![
-                    "-NoProfile".to_owned(),
-                    "-ExecutionPolicy".to_owned(),
-                    "Bypass".to_owned(),
-                    "-File".to_owned(),
-                    script.display().to_string(),
-                ],
-                workdir: None,
-                stdout_log_path: None,
-                stderr_log_path: None,
-                startup_probe: None,
-            })
+            .spawn_managed(
+                &ProcessRequest {
+                    program: PathBuf::from("powershell.exe"),
+                    args: vec![
+                        "-NoProfile".to_owned(),
+                        "-ExecutionPolicy".to_owned(),
+                        "Bypass".to_owned(),
+                        "-File".to_owned(),
+                        script.display().to_string(),
+                    ],
+                    workdir: None,
+                    stdout_log_path: None,
+                    stderr_log_path: None,
+                    startup_probe: None,
+                },
+                ManagedSpawnMode::Detached,
+            )
             .expect("spawn managed");
 
         let child_pid = read_pid(&child_pid_path);
@@ -1273,20 +1431,23 @@ mod tests {
         .expect("write script");
 
         let runner = ProcessExecutor;
-        let err = match runner.spawn_managed(&ProcessRequest {
-            program: PathBuf::from("powershell.exe"),
-            args: vec![
-                "-NoProfile".to_owned(),
-                "-ExecutionPolicy".to_owned(),
-                "Bypass".to_owned(),
-                "-File".to_owned(),
-                script.display().to_string(),
-            ],
-            workdir: None,
-            stdout_log_path: None,
-            stderr_log_path: None,
-            startup_probe: Some(Duration::from_millis(200)),
-        }) {
+        let err = match runner.spawn_managed(
+            &ProcessRequest {
+                program: PathBuf::from("powershell.exe"),
+                args: vec![
+                    "-NoProfile".to_owned(),
+                    "-ExecutionPolicy".to_owned(),
+                    "Bypass".to_owned(),
+                    "-File".to_owned(),
+                    script.display().to_string(),
+                ],
+                workdir: None,
+                stdout_log_path: None,
+                stderr_log_path: None,
+                startup_probe: Some(Duration::from_millis(200)),
+            },
+            ManagedSpawnMode::Detached,
+        ) {
             Ok(managed) => {
                 managed.terminate();
                 panic!("expected managed startup probe to detect early exit");

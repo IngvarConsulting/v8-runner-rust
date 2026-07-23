@@ -8,7 +8,7 @@ use crate::platform::enterprise::{
     build_launch_args, normalize_launch_payload_path, LaunchClientMode,
 };
 use crate::platform::locator::UtilityType;
-use crate::platform::process::ProcessRequest;
+use crate::platform::process::{ManagedSpawnMode, ProcessRequest};
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::client_mcp_readiness;
@@ -102,7 +102,7 @@ pub fn execute(
 
     if let Some(plan) = external_epf_wait {
         let managed = runner
-            .spawn_managed_for_wait(&process_request)
+            .spawn_managed(&process_request, ManagedSpawnMode::Wait)
             .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
         let pid = managed.pid();
         let outcome = managed
@@ -111,22 +111,23 @@ pub fn execute(
                 Some(Duration::from_millis(plan.timeout_ms)),
             ))
             .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
-        return Ok(LaunchResult {
+        let message = if outcome.timed_out {
+            format!(
+                "External EPF client timed out after {}ms and was terminated",
+                plan.timeout_ms
+            )
+        } else {
+            format!(
+                "External EPF client exited with status {}",
+                outcome.exit_code.unwrap_or(-1)
+            )
+        };
+        let result = LaunchResult {
             ok: !outcome.timed_out,
             mode,
             pid: Some(pid),
             binary: location.path,
-            message: Some(if outcome.timed_out {
-                format!(
-                    "External EPF client timed out after {}ms and was terminated",
-                    plan.timeout_ms
-                )
-            } else {
-                format!(
-                    "External EPF client exited with status {}",
-                    outcome.exit_code.unwrap_or(-1)
-                )
-            }),
+            message: Some(message.clone()),
             mcp_readiness: None,
             external_epf_wait: Some(ExternalEpfWaitResult {
                 pid,
@@ -136,12 +137,19 @@ pub fn execute(
                 output_path: plan.output_path,
                 stderr_path: plan.stderr_path.display().to_string(),
             }),
-        });
+        };
+        if outcome.timed_out {
+            return Err(UseCaseFailure::with_payload(
+                AppError::Runtime(message),
+                result,
+            ));
+        }
+        return Ok(result);
     }
 
     if let Some(url) = readiness_url {
         let managed = runner
-            .spawn_managed(&process_request)
+            .spawn_managed(&process_request, ManagedSpawnMode::Detached)
             .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
         let pid = managed.pid();
         let binary = managed.binary().clone();

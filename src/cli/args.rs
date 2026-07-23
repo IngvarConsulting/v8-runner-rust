@@ -251,10 +251,21 @@ pub struct TestArgs {
     pub client_mode: Option<String>,
 
     #[command(flatten)]
-    pub launch: LaunchOptionsArgs,
+    pub launch: TestLaunchOptionsArgs,
 
     #[command(subcommand)]
     pub runner: TestRunner,
+}
+
+#[derive(Args, Debug, Clone, Default, PartialEq, Eq)]
+#[command(next_help_heading = "Command options")]
+pub struct TestLaunchOptionsArgs {
+    /// Enables `/UsePrivilegedMode`
+    #[arg(long = "use-privileged-mode")]
+    pub use_privileged_mode: bool,
+    /// Additional raw launch arguments appended after typed launch keys
+    #[arg(long = "raw-key")]
+    pub raw_keys: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -396,7 +407,7 @@ pub struct LaunchArgs {
     pub mcp_mode: Option<String>,
 
     #[command(flatten)]
-    pub launch: LaunchOptionsArgs,
+    pub launch: DirectLaunchOptionsArgs,
 
     /// JSON config path for onec-client-mcp-devkit `/C"runMcp=<FILE>"`
     #[arg(long = "mcp-config")]
@@ -426,6 +437,16 @@ pub struct LaunchOptionsArgs {
     /// User-provided `/Out` path allowed only for direct launch
     #[arg(long)]
     pub output: Option<String>,
+    /// Additional raw launch arguments appended after typed launch keys
+    #[arg(long = "raw-key")]
+    pub raw_keys: Vec<String>,
+}
+
+#[derive(Args, Debug, Clone, Default, PartialEq, Eq)]
+#[command(next_help_heading = "Command options")]
+pub struct DirectLaunchOptionsArgs {
+    #[command(flatten)]
+    pub common: LaunchOptionsArgs,
     /// Capture client stderr to this path while waiting for an external EPF to exit
     #[arg(long = "stderr-output")]
     pub stderr_output: Option<String>,
@@ -435,9 +456,6 @@ pub struct LaunchOptionsArgs {
     /// Maximum wait time in milliseconds for --wait-for-exit
     #[arg(long = "wait-timeout-ms")]
     pub wait_timeout_ms: Option<u64>,
-    /// Additional raw launch arguments appended after typed launch keys
-    #[arg(long = "raw-key")]
-    pub raw_keys: Vec<String>,
 }
 
 #[derive(Args, Debug)]
@@ -551,8 +569,9 @@ pub struct DesignerModulesSyntaxArgs {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtifactsArgs, Cli, Command, ConvertArgs, ExtensionsArgs, LaunchArgs, LaunchOptionsArgs,
-        LoadArgs, McpCommand, McpServeTransport, SyntaxTarget, TestRunner, TestScope,
+        ArtifactsArgs, Cli, Command, ConvertArgs, DirectLaunchOptionsArgs, ExtensionsArgs,
+        LaunchArgs, LoadArgs, McpCommand, McpServeTransport, SyntaxTarget, TestLaunchOptionsArgs,
+        TestRunner, TestScope,
     };
     use clap::Parser;
 
@@ -696,7 +715,7 @@ mod tests {
         match cli.command {
             Command::Test(args) => {
                 assert!(matches!(args.runner, TestRunner::Va(_)));
-                assert_eq!(args.launch, LaunchOptionsArgs::default());
+                assert_eq!(args.launch, TestLaunchOptionsArgs::default());
             }
             _ => panic!("unexpected command"),
         }
@@ -738,8 +757,6 @@ mod tests {
         let cli = Cli::try_parse_from([
             "v8-runner",
             "test",
-            "--c",
-            "RunUnitTests=config.json",
             "--use-privileged-mode",
             "--raw-key",
             "/WA-",
@@ -752,14 +769,8 @@ mod tests {
             Command::Test(args) => {
                 assert_eq!(
                     args.launch,
-                    LaunchOptionsArgs {
-                        c: Some("RunUnitTests=config.json".to_owned()),
-                        execute: None,
+                    TestLaunchOptionsArgs {
                         use_privileged_mode: true,
-                        output: None,
-                        stderr_output: None,
-                        wait_for_exit: false,
-                        wait_timeout_ms: None,
                         raw_keys: vec!["/WA-".to_owned()],
                     }
                 );
@@ -799,11 +810,11 @@ mod tests {
                 wait_ready,
             }) => {
                 assert_eq!(target, "ordinary");
-                assert_eq!(launch.c.as_deref(), Some("DoWork"));
-                assert_eq!(launch.execute.as_deref(), Some("tool.epf"));
-                assert!(launch.use_privileged_mode);
-                assert_eq!(launch.output.as_deref(), Some("launch.log"));
-                assert_eq!(launch.raw_keys, vec!["/WA-", "/DisplayAllFunctions"]);
+                assert_eq!(launch.common.c.as_deref(), Some("DoWork"));
+                assert_eq!(launch.common.execute.as_deref(), Some("tool.epf"));
+                assert!(launch.common.use_privileged_mode);
+                assert_eq!(launch.common.output.as_deref(), Some("launch.log"));
+                assert_eq!(launch.common.raw_keys, vec!["/WA-", "/DisplayAllFunctions"]);
                 assert_eq!(mcp_scenario, None);
                 assert_eq!(mcp_mode, None);
                 assert_eq!(mcp_config, None);
@@ -850,7 +861,7 @@ mod tests {
                 wait_ready,
             }) => {
                 assert_eq!(target, "designer");
-                assert_eq!(launch, LaunchOptionsArgs::default());
+                assert_eq!(launch, DirectLaunchOptionsArgs::default());
                 assert_eq!(mcp_scenario, None);
                 assert_eq!(mcp_mode, None);
                 assert_eq!(mcp_config, None);
@@ -889,7 +900,7 @@ mod tests {
                 wait_ready,
             }) => {
                 assert_eq!(target, "mcp");
-                assert_eq!(launch, LaunchOptionsArgs::default());
+                assert_eq!(launch, DirectLaunchOptionsArgs::default());
                 assert_eq!(mcp_scenario.as_deref(), Some("va"));
                 assert_eq!(mcp_mode.as_deref(), Some("ordinary"));
                 assert_eq!(mcp_config.as_deref(), Some("mcp-conf.json"));

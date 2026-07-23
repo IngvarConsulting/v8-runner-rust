@@ -700,55 +700,32 @@ fn test_rejects_c_and_execute_on_test_surface() {
 }
 
 #[test]
-fn test_rejects_external_epf_wait_options_on_test_surface() {
-    let (_dir, config_path, _build_calls, test_calls, _captured_config) =
-        setup_project("work", JUNIT_SMOKE_REPORT_FIXTURE, "", 0, false, 5, None);
-
-    let output = v8_runner_command()
-        .args([
-            "--config",
-            &config_path.display().to_string(),
-            "test",
-            "--wait-for-exit",
-            "--wait-timeout-ms",
-            "100",
-            "--stderr-output",
-            "/tmp/runtime.stderr",
-            "yaxunit",
-            "all",
-        ])
-        .output()
-        .expect("run");
-
-    assert!(!output.status.success());
-    assert_ne!(output.status.code(), Some(0));
-    assert!(!test_calls.exists());
-    assert!(String::from_utf8_lossy(&output.stderr)
-        .contains("--wait-for-exit, --wait-timeout-ms, and --stderr-output are supported only for direct `launch thin`"));
-}
-
-#[test]
 fn test_rejects_reserved_raw_launch_payloads() {
     let (_dir, config_path, _build_calls, test_calls, _captured_config) =
         setup_project("work", JUNIT_SMOKE_REPORT_FIXTURE, "", 0, false, 5, None);
 
-    let output = v8_runner_command()
-        .args([
-            "--config",
-            &config_path.display().to_string(),
-            "test",
-            "--raw-key",
-            "/C\"RunOther\"",
-            "yaxunit",
-            "all",
-        ])
-        .output()
-        .expect("run");
+    for raw_key in ["/C\"RunOther\"", "/C RunOther", "/Execute:tool.epf"] {
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "test",
+                "--raw-key",
+                raw_key,
+                "yaxunit",
+                "all",
+            ])
+            .output()
+            .expect("run");
 
-    assert!(!output.status.success());
-    assert_ne!(output.status.code(), Some(0));
+        assert!(
+            !output.status.success(),
+            "raw key should be rejected: {raw_key}"
+        );
+        assert_ne!(output.status.code(), Some(0));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("does not support raw /C"));
+    }
     assert!(!test_calls.exists());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("does not support raw /C"));
 }
 
 #[test]
