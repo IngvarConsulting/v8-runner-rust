@@ -35,8 +35,8 @@ use crate::domain::load::{
     CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
 };
 use crate::domain::runner::{
-    ExecutionPolicy, ExternalEpfWaitOptions, LaunchClientModeRequest, LaunchOptions, RunnerKind,
-    RunnerOutputFormat, RunnerProfile,
+    launch_key_alias_matches, ExecutionPolicy, ExternalEpfWaitOptions, LaunchClientModeRequest,
+    LaunchOptions, RunnerKind, RunnerOutputFormat, RunnerProfile,
 };
 use crate::domain::syntax::{SyntaxCheckResult, SyntaxCheckStatus};
 use crate::domain::test::{RetainedPaths, TestReport, TestRunResult, TestStatus, TestTarget};
@@ -1467,25 +1467,9 @@ fn map_mcp_client_mode(mode: Option<&str>) -> Result<ClientMcpMode, UseCaseError
 }
 
 fn is_reserved_raw_launch_key(raw: &str) -> bool {
-    let normalized = raw
-        .trim_start()
-        .trim_start_matches(['/', '-'])
-        .to_ascii_lowercase();
     ["c", "execute", "out"]
         .iter()
-        .any(|key| reserved_raw_launch_key_matches(&normalized, key))
-}
-
-fn reserved_raw_launch_key_matches(normalized: &str, key: &str) -> bool {
-    if normalized == key {
-        return true;
-    }
-    let Some(rest) = normalized.strip_prefix(key) else {
-        return false;
-    };
-    rest.chars()
-        .next()
-        .is_some_and(|ch| matches!(ch, '"' | '=' | ':' | ' ' | '\t'))
+        .any(|key| launch_key_alias_matches(raw, key))
 }
 
 #[derive(Debug, Serialize)]

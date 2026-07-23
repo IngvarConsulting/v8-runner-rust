@@ -130,7 +130,7 @@ v8-runner launch thick
 v8-runner launch ordinary
 ```
 
-Launch onec-client-mcp-devkit through the supported `launch mcp` surface instead of manually assembling `/C"runMcp..."`:
+Launch onec-client-mcp-devkit through the supported `launch mcp` surface instead of manually assembling `/C runMcp...`:
 
 ```bash
 v8-runner launch mcp

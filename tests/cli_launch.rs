@@ -636,8 +636,7 @@ fn launch_ordinary_supports_typed_keys_and_filters_reserved_raw_duplicates() {
     assert!(args.contains("/UsePrivilegedMode"));
     assert!(args.contains("/Execute"));
     assert!(args.contains("/tmp/tool.epf"));
-    assert!(args.contains("/C\"DoWork\""));
-    assert!(args.contains("DoWork"));
+    assert!(args.contains("/C\nDoWork\n"));
     assert!(args.contains("/WA-"));
     assert!(args.contains("/tmp/user.out.log"));
     assert!(!args.contains("/tmp/ignored.out.log"));
@@ -684,7 +683,7 @@ fn launch_mcp_va_builds_payload_from_configured_port_and_ordinary_mode() {
     assert!(args.contains("/RunModeOrdinaryApplication"));
     assert!(args.contains("/Execute"));
     assert!(args.contains("vanessa-automation.epf"));
-    assert!(args.contains("/C\"runMcp=/tmp/mcp conf.json;mcpPort=9874;VAParams="));
+    assert!(args.contains("/C\nrunMcp=/tmp/mcp conf.json;mcpPort=9874;VAParams="));
     assert!(!args.contains("StartFeaturePlayer"));
     assert!(args.contains("/TESTMANAGER"));
     assert!(args.contains("/WA-"));
@@ -1237,6 +1236,44 @@ fn thin_external_epf_wait_rejects_whitespace_raw_execute_alias_before_spawn() {
             "100",
             "--raw-key",
             "/Execute alternate.epf",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!output.status.success());
+    assert!(
+        !started.exists(),
+        "validation must happen before client spawn"
+    );
+}
+
+#[test]
+fn thin_external_epf_wait_rejects_attached_c_alias_before_spawn() {
+    let marker = temp_workspace();
+    let started = marker.path().join("started");
+    let script = format!("printf started > '{}'\nsleep 1", started.display());
+    let (_dir, config_path, _install_dir, work_path) = setup_project_with_thin_script(&script);
+    let epf = work_path.join("runtime-check.epf");
+    fs::write(&epf, "epf").expect("epf");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "thin",
+            "--execute",
+            &epf.display().to_string(),
+            "--output",
+            "/tmp/runtime.out",
+            "--stderr-output",
+            "/tmp/runtime.stderr",
+            "--wait-for-exit",
+            "--wait-timeout-ms",
+            "100",
+            "--raw-key",
+            "/C\"RunUnitTests\"",
         ])
         .output()
         .expect("run command");
