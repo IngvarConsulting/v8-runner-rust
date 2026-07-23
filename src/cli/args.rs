@@ -409,11 +409,11 @@ pub struct LaunchArgs {
     #[command(flatten)]
     pub launch: DirectLaunchOptionsArgs,
 
-    /// JSON config path for onec-client-mcp-devkit `/C"runMcp=<FILE>"`
+    /// JSON config path for onec-client-mcp-devkit `/C runMcp=<FILE>`
     #[arg(long = "mcp-config")]
     pub mcp_config: Option<String>,
 
-    /// Port override for onec-client-mcp-devkit `/C"...;mcpPort=<PORT>"`
+    /// Port override for onec-client-mcp-devkit `/C ...;mcpPort=<PORT>`
     #[arg(long = "mcp-port")]
     pub mcp_port: Option<u16>,
 

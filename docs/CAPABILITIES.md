@@ -309,7 +309,7 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--wait-ready] [FLAGS]
 - `designer` использует `1cv8`.
 - `thin` использует `1cv8c`.
 - `thick` и `ordinary` используют `1cv8`.
-- `mcp` запускает клиентский MCP-сервер onec-client-mcp-devkit через `/C"runMcp"`.
+- `mcp` запускает клиентский MCP-сервер onec-client-mcp-devkit через `/C runMcp`.
 - `launch mcp` по умолчанию использует `--mode thin` и `1cv8c`.
 - `launch mcp --mode thick` использует `1cv8`; `launch mcp --mode ordinary` использует `1cv8`
   и добавляет `/RunModeOrdinaryApplication`.
@@ -317,10 +317,12 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--wait-ready] [FLAGS]
   и передаёт `VAParams=<runtime params>` без `StartFeaturePlayer`.
 - Для интерактивной отладки и написания функциональных `.feature`-сценариев используйте
   `launch mcp va --wait-ready`; голый `launch mcp` поднимает client MCP без Vanessa tools.
-- Любой управляемый runner payload для ключа `/C` передаётся как один аргумент
-  `/C"<payload>"`: это касается `launch --c`, `launch mcp`, `test yaxunit` и `test va`.
+- Любой управляемый runner payload для ключа `/C` передаётся как значение отдельного
+  аргумента `/C`: это касается `launch --c`, `launch mcp`, `test yaxunit` и `test va`.
+  На уровне process argv это два элемента: `/C` и `<payload>`; shell-подобная запись
+  `/C <payload>` в документации не означает один склеенный аргумент.
 - Для `mcp` доступны typed flags `--mcp-config <FILE>` и `--mcp-port <PORT>`;
-  итоговый payload: `/C"runMcp[=<FILE>][;mcpPort=<PORT>]"`.
+  итоговый payload: `/C runMcp[=<FILE>][;mcpPort=<PORT>]`.
 - Если `--mcp-port` не указан, используется `tools.client_mcp.port` из `v8project.yaml`.
 - `--wait-ready` ждёт `http://127.0.0.1:<port>/mcp`, выполняет MCP `initialize`,
   `notifications/initialized` и `tools/list`, а в JSON-результате возвращает `mcp_readiness`

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crate::config::model::AppConfig;
 use crate::domain::launch::{ExternalEpfWaitResult, LaunchMode, LaunchResult};
-use crate::domain::runner::LaunchOptions;
+use crate::domain::runner::{launch_key_alias_matches, LaunchOptions};
 use crate::platform::enterprise::{
     build_launch_args, normalize_launch_payload_path, LaunchClientMode,
 };
@@ -267,18 +267,9 @@ fn external_epf_wait_plan(
 }
 
 fn is_wait_reserved_raw_key(raw: &str) -> bool {
-    let normalized = raw
-        .trim_start()
-        .trim_start_matches(['/', '-'])
-        .split(|character: char| {
-            character == '=' || character == ':' || character == '"' || character.is_whitespace()
-        })
-        .next()
-        .unwrap_or_default();
-    matches!(
-        normalized.to_ascii_lowercase().as_str(),
-        "c" | "execute" | "out"
-    )
+    ["c", "execute", "out"]
+        .iter()
+        .any(|key| launch_key_alias_matches(raw, key))
 }
 
 fn client_mcp_readiness_url(
@@ -647,7 +638,7 @@ mod tests {
             .contains("v8-runner build"));
         let args = read_args_log(&args_log);
         assert!(args.contains("ENTERPRISE"));
-        assert!(args.contains("/C\"runMcp;mcpPort=9874\""));
+        assert!(args.contains("/C\nrunMcp;mcpPort=9874"));
         assert!(!args.contains("/LoadCfg"));
         assert!(!args.contains("-Extension"));
     }
