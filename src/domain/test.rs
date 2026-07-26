@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use crate::domain::artifact::{ArtifactKind, ArtifactRef};
 use crate::domain::artifact::{
-    ArtifactKind, ArtifactRef, ArtifactSet, ARTIFACT_ROLE_ALLURE_RESULTS, ARTIFACT_ROLE_CONFIG,
-    ARTIFACT_ROLE_JUNIT_XML, ARTIFACT_ROLE_PLATFORM_LOG, ARTIFACT_ROLE_RUNNER_LOG,
-    ARTIFACT_ROLE_RUN_DIR, ARTIFACT_ROLE_SENTINEL,
+    ArtifactSet, ARTIFACT_ROLE_ALLURE_RESULTS, ARTIFACT_ROLE_CONFIG, ARTIFACT_ROLE_JUNIT_XML,
+    ARTIFACT_ROLE_PLATFORM_LOG, ARTIFACT_ROLE_RUNNER_LOG, ARTIFACT_ROLE_RUN_DIR,
+    ARTIFACT_ROLE_SENTINEL,
 };
 use crate::domain::execution::{
     ExecutionError, ExecutionMetrics, ExecutionOutcome, ExecutionStatus, StepResult,
@@ -117,6 +119,7 @@ pub struct RetainedPaths {
 }
 
 impl RetainedPaths {
+    #[cfg(test)]
     pub fn into_artifact_set(self) -> ArtifactSet {
         let mut set = ArtifactSet::with_root(self.run_dir.clone());
         set.push(

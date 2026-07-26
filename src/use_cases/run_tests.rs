@@ -8,7 +8,11 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::config::model::AppConfig;
-use crate::domain::artifact::ArtifactSet;
+use crate::domain::artifact::{
+    ArtifactKind, ArtifactRef, ArtifactSet, ARTIFACT_ROLE_ALLURE_RESULTS, ARTIFACT_ROLE_CONFIG,
+    ARTIFACT_ROLE_JUNIT_XML, ARTIFACT_ROLE_PLATFORM_LOG, ARTIFACT_ROLE_RUNNER_LOG,
+    ARTIFACT_ROLE_RUN_DIR,
+};
 use crate::domain::execution::{
     ExecutionMetrics, ExecutionOutcome, ExecutionStatus, ExecutionStepKind, StepResult,
 };
@@ -57,15 +61,18 @@ pub fn execute(
 struct YaXUnitConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     filter: Option<YaXUnitFilter>,
-    #[serde(rename = "reportFormat")]
-    report_format: &'static str,
-    #[serde(rename = "reportPath")]
-    report_path: String,
+    reports: Vec<YaXUnitReportConfig>,
     #[serde(rename = "closeAfterTests")]
     close_after_tests: bool,
     #[serde(rename = "showReport")]
     show_report: bool,
     logging: YaXUnitLogging,
+}
+
+#[derive(Debug, Serialize)]
+struct YaXUnitReportConfig {
+    format: &'static str,
+    path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -86,9 +93,20 @@ struct RunArtifacts {
     config_json: PathBuf,
     junit_xml: PathBuf,
     junit_dir: PathBuf,
+    allure_results_dir: PathBuf,
     runner_log: PathBuf,
     platform_log: PathBuf,
     sentinel: PathBuf,
+}
+
+impl Drop for RunArtifacts {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_file(&self.sentinel) {
+            if self.sentinel.exists() {
+                debug!(path = %self.sentinel.display(), %error, "failed to remove test run sentinel");
+            }
+        }
+    }
 }
 
 enum PreparedRun {
@@ -117,8 +135,16 @@ fn build_yaxunit_config(target: &TestTarget, artifacts: &RunArtifacts) -> YaXUni
                 modules: vec![name.clone()],
             }),
         },
-        report_format: "jUnit",
-        report_path: artifacts.junit_xml.display().to_string(),
+        reports: vec![
+            YaXUnitReportConfig {
+                format: "jUnit",
+                path: artifacts.junit_xml.display().to_string(),
+            },
+            YaXUnitReportConfig {
+                format: "allure",
+                path: artifacts.allure_results_dir.display().to_string(),
+            },
+        ],
         close_after_tests: true,
         show_report: false,
         logging: YaXUnitLogging {
@@ -150,15 +176,21 @@ fn create_run_artifacts(config: &AppConfig, runner_id: &str) -> std::io::Result<
     fs::write(&sentinel, &run_id)?;
     set_file_permissions(&sentinel)?;
 
+    let junit_dir = run_dir.join("junit");
     let artifacts = RunArtifacts {
         run_dir: run_dir.clone(),
         config_json: run_dir.join("config.json"),
-        junit_xml: run_dir.join("report.xml"),
-        junit_dir: run_dir.join("junit"),
+        junit_xml: junit_dir.join("report.xml"),
+        junit_dir,
+        allure_results_dir: run_dir.join("allure-results"),
         runner_log: run_dir.join("runner.log"),
         platform_log: run_dir.join("enterprise.out.log"),
         sentinel,
     };
+    fs::create_dir_all(&artifacts.junit_dir)?;
+    set_dir_permissions(&artifacts.junit_dir)?;
+    fs::create_dir_all(&artifacts.allure_results_dir)?;
+    set_dir_permissions(&artifacts.allure_results_dir)?;
     Ok(artifacts)
 }
 
@@ -179,6 +211,7 @@ fn prepare_vanessa_run(
         VanessaTestArtifacts {
             run_dir: &artifacts.run_dir,
             junit_dir: &artifacts.junit_dir,
+            allure_results_dir: &artifacts.allure_results_dir,
             runner_log: &artifacts.runner_log,
         },
     )?;
@@ -391,21 +424,114 @@ fn retain_run_artifacts(
     _config: &AppConfig,
     artifacts: &RunArtifacts,
 ) -> std::io::Result<ArtifactSet> {
-    Ok(crate::domain::test::RetainedPaths {
-        run_dir: artifacts.run_dir.clone(),
-        config_json: artifacts.config_json.clone(),
-        junit_xml: artifacts.junit_xml.clone(),
-        allure_results: None,
-        yaxunit_log: artifacts.runner_log.clone(),
-        platform_log: artifacts.platform_log.clone(),
-        sentinel: artifacts.sentinel.clone(),
+    Ok(collect_run_artifacts(artifacts))
+}
+
+fn collect_run_artifacts(artifacts: &RunArtifacts) -> ArtifactSet {
+    let mut collected = if is_existing_dir(&artifacts.run_dir) {
+        let mut set = ArtifactSet::with_root(artifacts.run_dir.clone());
+        set.push(
+            ArtifactRef::new(ArtifactKind::RunDirectory, artifacts.run_dir.clone())
+                .with_role(ARTIFACT_ROLE_RUN_DIR),
+        );
+        set
+    } else {
+        ArtifactSet::default()
+    };
+
+    push_existing_file(
+        &mut collected,
+        ArtifactKind::Config,
+        ARTIFACT_ROLE_CONFIG,
+        &artifacts.config_json,
+    );
+
+    let mut junit_reports = collect_existing_junit_reports(&artifacts.junit_dir);
+    if is_existing_file(&artifacts.junit_xml) && !junit_reports.contains(&artifacts.junit_xml) {
+        junit_reports.push(artifacts.junit_xml.clone());
     }
-    .into_artifact_set())
+    junit_reports.sort();
+    for report in junit_reports {
+        push_existing_file(
+            &mut collected,
+            ArtifactKind::JunitXml,
+            ARTIFACT_ROLE_JUNIT_XML,
+            &report,
+        );
+    }
+
+    push_existing_dir(
+        &mut collected,
+        ArtifactKind::AllureResults,
+        ARTIFACT_ROLE_ALLURE_RESULTS,
+        &artifacts.allure_results_dir,
+    );
+    push_existing_file(
+        &mut collected,
+        ArtifactKind::RunnerLog,
+        ARTIFACT_ROLE_RUNNER_LOG,
+        &artifacts.runner_log,
+    );
+    push_existing_file(
+        &mut collected,
+        ArtifactKind::PlatformLog,
+        ARTIFACT_ROLE_PLATFORM_LOG,
+        &artifacts.platform_log,
+    );
+
+    collected
+}
+
+fn collect_existing_junit_reports(root: &Path) -> Vec<PathBuf> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut reports = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if metadata.is_file()
+            && path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("xml"))
+        {
+            reports.push(path);
+        } else if metadata.is_dir() {
+            reports.extend(collect_existing_junit_reports(&path));
+        }
+    }
+    reports.sort();
+    reports
+}
+
+fn push_existing_file(set: &mut ArtifactSet, kind: ArtifactKind, role: &str, path: &Path) {
+    if is_existing_file(path) {
+        set.push(ArtifactRef::new(kind, path).with_role(role));
+    }
+}
+
+fn push_existing_dir(set: &mut ArtifactSet, kind: ArtifactKind, role: &str, path: &Path) {
+    if is_existing_dir(path) {
+        set.push(ArtifactRef::new(kind, path).with_role(role));
+    }
+}
+
+fn is_existing_file(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
+}
+
+fn is_existing_dir(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
 }
 
 fn cleanup_run_dir(artifacts: &RunArtifacts) {
     let _ = fs::remove_file(&artifacts.sentinel);
-    let _ = fs::remove_dir_all(&artifacts.run_dir);
 }
 
 fn sanitize_text(text: &str, config: &AppConfig) -> String {
@@ -514,13 +640,17 @@ fn set_file_permissions(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_yaxunit_config, compact_report, create_run_artifacts, materialize_vanessa_runner_log,
-        parse_junit_report, retain_run_artifacts, run_tests, sanitize_text, sanitize_text_full,
-        truncate_stack_trace, RunArtifacts,
+        build_yaxunit_config, collect_run_artifacts, compact_report, create_run_artifacts,
+        materialize_vanessa_runner_log, parse_junit_report, retain_run_artifacts, run_tests,
+        sanitize_text, sanitize_text_full, truncate_stack_trace, RunArtifacts,
     };
     use crate::config::model::{
         AppConfig, BuildConfig, BuilderBackend, PlatformToolConfig, SourceFormat, SourceSetConfig,
         SourceSetPurpose, TestsConfig, ToolsConfig, VanessaProfileConfig,
+    };
+    use crate::domain::artifact::{
+        ARTIFACT_ROLE_ALLURE_RESULTS, ARTIFACT_ROLE_CONFIG, ARTIFACT_ROLE_JUNIT_XML,
+        ARTIFACT_ROLE_PLATFORM_LOG, ARTIFACT_ROLE_RUNNER_LOG,
     };
     use crate::domain::execution::{ExecutionStatus, ExecutionTimeouts};
     use crate::domain::runner::{
@@ -582,6 +712,71 @@ mod tests {
         );
         let json = serde_json::to_value(payload).expect("json");
         assert_eq!(json["filter"]["modules"][0], "Foo Бар");
+    }
+
+    #[test]
+    fn yaxunit_config_serializes_simultaneous_junit_and_allure_reports() {
+        let dir = tempdir().expect("tempdir");
+        let artifacts = create_artifacts(dir.path());
+        let payload = build_yaxunit_config(&TestTarget::All, &artifacts);
+
+        let json = serde_json::to_value(payload).expect("json");
+
+        assert_eq!(json["reports"][0]["format"], "jUnit");
+        assert_eq!(
+            json["reports"][0]["path"],
+            artifacts.junit_xml.display().to_string()
+        );
+        assert_eq!(json["reports"][1]["format"], "allure");
+        assert_eq!(
+            json["reports"][1]["path"],
+            artifacts.allure_results_dir.display().to_string()
+        );
+        assert!(json.get("reportFormat").is_none());
+    }
+
+    #[test]
+    fn collect_run_artifacts_omits_missing_junit_and_keeps_existing_outputs() {
+        let dir = tempdir().expect("tempdir");
+        let artifacts = create_artifacts(dir.path());
+        std::fs::create_dir_all(&artifacts.allure_results_dir).expect("allure dir");
+        std::fs::write(&artifacts.config_json, b"{}").expect("config");
+        std::fs::write(&artifacts.runner_log, b"runner").expect("runner log");
+        std::fs::write(&artifacts.platform_log, b"platform").expect("platform log");
+
+        let collected = collect_run_artifacts(&artifacts);
+
+        assert!(collected.get_by_role(ARTIFACT_ROLE_JUNIT_XML).is_none());
+        assert_eq!(
+            collected.get_by_role(ARTIFACT_ROLE_CONFIG),
+            Some(artifacts.config_json.as_path())
+        );
+        assert_eq!(
+            collected.get_by_role(ARTIFACT_ROLE_ALLURE_RESULTS),
+            Some(artifacts.allure_results_dir.as_path())
+        );
+        assert_eq!(
+            collected.get_by_role(ARTIFACT_ROLE_RUNNER_LOG),
+            Some(artifacts.runner_log.as_path())
+        );
+        assert_eq!(
+            collected.get_by_role(ARTIFACT_ROLE_PLATFORM_LOG),
+            Some(artifacts.platform_log.as_path())
+        );
+    }
+
+    #[test]
+    fn dropping_run_artifacts_removes_sentinel_but_keeps_run_directory() {
+        let dir = tempdir().expect("tempdir");
+        let config = config(dir.path());
+        let (run_dir, sentinel) = {
+            let artifacts = create_run_artifacts(&config, "yaxunit").expect("artifacts");
+            assert!(artifacts.sentinel.is_file());
+            (artifacts.run_dir.clone(), artifacts.sentinel.clone())
+        };
+
+        assert!(run_dir.is_dir());
+        assert!(!sentinel.exists());
     }
 
     #[test]
@@ -672,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn vanessa_junit_parse_failure_retains_materialized_runner_log() {
+    fn vanessa_junit_parse_failure_inventories_materialized_runner_log() {
         let dir = tempdir().expect("tempdir");
         let config = config(dir.path());
         let artifacts = create_artifacts(dir.path());
@@ -688,10 +883,11 @@ mod tests {
         );
 
         let retained = retain_run_artifacts(&config, &artifacts).expect("retain artifacts");
-        let retained_paths = crate::domain::test::RetainedPaths::from_artifact_set(&retained)
-            .expect("retained paths");
-        assert!(retained_paths.yaxunit_log.exists());
-        assert_eq!(retained_paths.yaxunit_log, artifacts.runner_log);
+        assert_eq!(
+            retained.get_by_role(ARTIFACT_ROLE_RUNNER_LOG),
+            Some(artifacts.runner_log.as_path())
+        );
+        assert!(retained.get_by_role(ARTIFACT_ROLE_JUNIT_XML).is_none());
     }
 
     #[test]
@@ -773,14 +969,17 @@ mod tests {
     }
 
     fn create_artifacts(root: &std::path::Path) -> RunArtifacts {
+        let run_dir = root.join("run");
+        let junit_dir = run_dir.join("junit");
         RunArtifacts {
-            run_dir: root.join("run"),
-            config_json: root.join("run/config.json"),
-            junit_xml: root.join("run/report.xml"),
+            run_dir: run_dir.clone(),
+            config_json: run_dir.join("config.json"),
+            junit_xml: junit_dir.join("report.xml"),
             junit_dir: root.join("run/junit"),
-            runner_log: root.join("run/yax.log"),
-            platform_log: root.join("run/platform.log"),
-            sentinel: root.join("run/run.inprogress"),
+            allure_results_dir: run_dir.join("allure-results"),
+            runner_log: run_dir.join("yax.log"),
+            platform_log: run_dir.join("platform.log"),
+            sentinel: run_dir.join("run.inprogress"),
         }
     }
 
