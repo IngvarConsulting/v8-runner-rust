@@ -10,8 +10,8 @@ use uuid::Uuid;
 use crate::config::model::AppConfig;
 use crate::domain::artifact::{
     ArtifactKind, ArtifactRef, ArtifactSet, ARTIFACT_ROLE_ALLURE_RESULTS, ARTIFACT_ROLE_CONFIG,
-    ARTIFACT_ROLE_JUNIT_XML, ARTIFACT_ROLE_PLATFORM_LOG, ARTIFACT_ROLE_RUNNER_LOG,
-    ARTIFACT_ROLE_RUN_DIR,
+    ARTIFACT_ROLE_ERROR_DETAILS, ARTIFACT_ROLE_JUNIT_XML, ARTIFACT_ROLE_PLATFORM_LOG,
+    ARTIFACT_ROLE_RUNNER_LOG, ARTIFACT_ROLE_RUN_DIR, ARTIFACT_ROLE_SCREENSHOT,
 };
 use crate::domain::execution::{
     ExecutionMetrics, ExecutionOutcome, ExecutionStatus, ExecutionStepKind, StepResult,
@@ -94,6 +94,8 @@ struct RunArtifacts {
     junit_xml: PathBuf,
     junit_dir: PathBuf,
     allure_results_dir: PathBuf,
+    error_details_dir: PathBuf,
+    screenshots_dir: PathBuf,
     runner_log: PathBuf,
     platform_log: PathBuf,
     sentinel: PathBuf,
@@ -183,6 +185,8 @@ fn create_run_artifacts(config: &AppConfig, runner_id: &str) -> std::io::Result<
         junit_xml: junit_dir.join("report.xml"),
         junit_dir,
         allure_results_dir: run_dir.join("allure-results"),
+        error_details_dir: run_dir.join("error-details"),
+        screenshots_dir: run_dir.join("screenshots"),
         runner_log: run_dir.join("runner.log"),
         platform_log: run_dir.join("enterprise.out.log"),
         sentinel,
@@ -224,18 +228,115 @@ fn prepare_vanessa_run(
 }
 
 fn materialize_vanessa_runner_log(artifacts: &RunArtifacts) -> Result<(), String> {
-    if artifacts
-        .runner_log
-        .metadata()
-        .is_ok_and(|metadata| metadata.len() > 0)
-    {
-        return Ok(());
+    match fs::symlink_metadata(&artifacts.runner_log) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(format!(
+                "failed to materialize Vanessa runner log: destination '{}' is a symlink",
+                artifacts.runner_log.display()
+            ));
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(format!(
+                "failed to materialize Vanessa runner log: destination '{}' is not a regular file",
+                artifacts.runner_log.display()
+            ));
+        }
+        Ok(metadata) if metadata.len() > 0 => return Ok(()),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect Vanessa runner log destination '{}': {error}",
+                artifacts.runner_log.display()
+            ));
+        }
     }
-    fs::copy(&artifacts.platform_log, &artifacts.runner_log).map_err(|error| {
-        format!("failed to materialize Vanessa runner log from enterprise output: {error}")
+
+    let source_metadata = fs::symlink_metadata(&artifacts.platform_log).map_err(|error| {
+        format!(
+            "failed to materialize Vanessa runner log from enterprise output '{}': {error}",
+            artifacts.platform_log.display()
+        )
     })?;
-    set_file_permissions(&artifacts.runner_log)
-        .map_err(|error| format!("failed to chmod Vanessa runner log: {error}"))
+    if source_metadata.file_type().is_symlink() {
+        return Err(format!(
+            "failed to materialize Vanessa runner log: source '{}' is a symlink",
+            artifacts.platform_log.display()
+        ));
+    }
+    if !source_metadata.is_file() {
+        return Err(format!(
+            "failed to materialize Vanessa runner log: source '{}' is not a regular file",
+            artifacts.platform_log.display()
+        ));
+    }
+
+    let temp_path = artifacts
+        .run_dir
+        .join(format!(".runner-log-{}.tmp", Uuid::new_v4().simple()));
+    let result = (|| -> std::io::Result<()> {
+        let mut source = open_file_no_follow(&artifacts.platform_log)?;
+        let mut temp = create_private_file(&temp_path)?;
+        std::io::copy(&mut source, &mut temp)?;
+        set_open_file_permissions(&temp)?;
+        temp.sync_all()?;
+        drop(temp);
+        replace_file(&temp_path, &artifacts.runner_log)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result.map_err(|error| {
+        format!("failed to materialize Vanessa runner log from enterprise output: {error}")
+    })
+}
+
+fn open_file_no_follow(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(path)
+}
+
+fn create_private_file(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(path)
+}
+
+fn set_open_file_permissions(file: &fs::File) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = file.metadata()?.permissions();
+        permissions.set_mode(0o600);
+        file.set_permissions(permissions)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    match fs::remove_file(destination) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    fs::rename(source, destination)
 }
 
 fn parse_runner_log(
@@ -315,28 +416,14 @@ fn parse_runner_log(
 }
 
 fn discover_junit_reports(root: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let mut reports = Vec::new();
-    collect_junit_reports(root, &mut reports)?;
-    reports.sort();
-    Ok(reports)
-}
-
-fn collect_junit_reports(root: &Path, reports: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    for entry in fs::read_dir(root)? {
-        let path = entry?.path();
-        let metadata = fs::symlink_metadata(&path)?;
-        if metadata.is_file()
-            && path
-                .extension()
+    Ok(collect_regular_files(root)?
+        .into_iter()
+        .filter(|path| {
+            path.extension()
                 .and_then(|value| value.to_str())
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("xml"))
-        {
-            reports.push(path);
-        } else if metadata.is_dir() {
-            collect_junit_reports(&path, reports)?;
-        }
-    }
-    Ok(())
+        })
+        .collect())
 }
 
 fn parse_junit_reports(reports: &[PathBuf]) -> crate::parsers::NormalizedParse<TestReport> {
@@ -437,31 +524,106 @@ fn parse_junit_report(artifacts: &RunArtifacts) -> crate::parsers::NormalizedPar
     }
 }
 
-fn validate_allure_results(root: &Path) -> Result<(), TestErrorKind> {
-    let metadata = fs::symlink_metadata(root).map_err(|_| TestErrorKind::AllureNotProduced)?;
+#[derive(Debug, PartialEq, Eq)]
+struct AllureValidationFailure {
+    kind: TestErrorKind,
+    message: String,
+    details: Vec<String>,
+}
+
+fn validate_allure_results(root: &Path) -> Result<(), AllureValidationFailure> {
+    let metadata = match fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AllureValidationFailure {
+                kind: TestErrorKind::AllureNotProduced,
+                message: "Allure results directory was not produced".to_owned(),
+                details: vec![format!("Allure results directory: {}", root.display())],
+            });
+        }
+        Err(error) => {
+            return Err(allure_io_failure(root, error));
+        }
+    };
     if !metadata.is_dir() {
-        return Err(TestErrorKind::AllureNotProduced);
+        return Err(AllureValidationFailure {
+            kind: TestErrorKind::AllureNotProduced,
+            message: "Allure results directory was not produced".to_owned(),
+            details: vec![format!("Allure results directory: {}", root.display())],
+        });
     }
-    if contains_regular_file(root) {
-        Ok(())
+    let files = collect_regular_files(root).map_err(|error| allure_io_failure(root, error))?;
+    if files.is_empty() {
+        Err(AllureValidationFailure {
+            kind: TestErrorKind::AllureEmpty,
+            message: "Allure results directory is empty".to_owned(),
+            details: vec![format!("Allure results directory: {}", root.display())],
+        })
     } else {
-        Err(TestErrorKind::AllureEmpty)
+        Ok(())
     }
 }
 
-fn contains_regular_file(root: &Path) -> bool {
-    let entries = match fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(_) => return false,
-    };
-    entries.flatten().any(|entry| {
-        let path = entry.path();
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.is_file() => true,
-            Ok(metadata) if metadata.is_dir() => contains_regular_file(&path),
-            Ok(_) | Err(_) => false,
+fn allure_io_failure(root: &Path, error: std::io::Error) -> AllureValidationFailure {
+    AllureValidationFailure {
+        kind: TestErrorKind::TestSetupFailed,
+        message: "failed to inspect Allure results".to_owned(),
+        details: vec![
+            format!("Allure results directory: {}", root.display()),
+            error.to_string(),
+        ],
+    }
+}
+
+fn collect_regular_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let root_metadata = fs::symlink_metadata(root).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("failed to inspect '{}': {error}", root.display()),
+        )
+    })?;
+    if !root_metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("'{}' is not a directory", root.display()),
+        ));
+    }
+
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(directory) = pending.pop() {
+        let entries = fs::read_dir(&directory).map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!(
+                    "failed to read directory '{}': {error}",
+                    directory.display()
+                ),
+            )
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!("failed to read entry in '{}': {error}", directory.display()),
+                )
+            })?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!("failed to inspect '{}': {error}", path.display()),
+                )
+            })?;
+            if metadata.is_file() {
+                files.push(path);
+            } else if metadata.is_dir() {
+                pending.push(path);
+            }
         }
-    })
+    }
+    files.sort();
+    Ok(files)
 }
 
 fn classify_test_completion(
@@ -555,6 +717,18 @@ fn collect_run_artifacts(artifacts: &RunArtifacts) -> ArtifactSet {
         ARTIFACT_ROLE_ALLURE_RESULTS,
         &artifacts.allure_results_dir,
     );
+    push_optional_diagnostics(
+        &mut collected,
+        ArtifactKind::ErrorDetails,
+        ARTIFACT_ROLE_ERROR_DETAILS,
+        &artifacts.error_details_dir,
+    );
+    push_optional_diagnostics(
+        &mut collected,
+        ArtifactKind::Screenshot,
+        ARTIFACT_ROLE_SCREENSHOT,
+        &artifacts.screenshots_dir,
+    );
     push_existing_file(
         &mut collected,
         ArtifactKind::RunnerLog,
@@ -578,6 +752,7 @@ fn collect_run_artifacts(artifacts: &RunArtifacts) -> ArtifactSet {
     collected
 }
 
+#[allow(deprecated)]
 fn artifact_kind_sort_key(kind: &ArtifactKind) -> &str {
     match kind {
         ArtifactKind::RunDirectory => "run_directory",
@@ -590,12 +765,22 @@ fn artifact_kind_sort_key(kind: &ArtifactKind) -> &str {
         ArtifactKind::Screenshot => "screenshot",
         ArtifactKind::RunnerLog => "runner_log",
         ArtifactKind::PlatformLog => "platform_log",
+        ArtifactKind::Sentinel => "sentinel",
         ArtifactKind::Other(value) => value,
     }
 }
 
 fn collect_existing_junit_reports(root: &Path) -> Vec<PathBuf> {
     discover_junit_reports(root).unwrap_or_default()
+}
+
+fn push_optional_diagnostics(set: &mut ArtifactSet, kind: ArtifactKind, role: &str, root: &Path) {
+    let Ok(paths) = collect_regular_files(root) else {
+        return;
+    };
+    for path in paths {
+        set.push(ArtifactRef::new(kind.clone(), path).with_role(role));
+    }
 }
 
 fn push_existing_file(set: &mut ArtifactSet, kind: ArtifactKind, role: &str, path: &Path) {
@@ -734,8 +919,9 @@ mod tests {
         SourceSetPurpose, TestsConfig, ToolsConfig, VanessaProfileConfig,
     };
     use crate::domain::artifact::{
-        ArtifactKind, ARTIFACT_ROLE_ALLURE_RESULTS, ARTIFACT_ROLE_CONFIG, ARTIFACT_ROLE_JUNIT_XML,
-        ARTIFACT_ROLE_PLATFORM_LOG, ARTIFACT_ROLE_RUNNER_LOG,
+        ArtifactKind, ARTIFACT_ROLE_ALLURE_RESULTS, ARTIFACT_ROLE_CONFIG,
+        ARTIFACT_ROLE_ERROR_DETAILS, ARTIFACT_ROLE_JUNIT_XML, ARTIFACT_ROLE_PLATFORM_LOG,
+        ARTIFACT_ROLE_RUNNER_LOG, ARTIFACT_ROLE_SCREENSHOT,
     };
     use crate::domain::execution::{ExecutionStatus, ExecutionTimeouts};
     use crate::domain::runner::{
@@ -784,6 +970,8 @@ mod tests {
         let first = create_run_artifacts(&config, "yaxunit").expect("first");
         let second = create_run_artifacts(&config, "yaxunit").expect("second");
         assert_ne!(first.run_dir, second.run_dir);
+        assert!(!first.error_details_dir.exists());
+        assert!(!first.screenshots_dir.exists());
     }
 
     #[test]
@@ -921,6 +1109,95 @@ mod tests {
                 ),
             ]
         );
+        assert!(collected.items.iter().all(|artifact| {
+            serde_json::to_value(&artifact.kind).expect("artifact kind")
+                != serde_json::json!("sentinel")
+        }));
+    }
+
+    #[test]
+    fn collect_run_artifacts_includes_nested_optional_diagnostics_in_stable_order() {
+        let dir = tempdir().expect("tempdir");
+        let artifacts = create_artifacts(dir.path());
+        std::fs::create_dir_all(artifacts.error_details_dir.join("nested")).expect("error details");
+        std::fs::create_dir_all(&artifacts.screenshots_dir).expect("screenshots");
+        let later_error = artifacts.error_details_dir.join("z.txt");
+        let earlier_error = artifacts.error_details_dir.join("nested/a.txt");
+        let screenshot = artifacts.screenshots_dir.join("failure.png");
+        std::fs::write(&later_error, "later").expect("later error");
+        std::fs::write(&earlier_error, "earlier").expect("earlier error");
+        std::fs::write(&screenshot, "png").expect("screenshot");
+
+        let collected = collect_run_artifacts(&artifacts);
+        let diagnostics = collected
+            .items
+            .iter()
+            .filter(|artifact| {
+                matches!(
+                    artifact.kind,
+                    ArtifactKind::ErrorDetails | ArtifactKind::Screenshot
+                )
+            })
+            .map(|artifact| {
+                (
+                    artifact.kind.clone(),
+                    artifact.role.clone().expect("role"),
+                    artifact.path.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            diagnostics,
+            vec![
+                (
+                    ArtifactKind::ErrorDetails,
+                    ARTIFACT_ROLE_ERROR_DETAILS.to_owned(),
+                    earlier_error,
+                ),
+                (
+                    ArtifactKind::ErrorDetails,
+                    ARTIFACT_ROLE_ERROR_DETAILS.to_owned(),
+                    later_error,
+                ),
+                (
+                    ArtifactKind::Screenshot,
+                    ARTIFACT_ROLE_SCREENSHOT.to_owned(),
+                    screenshot,
+                ),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_run_artifacts_skips_symlinked_optional_diagnostics() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().expect("tempdir");
+        let artifacts = create_artifacts(dir.path());
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("outside");
+        std::fs::write(outside.join("secret.txt"), "secret").expect("outside file");
+        std::fs::create_dir_all(&artifacts.error_details_dir).expect("error details");
+        std::fs::create_dir_all(&artifacts.screenshots_dir).expect("screenshots");
+        symlink(&outside, artifacts.error_details_dir.join("external")).expect("dir symlink");
+        symlink(
+            outside.join("secret.txt"),
+            artifacts.screenshots_dir.join("external.png"),
+        )
+        .expect("file symlink");
+
+        let collected = collect_run_artifacts(&artifacts);
+
+        assert!(collected
+            .get_all_by_role(ARTIFACT_ROLE_ERROR_DETAILS)
+            .next()
+            .is_none());
+        assert!(collected
+            .get_all_by_role(ARTIFACT_ROLE_SCREENSHOT)
+            .next()
+            .is_none());
     }
 
     #[test]
@@ -1003,12 +1280,12 @@ mod tests {
         std::fs::create_dir_all(empty.join("nested")).expect("empty allure dir");
 
         assert_eq!(
-            validate_allure_results(&missing),
-            Err(TestErrorKind::AllureNotProduced)
+            validate_allure_results(&missing).expect_err("missing").kind,
+            TestErrorKind::AllureNotProduced
         );
         assert_eq!(
-            validate_allure_results(&empty),
-            Err(TestErrorKind::AllureEmpty)
+            validate_allure_results(&empty).expect_err("empty").kind,
+            TestErrorKind::AllureEmpty
         );
     }
 
@@ -1053,9 +1330,38 @@ mod tests {
             .expect("discover reports")
             .is_empty());
         assert_eq!(
-            validate_allure_results(&allure_dir),
-            Err(TestErrorKind::AllureEmpty)
+            validate_allure_results(&allure_dir)
+                .expect_err("symlinks do not count")
+                .kind,
+            TestErrorKind::AllureEmpty
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn allure_traversal_io_failure_preserves_path_and_os_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().expect("tempdir");
+        let allure = dir.path().join("allure-results");
+        let unreadable = allure.join("unreadable");
+        std::fs::create_dir_all(&unreadable).expect("allure dir");
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000))
+            .expect("restrict");
+
+        let failure = validate_allure_results(&allure).expect_err("traversal failure");
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o700))
+            .expect("restore");
+
+        assert_eq!(failure.kind, TestErrorKind::TestSetupFailed);
+        assert!(failure
+            .details
+            .iter()
+            .any(|detail| detail.contains(&unreadable.display().to_string())));
+        assert!(failure
+            .details
+            .iter()
+            .any(|detail| detail.contains("Permission denied")));
     }
 
     #[test]
@@ -1220,6 +1526,50 @@ mod tests {
         assert!(warning.contains("failed to materialize Vanessa runner log"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn materialize_vanessa_runner_log_rejects_symlink_source() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().expect("tempdir");
+        let artifacts = create_artifacts(dir.path());
+        std::fs::create_dir_all(&artifacts.run_dir).expect("run dir");
+        let outside = dir.path().join("outside.log");
+        std::fs::write(&outside, "outside").expect("outside");
+        symlink(&outside, &artifacts.platform_log).expect("source symlink");
+
+        let warning = materialize_vanessa_runner_log(&artifacts).expect_err("warning");
+
+        assert!(warning.contains("symlink"));
+        assert_eq!(
+            std::fs::read_to_string(&outside).expect("outside"),
+            "outside"
+        );
+        assert!(!artifacts.runner_log.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialize_vanessa_runner_log_rejects_symlink_destination() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().expect("tempdir");
+        let artifacts = create_artifacts(dir.path());
+        std::fs::create_dir_all(&artifacts.run_dir).expect("run dir");
+        std::fs::write(&artifacts.platform_log, "platform").expect("platform");
+        let outside = dir.path().join("outside.log");
+        std::fs::write(&outside, "outside").expect("outside");
+        symlink(&outside, &artifacts.runner_log).expect("destination symlink");
+
+        let warning = materialize_vanessa_runner_log(&artifacts).expect_err("warning");
+
+        assert!(warning.contains("symlink"));
+        assert_eq!(
+            std::fs::read_to_string(&outside).expect("outside"),
+            "outside"
+        );
+    }
+
     #[test]
     fn vanessa_junit_parse_failure_inventories_materialized_runner_log() {
         let dir = tempdir().expect("tempdir");
@@ -1293,6 +1643,7 @@ mod tests {
         assert!(result.is_err());
         let error = result.err().expect("error");
         assert!(error.error.to_string().contains("unsafe path characters"));
+        assert!(!dir.path().join("temp").exists());
     }
 
     #[test]
@@ -1336,6 +1687,8 @@ mod tests {
             junit_xml: junit_dir.join("report.xml"),
             junit_dir: root.join("run/junit"),
             allure_results_dir: run_dir.join("allure-results"),
+            error_details_dir: run_dir.join("error-details"),
+            screenshots_dir: run_dir.join("screenshots"),
             runner_log: run_dir.join("yax.log"),
             platform_log: run_dir.join("platform.log"),
             sentinel: run_dir.join("run.inprogress"),

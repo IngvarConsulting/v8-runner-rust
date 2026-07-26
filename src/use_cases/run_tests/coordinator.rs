@@ -64,66 +64,9 @@ pub(super) fn run_tests(
         }
     };
 
-    debug!("running build prerequisite for tests");
-    log_live_stage(
-        "test: build prerequisite",
-        "[Build] preparing test infobase",
-    );
-    let build_started = Instant::now();
-    let build_result = match build_project::execute(
-        context,
-        config,
-        &BuildArgs {
-            full_rebuild: false,
-            source_set: None,
-        },
-    ) {
-        Ok(result) => result,
-        Err(failure) => {
-            let summary = failure
-                .payload
-                .as_ref()
-                .map(build_summary)
-                .unwrap_or_else(|| failure.error.to_string());
-            steps.push(
-                failed_step(
-                    "build",
-                    ExecutionStepKind::PlatformCommand,
-                    build_started.elapsed().as_millis() as u64,
-                    summary.clone(),
-                )
-                .with_errors(vec![test_execution_error(
-                    TestErrorKind::BuildFailed,
-                    summary.clone(),
-                )]),
-            );
-            let outcome = ExecutionOutcome::new(ExecutionStatus::Failed)
-                .with_diagnostics(vec![summary.clone()])
-                .with_errors(vec![test_execution_error(
-                    TestErrorKind::BuildFailed,
-                    summary.clone(),
-                )]);
-            let result = make_test_result(
-                target,
-                mode,
-                outcome,
-                warnings,
-                steps,
-                started.elapsed().as_millis() as u64,
-            );
-            return Err(TestExecutionFailure::with_payload(failure.error, result));
-        }
-    };
-    steps.push(succeeded_step(
-        "build",
-        ExecutionStepKind::PlatformCommand,
-        build_started.elapsed().as_millis() as u64,
-        build_summary(&build_result),
-    ));
-
     debug!("preparing test run artifacts");
     let prepare_artifacts_started = Instant::now();
-    let mut artifacts = match create_run_artifacts(config, &runner_id) {
+    let mut artifacts = match create_run_artifacts(config, runner_id) {
         Ok(artifacts) => artifacts,
         Err(error) => {
             let app_error =
@@ -166,6 +109,67 @@ pub(super) fn run_tests(
         )
         .with_target(artifacts.run_dir.display().to_string()),
     );
+
+    debug!("running build prerequisite for tests");
+    log_live_stage(
+        "test: build prerequisite",
+        "[Build] preparing test infobase",
+    );
+    let build_started = Instant::now();
+    let build_result = match build_project::execute(
+        context,
+        config,
+        &BuildArgs {
+            full_rebuild: false,
+            source_set: None,
+        },
+    ) {
+        Ok(result) => result,
+        Err(failure) => {
+            let summary = failure
+                .payload
+                .as_ref()
+                .map(build_summary)
+                .unwrap_or_else(|| failure.error.to_string());
+            steps.push(
+                failed_step(
+                    "build",
+                    ExecutionStepKind::PlatformCommand,
+                    build_started.elapsed().as_millis() as u64,
+                    summary.clone(),
+                )
+                .with_errors(vec![test_execution_error(
+                    TestErrorKind::BuildFailed,
+                    summary.clone(),
+                )]),
+            );
+            let retained_paths = retain_run_artifacts(config, &artifacts).ok();
+            let outcome = with_retained_artifacts(
+                ExecutionOutcome::new(ExecutionStatus::Failed)
+                    .with_diagnostics(vec![summary.clone()])
+                    .with_errors(vec![test_execution_error(
+                        TestErrorKind::BuildFailed,
+                        summary.clone(),
+                    )]),
+                retained_paths,
+            );
+            let result = make_test_result(
+                target,
+                mode,
+                outcome,
+                warnings,
+                steps,
+                started.elapsed().as_millis() as u64,
+            );
+            return Err(TestExecutionFailure::with_payload(failure.error, result));
+        }
+    };
+    steps.push(succeeded_step(
+        "build",
+        ExecutionStepKind::PlatformCommand,
+        build_started.elapsed().as_millis() as u64,
+        build_summary(&build_result),
+    ));
 
     let prepare_runner_started = Instant::now();
     if let Some(failure) = interrupted_test_failure(
@@ -423,30 +427,11 @@ pub(super) fn run_tests(
     };
 
     let validate_allure_started = Instant::now();
-    if let Err(kind) = validate_allure_results(&artifacts.allure_results_dir) {
-        let message = match &kind {
-            TestErrorKind::AllureNotProduced => "Allure results directory was not produced",
-            TestErrorKind::AllureEmpty => "Allure results directory is empty",
-            TestErrorKind::BuildFailed
-            | TestErrorKind::TestSetupFailed
-            | TestErrorKind::EnterpriseSpawnFailed
-            | TestErrorKind::EnterpriseStartupCheckFailed
-            | TestErrorKind::EnterpriseExitedEarly
-            | TestErrorKind::EnterpriseStdoutLogIo
-            | TestErrorKind::EnterpriseStderrLogIo
-            | TestErrorKind::EnterpriseTimedOut
-            | TestErrorKind::EnterpriseExitedNonZero
-            | TestErrorKind::TestFailures
-            | TestErrorKind::JunitNotProduced
-            | TestErrorKind::JunitEmpty
-            | TestErrorKind::JunitMalformed => "Allure results validation failed",
-        }
-        .to_owned();
+    if let Err(failure) = validate_allure_results(&artifacts.allure_results_dir) {
+        let kind = failure.kind;
+        let message = failure.message;
         let error =
-            test_execution_error(kind.clone(), message.clone()).with_details(vec![format!(
-                "Allure results directory: {}",
-                artifacts.allure_results_dir.display()
-            )]);
+            test_execution_error(kind.clone(), message.clone()).with_details(failure.details);
         steps.push(
             failed_step(
                 "validate_allure",

@@ -16,6 +16,9 @@ pub const ARTIFACT_ROLE_RUNNER_LOG: &str = "runner_log";
 pub const ARTIFACT_ROLE_PLATFORM_LOG: &str = "platform_log";
 pub const ARTIFACT_ROLE_PACKAGE_FILE: &str = "package_file";
 pub const ARTIFACT_ROLE_STAGE_FILE: &str = "stage_file";
+#[allow(dead_code)]
+#[deprecated(note = "sentinels are internal cleanup markers and are no longer emitted")]
+pub const ARTIFACT_ROLE_SENTINEL: &str = "sentinel";
 
 /// Stable artifact classification for runner/package outputs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -31,6 +34,8 @@ pub enum ArtifactKind {
     Screenshot,
     RunnerLog,
     PlatformLog,
+    #[deprecated(note = "sentinels are internal cleanup markers and are no longer emitted")]
+    Sentinel,
     Other(String),
 }
 
@@ -98,10 +103,11 @@ impl ArtifactSet {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::{
         ArtifactKind, ARTIFACT_ROLE_ALLURE_RESULTS, ARTIFACT_ROLE_ERROR_DETAILS,
-        ARTIFACT_ROLE_JUNIT_XML, ARTIFACT_ROLE_SCREENSHOT,
+        ARTIFACT_ROLE_JUNIT_XML, ARTIFACT_ROLE_SCREENSHOT, ARTIFACT_ROLE_SENTINEL,
     };
 
     #[test]
@@ -118,5 +124,14 @@ mod tests {
         assert_eq!(ARTIFACT_ROLE_ALLURE_RESULTS, "allure_results");
         assert_eq!(ARTIFACT_ROLE_ERROR_DETAILS, "error_details");
         assert_eq!(ARTIFACT_ROLE_SCREENSHOT, "screenshot");
+    }
+
+    #[test]
+    fn deserializes_legacy_sentinel_artifact_kind() {
+        assert_eq!(
+            serde_json::from_value::<ArtifactKind>(serde_json::json!("sentinel")).unwrap(),
+            ArtifactKind::Sentinel
+        );
+        assert_eq!(ARTIFACT_ROLE_SENTINEL, "sentinel");
     }
 }

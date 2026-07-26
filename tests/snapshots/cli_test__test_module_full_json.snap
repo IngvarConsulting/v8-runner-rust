@@ -158,20 +158,20 @@ Object {
     "steps": Array [
         Object {
             "duration_ms": String("<duration>"),
-            "kind": String("platform_command"),
-            "message": String("build completed"),
-            "name": String("build"),
-            "ok": Bool(true),
-            "status": String("succeeded"),
-        },
-        Object {
-            "duration_ms": String("<duration>"),
             "kind": String("prepare_workspace"),
             "message": String("created <run_dir>"),
             "name": String("prepare_artifacts"),
             "ok": Bool(true),
             "status": String("succeeded"),
             "target": String("<run_dir>"),
+        },
+        Object {
+            "duration_ms": String("<duration>"),
+            "kind": String("platform_command"),
+            "message": String("build completed"),
+            "name": String("build"),
+            "ok": Bool(true),
+            "status": String("succeeded"),
         },
         Object {
             "duration_ms": String("<duration>"),

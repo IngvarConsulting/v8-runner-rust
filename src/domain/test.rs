@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use crate::domain::artifact::{ArtifactKind, ArtifactRef};
 use crate::domain::artifact::{
     ArtifactSet, ARTIFACT_ROLE_ALLURE_RESULTS, ARTIFACT_ROLE_CONFIG, ARTIFACT_ROLE_JUNIT_XML,
-    ARTIFACT_ROLE_PLATFORM_LOG, ARTIFACT_ROLE_RUNNER_LOG, ARTIFACT_ROLE_RUN_DIR,
+    ARTIFACT_ROLE_PLATFORM_LOG, ARTIFACT_ROLE_REPORT, ARTIFACT_ROLE_RUNNER_LOG,
+    ARTIFACT_ROLE_RUN_DIR,
 };
 use crate::domain::execution::{
     ExecutionError, ExecutionMetrics, ExecutionOutcome, ExecutionStatus, StepResult,
@@ -167,6 +168,7 @@ impl RetainedPaths {
             junit_xml: set
                 .get_all_by_role(ARTIFACT_ROLE_JUNIT_XML)
                 .min()
+                .or_else(|| set.get_all_by_role(ARTIFACT_ROLE_REPORT).min())
                 .map(Path::to_path_buf),
             allure_results: set
                 .get_by_role(ARTIFACT_ROLE_ALLURE_RESULTS)
@@ -345,7 +347,10 @@ mod tests {
         test_execution_error, RetainedPaths, TestErrorKind, TestOutputMode, TestReport,
         TestRunResult, TestSummary, TestTarget,
     };
-    use crate::domain::artifact::{ArtifactKind, ArtifactRef, ARTIFACT_ROLE_JUNIT_XML};
+    use crate::domain::artifact::{
+        ArtifactKind, ArtifactRef, ArtifactSet, ARTIFACT_ROLE_JUNIT_XML, ARTIFACT_ROLE_REPORT,
+        ARTIFACT_ROLE_RUN_DIR,
+    };
     use crate::domain::execution::{ExecutionMetrics, ExecutionOutcome, ExecutionStatus};
     use std::path::PathBuf;
 
@@ -370,6 +375,50 @@ mod tests {
         );
 
         assert_eq!(RetainedPaths::from_artifact_set(&set), Some(expected));
+    }
+
+    #[test]
+    fn retained_paths_falls_back_to_legacy_report_role() {
+        let mut set = ArtifactSet::with_root("/tmp/run");
+        set.push(
+            ArtifactRef::new(ArtifactKind::RunDirectory, "/tmp/run")
+                .with_role(ARTIFACT_ROLE_RUN_DIR),
+        );
+        set.push(
+            ArtifactRef::new(ArtifactKind::Report, "/tmp/legacy-report.xml")
+                .with_role(ARTIFACT_ROLE_REPORT),
+        );
+
+        let projected = RetainedPaths::from_artifact_set(&set).expect("retained paths");
+
+        assert_eq!(
+            projected.junit_xml,
+            Some(PathBuf::from("/tmp/legacy-report.xml"))
+        );
+    }
+
+    #[test]
+    fn retained_paths_prefers_modern_junit_role_over_legacy_report() {
+        let mut set = ArtifactSet::with_root("/tmp/run");
+        set.push(
+            ArtifactRef::new(ArtifactKind::RunDirectory, "/tmp/run")
+                .with_role(ARTIFACT_ROLE_RUN_DIR),
+        );
+        set.push(
+            ArtifactRef::new(ArtifactKind::Report, "/tmp/a-legacy-report.xml")
+                .with_role(ARTIFACT_ROLE_REPORT),
+        );
+        set.push(
+            ArtifactRef::new(ArtifactKind::JunitXml, "/tmp/z-modern-report.xml")
+                .with_role(ARTIFACT_ROLE_JUNIT_XML),
+        );
+
+        let projected = RetainedPaths::from_artifact_set(&set).expect("retained paths");
+
+        assert_eq!(
+            projected.junit_xml,
+            Some(PathBuf::from("/tmp/z-modern-report.xml"))
+        );
     }
 
     #[test]

@@ -94,5 +94,8 @@ from `data.execution.artifacts.items`; `data.retained_paths` is only a compatibi
 Missing, empty, or malformed JUnit and missing or empty Allure results are `invalid_output`
 infrastructure failures. Successful and failed run directories remain until explicitly removed;
 internal cleanup markers are never public artifacts.
+Optional runner diagnostics may appear under `error-details/` and `screenshots/` in the run
+directory. These directories are not pre-created; existing regular files are inventoried as
+`error_details` and `screenshot`, respectively.
 
 In final answers, include the command, pass/fail result, and artifact path when present.

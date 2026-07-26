@@ -215,6 +215,9 @@ v8-runner test va --feature login --filter-tag @smoke
 - В `--json-message` summary находится в `data.execution.metrics`, а все существующие пути и их
   точные kinds — в `data.execution.artifacts.items`; `data.retained_paths` остаётся compatibility
   projection основных путей.
+- Runner может дополнительно сохранить диагностические файлы в `error-details/` и снимки экрана
+  в `screenshots/` внутри run directory. Эти каталоги не создаются заранее; существующие обычные
+  файлы публикуются с kinds `error_details` и `screenshot`.
 - Отсутствующий, пустой или некорректный JUnit либо отсутствующий/пустой Allure — это
   инфраструктурная ошибка `invalid_output`, а не успешный или обычный test failure.
 

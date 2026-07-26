@@ -504,7 +504,7 @@ fn assert_success_artifact_contract(payload: &Value) {
 }
 
 #[test]
-fn test_all_full_json_runs_build_first_and_returns_report() {
+fn test_all_full_json_builds_before_runner_and_returns_report() {
     let (_dir, config_path, build_calls, test_calls, _captured_config) = setup_project(
         "work path",
         JUNIT_SMOKE_REPORT_FIXTURE,
@@ -1371,6 +1371,25 @@ fn test_module_build_failure_prevents_enterprise_launch() {
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], false);
     assert_eq!(payload["data"]["error_kind"], "build_failed");
+    let run_dir = payload["data"]["retained_paths"]["run_dir"]
+        .as_str()
+        .expect("retained run dir");
+    assert!(Path::new(run_dir).is_dir());
+    assert_eq!(
+        payload["data"]["execution"]["artifacts"]["root_dir"],
+        run_dir
+    );
+    assert!(payload["data"]["execution"]["artifacts"]["items"]
+        .as_array()
+        .expect("artifacts")
+        .iter()
+        .any(|artifact| {
+            artifact["kind"] == "run_directory"
+                && artifact["role"] == "run_dir"
+                && artifact["path"] == run_dir
+        }));
+    assert_eq!(payload["steps"][0]["name"], "prepare_artifacts");
+    assert_eq!(payload["steps"][1]["name"], "build");
 }
 
 #[test]

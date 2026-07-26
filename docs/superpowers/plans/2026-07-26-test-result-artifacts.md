@@ -452,4 +452,3 @@ git log --oneline d612e2d07e0702c6c829f3981d083022611f6373..HEAD
 ```
 
 Ensure no generated scratch files or unrelated changes remain.
-
