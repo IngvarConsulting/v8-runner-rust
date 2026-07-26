@@ -171,6 +171,7 @@ pub struct IbcmdDsl<'a> {
     connection: IbcmdConnection,
     runner: &'a dyn ProcessRunner,
     execution_policy: ProcessExecutionPolicy,
+    data_path: Option<PathBuf>,
 }
 
 impl<'a> IbcmdDsl<'a> {
@@ -185,7 +186,14 @@ impl<'a> IbcmdDsl<'a> {
             connection,
             runner,
             execution_policy: ProcessExecutionPolicy::default(),
+            data_path: None,
         }
+    }
+
+    /// Uses an isolated standalone-server data directory for every IBCMD call.
+    pub fn with_data_path(mut self, data_path: PathBuf) -> Self {
+        self.data_path = Some(data_path);
+        self
     }
 
     /// Overrides the shared execution policy for process-level cancellation and deadlines.
@@ -340,12 +348,17 @@ impl<'a> IbcmdDsl<'a> {
     }
 
     fn run(&self, args: &[String]) -> Result<PlatformCommandResult, IbcmdError> {
+        let mut args_with_data = args.to_vec();
+        if let Some(data_path) = &self.data_path {
+            args_with_data.insert(1, data_path.display().to_string());
+            args_with_data.insert(1, "--data".to_owned());
+        }
         let process = self
             .runner
             .run_with_policy(
                 &ProcessRequest {
                     program: self.binary.clone(),
-                    args: args.to_vec(),
+                    args: args_with_data,
                     workdir: None,
                     stdout_log_path: None,
                     stderr_log_path: None,
@@ -598,6 +611,42 @@ mod tests {
         let args = fs::read_to_string(args_log).expect("args");
         assert!(args.contains("export"));
         assert!(args.contains("--force"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_export_full_with_data_path_builds_expected_args() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("ibcmd");
+        let args_log = dir.path().join("args.log");
+        let data_path = dir.path().join("ibcmd-data");
+        write_script(
+            &script,
+            &format!("printf '%s\\n' \"$@\" > \"{}\"\nexit 0", args_log.display()),
+        );
+        let runner = ProcessExecutor;
+        let conn = file_connection("File=/ib");
+        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner)
+            .with_data_path(data_path.clone());
+
+        dsl.config_export_full(dir.path(), None).expect("export");
+
+        let args = fs::read_to_string(args_log).expect("args");
+        let args = args.lines().map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "infobase".to_owned(),
+                "--data".to_owned(),
+                data_path.display().to_string(),
+                "--db-path".to_owned(),
+                "/ib".to_owned(),
+                "config".to_owned(),
+                "export".to_owned(),
+                "--force".to_owned(),
+                dir.path().display().to_string(),
+            ]
+        );
     }
 
     #[cfg(unix)]

@@ -5,7 +5,7 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::runner::LaunchClientModeRequest;
-use crate::domain::runner::LaunchOptions;
+use crate::domain::runner::{launch_key_alias_matches, LaunchOptions};
 use crate::platform::connection::V8Connection;
 use crate::platform::process::{
     ProcessError, ProcessExecutionPolicy, ProcessInterruptionSafety, ProcessRequest, ProcessRunner,
@@ -157,7 +157,8 @@ pub fn build_launch_args(
         args.push(execute.clone());
     }
     if let Some(c) = &launch.c {
-        args.push(quoted_c_arg(c));
+        args.push("/C".to_owned());
+        args.push(c.clone());
     }
 
     let mut extra_args = Vec::new();
@@ -182,10 +183,6 @@ fn effective_out_path(launch: &LaunchOptions) -> Option<&str> {
     launch.internal_out.as_deref().or(launch.out.as_deref())
 }
 
-fn quoted_c_arg(payload: &str) -> String {
-    format!("/C\"{payload}\"")
-}
-
 fn filtered_raw_launch_args(args: &[String]) -> Vec<String> {
     let mut filtered = Vec::new();
     let mut skip_value = false;
@@ -206,24 +203,24 @@ fn filtered_raw_launch_args(args: &[String]) -> Vec<String> {
 }
 
 fn reserved_launch_key(arg: &str) -> Option<(bool, bool)> {
-    if !arg.starts_with('/') && !arg.starts_with('-') {
-        return None;
-    }
-
+    let reserved_key = [
+        "c",
+        "execute",
+        "useprivilegedmode",
+        "out",
+        "runmodeordinaryapplication",
+        "disablestartupdialogs",
+    ]
+    .into_iter()
+    .find(|key| launch_key_alias_matches(arg, key))?;
     let normalized = arg
+        .trim_start()
         .trim_start_matches(['/', '-'])
         .trim()
         .to_ascii_lowercase();
-    let consumes_value = matches!(normalized.as_str(), "c" | "execute" | "out");
-    let reserved = matches!(
-        normalized.as_str(),
-        "c" | "execute"
-            | "useprivilegedmode"
-            | "out"
-            | "runmodeordinaryapplication"
-            | "disablestartupdialogs"
-    );
-    Some((reserved, consumes_value))
+    let consumes_value =
+        normalized == reserved_key && matches!(reserved_key, "c" | "execute" | "out");
+    Some((true, consumes_value))
 }
 
 #[cfg(test)]
@@ -261,10 +258,14 @@ mod tests {
         assert_eq!(args[0], "ENTERPRISE");
         assert_eq!(args[1], "/DisableStartupDialogs");
         assert!(args.iter().any(|arg| arg == "/TESTMANAGER"));
-        assert!(args
+        assert!(args.windows(2).any(|pair| pair
+            == [
+                "/C".to_owned(),
+                "RunUnitTests=/tmp/path with space/тест config.json".to_owned(),
+            ]));
+        assert!(!args
             .iter()
             .any(|arg| arg == "/C\"RunUnitTests=/tmp/path with space/тест config.json\""));
-        assert!(!args.iter().any(|arg| arg == "/C"));
         assert!(args.iter().any(|arg| arg == "/Out"));
     }
 
@@ -288,10 +289,14 @@ mod tests {
             .iter()
             .any(|arg| arg == "/tmp/va/vanessa automation.epf"));
         assert!(args.iter().any(|arg| arg == "/TESTMANAGER"));
-        assert!(args
+        assert!(args.windows(2).any(|pair| pair
+            == [
+                "/C".to_owned(),
+                "StartFeaturePlayer;VAParams=/tmp/va/va-params.json".to_owned(),
+            ]));
+        assert!(!args
             .iter()
             .any(|arg| arg == "/C\"StartFeaturePlayer;VAParams=/tmp/va/va-params.json\""));
-        assert!(!args.iter().any(|arg| arg == "/C"));
     }
 
     #[test]
@@ -311,6 +316,11 @@ mod tests {
                     "user.log".to_owned(),
                     "/C".to_owned(),
                     "ignored".to_owned(),
+                    "/C\"attached\"".to_owned(),
+                    "/C spaced".to_owned(),
+                    "/C=assigned".to_owned(),
+                    "/Execute:tool.epf".to_owned(),
+                    "/Out=raw.log".to_owned(),
                     "/WA-".to_owned(),
                 ],
                 out: Some("launch.log".to_owned()),
@@ -328,6 +338,11 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "/UsePrivilegedMode"));
         assert!(args.iter().any(|arg| arg == "/WA-"));
         assert!(!args.iter().any(|arg| arg == "ignored"));
+        assert!(!args.iter().any(|arg| arg == "/C\"attached\""));
+        assert!(!args.iter().any(|arg| arg == "/C spaced"));
+        assert!(!args.iter().any(|arg| arg == "/C=assigned"));
+        assert!(!args.iter().any(|arg| arg == "/Execute:tool.epf"));
+        assert!(!args.iter().any(|arg| arg == "/Out=raw.log"));
         assert!(args.ends_with(&["/Out".to_owned(), "launch.log".to_owned()]));
     }
 

@@ -9,6 +9,8 @@ pub const DEFAULT_PARTIAL_LOAD_THRESHOLD: usize = 20;
 /// The name of the root configuration descriptor — if changed, partial load is forbidden.
 const CONFIGURATION_XML: &str = "Configuration.xml";
 
+const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
+
 /// Decision made by [`decide`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadDecision {
@@ -49,17 +51,22 @@ pub fn decide(changes: &[FileChange], source_root: &Path, threshold: usize) -> L
     }
 }
 
-/// Write a partial-load list file (UTF-8, one path per line, no empty lines).
+/// Write a partial-load list file as UTF-8 with BOM and CRLF-separated paths.
 ///
 /// Paths are written relative to `source_root` as required by Designer's
-/// `-listFile` parameter when running in agent mode.
+/// `-listFile` parameter when running in agent mode. Path component separators
+/// remain native to the current operating system.
 pub fn write_list_file(paths: &[PathBuf], source_root: &Path, dest: &Path) -> std::io::Result<()> {
     let rel_paths = relative_paths(paths, source_root)?;
     let lines = rel_paths
         .iter()
         .map(|path| path.display().to_string())
         .collect::<Vec<_>>();
-    std::fs::write(dest, lines.join("\r\n"))
+    let contents = lines.join("\r\n");
+    let mut payload = Vec::with_capacity(UTF8_BOM.len() + contents.len());
+    payload.extend_from_slice(UTF8_BOM);
+    payload.extend_from_slice(contents.as_bytes());
+    std::fs::write(dest, payload)
 }
 
 /// Convert safe absolute paths into relative paths under `source_root`.
@@ -220,7 +227,46 @@ mod tests {
 
         write_list_file(&[root.to_path_buf()], root, &list_file).expect("write list");
 
-        assert_eq!(std::fs::read_to_string(list_file).expect("read list"), "");
+        assert_eq!(
+            std::fs::read(list_file).expect("read list"),
+            b"\xEF\xBB\xBF"
+        );
+    }
+
+    #[test]
+    fn write_list_file_uses_utf8_bom_and_crlf_for_unicode_relative_paths() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().join("src");
+        let first = root.join("CommonModules").join("ОбщийМодуль1.xml");
+        let second = root
+            .join("CommonModules")
+            .join("ОбщийМодуль1")
+            .join("Ext")
+            .join("Module.bsl");
+        let list_file = temp.path().join("partial.lst");
+
+        std::fs::create_dir_all(first.parent().expect("first parent")).expect("first parent dir");
+        std::fs::create_dir_all(second.parent().expect("second parent"))
+            .expect("second parent dir");
+        std::fs::write(&first, "<xml />").expect("write first");
+        std::fs::write(&second, "procedure Test()\nendprocedure").expect("write second");
+
+        write_list_file(&[first.clone(), second.clone()], &root, &list_file).expect("write list");
+
+        let relative_payload = [first, second]
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&root)
+                    .expect("relative path")
+                    .display()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        let mut expected = b"\xEF\xBB\xBF".to_vec();
+        expected.extend_from_slice(relative_payload.as_bytes());
+
+        assert_eq!(std::fs::read(list_file).expect("read list"), expected);
     }
 
     #[test]

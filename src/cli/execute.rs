@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::json;
@@ -7,9 +7,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cli::args::{
     ArtifactsArgs, BuildArgs, Command, ConvertArgs, DesignerConfigSyntaxArgs,
-    DesignerModulesSyntaxArgs, DumpArgs, ExtensionsArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs,
-    SyntaxArgs, SyntaxTarget, TestArgs, TestRunner, TestScope, TestVaArgs, TestYaxunitArgs,
-    ToolsArgs, ToolsCommand, ToolsDownloadArgs, ToolsDownloadCommand,
+    DesignerModulesSyntaxArgs, DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs, LaunchArgs,
+    LaunchOptionsArgs, LoadArgs, SyntaxArgs, SyntaxTarget, TestArgs, TestLaunchOptionsArgs,
+    TestRunner, TestScope, TestVaArgs, TestYaxunitArgs, ToolsArgs, ToolsCommand, ToolsDownloadArgs,
+    ToolsDownloadCommand,
 };
 use crate::cli::output::{
     failure_envelope, pre_dispatch_error_envelope, print_command_use_case_error, with_cli_error,
@@ -34,8 +35,8 @@ use crate::domain::load::{
     CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
 };
 use crate::domain::runner::{
-    ExecutionPolicy, LaunchClientModeRequest, LaunchOptions, RunnerKind, RunnerOutputFormat,
-    RunnerProfile,
+    launch_key_alias_matches, ExecutionPolicy, ExternalEpfWaitOptions, LaunchClientModeRequest,
+    LaunchOptions, RunnerKind, RunnerOutputFormat, RunnerProfile,
 };
 use crate::domain::syntax::{SyntaxCheckResult, SyntaxCheckStatus};
 use crate::domain::test::{RetainedPaths, TestReport, TestRunResult, TestStatus, TestTarget};
@@ -74,6 +75,8 @@ use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
 use crate::use_cases::tools_download;
 use crate::use_cases::transport::dispatch_with_workspace_lock;
+
+const EXTERNAL_EPF_WAIT_CLEANUP_MARGIN: Duration = Duration::from_millis(500);
 
 /// Executes a parsed CLI command by mapping it into transport-neutral requests and
 /// rendering the resulting command output.
@@ -727,7 +730,7 @@ fn execute_launch(
 ) -> Result<(), UseCaseError> {
     let request = map_launch_request(args)
         .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Launch, error))?;
-    let context = cli_context(config, CommandName::Launch, cancellation);
+    let context = launch_cli_context(config, &request, cancellation);
     let started = Instant::now();
     with_cli_workspace_lock(
         config,
@@ -968,7 +971,7 @@ fn map_yaxunit_scope(scope: &TestScope) -> Result<TestScopeRequest, UseCaseError
 
 fn build_yaxunit_execution(
     config: &AppConfig,
-    launch_args: &LaunchOptionsArgs,
+    launch_args: &TestLaunchOptionsArgs,
     client_mode: Option<LaunchClientModeRequest>,
 ) -> Result<crate::domain::runner::ScenarioExecutionRequest, UseCaseError> {
     validate_test_launch_options(launch_args)?;
@@ -985,7 +988,7 @@ fn build_yaxunit_execution(
 
 fn build_vanessa_execution(
     config: &AppConfig,
-    launch_args: &LaunchOptionsArgs,
+    launch_args: &TestLaunchOptionsArgs,
     client_mode: Option<LaunchClientModeRequest>,
 ) -> Result<crate::domain::runner::ScenarioExecutionRequest, UseCaseError> {
     validate_test_launch_options(launch_args)?;
@@ -1048,25 +1051,7 @@ fn build_vanessa_execution(
     Ok(execution)
 }
 
-fn map_test_launch_options(args: &LaunchOptionsArgs) -> Result<LaunchOptions, UseCaseError> {
-    if args.c.is_some() {
-        return Err(UseCaseError::new(
-            UseCaseErrorKind::Validation,
-            "--c is not supported for test; it is reserved for the internal runner payload",
-        ));
-    }
-    if args.execute.is_some() {
-        return Err(UseCaseError::new(
-            UseCaseErrorKind::Validation,
-            "--execute is not supported for test; it is reserved for the internal runner payload",
-        ));
-    }
-    if args.output.is_some() {
-        return Err(UseCaseError::new(
-            UseCaseErrorKind::Validation,
-            "--output is not supported for test; the platform log path is managed internally",
-        ));
-    }
+fn map_test_launch_options(args: &TestLaunchOptionsArgs) -> Result<LaunchOptions, UseCaseError> {
     Ok(LaunchOptions {
         c: None,
         execute: None,
@@ -1074,16 +1059,11 @@ fn map_test_launch_options(args: &LaunchOptionsArgs) -> Result<LaunchOptions, Us
         out: None,
         internal_out: None,
         raw_args: args.raw_keys.clone(),
+        external_epf_wait: None,
     })
 }
 
-fn validate_test_launch_options(args: &LaunchOptionsArgs) -> Result<(), UseCaseError> {
-    if args.c.is_some() || args.execute.is_some() || args.output.is_some() {
-        return Err(UseCaseError::new(
-            UseCaseErrorKind::Validation,
-            "test accepts only --use-privileged-mode and raw launch keys; /C, /Execute, and /Out are managed by the runner",
-        ));
-    }
+fn validate_test_launch_options(args: &TestLaunchOptionsArgs) -> Result<(), UseCaseError> {
     if args
         .raw_keys
         .iter()
@@ -1104,6 +1084,27 @@ fn cli_context(
 ) -> ExecutionContext {
     ExecutionContext::cli(command)
         .with_deadline(Some(Instant::now() + config.execution_timeout_duration()))
+        .with_cancellation(cancellation)
+}
+
+fn launch_cli_context(
+    config: &AppConfig,
+    request: &LaunchRequest,
+    cancellation: CancellationToken,
+) -> ExecutionContext {
+    let timeout = request
+        .launch
+        .external_epf_wait
+        .as_ref()
+        .map(|wait| {
+            config.execution_timeout_duration().max(
+                Duration::from_millis(wait.timeout_ms)
+                    .saturating_add(EXTERNAL_EPF_WAIT_CLEANUP_MARGIN),
+            )
+        })
+        .unwrap_or_else(|| config.execution_timeout_duration());
+    ExecutionContext::cli(CommandName::Launch)
+        .with_deadline(Some(Instant::now() + timeout))
         .with_cancellation(cancellation)
 }
 
@@ -1325,20 +1326,65 @@ fn map_launch_request(args: &LaunchArgs) -> Result<LaunchRequest, UseCaseError> 
 
 fn map_direct_launch_options(
     target: crate::use_cases::request::LaunchTargetRequest,
-    args: &LaunchOptionsArgs,
+    args: &DirectLaunchOptionsArgs,
     is_client_mcp: bool,
 ) -> Result<LaunchOptions, UseCaseError> {
     if is_client_mcp {
-        return map_mcp_launch_options(args);
+        if args.wait_for_exit || args.wait_timeout_ms.is_some() || args.stderr_output.is_some() {
+            return Err(UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "--wait-for-exit, --wait-timeout-ms, and --stderr-output are supported only for direct `launch thin`",
+            ));
+        }
+        return map_mcp_launch_options(&args.common);
     }
     let _ = target;
+    let common = &args.common;
+    let external_epf_wait = match (
+        args.wait_for_exit,
+        args.wait_timeout_ms,
+        &args.stderr_output,
+    ) {
+        (false, None, None) => None,
+        (false, _, _) => {
+            return Err(UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "--wait-timeout-ms and --stderr-output require --wait-for-exit",
+            ));
+        }
+        (true, Some(timeout_ms), Some(stderr_output)) => {
+            if timeout_ms == 0 {
+                return Err(UseCaseError::new(
+                    UseCaseErrorKind::Validation,
+                    "--wait-timeout-ms must be greater than or equal to 1",
+                ));
+            }
+            Some(ExternalEpfWaitOptions {
+                timeout_ms,
+                stderr_output: stderr_output.clone(),
+            })
+        }
+        (true, None, _) => {
+            return Err(UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "--wait-for-exit requires --wait-timeout-ms",
+            ));
+        }
+        (true, _, None) => {
+            return Err(UseCaseError::new(
+                UseCaseErrorKind::Validation,
+                "--wait-for-exit requires --stderr-output",
+            ));
+        }
+    };
     Ok(LaunchOptions {
-        c: args.c.clone(),
-        execute: args.execute.clone(),
-        use_privileged_mode: args.use_privileged_mode,
-        out: args.output.clone(),
+        c: common.c.clone(),
+        execute: common.execute.clone(),
+        use_privileged_mode: common.use_privileged_mode,
+        out: common.output.clone(),
         internal_out: None,
-        raw_args: args.raw_keys.clone(),
+        raw_args: common.raw_keys.clone(),
+        external_epf_wait,
     })
 }
 
@@ -1367,6 +1413,7 @@ fn map_mcp_launch_options(args: &LaunchOptionsArgs) -> Result<LaunchOptions, Use
         out: args.output.clone(),
         internal_out: None,
         raw_args: args.raw_keys.clone(),
+        external_epf_wait: None,
     })
 }
 
@@ -1420,19 +1467,9 @@ fn map_mcp_client_mode(mode: Option<&str>) -> Result<ClientMcpMode, UseCaseError
 }
 
 fn is_reserved_raw_launch_key(raw: &str) -> bool {
-    let normalized = raw
-        .trim_start()
-        .trim_start_matches(['/', '-'])
-        .to_ascii_lowercase();
-    normalized == "c"
-        || normalized.starts_with("c\"")
-        || normalized.starts_with("c=")
-        || normalized == "execute"
-        || normalized.starts_with("execute\"")
-        || normalized.starts_with("execute=")
-        || normalized == "out"
-        || normalized.starts_with("out\"")
-        || normalized.starts_with("out=")
+    ["c", "execute", "out"]
+        .iter()
+        .any(|key| launch_key_alias_matches(raw, key))
 }
 
 #[derive(Debug, Serialize)]
@@ -2425,8 +2462,9 @@ mod tests {
     };
     use crate::cli::args::{
         ArtifactsArgs, BuildArgs, Command, DesignerConfigSyntaxArgs, DesignerModulesSyntaxArgs,
-        DumpArgs, ExtensionsArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs, SyntaxArgs,
-        SyntaxTarget, TestArgs, TestRunner, TestScope, TestVaArgs, TestYaxunitArgs,
+        DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs,
+        SyntaxArgs, SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope,
+        TestVaArgs, TestYaxunitArgs,
     };
     use crate::cli::output::pre_dispatch_error_envelope;
     use crate::config::model::{
@@ -2463,7 +2501,7 @@ mod tests {
             &TestArgs {
                 full: true,
                 client_mode: None,
-                launch: LaunchOptionsArgs::default(),
+                launch: TestLaunchOptionsArgs::default(),
                 runner: TestRunner::Yaxunit(TestYaxunitArgs {
                     scope: TestScope::Module {
                         name: "ModuleA".to_owned(),
@@ -2491,7 +2529,7 @@ mod tests {
             &TestArgs {
                 full: false,
                 client_mode: None,
-                launch: LaunchOptionsArgs::default(),
+                launch: TestLaunchOptionsArgs::default(),
                 runner: TestRunner::Yaxunit(TestYaxunitArgs {
                     scope: TestScope::Module {
                         name: "   ".to_owned(),
@@ -2538,7 +2576,7 @@ mod tests {
             &TestArgs {
                 full: false,
                 client_mode: None,
-                launch: LaunchOptionsArgs::default(),
+                launch: TestLaunchOptionsArgs::default(),
                 runner: TestRunner::Va(TestVaArgs::default()),
             },
         )
@@ -2622,12 +2660,15 @@ mod tests {
                 target: "thin".to_owned(),
                 mcp_scenario: None,
                 mcp_mode: None,
-                launch: LaunchOptionsArgs {
-                    c: Some("Command".to_owned()),
-                    execute: Some("tool.epf".to_owned()),
-                    use_privileged_mode: true,
-                    output: Some("launch.log".to_owned()),
-                    raw_keys: vec!["/WA-".to_owned(), "/DisplayAllFunctions".to_owned()],
+                launch: DirectLaunchOptionsArgs {
+                    common: LaunchOptionsArgs {
+                        c: Some("Command".to_owned()),
+                        execute: Some("tool.epf".to_owned()),
+                        use_privileged_mode: true,
+                        output: Some("launch.log".to_owned()),
+                        raw_keys: vec!["/WA-".to_owned(), "/DisplayAllFunctions".to_owned()],
+                    },
+                    ..DirectLaunchOptionsArgs::default()
                 },
                 mcp_config: None,
                 mcp_port: None,
@@ -2643,6 +2684,7 @@ mod tests {
                     out: Some("launch.log".to_owned()),
                     internal_out: None,
                     raw_args: vec!["/WA-".to_owned(), "/DisplayAllFunctions".to_owned()],
+                    external_epf_wait: None,
                 },
                 client_mcp: None,
             }
@@ -2652,7 +2694,7 @@ mod tests {
                 target: "ordinary".to_owned(),
                 mcp_scenario: None,
                 mcp_mode: None,
-                launch: LaunchOptionsArgs::default(),
+                launch: DirectLaunchOptionsArgs::default(),
                 mcp_config: None,
                 mcp_port: None,
                 wait_ready: false,
@@ -2666,7 +2708,7 @@ mod tests {
                 target: "thin".to_owned(),
                 mcp_scenario: None,
                 mcp_mode: None,
-                launch: LaunchOptionsArgs::default(),
+                launch: DirectLaunchOptionsArgs::default(),
                 mcp_config: None,
                 mcp_port: None,
                 wait_ready: false,
@@ -2680,7 +2722,7 @@ mod tests {
                 target: "mcp".to_owned(),
                 mcp_scenario: Some("va".to_owned()),
                 mcp_mode: Some("ordinary".to_owned()),
-                launch: LaunchOptionsArgs::default(),
+                launch: DirectLaunchOptionsArgs::default(),
                 mcp_config: Some("C:\\tmp\\mcp-conf.json".to_owned()),
                 mcp_port: Some(123),
                 wait_ready: true,
@@ -2695,6 +2737,7 @@ mod tests {
                     out: None,
                     internal_out: None,
                     raw_args: Vec::new(),
+                    external_epf_wait: None,
                 },
                 client_mcp: Some(ClientMcpOptionsRequest {
                     config_path: Some("C:\\tmp\\mcp-conf.json".to_owned()),
@@ -2759,7 +2802,7 @@ mod tests {
             target: "garbage".to_owned(),
             mcp_scenario: None,
             mcp_mode: None,
-            launch: LaunchOptionsArgs::default(),
+            launch: DirectLaunchOptionsArgs::default(),
             mcp_config: None,
             mcp_port: None,
             wait_ready: false,
@@ -2969,7 +3012,7 @@ mod tests {
             &Command::Test(TestArgs {
                 full: false,
                 client_mode: None,
-                launch: LaunchOptionsArgs::default(),
+                launch: TestLaunchOptionsArgs::default(),
                 runner: TestRunner::Yaxunit(TestYaxunitArgs {
                     scope: TestScope::All,
                 }),
@@ -3002,7 +3045,7 @@ mod tests {
                 target: "garbage".to_owned(),
                 mcp_scenario: None,
                 mcp_mode: None,
-                launch: LaunchOptionsArgs::default(),
+                launch: DirectLaunchOptionsArgs::default(),
                 mcp_config: None,
                 mcp_port: None,
                 wait_ready: false,
@@ -3033,7 +3076,7 @@ mod tests {
             &Command::Test(TestArgs {
                 full: false,
                 client_mode: None,
-                launch: LaunchOptionsArgs::default(),
+                launch: TestLaunchOptionsArgs::default(),
                 runner: TestRunner::Yaxunit(TestYaxunitArgs {
                     scope: TestScope::Module {
                         name: "   ".to_owned(),

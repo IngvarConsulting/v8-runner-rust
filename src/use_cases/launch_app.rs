@@ -2,17 +2,17 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::config::model::AppConfig;
-use crate::domain::launch::{LaunchMode, LaunchResult};
-use crate::domain::runner::LaunchOptions;
+use crate::domain::launch::{ExternalEpfWaitResult, LaunchMode, LaunchResult};
+use crate::domain::runner::{launch_key_alias_matches, LaunchOptions};
 use crate::platform::enterprise::{
     build_launch_args, normalize_launch_payload_path, LaunchClientMode,
 };
 use crate::platform::locator::UtilityType;
-use crate::platform::process::ProcessRequest;
+use crate::platform::process::{ManagedSpawnMode, ProcessRequest};
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::client_mcp_readiness;
-use crate::use_cases::context::{ExecutionContext, ExecutionInterruption};
+use crate::use_cases::context::{ExecutionContext, ExecutionInterruption, InterruptionSafetyClass};
 use crate::use_cases::launch_keys::vanessa_enterprise_launch_keys;
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::{
@@ -68,6 +68,8 @@ pub fn execute(
 
     let launch = effective_launch_options(config, args)
         .map_err(|error| UseCaseFailure::without_payload(error))?;
+    let external_epf_wait =
+        external_epf_wait_plan(config, args, &launch).map_err(UseCaseFailure::without_payload)?;
     let readiness_url = client_mcp_readiness_url(config, args)
         .map_err(|error| UseCaseFailure::without_payload(error))?;
     let additional_launch_keys = effective_enterprise_launch_keys(config, args, &launch);
@@ -85,17 +87,69 @@ pub fn execute(
         ),
         workdir: None,
         stdout_log_path: None,
-        stderr_log_path: None,
-        startup_probe: Some(LAUNCH_STARTUP_PROBE),
+        stderr_log_path: external_epf_wait
+            .as_ref()
+            .map(|plan| plan.stderr_path.clone()),
+        startup_probe: external_epf_wait
+            .as_ref()
+            .map(|_| None)
+            .unwrap_or(Some(LAUNCH_STARTUP_PROBE)),
     };
 
     debug!("[Запуск] Приложение: {}", mode_label(args.target));
     log_live_stage("launch: start", "[Launch] starting client process");
     let runner = utilities.runner_for(utility);
 
+    if let Some(plan) = external_epf_wait {
+        let managed = runner
+            .spawn_managed(&process_request, ManagedSpawnMode::Wait)
+            .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+        let pid = managed.pid();
+        let outcome = managed
+            .wait_for_exit(&context.process_policy(
+                InterruptionSafetyClass::GracefulThenKill,
+                Some(Duration::from_millis(plan.timeout_ms)),
+            ))
+            .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+        let message = if outcome.timed_out {
+            format!(
+                "External EPF client timed out after {}ms and was terminated",
+                plan.timeout_ms
+            )
+        } else {
+            format!(
+                "External EPF client exited with status {}",
+                outcome.exit_code.unwrap_or(-1)
+            )
+        };
+        let result = LaunchResult {
+            ok: !outcome.timed_out,
+            mode,
+            pid: Some(pid),
+            binary: location.path,
+            message: Some(message.clone()),
+            mcp_readiness: None,
+            external_epf_wait: Some(ExternalEpfWaitResult {
+                pid,
+                execute_path: plan.execute_path,
+                exit_code: outcome.exit_code,
+                timed_out: outcome.timed_out,
+                output_path: plan.output_path,
+                stderr_path: plan.stderr_path.display().to_string(),
+            }),
+        };
+        if outcome.timed_out {
+            return Err(UseCaseFailure::with_payload(
+                AppError::Runtime(message),
+                result,
+            ));
+        }
+        return Ok(result);
+    }
+
     if let Some(url) = readiness_url {
         let managed = runner
-            .spawn_managed(&process_request)
+            .spawn_managed(&process_request, ManagedSpawnMode::Detached)
             .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
         let pid = managed.pid();
         let binary = managed.binary().clone();
@@ -106,6 +160,7 @@ pub fn execute(
             binary: binary.clone(),
             message: Some(launch_message(config, args, &binary, pid)),
             mcp_readiness: None,
+            external_epf_wait: None,
         };
         let required_tools = required_mcp_tools(args);
         match client_mcp_readiness::wait_for_readiness(
@@ -152,7 +207,69 @@ pub fn execute(
         binary: spawned.binary.clone(),
         message: Some(launch_message(config, args, &spawned.binary, spawned.pid)),
         mcp_readiness: None,
+        external_epf_wait: None,
     })
+}
+
+struct ExternalEpfWaitPlan {
+    timeout_ms: u64,
+    execute_path: String,
+    output_path: String,
+    stderr_path: std::path::PathBuf,
+}
+
+fn external_epf_wait_plan(
+    config: &AppConfig,
+    args: &LaunchArgs,
+    launch: &LaunchOptions,
+) -> Result<Option<ExternalEpfWaitPlan>, AppError> {
+    let Some(wait) = &launch.external_epf_wait else {
+        return Ok(None);
+    };
+    if !matches!(
+        args.target,
+        LaunchTargetRequest::Enterprise(EnterpriseLaunchTarget::ThinClient)
+    ) {
+        return Err(AppError::Validation(
+            "--wait-for-exit is supported only for `launch thin`".to_owned(),
+        ));
+    }
+    let execute = launch.execute.as_deref().ok_or_else(|| {
+        AppError::Validation(
+            "--wait-for-exit requires an explicit --execute <external.epf>".to_owned(),
+        )
+    })?;
+    if !execute.to_ascii_lowercase().ends_with(".epf") {
+        return Err(AppError::Validation(
+            "--wait-for-exit requires --execute to name an external .epf file".to_owned(),
+        ));
+    }
+    let output_path = launch
+        .out
+        .clone()
+        .ok_or_else(|| AppError::Validation("--wait-for-exit requires --output".to_owned()))?;
+    if launch
+        .raw_args
+        .iter()
+        .chain(config.tools.enterprise.additional_launch_keys.iter())
+        .any(|raw| is_wait_reserved_raw_key(raw))
+    {
+        return Err(AppError::Validation(
+            "--wait-for-exit does not support raw /C, /Execute, or /Out launch keys".to_owned(),
+        ));
+    }
+    Ok(Some(ExternalEpfWaitPlan {
+        timeout_ms: wait.timeout_ms,
+        execute_path: normalize_launch_payload_path(Path::new(execute)),
+        output_path,
+        stderr_path: std::path::PathBuf::from(&wait.stderr_output),
+    }))
+}
+
+fn is_wait_reserved_raw_key(raw: &str) -> bool {
+    ["c", "execute", "out"]
+        .iter()
+        .any(|key| launch_key_alias_matches(raw, key))
 }
 
 fn client_mcp_readiness_url(
@@ -521,7 +638,7 @@ mod tests {
             .contains("v8-runner build"));
         let args = read_args_log(&args_log);
         assert!(args.contains("ENTERPRISE"));
-        assert!(args.contains("/C\"runMcp;mcpPort=9874\""));
+        assert!(args.contains("/C\nrunMcp;mcpPort=9874"));
         assert!(!args.contains("/LoadCfg"));
         assert!(!args.contains("-Extension"));
     }
