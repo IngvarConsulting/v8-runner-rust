@@ -32,6 +32,7 @@ use crate::use_cases::tool_extension;
 use tempfile::NamedTempFile;
 use tracing::debug;
 
+mod cdfi_recovery;
 mod coordinator;
 mod helpers;
 
