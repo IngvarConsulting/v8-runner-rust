@@ -36,6 +36,7 @@ mod cdfi_recovery;
 mod coordinator;
 mod helpers;
 
+use self::cdfi_recovery::CdfiRecoveryGuard;
 pub(crate) use self::helpers::ensure_platform_success;
 use self::helpers::{
     build_designer_dsl, build_ibcmd_dsl, commit_step_state, deferred_interruption_warning,
@@ -453,7 +454,7 @@ fn execute_source_set_step(
             TimelineStageStatus::Running,
         );
     }
-    let load_result = if let Some(paths) = partial_paths {
+    let (load_result, partial_list_file, mut recovery_guard) = if let Some(paths) = partial_paths {
         let list_file = partial_list_file(&config.work_path).map_err(|error| {
             AppError::Runtime(format!("failed to create partial list file: {error}"))
         })?;
@@ -474,29 +475,22 @@ fn execute_source_set_step(
                 return Err(attach_partial_load_list_path(error, partial_list));
             }
         };
+        let recovery_guard =
+            match CdfiRecoveryGuard::capture(load_context.path(), &config.work_path) {
+                Ok(recovery_guard) => recovery_guard,
+                Err(error) => {
+                    let partial_list = preserve_partial_load_list(list_file);
+                    return Err(attach_partial_load_list_path(error, partial_list));
+                }
+            };
         let load_result = designer_dsl.load_config_from_files_partial(
             load_context.path(),
             list_file.path(),
             extension_name(source_set),
         );
-        match load_result {
-            Ok(result) if result.process.exit_code == 0 => result,
-            Ok(result) => {
-                let partial_list = preserve_partial_load_list(list_file);
-                ensure_platform_success("load", source_set, &result)
-                    .map_err(|error| attach_partial_load_list_path(error, partial_list))?;
-                result
-            }
-            Err(error) => {
-                let partial_list = preserve_partial_load_list(list_file);
-                return Err(attach_partial_load_list_path(
-                    AppError::from(error),
-                    partial_list,
-                ));
-            }
-        }
+        (load_result, Some(list_file), recovery_guard)
     } else {
-        build_designer_dsl(
+        let designer_dsl = build_designer_dsl(
             context,
             config,
             binary,
@@ -505,17 +499,39 @@ fn execute_source_set_step(
             step_index,
             "load",
             InterruptionSafetyClass::CriticalNonAbortable,
-        )?
-        .load_config_from_files_full(load_context.path(), extension_name(source_set))
-        .map_err(AppError::from)?
+        )?;
+        let recovery_guard = CdfiRecoveryGuard::capture(load_context.path(), &config.work_path)?;
+        let load_result = designer_dsl
+            .load_config_from_files_full(load_context.path(), extension_name(source_set));
+        (load_result, None, recovery_guard)
     };
-    ensure_platform_success("load", source_set, &load_result)?;
+    let load_result = match load_result {
+        Ok(result) => result,
+        Err(error) => {
+            let error =
+                attach_partial_load_list_if_present(AppError::from(error), partial_list_file);
+            return Err(restore_cdfi_after_designer_failure(
+                error,
+                &mut recovery_guard,
+            ));
+        }
+    };
+    if let Err(error) = ensure_platform_success("load", source_set, &load_result) {
+        let error = attach_partial_load_list_if_present(error, partial_list_file);
+        return Err(restore_cdfi_after_designer_failure(
+            error,
+            &mut recovery_guard,
+        ));
+    }
 
     if let Some(error) = interruption_before_safe_point(
         context,
         format!("update_db_cfg for source-set '{}'", source_set.name),
     ) {
-        return Err(error);
+        return Err(restore_cdfi_after_designer_failure(
+            error,
+            &mut recovery_guard,
+        ));
     }
 
     debug!(
@@ -528,7 +544,7 @@ fn execute_source_set_step(
         "[Конфигуратор] Применение изменений",
         TimelineStageStatus::Running,
     );
-    let update_result = build_designer_dsl(
+    let update_dsl = match build_designer_dsl(
         context,
         config,
         binary,
@@ -537,20 +553,72 @@ fn execute_source_set_step(
         step_index,
         "update",
         InterruptionSafetyClass::CriticalNonAbortable,
-    )?
-    .update_db_cfg(extension_name(source_set))
-    .map_err(AppError::from)?;
-    ensure_platform_success("update_db_cfg", source_set, &update_result)?;
-
-    commit_step_state(source_set, commit_context, &config.work_path, commit)?;
+    ) {
+        Ok(dsl) => dsl,
+        Err(error) => {
+            return Err(restore_cdfi_after_designer_failure(
+                error,
+                &mut recovery_guard,
+            ))
+        }
+    };
+    let update_result = match update_dsl.update_db_cfg(extension_name(source_set)) {
+        Ok(result) => result,
+        Err(error) => {
+            return Err(restore_cdfi_after_designer_failure(
+                AppError::from(error),
+                &mut recovery_guard,
+            ));
+        }
+    };
+    if let Err(error) = ensure_platform_success("update_db_cfg", source_set, &update_result) {
+        return Err(restore_cdfi_after_designer_failure(
+            error,
+            &mut recovery_guard,
+        ));
+    }
+    if let Err(error) = commit_step_state(source_set, commit_context, &config.work_path, commit) {
+        return Err(restore_cdfi_after_designer_failure(
+            error,
+            &mut recovery_guard,
+        ));
+    }
+    let cleanup_warning = recovery_guard.cleanup().err().map(|error| {
+        format!("failed to remove CDFI recovery snapshot after successful Designer build: {error}")
+    });
 
     Ok([
         deferred_interruption_warning("load", &load_result),
         deferred_interruption_warning("update_db_cfg", &update_result),
+        cleanup_warning,
     ]
     .into_iter()
     .flatten()
     .collect())
+}
+
+fn restore_cdfi_after_designer_failure(
+    error: AppError,
+    recovery_guard: &mut CdfiRecoveryGuard,
+) -> AppError {
+    match recovery_guard.restore() {
+        Ok(_) => error,
+        Err(recovery_error) => error.with_context(format!(
+            "failed to restore CDFI after Designer build failure: {recovery_error}"
+        )),
+    }
+}
+
+fn attach_partial_load_list_if_present(
+    error: AppError,
+    list_file: Option<NamedTempFile>,
+) -> AppError {
+    match list_file {
+        Some(list_file) => {
+            attach_partial_load_list_path(error, preserve_partial_load_list(list_file))
+        }
+        None => error,
+    }
 }
 
 fn write_partial_load_list_or_preserve(
@@ -734,6 +802,16 @@ mod tests {
 
     #[cfg(unix)]
     fn write_designer_script(path: &Path, calls_log: &Path, fail_pattern: Option<&str>) {
+        write_designer_script_with_load_delay(path, calls_log, fail_pattern, None);
+    }
+
+    #[cfg(unix)]
+    fn write_designer_script_with_load_delay(
+        path: &Path,
+        calls_log: &Path,
+        fail_pattern: Option<&str>,
+        load_delay: Option<Duration>,
+    ) {
         let pattern_branch = fail_pattern
             .map(|pattern| {
                 format!(
@@ -742,10 +820,20 @@ mod tests {
                 )
             })
             .unwrap_or_default();
+        let load_delay_branch = load_delay
+            .map(|delay| {
+                format!(
+                    "if [ -n \"$load_dir\" ]; then sleep {}.{:03}; fi",
+                    delay.as_secs(),
+                    delay.subsec_millis()
+                )
+            })
+            .unwrap_or_default();
         let body = format!(
-            "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$out\" ]; then printf 'designer log for %s\\n' \"$args\" > \"$out\"; fi\nprintf '%s\\n' \"$args\" >> \"{}\"\n{}\nexit 0",
+            "args=\"$*\"\nout=\"\"\nload_dir=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"/LoadConfigFromFiles\" ]; then load_dir=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$out\" ]; then printf 'designer log for %s\\n' \"$args\" > \"$out\"; fi\nif [ -n \"$load_dir\" ]; then printf '<ConfigDumpInfo>platform replacement</ConfigDumpInfo>\\n' > \"$load_dir/ConfigDumpInfo.xml\"; fi\nprintf '%s\\n' \"$args\" >> \"{}\"\n{}\n{}\nexit 0",
             calls_log.display(),
-            pattern_branch
+            load_delay_branch,
+            pattern_branch,
         );
 
         if let Some(parent) = path.parent() {
@@ -1022,6 +1110,160 @@ mod tests {
                     .expect("calls")
                     .trim()
                     .is_empty()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_build_restores_cdfi_after_failed_designer_load() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let platform = dir.path().join("1cv8");
+        let calls_log = dir.path().join("designer.calls.log");
+        let original_cdfi =
+            b"\xEF\xBB\xBF<ConfigDumpInfo>original load fixture</ConfigDumpInfo>\r\n";
+        create_source_tree(&base);
+        fs::create_dir_all(&work).expect("work");
+        fs::write(base.join("main").join("ConfigDumpInfo.xml"), original_cdfi)
+            .expect("original CDFI");
+        write_designer_script(&platform, &calls_log, Some("/LoadConfigFromFiles"));
+        let config = build_config(
+            &base,
+            &work,
+            &platform,
+            20,
+            SourceFormat::Designer,
+            BuilderBackend::Designer,
+        );
+
+        let failure = run_build(&config, &build_args(true)).expect_err("load must fail");
+
+        assert!(failure.error.message().contains("exit code 17"));
+        assert_eq!(
+            fs::read(base.join("main").join("ConfigDumpInfo.xml")).expect("restored CDFI"),
+            original_cdfi
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_build_restores_cdfi_after_interruption_before_designer_update() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let platform = dir.path().join("1cv8");
+        let calls_log = dir.path().join("designer.calls.log");
+        let original_cdfi =
+            b"\xEF\xBB\xBF<ConfigDumpInfo>original interruption fixture</ConfigDumpInfo>\r\n";
+        create_source_tree(&base);
+        fs::create_dir_all(&work).expect("work");
+        fs::write(base.join("main").join("ConfigDumpInfo.xml"), original_cdfi)
+            .expect("original CDFI");
+        write_designer_script_with_load_delay(
+            &platform,
+            &calls_log,
+            None,
+            Some(Duration::from_millis(100)),
+        );
+        let config = build_config(
+            &base,
+            &work,
+            &platform,
+            20,
+            SourceFormat::Designer,
+            BuilderBackend::Designer,
+        );
+        let cancellation = CancellationToken::new();
+        let delayed_cancel = cancellation.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            delayed_cancel.cancel();
+        });
+
+        let failure = super::execute(
+            &ExecutionContext::cli(CommandName::Build).with_cancellation(cancellation),
+            &config,
+            &build_args(true),
+        )
+        .expect_err("build must stop before update");
+
+        assert!(failure
+            .error
+            .message()
+            .contains("before entering update_db_cfg for source-set 'main' safe point"));
+        assert_eq!(
+            fs::read(base.join("main").join("ConfigDumpInfo.xml")).expect("restored CDFI"),
+            original_cdfi
+        );
+        let calls = fs::read_to_string(&calls_log).expect("calls");
+        assert!(calls.contains("/LoadConfigFromFiles"));
+        assert!(!calls.contains("/UpdateDBCfg"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_build_restores_cdfi_after_failed_designer_update() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let platform = dir.path().join("1cv8");
+        let calls_log = dir.path().join("designer.calls.log");
+        let original_cdfi =
+            b"\xEF\xBB\xBF<ConfigDumpInfo>original update fixture</ConfigDumpInfo>\r\n";
+        create_source_tree(&base);
+        fs::create_dir_all(&work).expect("work");
+        fs::write(base.join("main").join("ConfigDumpInfo.xml"), original_cdfi)
+            .expect("original CDFI");
+        write_designer_script(&platform, &calls_log, Some("/UpdateDBCfg"));
+        let config = build_config(
+            &base,
+            &work,
+            &platform,
+            20,
+            SourceFormat::Designer,
+            BuilderBackend::Designer,
+        );
+
+        let failure = run_build(&config, &build_args(true)).expect_err("update must fail");
+
+        assert!(failure.error.message().contains("exit code 17"));
+        assert_eq!(
+            fs::read(base.join("main").join("ConfigDumpInfo.xml")).expect("restored CDFI"),
+            original_cdfi
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_build_keeps_designer_cdfi_replacement_after_successful_update() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let platform = dir.path().join("1cv8");
+        let calls_log = dir.path().join("designer.calls.log");
+        let original_cdfi =
+            b"\xEF\xBB\xBF<ConfigDumpInfo>original success fixture</ConfigDumpInfo>\r\n";
+        create_source_tree(&base);
+        fs::create_dir_all(&work).expect("work");
+        fs::write(base.join("main").join("ConfigDumpInfo.xml"), original_cdfi)
+            .expect("original CDFI");
+        write_designer_script(&platform, &calls_log, None);
+        let config = build_config(
+            &base,
+            &work,
+            &platform,
+            20,
+            SourceFormat::Designer,
+            BuilderBackend::Designer,
+        );
+
+        let result = run_build(&config, &build_args(true)).expect("build");
+
+        assert!(result.ok);
+        assert_eq!(
+            fs::read(base.join("main").join("ConfigDumpInfo.xml")).expect("platform CDFI"),
+            b"<ConfigDumpInfo>platform replacement</ConfigDumpInfo>\n"
         );
     }
 
