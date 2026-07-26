@@ -79,6 +79,19 @@ fn test_help_exposes_no_build_option() {
 }
 
 #[test]
+fn dump_help_clarifies_object_selector_compatibility() {
+    let output = v8_runner_command()
+        .args(["dump", "--help"])
+        .output()
+        .expect("run command");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("canonical TYPE:NAME selectors"));
+    assert!(stdout.contains("legacy TYPE.NAME selectors are accepted for compatibility"));
+}
+
+#[test]
 fn tools_download_help_exposes_tool_commands() {
     let output = v8_runner_command()
         .args(["tools", "download", "--help"])
@@ -121,9 +134,29 @@ fn launch_help_uses_output_path_name_and_global_json_selector() {
     assert!(stdout.contains("Command options:"));
     assert!(stdout.contains("Global options:"));
     assert!(stdout.contains("--output <OUTPUT>"));
+    assert!(stdout.contains("--stderr-output <STDERR_OUTPUT>"));
+    assert!(stdout.contains("--wait-for-exit"));
+    assert!(stdout.contains("--wait-timeout-ms <WAIT_TIMEOUT_MS>"));
     assert!(!stdout.contains("--out <OUT>"));
     assert!(!stdout.contains("--mode <MODE>"));
     assert!(stdout.contains("--json-message"));
+}
+
+#[test]
+fn test_help_does_not_expose_direct_launch_wait_options() {
+    let output = v8_runner_command()
+        .args(["test", "--help"])
+        .output()
+        .expect("run command");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("--c <C>"));
+    assert!(!stdout.contains("--execute <EXECUTE>"));
+    assert!(!stdout.contains("--output <OUTPUT>"));
+    assert!(!stdout.contains("--stderr-output"));
+    assert!(!stdout.contains("--wait-for-exit"));
+    assert!(!stdout.contains("--wait-timeout-ms"));
 }
 
 #[test]

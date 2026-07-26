@@ -7,6 +7,8 @@ pub struct DumpResult {
     pub source_set: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extension: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selectors: Option<Vec<DumpSelectorResult>>,
     pub mode: DumpMode,
     pub target_path: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -14,6 +16,12 @@ pub struct DumpResult {
     pub duration_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DumpSelectorResult {
+    pub requested: String,
+    pub normalized: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

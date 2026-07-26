@@ -34,7 +34,8 @@
 10. Partial load является file-level стратегией, а не semantic object dependency graph.
 11. Partial load запрещён и заменяется full load, если изменён `Configuration.xml`, есть удаления, expansion небезопасен, expanded set пустой или превышает `build.partialLoadThreshold`.
 12. Изменения `.bsl` расширяются только до существующих связанных XML-файлов, включая sibling XML и ancestor XML descriptors; каталоги в `-listFile` не добавляются, потому что Designer partial load должен получать file-only список.
-13. Prepared snapshot коммитится только после успешного соответствующего export/load step.
+13. Designer partial-load `listFile` пишется как UTF-8 с ровно одним BOM `EF BB BF` перед payload; записи остаются относительными к source-set root, используют нативные разделители компонентов пути, разделяются `CRLF` без завершающего `CRLF`, а пустой payload представлен BOM-only файлом. Этот byte contract относится только к Designer `/LoadConfigFromFiles -partial -listFile` и не меняет IBCMD partial import или partial dump list files.
+14. Prepared snapshot коммитится только после успешного соответствующего export/load step.
 
 ## Неграницы (Non-goals)
 
@@ -74,8 +75,9 @@
 
 1. новые build/export flows должны использовать `ChangeAnalysis` вместо самостоятельного обхода файлов;
 2. новые partial load rules должны покрываться unit tests в `change_detection::partial_load`;
-3. любые изменения context naming или storage layout должны обновлять ADR-0002 и этот ADR;
-4. failure handling должен сохранять safe fallback semantics для recoverable ошибок.
+3. изменения byte contract для Designer partial-load `listFile` должны покрываться точными byte-level tests, включая BOM, UTF-8 имена, `CRLF` и пустой список;
+4. любые изменения context naming или storage layout должны обновлять ADR-0002 и этот ADR;
+5. failure handling должен сохранять safe fallback semantics для recoverable ошибок.
 
 ## Верификация
 
@@ -83,6 +85,7 @@
 - [x] ADR фиксирует per-context `redb` storage под `workPath/hash-storages`.
 - [x] ADR фиксирует разные contexts для EDT source и generated Designer output.
 - [x] ADR фиксирует conservative full-load fallback для unsafe partial cases.
+- [x] ADR фиксирует Designer partial-load `listFile` как UTF-8 with BOM и `CRLF` byte contract.
 - [x] ADR фиксирует commit snapshot только после successful platform step.
 - [ ] EDT build выполняет Designer analysis всегда после successful или skipped EDT stage.
 - [ ] Отсутствие изменений в generated Designer output приводит к skip без load/apply.

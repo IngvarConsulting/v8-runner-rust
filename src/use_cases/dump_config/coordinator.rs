@@ -27,6 +27,7 @@ pub(super) fn run_dump_with_context(
                 None,
                 None,
                 None,
+                None,
                 Some(SUPPORTED_DUMP_ERROR.to_owned()),
             ),
         ));
@@ -44,11 +45,21 @@ pub(super) fn run_dump_with_context(
                     args.source_set.clone(),
                     args.extension.clone(),
                     None,
+                    None,
                     Some(message),
                 ),
             ));
         }
     };
+    let selectors = partial_objects.as_ref().map(|objects| {
+        objects
+            .iter()
+            .map(|selector| DumpSelectorResult {
+                requested: selector.requested().to_owned(),
+                normalized: selector.normalized(),
+            })
+            .collect()
+    });
 
     let resolved = match resolve_target(config, args) {
         Ok(resolved) => resolved,
@@ -61,6 +72,7 @@ pub(super) fn run_dump_with_context(
                     started,
                     args.source_set.clone(),
                     args.extension.clone(),
+                    selectors.clone(),
                     None,
                     Some(message),
                 ),
@@ -85,6 +97,7 @@ pub(super) fn run_dump_with_context(
                     started,
                     Some(resolved.source_set_name.clone()),
                     resolved.extension.clone(),
+                    selectors.clone(),
                     Some(resolved.target_path.clone()),
                     Some(message),
                 ),
@@ -104,6 +117,7 @@ pub(super) fn run_dump_with_context(
                         started,
                         Some(resolved.source_set_name.clone()),
                         resolved.extension.clone(),
+                        selectors.clone(),
                         Some(resolved.target_path.clone()),
                         Some(message),
                     ),
@@ -129,6 +143,7 @@ pub(super) fn run_dump_with_context(
                     started,
                     Some(resolved.source_set_name.clone()),
                     resolved.extension.clone(),
+                    selectors.clone(),
                     Some(resolved.target_path.clone()),
                     Some(message),
                 ),
@@ -146,6 +161,7 @@ pub(super) fn run_dump_with_context(
                 started,
                 Some(resolved.source_set_name.clone()),
                 resolved.extension.clone(),
+                selectors.clone(),
                 Some(resolved.target_path.clone()),
                 Some(message),
             ),
@@ -162,6 +178,7 @@ pub(super) fn run_dump_with_context(
                     started,
                     Some(resolved.source_set_name.clone()),
                     resolved.extension.clone(),
+                    selectors.clone(),
                     Some(resolved.target_path.clone()),
                     Some(message),
                 ),
@@ -178,6 +195,7 @@ pub(super) fn run_dump_with_context(
                 started,
                 Some(resolved.source_set_name.clone()),
                 resolved.extension.clone(),
+                selectors.clone(),
                 Some(resolved.target_path.clone()),
                 Some(message),
             ),
@@ -193,6 +211,7 @@ pub(super) fn run_dump_with_context(
                     started,
                     Some(resolved.source_set_name.clone()),
                     resolved.extension.clone(),
+                    selectors.clone(),
                     Some(resolved.target_path.clone()),
                     Some(message),
                 ),
@@ -359,6 +378,7 @@ pub(super) fn run_dump_with_context(
             ok: true,
             source_set: Some(resolved.source_set_name),
             extension: resolved.extension,
+            selectors,
             mode,
             target_path: resolved.target_path,
             platform_log_path: platform_result.platform_log_path,
@@ -373,6 +393,7 @@ pub(super) fn run_dump_with_context(
                     ok: false,
                     source_set: Some(resolved.source_set_name),
                     extension: resolved.extension,
+                    selectors,
                     mode,
                     target_path: resolved.target_path,
                     platform_log_path: None,
