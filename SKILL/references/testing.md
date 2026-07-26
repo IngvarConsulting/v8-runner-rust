@@ -82,14 +82,17 @@ v8-runner syntax edt
 
 ## Artifacts
 
-Preserve failed test artifacts under:
+Each YaXUnit or Vanessa Automation test run retains its diagnostics under:
 
 ```text
 workPath/temp/<runner-id>/runs/<run-id>/
 ```
 
-When native runners materialize them, the returned artifacts include JUnit XML and
-the native Allure results directory. Only existing run outputs are returned; internal
-cleanup markers are not part of the public artifact contract.
+Supported current/latest native runners produce JUnit XML and Allure results together. In
+`--json-message`, read the summary from `data.execution.metrics` and every existing typed path
+from `data.execution.artifacts.items`; `data.retained_paths` is only a compatibility projection.
+Missing, empty, or malformed JUnit and missing or empty Allure results are `invalid_output`
+infrastructure failures. Successful and failed run directories remain until explicitly removed;
+internal cleanup markers are never public artifacts.
 
 In final answers, include the command, pass/fail result, and artifact path when present.

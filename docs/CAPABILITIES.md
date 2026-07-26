@@ -208,6 +208,15 @@ v8-runner test va --feature login --filter-tag @smoke
   `test va` или MCP `run_all_tests` с `runner=vanessa`, а не дефолтный YaXUnit-runner.
 - `--full` включает полный вывод успешных кейсов и расширенные stack traces.
 - `tests.*.timeouts.total_ms` остаётся активным пользовательским контрактом таймаутов.
+- Поддерживаемые current/latest YaXUnit и Vanessa Automation одновременно создают JUnit и
+  Allure results; вручную подставленный старый runner без обоих отчётов считается несовместимым.
+- Каждый запуск сохраняется в `workPath/temp/<runner-id>/runs/<run-id>/`. Успешные и неуспешные
+  результаты остаются там до явного удаления пользователем.
+- В `--json-message` summary находится в `data.execution.metrics`, а все существующие пути и их
+  точные kinds — в `data.execution.artifacts.items`; `data.retained_paths` остаётся compatibility
+  projection основных путей.
+- Отсутствующий, пустой или некорректный JUnit либо отсутствующий/пустой Allure — это
+  инфраструктурная ошибка `invalid_output`, а не успешный или обычный test failure.
 
 ### `syntax`
 

@@ -1,6 +1,6 @@
 ---
 source: tests/cli_test.rs
-assertion_line: 1309
+assertion_line: 1686
 expression: full_snapshot
 ---
 Object {
@@ -14,9 +14,9 @@ Object {
             "artifacts": Object {
                 "items": Array [
                     Object {
-                        "kind": String("run_directory"),
-                        "path": String("<run_dir>"),
-                        "role": String("run_dir"),
+                        "kind": String("allure_results"),
+                        "path": String("<allure_results>"),
+                        "role": String("allure_results"),
                     },
                     Object {
                         "kind": String("config"),
@@ -29,19 +29,19 @@ Object {
                         "role": String("junit_xml"),
                     },
                     Object {
-                        "kind": String("allure_results"),
-                        "path": String("<allure_results>"),
-                        "role": String("allure_results"),
+                        "kind": String("platform_log"),
+                        "path": String("<platform_log>"),
+                        "role": String("platform_log"),
+                    },
+                    Object {
+                        "kind": String("run_directory"),
+                        "path": String("<run_dir>"),
+                        "role": String("run_dir"),
                     },
                     Object {
                         "kind": String("runner_log"),
                         "path": String("<yaxunit_log>"),
                         "role": String("runner_log"),
-                    },
-                    Object {
-                        "kind": String("platform_log"),
-                        "path": String("<platform_log>"),
-                        "role": String("platform_log"),
                     },
                 ],
                 "root_dir": String("<run_dir>"),

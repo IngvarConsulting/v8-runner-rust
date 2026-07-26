@@ -28,12 +28,60 @@ const YAXUNIT_LOG_FIXTURE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/parsers/yaxunit.log"
 ));
+const JUNIT_FAILURE_REPORT_FIXTURE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/parsers/junit_report.xml"
+));
+
+#[derive(Clone, Copy)]
+enum NativeReportFixture {
+    Complete,
+    MissingJunit,
+    EmptyJunit,
+    MissingAllure,
+    EmptyAllure,
+}
+
+struct NativeReportOutput<'a> {
+    report_xml: &'a str,
+    fixture: NativeReportFixture,
+}
+
+struct ProjectTestSetup<'a> {
+    report_xml: &'a str,
+    yax_log: &'a str,
+    enterprise_exit: i32,
+    build_fail: bool,
+    timeout_seconds: u64,
+    sleep_seconds: Option<u64>,
+    native_reports: NativeReportFixture,
+}
+
+impl NativeReportFixture {
+    fn materialization(self, report_xml: &str, junit_file: &str) -> (String, String) {
+        let junit = match self {
+            Self::Complete | Self::MissingAllure | Self::EmptyAllure => format!(
+                "mkdir -p \"$(dirname \"{junit_file}\")\"\ncat <<'XML' > \"{junit_file}\"\n{report_xml}\nXML"
+            ),
+            Self::MissingJunit => String::new(),
+            Self::EmptyJunit => {
+                format!("mkdir -p \"$(dirname \"{junit_file}\")\"\n: > \"{junit_file}\"")
+            }
+        };
+        let allure = match self {
+            Self::Complete | Self::MissingJunit | Self::EmptyJunit => "mkdir -p \"$allure_dir\"\nprintf '%s\\n' '{\"uuid\":\"fixture\",\"name\":\"fixture\",\"status\":\"passed\",\"stage\":\"finished\"}' > \"$allure_dir/fixture-result.json\"".to_owned(),
+            Self::EmptyAllure => "mkdir -p \"$allure_dir\"".to_owned(),
+            Self::MissingAllure => "rmdir \"$allure_dir\"".to_owned(),
+        };
+        (junit, allure)
+    }
+}
 
 fn write_test_script(
     path: &Path,
     calls_log: &Path,
     captured_config: &Path,
-    report_xml: &str,
+    output: NativeReportOutput<'_>,
     yax_log: &str,
     exit_code: i32,
     sleep_seconds: Option<u64>,
@@ -41,11 +89,14 @@ fn write_test_script(
     let sleep_branch = sleep_seconds
         .map(|value| format!("sleep {value}"))
         .unwrap_or_default();
+    let (junit_output, allure_output) =
+        output.fixture.materialization(output.report_xml, "$report");
     let body = format!(
-        "printf '%s\\n' \"$*\" >> '{}'\npayload=\"\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/C\" ]; then payload=\"$arg\"; fi\n  case \"$arg\" in /C*) payload=\"${{arg#/C}}\" ;; esac\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\ncfg=$(printf '%s' \"$payload\" | sed 's/^\"//; s/\"$//; s/^RunUnitTests=//')\ncp \"$cfg\" '{}'\nreport=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    print(json.load(fh)['reports'][0]['path'])\nPY\n)\nallure_dir=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    print(json.load(fh)['reports'][1]['path'])\nPY\n)\nylog=$(awk -F '\"' '/\"file\"/ {{print $4; exit}}' \"$cfg\")\nmkdir -p \"$(dirname \"$report\")\" \"$allure_dir\" \"$(dirname \"$ylog\")\" \"$(dirname \"$out\")\"\ncat <<'XML' > \"$report\"\n{}\nXML\nprintf '%s\\n' '{{\"uuid\":\"fixture\",\"name\":\"fixture\",\"status\":\"passed\",\"stage\":\"finished\"}}' > \"$allure_dir/fixture-result.json\"\ncat <<'LOG' > \"$ylog\"\n{}\nLOG\nprintf 'platform /P secret uri http://user:pass@example\\n' > \"$out\"\n{}\nexit {}",
+        "printf '%s\\n' \"$*\" >> '{}'\npayload=\"\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/C\" ]; then payload=\"$arg\"; fi\n  case \"$arg\" in /C*) payload=\"${{arg#/C}}\" ;; esac\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\ncfg=$(printf '%s' \"$payload\" | sed 's/^\"//; s/\"$//; s/^RunUnitTests=//')\ncp \"$cfg\" '{}'\nreport=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    print(json.load(fh)['reports'][0]['path'])\nPY\n)\nallure_dir=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    print(json.load(fh)['reports'][1]['path'])\nPY\n)\nylog=$(awk -F '\"' '/\"file\"/ {{print $4; exit}}' \"$cfg\")\nmkdir -p \"$(dirname \"$ylog\")\" \"$(dirname \"$out\")\"\n{}\n{}\ncat <<'LOG' > \"$ylog\"\n{}\nLOG\nprintf 'platform /P secret uri http://user:pass@example\\n' > \"$out\"\n{}\nexit {}",
         calls_log.display(),
         captured_config.display(),
-        report_xml,
+        junit_output,
+        allure_output,
         yax_log,
         sleep_branch,
         exit_code
@@ -128,6 +179,7 @@ fn write_va_test_script(
     captured_params: &Path,
     report_xml: &str,
     exit_code: i32,
+    native_reports: NativeReportFixture,
 ) {
     let body = format!(
         "printf '%s\\n' \"$*\" >> '{}'\npayload=\"\"\nout=\"\"\nexecute=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/C\" ]; then payload=\"$arg\"; fi\n  case \"$arg\" in /C*) payload=\"${{arg#/C}}\" ;; esac\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"/Execute\" ]; then execute=\"$arg\"; fi\n  prev=\"$arg\"\ndone\ncfg=$(printf '%s' \"$payload\" | sed 's/^\"//; s/\"$//; s/^StartFeaturePlayer;VAParams=//')\ncp \"$cfg\" '{}'\nreport_dir=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    data = json.load(fh)\nprint(data['КаталогВыгрузкиJUnit'])\nPY\n)\ntext_log=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    data = json.load(fh)\nprint(data['ИмяФайлаЛогВыполненияСценариев'])\nPY\n)\nmkdir -p \"$report_dir\" \"$(dirname \"$out\")\" \"$(dirname \"$text_log\")\"\ncat <<'XML' > \"$report_dir/result.xml\"\n{}\nXML\nprintf 'va execute=%s\\n' \"$execute\" > \"$out\"\nprintf 'INFO ok\\nОшибка VA из текстового лога\\n' > \"$text_log\"\nexit {}",
@@ -153,6 +205,23 @@ cat <<'XML' > "$report_dir/result.xml""#,
         "XML\nprintf 'va execute=%s\\n'",
         "XML\nprintf '%s\\n' '{\"uuid\":\"fixture\",\"name\":\"fixture\",\"status\":\"passed\",\"stage\":\"finished\"}' > \"$allure_dir/fixture-result.json\"\nprintf 'va execute=%s\\n'",
     );
+    let junit_output = format!("cat <<'XML' > \"$report_dir/result.xml\"\n{report_xml}\nXML\n");
+    let allure_output = "printf '%s\\n' '{\"uuid\":\"fixture\",\"name\":\"fixture\",\"status\":\"passed\",\"stage\":\"finished\"}' > \"$allure_dir/fixture-result.json\"\n";
+    let body = match native_reports {
+        NativeReportFixture::Complete => body,
+        NativeReportFixture::MissingJunit => body.replace(&junit_output, ""),
+        NativeReportFixture::EmptyJunit => body.replace(
+            &junit_output,
+            "cat <<'XML' > \"$report_dir/result.xml\"\nXML\n",
+        ),
+        NativeReportFixture::MissingAllure => body
+            .replace(
+                "mkdir -p \"$report_dir\" \"$allure_dir\"",
+                "mkdir -p \"$report_dir\"",
+            )
+            .replace(allure_output, "rmdir \"$allure_dir\"\n"),
+        NativeReportFixture::EmptyAllure => body.replace(allure_output, ""),
+    };
     write_script(path, &body);
 }
 
@@ -196,24 +265,30 @@ fn setup_project(
 ) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, PathBuf) {
     setup_project_with_additional_launch_keys(
         work_dir_name,
-        report_xml,
-        yax_log,
-        enterprise_exit,
-        build_fail,
-        timeout_seconds,
-        sleep_seconds,
+        ProjectTestSetup {
+            report_xml,
+            yax_log,
+            enterprise_exit,
+            build_fail,
+            timeout_seconds,
+            sleep_seconds,
+            native_reports: NativeReportFixture::Complete,
+        },
         &[],
     )
 }
 
 fn setup_project_with_additional_launch_keys(
     work_dir_name: &str,
-    report_xml: &str,
-    yax_log: &str,
-    enterprise_exit: i32,
-    build_fail: bool,
-    timeout_seconds: u64,
-    sleep_seconds: Option<u64>,
+    setup: ProjectTestSetup<'_>,
+    additional_launch_keys: &[&str],
+) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, PathBuf) {
+    setup_project_with_native_reports(work_dir_name, setup, additional_launch_keys)
+}
+
+fn setup_project_with_native_reports(
+    work_dir_name: &str,
+    setup: ProjectTestSetup<'_>,
     additional_launch_keys: &[&str],
 ) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, PathBuf) {
     let dir = temp_workspace();
@@ -236,23 +311,26 @@ fn setup_project_with_additional_launch_keys(
     write_build_script(
         &install_dir.join("bin").join("1cv8"),
         &build_calls,
-        build_fail,
+        setup.build_fail,
     );
     write_test_script(
         &install_dir.join("bin").join("1cv8c"),
         &test_calls,
         &captured_config,
-        report_xml,
-        yax_log,
-        enterprise_exit,
-        sleep_seconds,
+        NativeReportOutput {
+            report_xml: setup.report_xml,
+            fixture: setup.native_reports,
+        },
+        setup.yax_log,
+        setup.enterprise_exit,
+        setup.sleep_seconds,
     );
     write_config(
         &config_path,
         &base_path,
         &work_path,
         &install_dir,
-        timeout_seconds,
+        setup.timeout_seconds,
         additional_launch_keys,
     );
 
@@ -263,13 +341,35 @@ fn setup_va_project(
     report_xml: &str,
     additional_launch_keys: &[&str],
 ) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, PathBuf) {
-    setup_va_project_with_work_name(report_xml, additional_launch_keys, "work")
+    setup_va_project_with_native_reports(
+        report_xml,
+        additional_launch_keys,
+        "work",
+        0,
+        NativeReportFixture::Complete,
+    )
 }
 
 fn setup_va_project_with_work_name(
     report_xml: &str,
     additional_launch_keys: &[&str],
     work_dir_name: &str,
+) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, PathBuf) {
+    setup_va_project_with_native_reports(
+        report_xml,
+        additional_launch_keys,
+        work_dir_name,
+        0,
+        NativeReportFixture::Complete,
+    )
+}
+
+fn setup_va_project_with_native_reports(
+    report_xml: &str,
+    additional_launch_keys: &[&str],
+    work_dir_name: &str,
+    enterprise_exit: i32,
+    native_reports: NativeReportFixture,
 ) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, PathBuf) {
     let dir = temp_workspace();
     let base_path = dir.path().join("project");
@@ -303,7 +403,8 @@ fn setup_va_project_with_work_name(
         &test_calls,
         &captured_params,
         report_xml,
-        0,
+        enterprise_exit,
+        native_reports,
     );
 
     let additional_launch_keys_block = if additional_launch_keys.is_empty() {
@@ -390,6 +491,18 @@ fn scrub_snapshot(value: &mut Value) {
     }
 }
 
+fn assert_success_artifact_contract(payload: &Value) {
+    assert_eq!(payload["data"]["execution"]["metrics"]["total"], 1);
+    let items = payload["data"]["execution"]["artifacts"]["items"]
+        .as_array()
+        .expect("artifact items");
+    assert!(items.iter().any(|item| item["kind"] == "junit_xml"));
+    assert!(items.iter().any(|item| item["kind"] == "allure_results"));
+    for item in items {
+        assert!(Path::new(item["path"].as_str().expect("artifact path")).exists());
+    }
+}
+
 #[test]
 fn test_all_full_json_runs_build_first_and_returns_report() {
     let (_dir, config_path, build_calls, test_calls, _captured_config) = setup_project(
@@ -443,12 +556,7 @@ fn test_all_full_json_runs_build_first_and_returns_report() {
     assert!(retained["run_dir"].is_string());
     assert!(retained["junit_xml"].is_string());
     assert!(retained["allure_results"].is_string());
-    for item in payload["data"]["execution"]["artifacts"]["items"]
-        .as_array()
-        .expect("artifact items")
-    {
-        assert!(Path::new(item["path"].as_str().expect("artifact path")).exists());
-    }
+    assert_success_artifact_contract(&payload);
 }
 
 #[test]
@@ -456,12 +564,15 @@ fn test_run_appends_enterprise_additional_launch_keys() {
     let (_dir, config_path, _build_calls, test_calls, _captured_config) =
         setup_project_with_additional_launch_keys(
             "work",
-            JUNIT_SMOKE_REPORT_FIXTURE,
-            "12:00:00.000 [INF] ok",
-            0,
-            false,
-            5,
-            None,
+            ProjectTestSetup {
+                report_xml: JUNIT_SMOKE_REPORT_FIXTURE,
+                yax_log: "12:00:00.000 [INF] ok",
+                enterprise_exit: 0,
+                build_fail: false,
+                timeout_seconds: 5,
+                sleep_seconds: None,
+                native_reports: NativeReportFixture::Complete,
+            },
             &["/TESTMANAGER", "/TCUser", "ci-user"],
         );
 
@@ -845,6 +956,233 @@ fn test_va_builds_vanessa_command_and_overlay() {
         payload["data"]["report"]["extracted_errors"][0],
         "Ошибка VA из текстового лога"
     );
+    assert_success_artifact_contract(&payload);
+}
+
+#[test]
+fn test_yaxunit_nonzero_exit_with_failed_junit_reports_test_failures() {
+    // Break caught: nonzero process exits must not mask report-proven test failures.
+    let (_dir, config_path, _build_calls, _test_calls, _captured_config) =
+        setup_project_with_native_reports(
+            "work",
+            ProjectTestSetup {
+                report_xml: JUNIT_FAILURE_REPORT_FIXTURE,
+                yax_log: "12:00:00.000 [INF] failed",
+                enterprise_exit: 17,
+                build_fail: false,
+                timeout_seconds: 5,
+                sleep_seconds: None,
+                native_reports: NativeReportFixture::Complete,
+            },
+            &[],
+        );
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "test",
+            "yaxunit",
+            "all",
+        ])
+        .output()
+        .expect("run");
+
+    assert!(!output.status.success());
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["data"]["error_kind"], "test_failures");
+    assert_eq!(payload["data"]["execution"]["status"], "failed");
+    assert_eq!(payload["data"]["report"]["summary"]["total"], 2);
+    assert_eq!(payload["data"]["report"]["summary"]["failed"], 1);
+}
+
+#[test]
+fn test_yaxunit_missing_or_empty_native_reports_are_invalid_output() {
+    // Break caught: accepting incomplete native reports turns infrastructure failures into success.
+    for (name, native_reports, error_kind) in [
+        (
+            "missing-junit",
+            NativeReportFixture::MissingJunit,
+            "junit_not_produced",
+        ),
+        (
+            "empty-junit",
+            NativeReportFixture::EmptyJunit,
+            "junit_empty",
+        ),
+        (
+            "missing-allure",
+            NativeReportFixture::MissingAllure,
+            "allure_not_produced",
+        ),
+        (
+            "empty-allure",
+            NativeReportFixture::EmptyAllure,
+            "allure_empty",
+        ),
+    ] {
+        let (_dir, config_path, _build_calls, _test_calls, _captured_config) =
+            setup_project_with_native_reports(
+                name,
+                ProjectTestSetup {
+                    report_xml: JUNIT_SMOKE_REPORT_FIXTURE,
+                    yax_log: "12:00:00.000 [INF] incomplete",
+                    enterprise_exit: 0,
+                    build_fail: false,
+                    timeout_seconds: 5,
+                    sleep_seconds: None,
+                    native_reports,
+                },
+                &[],
+            );
+
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "test",
+                "yaxunit",
+                "all",
+            ])
+            .output()
+            .expect("run");
+
+        assert!(!output.status.success(), "{name}");
+        let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+        assert_eq!(
+            payload["data"]["execution"]["status"], "invalid_output",
+            "{name}"
+        );
+        assert_eq!(payload["data"]["error_kind"], error_kind, "{name}");
+    }
+}
+
+#[test]
+fn test_yaxunit_repeated_runs_retain_distinct_roots() {
+    // Break caught: reusing a run directory would overwrite retained diagnostics.
+    let (_dir, config_path, _build_calls, _test_calls, _captured_config) = setup_project(
+        "work",
+        JUNIT_SMOKE_REPORT_FIXTURE,
+        "12:00:00.000 [INF] ok",
+        0,
+        false,
+        5,
+        None,
+    );
+
+    let mut retained_roots = Vec::new();
+    for _ in 0..2 {
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "test",
+                "yaxunit",
+                "all",
+            ])
+            .output()
+            .expect("run");
+        assert!(output.status.success());
+        let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+        let root = PathBuf::from(
+            payload["data"]["retained_paths"]["run_dir"]
+                .as_str()
+                .expect("run directory"),
+        );
+        assert!(root.is_dir());
+        retained_roots.push(root);
+    }
+
+    assert_ne!(retained_roots[0], retained_roots[1]);
+}
+
+#[test]
+fn test_va_nonzero_exit_with_failed_junit_reports_test_failures() {
+    // Break caught: Vanessa process exits must not mask report-proven test failures.
+    let (_dir, config_path, _build_calls, _test_calls, _captured_params) =
+        setup_va_project_with_native_reports(
+            JUNIT_FAILURE_REPORT_FIXTURE,
+            &[],
+            "work",
+            17,
+            NativeReportFixture::Complete,
+        );
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "test",
+            "va",
+        ])
+        .output()
+        .expect("run");
+
+    assert!(!output.status.success());
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["data"]["error_kind"], "test_failures");
+    assert_eq!(payload["data"]["execution"]["status"], "failed");
+    assert_eq!(payload["data"]["report"]["summary"]["total"], 2);
+    assert_eq!(payload["data"]["report"]["summary"]["failed"], 1);
+}
+
+#[test]
+fn test_va_missing_or_empty_native_reports_are_invalid_output() {
+    // Break caught: Vanessa-specific report paths must be validated before success is returned.
+    for (name, native_reports, error_kind) in [
+        (
+            "missing-junit",
+            NativeReportFixture::MissingJunit,
+            "junit_not_produced",
+        ),
+        (
+            "empty-junit",
+            NativeReportFixture::EmptyJunit,
+            "junit_empty",
+        ),
+        (
+            "missing-allure",
+            NativeReportFixture::MissingAllure,
+            "allure_not_produced",
+        ),
+        (
+            "empty-allure",
+            NativeReportFixture::EmptyAllure,
+            "allure_empty",
+        ),
+    ] {
+        let (_dir, config_path, _build_calls, _test_calls, _captured_params) =
+            setup_va_project_with_native_reports(
+                JUNIT_SMOKE_REPORT_FIXTURE,
+                &[],
+                name,
+                0,
+                native_reports,
+            );
+
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "test",
+                "va",
+            ])
+            .output()
+            .expect("run");
+
+        assert!(!output.status.success(), "{name}");
+        let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+        assert_eq!(
+            payload["data"]["execution"]["status"], "invalid_output",
+            "{name}"
+        );
+        assert_eq!(payload["data"]["error_kind"], error_kind, "{name}");
+    }
 }
 
 #[test]
@@ -1091,7 +1429,10 @@ fn test_module_edt_extension_build_uses_full_load_before_enterprise_launch() {
         &install_dir.join("bin").join("1cv8c"),
         &test_calls,
         &captured_config,
-        JUNIT_SMOKE_REPORT_FIXTURE,
+        NativeReportOutput {
+            report_xml: JUNIT_SMOKE_REPORT_FIXTURE,
+            fixture: NativeReportFixture::Complete,
+        },
         YAXUNIT_LOG_FIXTURE,
         0,
         None,
@@ -1181,7 +1522,10 @@ fn repeated_test_skips_unchanged_source_backed_tool_extension_build() {
         &install_dir.join("bin").join("1cv8c"),
         &test_calls,
         &captured_config,
-        JUNIT_SMOKE_REPORT_FIXTURE,
+        NativeReportOutput {
+            report_xml: JUNIT_SMOKE_REPORT_FIXTURE,
+            fixture: NativeReportFixture::Complete,
+        },
         YAXUNIT_LOG_FIXTURE,
         0,
         None,

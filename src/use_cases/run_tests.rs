@@ -568,7 +568,30 @@ fn collect_run_artifacts(artifacts: &RunArtifacts) -> ArtifactSet {
         &artifacts.platform_log,
     );
 
+    collected.items.sort_by(|left, right| {
+        artifact_kind_sort_key(&left.kind)
+            .cmp(artifact_kind_sort_key(&right.kind))
+            .then_with(|| left.role.cmp(&right.role))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+
     collected
+}
+
+fn artifact_kind_sort_key(kind: &ArtifactKind) -> &str {
+    match kind {
+        ArtifactKind::RunDirectory => "run_directory",
+        ArtifactKind::Config => "config",
+        ArtifactKind::Package => "package",
+        ArtifactKind::Report => "report",
+        ArtifactKind::JunitXml => "junit_xml",
+        ArtifactKind::AllureResults => "allure_results",
+        ArtifactKind::ErrorDetails => "error_details",
+        ArtifactKind::Screenshot => "screenshot",
+        ArtifactKind::RunnerLog => "runner_log",
+        ArtifactKind::PlatformLog => "platform_log",
+        ArtifactKind::Other(value) => value,
+    }
 }
 
 fn collect_existing_junit_reports(root: &Path) -> Vec<PathBuf> {
@@ -711,7 +734,7 @@ mod tests {
         SourceSetPurpose, TestsConfig, ToolsConfig, VanessaProfileConfig,
     };
     use crate::domain::artifact::{
-        ARTIFACT_ROLE_ALLURE_RESULTS, ARTIFACT_ROLE_CONFIG, ARTIFACT_ROLE_JUNIT_XML,
+        ArtifactKind, ARTIFACT_ROLE_ALLURE_RESULTS, ARTIFACT_ROLE_CONFIG, ARTIFACT_ROLE_JUNIT_XML,
         ARTIFACT_ROLE_PLATFORM_LOG, ARTIFACT_ROLE_RUNNER_LOG,
     };
     use crate::domain::execution::{ExecutionStatus, ExecutionTimeouts};
@@ -825,6 +848,78 @@ mod tests {
         assert_eq!(
             collected.get_by_role(ARTIFACT_ROLE_PLATFORM_LOG),
             Some(artifacts.platform_log.as_path())
+        );
+    }
+
+    #[test]
+    fn collect_run_artifacts_sorts_public_inventory_by_kind_role_and_path() {
+        // Break caught: append order leaking implementation details makes JSON artifacts unstable.
+        let dir = tempdir().expect("tempdir");
+        let artifacts = create_artifacts(dir.path());
+        std::fs::create_dir_all(artifacts.junit_dir.join("nested")).expect("junit dir");
+        std::fs::create_dir_all(&artifacts.allure_results_dir).expect("allure dir");
+        for path in [
+            &artifacts.config_json,
+            &artifacts.junit_xml,
+            &artifacts.junit_dir.join("nested").join("second.xml"),
+            &artifacts.runner_log,
+            &artifacts.platform_log,
+        ] {
+            std::fs::write(path, b"fixture").expect("artifact");
+        }
+
+        let collected = collect_run_artifacts(&artifacts);
+        let inventory: Vec<_> = collected
+            .items
+            .iter()
+            .map(|item| {
+                (
+                    item.kind.clone(),
+                    item.role.as_deref().expect("role"),
+                    item.path.clone(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            inventory,
+            vec![
+                (
+                    ArtifactKind::AllureResults,
+                    ARTIFACT_ROLE_ALLURE_RESULTS,
+                    artifacts.allure_results_dir.clone(),
+                ),
+                (
+                    ArtifactKind::Config,
+                    ARTIFACT_ROLE_CONFIG,
+                    artifacts.config_json.clone(),
+                ),
+                (
+                    ArtifactKind::JunitXml,
+                    ARTIFACT_ROLE_JUNIT_XML,
+                    artifacts.junit_dir.join("nested").join("second.xml"),
+                ),
+                (
+                    ArtifactKind::JunitXml,
+                    ARTIFACT_ROLE_JUNIT_XML,
+                    artifacts.junit_xml.clone(),
+                ),
+                (
+                    ArtifactKind::PlatformLog,
+                    ARTIFACT_ROLE_PLATFORM_LOG,
+                    artifacts.platform_log.clone(),
+                ),
+                (
+                    ArtifactKind::RunDirectory,
+                    "run_dir",
+                    artifacts.run_dir.clone(),
+                ),
+                (
+                    ArtifactKind::RunnerLog,
+                    ARTIFACT_ROLE_RUNNER_LOG,
+                    artifacts.runner_log.clone(),
+                ),
+            ]
         );
     }
 
