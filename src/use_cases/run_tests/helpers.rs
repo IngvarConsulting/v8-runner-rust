@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 use crate::config::model::AppConfig;
 use crate::domain::artifact::ArtifactSet;
 use crate::domain::execution::{
-    ExecutionInterruptionDetails, ExecutionOutcome, ExecutionStatus, ExecutionStepKind, StepResult,
+    ExecutionInterruptionDetails, ExecutionOutcome, ExecutionStatus, ExecutionStepKind,
+    ExecutionStepStatus, StepResult,
 };
 use crate::domain::runner::{LaunchClientModeRequest, LaunchOptions, RunnerKind};
 use crate::domain::test::{TestErrorKind, TestOutputMode, TestReport, TestRunResult, TestTarget};
@@ -150,6 +151,15 @@ pub(super) fn succeeded_step(
     message: impl Into<String>,
 ) -> StepResult {
     StepResult::succeeded(name, kind, duration_ms).with_message(message)
+}
+
+pub(super) fn skipped_step(
+    name: &str,
+    kind: ExecutionStepKind,
+    duration_ms: u64,
+    message: impl Into<String>,
+) -> StepResult {
+    StepResult::new(name, kind, ExecutionStepStatus::Skipped, duration_ms).with_message(message)
 }
 
 pub(super) fn failed_step(
