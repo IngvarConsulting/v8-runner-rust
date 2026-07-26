@@ -252,25 +252,27 @@ fn lock_holder_is_live(_pid: u32) -> bool {
 }
 
 pub fn best_effort_fsync_dir(path: &Path) -> std::io::Result<()> {
-    let dir = File::open(path)?;
-
     #[cfg(unix)]
-    unsafe {
-        let rc = libc::fsync(std::os::fd::AsRawFd::as_raw_fd(&dir));
-        if rc == 0 {
-            return Ok(());
-        }
+    {
+        let dir = File::open(path)?;
 
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::EINVAL) {
-            return Ok(());
+        unsafe {
+            let rc = libc::fsync(std::os::fd::AsRawFd::as_raw_fd(&dir));
+            if rc == 0 {
+                return Ok(());
+            }
+
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINVAL) {
+                return Ok(());
+            }
+            Err(error)
         }
-        return Err(error);
     }
 
     #[cfg(not(unix))]
     {
-        let _ = dir;
+        let _ = path;
         Ok(())
     }
 }
@@ -610,6 +612,8 @@ fn with_rollback_context(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use super::best_effort_fsync_dir;
     use super::{
         acquire_advisory_lock, advisory_lock_owner_id, publish_file_atomically,
         publish_file_atomically_impl, read_advisory_lock_metadata, remove_path_if_exists,
@@ -822,6 +826,15 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(fs::read_to_string(&destination).expect("dest"), "new");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_fsync_ignores_missing_directory() {
+        let dir = tempdir().expect("tempdir");
+        let missing_path = dir.path().join("missing-directory");
+
+        best_effort_fsync_dir(&missing_path).expect("best-effort fsync");
     }
 
     #[cfg(windows)]
