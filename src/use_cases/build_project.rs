@@ -905,11 +905,13 @@ mod tests {
                     name: "main".to_owned(),
                     purpose: SourceSetPurpose::Configuration,
                     path: PathBuf::from("main"),
+                    depends_on: Vec::new(),
                 },
                 SourceSetConfig {
                     name: "ext".to_owned(),
                     purpose: SourceSetPurpose::Extension,
                     path: PathBuf::from("ext"),
+                    depends_on: Vec::new(),
                 },
             ],
             build: BuildConfig {
@@ -945,11 +947,13 @@ mod tests {
                     name: "main".to_owned(),
                     purpose: SourceSetPurpose::Configuration,
                     path: PathBuf::from("main"),
+                    depends_on: Vec::new(),
                 },
                 SourceSetConfig {
                     name: "ext".to_owned(),
                     purpose: SourceSetPurpose::Extension,
                     path: PathBuf::from("ext"),
+                    depends_on: Vec::new(),
                 },
             ],
             build: BuildConfig {
@@ -1197,6 +1201,7 @@ mod tests {
             name: "set".to_owned(),
             purpose,
             path: PathBuf::from("set"),
+            depends_on: Vec::new(),
         };
 
         assert!(super::edt_export_requires_configuration_xml(&source_set(
@@ -1253,6 +1258,7 @@ mod tests {
             name: "processors".to_owned(),
             purpose: SourceSetPurpose::ExternalDataProcessors,
             path: PathBuf::from("processors"),
+            depends_on: Vec::new(),
         }];
 
         let result = run_build(&config, &build_args(true)).expect("build");
@@ -1400,6 +1406,7 @@ mod tests {
             name: "main".to_owned(),
             purpose: SourceSetPurpose::Configuration,
             path: PathBuf::from("main"),
+            depends_on: Vec::new(),
         }];
         config.tools.client_mcp.extension = Some(ToolExtensionConfig {
             name: "client_mcp".to_owned(),
@@ -1463,6 +1470,7 @@ mod tests {
             name: "main".to_owned(),
             purpose: SourceSetPurpose::Configuration,
             path: PathBuf::from("main"),
+            depends_on: Vec::new(),
         }];
         config.tools.client_mcp.extension = Some(ToolExtensionConfig {
             name: "client_mcp".to_owned(),
@@ -1503,6 +1511,7 @@ mod tests {
             name: "main".to_owned(),
             purpose: SourceSetPurpose::Configuration,
             path: PathBuf::from("main"),
+            depends_on: Vec::new(),
         }];
         config.tools.client_mcp.extension = Some(ToolExtensionConfig {
             name: "client_mcp".to_owned(),
@@ -1564,6 +1573,7 @@ mod tests {
             name: "main".to_owned(),
             purpose: SourceSetPurpose::Configuration,
             path: PathBuf::from("main"),
+            depends_on: Vec::new(),
         }];
         config.tools.client_mcp.extension = Some(ToolExtensionConfig {
             name: "client_mcp".to_owned(),
@@ -1623,6 +1633,7 @@ mod tests {
             name: "main".to_owned(),
             purpose: SourceSetPurpose::Configuration,
             path: PathBuf::from("main"),
+            depends_on: Vec::new(),
         }];
         config.tools.client_mcp.extension = Some(ToolExtensionConfig {
             name: "client_mcp".to_owned(),
@@ -1670,6 +1681,7 @@ mod tests {
             name: "main".to_owned(),
             purpose: SourceSetPurpose::Configuration,
             path: PathBuf::from("main"),
+            depends_on: Vec::new(),
         }];
         config.tools.client_mcp.extension = Some(ToolExtensionConfig {
             name: "client_mcp".to_owned(),
@@ -1727,6 +1739,7 @@ mod tests {
             name: "main".to_owned(),
             purpose: SourceSetPurpose::Configuration,
             path: PathBuf::from("main"),
+            depends_on: Vec::new(),
         }];
         config.tools.client_mcp.extension = Some(ToolExtensionConfig {
             name: "client_mcp".to_owned(),
@@ -1777,6 +1790,7 @@ mod tests {
             name: "main".to_owned(),
             purpose: SourceSetPurpose::Configuration,
             path: PathBuf::from("main"),
+            depends_on: Vec::new(),
         }];
         config.tools.client_mcp.extension = Some(ToolExtensionConfig {
             name: "client_mcp".to_owned(),
@@ -1825,6 +1839,7 @@ mod tests {
             name: "main".to_owned(),
             purpose: SourceSetPurpose::Configuration,
             path: PathBuf::from("main"),
+            depends_on: Vec::new(),
         }];
         config.tools.client_mcp.extension = Some(ToolExtensionConfig {
             name: "client_mcp".to_owned(),
@@ -2077,6 +2092,7 @@ mod tests {
             name: "client_mcp".to_owned(),
             purpose: SourceSetPurpose::Extension,
             path: PathBuf::from("exts/client-mcp"),
+            depends_on: Vec::new(),
         }];
         prime_edt_snapshots(&config);
         fs::write(
@@ -2117,6 +2133,7 @@ mod tests {
             name: "client_mcp".to_owned(),
             purpose: SourceSetPurpose::Extension,
             path: PathBuf::from("exts/client-mcp"),
+            depends_on: Vec::new(),
         }];
         prime_edt_snapshots(&config);
         fs::write(
@@ -2164,6 +2181,7 @@ mod tests {
             name: "client_mcp".to_owned(),
             purpose: SourceSetPurpose::Extension,
             path: PathBuf::from("exts/client-mcp"),
+            depends_on: Vec::new(),
         }];
         prime_edt_snapshots(&config);
         fs::write(
@@ -2238,6 +2256,7 @@ mod tests {
             name: "client_mcp".to_owned(),
             purpose: SourceSetPurpose::Extension,
             path: PathBuf::from("exts/client-mcp"),
+            depends_on: Vec::new(),
         }];
         prime_edt_snapshots(&config);
         fs::write(
@@ -2302,6 +2321,7 @@ mod tests {
             name: "client_mcp".to_owned(),
             purpose: SourceSetPurpose::Extension,
             path: PathBuf::from("exts/client-mcp"),
+            depends_on: Vec::new(),
         }];
         prime_edt_snapshots(&config);
         fs::write(
