@@ -24,6 +24,8 @@ pub mod issue;
 pub mod launch;
 /// Artifact load/import domain models.
 pub mod load;
+/// Canonical selectors for partial dumps.
+pub mod partial_dump_selector;
 /// Shared runner models.
 pub mod runner;
 /// Versioned runtime-state identity and path models.

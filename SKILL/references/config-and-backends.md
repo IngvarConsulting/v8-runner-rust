@@ -21,12 +21,13 @@ settings before CLI overrides.
 ## Format And Backend Rules
 
 - `format=DESIGNER`, `builder=DESIGNER`: supports init, build, extensions, dump, Designer syntax checks, tests, make/load/artifact workflows if configured.
-- `format=DESIGNER`, `builder=IBCMD`: supports init, build, extensions, dump with a limited backend and only file infobases.
+- `format=DESIGNER`, `builder=IBCMD`: supports init, build, extensions, and dump for file infobases and server infobases with `infobase.dbms`.
 - `format=EDT`, `builder=DESIGNER`: supports init, build through EDT export to Designer files, EDT syntax checks, extensions, and tests.
 - `format=EDT`, `builder=IBCMD`: supports init and build through EDT export to Designer files followed by IBCMD import/apply; requires a file infobase.
 - `extensions` supports Designer and EDT projects, but only extension `source-set` entries are actionable.
 - `syntax designer-config` and `syntax designer-modules` require Designer format with Designer backend.
 - `syntax edt` requires EDT format with Designer backend.
+- IBCMD dump uses project-local standalone-server data under `workPath/ibcmd-data`.
 - `dump --mode partial` with IBCMD degrades to incremental dump and must be called out in user-facing summaries.
 - `convert` is CLI-only, repo-aware, uses configured `source-set`, does not use `builder`, and does not require an infobase.
 - `load` supports `.cf` and `.cfe` only for `format=DESIGNER`, `builder=DESIGNER`.

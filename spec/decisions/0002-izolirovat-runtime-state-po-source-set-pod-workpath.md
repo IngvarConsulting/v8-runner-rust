@@ -69,6 +69,7 @@ EDT source-set
 3. YaXUnit и Vanessa Automation run artifacts;
 4. `redb` hash storages;
 5. generated Designer output для EDT flow.
+6. project-local standalone-server data для `IBCMD` dump под `workPath/ibcmd-data`.
 
 ## Неграницы (Non-goals)
 
@@ -84,6 +85,7 @@ EDT source-set
 2. `source-set.name` влияет на runtime paths и имена storage contexts, поэтому имена должны оставаться безопасными для путей и уникальными.
 3. EDT flow обязан различать исходные EDT-файлы и generated Designer-файлы: первый контур управляет export step, второй контур управляет load step.
 4. При сбоях или небезопасных условиях partial load должен деградировать в full load, а не пытаться выполнить потенциально неполную загрузку.
+5. Project-scoped runtime-каталоги без сегмента `source-set` допустимы только для состояния внешнего инструмента, которое само является проектным и защищено workspace lock.
 
 ## План реализации
 

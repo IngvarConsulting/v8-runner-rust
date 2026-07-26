@@ -17,12 +17,45 @@ pub struct LaunchOptions {
     pub internal_out: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub raw_args: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_epf_wait: Option<ExternalEpfWaitOptions>,
+}
+
+/// Opt-in bounded observation settings for a direct external EPF launch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExternalEpfWaitOptions {
+    pub timeout_ms: u64,
+    pub stderr_output: String,
 }
 
 impl LaunchOptions {
     pub fn is_empty(&self) -> bool {
         self == &Self::default()
     }
+}
+
+pub(crate) fn launch_key_alias_matches(raw: &str, key: &str) -> bool {
+    let trimmed = raw.trim_start();
+    if !trimmed.starts_with(['/', '-']) {
+        return false;
+    }
+    let normalized = trimmed
+        .trim_start_matches(['/', '-'])
+        .trim_end()
+        .to_ascii_lowercase();
+    let expected = key
+        .trim_start_matches(['/', '-'])
+        .trim()
+        .to_ascii_lowercase();
+    if normalized == expected {
+        return true;
+    }
+    let Some(rest) = normalized.strip_prefix(&expected) else {
+        return false;
+    };
+    rest.chars()
+        .next()
+        .is_some_and(|ch| matches!(ch, '"' | '=' | ':' | ' ' | '\t'))
 }
 
 /// Shared client/utility mode for runner-like execution requests.
@@ -97,4 +130,38 @@ pub struct ScenarioExecutionRequest {
     /// Shared launch surface for enterprise/designer execution scenarios.
     #[serde(default, skip_serializing_if = "LaunchOptions::is_empty")]
     pub launch: LaunchOptions,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::launch_key_alias_matches;
+
+    #[test]
+    fn launch_key_alias_matches_exact_and_attached_separator_forms() {
+        for raw in [
+            "/C",
+            "-c",
+            "/C\"payload\"",
+            "/C payload",
+            "/C=payload",
+            "/C:payload",
+        ] {
+            assert!(launch_key_alias_matches(raw, "c"), "{raw}");
+        }
+    }
+
+    #[test]
+    fn launch_key_alias_does_not_match_longer_key_prefixes() {
+        for raw in [
+            "C=payload",
+            "/ C payload",
+            "/Config",
+            "/Client",
+            "/Certificate",
+            "/ExecuteScript",
+        ] {
+            assert!(!launch_key_alias_matches(raw, "c"), "{raw}");
+            assert!(!launch_key_alias_matches(raw, "execute"), "{raw}");
+        }
+    }
 }

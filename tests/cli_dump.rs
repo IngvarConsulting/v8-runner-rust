@@ -37,6 +37,14 @@ fn write_designer_dump_script_for_edt(path: &Path, calls_log: &Path) {
     write_script(path, &body);
 }
 
+fn write_designer_partial_dump_script(path: &Path, captured_list: &Path) {
+    let body = format!(
+        "list_file=\"\"\ntarget=\"\"\nprevious=\"\"\nfor argument in \"$@\"; do\n  if [ \"$previous\" = \"-listFile\" ]; then list_file=\"$argument\"; fi\n  if [ \"$previous\" = \"/DumpConfigToFiles\" ]; then target=\"$argument\"; fi\n  previous=\"$argument\"\ndone\nif [ -n \"$list_file\" ]; then cp \"$list_file\" \"{}\"; fi\nmkdir -p \"$target\"\nprintf '<Configuration />\\n' > \"$target/Configuration.xml\"\nprintf '<ConfigDumpInfo version=\"2.17\"><Metadata id=\"private-id\" configVersion=\"7\"/></ConfigDumpInfo>\\n' > \"$target/ConfigDumpInfo.xml\"\nexit 0",
+        captured_list.display()
+    );
+    write_script(path, &body);
+}
+
 fn write_edt_import_script(path: &Path, calls_log: &Path) {
     let body = format!(
         r#"args="$*"
@@ -160,6 +168,24 @@ fn setup_project() -> (
     )
 }
 
+fn assert_ibcmd_data_path(calls: &str, work_path: &Path) {
+    let expected_fragment = format!("infobase --data {}", work_path.join("ibcmd-data").display());
+    assert!(
+        calls.contains(&expected_fragment),
+        "expected isolated IBCMD data path fragment: {expected_fragment}"
+    );
+}
+
+fn write_designer_config(path: &Path, work_path: &Path, platform_path: &Path) {
+    let config = format!(
+        "workPath: '{}'\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
+        work_path.display(),
+        platform_path.display(),
+    );
+
+    fs::write(path, config).expect("config");
+}
+
 fn write_edt_dump_config(
     path: &Path,
     _base_path: &Path,
@@ -280,7 +306,7 @@ fn snapshot_runtime_generations(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 
 #[test]
 fn dump_ibcmd_full_json_success() {
-    let (_dir, config_path, _binary_path, _work_path, base_path, calls_log) = setup_project();
+    let (_dir, config_path, _binary_path, work_path, base_path, calls_log) = setup_project();
 
     let output = v8_runner_command()
         .args([
@@ -306,6 +332,7 @@ fn dump_ibcmd_full_json_success() {
     );
     let calls = fs::read_to_string(calls_log).expect("calls");
     assert!(calls.contains("--force"));
+    assert_ibcmd_data_path(&calls, &work_path);
     assert!(base_path.join("main").exists());
 }
 
@@ -429,13 +456,14 @@ fn dump_ibcmd_incremental_json_success() {
     assert_eq!(payload["data"]["receipt"]["status"], "applied");
     let calls = fs::read_to_string(calls_log).expect("calls");
     assert!(calls.contains("--sync"));
+    assert_ibcmd_data_path(&calls, &work_path);
     assert!(calls.contains(work_path.display().to_string().as_str()));
     assert!(!calls.contains(base_path.join("main").display().to_string().as_str()));
 }
 
 #[test]
 fn dump_ibcmd_partial_json_success_uses_degraded_fallback() {
-    let (_dir, config_path, _binary_path, _work_path, _base_path, calls_log) = setup_project();
+    let (_dir, config_path, _binary_path, work_path, _base_path, calls_log) = setup_project();
     bootstrap_full(&config_path);
     fs::write(&calls_log, []).expect("clear calls");
 
@@ -467,6 +495,7 @@ fn dump_ibcmd_partial_json_success_uses_degraded_fallback() {
         .contains("IBCMD does not support object-scoped partial dump"));
     let calls = fs::read_to_string(calls_log).expect("calls");
     assert!(calls.contains("--sync"));
+    assert_ibcmd_data_path(&calls, &work_path);
 }
 
 #[test]
@@ -537,6 +566,74 @@ fn dump_ibcmd_partial_failure_keeps_partial_mode_and_warning() {
         .as_str()
         .expect("message")
         .contains("dump failed for source-set 'main' with exit code 17"));
+}
+
+#[test]
+fn dump_designer_partial_json_normalizes_colon_selector_and_reports_both_forms() {
+    let (_dir, config_path, binary_path, work_path, _base_path, _calls_log) = setup_project();
+    let designer_binary = binary_path.with_file_name("1cv8");
+    let captured_list = config_path
+        .parent()
+        .expect("project directory")
+        .join("partial-list.txt");
+    write_designer_partial_dump_script(&designer_binary, &captured_list);
+    write_designer_config(&config_path, &work_path, &designer_binary);
+    bootstrap_full(&config_path);
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "dump",
+            "--mode",
+            "partial",
+            "--object",
+            "  Catalog:Items  ",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(output.status.success());
+    assert_eq!(
+        fs::read_to_string(captured_list).expect("captured selector list"),
+        "Catalog.Items\n"
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(
+        payload["data"]["selectors"][0]["requested"],
+        "  Catalog:Items  "
+    );
+    assert_eq!(
+        payload["data"]["selectors"][0]["normalized"],
+        "Catalog.Items"
+    );
+}
+
+#[test]
+fn dump_text_failure_shows_error_message() {
+    let (_dir, config_path, binary_path, _work_path, _base_path, calls_log) = setup_project();
+    write_ibcmd_script(&binary_path, &calls_log, Some("--force"));
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--no-color",
+            "dump",
+            "--mode",
+            "full",
+            "--source-set",
+            "main",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("● Dump failed"));
+    assert!(stdout.contains("[error]"));
+    assert!(stdout.contains("exit code 17"));
 }
 
 #[test]
@@ -639,7 +736,7 @@ fn dump_json_incremental_and_partial_conflicts_preserve_source_and_runtime_state
 
 #[test]
 fn dump_ibcmd_full_server_connection_passes_dbms_and_infobase_credentials() {
-    let (_dir, config_path, _binary_path, _work_path, _base_path, calls_log) = setup_project();
+    let (_dir, config_path, _binary_path, work_path, _base_path, calls_log) = setup_project();
     write_config_with_infobase(
         &config_path,
         &config_path.parent().expect("dir").join("project"),
@@ -667,4 +764,5 @@ fn dump_ibcmd_full_server_connection_passes_dbms_and_infobase_credentials() {
     assert!(calls.contains("--dbms PostgreSQL --database-server localhost --database-name maindb"));
     assert!(calls.contains("--user Admin --password secret"));
     assert!(calls.contains("--database-user postgres --database-password pg-secret"));
+    assert_ibcmd_data_path(&calls, &work_path);
 }

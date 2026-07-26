@@ -69,15 +69,24 @@ V8_RUNNER_CI_SCOPE=happy-path bash scripts/test/ci-rust.sh
 
 1. `init/setup infobase`
 2. `build --full-rebuild`
-3. `syntax designer-config`
-4. `syntax designer-modules`
-5. `test`
-6. `make` для `.cf/.cfe/.epf/.erf`
-7. проверку, что все deploy-ready артефакты существуют и не пусты
-8. отсутствие `ConfigDumpInfo.xml` в source и наличие private CDFI под `workPath/ib-state/v1`
-9. успешный `dump full` bootstrap в пустой owned target, затем `dump incremental` и
+3. incremental `build` без изменений
+4. Designer-only partial `build --source-set <configuration>` после изменения существующего `.bsl` файла с кириллическим путём
+5. `syntax designer-config`
+6. `syntax designer-modules`
+7. `test`
+8. `make` для `.cf/.cfe/.epf/.erf`
+9. проверку, что все deploy-ready артефакты существуют и не пусты
+10. отсутствие `ConfigDumpInfo.xml` в source и наличие private CDFI под `workPath/ib-state/v1`
+11. успешный `dump full` bootstrap в пустой owned target, затем `dump incremental` и
    `dump partial` с детерминированным `LocalOnly.txt` conflict, точным receipt и byte-exact
    сохранением конфликтующего source/runtime state
+
+Partial smoke contract:
+
+- partial stage запускается только для `builder: DESIGNER`, потому что проверяет Designer `/LoadConfigFromFiles -partial -listFile`;
+- изменяемый `.bsl` файл должен резолвиться внутри скопированного fixture workspace;
+- JSON build result для configuration source-set должен содержать successful step с mode object exactly `{"partial":{"file_count":N}}`, где `N > 0`;
+- byte-level контракт самого `listFile` проверяется unit/regression тестами `change_detection::partial_load`, а trusted smoke подтверждает, что созданный partial-list принимается реальным Designer в Linux/Windows happy-path.
 
 ### 3. Non-blocking live contours
 
