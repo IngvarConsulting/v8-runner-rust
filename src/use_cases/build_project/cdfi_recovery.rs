@@ -5,23 +5,11 @@ use std::path::{Path, PathBuf};
 use tempfile::Builder;
 use uuid::Uuid;
 
+use crate::domain::build::{CdfiRecoveryAction, CdfiRecoverySummary};
 use crate::support::error::AppError;
 use crate::support::fs::replace_file_atomically;
 
 const CDFI_FILE_NAME: &str = "ConfigDumpInfo.xml";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CdfiRecoveryAction {
-    RestoredOriginal,
-    RemovedCreatedFile,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct CdfiRecoverySummary {
-    pub(super) tracked_path: PathBuf,
-    pub(super) snapshot_path: PathBuf,
-    pub(super) action: CdfiRecoveryAction,
-}
 
 #[derive(Debug)]
 pub(super) struct CdfiRecoveryGuard {
@@ -98,10 +86,31 @@ impl CdfiRecoveryGuard {
         };
 
         Ok(CdfiRecoverySummary {
-            tracked_path: self.tracked_path.clone(),
-            snapshot_path: self.snapshot_path.clone(),
             action,
+            snapshot_path: None,
+            failure: None,
         })
+    }
+
+    pub(super) fn failed_summary(&self, error: &AppError) -> CdfiRecoverySummary {
+        CdfiRecoverySummary {
+            action: CdfiRecoveryAction::RestoreFailed,
+            snapshot_path: Some(self.snapshot_path.clone()),
+            failure: Some(error.to_string()),
+        }
+    }
+
+    pub(super) fn finalize_successful_restore(
+        &mut self,
+        mut summary: CdfiRecoverySummary,
+    ) -> CdfiRecoverySummary {
+        if let Err(error) = self.cleanup() {
+            summary.snapshot_path = Some(self.snapshot_path.clone());
+            summary.failure = Some(format!(
+                "failed to remove CDFI recovery snapshot after restoration: {error}"
+            ));
+        }
+        summary
     }
 
     pub(super) fn cleanup(&mut self) -> Result<(), AppError> {

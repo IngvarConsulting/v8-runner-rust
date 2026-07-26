@@ -72,6 +72,7 @@ v8-runner init
 - Source files changed and infobase may be stale: run `v8-runner build`.
 - Only one source-set changed: use commands that accept `--source-set <NAME>` instead of rebuilding or materializing everything.
 - Branch switch, rebase, large object moves, stale source-backed tool extension state, or suspicious incremental state: run `v8-runner build --full-rebuild`.
+- A failed Designer build restores the prior `ConfigDumpInfo.xml` automatically. In JSON/MCP output, inspect `data.cdfi_recovery`; a retained `snapshot_path` means automatic recovery or its snapshot cleanup could not finish and manual diagnosis may be needed.
 - Syntax check: inspect `format` and `builder`, then choose `syntax designer-modules`, `syntax designer-config`, or `syntax edt`.
 - Behavior validation: run the relevant `v8-runner test ...` command; tests build first.
 - Missing local YAxUnit, Vanessa Automation, or onec-client-mcp-devkit setup: run

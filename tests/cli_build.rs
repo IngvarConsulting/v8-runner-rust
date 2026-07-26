@@ -412,6 +412,40 @@ fn build_json_failure_returns_step_payload() {
 }
 
 #[test]
+fn build_json_failure_reports_successful_cdfi_recovery() {
+    let (dir, config_path, binary_path, _work_path) = setup_project();
+    let cdfi_path = dir
+        .path()
+        .join("project")
+        .join("main")
+        .join("ConfigDumpInfo.xml");
+    let original_cdfi = b"\xEF\xBB\xBF<ConfigDumpInfo>original</ConfigDumpInfo>\r\n";
+    fs::write(&cdfi_path, original_cdfi).expect("original CDFI");
+    write_build_script(&binary_path, Some("/LoadConfigFromFiles"));
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "build",
+            "--full-rebuild",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!output.status.success());
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(
+        payload["data"]["cdfi_recovery"]["action"],
+        "restored_original"
+    );
+    assert!(payload["data"]["cdfi_recovery"]["snapshot_path"].is_null());
+    assert!(payload["data"]["cdfi_recovery"]["failure"].is_null());
+    assert_eq!(fs::read(cdfi_path).expect("restored CDFI"), original_cdfi);
+}
+
+#[test]
 fn build_ibcmd_json_failure_reports_operation_target_and_exit_code() {
     let (_dir, config_path, binary_path, _work_path, _base_path, calls_log) = setup_ibcmd_project();
     write_ibcmd_script(&binary_path, &calls_log, Some("config apply"));

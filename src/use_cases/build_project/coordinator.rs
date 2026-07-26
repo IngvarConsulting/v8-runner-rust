@@ -23,6 +23,7 @@ pub(super) fn run_build_designer(
                         ok: false,
                         steps: vec![],
                         duration_ms: started.elapsed().as_millis() as u64,
+                        cdfi_recovery: None,
                     },
                 ));
             }
@@ -184,16 +185,17 @@ pub(super) fn run_build_designer(
                         step_started.elapsed().as_millis() as u64,
                     ),
                     Err(error) => {
-                        let result = fail_from_source_set_index(
+                        let mut result = fail_from_source_set_index(
                             started,
                             steps,
                             &ordered_source_sets,
                             index,
                             source_set,
                             mode,
-                            error.to_string(),
+                            error.error.to_string(),
                         );
-                        return Err(BuildExecutionFailure::with_payload(error, result));
+                        result.cdfi_recovery = error.cdfi_recovery;
+                        return Err(BuildExecutionFailure::with_payload(error.error, result));
                     }
                 }
             }
@@ -204,6 +206,7 @@ pub(super) fn run_build_designer(
         ok: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,
+        cdfi_recovery: None,
     })
 }
 
@@ -230,6 +233,7 @@ pub(super) fn run_build_ibcmd(
                         ok: false,
                         steps: vec![],
                         duration_ms: started.elapsed().as_millis() as u64,
+                        cdfi_recovery: None,
                     },
                 ));
             }
@@ -375,6 +379,7 @@ pub(super) fn run_build_ibcmd(
         ok: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,
+        cdfi_recovery: None,
     })
 }
 
@@ -395,6 +400,7 @@ pub(super) fn run_build_edt(
                 ok: false,
                 steps: vec![],
                 duration_ms: 0,
+                cdfi_recovery: None,
             },
         ));
     }
@@ -411,6 +417,7 @@ pub(super) fn run_build_edt(
                         ok: false,
                         steps: vec![],
                         duration_ms: started.elapsed().as_millis() as u64,
+                        cdfi_recovery: None,
                     },
                 ));
             }
@@ -927,6 +934,7 @@ pub(super) fn run_build_edt(
                             partial_paths.as_deref(),
                             &commit,
                         )
+                        .map_err(BuildStepFailure::from)
                     }
                 };
                 match load_result {
@@ -939,16 +947,17 @@ pub(super) fn run_build_edt(
                         load_started.elapsed().as_millis() as u64,
                     ),
                     Err(error) => {
-                        let result = fail_from_source_set_index(
+                        let mut result = fail_from_source_set_index(
                             started,
                             steps,
                             &ordered_source_sets,
                             index,
                             source_set,
                             mode,
-                            error.to_string(),
+                            error.error.to_string(),
                         );
-                        return Err(BuildExecutionFailure::with_payload(error, result));
+                        result.cdfi_recovery = error.cdfi_recovery;
+                        return Err(BuildExecutionFailure::with_payload(error.error, result));
                     }
                 }
             }
@@ -959,5 +968,6 @@ pub(super) fn run_build_edt(
         ok: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,
+        cdfi_recovery: None,
     })
 }

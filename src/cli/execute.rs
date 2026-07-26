@@ -21,7 +21,7 @@ use crate::domain::artifact::{
     ArtifactRef, ArtifactSet, ARTIFACT_ROLE_PACKAGE_FILE, ARTIFACT_ROLE_PLATFORM_LOG,
 };
 use crate::domain::artifacts::{ArtifactBuildMetadata, ArtifactBuildMode, ArtifactsResult};
-use crate::domain::build::{BuildMode, BuildResult};
+use crate::domain::build::{BuildMode, BuildResult, CdfiRecoveryAction};
 use crate::domain::convert::{ConvertDirection, ConvertResult, ConvertScope};
 use crate::domain::dump::{DumpMode, DumpResult};
 use crate::domain::execution::{
@@ -1601,7 +1601,7 @@ fn test_report(result: &TestRunResult) -> Option<&TestReport> {
 }
 
 fn render_build_text(result: &BuildResult, presenter: &Presenter, succeeded: bool) {
-    let summary = if !succeeded {
+    let mut summary = if !succeeded {
         TimelineItem::new(TimelineStatus::Failed, "Build failed")
     } else if result
         .steps
@@ -1612,6 +1612,23 @@ fn render_build_text(result: &BuildResult, presenter: &Presenter, succeeded: boo
     } else {
         TimelineItem::new(TimelineStatus::Succeeded, "Build completed successfully")
     };
+    if let Some((action, snapshot_path)) = result.cdfi_recovery.as_ref().and_then(|recovery| {
+        recovery
+            .snapshot_path
+            .as_ref()
+            .map(|snapshot_path| (&recovery.action, snapshot_path))
+    }) {
+        let label = match action {
+            CdfiRecoveryAction::RestoreFailed => "CDFI recovery failed",
+            CdfiRecoveryAction::RestoredOriginal | CdfiRecoveryAction::RemovedCreatedFile => {
+                "CDFI recovery snapshot cleanup failed"
+            }
+        };
+        summary = summary.with_detail(format!(
+            "{label}; retained snapshot: {}",
+            snapshot_path.display(),
+        ));
+    }
     presenter.print_timeline(&[summary]);
 }
 

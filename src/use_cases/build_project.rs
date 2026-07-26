@@ -7,7 +7,7 @@ use std::time::Instant;
 use crate::change_detection::analyzer::{self, AnalysisOutcome};
 use crate::change_detection::partial_load;
 use crate::config::model::{AppConfig, BuilderBackend, SourceFormat, SourceSetConfig};
-use crate::domain::build::{BuildMode, BuildResult};
+use crate::domain::build::{BuildMode, BuildResult, CdfiRecoverySummary};
 use crate::domain::source_set::SourceSetContext;
 use crate::platform::edt::EdtDsl;
 use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
@@ -67,6 +67,30 @@ pub fn execute(
 
 pub(crate) type BuildExecutionFailure = UseCaseFailure<BuildResult>;
 
+#[derive(Debug)]
+struct BuildStepFailure {
+    error: AppError,
+    cdfi_recovery: Option<CdfiRecoverySummary>,
+}
+
+impl BuildStepFailure {
+    fn with_cdfi_recovery(error: AppError, cdfi_recovery: CdfiRecoverySummary) -> Self {
+        Self {
+            error,
+            cdfi_recovery: Some(cdfi_recovery),
+        }
+    }
+}
+
+impl From<AppError> for BuildStepFailure {
+    fn from(error: AppError) -> Self {
+        Self {
+            error,
+            cdfi_recovery: None,
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn run_build(config: &AppConfig, args: &BuildArgs) -> UseCaseResult<BuildResult> {
     run_build_unlocked(
@@ -93,6 +117,7 @@ pub(crate) fn run_build_unlocked(
                 ok: false,
                 steps: vec![],
                 duration_ms: 0,
+                cdfi_recovery: None,
             },
         ));
     }
@@ -430,12 +455,12 @@ fn execute_source_set_step(
     step_index: usize,
     partial_paths: Option<&[PathBuf]>,
     commit: &StepCommit,
-) -> Result<Vec<String>, AppError> {
+) -> Result<Vec<String>, BuildStepFailure> {
     if let Some(error) = interruption_before_safe_point(
         context,
         format!("build load for source-set '{}'", source_set.name),
     ) {
-        return Err(error);
+        return Err(error.into());
     }
     if let Some(paths) = partial_paths {
         log_timeline_stage(
@@ -472,7 +497,7 @@ fn execute_source_set_step(
             Ok(dsl) => dsl,
             Err(error) => {
                 let partial_list = preserve_partial_load_list(list_file);
-                return Err(attach_partial_load_list_path(error, partial_list));
+                return Err(attach_partial_load_list_path(error, partial_list).into());
             }
         };
         let recovery_guard =
@@ -480,7 +505,7 @@ fn execute_source_set_step(
                 Ok(recovery_guard) => recovery_guard,
                 Err(error) => {
                     let partial_list = preserve_partial_load_list(list_file);
-                    return Err(attach_partial_load_list_path(error, partial_list));
+                    return Err(attach_partial_load_list_path(error, partial_list).into());
                 }
             };
         let load_result = designer_dsl.load_config_from_files_partial(
@@ -600,12 +625,21 @@ fn execute_source_set_step(
 fn restore_cdfi_after_designer_failure(
     error: AppError,
     recovery_guard: &mut CdfiRecoveryGuard,
-) -> AppError {
+) -> BuildStepFailure {
     match recovery_guard.restore() {
-        Ok(_) => error,
-        Err(recovery_error) => error.with_context(format!(
-            "failed to restore CDFI after Designer build failure: {recovery_error}"
-        )),
+        Ok(summary) => BuildStepFailure::with_cdfi_recovery(
+            error,
+            recovery_guard.finalize_successful_restore(summary),
+        ),
+        Err(recovery_error) => {
+            let failure = error.with_context(format!(
+                "failed to restore CDFI after Designer build failure: {recovery_error}"
+            ));
+            BuildStepFailure::with_cdfi_recovery(
+                failure,
+                recovery_guard.failed_summary(&recovery_error),
+            )
+        }
     }
 }
 
@@ -787,7 +821,7 @@ mod tests {
     use std::io::ErrorKind;
     use std::path::{Path, PathBuf};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
 
@@ -1144,6 +1178,16 @@ mod tests {
             fs::read(base.join("main").join("ConfigDumpInfo.xml")).expect("restored CDFI"),
             original_cdfi
         );
+        assert!(
+            !fs::read_dir(&work)
+                .expect("work entries")
+                .flatten()
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("cdfi-recovery-")),
+            "successful CDFI restoration must remove its private snapshot"
+        );
     }
 
     #[cfg(unix)]
@@ -1192,6 +1236,56 @@ mod tests {
             .error
             .message()
             .contains("before entering update_db_cfg for source-set 'main' safe point"));
+        assert_eq!(
+            fs::read(base.join("main").join("ConfigDumpInfo.xml")).expect("restored CDFI"),
+            original_cdfi
+        );
+        let calls = fs::read_to_string(&calls_log).expect("calls");
+        assert!(calls.contains("/LoadConfigFromFiles"));
+        assert!(!calls.contains("/UpdateDBCfg"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_build_restores_cdfi_after_deadline_before_designer_update() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let platform = dir.path().join("1cv8");
+        let calls_log = dir.path().join("designer.calls.log");
+        let original_cdfi =
+            b"\xEF\xBB\xBF<ConfigDumpInfo>original deadline fixture</ConfigDumpInfo>\r\n";
+        create_source_tree(&base);
+        fs::create_dir_all(&work).expect("work");
+        fs::write(base.join("main").join("ConfigDumpInfo.xml"), original_cdfi)
+            .expect("original CDFI");
+        write_designer_script_with_load_delay(
+            &platform,
+            &calls_log,
+            None,
+            Some(Duration::from_millis(100)),
+        );
+        let config = build_config(
+            &base,
+            &work,
+            &platform,
+            20,
+            SourceFormat::Designer,
+            BuilderBackend::Designer,
+        );
+
+        let failure = super::execute(
+            &ExecutionContext::cli(CommandName::Build)
+                .with_deadline(Some(Instant::now() + Duration::from_millis(20))),
+            &config,
+            &build_args(true),
+        )
+        .expect_err("build must stop before update after deadline");
+
+        assert!(failure
+            .error
+            .message()
+            .contains("execution timeout expired before reaching a safe completion point"));
         assert_eq!(
             fs::read(base.join("main").join("ConfigDumpInfo.xml")).expect("restored CDFI"),
             original_cdfi
@@ -1264,6 +1358,16 @@ mod tests {
         assert_eq!(
             fs::read(base.join("main").join("ConfigDumpInfo.xml")).expect("platform CDFI"),
             b"<ConfigDumpInfo>platform replacement</ConfigDumpInfo>\n"
+        );
+        assert!(
+            !fs::read_dir(&work)
+                .expect("work entries")
+                .flatten()
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("cdfi-recovery-")),
+            "successful build must remove its private CDFI recovery snapshot"
         );
     }
 
@@ -3331,10 +3435,12 @@ mod tests {
                 },
             ],
             duration_ms: 42,
+            cdfi_recovery: None,
         };
 
         let json = serde_json::to_value(result).expect("json");
         assert_eq!(BUILD_COMMAND, "build");
         assert_eq!(json["steps"][0]["mode"], "full");
+        assert!(json.get("cdfi_recovery").is_none());
     }
 }
