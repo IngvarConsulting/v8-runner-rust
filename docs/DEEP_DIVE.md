@@ -63,8 +63,9 @@ dependencies раньше dependent, выбирая одновременно г�
 4. Load/apply generated files через `DESIGNER` или `IBCMD`.
 
 Пайплайн намеренно не является атомарным across many `source-set`: поздний failure не откатывает
-уже успешные ранние шаги. Failure dependency останавливает platform execution для всех оставшихся
-selected nodes; они остаются в structured result как `skipped` с причиной
+уже успешные ранние шаги. `build` использует fail-fast policy: failure любого source-set (в том
+числе dependency) останавливает platform execution для всех оставшихся selected nodes, включая
+независимые. Они остаются в structured result как `skipped` с причиной
 `aborted after previous failure`.
 
 ## Проверка и тесты
