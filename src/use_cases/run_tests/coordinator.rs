@@ -39,7 +39,7 @@ pub(super) fn run_tests(
     let mut steps = Vec::new();
     let mut warnings = Vec::new();
     if let Some(failure) =
-        interrupted_test_failure(context, &target, &mode, &warnings, &steps, started)
+        interrupted_test_failure(context, &target, &mode, &warnings, &steps, started, None)
     {
         return Err(failure);
     }
@@ -168,9 +168,15 @@ pub(super) fn run_tests(
     );
 
     let prepare_runner_started = Instant::now();
-    if let Some(failure) =
-        interrupted_test_failure(context, &target, &mode, &warnings, &steps, started)
-    {
+    if let Some(failure) = interrupted_test_failure(
+        context,
+        &target,
+        &mode,
+        &warnings,
+        &steps,
+        started,
+        retain_run_artifacts(config, &artifacts).ok(),
+    ) {
         return Err(failure);
     }
     let prepared_run = match prepare_runner_artifacts(config, args, &target, &mut artifacts) {
@@ -276,9 +282,15 @@ pub(super) fn run_tests(
         }
     };
 
-    if let Some(failure) =
-        interrupted_test_failure(context, &target, &mode, &warnings, &steps, started)
-    {
+    if let Some(failure) = interrupted_test_failure(
+        context,
+        &target,
+        &mode,
+        &warnings,
+        &steps,
+        started,
+        retain_run_artifacts(config, &artifacts).ok(),
+    ) {
         return Err(failure);
     }
     let platform_result = match enterprise.run_launch(&platform_launch) {
@@ -415,7 +427,19 @@ pub(super) fn run_tests(
         let message = match &kind {
             TestErrorKind::AllureNotProduced => "Allure results directory was not produced",
             TestErrorKind::AllureEmpty => "Allure results directory is empty",
-            _ => "Allure results validation failed",
+            TestErrorKind::BuildFailed
+            | TestErrorKind::TestSetupFailed
+            | TestErrorKind::EnterpriseSpawnFailed
+            | TestErrorKind::EnterpriseStartupCheckFailed
+            | TestErrorKind::EnterpriseExitedEarly
+            | TestErrorKind::EnterpriseStdoutLogIo
+            | TestErrorKind::EnterpriseStderrLogIo
+            | TestErrorKind::EnterpriseTimedOut
+            | TestErrorKind::EnterpriseExitedNonZero
+            | TestErrorKind::TestFailures
+            | TestErrorKind::JunitNotProduced
+            | TestErrorKind::JunitEmpty
+            | TestErrorKind::JunitMalformed => "Allure results validation failed",
         }
         .to_owned();
         let error =
@@ -499,7 +523,19 @@ pub(super) fn run_tests(
                 platform_result.process.exit_code
             ),
             TestErrorKind::TestFailures => "test run reported failures".to_owned(),
-            _ => "test run failed".to_owned(),
+            TestErrorKind::BuildFailed
+            | TestErrorKind::TestSetupFailed
+            | TestErrorKind::EnterpriseSpawnFailed
+            | TestErrorKind::EnterpriseStartupCheckFailed
+            | TestErrorKind::EnterpriseExitedEarly
+            | TestErrorKind::EnterpriseStdoutLogIo
+            | TestErrorKind::EnterpriseStderrLogIo
+            | TestErrorKind::EnterpriseTimedOut
+            | TestErrorKind::JunitNotProduced
+            | TestErrorKind::JunitEmpty
+            | TestErrorKind::JunitMalformed
+            | TestErrorKind::AllureNotProduced
+            | TestErrorKind::AllureEmpty => "test run failed".to_owned(),
         };
         let outcome = with_retained_artifacts(
             ExecutionOutcome::new(test_execution_status(Some(kind.clone()), false))
