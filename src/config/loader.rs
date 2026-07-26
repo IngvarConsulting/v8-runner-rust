@@ -224,6 +224,9 @@ fn normalize_config_paths(config: &mut AppConfig, config_dir: &Path) {
     if let Some(path) = config.tools.va.epf_path.as_mut() {
         *path = normalize_optional_path(path, config_dir);
     }
+    if let Some(path) = config.tools.platform.path.as_mut() {
+        *path = normalize_optional_path(path, config_dir);
+    }
     if let Some(extension) = config.tools.client_mcp.extension.as_mut() {
         if let Some(source) = extension.source_mut() {
             source.path = normalize_optional_path(&source.path, config_dir);
@@ -1257,6 +1260,77 @@ mod tests {
         assert_eq!(
             config.tools.edt_cli.version.as_deref(),
             Some("1c-edt-2025.2.3")
+        );
+    }
+
+    #[test]
+    fn load_config_defaults_platform_strict_to_false() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let src = base.join("src");
+        std::fs::create_dir_all(&src).expect("src dir");
+        let config_path = dir.path().join("v8project.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "workPath: {}\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: \"File=/tmp/ib\"\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: base/src\n",
+                work.display()
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(config_path.to_str(), None).expect("load config");
+
+        assert!(!config.tools.platform.strict);
+    }
+
+    #[test]
+    fn load_config_accepts_strict_platform_without_path() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let src = base.join("src");
+        std::fs::create_dir_all(&src).expect("src dir");
+        let config_path = dir.path().join("v8project.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "workPath: {}\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: \"File=/tmp/ib\"\ntools:\n  platform:\n    strict: true\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: base/src\n",
+                work.display()
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(config_path.to_str(), None).expect("strict without path");
+
+        assert!(config.tools.platform.strict);
+        assert!(config.tools.platform.path.is_none());
+    }
+
+    #[test]
+    fn load_config_normalizes_relative_platform_path_against_config_directory() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let src = base.join("src");
+        std::fs::create_dir_all(&src).expect("src dir");
+        let config_path = dir.path().join("v8project.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "workPath: {}\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: \"File=/tmp/ib\"\ntools:\n  platform:\n    path: platform/bin\n    strict: false\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: base/src\n",
+                work.display()
+            ),
+        )
+        .expect("write config");
+
+        let config = load_config(config_path.to_str(), None).expect("load config");
+        let config_dir = std::fs::canonicalize(dir.path()).expect("canonical config dir");
+
+        assert_eq!(
+            config.tools.platform.path.as_deref(),
+            Some(config_dir.join("platform/bin").as_path())
         );
     }
 }

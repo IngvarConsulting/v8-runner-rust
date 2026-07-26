@@ -996,7 +996,9 @@ mod tests {
     use crate::domain::dump::{DumpMode, DumpResult};
     use crate::domain::execution::{ExecutionStepKind, StepResult};
     use crate::domain::issue::{Issue, IssueSeverity, ModuleIssue};
-    use crate::domain::launch::{LaunchMode, LaunchResult};
+    use crate::domain::launch::{
+        LaunchMode, LaunchResult, PlatformResolution, PlatformResolutionSource,
+    };
     use crate::domain::runner::RunnerKind;
     use crate::domain::syntax::{SyntaxCheckResult, SyntaxCheckStatus, SyntaxIssueSummary};
     use crate::domain::test::{
@@ -1828,6 +1830,7 @@ mod tests {
                 mode: result_mode,
                 pid: Some(42),
                 binary: PathBuf::from("/opt/1cv8"),
+                platform_resolution: sample_platform_resolution("/opt/1cv8"),
                 message: None,
                 mcp_readiness: None,
                 external_epf_wait: None,
@@ -1859,6 +1862,7 @@ mod tests {
             mode: LaunchMode::Mcp,
             pid: Some(42),
             binary: PathBuf::from("/opt/1cv8"),
+            platform_resolution: sample_platform_resolution("/opt/1cv8"),
             message: None,
             mcp_readiness: None,
             external_epf_wait: None,
@@ -1907,6 +1911,7 @@ mod tests {
                 mode: LaunchMode::Thin,
                 pid: Some(42),
                 binary: PathBuf::from("/opt/1cv8c"),
+                platform_resolution: sample_platform_resolution("/opt/1cv8c"),
                 message: None,
                 mcp_readiness: None,
                 external_epf_wait: None,
@@ -1948,6 +1953,7 @@ mod tests {
                 mode: LaunchMode::Thin,
                 pid: Some(42),
                 binary: PathBuf::from("/opt/1cv8c"),
+                platform_resolution: sample_platform_resolution("/opt/1cv8c"),
                 message: None,
                 mcp_readiness: None,
                 external_epf_wait: None,
@@ -1983,6 +1989,7 @@ mod tests {
                 mode: LaunchMode::Mcp,
                 pid: Some(42),
                 binary: PathBuf::from("/opt/1cv8"),
+                platform_resolution: sample_platform_resolution("/opt/1cv8"),
                 message: None,
                 mcp_readiness: None,
                 external_epf_wait: None,
@@ -2023,6 +2030,7 @@ mod tests {
                 mode: LaunchMode::Mcp,
                 pid: Some(42),
                 binary: PathBuf::from("/opt/1cv8"),
+                platform_resolution: sample_platform_resolution("/opt/1cv8"),
                 message: None,
                 mcp_readiness: None,
                 external_epf_wait: None,
@@ -2063,6 +2071,7 @@ mod tests {
                 mode: LaunchMode::Designer,
                 pid: None,
                 binary: PathBuf::from("/opt/1cv8"),
+                platform_resolution: sample_platform_resolution("/opt/1cv8"),
                 message: None,
                 mcp_readiness: None,
                 external_epf_wait: None,
@@ -2104,6 +2113,7 @@ mod tests {
                 mode: LaunchMode::Designer,
                 pid: None,
                 binary: PathBuf::from("/opt/1cv8"),
+                platform_resolution: sample_platform_resolution("/opt/1cv8"),
                 message: None,
                 mcp_readiness: None,
                 external_epf_wait: None,
@@ -2532,6 +2542,15 @@ mod tests {
             },
             mcp: Default::default(),
             tests: TestsConfig::default(),
+        }
+    }
+
+    fn sample_platform_resolution(path: &str) -> PlatformResolution {
+        PlatformResolution {
+            path: PathBuf::from(path),
+            version: Some("8.3.25.1234".to_owned()),
+            source: PlatformResolutionSource::Explicit,
+            installation_root: PathBuf::from("/opt"),
         }
     }
 

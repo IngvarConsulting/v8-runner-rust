@@ -134,6 +134,10 @@ v8-runner launch mcp va --mcp-port 1550 --wait-ready
 `test va`, MCP `run_all_tests` с `runner=vanessa` или `launch mcp va --wait-ready`; голый
 `launch mcp` предназначен только для client MCP без загрузки Vanessa.
 
+Для автоматизации `v8-runner --json-message launch ...` сохраняет поле `binary` и добавляет
+canonical `platform_resolution` (path, version, source и installation root). Эта metadata
+публикуется только для результата `launch`, а не для всех команд.
+
 ### Поднимите MCP transport (MCP-транспорт) для AI-агентов:
 
 ```bash

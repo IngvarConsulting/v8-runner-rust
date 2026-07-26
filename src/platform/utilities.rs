@@ -1,6 +1,7 @@
 use crate::config::model::AppConfig;
 use crate::platform::locator::{
-    EdtVersion, Locator, PlatformVersionRequirement, UtilityLocation, UtilityType,
+    EdtVersion, Locator, LocatorOptions, PlatformResolutionPolicy, PlatformVersionRequirement,
+    UtilityLocation, UtilityType,
 };
 use crate::platform::process::{ProcessExecutor, ProcessRunner};
 use tracing::debug;
@@ -37,17 +38,22 @@ impl PlatformUtilities {
                     .and_then(EdtVersion::parse_lenient)
             });
         Self {
-            locator: Locator::new(
-                config.tools.platform.path.clone(),
-                config
+            locator: Locator::new(LocatorOptions {
+                platform_hint: config.tools.platform.path.clone(),
+                platform_version: config
                     .tools
                     .platform
                     .version
                     .as_deref()
                     .and_then(PlatformVersionRequirement::parse),
+                platform_policy: if config.tools.platform.strict {
+                    PlatformResolutionPolicy::Strict
+                } else {
+                    PlatformResolutionPolicy::Lenient
+                },
                 edt_hint,
                 edt_version,
-            ),
+            }),
             standard_runner: ProcessExecutor,
         }
     }
@@ -88,7 +94,10 @@ mod tests {
         AppConfig, BuildConfig, BuilderBackend, InfobaseConfig, McpConfig, PlatformToolConfig,
         SourceFormat, TestsConfig, ToolsConfig,
     };
-    use crate::platform::locator::{EdtVersion, Locator, LocatorError, UtilityType};
+    use crate::platform::locator::{
+        EdtVersion, Locator, LocatorError, PlatformVersion, PlatformVersionRequirement, UtilityType,
+    };
+    use crate::support::path::normalize_windows_verbatim_path;
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
@@ -102,16 +111,15 @@ mod tests {
         fs::set_permissions(path, perms).expect("chmod");
     }
 
-    #[cfg(unix)]
     fn touch_executable(path: &Path) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("create dirs");
         }
         fs::write(path, "#!/bin/sh\nexit 0\n").expect("write");
+        #[cfg(unix)]
         make_executable(path);
     }
 
-    #[cfg(unix)]
     fn sample_config(platform_path: Option<PathBuf>, platform_version: Option<&str>) -> AppConfig {
         AppConfig {
             base_path: PathBuf::from("/tmp/project"),
@@ -125,6 +133,7 @@ mod tests {
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: platform_path,
+                    strict: false,
                     version: platform_version.map(str::to_owned),
                 },
                 ..ToolsConfig::default()
@@ -146,7 +155,10 @@ mod tests {
 
         let location = utilities.locate(UtilityType::EdtCli).expect("locate edt");
 
-        assert_eq!(location.path, binary);
+        assert_eq!(
+            location.path,
+            binary.canonicalize().expect("canonical binary")
+        );
     }
 
     #[cfg(unix)]
@@ -194,7 +206,10 @@ mod tests {
 
         let location = utilities.locate(UtilityType::EdtCli).expect("locate edt");
 
-        assert_eq!(location.path, wanted);
+        assert_eq!(
+            location.path,
+            wanted.canonicalize().expect("canonical binary")
+        );
     }
 
     #[cfg(unix)]
@@ -221,7 +236,59 @@ mod tests {
 
             let location = utilities.locate(utility).expect("locate platform utility");
 
-            assert_eq!(location.path, wanted);
+            assert_eq!(
+                location.path,
+                wanted.canonicalize().expect("canonical binary")
+            );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn from_config_ignores_platform_version_for_lenient_path_hint() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("platform");
+        let binary = root
+            .join("8.4.1.1")
+            .join("bin")
+            .join(UtilityType::V8.executable_name());
+        touch_executable(&binary);
+        let config = sample_config(Some(root), Some("8.3"));
+        let mut utilities = PlatformUtilities::from_config(&config);
+
+        let location = utilities
+            .locate(UtilityType::V8)
+            .expect("lenient path ignores configured version");
+
+        assert_eq!(
+            location.path,
+            binary.canonicalize().expect("canonical binary")
+        );
+    }
+
+    #[test]
+    fn from_config_maps_strict_platform_flag_to_fail_closed_policy() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("platform");
+        let binary = root
+            .join("8.3.25.9999")
+            .join("bin")
+            .join(UtilityType::V8.executable_name());
+        touch_executable(&binary);
+        let mut config = sample_config(Some(root), Some("8.3.25.1234"));
+        config.tools.platform.strict = true;
+        let mut utilities = PlatformUtilities::from_config(&config);
+
+        assert_eq!(
+            utilities.locate(UtilityType::V8).expect_err("mismatch"),
+            LocatorError::VersionMismatch {
+                utility: UtilityType::V8,
+                path: normalize_windows_verbatim_path(
+                    &binary.canonicalize().expect("canonical binary")
+                ),
+                required: PlatformVersionRequirement::parse("8.3.25.1234").expect("requirement"),
+                found: PlatformVersion::parse_strict("8.3.25.9999").expect("version"),
+            }
+        );
     }
 }

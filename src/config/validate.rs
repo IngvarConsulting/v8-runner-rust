@@ -1157,6 +1157,7 @@ mod tests {
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: None,
+                    strict: false,
                     version: Some("8.3.25".to_owned()),
                 },
                 ..ToolsConfig::default()
@@ -1194,6 +1195,7 @@ mod tests {
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: None,
+                    strict: false,
                     version: Some("8.3".to_owned()),
                 },
                 ..ToolsConfig::default()
@@ -1231,6 +1233,7 @@ mod tests {
             tools: ToolsConfig {
                 platform: PlatformToolConfig {
                     path: None,
+                    strict: false,
                     version: Some("8".to_owned()),
                 },
                 ..ToolsConfig::default()
