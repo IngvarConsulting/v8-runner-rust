@@ -626,13 +626,13 @@ struct PartialToolsSchema {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct PlatformToolSchema {
-    /// Platform binary, installation `bin` directory, or platform root discovery hint.
+    /// Platform binary, installation `bin` directory, or platform root discovery hint. When set, platform discovery uses only this path and never falls back to default roots or PATH.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     path: Option<PathBuf>,
-    /// Require platform utility resolution to stay within the configured path.
+    /// Enforce `version` for a configured `path`. Without `path`, `version` is applied to normal default-root and PATH discovery.
     #[serde(default)]
     strict: bool,
-    /// Platform version requirement used for discovery.
+    /// Platform version requirement. Without `path`, it filters normal discovery; with `path`, it is ignored unless `strict` is true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     version: Option<String>,
 }

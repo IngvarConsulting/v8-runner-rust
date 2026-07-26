@@ -1271,7 +1271,7 @@ mod tests {
     }
 
     #[test]
-    fn load_config_rejects_strict_platform_without_path() {
+    fn load_config_accepts_strict_platform_without_path() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
@@ -1287,12 +1287,10 @@ mod tests {
         )
         .expect("write config");
 
-        let error = load_config(config_path.to_str(), None).expect_err("strict path validation");
+        let config = load_config(config_path.to_str(), None).expect("strict without path");
 
-        assert!(matches!(
-            error,
-            ConfigLoadError::ValidationError(ConfigValidationError::StrictPlatformRequiresPath)
-        ));
+        assert!(config.tools.platform.strict);
+        assert!(config.tools.platform.path.is_none());
     }
 
     #[test]

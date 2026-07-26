@@ -4,21 +4,21 @@
 
 **Goal:** Add fail-closed platform pinning with coherent installation resolution and observable launch metadata.
 
-**Architecture:** Add a typed resolution policy at the config-to-locator boundary. Candidates carry their source; strict resolution searches only the explicit boundary and pins one canonical installation root for all platform utilities.
+**Architecture:** Add a typed resolution policy at the config-to-locator boundary. Candidates carry their source; any configured platform path searches only that explicit boundary, while strict path resolution also enforces version and pins one canonical installation root for all platform utilities.
 
 **Tech Stack:** Rust, serde, schemars, clap integration tests, existing locator and launch contracts.
 
 ## Task 1: Configuration and path normalization
 
-- [ ] Add failing model/schema/loader tests for strict and relative platform paths.
-- [ ] Add `PlatformToolConfig.strict`, schema fields, strict-without-path validation, and path normalization.
+- [ ] Add failing model/schema/loader tests for strict, relative platform paths, and strict without path.
+- [ ] Add `PlatformToolConfig.strict`, schema fields, strict-without-path acceptance, and path normalization.
 - [ ] Regenerate both checked-in schemas and run focused config tests.
 
 ## Task 2: Typed strict locator
 
-- [ ] Add failing locator tests for no fallback, exact/prefix mismatch, unknown version, and sibling consistency.
+- [ ] Add failing locator tests for the path/version/strict contract matrix, exact/prefix mismatch, unknown version, and sibling consistency.
 - [ ] Add typed policy/source/errors and source-aware candidates.
-- [ ] Bind strict resolution to one canonical installation root and capture PATH roots once.
+- [ ] Make configured path resolution explicit-only, bind strict path resolution to one canonical installation root, and capture PATH roots once.
 - [ ] Run the complete locator and utilities suites.
 
 ## Task 3: JSON and documentation

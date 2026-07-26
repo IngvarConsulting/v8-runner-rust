@@ -553,7 +553,12 @@ pub struct PlatformToolConfig {
     /// directory, or to a platform root that contains versioned subdirectories.
     pub path: Option<PathBuf>,
 
-    /// Require platform utility resolution to stay within the configured path.
+    /// Enforce `version` for a configured `path`.
+    ///
+    /// `path` is always an explicit-only search boundary. When `strict` is `false`,
+    /// `version` is ignored for that path; when `strict` is `true`, the executable
+    /// found inside the path must match `version`. Without `path`, `version` is
+    /// applied to normal default-root and PATH discovery.
     #[serde(default)]
     pub strict: bool,
 

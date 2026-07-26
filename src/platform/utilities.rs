@@ -49,7 +49,7 @@ impl PlatformUtilities {
                 platform_policy: if config.tools.platform.strict {
                     PlatformResolutionPolicy::Strict
                 } else {
-                    PlatformResolutionPolicy::Fallback
+                    PlatformResolutionPolicy::Lenient
                 },
                 edt_hint,
                 edt_version,
@@ -241,6 +241,29 @@ mod tests {
                 wanted.canonicalize().expect("canonical binary")
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn from_config_ignores_platform_version_for_lenient_path_hint() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("platform");
+        let binary = root
+            .join("8.4.1.1")
+            .join("bin")
+            .join(UtilityType::V8.executable_name());
+        touch_executable(&binary);
+        let config = sample_config(Some(root), Some("8.3"));
+        let mut utilities = PlatformUtilities::from_config(&config);
+
+        let location = utilities
+            .locate(UtilityType::V8)
+            .expect("lenient path ignores configured version");
+
+        assert_eq!(
+            location.path,
+            binary.canonicalize().expect("canonical binary")
+        );
     }
 
     #[test]

@@ -510,6 +510,8 @@ source-set build, а `launch mcp` и `launch mcp va` расширение не �
 - на корень установки с версиями.
 
 Относительный путь нормализуется относительно каталога primary `v8project.yaml`.
+Если `path` задан, поиск platform utilities ограничивается этим путём и не переходит к default
+roots или `PATH`, независимо от `strict`.
 
 ### `tools.platform.strict`
 
@@ -517,12 +519,15 @@ source-set build, а `launch mcp` и `launch mcp va` расширение не �
 - Обязателен: нет
 - По умолчанию: `false`
 
-При `strict: true` поле `tools.platform.path` обязательно. Поиск ограничивается указанной
-установкой: отсутствующая utility, неизвестная версия при заданном `tools.platform.version` или
-несовпадение версии завершают команду ошибкой без fallback к default roots или `PATH`.
-Первая найденная platform utility фиксирует один canonical installation root; последующие
-`1cv8`, `1cv8c` и `ibcmd` выбираются только из этого root. При `strict: false` сохранён legacy
-порядок: explicit path, default roots, затем `PATH`.
+`strict` управляет проверкой `tools.platform.version` внутри configured `path`. Сам `path` всегда
+является explicit-only границей. При `strict: false` значение `version` для configured `path`
+игнорируется. При `strict: true` найденная внутри `path` utility обязана соответствовать
+`version`; неизвестная версия или несовпадение версии завершают команду ошибкой.
+
+Если `path` указывает на конкретный executable, поиск sibling utilities (`1cv8`, `1cv8c`,
+`ibcmd`) в `strict: false` идёт рядом с указанным файлом, а в `strict: true` — рядом с его
+canonical installation. При `strict: true` первая найденная platform utility фиксирует один
+canonical installation root; последующие `1cv8`, `1cv8c` и `ibcmd` выбираются только из этого root.
 
 ### `tools.platform.version`
 
@@ -536,8 +541,16 @@ source-set build, а `launch mcp` и `launch mcp va` расширение не �
 - `8.3.20`: выбирается максимальная найденная сборка `8.3.20.*`;
 - `8.3`: выбирается максимальная найденная версия `8.3.*.*`.
 
-В strict mode version requirement не допускает неизвестную версию: такая установка отклоняется
-вместо fallback.
+Матрица поведения:
+
+| Конфигурация | Поведение |
+| --- | --- |
+| `version`, без `path` | Поиск по default roots и `PATH` с проверкой версии. |
+| `path + version`, `strict: false` | Поиск только по `path`; `version` игнорируется. |
+| `path + version`, `strict: true` | Поиск только по `path`; версия обязана совпасть. |
+| `path`, без `version` | Поиск только по `path`; проверки версии нет. |
+| Без `path` и без `version` | Обычный поиск по default roots и `PATH`. |
+| `strict: true`, без `path` | Не создаёт boundary; с `version` работает как version-only поиск, без `version` не меняет обычный поиск. |
 
 ## `tools.enterprise`
 

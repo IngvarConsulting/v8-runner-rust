@@ -341,6 +341,10 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--wait-ready] [FLAGS]
   `--raw-key` не может задавать `/C`, `/Execute` или `/Out`.
 - Для `designer`/`thin`/`thick`/`ordinary` дополнительные typed flags: `--c`, `--execute`, `--use-privileged-mode`, `--output`,
   повторяемый `--raw-key`.
+- Platform discovery использует `tools.platform.path` как explicit-only границу: если path задан,
+  default roots и `PATH` не используются. `tools.platform.version` без path фильтрует обычный
+  поиск; вместе с path проверяется только при `tools.platform.strict: true`, а при
+  `strict: false` игнорируется.
 - JSON-результат именно `launch` содержит legacy `binary` и `platform_resolution` с canonical
   `path`, `version` (или `null`), `source` (`explicit`, `default-root` или `path`) и
   `installation_root`. Это не общий metadata contract для остальных команд.

@@ -187,10 +187,10 @@ pub enum UtilityVersion {
 /// Resolution behavior for configured platform installation hints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum PlatformResolutionPolicy {
-    /// Prefer the configured hint, then retain legacy default-root and `PATH` fallback.
+    /// Do not enforce `tools.platform.version` for a configured platform path.
     #[default]
-    Fallback,
-    /// Resolve platform utilities only inside the configured hint boundary.
+    Lenient,
+    /// Enforce `tools.platform.version` inside a configured platform path boundary.
     Strict,
 }
 
@@ -201,7 +201,7 @@ pub struct LocatorOptions {
     pub platform_hint: Option<PathBuf>,
     /// Optional platform version prefix or exact build.
     pub platform_version: Option<PlatformVersionRequirement>,
-    /// Platform fallback behavior.
+    /// Whether a configured platform path enforces `platform_version`.
     pub platform_policy: PlatformResolutionPolicy,
     /// Configured EDT executable or installation hint.
     pub edt_hint: Option<PathBuf>,
@@ -359,6 +359,12 @@ impl Locator {
         if cached.utility != utility {
             return None;
         }
+        if utility.is_platform()
+            && self.platform_hint.is_some()
+            && self.platform_policy == PlatformResolutionPolicy::Lenient
+        {
+            return None;
+        }
 
         let candidate = Candidate {
             path: cached.path.clone(),
@@ -373,7 +379,7 @@ impl Locator {
             ) => select_pinned_candidate(
                 utility,
                 vec![candidate],
-                self.platform_version.as_ref(),
+                self.effective_platform_version_requirement(),
                 &pinned.root,
             ),
             (
@@ -385,18 +391,23 @@ impl Locator {
                 select_candidate(
                     utility,
                     vec![candidate],
-                    self.platform_version.as_ref(),
+                    self.effective_platform_version_requirement(),
                     boundary.as_deref(),
                 )
             }
             (
                 UtilityType::V8 | UtilityType::V8C | UtilityType::Ibcmd,
-                PlatformResolutionPolicy::Fallback,
+                PlatformResolutionPolicy::Lenient,
                 Some(_) | None,
-            ) => select_candidate(utility, vec![candidate], None, None),
+            ) => select_candidate(
+                utility,
+                vec![candidate],
+                self.effective_platform_version_requirement(),
+                None,
+            ),
             (
                 UtilityType::EdtCli,
-                PlatformResolutionPolicy::Fallback | PlatformResolutionPolicy::Strict,
+                PlatformResolutionPolicy::Lenient | PlatformResolutionPolicy::Strict,
                 Some(_) | None,
             ) => select_edt_candidate(vec![candidate], utility, None),
         }?;
@@ -416,7 +427,7 @@ impl Locator {
         Self::with_search_roots(
             platform_hint,
             platform_version,
-            PlatformResolutionPolicy::Fallback,
+            PlatformResolutionPolicy::Lenient,
             edt_hint,
             edt_version,
             platform_roots,
@@ -452,7 +463,8 @@ impl Locator {
 
     fn version_requirement_string(&self, utility: UtilityType) -> Option<String> {
         if utility.is_platform() {
-            self.platform_version.as_ref().map(ToString::to_string)
+            self.effective_platform_version_requirement()
+                .map(ToString::to_string)
         } else {
             self.edt_version.as_ref().map(|version| {
                 version
@@ -465,13 +477,22 @@ impl Locator {
         }
     }
 
+    fn effective_platform_version_requirement(&self) -> Option<&PlatformVersionRequirement> {
+        if self.platform_hint.is_some() && self.platform_policy == PlatformResolutionPolicy::Lenient
+        {
+            None
+        } else {
+            self.platform_version.as_ref()
+        }
+    }
+
     fn locate_platform(&mut self, utility: UtilityType) -> Result<UtilityLocation, LocatorError> {
         if self.platform_policy == PlatformResolutionPolicy::Strict {
             if let Some(pinned) = self.pinned_platform.as_ref() {
                 return select_pinned_candidate(
                     utility,
                     pinned_platform_candidates(utility, pinned),
-                    self.platform_version.as_ref(),
+                    self.effective_platform_version_requirement(),
                     &pinned.root,
                 )
                 .ok_or_else(|| LocatorError::MissingSibling {
@@ -489,7 +510,7 @@ impl Locator {
                     hint,
                     utility,
                     match self.platform_policy {
-                        PlatformResolutionPolicy::Fallback => FileHintSiblingResolution::Lexical,
+                        PlatformResolutionPolicy::Lenient => FileHintSiblingResolution::Lexical,
                         PlatformResolutionPolicy::Strict => {
                             FileHintSiblingResolution::CanonicalInstallation
                         }
@@ -498,7 +519,7 @@ impl Locator {
             })
             .unwrap_or_default();
         let strict_boundary = match self.platform_policy {
-            PlatformResolutionPolicy::Fallback => None,
+            PlatformResolutionPolicy::Lenient => None,
             PlatformResolutionPolicy::Strict => {
                 self.platform_hint.as_deref().map(strict_candidate_boundary)
             }
@@ -516,42 +537,29 @@ impl Locator {
             })
             .unwrap_or_default();
 
-        match self.platform_policy {
-            PlatformResolutionPolicy::Strict => {
-                let mut explicit_candidates = direct_explicit_candidates;
-                explicit_candidates.extend(versioned_explicit_candidates);
-                if let Some(location) = select_candidate(
-                    utility,
-                    explicit_candidates.clone(),
-                    self.platform_version.as_ref(),
-                    strict_boundary.as_deref(),
-                ) {
-                    self.pin_platform(&location);
-                    return Ok(location);
-                }
-                return Err(strict_resolution_error(
+        if self.platform_hint.is_some() {
+            let mut explicit_candidates = direct_explicit_candidates;
+            explicit_candidates.extend(versioned_explicit_candidates);
+            let required = self.effective_platform_version_requirement();
+            if let Some(location) = select_candidate(
+                utility,
+                explicit_candidates.clone(),
+                required,
+                strict_boundary.as_deref(),
+            ) {
+                self.pin_platform(&location);
+                return Ok(location);
+            }
+            return match self.platform_policy {
+                PlatformResolutionPolicy::Strict => Err(strict_resolution_error(
                     utility,
                     self.platform_hint.as_deref(),
                     explicit_candidates,
-                    self.platform_version.as_ref(),
+                    required,
                     strict_boundary.as_deref(),
-                ));
-            }
-            PlatformResolutionPolicy::Fallback => {
-                if let Some(location) =
-                    select_candidate(utility, direct_explicit_candidates, None, None)
-                {
-                    return Ok(location);
-                }
-                if let Some(location) = select_candidate(
-                    utility,
-                    versioned_explicit_candidates,
-                    self.platform_version.as_ref(),
-                    None,
-                ) {
-                    return Ok(location);
-                }
-            }
+                )),
+                PlatformResolutionPolicy::Lenient => Err(LocatorError::NotFound(utility)),
+            };
         }
 
         let mut candidates = platform_candidates_any_version(
@@ -560,14 +568,20 @@ impl Locator {
             ResolutionSource::DefaultRoot,
         );
         candidates.extend(path_candidates(utility, &self.path_roots));
-        let location = select_candidate(utility, candidates, self.platform_version.as_ref(), None)
-            .ok_or(LocatorError::NotFound(utility))?;
+        let location = select_candidate(
+            utility,
+            candidates,
+            self.effective_platform_version_requirement(),
+            None,
+        )
+        .ok_or(LocatorError::NotFound(utility))?;
         self.pin_platform(&location);
         Ok(location)
     }
 
     fn pin_platform(&mut self, location: &UtilityLocation) {
-        if self.platform_policy != PlatformResolutionPolicy::Strict {
+        if self.platform_policy != PlatformResolutionPolicy::Strict || self.platform_hint.is_none()
+        {
             return;
         }
         self.pinned_platform = Some(PinnedPlatformInstallation {
@@ -1243,6 +1257,24 @@ mod tests {
         )
     }
 
+    fn lenient_locator(
+        hint: Option<PathBuf>,
+        version: Option<&str>,
+        platform_roots: Vec<PathBuf>,
+        path_roots: Vec<PathBuf>,
+    ) -> Locator {
+        Locator::with_search_roots(
+            hint,
+            version.and_then(PlatformVersionRequirement::parse),
+            PlatformResolutionPolicy::Lenient,
+            None,
+            None,
+            platform_roots,
+            Vec::new(),
+            path_roots,
+        )
+    }
+
     #[test]
     fn strict_resolution_does_not_fallback_to_default_or_path_roots() {
         let dir = tempdir().expect("tempdir");
@@ -1662,7 +1694,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_resolution_preserves_unknown_direct_hint_precedence() {
+    fn lenient_path_resolution_ignores_version_for_direct_hint() {
         let dir = tempdir().expect("tempdir");
         let explicit_root = dir.path().join("explicit");
         let default_root = dir.path().join("default");
@@ -1671,14 +1703,10 @@ mod tests {
             .join(UtilityType::V8.executable_name());
         touch_executable(&explicit);
         touch_versioned_platform_executable(&default_root, "8.3.25.1234", UtilityType::V8, true);
-        let mut locator = Locator::with_search_roots(
+        let mut locator = lenient_locator(
             Some(explicit_root),
-            PlatformVersionRequirement::parse("8.3.25.1234"),
-            PlatformResolutionPolicy::Fallback,
-            None,
-            None,
+            Some("8.3.25.1234"),
             vec![default_root],
-            vec![],
             vec![],
         );
 
@@ -1690,7 +1718,40 @@ mod tests {
     }
 
     #[test]
-    fn fallback_resolution_keeps_platform_utility_searches_independent() {
+    fn lenient_path_resolution_ignores_version_for_versioned_hint() {
+        let dir = tempdir().expect("tempdir");
+        let explicit_root = dir.path().join("explicit");
+        let default_root = dir.path().join("default");
+        let explicit = touch_versioned_platform_executable(
+            &explicit_root,
+            "8.3.24.9999",
+            UtilityType::V8,
+            true,
+        );
+        touch_versioned_platform_executable(&default_root, "8.3.25.1234", UtilityType::V8, true);
+        let mut locator = lenient_locator(
+            Some(explicit_root),
+            Some("8.3.25.1234"),
+            vec![default_root],
+            vec![],
+        );
+
+        let location = locator
+            .locate(UtilityType::V8)
+            .expect("version ignored for explicit path");
+
+        assert_eq!(location.path, canonical(&explicit));
+        assert_eq!(
+            location.version,
+            Some(UtilityVersion::Platform(
+                PlatformVersion::parse_strict("8.3.24.9999").expect("version")
+            ))
+        );
+        assert_eq!(location.source, ResolutionSource::Explicit);
+    }
+
+    #[test]
+    fn lenient_path_resolution_does_not_fallback_to_default_roots() {
         let dir = tempdir().expect("tempdir");
         let explicit_root = dir.path().join("explicit");
         let default_root = dir.path().join("default");
@@ -1700,16 +1761,95 @@ mod tests {
             UtilityType::V8,
             true,
         );
-        let v8c = touch_versioned_platform_executable(
+        touch_versioned_platform_executable(&default_root, "8.3.25.1234", UtilityType::V8C, true);
+        let mut locator = lenient_locator(
+            Some(explicit_root),
+            Some("8.3.25.1234"),
+            vec![default_root],
+            vec![],
+        );
+
+        let first = locator.locate(UtilityType::V8).expect("explicit v8");
+
+        assert_eq!(first.path, canonical(&v8));
+        assert_eq!(first.source, ResolutionSource::Explicit);
+        assert_eq!(
+            locator
+                .locate(UtilityType::V8C)
+                .expect_err("configured path must not fallback"),
+            LocatorError::NotFound(UtilityType::V8C)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lenient_file_symlink_hint_cache_revalidates_current_hint() {
+        let dir = tempdir().expect("tempdir");
+        let actual = dir
+            .path()
+            .join("actual")
+            .join("8.3.25.1234")
+            .join("bin")
+            .join(UtilityType::V8.executable_name());
+        touch_executable(&actual);
+        let aliases = dir.path().join("aliases");
+        fs::create_dir_all(&aliases).expect("aliases");
+        let hint = aliases.join(UtilityType::V8.executable_name());
+        std::os::unix::fs::symlink(&actual, &hint).expect("hint symlink");
+        let mut locator = lenient_locator(Some(hint.clone()), None, vec![], vec![]);
+
+        let first = locator.locate(UtilityType::V8).expect("initial hint");
+        fs::remove_file(&hint).expect("remove hint");
+
+        assert_eq!(first.path, canonical(&actual));
+        assert_eq!(
+            locator
+                .locate(UtilityType::V8)
+                .expect_err("current hint is gone"),
+            LocatorError::NotFound(UtilityType::V8)
+        );
+    }
+
+    #[test]
+    fn version_only_resolution_uses_default_roots_and_path_with_version_filter() {
+        let dir = tempdir().expect("tempdir");
+        let default_root = dir.path().join("default");
+        let path_root = dir.path().join("path-bin");
+        touch_versioned_platform_executable(&default_root, "8.3.24.9999", UtilityType::V8, true);
+        let wanted = touch_versioned_platform_executable(
             &default_root,
             "8.3.25.1234",
-            UtilityType::V8C,
+            UtilityType::V8,
+            true,
+        );
+        touch_executable(&path_root.join(UtilityType::V8.executable_name()));
+        let mut locator = lenient_locator(
+            None,
+            Some("8.3.25.1234"),
+            vec![default_root],
+            vec![path_root],
+        );
+
+        let location = locator.locate(UtilityType::V8).expect("versioned utility");
+
+        assert_eq!(location.path, canonical(&wanted));
+        assert_eq!(location.source, ResolutionSource::DefaultRoot);
+    }
+
+    #[test]
+    fn strict_without_path_uses_default_roots_with_version_filter() {
+        let dir = tempdir().expect("tempdir");
+        let default_root = dir.path().join("default");
+        let wanted = touch_versioned_platform_executable(
+            &default_root,
+            "8.3.25.1234",
+            UtilityType::V8,
             true,
         );
         let mut locator = Locator::with_search_roots(
-            Some(explicit_root),
+            None,
             PlatformVersionRequirement::parse("8.3.25.1234"),
-            PlatformResolutionPolicy::Fallback,
+            PlatformResolutionPolicy::Strict,
             None,
             None,
             vec![default_root],
@@ -1717,31 +1857,19 @@ mod tests {
             vec![],
         );
 
-        let first = locator.locate(UtilityType::V8).expect("explicit v8");
-        let second = locator.locate(UtilityType::V8C).expect("fallback v8c");
+        let location = locator.locate(UtilityType::V8).expect("versioned utility");
 
-        assert_eq!(first.path, canonical(&v8));
-        assert_eq!(first.source, ResolutionSource::Explicit);
-        assert_eq!(second.path, canonical(&v8c));
-        assert_eq!(second.source, ResolutionSource::DefaultRoot);
+        assert_eq!(location.path, canonical(&wanted));
+        assert_eq!(location.source, ResolutionSource::DefaultRoot);
     }
 
     #[test]
-    fn fallback_resolution_uses_injected_path_roots_and_reports_path_source() {
+    fn lenient_resolution_without_hint_uses_injected_path_roots_and_reports_path_source() {
         let dir = tempdir().expect("tempdir");
         let path_root = dir.path().join("path-bin");
         let binary = path_root.join(UtilityType::Ibcmd.executable_name());
         touch_executable(&binary);
-        let mut locator = Locator::with_search_roots(
-            None,
-            None,
-            PlatformResolutionPolicy::Fallback,
-            None,
-            None,
-            vec![],
-            vec![],
-            vec![path_root.clone()],
-        );
+        let mut locator = lenient_locator(None, None, vec![], vec![path_root.clone()]);
 
         let location = locator.locate(UtilityType::Ibcmd).expect("PATH utility");
 

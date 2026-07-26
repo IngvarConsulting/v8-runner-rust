@@ -103,9 +103,6 @@ pub enum ConfigValidationError {
     #[error("platform version must use format major.minor, major.minor.patch or major.minor.patch.build: {0}")]
     InvalidPlatformVersion(String),
 
-    #[error("tools.platform.path is required when tools.platform.strict is true")]
-    StrictPlatformRequiresPath,
-
     #[error("build.partialLoadThreshold must be greater than or equal to 1")]
     InvalidPartialLoadThreshold,
 
@@ -673,10 +670,6 @@ fn validate_matrix(_config: &AppConfig) -> Result<(), ConfigValidationError> {
 }
 
 fn validate_platform_version(config: &AppConfig) -> Result<(), ConfigValidationError> {
-    if config.tools.platform.strict && config.tools.platform.path.is_none() {
-        return Err(ConfigValidationError::StrictPlatformRequiresPath);
-    }
-
     if let Some(version) = config.tools.platform.version.as_deref() {
         if PlatformVersionRequirement::parse(version).is_none() {
             return Err(ConfigValidationError::InvalidPlatformVersion(

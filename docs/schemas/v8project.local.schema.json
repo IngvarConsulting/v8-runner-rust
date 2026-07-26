@@ -405,7 +405,7 @@
       "additionalProperties": false,
       "properties": {
         "path": {
-          "description": "Platform binary, installation `bin` directory, or platform root discovery hint.",
+          "description": "Platform binary, installation `bin` directory, or platform root discovery hint. When set, platform discovery uses only this path and never falls back to default roots or PATH.",
           "type": [
             "string",
             "null"
@@ -413,11 +413,11 @@
         },
         "strict": {
           "default": false,
-          "description": "Require platform utility resolution to stay within the configured path.",
+          "description": "Enforce `version` for a configured `path`. Without `path`, `version` is applied to normal default-root and PATH discovery.",
           "type": "boolean"
         },
         "version": {
-          "description": "Platform version requirement used for discovery.",
+          "description": "Platform version requirement. Without `path`, it filters normal discovery; with `path`, it is ignored unless `strict` is true.",
           "type": [
             "string",
             "null"
