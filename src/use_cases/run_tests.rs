@@ -250,7 +250,7 @@ fn parse_runner_log(
         PreparedRun::YaXUnit => match yaxunit_log::normalize_file(runner_log_path) {
             Ok(parsed) => {
                 if let Some(errors) = parsed.payload {
-                    report.extracted_errors = errors;
+                    report.extracted_errors.extend(errors);
                 }
                 warnings.extend(parsed.warnings);
                 steps.push(
@@ -282,7 +282,7 @@ fn parse_runner_log(
         PreparedRun::Vanessa { .. } => match vanessa_log::normalize_file(runner_log_path) {
             Ok(parsed) => {
                 if let Some(errors) = parsed.payload {
-                    report.extracted_errors = errors;
+                    report.extracted_errors.extend(errors);
                 }
                 warnings.extend(parsed.warnings);
                 steps.push(
@@ -314,78 +314,167 @@ fn parse_runner_log(
     }
 }
 
-fn resolve_vanessa_junit_path(artifacts: &mut RunArtifacts) {
-    if artifacts.junit_xml.exists() {
-        return;
-    }
-    if let Some(path) = discover_junit_report(&artifacts.junit_dir) {
-        artifacts.junit_xml = path;
-    }
+fn discover_junit_reports(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut reports = Vec::new();
+    collect_junit_reports(root, &mut reports)?;
+    reports.sort();
+    Ok(reports)
 }
 
-fn discover_junit_report(root: &Path) -> Option<PathBuf> {
-    let entries = fs::read_dir(root).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_file()
+fn collect_junit_reports(root: &Path, reports: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in fs::read_dir(root)? {
+        let path = entry?.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.is_file()
             && path
                 .extension()
                 .and_then(|value| value.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("xml"))
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("xml"))
         {
-            return Some(path);
-        }
-        if path.is_dir() {
-            if let Some(found) = discover_junit_report(&path) {
-                return Some(found);
-            }
+            reports.push(path);
+        } else if metadata.is_dir() {
+            collect_junit_reports(&path, reports)?;
         }
     }
-    None
+    Ok(())
 }
 
-fn parse_junit_report(artifacts: &RunArtifacts) -> crate::parsers::NormalizedParse<TestReport> {
-    if !artifacts.junit_xml.exists() {
+fn parse_junit_reports(reports: &[PathBuf]) -> crate::parsers::NormalizedParse<TestReport> {
+    if reports.is_empty() {
         return crate::parsers::NormalizedParse::default().with_errors(vec![test_execution_error(
             TestErrorKind::JunitNotProduced,
             "JUnit report was not produced",
         )]);
     }
-    if fs::metadata(&artifacts.junit_xml)
-        .map(|meta| meta.len() == 0)
-        .unwrap_or(false)
-    {
-        return crate::parsers::NormalizedParse::default().with_errors(vec![test_execution_error(
-            TestErrorKind::JunitEmpty,
-            "JUnit report is empty",
-        )]);
-    }
-    let file = fs::File::open(&artifacts.junit_xml).map_err(|error| error.to_string());
-    let file = match file {
-        Ok(file) => file,
-        Err(error) => {
-            return crate::parsers::NormalizedParse::default().with_errors(vec![
-                test_execution_error(TestErrorKind::JunitNotProduced, error),
-            ]);
-        }
+
+    let mut report = TestReport {
+        summary: crate::domain::test::TestSummary {
+            total: 0,
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+            errors: 0,
+        },
+        suites: Vec::new(),
+        extracted_errors: Vec::new(),
     };
-    let reader = BufReader::new(file);
-    let mut normalized = junit::parse_normalized(reader);
-    if normalized.errors.is_empty() {
-        return normalized;
+    let mut errors = Vec::new();
+
+    for path in reports {
+        match fs::File::open(path) {
+            Ok(file) => {
+                let normalized = junit::parse_normalized(BufReader::new(file));
+                if let Some(parsed) = normalized.payload {
+                    report.summary.total =
+                        report.summary.total.saturating_add(parsed.summary.total);
+                    report.summary.passed =
+                        report.summary.passed.saturating_add(parsed.summary.passed);
+                    report.summary.failed =
+                        report.summary.failed.saturating_add(parsed.summary.failed);
+                    report.summary.skipped = report
+                        .summary
+                        .skipped
+                        .saturating_add(parsed.summary.skipped);
+                    report.summary.errors =
+                        report.summary.errors.saturating_add(parsed.summary.errors);
+                    report.suites.extend(parsed.suites);
+                    report.extracted_errors.extend(parsed.extracted_errors);
+                }
+                errors.extend(normalized.errors.into_iter().map(|error| {
+                    let mut details = vec![format!("JUnit report: {}", path.display())];
+                    details.extend(error.details.clone());
+                    match error.code.as_str() {
+                        "junit_empty" => {
+                            test_execution_error(TestErrorKind::JunitEmpty, error.message)
+                                .with_details(details)
+                        }
+                        "junit_malformed" => {
+                            test_execution_error(TestErrorKind::JunitMalformed, error.message)
+                                .with_details(details)
+                        }
+                        _ => error.with_details(details),
+                    }
+                }));
+            }
+            Err(error) => errors.push(
+                test_execution_error(TestErrorKind::JunitNotProduced, error.to_string())
+                    .with_details(vec![format!("JUnit report: {}", path.display())]),
+            ),
+        }
     }
-    normalized.errors = normalized
-        .errors
-        .into_iter()
-        .map(|error| match error.code.as_str() {
-            "junit_empty" => test_execution_error(TestErrorKind::JunitEmpty, error.message)
-                .with_details(error.details),
-            "junit_malformed" => test_execution_error(TestErrorKind::JunitMalformed, error.message)
-                .with_details(error.details),
-            _ => error,
-        })
-        .collect();
-    normalized
+
+    if !errors.is_empty() {
+        return crate::parsers::NormalizedParse::default().with_errors(errors);
+    }
+
+    crate::parsers::NormalizedParse::default()
+        .with_metrics(ExecutionMetrics::from(&report.summary))
+        .with_payload(report)
+}
+
+fn parse_junit_report(artifacts: &RunArtifacts) -> crate::parsers::NormalizedParse<TestReport> {
+    match discover_junit_reports(&artifacts.junit_dir) {
+        Ok(reports) if reports.is_empty() => crate::parsers::NormalizedParse::default()
+            .with_errors(vec![test_execution_error(
+                TestErrorKind::JunitNotProduced,
+                "JUnit report was not produced",
+            )
+            .with_details(vec![format!(
+                "JUnit report directory: {}",
+                artifacts.junit_dir.display()
+            )])]),
+        Ok(reports) => parse_junit_reports(&reports),
+        Err(error) => {
+            crate::parsers::NormalizedParse::default().with_errors(vec![test_execution_error(
+                TestErrorKind::JunitNotProduced,
+                error.to_string(),
+            )
+            .with_details(vec![format!(
+                "JUnit report directory: {}",
+                artifacts.junit_dir.display()
+            )])])
+        }
+    }
+}
+
+fn validate_allure_results(root: &Path) -> Result<(), TestErrorKind> {
+    let metadata = fs::symlink_metadata(root).map_err(|_| TestErrorKind::AllureNotProduced)?;
+    if !metadata.is_dir() {
+        return Err(TestErrorKind::AllureNotProduced);
+    }
+    if contains_regular_file(root) {
+        Ok(())
+    } else {
+        Err(TestErrorKind::AllureEmpty)
+    }
+}
+
+fn contains_regular_file(root: &Path) -> bool {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return false,
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() => true,
+            Ok(metadata) if metadata.is_dir() => contains_regular_file(&path),
+            Ok(_) | Err(_) => false,
+        }
+    })
+}
+
+fn classify_test_completion(
+    summary: &crate::domain::test::TestSummary,
+    exit_code: i32,
+) -> Option<TestErrorKind> {
+    if summary.failed > 0 || summary.errors > 0 {
+        Some(TestErrorKind::TestFailures)
+    } else if exit_code != 0 {
+        Some(TestErrorKind::EnterpriseExitedNonZero)
+    } else {
+        None
+    }
 }
 
 fn compact_report(report: &TestReport) -> TestReport {
@@ -483,31 +572,7 @@ fn collect_run_artifacts(artifacts: &RunArtifacts) -> ArtifactSet {
 }
 
 fn collect_existing_junit_reports(root: &Path) -> Vec<PathBuf> {
-    let entries = match fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut reports = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(_) => continue,
-        };
-        if metadata.is_file()
-            && path
-                .extension()
-                .and_then(|value| value.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("xml"))
-        {
-            reports.push(path);
-        } else if metadata.is_dir() {
-            reports.extend(collect_existing_junit_reports(&path));
-        }
-    }
-    reports.sort();
-    reports
+    discover_junit_reports(root).unwrap_or_default()
 }
 
 fn push_existing_file(set: &mut ArtifactSet, kind: ArtifactKind, role: &str, path: &Path) {
@@ -528,10 +593,6 @@ fn is_existing_file(path: &Path) -> bool {
 
 fn is_existing_dir(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
-}
-
-fn cleanup_run_dir(artifacts: &RunArtifacts) {
-    let _ = fs::remove_file(&artifacts.sentinel);
 }
 
 fn sanitize_text(text: &str, config: &AppConfig) -> String {
@@ -640,9 +701,10 @@ fn set_file_permissions(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_yaxunit_config, collect_run_artifacts, compact_report, create_run_artifacts,
-        materialize_vanessa_runner_log, parse_junit_report, retain_run_artifacts, run_tests,
-        sanitize_text, sanitize_text_full, truncate_stack_trace, RunArtifacts,
+        build_yaxunit_config, classify_test_completion, collect_run_artifacts, compact_report,
+        create_run_artifacts, discover_junit_reports, materialize_vanessa_runner_log,
+        parse_junit_report, parse_junit_reports, retain_run_artifacts, run_tests, sanitize_text,
+        sanitize_text_full, truncate_stack_trace, validate_allure_results, RunArtifacts,
     };
     use crate::config::model::{
         AppConfig, BuildConfig, BuilderBackend, PlatformToolConfig, SourceFormat, SourceSetConfig,
@@ -658,7 +720,8 @@ mod tests {
         ScenarioExecutionRequest,
     };
     use crate::domain::test::{
-        TestCase, TestErrorKind, TestReport, TestStatus, TestSuite, TestSummary, TestTarget,
+        test_execution_status, TestCase, TestErrorKind, TestReport, TestStatus, TestSuite,
+        TestSummary, TestTarget,
     };
     use crate::use_cases::context::{CommandName, ExecutionContext};
     use crate::use_cases::request::{TestRequest, TestScopeRequest};
@@ -763,6 +826,202 @@ mod tests {
             collected.get_by_role(ARTIFACT_ROLE_PLATFORM_LOG),
             Some(artifacts.platform_log.as_path())
         );
+    }
+
+    #[test]
+    fn discovers_sorted_nested_junit_reports_and_aggregates_every_report() {
+        // Break caught: returning the first report or filesystem iteration order would lose cases.
+        let dir = tempdir().expect("tempdir");
+        let junit_dir = dir.path().join("junit");
+        let nested = junit_dir.join("a");
+        std::fs::create_dir_all(&nested).expect("nested junit dir");
+
+        let later_path = junit_dir.join("z-report.xml");
+        std::fs::write(
+            &later_path,
+            r#"<testsuite name="later"><testcase name="failed"><failure/></testcase><testcase name="errored"><error/></testcase></testsuite>"#,
+        )
+        .expect("later report");
+        let earlier_path = nested.join("a-report.xml");
+        std::fs::write(
+            &earlier_path,
+            r#"<testsuite name="earlier"><testcase name="passed"/></testsuite>"#,
+        )
+        .expect("earlier report");
+
+        let reports = discover_junit_reports(&junit_dir).expect("discover reports");
+
+        assert_eq!(reports, vec![earlier_path, later_path]);
+        let parsed = parse_junit_reports(&reports);
+        assert!(parsed.errors.is_empty());
+        assert_eq!(
+            parsed.payload.expect("aggregate report").summary,
+            TestSummary {
+                total: 3,
+                passed: 1,
+                failed: 1,
+                skipped: 0,
+                errors: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_aggregate_when_any_junit_report_is_malformed_with_its_path() {
+        // Break caught: accepting the first valid report silently hides invalid native output.
+        let dir = tempdir().expect("tempdir");
+        let junit_dir = dir.path().join("junit");
+        std::fs::create_dir_all(&junit_dir).expect("junit dir");
+        let valid = junit_dir.join("a-valid.xml");
+        std::fs::write(
+            &valid,
+            r#"<testsuite name="suite"><testcase name="passed"/></testsuite>"#,
+        )
+        .expect("valid report");
+        let malformed = junit_dir.join("b-malformed.xml");
+        std::fs::write(&malformed, "<testsuite>").expect("malformed report");
+        let another_malformed = junit_dir.join("c-malformed.xml");
+        std::fs::write(&another_malformed, "<testsuite><testcase>")
+            .expect("another malformed report");
+
+        let parsed = parse_junit_reports(&[valid, malformed.clone(), another_malformed.clone()]);
+
+        assert!(parsed.payload.is_none());
+        assert_eq!(parsed.errors.len(), 2);
+        for path in [malformed, another_malformed] {
+            assert!(parsed.errors.iter().any(|error| {
+                error.code == TestErrorKind::JunitMalformed.code()
+                    && error
+                        .details
+                        .iter()
+                        .any(|detail| detail.contains(&path.display().to_string()))
+            }));
+        }
+    }
+
+    #[test]
+    fn validates_missing_and_empty_allure_results() {
+        // Break caught: treating pre-created or missing Allure directories as valid native output.
+        let dir = tempdir().expect("tempdir");
+        let missing = dir.path().join("missing-allure-results");
+        let empty = dir.path().join("empty-allure-results");
+        std::fs::create_dir_all(empty.join("nested")).expect("empty allure dir");
+
+        assert_eq!(
+            validate_allure_results(&missing),
+            Err(TestErrorKind::AllureNotProduced)
+        );
+        assert_eq!(
+            validate_allure_results(&empty),
+            Err(TestErrorKind::AllureEmpty)
+        );
+    }
+
+    #[test]
+    fn accepts_allure_results_with_a_nested_regular_file() {
+        let dir = tempdir().expect("tempdir");
+        let allure = dir.path().join("allure-results");
+        std::fs::create_dir_all(allure.join("nested")).expect("allure dir");
+        std::fs::write(allure.join("nested/result.json"), "{}").expect("allure result");
+
+        assert_eq!(validate_allure_results(&allure), Ok(()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_and_allure_validation_ignore_symlinked_outputs() {
+        use std::os::unix::fs::symlink;
+
+        // Break caught: following symlinks can escape the run directory or make empty output valid.
+        let dir = tempdir().expect("tempdir");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("outside dir");
+        std::fs::write(
+            outside.join("report.xml"),
+            "<testsuite name=\"s\"><testcase name=\"p\"/></testsuite>",
+        )
+        .expect("outside junit");
+        std::fs::write(outside.join("result.json"), "{}").expect("outside allure");
+
+        let junit_dir = dir.path().join("junit");
+        let allure_dir = dir.path().join("allure-results");
+        std::fs::create_dir_all(&junit_dir).expect("junit dir");
+        std::fs::create_dir_all(&allure_dir).expect("allure dir");
+        symlink(&outside, junit_dir.join("external")).expect("junit symlink");
+        symlink(
+            outside.join("result.json"),
+            allure_dir.join("external.json"),
+        )
+        .expect("allure symlink");
+
+        assert!(discover_junit_reports(&junit_dir)
+            .expect("discover reports")
+            .is_empty());
+        assert_eq!(
+            validate_allure_results(&allure_dir),
+            Err(TestErrorKind::AllureEmpty)
+        );
+    }
+
+    #[test]
+    fn classifies_native_reports_before_process_exit_status() {
+        // Break caught: nonzero process exits masking report-proven test failures.
+        let cases = [
+            (
+                TestSummary {
+                    total: 1,
+                    passed: 0,
+                    failed: 1,
+                    skipped: 0,
+                    errors: 0,
+                },
+                1,
+                Some(TestErrorKind::TestFailures),
+                ExecutionStatus::Failed,
+            ),
+            (
+                TestSummary {
+                    total: 1,
+                    passed: 0,
+                    failed: 0,
+                    skipped: 0,
+                    errors: 1,
+                },
+                2,
+                Some(TestErrorKind::TestFailures),
+                ExecutionStatus::Failed,
+            ),
+            (
+                TestSummary {
+                    total: 1,
+                    passed: 1,
+                    failed: 0,
+                    skipped: 0,
+                    errors: 0,
+                },
+                1,
+                Some(TestErrorKind::EnterpriseExitedNonZero),
+                ExecutionStatus::Failed,
+            ),
+            (
+                TestSummary {
+                    total: 1,
+                    passed: 1,
+                    failed: 0,
+                    skipped: 0,
+                    errors: 0,
+                },
+                0,
+                None,
+                ExecutionStatus::Succeeded,
+            ),
+        ];
+
+        for (summary, exit_code, expected, expected_status) in cases {
+            let is_success = expected.is_none();
+            assert_eq!(classify_test_completion(&summary, exit_code), expected);
+            assert_eq!(test_execution_status(expected, is_success), expected_status);
+        }
     }
 
     #[test]
@@ -872,6 +1131,7 @@ mod tests {
         let config = config(dir.path());
         let artifacts = create_artifacts(dir.path());
         std::fs::create_dir_all(&artifacts.run_dir).expect("run dir");
+        std::fs::create_dir_all(&artifacts.junit_dir).expect("junit dir");
         std::fs::write(&artifacts.platform_log, b"enterprise /Out").expect("platform log");
 
         materialize_vanessa_runner_log(&artifacts).expect("materialize log");
@@ -881,6 +1141,10 @@ mod tests {
             junit_parse.errors[0].code,
             TestErrorKind::JunitNotProduced.code()
         );
+        assert!(junit_parse.errors[0]
+            .details
+            .iter()
+            .any(|detail| detail.contains(&artifacts.junit_dir.display().to_string())));
 
         let retained = retain_run_artifacts(&config, &artifacts).expect("retain artifacts");
         assert_eq!(

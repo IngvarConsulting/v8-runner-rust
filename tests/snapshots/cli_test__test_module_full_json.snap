@@ -194,11 +194,20 @@ Object {
         Object {
             "duration_ms": String("<duration>"),
             "kind": String("parse_output"),
-            "message": String("parsed 2 test cases"),
+            "message": String("parsed 2 test cases from native JUnit reports"),
             "name": String("parse_junit"),
             "ok": Bool(true),
             "status": String("succeeded"),
-            "target": String("<junit_xml>"),
+            "target": String("<junit_dir>"),
+        },
+        Object {
+            "duration_ms": String("<duration>"),
+            "kind": String("parse_output"),
+            "message": String("validated native Allure results"),
+            "name": String("validate_allure"),
+            "ok": Bool(true),
+            "status": String("succeeded"),
+            "target": String("<allure_results>"),
         },
         Object {
             "duration_ms": String("<duration>"),

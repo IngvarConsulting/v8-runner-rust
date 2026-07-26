@@ -340,13 +340,12 @@ pub(super) fn run_tests(
     };
 
     if matches!(prepared_run, PreparedRun::Vanessa { .. }) {
-        resolve_vanessa_junit_path(&mut artifacts);
         if let Err(warning) = materialize_vanessa_runner_log(&artifacts) {
             warnings.push(warning);
         }
     }
 
-    debug!(path = %artifacts.junit_xml.display(), "parsing JUnit report");
+    debug!(path = %artifacts.junit_dir.display(), "parsing JUnit reports");
     let parse_junit_started = Instant::now();
     let junit_parse = parse_junit_report(&artifacts);
     let mut report = match junit_parse.payload {
@@ -356,18 +355,25 @@ pub(super) fn run_tests(
                     "parse_junit",
                     ExecutionStepKind::ParseOutput,
                     parse_junit_started.elapsed().as_millis() as u64,
-                    format!("parsed {} test cases", report.summary.total),
+                    format!(
+                        "parsed {} test cases from native JUnit reports",
+                        report.summary.total
+                    ),
                 )
-                .with_target(artifacts.junit_xml.display().to_string()),
+                .with_target(artifacts.junit_dir.display().to_string()),
             );
             report
         }
         None => {
-            let error = junit_parse
-                .errors
-                .first()
-                .cloned()
-                .expect("junit parse error");
+            let errors = if junit_parse.errors.is_empty() {
+                vec![test_execution_error(
+                    TestErrorKind::JunitMalformed,
+                    "JUnit report parsing returned no report or error",
+                )]
+            } else {
+                junit_parse.errors
+            };
+            let error = errors[0].clone();
             let kind =
                 TestErrorKind::from_code(&error.code).unwrap_or(TestErrorKind::JunitMalformed);
             let message = error.message.clone();
@@ -378,17 +384,15 @@ pub(super) fn run_tests(
                     parse_junit_started.elapsed().as_millis() as u64,
                     message.clone(),
                 )
-                .with_target(artifacts.junit_xml.display().to_string())
-                .with_errors(vec![error
-                    .clone()
-                    .with_details(junit_parse.diagnostics.clone())]),
+                .with_target(artifacts.junit_dir.display().to_string())
+                .with_errors(errors.clone()),
             );
             let retained_paths = retain_run_artifacts(config, &artifacts).ok();
             let diagnostics = collect_diagnostics(&platform_result, vec![message.clone()], config);
             let outcome = with_retained_artifacts(
                 ExecutionOutcome::new(test_execution_status(Some(kind.clone()), false))
                     .with_diagnostics(diagnostics)
-                    .with_errors(vec![error.with_details(junit_parse.diagnostics)]),
+                    .with_errors(errors),
                 retained_paths,
             );
             let result = make_test_result(
@@ -406,6 +410,60 @@ pub(super) fn run_tests(
         }
     };
 
+    let validate_allure_started = Instant::now();
+    if let Err(kind) = validate_allure_results(&artifacts.allure_results_dir) {
+        let message = match &kind {
+            TestErrorKind::AllureNotProduced => "Allure results directory was not produced",
+            TestErrorKind::AllureEmpty => "Allure results directory is empty",
+            _ => "Allure results validation failed",
+        }
+        .to_owned();
+        let error =
+            test_execution_error(kind.clone(), message.clone()).with_details(vec![format!(
+                "Allure results directory: {}",
+                artifacts.allure_results_dir.display()
+            )]);
+        steps.push(
+            failed_step(
+                "validate_allure",
+                ExecutionStepKind::ParseOutput,
+                validate_allure_started.elapsed().as_millis() as u64,
+                message.clone(),
+            )
+            .with_target(artifacts.allure_results_dir.display().to_string())
+            .with_errors(vec![error.clone()]),
+        );
+        let retained_paths = retain_run_artifacts(config, &artifacts).ok();
+        let diagnostics = collect_diagnostics(&platform_result, vec![message.clone()], config);
+        let outcome = with_retained_artifacts(
+            ExecutionOutcome::new(test_execution_status(Some(kind), false))
+                .with_diagnostics(diagnostics)
+                .with_errors(vec![error]),
+            retained_paths,
+        );
+        let result = make_test_result(
+            target,
+            mode,
+            outcome,
+            warnings,
+            steps,
+            started.elapsed().as_millis() as u64,
+        );
+        return Err(TestExecutionFailure::with_payload(
+            AppError::Runtime(message),
+            result,
+        ));
+    }
+    steps.push(
+        succeeded_step(
+            "validate_allure",
+            ExecutionStepKind::ParseOutput,
+            validate_allure_started.elapsed().as_millis() as u64,
+            "validated native Allure results",
+        )
+        .with_target(artifacts.allure_results_dir.display().to_string()),
+    );
+
     parse_runner_log(
         &prepared_run,
         &artifacts.runner_log,
@@ -419,35 +477,34 @@ pub(super) fn run_tests(
         TestOutputMode::Compact => compact_report(&report),
     };
 
-    let has_test_failures = report.summary.failed > 0 || report.summary.errors > 0;
-    let process_failed = platform_result.process.exit_code != 0;
-    let diagnostics = collect_diagnostics(&platform_result, Vec::new(), config);
+    let classification =
+        classify_test_completion(&report.summary, platform_result.process.exit_code);
+    let mut diagnostics = collect_diagnostics(&platform_result, Vec::new(), config);
 
-    if process_failed || has_test_failures {
+    if let Some(kind) = classification {
         debug!(
-            process_failed,
-            has_test_failures, "retaining failed test artifacts"
+            error_kind = kind.clone().code(),
+            "retaining failed test artifacts"
         );
+        if matches!(&kind, TestErrorKind::TestFailures) && platform_result.process.exit_code != 0 {
+            diagnostics.push(format!(
+                "enterprise test run exited with code {}",
+                platform_result.process.exit_code
+            ));
+        }
         let retained_paths = retain_run_artifacts(config, &artifacts).ok();
-        let kind = if process_failed {
-            TestErrorKind::EnterpriseExitedNonZero
-        } else {
-            TestErrorKind::TestFailures
+        let message = match &kind {
+            TestErrorKind::EnterpriseExitedNonZero => format!(
+                "enterprise test run exited with code {}",
+                platform_result.process.exit_code
+            ),
+            TestErrorKind::TestFailures => "test run reported failures".to_owned(),
+            _ => "test run failed".to_owned(),
         };
         let outcome = with_retained_artifacts(
             ExecutionOutcome::new(test_execution_status(Some(kind.clone()), false))
                 .with_diagnostics(diagnostics)
-                .with_errors(vec![test_execution_error(
-                    kind,
-                    if process_failed {
-                        format!(
-                            "enterprise test run exited with code {}",
-                            platform_result.process.exit_code
-                        )
-                    } else {
-                        "test run reported failures".to_owned()
-                    },
-                )])
+                .with_errors(vec![test_execution_error(kind, message.clone())])
                 .with_metrics(ExecutionMetrics::from(&report.summary))
                 .with_payload(rendered_report),
             retained_paths,
@@ -461,27 +518,22 @@ pub(super) fn run_tests(
             started.elapsed().as_millis() as u64,
         );
         return Err(TestExecutionFailure::with_payload(
-            AppError::Runtime(if process_failed {
-                format!(
-                    "enterprise test run exited with code {}",
-                    platform_result.process.exit_code
-                )
-            } else {
-                "test run reported failures".to_owned()
-            }),
+            AppError::Runtime(message),
             result,
         ));
     }
 
-    debug!(path = %artifacts.run_dir.display(), "cleaning successful test run directory");
-    cleanup_run_dir(&artifacts);
+    let retained_paths = retain_run_artifacts(config, &artifacts).ok();
     Ok(make_test_result(
         target,
         mode,
-        ExecutionOutcome::new(ExecutionStatus::Succeeded)
-            .with_diagnostics(diagnostics)
-            .with_metrics(ExecutionMetrics::from(&report.summary))
-            .with_payload(rendered_report),
+        with_retained_artifacts(
+            ExecutionOutcome::new(ExecutionStatus::Succeeded)
+                .with_diagnostics(diagnostics)
+                .with_metrics(ExecutionMetrics::from(&report.summary))
+                .with_payload(rendered_report),
+            retained_paths,
+        ),
         warnings,
         steps,
         started.elapsed().as_millis() as u64,

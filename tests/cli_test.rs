@@ -136,6 +136,23 @@ fn write_va_test_script(
         report_xml,
         exit_code
     );
+    let body = body.replace(
+        r#"mkdir -p "$report_dir" "$(dirname "$out")" "$(dirname "$text_log")"
+cat <<'XML' > "$report_dir/result.xml""#,
+        r#"allure_dir=$(python3 - <<'PY' "$cfg"
+import json, sys
+with open(sys.argv[1], 'r', encoding='utf-8') as fh:
+    data = json.load(fh)
+print(data['КаталогВыгрузкиAllure'])
+PY
+)
+mkdir -p "$report_dir" "$allure_dir" "$(dirname "$out")" "$(dirname "$text_log")"
+cat <<'XML' > "$report_dir/result.xml""#,
+    );
+    let body = body.replace(
+        "XML\nprintf 'va execute=%s\\n'",
+        "XML\nprintf '%s\\n' '{\"uuid\":\"fixture\",\"name\":\"fixture\",\"status\":\"passed\",\"stage\":\"finished\"}' > \"$allure_dir/fixture-result.json\"\nprintf 'va execute=%s\\n'",
+    );
     write_script(path, &body);
 }
 
@@ -359,7 +376,8 @@ fn scrub_snapshot(value: &mut Value) {
                     Some("prepare_artifacts") => "<run_dir>",
                     Some("prepare_runner") => "<config_json>",
                     Some("run") => "<platform_log>",
-                    Some("parse_junit") => "<junit_xml>",
+                    Some("parse_junit") => "<junit_dir>",
+                    Some("validate_allure") => "<allure_results>",
                     Some("parse_log") => "<yaxunit_log>",
                     _ => "<target>",
                 };
@@ -421,7 +439,16 @@ fn test_all_full_json_runs_build_first_and_returns_report() {
         payload["data"]["report"]["suites"][0]["cases"][0]["name"],
         "ok"
     );
-    assert_eq!(payload["data"]["retained_paths"], Value::Null);
+    let retained = &payload["data"]["retained_paths"];
+    assert!(retained["run_dir"].is_string());
+    assert!(retained["junit_xml"].is_string());
+    assert!(retained["allure_results"].is_string());
+    for item in payload["data"]["execution"]["artifacts"]["items"]
+        .as_array()
+        .expect("artifact items")
+    {
+        assert!(Path::new(item["path"].as_str().expect("artifact path")).exists());
+    }
 }
 
 #[test]
