@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::domain::artifact::{
-    ArtifactKind, ArtifactRef, ArtifactSet, ARTIFACT_ROLE_CONFIG, ARTIFACT_ROLE_PLATFORM_LOG,
-    ARTIFACT_ROLE_REPORT, ARTIFACT_ROLE_RUNNER_LOG, ARTIFACT_ROLE_RUN_DIR, ARTIFACT_ROLE_SENTINEL,
+    ArtifactKind, ArtifactRef, ArtifactSet, ARTIFACT_ROLE_ALLURE_RESULTS, ARTIFACT_ROLE_CONFIG,
+    ARTIFACT_ROLE_JUNIT_XML, ARTIFACT_ROLE_PLATFORM_LOG, ARTIFACT_ROLE_RUNNER_LOG,
+    ARTIFACT_ROLE_RUN_DIR, ARTIFACT_ROLE_SENTINEL,
 };
 use crate::domain::execution::{
     ExecutionError, ExecutionMetrics, ExecutionOutcome, ExecutionStatus, StepResult,
@@ -22,6 +23,8 @@ pub const TEST_ERROR_CODE_TEST_FAILURES: &str = "test_failures";
 pub const TEST_ERROR_CODE_JUNIT_NOT_PRODUCED: &str = "junit_not_produced";
 pub const TEST_ERROR_CODE_JUNIT_EMPTY: &str = "junit_empty";
 pub const TEST_ERROR_CODE_JUNIT_MALFORMED: &str = "junit_malformed";
+pub const TEST_ERROR_CODE_ALLURE_NOT_PRODUCED: &str = "allure_not_produced";
+pub const TEST_ERROR_CODE_ALLURE_EMPTY: &str = "allure_empty";
 pub const TEST_RUNNER_ID: &str = "yaxunit";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -54,6 +57,8 @@ pub enum TestErrorKind {
     JunitNotProduced,
     JunitEmpty,
     JunitMalformed,
+    AllureNotProduced,
+    AllureEmpty,
 }
 
 impl TestErrorKind {
@@ -72,6 +77,8 @@ impl TestErrorKind {
             Self::JunitNotProduced => TEST_ERROR_CODE_JUNIT_NOT_PRODUCED,
             Self::JunitEmpty => TEST_ERROR_CODE_JUNIT_EMPTY,
             Self::JunitMalformed => TEST_ERROR_CODE_JUNIT_MALFORMED,
+            Self::AllureNotProduced => TEST_ERROR_CODE_ALLURE_NOT_PRODUCED,
+            Self::AllureEmpty => TEST_ERROR_CODE_ALLURE_EMPTY,
         }
     }
 
@@ -90,6 +97,8 @@ impl TestErrorKind {
             TEST_ERROR_CODE_JUNIT_NOT_PRODUCED => Self::JunitNotProduced,
             TEST_ERROR_CODE_JUNIT_EMPTY => Self::JunitEmpty,
             TEST_ERROR_CODE_JUNIT_MALFORMED => Self::JunitMalformed,
+            TEST_ERROR_CODE_ALLURE_NOT_PRODUCED => Self::AllureNotProduced,
+            TEST_ERROR_CODE_ALLURE_EMPTY => Self::AllureEmpty,
             _ => return None,
         })
     }
@@ -100,6 +109,8 @@ pub struct RetainedPaths {
     pub run_dir: PathBuf,
     pub config_json: PathBuf,
     pub junit_xml: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allure_results: Option<PathBuf>,
     pub yaxunit_log: PathBuf,
     pub platform_log: PathBuf,
     pub sentinel: PathBuf,
@@ -117,8 +128,15 @@ impl RetainedPaths {
                 .with_role(ARTIFACT_ROLE_CONFIG),
         );
         set.push(
-            ArtifactRef::new(ArtifactKind::Report, self.junit_xml).with_role(ARTIFACT_ROLE_REPORT),
+            ArtifactRef::new(ArtifactKind::JunitXml, self.junit_xml)
+                .with_role(ARTIFACT_ROLE_JUNIT_XML),
         );
+        if let Some(allure_results) = self.allure_results {
+            set.push(
+                ArtifactRef::new(ArtifactKind::AllureResults, allure_results)
+                    .with_role(ARTIFACT_ROLE_ALLURE_RESULTS),
+            );
+        }
         set.push(
             ArtifactRef::new(ArtifactKind::RunnerLog, self.yaxunit_log)
                 .with_role(ARTIFACT_ROLE_RUNNER_LOG),
@@ -138,7 +156,13 @@ impl RetainedPaths {
         Some(Self {
             run_dir: set.get_by_role(ARTIFACT_ROLE_RUN_DIR)?.to_path_buf(),
             config_json: set.get_by_role(ARTIFACT_ROLE_CONFIG)?.to_path_buf(),
-            junit_xml: set.get_by_role(ARTIFACT_ROLE_REPORT)?.to_path_buf(),
+            junit_xml: set
+                .get_all_by_role(ARTIFACT_ROLE_JUNIT_XML)
+                .min()?
+                .to_path_buf(),
+            allure_results: set
+                .get_by_role(ARTIFACT_ROLE_ALLURE_RESULTS)
+                .map(Path::to_path_buf),
             yaxunit_log: set.get_by_role(ARTIFACT_ROLE_RUNNER_LOG)?.to_path_buf(),
             platform_log: set.get_by_role(ARTIFACT_ROLE_PLATFORM_LOG)?.to_path_buf(),
             sentinel: set.get_by_role(ARTIFACT_ROLE_SENTINEL)?.to_path_buf(),
@@ -285,7 +309,9 @@ pub fn test_execution_status(kind: Option<TestErrorKind>, ok: bool) -> Execution
         Some(
             TestErrorKind::JunitMalformed
             | TestErrorKind::JunitEmpty
-            | TestErrorKind::JunitNotProduced,
+            | TestErrorKind::JunitNotProduced
+            | TestErrorKind::AllureNotProduced
+            | TestErrorKind::AllureEmpty,
         ) => ExecutionStatus::InvalidOutput,
         Some(
             TestErrorKind::BuildFailed
@@ -308,6 +334,7 @@ mod tests {
         test_execution_error, RetainedPaths, TestErrorKind, TestOutputMode, TestReport,
         TestRunResult, TestSummary, TestTarget,
     };
+    use crate::domain::artifact::{ArtifactKind, ArtifactRef, ARTIFACT_ROLE_JUNIT_XML};
     use crate::domain::execution::{ExecutionMetrics, ExecutionOutcome, ExecutionStatus};
     use std::path::PathBuf;
 
@@ -316,7 +343,32 @@ mod tests {
         let retained = RetainedPaths {
             run_dir: PathBuf::from("/tmp/run"),
             config_json: PathBuf::from("/tmp/config.json"),
+            junit_xml: PathBuf::from("/tmp/z-report.xml"),
+            allure_results: Some(PathBuf::from("/tmp/allure-results")),
+            yaxunit_log: PathBuf::from("/tmp/yaxunit.log"),
+            platform_log: PathBuf::from("/tmp/platform.log"),
+            sentinel: PathBuf::from("/tmp/sentinel"),
+        };
+
+        let first_junit = PathBuf::from("/tmp/a-report.xml");
+        let mut expected = retained.clone();
+        expected.junit_xml = first_junit.clone();
+        let mut set = retained.into_artifact_set();
+        set.push(
+            ArtifactRef::new(ArtifactKind::JunitXml, first_junit)
+                .with_role(ARTIFACT_ROLE_JUNIT_XML),
+        );
+
+        assert_eq!(RetainedPaths::from_artifact_set(&set), Some(expected));
+    }
+
+    #[test]
+    fn retained_paths_omit_allure_artifact_until_runner_produces_it() {
+        let retained = RetainedPaths {
+            run_dir: PathBuf::from("/tmp/run"),
+            config_json: PathBuf::from("/tmp/config.json"),
             junit_xml: PathBuf::from("/tmp/report.xml"),
+            allure_results: None,
             yaxunit_log: PathBuf::from("/tmp/yaxunit.log"),
             platform_log: PathBuf::from("/tmp/platform.log"),
             sentinel: PathBuf::from("/tmp/sentinel"),
@@ -324,6 +376,10 @@ mod tests {
 
         let set = retained.clone().into_artifact_set();
 
+        assert_eq!(
+            set.get_by_role(crate::domain::artifact::ARTIFACT_ROLE_ALLURE_RESULTS),
+            None
+        );
         assert_eq!(RetainedPaths::from_artifact_set(&set), Some(retained));
     }
 
@@ -363,11 +419,24 @@ mod tests {
     }
 
     #[test]
+    fn allure_output_errors_are_invalid_output() {
+        assert_eq!(
+            super::test_execution_status(Some(TestErrorKind::AllureNotProduced), false),
+            ExecutionStatus::InvalidOutput
+        );
+        assert_eq!(
+            super::test_execution_status(Some(TestErrorKind::AllureEmpty), false),
+            ExecutionStatus::InvalidOutput
+        );
+    }
+
+    #[test]
     fn test_run_result_derives_read_model_from_outcome() {
         let retained = RetainedPaths {
             run_dir: PathBuf::from("/tmp/run"),
             config_json: PathBuf::from("/tmp/config.json"),
             junit_xml: PathBuf::from("/tmp/report.xml"),
+            allure_results: Some(PathBuf::from("/tmp/allure-results")),
             yaxunit_log: PathBuf::from("/tmp/yaxunit.log"),
             platform_log: PathBuf::from("/tmp/platform.log"),
             sentinel: PathBuf::from("/tmp/sentinel"),

@@ -319,6 +319,10 @@ fn scrub_snapshot(value: &mut Value) {
     value["data"]["retained_paths"]["run_dir"] = Value::String("<run_dir>".to_owned());
     value["data"]["retained_paths"]["config_json"] = Value::String("<config_json>".to_owned());
     value["data"]["retained_paths"]["junit_xml"] = Value::String("<junit_xml>".to_owned());
+    if value["data"]["retained_paths"]["allure_results"].is_string() {
+        value["data"]["retained_paths"]["allure_results"] =
+            Value::String("<allure_results>".to_owned());
+    }
     value["data"]["retained_paths"]["yaxunit_log"] = Value::String("<yaxunit_log>".to_owned());
     value["data"]["retained_paths"]["platform_log"] = Value::String("<platform_log>".to_owned());
     value["data"]["retained_paths"]["sentinel"] = Value::String("<sentinel>".to_owned());
@@ -330,7 +334,8 @@ fn scrub_snapshot(value: &mut Value) {
             let replacement = match item["role"].as_str() {
                 Some("run_dir") => "<run_dir>",
                 Some("config") => "<config_json>",
-                Some("report") => "<junit_xml>",
+                Some("junit_xml") => "<junit_xml>",
+                Some("allure_results") => "<allure_results>",
                 Some("runner_log") => "<yaxunit_log>",
                 Some("platform_log") => "<platform_log>",
                 Some("sentinel") => "<sentinel>",

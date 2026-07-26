@@ -395,6 +395,7 @@ fn retain_run_artifacts(
         run_dir: artifacts.run_dir.clone(),
         config_json: artifacts.config_json.clone(),
         junit_xml: artifacts.junit_xml.clone(),
+        allure_results: None,
         yaxunit_log: artifacts.runner_log.clone(),
         platform_log: artifacts.platform_log.clone(),
         sentinel: artifacts.sentinel.clone(),

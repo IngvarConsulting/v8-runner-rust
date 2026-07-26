@@ -516,6 +516,7 @@ fn build_vanessa_run_all_execution(
             kind: RunnerKind::Vanessa,
             output_formats: vec![
                 RunnerOutputFormat::JunitXml,
+                RunnerOutputFormat::AllureResults,
                 RunnerOutputFormat::PlainTextLog,
             ],
             backend_hint: Some("enterprise".to_owned()),
@@ -527,7 +528,7 @@ fn build_vanessa_run_all_execution(
         ),
         policy: ExecutionPolicy {
             retain_artifacts_on_failure: true,
-            retain_artifacts_on_success: false,
+            retain_artifacts_on_success: true,
         },
         launch: LaunchOptions {
             c: Some("StartFeaturePlayer;VAParams={params_path}".to_owned()),
@@ -994,7 +995,7 @@ mod tests {
     use crate::domain::execution::{ExecutionStepKind, StepResult};
     use crate::domain::issue::{Issue, IssueSeverity, ModuleIssue};
     use crate::domain::launch::{LaunchMode, LaunchResult};
-    use crate::domain::runner::RunnerKind;
+    use crate::domain::runner::{RunnerKind, RunnerOutputFormat};
     use crate::domain::syntax::{SyntaxCheckResult, SyntaxCheckStatus, SyntaxIssueSummary};
     use crate::domain::test::{
         RetainedPaths, TestCase, TestOutputMode, TestReport, TestRunResult, TestStatus, TestSuite,
@@ -1296,6 +1297,13 @@ mod tests {
         assert_eq!(requests[0].1.scope, TestScopeRequest::All);
         assert_eq!(requests[0].1.execution.profile.kind, RunnerKind::Vanessa);
         assert_eq!(requests[0].1.execution.profile.id, "acceptance");
+        assert!(requests[0]
+            .1
+            .execution
+            .profile
+            .output_formats
+            .contains(&RunnerOutputFormat::AllureResults));
+        assert!(requests[0].1.execution.policy.retain_artifacts_on_success);
         assert_eq!(
             requests[0].1.execution.launch.c.as_deref(),
             Some("StartFeaturePlayer;VAParams={params_path}")
@@ -2537,6 +2545,7 @@ mod tests {
             run_dir: PathBuf::from("/tmp/run"),
             config_json: PathBuf::from("/tmp/config.json"),
             junit_xml: PathBuf::from("/tmp/junit.xml"),
+            allure_results: Some(PathBuf::from("/tmp/allure-results")),
             yaxunit_log: PathBuf::from("/tmp/yaxunit.log"),
             platform_log: PathBuf::from("/tmp/platform.log"),
             sentinel: PathBuf::from("/tmp/sentinel"),

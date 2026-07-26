@@ -1029,6 +1029,7 @@ fn build_vanessa_execution(
             kind: RunnerKind::Vanessa,
             output_formats: vec![
                 RunnerOutputFormat::JunitXml,
+                RunnerOutputFormat::AllureResults,
                 RunnerOutputFormat::PlainTextLog,
             ],
             backend_hint: Some("enterprise".to_owned()),
@@ -1040,7 +1041,7 @@ fn build_vanessa_execution(
         ),
         policy: ExecutionPolicy {
             retain_artifacts_on_failure: true,
-            retain_artifacts_on_success: false,
+            retain_artifacts_on_success: true,
         },
         launch: LaunchOptions::default(),
     };
@@ -2476,7 +2477,7 @@ mod tests {
     use crate::domain::load::{
         CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
     };
-    use crate::domain::runner::{LaunchOptions, RunnerKind};
+    use crate::domain::runner::{LaunchOptions, RunnerKind, RunnerOutputFormat};
     use crate::output::presenter::{ColorMode, Presenter};
     use crate::support::fs::acquire_advisory_lock;
     use crate::support::temp::platform_logs_dir;
@@ -2584,6 +2585,12 @@ mod tests {
 
         assert_eq!(request.execution.profile.kind, RunnerKind::Vanessa);
         assert_eq!(request.execution.profile.id, "smoke");
+        assert!(request
+            .execution
+            .profile
+            .output_formats
+            .contains(&RunnerOutputFormat::AllureResults));
+        assert!(request.execution.policy.retain_artifacts_on_success);
         assert_eq!(request.scope, TestScopeRequest::All);
         assert_eq!(request.execution.timeouts.total_ms, Some(300_000));
     }

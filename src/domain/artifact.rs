@@ -4,7 +4,14 @@ use serde::{Deserialize, Serialize};
 
 pub const ARTIFACT_ROLE_RUN_DIR: &str = "run_dir";
 pub const ARTIFACT_ROLE_CONFIG: &str = "config";
+#[allow(dead_code)]
 pub const ARTIFACT_ROLE_REPORT: &str = "report";
+pub const ARTIFACT_ROLE_JUNIT_XML: &str = "junit_xml";
+pub const ARTIFACT_ROLE_ALLURE_RESULTS: &str = "allure_results";
+#[allow(dead_code)]
+pub const ARTIFACT_ROLE_ERROR_DETAILS: &str = "error_details";
+#[allow(dead_code)]
+pub const ARTIFACT_ROLE_SCREENSHOT: &str = "screenshot";
 pub const ARTIFACT_ROLE_RUNNER_LOG: &str = "runner_log";
 pub const ARTIFACT_ROLE_PLATFORM_LOG: &str = "platform_log";
 pub const ARTIFACT_ROLE_SENTINEL: &str = "sentinel";
@@ -19,6 +26,10 @@ pub enum ArtifactKind {
     Config,
     Package,
     Report,
+    JunitXml,
+    AllureResults,
+    ErrorDetails,
+    Screenshot,
     RunnerLog,
     PlatformLog,
     Sentinel,
@@ -78,5 +89,36 @@ impl ArtifactSet {
             .iter()
             .find(|item| item.role.as_deref() == Some(role))
             .map(|item| item.path.as_path())
+    }
+
+    pub fn get_all_by_role<'a>(&'a self, role: &'a str) -> impl Iterator<Item = &'a Path> + 'a {
+        self.items
+            .iter()
+            .filter(move |item| item.role.as_deref() == Some(role))
+            .map(|item| item.path.as_path())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ArtifactKind, ARTIFACT_ROLE_ALLURE_RESULTS, ARTIFACT_ROLE_ERROR_DETAILS,
+        ARTIFACT_ROLE_JUNIT_XML, ARTIFACT_ROLE_SCREENSHOT,
+    };
+
+    #[test]
+    fn serializes_typed_test_artifact_kinds_and_roles() {
+        assert_eq!(
+            serde_json::to_value(ArtifactKind::JunitXml).unwrap(),
+            serde_json::json!("junit_xml")
+        );
+        assert_eq!(
+            serde_json::to_value(ArtifactKind::AllureResults).unwrap(),
+            serde_json::json!("allure_results")
+        );
+        assert_eq!(ARTIFACT_ROLE_JUNIT_XML, "junit_xml");
+        assert_eq!(ARTIFACT_ROLE_ALLURE_RESULTS, "allure_results");
+        assert_eq!(ARTIFACT_ROLE_ERROR_DETAILS, "error_details");
+        assert_eq!(ARTIFACT_ROLE_SCREENSHOT, "screenshot");
     }
 }

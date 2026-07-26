@@ -1,6 +1,6 @@
 ---
 source: tests/cli_test.rs
-assertion_line: 693
+assertion_line: 1308
 expression: compact_snapshot
 ---
 Object {
@@ -24,9 +24,9 @@ Object {
                         "role": String("config"),
                     },
                     Object {
-                        "kind": String("report"),
+                        "kind": String("junit_xml"),
                         "path": String("<junit_xml>"),
-                        "role": String("report"),
+                        "role": String("junit_xml"),
                     },
                     Object {
                         "kind": String("runner_log"),
