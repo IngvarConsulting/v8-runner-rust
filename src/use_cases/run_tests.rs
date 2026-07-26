@@ -291,15 +291,50 @@ fn materialize_vanessa_runner_log(artifacts: &RunArtifacts) -> Result<(), String
     })
 }
 
+#[cfg(unix)]
 fn open_file_no_follow(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
     let mut options = fs::OpenOptions::new();
     options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
+    options.custom_flags(libc::O_NOFOLLOW);
     options.open(path)
+}
+
+#[cfg(windows)]
+fn open_file_no_follow(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    ensure_windows_handle_is_not_reparse_point(&file)?;
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn ensure_windows_handle_is_not_reparse_point(file: &fs::File) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT,
+    };
+
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `file` owns a valid live handle and `information` points to writable storage
+    // of the exact structure expected by `GetFileInformationByHandle`.
+    let succeeded = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
+    if succeeded == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "source is a Windows reparse point",
+        ));
+    }
+    Ok(())
 }
 
 fn create_private_file(path: &Path) -> std::io::Result<fs::File> {
@@ -331,12 +366,52 @@ fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
-    match fs::remove_file(destination) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    fn wide_path(path: &Path) -> std::io::Result<Vec<u16>> {
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Windows path has no parent: {}", path.display()),
+            )
+        })?;
+        let file_name = path.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Windows path has no file name: {}", path.display()),
+            )
+        })?;
+        let normalized = fs::canonicalize(parent)?.join(file_name);
+        let mut wide = normalized.as_os_str().encode_wide().collect::<Vec<_>>();
+        if wide.contains(&0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Windows path contains a NUL code unit",
+            ));
+        }
+        wide.push(0);
+        Ok(wide)
     }
-    fs::rename(source, destination)
+
+    let source = wide_path(source)?;
+    let destination = wide_path(destination)?;
+    // SAFETY: both vectors are NUL-terminated, contain no interior NULs, and remain alive
+    // for the duration of the synchronous `MoveFileExW` call.
+    let succeeded = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if succeeded == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 fn parse_runner_log(
@@ -936,6 +1011,9 @@ mod tests {
     use crate::use_cases::request::{TestRequest, TestScopeRequest};
     use std::path::PathBuf;
     use tempfile::tempdir;
+
+    #[cfg(windows)]
+    use super::replace_file;
     use tokio_util::sync::CancellationToken;
 
     fn config(work_path: &std::path::Path) -> AppConfig {
@@ -1524,6 +1602,29 @@ mod tests {
 
         let warning = materialize_vanessa_runner_log(&artifacts).expect_err("warning");
         assert!(warning.contains("failed to materialize Vanessa runner log"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_atomic_replace_supports_extended_length_paths() {
+        let dir = tempdir().expect("tempdir");
+        let mut long_dir = dir.path().to_path_buf();
+        while long_dir.as_os_str().len() <= 300 {
+            long_dir.push("long-path-segment");
+        }
+        std::fs::create_dir_all(&long_dir).expect("long directory");
+        let source = long_dir.join("source.tmp");
+        let destination = long_dir.join("runner.log");
+        std::fs::write(&source, "replacement").expect("source");
+        std::fs::write(&destination, "old").expect("destination");
+
+        replace_file(&source, &destination).expect("atomic replace");
+
+        assert_eq!(
+            std::fs::read_to_string(&destination).expect("destination"),
+            "replacement"
+        );
+        assert!(!source.exists());
     }
 
     #[cfg(unix)]
