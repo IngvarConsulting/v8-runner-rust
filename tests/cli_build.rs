@@ -13,6 +13,11 @@ const V8_EXTENSION_NATURE: &str = "com._1c.g5.v8.dt.core.V8ExtensionNature";
 const EDT_RUNTIME_VERSION: &str = "8.3.27";
 
 fn write_build_script(path: &Path, fail_pattern: Option<&str>) {
+    let cdfi_mutation_branch = (fail_pattern == Some("/LoadConfigFromFiles"))
+        .then_some(
+            "if [ -n \"$load_dir\" ]; then printf '<ConfigDumpInfo>mutated by fake Designer</ConfigDumpInfo>\\n' > \"$load_dir/ConfigDumpInfo.xml\"; fi",
+        )
+        .unwrap_or_default();
     let pattern_branch = fail_pattern
         .map(|pattern| {
             format!(
@@ -22,8 +27,8 @@ fn write_build_script(path: &Path, fail_pattern: Option<&str>) {
         })
         .unwrap_or_default();
     let body = format!(
-        "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$out\" ]; then printf 'designer log for %s\\n' \"$args\" > \"$out\"; fi\n{}\nexit 0",
-        pattern_branch
+        "args=\"$*\"\nout=\"\"\nload_dir=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"/LoadConfigFromFiles\" ]; then load_dir=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$out\" ]; then printf 'designer log for %s\\n' \"$args\" > \"$out\"; fi\n{}\n{}\nexit 0",
+        cdfi_mutation_branch, pattern_branch
     );
     write_script(path, &body);
 }
@@ -436,7 +441,7 @@ fn build_json_failure_reports_successful_cdfi_recovery() {
 
     assert!(!output.status.success());
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
-    assert_eq!(payload["data"]["cdfi_recovery"]["action"], "not_needed");
+    assert_eq!(payload["data"]["cdfi_recovery"]["action"], "restored");
     assert_eq!(
         payload["data"]["cdfi_recovery"]["tracked_path"],
         fs::canonicalize(&cdfi_path)
@@ -445,7 +450,7 @@ fn build_json_failure_reports_successful_cdfi_recovery() {
             .to_string()
     );
     assert_eq!(payload["data"]["cdfi_recovery"]["original_existed"], true);
-    assert_eq!(payload["data"]["cdfi_recovery"]["changed_entry_count"], 0);
+    assert_eq!(payload["data"]["cdfi_recovery"]["changed_entry_count"], 1);
     assert!(payload["data"]["cdfi_recovery"]["snapshot_path"].is_null());
     assert!(payload["data"]["cdfi_recovery"]["cleanup_warning"].is_null());
     assert!(payload["data"]["cdfi_recovery"]["failure"].is_null());
