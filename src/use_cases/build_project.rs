@@ -198,19 +198,14 @@ fn selected_ordered_source_sets<'a>(
         .map(str::trim)
         .filter(|name| !name.is_empty())
     {
-        Some(name) => inventory
-            .ordered_source_sets()
-            .into_iter()
-            .find(|source_set| source_set.name == name)
-            .map(|source_set| vec![source_set])
-            .ok_or_else(|| AppError::Validation(format!("unknown source-set '{name}'"))),
+        Some(name) => inventory.dependency_ordered_source_sets(Some(name)),
         None => {
             if source_set_name.is_some() {
                 return Err(AppError::Validation(
                     "build source-set requires a non-empty name".to_owned(),
                 ));
             }
-            Ok(inventory.ordered_source_sets())
+            inventory.dependency_ordered_source_sets(None)
         }
     }
 }
@@ -982,6 +977,108 @@ mod tests {
             full_rebuild,
             source_set: None,
         }
+    }
+
+    fn dependency_build_config(
+        base_path: &Path,
+        work_path: &Path,
+        platform_path: &Path,
+    ) -> AppConfig {
+        let mut config = build_config(
+            base_path,
+            work_path,
+            platform_path,
+            20,
+            SourceFormat::Designer,
+            BuilderBackend::Designer,
+        );
+        config.source_sets = vec![
+            SourceSetConfig {
+                name: "tests".to_owned(),
+                purpose: SourceSetPurpose::Extension,
+                path: PathBuf::from("tests"),
+                depends_on: vec!["yaxunit".to_owned()],
+            },
+            SourceSetConfig {
+                name: "unrelated".to_owned(),
+                purpose: SourceSetPurpose::Extension,
+                path: PathBuf::from("unrelated"),
+                depends_on: vec!["main".to_owned()],
+            },
+            SourceSetConfig {
+                name: "yaxunit".to_owned(),
+                purpose: SourceSetPurpose::Extension,
+                path: PathBuf::from("yaxunit"),
+                depends_on: vec!["main".to_owned()],
+            },
+            SourceSetConfig {
+                name: "main".to_owned(),
+                purpose: SourceSetPurpose::Configuration,
+                path: PathBuf::from("main"),
+                depends_on: Vec::new(),
+            },
+        ];
+        config
+    }
+
+    fn create_dependency_source_tree(base_path: &Path) {
+        for source_set in ["main", "yaxunit", "tests", "unrelated"] {
+            let source_path = base_path.join(source_set);
+            fs::create_dir_all(&source_path).expect("source-set directory");
+            fs::write(
+                source_path.join("Configuration.xml"),
+                format!("<Configuration name=\"{source_set}\" />"),
+            )
+            .expect("source-set marker");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_build_executes_source_sets_in_stable_dependency_order() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let platform = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        create_dependency_source_tree(&base);
+        write_designer_script(&platform, &calls, None);
+        let config = dependency_build_config(&base, &work, &platform);
+
+        let result = run_build(&config, &build_args(true)).expect("build");
+        let source_sets = result
+            .steps
+            .iter()
+            .map(|step| step.source_set.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(source_sets, vec!["main", "unrelated", "yaxunit", "tests"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_build_executes_transitive_dependency_closure() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let platform = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        create_dependency_source_tree(&base);
+        write_designer_script(&platform, &calls, None);
+        let config = dependency_build_config(&base, &work, &platform);
+        let args = BuildArgs {
+            full_rebuild: true,
+            source_set: Some("tests".to_owned()),
+        };
+
+        let result = run_build(&config, &args).expect("build");
+        let source_sets = result
+            .steps
+            .iter()
+            .map(|step| step.source_set.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(source_sets, vec!["main", "yaxunit", "tests"]);
     }
 
     #[cfg(unix)]
