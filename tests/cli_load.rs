@@ -237,6 +237,16 @@ fn load_cfe_json_creates_missing_extension_from_artifact() {
 
     let calls = fs::read_to_string(calls_log).expect("calls");
     let calls = calls.lines().collect::<Vec<_>>();
+    let probe = calls
+        .iter()
+        .position(|call| {
+            call.contains("/CompareCfg")
+                && call.contains("ExtensionConfiguration")
+                && call.contains("ExtensionDBConfiguration")
+                && call.contains("-FirstName NewExt")
+                && call.contains("-SecondName NewExt")
+        })
+        .expect("extension compatibility probe");
     let load = calls
         .iter()
         .position(|call| {
@@ -248,8 +258,8 @@ fn load_cfe_json_creates_missing_extension_from_artifact() {
         .position(|call| call.contains("/UpdateDBCfg -Extension NewExt"))
         .expect("update call");
     assert!(
-        load < update,
-        "extension must be applied before database update"
+        probe < load && load < update,
+        "extension probe must precede load, which must precede database update"
     );
 }
 
