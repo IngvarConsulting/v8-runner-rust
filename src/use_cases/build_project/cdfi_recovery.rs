@@ -2,10 +2,11 @@ use std::fs;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
-use tempfile::{Builder, TempDir};
+use tempfile::Builder;
+use uuid::Uuid;
 
 use crate::support::error::AppError;
-use crate::support::fs::publish_file_atomically;
+use crate::support::fs::replace_file_atomically;
 
 const CDFI_FILE_NAME: &str = "ConfigDumpInfo.xml";
 
@@ -26,7 +27,7 @@ pub(super) struct CdfiRecoverySummary {
 pub(super) struct CdfiRecoveryGuard {
     tracked_path: PathBuf,
     snapshot_path: PathBuf,
-    snapshot_dir: Option<TempDir>,
+    snapshot_dir: Option<PathBuf>,
     original_exists: bool,
     original_permissions: Option<fs::Permissions>,
 }
@@ -76,6 +77,7 @@ impl CdfiRecoveryGuard {
             }
         };
         let original_exists = original_permissions.is_some();
+        let snapshot_dir = snapshot_dir.keep();
 
         Ok(Self {
             tracked_path,
@@ -106,7 +108,7 @@ impl CdfiRecoveryGuard {
         let Some(snapshot_dir) = self.snapshot_dir.as_ref() else {
             return Ok(());
         };
-        fs::remove_dir_all(snapshot_dir.path()).map_err(|error| {
+        fs::remove_dir_all(snapshot_dir).map_err(|error| {
             AppError::Runtime(format!(
                 "failed to remove CDFI recovery snapshot '{}': {error}",
                 self.snapshot_path.display()
@@ -167,12 +169,19 @@ impl CdfiRecoveryGuard {
                 self.tracked_path.display()
             ))
         })?;
-        publish_file_atomically(staging_file.path(), &self.tracked_path).map_err(|error| {
+        replace_file_atomically(
+            staging_file.path(),
+            &self.tracked_path,
+            &Uuid::new_v4().to_string(),
+            "cdfi-recovery",
+        )
+        .map_err(|error| {
             AppError::Runtime(format!(
                 "failed to restore CDFI '{}': {error}",
                 self.tracked_path.display()
             ))
         })
+        .map(|_| ())
     }
 
     fn remove_created_file(&self) -> Result<(), AppError> {
@@ -248,6 +257,35 @@ mod tests {
         guard.cleanup().expect("cleanup");
 
         assert!(!snapshot_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_restore_keeps_pristine_snapshot_after_guard_is_dropped() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        let source_root = temp.path().join("source");
+        let work_path = temp.path().join("work");
+        let tracked_path = source_root.join(CDFI_FILE_NAME);
+        let original = b"\xEF\xBB\xBF<ConfigDumpInfo/>\r\n";
+
+        fs::create_dir_all(&source_root).expect("source root");
+        fs::write(&tracked_path, original).expect("original CDFI");
+        let mut guard = CdfiRecoveryGuard::capture(&source_root, &work_path).expect("capture");
+        let snapshot_path = guard.snapshot_path.clone();
+        fs::set_permissions(&source_root, fs::Permissions::from_mode(0o500))
+            .expect("block restore staging");
+
+        guard.restore().expect_err("restore must fail");
+        drop(guard);
+        fs::set_permissions(&source_root, fs::Permissions::from_mode(0o700))
+            .expect("restore source permissions");
+
+        assert_eq!(
+            fs::read(snapshot_path).expect("retained snapshot"),
+            original
+        );
     }
 
     #[cfg(unix)]
