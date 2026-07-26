@@ -1203,11 +1203,15 @@ mod tests {
                     duration_ms: 9,
                 }],
                 duration_ms: 19,
-                cdfi_recovery: Some(CdfiRecoverySummary {
-                    action: CdfiRecoveryAction::RestoreFailed,
+                cdfi_recovery: Some(Box::new(CdfiRecoverySummary {
+                    tracked_path: "/src/ConfigDumpInfo.xml".into(),
+                    original_existed: true,
+                    changed_entry_count: Some(1),
+                    action: CdfiRecoveryAction::Failed,
                     snapshot_path: Some("/work/cdfi-recovery/ConfigDumpInfo.xml".into()),
+                    cleanup_warning: None,
                     failure: Some("permission denied".to_owned()),
-                }),
+                })),
             },
         )));
         let config = sample_config();
@@ -1224,9 +1228,14 @@ mod tests {
                 assert_eq!(failure.response.command, "build");
                 assert_eq!(failure.response.duration_ms, 19);
                 assert_eq!(failure.response.data["steps"][0]["ok"], false);
+                assert_eq!(failure.response.data["cdfi_recovery"]["action"], "failed");
                 assert_eq!(
-                    failure.response.data["cdfi_recovery"]["action"],
-                    "restore_failed"
+                    failure.response.data["cdfi_recovery"]["tracked_path"],
+                    "/src/ConfigDumpInfo.xml"
+                );
+                assert_eq!(
+                    failure.response.data["cdfi_recovery"]["changed_entry_count"],
+                    1
                 );
                 assert_eq!(
                     failure.response.data["cdfi_recovery"]["snapshot_path"],

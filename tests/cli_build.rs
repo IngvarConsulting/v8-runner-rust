@@ -436,11 +436,18 @@ fn build_json_failure_reports_successful_cdfi_recovery() {
 
     assert!(!output.status.success());
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["data"]["cdfi_recovery"]["action"], "not_needed");
     assert_eq!(
-        payload["data"]["cdfi_recovery"]["action"],
-        "restored_original"
+        payload["data"]["cdfi_recovery"]["tracked_path"],
+        fs::canonicalize(&cdfi_path)
+            .expect("canonical CDFI")
+            .display()
+            .to_string()
     );
+    assert_eq!(payload["data"]["cdfi_recovery"]["original_existed"], true);
+    assert_eq!(payload["data"]["cdfi_recovery"]["changed_entry_count"], 0);
     assert!(payload["data"]["cdfi_recovery"]["snapshot_path"].is_null());
+    assert!(payload["data"]["cdfi_recovery"]["cleanup_warning"].is_null());
     assert!(payload["data"]["cdfi_recovery"]["failure"].is_null());
     assert_eq!(fs::read(cdfi_path).expect("restored CDFI"), original_cdfi);
 }

@@ -1612,22 +1612,31 @@ fn render_build_text(result: &BuildResult, presenter: &Presenter, succeeded: boo
     } else {
         TimelineItem::new(TimelineStatus::Succeeded, "Build completed successfully")
     };
-    if let Some((action, snapshot_path)) = result.cdfi_recovery.as_ref().and_then(|recovery| {
-        recovery
-            .snapshot_path
-            .as_ref()
-            .map(|snapshot_path| (&recovery.action, snapshot_path))
-    }) {
-        let label = match action {
-            CdfiRecoveryAction::RestoreFailed => "CDFI recovery failed",
-            CdfiRecoveryAction::RestoredOriginal | CdfiRecoveryAction::RemovedCreatedFile => {
-                "CDFI recovery snapshot cleanup failed"
-            }
+    if let Some(recovery) = result.cdfi_recovery.as_deref() {
+        let action_label = match recovery.action {
+            CdfiRecoveryAction::NotNeeded => "not needed",
+            CdfiRecoveryAction::Restored => "restored",
+            CdfiRecoveryAction::RemovedCreatedFile => "removed created file",
+            CdfiRecoveryAction::Failed => "failed",
         };
-        summary = summary.with_detail(format!(
-            "{label}; retained snapshot: {}",
-            snapshot_path.display(),
-        ));
+        if let Some(failure) = recovery.failure.as_deref() {
+            summary = summary.with_detail(format!(
+                "CDFI recovery {action_label} for {}: {failure}",
+                recovery.tracked_path.display()
+            ));
+        }
+        if let Some(warning) = recovery.cleanup_warning.as_deref() {
+            summary = summary.with_detail(format!(
+                "CDFI recovery cleanup warning for {}: {warning}",
+                recovery.tracked_path.display()
+            ));
+        }
+        if let Some(snapshot_path) = recovery.snapshot_path.as_ref() {
+            summary = summary.with_detail(format!(
+                "retained CDFI recovery snapshot: {}",
+                snapshot_path.display()
+            ));
+        }
     }
     presenter.print_timeline(&[summary]);
 }

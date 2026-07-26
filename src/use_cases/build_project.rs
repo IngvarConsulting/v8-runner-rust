@@ -70,14 +70,14 @@ pub(crate) type BuildExecutionFailure = UseCaseFailure<BuildResult>;
 #[derive(Debug)]
 struct BuildStepFailure {
     error: AppError,
-    cdfi_recovery: Option<CdfiRecoverySummary>,
+    cdfi_recovery: Option<Box<CdfiRecoverySummary>>,
 }
 
 impl BuildStepFailure {
     fn with_cdfi_recovery(error: AppError, cdfi_recovery: CdfiRecoverySummary) -> Self {
         Self {
             error,
-            cdfi_recovery: Some(cdfi_recovery),
+            cdfi_recovery: Some(Box::new(cdfi_recovery)),
         }
     }
 }
@@ -86,6 +86,27 @@ impl From<AppError> for BuildStepFailure {
     fn from(error: AppError) -> Self {
         Self {
             error,
+            cdfi_recovery: None,
+        }
+    }
+}
+
+impl From<AppError> for Box<BuildStepFailure> {
+    fn from(error: AppError) -> Self {
+        Box::new(BuildStepFailure::from(error))
+    }
+}
+
+#[derive(Debug)]
+struct BuildStepOutcome {
+    warnings: Vec<String>,
+    cdfi_recovery: Option<Box<CdfiRecoverySummary>>,
+}
+
+impl From<Vec<String>> for BuildStepOutcome {
+    fn from(warnings: Vec<String>) -> Self {
+        Self {
+            warnings,
             cdfi_recovery: None,
         }
     }
@@ -455,7 +476,7 @@ fn execute_source_set_step(
     step_index: usize,
     partial_paths: Option<&[PathBuf]>,
     commit: &StepCommit,
-) -> Result<Vec<String>, BuildStepFailure> {
+) -> Result<BuildStepOutcome, Box<BuildStepFailure>> {
     if let Some(error) = interruption_before_safe_point(
         context,
         format!("build load for source-set '{}'", source_set.name),
@@ -608,37 +629,40 @@ fn execute_source_set_step(
             &mut recovery_guard,
         ));
     }
-    let cleanup_warning = recovery_guard.cleanup().err().map(|error| {
-        format!("failed to remove CDFI recovery snapshot after successful Designer build: {error}")
-    });
-
-    Ok([
+    let recovery = recovery_guard.finalize_successful_build();
+    let warnings = [
         deferred_interruption_warning("load", &load_result),
         deferred_interruption_warning("update_db_cfg", &update_result),
-        cleanup_warning,
+        recovery.cleanup_warning.clone(),
     ]
     .into_iter()
     .flatten()
-    .collect())
+    .collect();
+
+    Ok(BuildStepOutcome {
+        warnings,
+        cdfi_recovery: Some(Box::new(recovery)),
+    })
 }
 
 fn restore_cdfi_after_designer_failure(
     error: AppError,
     recovery_guard: &mut CdfiRecoveryGuard,
-) -> BuildStepFailure {
+) -> Box<BuildStepFailure> {
+    let changed_entry_count = recovery_guard.changed_entry_count();
     match recovery_guard.restore() {
-        Ok(summary) => BuildStepFailure::with_cdfi_recovery(
+        Ok(summary) => Box::new(BuildStepFailure::with_cdfi_recovery(
             error,
             recovery_guard.finalize_successful_restore(summary),
-        ),
+        )),
         Err(recovery_error) => {
             let failure = error.with_context(format!(
                 "failed to restore CDFI after Designer build failure: {recovery_error}"
             ));
-            BuildStepFailure::with_cdfi_recovery(
+            Box::new(BuildStepFailure::with_cdfi_recovery(
                 failure,
-                recovery_guard.failed_summary(&recovery_error),
-            )
+                recovery_guard.failed_summary(&recovery_error, changed_entry_count),
+            ))
         }
     }
 }
@@ -813,6 +837,7 @@ mod tests {
         ToolExtensionInput, ToolExtensionSourceConfig, ToolsConfig,
     };
     use crate::domain::build::BuildMode;
+    use crate::domain::build::CdfiRecoveryAction;
     use crate::domain::source_set::SourceSetContext;
     use crate::use_cases::context::{CommandName, ExecutionContext};
     use crate::use_cases::request::BuildRequest as BuildArgs;
@@ -1103,6 +1128,13 @@ mod tests {
         }
     }
 
+    fn source_set_build_args(name: &str) -> BuildArgs {
+        BuildArgs {
+            full_rebuild: true,
+            source_set: Some(name.to_owned()),
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn execute_build_honors_interruption_before_load_safe_point() {
@@ -1188,6 +1220,89 @@ mod tests {
                     .starts_with("cdfi-recovery-")),
             "successful CDFI restoration must remove its private snapshot"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeated_failed_designer_builds_restore_cdfi_idempotently() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let platform = dir.path().join("1cv8");
+        let calls_log = dir.path().join("designer.calls.log");
+        let tracked_path = base.join("main").join("ConfigDumpInfo.xml");
+        let original_cdfi = b"\xEF\xBB\xBF<ConfigDumpInfo>repeatable fixture</ConfigDumpInfo>\r\n";
+        create_source_tree(&base);
+        fs::create_dir_all(&work).expect("work");
+        fs::write(&tracked_path, original_cdfi).expect("original CDFI");
+        write_designer_script(&platform, &calls_log, Some("/LoadConfigFromFiles"));
+        let config = build_config(
+            &base,
+            &work,
+            &platform,
+            20,
+            SourceFormat::Designer,
+            BuilderBackend::Designer,
+        );
+
+        for attempt in 1..=2 {
+            let failure = run_build(&config, &source_set_build_args("main"))
+                .expect_err("load must fail on every run");
+            let recovery = failure
+                .payload
+                .as_ref()
+                .and_then(|result| result.cdfi_recovery.as_deref())
+                .expect("typed recovery");
+
+            assert_eq!(
+                fs::read(&tracked_path).expect("restored CDFI"),
+                original_cdfi,
+                "attempt {attempt} must restore the same baseline"
+            );
+            assert_eq!(recovery.action, CdfiRecoveryAction::Restored);
+            assert_eq!(recovery.changed_entry_count, Some(1));
+            assert_eq!(recovery.tracked_path, tracked_path);
+            assert!(recovery.original_existed);
+            assert!(recovery.snapshot_path.is_none());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_designer_build_restores_absent_cdfi_and_reports_result_contract() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let platform = dir.path().join("1cv8");
+        let calls_log = dir.path().join("designer.calls.log");
+        let tracked_path = base.join("main").join("ConfigDumpInfo.xml");
+        create_source_tree(&base);
+        fs::create_dir_all(&work).expect("work");
+        assert!(!tracked_path.exists());
+        write_designer_script(&platform, &calls_log, Some("/LoadConfigFromFiles"));
+        let config = build_config(
+            &base,
+            &work,
+            &platform,
+            20,
+            SourceFormat::Designer,
+            BuilderBackend::Designer,
+        );
+
+        let failure = run_build(&config, &source_set_build_args("main"))
+            .expect_err("load must fail after creating CDFI");
+        let recovery = failure
+            .payload
+            .as_ref()
+            .and_then(|result| result.cdfi_recovery.as_deref())
+            .expect("typed recovery");
+
+        assert!(!tracked_path.exists());
+        assert_eq!(recovery.action, CdfiRecoveryAction::RemovedCreatedFile);
+        assert_eq!(recovery.tracked_path, tracked_path);
+        assert!(!recovery.original_existed);
+        assert_eq!(recovery.changed_entry_count, Some(1));
+        assert!(recovery.snapshot_path.is_none());
     }
 
     #[cfg(unix)]
@@ -1355,6 +1470,16 @@ mod tests {
         let result = run_build(&config, &build_args(true)).expect("build");
 
         assert!(result.ok);
+        let recovery = result.cdfi_recovery.as_deref().expect("recovery summary");
+        assert_eq!(recovery.action, CdfiRecoveryAction::NotNeeded);
+        assert_eq!(
+            recovery.tracked_path,
+            base.join("ext").join("ConfigDumpInfo.xml")
+        );
+        assert!(!recovery.original_existed);
+        assert_eq!(recovery.changed_entry_count, Some(1));
+        assert!(recovery.snapshot_path.is_none());
+        assert!(recovery.cleanup_warning.is_none());
         assert_eq!(
             fs::read(base.join("main").join("ConfigDumpInfo.xml")).expect("platform CDFI"),
             b"<ConfigDumpInfo>platform replacement</ConfigDumpInfo>\n"
@@ -1369,6 +1494,106 @@ mod tests {
                     .starts_with("cdfi-recovery-")),
             "successful build must remove its private CDFI recovery snapshot"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_designer_build_reports_snapshot_cleanup_failure() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let platform = dir.path().join("1cv8");
+        let calls_log = dir.path().join("designer.calls.log");
+        let tracked_path = base.join("main").join("ConfigDumpInfo.xml");
+        create_source_tree(&base);
+        fs::create_dir_all(&work).expect("work");
+        fs::write(
+            &tracked_path,
+            b"<ConfigDumpInfo>cleanup baseline</ConfigDumpInfo>\n",
+        )
+        .expect("original CDFI");
+        write_designer_script(&platform, &calls_log, None);
+        let config = build_config(
+            &base,
+            &work,
+            &platform,
+            20,
+            SourceFormat::Designer,
+            BuilderBackend::Designer,
+        );
+
+        let _cleanup_failure = super::cdfi_recovery::simulate_cleanup_failure(
+            "simulated snapshot cleanup permission failure",
+        );
+        let result =
+            run_build(&config, &source_set_build_args("main")).expect("degraded successful build");
+        let recovery = result.cdfi_recovery.as_deref().expect("recovery summary");
+        let snapshot_path = recovery
+            .snapshot_path
+            .as_ref()
+            .expect("retained snapshot path");
+
+        assert!(result.ok);
+        assert_eq!(recovery.action, CdfiRecoveryAction::NotNeeded);
+        assert_eq!(recovery.tracked_path, tracked_path);
+        assert!(recovery.original_existed);
+        assert_eq!(recovery.changed_entry_count, Some(1));
+        assert!(recovery
+            .cleanup_warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("failed to remove CDFI recovery snapshot")));
+        assert!(snapshot_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn later_failure_keeps_earlier_cdfi_cleanup_artifact_visible() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let platform = dir.path().join("1cv8");
+        let calls_log = dir.path().join("designer.calls.log");
+        let main_cdfi = base.join("main").join("ConfigDumpInfo.xml");
+        create_source_tree(&base);
+        fs::create_dir_all(&work).expect("work");
+        fs::write(
+            &main_cdfi,
+            b"<ConfigDumpInfo>cleanup baseline</ConfigDumpInfo>\n",
+        )
+        .expect("original CDFI");
+        write_designer_script(&platform, &calls_log, Some("-Extension ext"));
+        let config = build_config(
+            &base,
+            &work,
+            &platform,
+            20,
+            SourceFormat::Designer,
+            BuilderBackend::Designer,
+        );
+
+        let _cleanup_failure = super::cdfi_recovery::simulate_cleanup_failure(
+            "simulated first snapshot cleanup failure",
+        );
+        let failure = run_build(&config, &build_args(true)).expect_err("extension load must fail");
+        let recovery = failure
+            .payload
+            .as_ref()
+            .and_then(|result| result.cdfi_recovery.as_deref())
+            .expect("typed recovery");
+        let warning = recovery
+            .cleanup_warning
+            .as_deref()
+            .expect("prior cleanup warning");
+
+        assert!(warning.contains(&main_cdfi.display().to_string()));
+        assert!(warning.contains("cdfi-recovery-"));
+        assert!(fs::read_dir(&work)
+            .expect("work entries")
+            .flatten()
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("cdfi-recovery-")));
     }
 
     #[cfg(unix)]
