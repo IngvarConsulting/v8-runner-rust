@@ -32,7 +32,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `build` | `format=EDT` + `builder=DESIGNER|IBCMD` | Экспортирует изменённые EDT `source-set`, затем грузит generated Designer output |
 | `test` | Та же матрица, что и у `build` | Всегда сначала запускает `build` |
 | `dump` | `format=DESIGNER` + `builder=DESIGNER` | Полная, инкрементальная или object-scoped partial выгрузка |
-| `dump` | `format=DESIGNER` + `builder=IBCMD` | Полная и инкрементальная выгрузка; `partial` деградирует в incremental с warning |
+| `dump` | `format=DESIGNER` + `builder=IBCMD` | Полная и инкрементальная выгрузка; `partial` деградирует в incremental с warning; standalone-server state изолирован в `workPath/ibcmd-data` |
 | `dump` | `format=EDT` + `builder=DESIGNER|IBCMD` | Reverse sync из ИБ через internal Designer snapshot и EDT import |
 | `convert` | CLI-only repo-aware конвертация текущих `source-set` | Не использует `builder` и не требует ИБ |
 | `load` | `format=DESIGNER` + `builder=DESIGNER` | Загрузка `.cf` / `.cfe` артефактов в ИБ |
@@ -244,6 +244,14 @@ v8-runner dump --mode <full|incremental|partial> [--source-set <NAME>] [--extens
 ```
 
 - `partial` требует хотя бы один `--object`.
+- Канонический ввод селектора — `TYPE:NAME` (например, `Catalog:Items`); для
+  совместимости принимается и `TYPE.NAME`. Переданный селектор сохраняется в JSON как
+  `data.selectors[*].requested`, а в списке Designer и как
+  `data.selectors[*].normalized` используется нормализованный `TYPE.NAME`.
+- До запуска платформы CLI валидирует синтаксис селектора: непустые `TYPE` и `NAME`,
+  ровно один разделитель `:` или `.`, без управляющих символов. В `builder=DESIGNER`
+  существование metadata root type проверяет Designer; `builder=IBCMD` не использует object list,
+  потому что деградирует в incremental.
 - `builder=DESIGNER` поддерживает true object-scoped partial.
 - `builder=IBCMD` не умеет object-scoped partial; запрос деградирует в incremental с warning.
 - `format=EDT` использует internal Designer snapshot под `workPath/designer/<sourceSetName>`,
@@ -301,7 +309,7 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--wait-ready] [FLAGS]
 - `designer` использует `1cv8`.
 - `thin` использует `1cv8c`.
 - `thick` и `ordinary` используют `1cv8`.
-- `mcp` запускает клиентский MCP-сервер onec-client-mcp-devkit через `/C"runMcp"`.
+- `mcp` запускает клиентский MCP-сервер onec-client-mcp-devkit через `/C runMcp`.
 - `launch mcp` по умолчанию использует `--mode thin` и `1cv8c`.
 - `launch mcp --mode thick` использует `1cv8`; `launch mcp --mode ordinary` использует `1cv8`
   и добавляет `/RunModeOrdinaryApplication`.
@@ -309,10 +317,12 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--wait-ready] [FLAGS]
   и передаёт `VAParams=<runtime params>` без `StartFeaturePlayer`.
 - Для интерактивной отладки и написания функциональных `.feature`-сценариев используйте
   `launch mcp va --wait-ready`; голый `launch mcp` поднимает client MCP без Vanessa tools.
-- Любой управляемый runner payload для ключа `/C` передаётся как один аргумент
-  `/C"<payload>"`: это касается `launch --c`, `launch mcp`, `test yaxunit` и `test va`.
+- Любой управляемый runner payload для ключа `/C` передаётся как значение отдельного
+  аргумента `/C`: это касается `launch --c`, `launch mcp`, `test yaxunit` и `test va`.
+  На уровне process argv это два элемента: `/C` и `<payload>`; shell-подобная запись
+  `/C <payload>` в документации не означает один склеенный аргумент.
 - Для `mcp` доступны typed flags `--mcp-config <FILE>` и `--mcp-port <PORT>`;
-  итоговый payload: `/C"runMcp[=<FILE>][;mcpPort=<PORT>]"`.
+  итоговый payload: `/C runMcp[=<FILE>][;mcpPort=<PORT>]`.
 - Если `--mcp-port` не указан, используется `tools.client_mcp.port` из `v8project.yaml`.
 - `--wait-ready` ждёт `http://127.0.0.1:<port>/mcp`, выполняет MCP `initialize`,
   `notifications/initialized` и `tools/list`, а в JSON-результате возвращает `mcp_readiness`
@@ -326,6 +336,7 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--wait-ready] [FLAGS]
   подготовка выполняется командой `v8-runner build`.
 - `--mcp-config` не должен содержать `;`, потому что `/C` payload разделяется точкой с запятой.
 - `launch mcp` не принимает `--c` и `--execute`, потому что `/C` управляется командой.
+- Для локальной проверки external EPF используйте только `launch thin --execute <file.epf> --output <out> --stderr-output <stderr> --wait-for-exit --wait-timeout-ms <ms>`: это opt-in bounded wait с JSON-полями PID, execute path, exit code/timeout и заявленными artifact paths. Timeout считается CLI failure и возвращает error envelope с payload после остановки группы процесса. Ненулевой exit code external EPF возвращается в JSON как наблюдаемый результат; вызывающий runtime gate обязан проверить `external_epf_wait.exit_code`. Обычный `launch` остаётся асинхронным. В wait-режиме запрещены raw `/C`, `/Execute` и `/Out` (включая configured additional launch keys).
 - `launch mcp` принимает общие launch flags `--use-privileged-mode`, `--output` и `--raw-key`, но
   `--raw-key` не может задавать `/C`, `/Execute` или `/Out`.
 - Для `designer`/`thin`/`thick`/`ordinary` дополнительные typed flags: `--c`, `--execute`, `--use-privileged-mode`, `--output`,
@@ -371,6 +382,7 @@ v8-runner mcp serve http
 - `workPath/hash-storages/`: persisted change-detection state.
 - `workPath/edt-workspace/`: общий EDT workspace для `init`.
 - `workPath/convert/edt-workspace/`: отдельный EDT workspace для `convert`.
+- `workPath/ibcmd-data/`: изолированный standalone-server data directory для IBCMD dump; это runtime state `v8-runner`, его можно удалить, когда нет активных CLI/MCP команд проекта.
 - `workPath/logs/platform/`: platform logs.
 - `workPath/logs/mcp/actions.log`: MCP action log.
 - `workPath/temp/`: временные run artifacts и диагностические файлы.

@@ -20,6 +20,20 @@ pub struct LaunchResult {
     /// Client-side MCP endpoint readiness details when readiness was requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_readiness: Option<McpReadinessResult>,
+    /// Direct external EPF wait outcome when explicitly requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_epf_wait: Option<ExternalEpfWaitResult>,
+}
+
+/// Observed outcome of an opt-in bounded external EPF client launch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalEpfWaitResult {
+    pub pid: u32,
+    pub execute_path: String,
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    pub output_path: String,
+    pub stderr_path: String,
 }
 
 /// Canonical platform installation metadata exposed by `launch` JSON results.

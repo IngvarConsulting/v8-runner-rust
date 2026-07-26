@@ -292,7 +292,7 @@ impl Default for McpConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(default, rename_all = "snake_case")]
 pub struct ClientMcpToolConfig {
-    /// Default port passed to onec-client-mcp-devkit via `/C"...;mcpPort=<PORT>"`.
+    /// Default port passed to onec-client-mcp-devkit via `/C ...;mcpPort=<PORT>`.
     pub port: Option<u16>,
 
     /// Optional wait-ready timeout in milliseconds. Defaults to `execution_timeout` when unset.
