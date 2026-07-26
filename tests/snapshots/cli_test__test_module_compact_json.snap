@@ -29,6 +29,11 @@ Object {
                         "role": String("junit_xml"),
                     },
                     Object {
+                        "kind": String("allure_results"),
+                        "path": String("<allure_results>"),
+                        "role": String("allure_results"),
+                    },
+                    Object {
                         "kind": String("runner_log"),
                         "path": String("<yaxunit_log>"),
                         "role": String("runner_log"),
@@ -37,11 +42,6 @@ Object {
                         "kind": String("platform_log"),
                         "path": String("<platform_log>"),
                         "role": String("platform_log"),
-                    },
-                    Object {
-                        "kind": String("sentinel"),
-                        "path": String("<sentinel>"),
-                        "role": String("sentinel"),
                     },
                 ],
                 "root_dir": String("<run_dir>"),
@@ -123,11 +123,11 @@ Object {
             },
         },
         "retained_paths": Object {
+            "allure_results": String("<allure_results>"),
             "config_json": String("<config_json>"),
             "junit_xml": String("<junit_xml>"),
             "platform_log": String("<platform_log>"),
             "run_dir": String("<run_dir>"),
-            "sentinel": String("<sentinel>"),
             "yaxunit_log": String("<yaxunit_log>"),
         },
         "target": Object {

@@ -88,4 +88,8 @@ Preserve failed test artifacts under:
 workPath/temp/<runner-id>/runs/<run-id>/
 ```
 
+When native runners materialize them, the returned artifacts include JUnit XML and
+the native Allure results directory. Only existing run outputs are returned; internal
+cleanup markers are not part of the public artifact contract.
+
 In final answers, include the command, pass/fail result, and artifact path when present.

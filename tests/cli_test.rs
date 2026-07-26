@@ -42,7 +42,7 @@ fn write_test_script(
         .map(|value| format!("sleep {value}"))
         .unwrap_or_default();
     let body = format!(
-        "printf '%s\\n' \"$*\" >> '{}'\npayload=\"\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/C\" ]; then payload=\"$arg\"; fi\n  case \"$arg\" in /C*) payload=\"${{arg#/C}}\" ;; esac\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\ncfg=$(printf '%s' \"$payload\" | sed 's/^\"//; s/\"$//; s/^RunUnitTests=//')\ncp \"$cfg\" '{}'\nreport=$(awk -F '\"' '/reportPath/ {{print $4; exit}}' \"$cfg\")\nylog=$(awk -F '\"' '/\"file\"/ {{print $4; exit}}' \"$cfg\")\nmkdir -p \"$(dirname \"$report\")\" \"$(dirname \"$ylog\")\" \"$(dirname \"$out\")\"\ncat <<'XML' > \"$report\"\n{}\nXML\ncat <<'LOG' > \"$ylog\"\n{}\nLOG\nprintf 'platform /P secret uri http://user:pass@example\\n' > \"$out\"\n{}\nexit {}",
+        "printf '%s\\n' \"$*\" >> '{}'\npayload=\"\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/C\" ]; then payload=\"$arg\"; fi\n  case \"$arg\" in /C*) payload=\"${{arg#/C}}\" ;; esac\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\ncfg=$(printf '%s' \"$payload\" | sed 's/^\"//; s/\"$//; s/^RunUnitTests=//')\ncp \"$cfg\" '{}'\nreport=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    print(json.load(fh)['reports'][0]['path'])\nPY\n)\nallure_dir=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    print(json.load(fh)['reports'][1]['path'])\nPY\n)\nylog=$(awk -F '\"' '/\"file\"/ {{print $4; exit}}' \"$cfg\")\nmkdir -p \"$(dirname \"$report\")\" \"$allure_dir\" \"$(dirname \"$ylog\")\" \"$(dirname \"$out\")\"\ncat <<'XML' > \"$report\"\n{}\nXML\nprintf '%s\\n' '{{\"uuid\":\"fixture\",\"name\":\"fixture\",\"status\":\"passed\",\"stage\":\"finished\"}}' > \"$allure_dir/fixture-result.json\"\ncat <<'LOG' > \"$ylog\"\n{}\nLOG\nprintf 'platform /P secret uri http://user:pass@example\\n' > \"$out\"\n{}\nexit {}",
         calls_log.display(),
         captured_config.display(),
         report_xml,
@@ -317,15 +317,23 @@ fn setup_va_project_with_work_name(
 fn scrub_snapshot(value: &mut Value) {
     value["duration_ms"] = Value::String("<duration>".to_owned());
     value["data"]["retained_paths"]["run_dir"] = Value::String("<run_dir>".to_owned());
-    value["data"]["retained_paths"]["config_json"] = Value::String("<config_json>".to_owned());
-    value["data"]["retained_paths"]["junit_xml"] = Value::String("<junit_xml>".to_owned());
+    if value["data"]["retained_paths"]["config_json"].is_string() {
+        value["data"]["retained_paths"]["config_json"] = Value::String("<config_json>".to_owned());
+    }
+    if value["data"]["retained_paths"]["junit_xml"].is_string() {
+        value["data"]["retained_paths"]["junit_xml"] = Value::String("<junit_xml>".to_owned());
+    }
     if value["data"]["retained_paths"]["allure_results"].is_string() {
         value["data"]["retained_paths"]["allure_results"] =
             Value::String("<allure_results>".to_owned());
     }
-    value["data"]["retained_paths"]["yaxunit_log"] = Value::String("<yaxunit_log>".to_owned());
-    value["data"]["retained_paths"]["platform_log"] = Value::String("<platform_log>".to_owned());
-    value["data"]["retained_paths"]["sentinel"] = Value::String("<sentinel>".to_owned());
+    if value["data"]["retained_paths"]["yaxunit_log"].is_string() {
+        value["data"]["retained_paths"]["yaxunit_log"] = Value::String("<yaxunit_log>".to_owned());
+    }
+    if value["data"]["retained_paths"]["platform_log"].is_string() {
+        value["data"]["retained_paths"]["platform_log"] =
+            Value::String("<platform_log>".to_owned());
+    }
     if value["data"]["execution"]["artifacts"]["root_dir"].is_string() {
         value["data"]["execution"]["artifacts"]["root_dir"] = Value::String("<run_dir>".to_owned());
     }
@@ -338,7 +346,6 @@ fn scrub_snapshot(value: &mut Value) {
                 Some("allure_results") => "<allure_results>",
                 Some("runner_log") => "<yaxunit_log>",
                 Some("platform_log") => "<platform_log>",
-                Some("sentinel") => "<sentinel>",
                 _ => continue,
             };
             item["path"] = Value::String(replacement.to_owned());
@@ -519,7 +526,7 @@ fn test_command_streams_enterprise_stage_before_runner_finishes() {
     write_script(
         &dir.path().join("platform").join("bin").join("1cv8c"),
         &format!(
-            "printf '%s\\n' \"$*\" >> '{}'\npayload=\"\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/C\" ]; then payload=\"$arg\"; fi\n  case \"$arg\" in /C*) payload=\"${{arg#/C}}\" ;; esac\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\ncfg=$(printf '%s' \"$payload\" | sed 's/^\"//; s/\"$//; s/^RunUnitTests=//')\ncp \"$cfg\" '{}'\ntouch '{}'\nwhile [ ! -f '{}' ]; do sleep 0.05; done\nreport=$(awk -F '\"' '/reportPath/ {{print $4; exit}}' \"$cfg\")\nylog=$(awk -F '\"' '/\"file\"/ {{print $4; exit}}' \"$cfg\")\nmkdir -p \"$(dirname \"$report\")\" \"$(dirname \"$ylog\")\" \"$(dirname \"$out\")\"\ncat <<'XML' > \"$report\"\n{}\nXML\ncat <<'LOG' > \"$ylog\"\n12:00:00.000 [INF] ok\nLOG\nprintf 'platform ok\\n' > \"$out\"\nexit 0",
+            "printf '%s\\n' \"$*\" >> '{}'\npayload=\"\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/C\" ]; then payload=\"$arg\"; fi\n  case \"$arg\" in /C*) payload=\"${{arg#/C}}\" ;; esac\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\ncfg=$(printf '%s' \"$payload\" | sed 's/^\"//; s/\"$//; s/^RunUnitTests=//')\ncp \"$cfg\" '{}'\ntouch '{}'\nwhile [ ! -f '{}' ]; do sleep 0.05; done\nreport=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    print(json.load(fh)['reports'][0]['path'])\nPY\n)\nallure_dir=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    print(json.load(fh)['reports'][1]['path'])\nPY\n)\nylog=$(awk -F '\"' '/\"file\"/ {{print $4; exit}}' \"$cfg\")\nmkdir -p \"$(dirname \"$report\")\" \"$allure_dir\" \"$(dirname \"$ylog\")\" \"$(dirname \"$out\")\"\ncat <<'XML' > \"$report\"\n{}\nXML\nprintf '%s\\n' '{{\"uuid\":\"fixture\",\"name\":\"fixture\",\"status\":\"passed\",\"stage\":\"finished\"}}' > \"$allure_dir/fixture-result.json\"\ncat <<'LOG' > \"$ylog\"\n12:00:00.000 [INF] ok\nLOG\nprintf 'platform ok\\n' > \"$out\"\nexit 0",
             test_calls.display(),
             captured_config.display(),
             runner_started.display(),
@@ -602,7 +609,7 @@ fn test_text_output_surfaces_failure_code_and_retained_artifacts() {
     assert!(stdout.contains("✗ enterprise run: runtime error: enterprise test run timed out"));
     assert!(stdout.contains("[warning] enterprise test run timed out"));
     assert!(stdout.contains("[artifact] run_dir -> "));
-    assert!(stdout.contains("[diagnostic] platform_log -> "));
+    assert!(!stdout.contains("[diagnostic] platform_log -> "));
 }
 
 #[test]
@@ -650,7 +657,7 @@ fn test_accepts_explicit_client_mode_for_vanessa_and_yaxunit() {
     write_script(
         &dir.path().join("platform").join("bin").join("1cv8"),
         &format!(
-            "printf '%s\\n' \"$*\" >> '{}'\npayload=\"\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/C\" ]; then payload=\"$arg\"; fi\n  case \"$arg\" in /C*) payload=\"${{arg#/C}}\" ;; esac\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif printf '%s' \"$payload\" | grep -F -q -- 'RunUnitTests='; then\n  cfg=$(printf '%s' \"$payload\" | sed 's/^\"//; s/\"$//; s/^RunUnitTests=//')\n  report=$(awk -F '\"' '/reportPath/ {{print $4; exit}}' \"$cfg\")\n  ylog=$(awk -F '\"' '/\"file\"/ {{print $4; exit}}' \"$cfg\")\n  mkdir -p \"$(dirname \"$report\")\" \"$(dirname \"$ylog\")\"\n  cat <<'XML' > \"$report\"\n{}\nXML\n  cat <<'LOG' > \"$ylog\"\n12:00:00.000 [INF] ok\nLOG\n  if [ -n \"$out\" ]; then mkdir -p \"$(dirname \"$out\")\" && : > \"$out\"; fi\n  exit 0\nfi\nif [ -n \"$out\" ]; then printf 'build /P secret\\n' > \"$out\"; fi\nexit 0",
+            "printf '%s\\n' \"$*\" >> '{}'\npayload=\"\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/C\" ]; then payload=\"$arg\"; fi\n  case \"$arg\" in /C*) payload=\"${{arg#/C}}\" ;; esac\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif printf '%s' \"$payload\" | grep -F -q -- 'RunUnitTests='; then\n  cfg=$(printf '%s' \"$payload\" | sed 's/^\"//; s/\"$//; s/^RunUnitTests=//')\n  report=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    print(json.load(fh)['reports'][0]['path'])\nPY\n)\nallure_dir=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    print(json.load(fh)['reports'][1]['path'])\nPY\n)\n  ylog=$(awk -F '\"' '/\"file\"/ {{print $4; exit}}' \"$cfg\")\n  mkdir -p \"$(dirname \"$report\")\" \"$allure_dir\" \"$(dirname \"$ylog\")\"\n  cat <<'XML' > \"$report\"\n{}\nXML\nprintf '%s\\n' '{{\"uuid\":\"fixture\",\"name\":\"fixture\",\"status\":\"passed\",\"stage\":\"finished\"}}' > \"$allure_dir/fixture-result.json\"\n  cat <<'LOG' > \"$ylog\"\n12:00:00.000 [INF] ok\nLOG\n  if [ -n \"$out\" ]; then mkdir -p \"$(dirname \"$out\")\" && : > \"$out\"; fi\n  exit 0\nfi\nif [ -n \"$out\" ]; then printf 'build /P secret\\n' > \"$out\"; fi\nexit 0",
             test_calls.display(),
             JUNIT_SMOKE_REPORT_FIXTURE
         ),
@@ -1268,12 +1275,11 @@ stack trace line 2</failure>
     let retained_config_path = compact_json["data"]["retained_paths"]["config_json"]
         .as_str()
         .expect("config path");
-    let retained_sentinel = compact_json["data"]["retained_paths"]["sentinel"]
-        .as_str()
-        .expect("sentinel");
     let retained_config = fs::read_to_string(retained_config_path).expect("retained config");
     assert!(retained_config.contains("\"modules\": ["));
-    assert!(Path::new(retained_sentinel).exists());
+    assert!(compact_json["data"]["retained_paths"]
+        .as_object()
+        .is_some_and(|paths| !paths.contains_key("sentinel")));
     assert!(fs::read_to_string(captured_config)
         .expect("captured config")
         .contains("Foo"));
@@ -1331,8 +1337,6 @@ fn test_timeout_retains_artifacts() {
 
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["data"]["execution"]["status"], "timed_out");
-    let platform_log = payload["data"]["retained_paths"]["platform_log"]
-        .as_str()
-        .expect("platform log");
-    assert!(!platform_log.is_empty());
+    assert!(payload["data"]["retained_paths"]["run_dir"].is_string());
+    assert!(payload["data"]["retained_paths"]["platform_log"].is_null());
 }

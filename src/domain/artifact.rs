@@ -14,7 +14,6 @@ pub const ARTIFACT_ROLE_ERROR_DETAILS: &str = "error_details";
 pub const ARTIFACT_ROLE_SCREENSHOT: &str = "screenshot";
 pub const ARTIFACT_ROLE_RUNNER_LOG: &str = "runner_log";
 pub const ARTIFACT_ROLE_PLATFORM_LOG: &str = "platform_log";
-pub const ARTIFACT_ROLE_SENTINEL: &str = "sentinel";
 pub const ARTIFACT_ROLE_PACKAGE_FILE: &str = "package_file";
 pub const ARTIFACT_ROLE_STAGE_FILE: &str = "stage_file";
 
@@ -32,7 +31,6 @@ pub enum ArtifactKind {
     Screenshot,
     RunnerLog,
     PlatformLog,
-    Sentinel,
     Other(String),
 }
 

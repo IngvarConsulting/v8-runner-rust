@@ -6,7 +6,6 @@ use crate::domain::artifact::{ArtifactKind, ArtifactRef};
 use crate::domain::artifact::{
     ArtifactSet, ARTIFACT_ROLE_ALLURE_RESULTS, ARTIFACT_ROLE_CONFIG, ARTIFACT_ROLE_JUNIT_XML,
     ARTIFACT_ROLE_PLATFORM_LOG, ARTIFACT_ROLE_RUNNER_LOG, ARTIFACT_ROLE_RUN_DIR,
-    ARTIFACT_ROLE_SENTINEL,
 };
 use crate::domain::execution::{
     ExecutionError, ExecutionMetrics, ExecutionOutcome, ExecutionStatus, StepResult,
@@ -109,13 +108,16 @@ impl TestErrorKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RetainedPaths {
     pub run_dir: PathBuf,
-    pub config_json: PathBuf,
-    pub junit_xml: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_json: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub junit_xml: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allure_results: Option<PathBuf>,
-    pub yaxunit_log: PathBuf,
-    pub platform_log: PathBuf,
-    pub sentinel: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yaxunit_log: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_log: Option<PathBuf>,
 }
 
 impl RetainedPaths {
@@ -126,49 +128,55 @@ impl RetainedPaths {
             ArtifactRef::new(ArtifactKind::RunDirectory, self.run_dir)
                 .with_role(ARTIFACT_ROLE_RUN_DIR),
         );
-        set.push(
-            ArtifactRef::new(ArtifactKind::Config, self.config_json)
-                .with_role(ARTIFACT_ROLE_CONFIG),
-        );
-        set.push(
-            ArtifactRef::new(ArtifactKind::JunitXml, self.junit_xml)
-                .with_role(ARTIFACT_ROLE_JUNIT_XML),
-        );
+        if let Some(config_json) = self.config_json {
+            set.push(
+                ArtifactRef::new(ArtifactKind::Config, config_json).with_role(ARTIFACT_ROLE_CONFIG),
+            );
+        }
+        if let Some(junit_xml) = self.junit_xml {
+            set.push(
+                ArtifactRef::new(ArtifactKind::JunitXml, junit_xml)
+                    .with_role(ARTIFACT_ROLE_JUNIT_XML),
+            );
+        }
         if let Some(allure_results) = self.allure_results {
             set.push(
                 ArtifactRef::new(ArtifactKind::AllureResults, allure_results)
                     .with_role(ARTIFACT_ROLE_ALLURE_RESULTS),
             );
         }
-        set.push(
-            ArtifactRef::new(ArtifactKind::RunnerLog, self.yaxunit_log)
-                .with_role(ARTIFACT_ROLE_RUNNER_LOG),
-        );
-        set.push(
-            ArtifactRef::new(ArtifactKind::PlatformLog, self.platform_log)
-                .with_role(ARTIFACT_ROLE_PLATFORM_LOG),
-        );
-        set.push(
-            ArtifactRef::new(ArtifactKind::Sentinel, self.sentinel)
-                .with_role(ARTIFACT_ROLE_SENTINEL),
-        );
+        if let Some(yaxunit_log) = self.yaxunit_log {
+            set.push(
+                ArtifactRef::new(ArtifactKind::RunnerLog, yaxunit_log)
+                    .with_role(ARTIFACT_ROLE_RUNNER_LOG),
+            );
+        }
+        if let Some(platform_log) = self.platform_log {
+            set.push(
+                ArtifactRef::new(ArtifactKind::PlatformLog, platform_log)
+                    .with_role(ARTIFACT_ROLE_PLATFORM_LOG),
+            );
+        }
         set
     }
 
     pub fn from_artifact_set(set: &ArtifactSet) -> Option<Self> {
         Some(Self {
             run_dir: set.get_by_role(ARTIFACT_ROLE_RUN_DIR)?.to_path_buf(),
-            config_json: set.get_by_role(ARTIFACT_ROLE_CONFIG)?.to_path_buf(),
+            config_json: set.get_by_role(ARTIFACT_ROLE_CONFIG).map(Path::to_path_buf),
             junit_xml: set
                 .get_all_by_role(ARTIFACT_ROLE_JUNIT_XML)
-                .min()?
-                .to_path_buf(),
+                .min()
+                .map(Path::to_path_buf),
             allure_results: set
                 .get_by_role(ARTIFACT_ROLE_ALLURE_RESULTS)
                 .map(Path::to_path_buf),
-            yaxunit_log: set.get_by_role(ARTIFACT_ROLE_RUNNER_LOG)?.to_path_buf(),
-            platform_log: set.get_by_role(ARTIFACT_ROLE_PLATFORM_LOG)?.to_path_buf(),
-            sentinel: set.get_by_role(ARTIFACT_ROLE_SENTINEL)?.to_path_buf(),
+            yaxunit_log: set
+                .get_by_role(ARTIFACT_ROLE_RUNNER_LOG)
+                .map(Path::to_path_buf),
+            platform_log: set
+                .get_by_role(ARTIFACT_ROLE_PLATFORM_LOG)
+                .map(Path::to_path_buf),
         })
     }
 }
@@ -345,17 +353,16 @@ mod tests {
     fn retained_paths_roundtrip_to_artifact_set() {
         let retained = RetainedPaths {
             run_dir: PathBuf::from("/tmp/run"),
-            config_json: PathBuf::from("/tmp/config.json"),
-            junit_xml: PathBuf::from("/tmp/z-report.xml"),
+            config_json: Some(PathBuf::from("/tmp/config.json")),
+            junit_xml: Some(PathBuf::from("/tmp/z-report.xml")),
             allure_results: Some(PathBuf::from("/tmp/allure-results")),
-            yaxunit_log: PathBuf::from("/tmp/yaxunit.log"),
-            platform_log: PathBuf::from("/tmp/platform.log"),
-            sentinel: PathBuf::from("/tmp/sentinel"),
+            yaxunit_log: Some(PathBuf::from("/tmp/yaxunit.log")),
+            platform_log: Some(PathBuf::from("/tmp/platform.log")),
         };
 
         let first_junit = PathBuf::from("/tmp/a-report.xml");
         let mut expected = retained.clone();
-        expected.junit_xml = first_junit.clone();
+        expected.junit_xml = Some(first_junit.clone());
         let mut set = retained.into_artifact_set();
         set.push(
             ArtifactRef::new(ArtifactKind::JunitXml, first_junit)
@@ -369,12 +376,11 @@ mod tests {
     fn retained_paths_omit_allure_artifact_until_runner_produces_it() {
         let retained = RetainedPaths {
             run_dir: PathBuf::from("/tmp/run"),
-            config_json: PathBuf::from("/tmp/config.json"),
-            junit_xml: PathBuf::from("/tmp/report.xml"),
+            config_json: Some(PathBuf::from("/tmp/config.json")),
+            junit_xml: Some(PathBuf::from("/tmp/report.xml")),
             allure_results: None,
-            yaxunit_log: PathBuf::from("/tmp/yaxunit.log"),
-            platform_log: PathBuf::from("/tmp/platform.log"),
-            sentinel: PathBuf::from("/tmp/sentinel"),
+            yaxunit_log: Some(PathBuf::from("/tmp/yaxunit.log")),
+            platform_log: Some(PathBuf::from("/tmp/platform.log")),
         };
 
         let set = retained.clone().into_artifact_set();
@@ -384,6 +390,24 @@ mod tests {
             None
         );
         assert_eq!(RetainedPaths::from_artifact_set(&set), Some(retained));
+    }
+
+    #[test]
+    fn retained_paths_do_not_require_or_serialize_internal_sentinel() {
+        let retained = RetainedPaths {
+            run_dir: PathBuf::from("/tmp/run"),
+            config_json: Some(PathBuf::from("/tmp/config.json")),
+            junit_xml: Some(PathBuf::from("/tmp/report.xml")),
+            allure_results: Some(PathBuf::from("/tmp/allure-results")),
+            yaxunit_log: Some(PathBuf::from("/tmp/yaxunit.log")),
+            platform_log: Some(PathBuf::from("/tmp/platform.log")),
+        };
+        let set = retained.into_artifact_set();
+
+        let projected = RetainedPaths::from_artifact_set(&set).expect("retained paths");
+        let json = serde_json::to_value(projected).expect("json");
+
+        assert!(json.get("sentinel").is_none());
     }
 
     #[test]
@@ -437,12 +461,11 @@ mod tests {
     fn test_run_result_derives_read_model_from_outcome() {
         let retained = RetainedPaths {
             run_dir: PathBuf::from("/tmp/run"),
-            config_json: PathBuf::from("/tmp/config.json"),
-            junit_xml: PathBuf::from("/tmp/report.xml"),
+            config_json: Some(PathBuf::from("/tmp/config.json")),
+            junit_xml: Some(PathBuf::from("/tmp/report.xml")),
             allure_results: Some(PathBuf::from("/tmp/allure-results")),
-            yaxunit_log: PathBuf::from("/tmp/yaxunit.log"),
-            platform_log: PathBuf::from("/tmp/platform.log"),
-            sentinel: PathBuf::from("/tmp/sentinel"),
+            yaxunit_log: Some(PathBuf::from("/tmp/yaxunit.log")),
+            platform_log: Some(PathBuf::from("/tmp/platform.log")),
         };
         let outcome = ExecutionOutcome::new(ExecutionStatus::Failed)
             .with_diagnostics(vec!["diag".to_owned()])

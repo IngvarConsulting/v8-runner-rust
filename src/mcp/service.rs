@@ -2543,12 +2543,11 @@ mod tests {
     fn sample_test_result(ok: bool) -> TestRunResult {
         let retained = RetainedPaths {
             run_dir: PathBuf::from("/tmp/run"),
-            config_json: PathBuf::from("/tmp/config.json"),
-            junit_xml: PathBuf::from("/tmp/junit.xml"),
+            config_json: Some(PathBuf::from("/tmp/config.json")),
+            junit_xml: Some(PathBuf::from("/tmp/junit.xml")),
             allure_results: Some(PathBuf::from("/tmp/allure-results")),
-            yaxunit_log: PathBuf::from("/tmp/yaxunit.log"),
-            platform_log: PathBuf::from("/tmp/platform.log"),
-            sentinel: PathBuf::from("/tmp/sentinel"),
+            yaxunit_log: Some(PathBuf::from("/tmp/yaxunit.log")),
+            platform_log: Some(PathBuf::from("/tmp/platform.log")),
         };
         let report = TestReport {
             summary: TestSummary {

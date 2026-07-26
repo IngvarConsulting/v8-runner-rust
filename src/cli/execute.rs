@@ -1871,21 +1871,24 @@ fn append_retained_test_artifacts(details: &mut Vec<String>, result: &TestRunRes
         details,
         format!("[artifact] run_dir -> {}", paths.run_dir.display()),
     );
-    push_unique_detail(
-        details,
-        format!("[artifact] report -> {}", paths.junit_xml.display()),
-    );
-    push_unique_detail(
-        details,
-        format!("[artifact] runner_log -> {}", paths.yaxunit_log.display()),
-    );
-    push_unique_detail(
-        details,
-        format!(
-            "[diagnostic] platform_log -> {}",
-            paths.platform_log.display()
-        ),
-    );
+    if let Some(junit_xml) = paths.junit_xml {
+        push_unique_detail(
+            details,
+            format!("[artifact] report -> {}", junit_xml.display()),
+        );
+    }
+    if let Some(yaxunit_log) = paths.yaxunit_log {
+        push_unique_detail(
+            details,
+            format!("[artifact] runner_log -> {}", yaxunit_log.display()),
+        );
+    }
+    if let Some(platform_log) = paths.platform_log {
+        push_unique_detail(
+            details,
+            format!("[diagnostic] platform_log -> {}", platform_log.display()),
+        );
+    }
 }
 
 fn should_hide_success_test_diagnostic(diagnostic: &str) -> bool {
