@@ -287,7 +287,8 @@ fn execute_extensions(
     clean_before_execution: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    let request = map_extensions_request(args)?;
+    let request = map_extensions_request(args)
+        .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Extensions, error))?;
     let context = cli_context(config, CommandName::Extensions, cancellation);
     with_cli_workspace_lock(
         config,

@@ -270,6 +270,65 @@ fn extensions_command_forwards_direct_platform_extension_name_without_trimming()
 }
 
 #[test]
+fn extensions_command_text_validation_renders_duplicate_direct_extension_error() {
+    let (_dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--no-color",
+            "extensions",
+            "--extension",
+            "SalesAddon",
+            "--extension",
+            "SalesAddon",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate --extension"));
+    assert!(
+        !calls_log.exists(),
+        "ibcmd must not run after validation failure"
+    );
+}
+
+#[test]
+fn extensions_command_json_validation_renders_blank_direct_extension_envelope() {
+    let (_dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "extensions",
+            "--extension",
+            "   ",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["ok"], false);
+    assert_eq!(payload["command"], "extensions");
+    assert_eq!(payload["error"]["code"], "invalid_argument");
+    assert!(payload["data"]["message"]
+        .as_str()
+        .expect("message")
+        .contains("invalid --extension"));
+    assert!(
+        !calls_log.exists(),
+        "ibcmd must not run after validation failure"
+    );
+}
+
+#[test]
 fn extensions_command_json_failure_reports_operation_target_and_exit_code() {
     let (_dir, config_path, _calls_log, ibcmd_path) = setup_extensions_project();
     write_script(&ibcmd_path, "echo 'cannot update extension' >&2\nexit 17");
