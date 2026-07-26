@@ -216,6 +216,60 @@ fn extensions_command_filters_by_requested_source_set_names() {
 }
 
 #[test]
+fn extensions_command_forwards_requested_platform_extension_names_in_order() {
+    let (_dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--no-color",
+            "extensions",
+            "--extension",
+            "SalesAddon",
+            "--extension",
+            "TestsAddon",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(output.status.success());
+    let calls = fs::read_to_string(calls_log).expect("calls");
+    let calls = calls.lines().collect::<Vec<_>>();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[0].contains("--name SalesAddon"));
+    assert!(calls[1].contains("--name TestsAddon"));
+}
+
+#[test]
+fn extensions_command_forwards_direct_platform_extension_name_without_trimming() {
+    let (_dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
+    write_script(
+        &ibcmd_path,
+        &format!(
+            "printf '<%s>\\n' \"$@\" > '{}'\nexit 0",
+            calls_log.display()
+        ),
+    );
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--no-color",
+            "extensions",
+            "--extension",
+            " SalesAddon ",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(output.status.success());
+    let calls = fs::read_to_string(calls_log).expect("calls");
+    assert!(calls.contains("< SalesAddon >"));
+}
+
+#[test]
 fn extensions_command_json_failure_reports_operation_target_and_exit_code() {
     let (_dir, config_path, _calls_log, ibcmd_path) = setup_extensions_project();
     write_script(&ibcmd_path, "echo 'cannot update extension' >&2\nexit 17");
