@@ -25,8 +25,7 @@ use crate::domain::build::{BuildMode, BuildResult};
 use crate::domain::convert::{ConvertDirection, ConvertResult, ConvertScope};
 use crate::domain::dump::{DumpMode, DumpResult};
 use crate::domain::execution::{
-    ExecutionError, ExecutionInterruptionDetails, ExecutionOutcome, ExecutionStepStatus,
-    ExecutionTimeouts, StepResult,
+    ExecutionError, ExecutionInterruptionDetails, ExecutionOutcome, ExecutionStepStatus, StepResult,
 };
 use crate::domain::init::{InitResult, InitStep, InitStepStatus};
 use crate::domain::issue::{Issue, IssueSeverity};
@@ -63,12 +62,13 @@ use crate::use_cases::init_project;
 use crate::use_cases::launch_app;
 use crate::use_cases::load_artifact;
 use crate::use_cases::request::{
-    ArtifactsModeRequest, ArtifactsRequest, BuildRequest, ClientMcpAddonRequest, ClientMcpMode,
-    ClientMcpOptionsRequest, ConfigureExtensionsRequest, ConvertRequest, ConvertScopeRequest,
-    DesignerClientScope, DesignerClientScopes, DesignerConfigCheck, DesignerConfigChecks,
-    DesignerConfigSyntaxRequest, DesignerModulesSyntaxRequest, DumpRequest, InitRequest,
-    LaunchRequest, LoadRequest, SyntaxExtensionScope, SyntaxRequest, SyntaxTargetRequest,
-    TestRequest, TestScopeRequest, ToolsDownloadRequest,
+    effective_test_timeouts, ArtifactsModeRequest, ArtifactsRequest, BuildRequest,
+    ClientMcpAddonRequest, ClientMcpMode, ClientMcpOptionsRequest, ConfigureExtensionsRequest,
+    ConvertRequest, ConvertScopeRequest, DesignerClientScope, DesignerClientScopes,
+    DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest,
+    DesignerModulesSyntaxRequest, DumpRequest, InitRequest, LaunchRequest, LoadRequest,
+    SyntaxExtensionScope, SyntaxRequest, SyntaxTargetRequest, TestRequest, TestScopeRequest,
+    ToolsDownloadRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
@@ -88,6 +88,7 @@ pub fn execute_command(
     let _signal_guard = CliSignalGuard::install(cancellation.clone());
     match command {
         Command::Version => unreachable!("version command is handled outside cli::execute"),
+        Command::Bootstrap(_) => unreachable!("bootstrap command is handled outside cli::execute"),
         Command::Config(_) => unreachable!("config commands are handled outside cli::execute"),
         Command::Tools(args) => execute_tools(
             config,
@@ -169,6 +170,7 @@ pub fn execute_command(
 pub fn command_name(command: &Command) -> CommandName {
     match command {
         Command::Version => unreachable!("version command does not map to execution use cases"),
+        Command::Bootstrap(_) => CommandName::Bootstrap,
         Command::Config(_) => unreachable!("config commands do not map to execution use cases"),
         Command::Tools(ToolsArgs {
             command: ToolsCommand::Download(_),
@@ -748,13 +750,29 @@ fn execute_launch(
             Err(failure) => {
                 let error = failure.error;
                 if presenter.is_json() {
-                    presenter.print_envelope(&failure_envelope(
-                        CommandName::Launch.as_str(),
-                        started.elapsed().as_millis() as u64,
-                        json!({ "message": error.message() }),
-                        &error,
-                    ));
+                    match failure.payload {
+                        Some(result) => presenter.print_envelope(&failure_envelope(
+                            CommandName::Launch.as_str(),
+                            started.elapsed().as_millis() as u64,
+                            result,
+                            &error,
+                        )),
+                        None => presenter.print_envelope(&failure_envelope(
+                            CommandName::Launch.as_str(),
+                            started.elapsed().as_millis() as u64,
+                            json!({ "message": error.message() }),
+                            &error,
+                        )),
+                    }
                 } else {
+                    if let Some(result) = failure.payload.as_ref() {
+                        render_launch_text_with_status(
+                            result,
+                            presenter,
+                            TimelineStatus::Failed,
+                            "Launch failed",
+                        );
+                    }
                     presenter.print_error(&error.to_string());
                 }
                 Err(error)
@@ -1079,17 +1097,6 @@ fn validate_test_launch_options(args: &LaunchOptionsArgs) -> Result<(), UseCaseE
     Ok(())
 }
 
-fn effective_test_timeouts(
-    legacy_total_seconds: u64,
-    runner_timeouts: &ExecutionTimeouts,
-) -> ExecutionTimeouts {
-    let mut timeouts = runner_timeouts.clone();
-    if timeouts.total_ms.is_none() {
-        timeouts.total_ms = Some(legacy_total_seconds.saturating_mul(1_000));
-    }
-    timeouts
-}
-
 fn cli_context(
     config: &AppConfig,
     command: CommandName,
@@ -1300,10 +1307,11 @@ fn map_launch_request(args: &LaunchArgs) -> Result<LaunchRequest, UseCaseError> 
             || args.mcp_port.is_some()
             || args.mcp_mode.is_some()
             || args.mcp_scenario.is_some()
+            || args.wait_ready
         {
             return Err(UseCaseError::new(
                 UseCaseErrorKind::Validation,
-                "--mcp-config, --mcp-port, --mode, and MCP_SCENARIO are supported only for `launch mcp`",
+                "--mcp-config, --mcp-port, --mode, --wait-ready, and MCP_SCENARIO are supported only for `launch mcp`",
             ));
         }
         None
@@ -1393,6 +1401,7 @@ fn map_mcp_options(args: &LaunchArgs) -> Result<ClientMcpOptionsRequest, UseCase
         config_path: args.mcp_config.clone(),
         port: args.mcp_port,
         addon,
+        wait_ready: args.wait_ready,
     })
 }
 
@@ -2230,6 +2239,20 @@ fn render_syntax_status(status: SyntaxCheckStatus) -> &'static str {
 }
 
 fn render_launch_text(result: &LaunchResult, presenter: &Presenter) {
+    render_launch_text_with_status(
+        result,
+        presenter,
+        TimelineStatus::Succeeded,
+        "Launch completed successfully",
+    );
+}
+
+fn render_launch_text_with_status(
+    result: &LaunchResult,
+    presenter: &Presenter,
+    status: TimelineStatus,
+    label: &'static str,
+) {
     let mut details = vec![
         format!("mode: {}", render_launch_mode(&result.mode)),
         format!("binary: {}", result.binary.display()),
@@ -2244,12 +2267,23 @@ fn render_launch_text(result: &LaunchResult, presenter: &Presenter) {
     if let Some(pid) = result.pid {
         details.push(format!("pid: {pid}"));
     }
-    single_timeline(
-        presenter,
-        TimelineStatus::Succeeded,
-        "Launch completed successfully",
-        details,
-    );
+    if let Some(readiness) = &result.mcp_readiness {
+        details.push(format!("mcp endpoint: {}", readiness.url));
+        details.push(format!(
+            "mcp ready: {}",
+            if readiness.ok { "yes" } else { "no" }
+        ));
+        if !readiness.tools.is_empty() {
+            details.push(format!("mcp tools: {}", readiness.tools.join(", ")));
+        }
+        if !readiness.missing_tools.is_empty() {
+            details.push(format!(
+                "missing mcp tools: {}",
+                readiness.missing_tools.join(", ")
+            ));
+        }
+    }
+    single_timeline(presenter, status, label, details);
 }
 
 fn render_launch_mode(mode: &LaunchMode) -> &'static str {
@@ -2597,6 +2631,7 @@ mod tests {
                 },
                 mcp_config: None,
                 mcp_port: None,
+                wait_ready: false,
             })
             .expect("request"),
             LaunchRequest {
@@ -2620,6 +2655,7 @@ mod tests {
                 launch: LaunchOptionsArgs::default(),
                 mcp_config: None,
                 mcp_port: None,
+                wait_ready: false,
             })
             .expect("request")
             .target,
@@ -2633,6 +2669,7 @@ mod tests {
                 launch: LaunchOptionsArgs::default(),
                 mcp_config: None,
                 mcp_port: None,
+                wait_ready: false,
             })
             .expect("request")
             .target,
@@ -2646,6 +2683,7 @@ mod tests {
                 launch: LaunchOptionsArgs::default(),
                 mcp_config: Some("C:\\tmp\\mcp-conf.json".to_owned()),
                 mcp_port: Some(123),
+                wait_ready: true,
             })
             .expect("request"),
             LaunchRequest {
@@ -2662,6 +2700,7 @@ mod tests {
                     config_path: Some("C:\\tmp\\mcp-conf.json".to_owned()),
                     port: Some(123),
                     addon: Some(ClientMcpAddonRequest::VanessaAutomation),
+                    wait_ready: true,
                 }),
             }
         );
@@ -2723,6 +2762,7 @@ mod tests {
             launch: LaunchOptionsArgs::default(),
             mcp_config: None,
             mcp_port: None,
+            wait_ready: false,
         })
         .expect_err("launch mode should be rejected");
 
@@ -2965,6 +3005,7 @@ mod tests {
                 launch: LaunchOptionsArgs::default(),
                 mcp_config: None,
                 mcp_port: None,
+                wait_ready: false,
             }),
             None,
             &presenter,

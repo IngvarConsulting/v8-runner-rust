@@ -21,6 +21,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | Сценарий | Поддерживаемые комбинации | Примечания |
 | --- | --- | --- |
 | `version` | Работает без существующего конфига | Печатает имя приложения и версию; с `--json-message` возвращает JSON envelope |
+| `bootstrap` | Работает без существующего конфига | Создаёт проект из существующей ИБ: config, local overlay, `.gitignore`, `src/configuration` |
 | `config init` | Работает без существующего конфига | Создаёт `v8project.yaml`, sibling `v8project.local.yaml`, `.gitignore` entry, autodetect-ит supported `source-set` и aggregate external roots |
 | `tools download <tool>` | CLI-only загрузка latest releases | Загружает выбранный YAxUnit, Vanessa Automation single или onec-client-mcp-devkit; обновляет local overlay для Vanessa/client MCP и при `yaxunit --sources` добавляет YAxUnit как `source-set` `tests` |
 | `init` | `format=DESIGNER` + `builder=DESIGNER` | Создаёт файловую ИБ через Designer; server connection остаётся manual prerequisite |
@@ -95,6 +96,20 @@ v8-runner config init [--force] [--output <FILE>] [--connection <CONNECTION>] [-
 - Для external roots создаёт aggregate `source-set` только при однородной классификации каталога.
 - Не пишет synthetic `CONFIGURATION`: отсутствие конфигурационного source-set это validation error.
 - Для `--builder IBCMD` найденные external roots считаются validation error.
+
+### `bootstrap`
+
+```bash
+v8-runner bootstrap --connection <CONNECTION> --platform-version <VERSION> [--project-dir <DIR>] [--source-dir <DIR>] [--user <USER>] [--password <PASSWORD>] [--platform-path <PATH>] [--force]
+```
+
+- Работает до загрузки `v8project.yaml` и предназначен для пустого project directory.
+- Создаёт `v8project.yaml`, schema-modelined `v8project.local.yaml`, `.gitignore` entry и
+  `source-set main` типа `CONFIGURATION`.
+- Выгружает основную конфигурацию из указанной ИБ в `src/configuration` через Designer full dump.
+- `--connection` не должен содержать embedded credentials; используйте `--user` и `--password`.
+  Эти значения пишутся только в `v8project.local.yaml`.
+- Не обнаруживает и не выгружает расширения автоматически.
 
 ### `init`
 
@@ -189,6 +204,8 @@ v8-runner test va --feature login --filter-tag @smoke
 - `test va` использует профиль из `tests.va.profile`; `--feature`, `--filter-tag`,
   `--ignore-tag` и `--scenario-filter` переопределяют соответствующие списки выбранного профиля
   только для текущего запуска.
+- Для функциональных `.feature`-сценариев и приемки используйте Vanessa Automation: CLI
+  `test va` или MCP `run_all_tests` с `runner=vanessa`, а не дефолтный YaXUnit-runner.
 - `--full` включает полный вывод успешных кейсов и расширенные stack traces.
 - `tests.*.timeouts.total_ms` остаётся активным пользовательским контрактом таймаутов.
 
@@ -276,7 +293,7 @@ v8-runner artifacts --output <TARGET> [--source-set <NAME>] [--extension <NAME>]
 
 ```bash
 v8-runner launch <designer|thin|thick|ordinary> [FLAGS]
-v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [FLAGS]
+v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--wait-ready] [FLAGS]
 ```
 
 - Для обычного запуска (`designer`/`thin`/`thick`/`ordinary`) режим задаётся позиционным
@@ -290,11 +307,21 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [FLAGS]
   и добавляет `/RunModeOrdinaryApplication`.
 - `launch mcp va` дополнительно запускает Vanessa Automation из `tools.va` через `/Execute <epf>`
   и передаёт `VAParams=<runtime params>` без `StartFeaturePlayer`.
+- Для интерактивной отладки и написания функциональных `.feature`-сценариев используйте
+  `launch mcp va --wait-ready`; голый `launch mcp` поднимает client MCP без Vanessa tools.
 - Любой управляемый runner payload для ключа `/C` передаётся как один аргумент
   `/C"<payload>"`: это касается `launch --c`, `launch mcp`, `test yaxunit` и `test va`.
 - Для `mcp` доступны typed flags `--mcp-config <FILE>` и `--mcp-port <PORT>`;
   итоговый payload: `/C"runMcp[=<FILE>][;mcpPort=<PORT>]"`.
 - Если `--mcp-port` не указан, используется `tools.client_mcp.port` из `v8project.yaml`.
+- `--wait-ready` ждёт `http://127.0.0.1:<port>/mcp`, выполняет MCP `initialize`,
+  `notifications/initialized` и `tools/list`, а в JSON-результате возвращает `mcp_readiness`
+  со списком tools. Для `launch mcp va --wait-ready` дополнительно проверяется наличие
+  Vanessa tools: `load_features`, `open_feature_file`, `run_scenario`, `get_test_results`,
+  `connect_test_client`.
+- Timeout ожидания задаётся `tools.client_mcp.wait_ready_timeout_ms`; если он не задан,
+  используется общий `execution_timeout`. Фактическое ожидание всё равно ограничено общим
+  command deadline, поэтому для более длинного ожидания нужно увеличить и `execution_timeout`.
 - Если настроено `tools.client_mcp.extension`, `launch mcp` не устанавливает и не обновляет его;
   подготовка выполняется командой `v8-runner build`.
 - `--mcp-config` не должен содержать `;`, потому что `/C` payload разделяется точкой с запятой.
@@ -316,16 +343,20 @@ v8-runner mcp serve http
 - Business failures возвращаются внутри tool result payload.
 - Transport/internal failures остаются MCP-native.
 - Все tool calls разделяют `mcp.execution.max_concurrent_calls`.
+- Если пользователь просит функциональные `.feature`-сценарии, приемку или Vanessa Automation,
+  агент должен выбирать `run_all_tests` с `runner=vanessa` либо `launch_app` с
+  `utilityType=mcp`, `mcpScenario=va` и `waitReady=true`; bare `utilityType=mcp` не загружает
+  Vanessa.
 
 ### Опубликованные MCP tools
 
 | Инструмент | Основные поля запроса | Примечания |
 | --- | --- | --- |
 | `build_project` | `fullRebuild`, `sourceSet` | `fullRebuild=false`; `sourceSet` omitted значит все source-set |
-| `run_all_tests` | `full` | Компактный вывод по умолчанию |
+| `run_all_tests` | `full`, `runner`, `profile`, `feature`, `filterTag`, `ignoreTag`, `scenarioFilter` | Компактный вывод по умолчанию; `runner=vanessa` запускает Vanessa Automation с выбранным профилем и фильтрами |
 | `run_module_tests` | `moduleName`, `full` | Отклоняет пустой `moduleName` |
 | `dump_config` | `mode`, `extension`, `objects` | Пустой `mode` нормализуется в `INCREMENTAL` |
-| `launch_app` | `utilityType` | Поддерживает алиасы `designer`, `thin`, `thick` и русские алиасы |
+| `launch_app` | `utilityType`, `mcpScenario`, `mode`, `mcpConfig`, `mcpPort`, `waitReady` | `utilityType=mcp` запускает client MCP; `mcpScenario=va` загружает Vanessa Automation; остальные MCP-поля доступны только для `utilityType=mcp` |
 | `check_syntax_edt` | `projectName` | Пустой `projectName` значит “все EDT-проекты” |
 | `check_syntax_designer_config` | Designer-config flags в `camelCase` | Область расширений нормализуется в service layer |
 | `check_syntax_designer_modules` | Designer-modules flags в `camelCase` | Область расширений нормализуется в service layer |

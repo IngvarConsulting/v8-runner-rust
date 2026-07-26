@@ -23,6 +23,16 @@ v8-runner config init --format edt
 v8-runner config init --builder IBCMD
 ```
 
+Create a new project from an existing infobase when the infobase is the current source of truth:
+
+```bash
+v8-runner bootstrap --connection "File=/path/to/ib" --platform-version 8.3.27
+```
+
+`bootstrap` creates config/local overlay/gitignore, dumps the main configuration to
+`src/configuration`, and stores credentials only in `v8project.local.yaml` when `--user` or
+`--password` is passed. It does not auto-discover extensions.
+
 Initialize generated runtime state only when the file infobase or EDT workspace needs to be created:
 
 ```bash
@@ -126,11 +136,13 @@ Launch onec-client-mcp-devkit through the supported `launch mcp` surface instead
 v8-runner launch mcp
 v8-runner launch mcp --mode thin --mcp-port <PORT>
 v8-runner launch mcp --mcp-config <FILE>
+v8-runner launch mcp --mcp-port <PORT> --wait-ready
 ```
 
 For ordinary direct launches, typed launch flags include `--c`, `--execute`, `--use-privileged-mode`, `--output`, and repeatable `--raw-key`.
 
 For `launch mcp`, use `--mcp-config` and `--mcp-port`; do not pass `/C` through `--c`.
+Use `--wait-ready` when a following agent or tool needs the client MCP HTTP endpoint to be initialized and able to return `tools/list`.
 
 `launch mcp` and `launch mcp va` do not install or update `tools.client_mcp.extension`; run `v8-runner build` first when that extension may be missing or stale.
 

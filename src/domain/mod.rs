@@ -2,6 +2,8 @@
 pub mod artifact;
 /// Artifact build/export domain models.
 pub mod artifacts;
+/// Bootstrap domain models.
+pub mod bootstrap;
 /// Build domain models.
 pub mod build;
 /// Config bootstrap domain models.

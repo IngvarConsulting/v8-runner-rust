@@ -45,6 +45,19 @@ overlay в `.gitignore`, если он еще не указан.
 Machine-local пути, credentials и настройки инструментов можно вынести в `v8project.local.yaml`
 рядом с основным конфигом. Этот файл применяется автоматически и должен оставаться вне Git.
 
+### Или создайте проект из существующей информационной базы:
+
+```bash
+v8-runner bootstrap \
+  --connection "File=/path/to/ib" \
+  --platform-version 8.3.27
+```
+
+Команда создает `v8project.yaml`, локальный overlay, `.gitignore` и выгружает основную
+конфигурацию в `src/configuration`. Credentials передавайте через `--user` и `--password`; они
+попадают только в `v8project.local.yaml`. Автоматическое обнаружение расширений этим bootstrap
+slice не выполняется.
+
 ### Загрузите тестовые и MCP-инструменты:
 
 ```bash
@@ -96,13 +109,18 @@ v8-runner test yaxunit all
 v8-runner test va
 ```
 
-Команда сначала выполняет `build`, затем запускает полный набор YAxUnit-тестов.
+Команда сначала выполняет `build`, затем запускает настроенный профиль Vanessa Automation.
 
-Для отладки и написания тестов Vanessa Automation запустите ее в режиме MCP
+Для отладки и написания тестов Vanessa Automation запустите ее в режиме MCP и, если агенту нужно
+сразу подключаться к endpoint, дождитесь готовности:
 
 ```bash
-v8-runner launch mcp va
+v8-runner launch mcp va --mcp-port 1550 --wait-ready
 ```
+
+Для функциональных `.feature`-сценариев, приемки и задач Vanessa Automation используйте
+`test va`, MCP `run_all_tests` с `runner=vanessa` или `launch mcp va --wait-ready`; голый
+`launch mcp` предназначен только для client MCP без загрузки Vanessa.
 
 ### Поднимите MCP transport (MCP-транспорт) для AI-агентов:
 
@@ -120,7 +138,7 @@ v8-runner mcp serve stdio
 
 | Зона | Команды | Что делает |
 | --- | --- | --- |
-| Project setup (настройка проекта) | `config init`, `tools download`, `init`, `extensions`, `build` | Создает config, скачивает инструменты, готовит ИБ, обновляет расширения и загружает исходники |
+| Project setup (настройка проекта) | `bootstrap`, `config init`, `tools download`, `init`, `extensions`, `build` | Создает проект/config, скачивает инструменты, готовит ИБ, обновляет расширения и загружает исходники |
 | Verification (проверка) | `syntax`, `test` | Запускает syntax checks, YAxUnit и Vanessa Automation |
 | File materialization (материализация файлов) | `dump`, `convert`, `load`, `make`, `artifacts` | Выгружает, конвертирует, загружает и публикует `.cf`, `.cfe`, `.epf`, `.erf` |
 | Direct launch (прямой запуск) | `launch <designer|thin|thick|ordinary>`, `launch mcp [va]` | Запускает 1C clients (клиенты 1С), Designer и MCP/Vanessa сценарии |

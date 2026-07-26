@@ -32,7 +32,10 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 rmcp = { version = "1.2.0", default-features = false, features = ["client", "macros", "server", "transport-child-process", "transport-io", "transport-streamable-http-server"] }
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = "0.7"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+[target.'cfg(windows)'.dependencies]
+process-wrap = { version = "9.1.0", default-features = false, features = ["std", "job-object", "creation-flags"] }
 
 [dev-dependencies]
 assert_cmd = "2"

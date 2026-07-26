@@ -49,6 +49,48 @@ pub struct SpawnResult {
     pub binary: PathBuf,
 }
 
+/// Managed process handle used while the caller still needs a cleanup boundary.
+pub struct ManagedSpawnResult {
+    result: SpawnResult,
+    child: Option<SpawnedChild>,
+}
+
+impl ManagedSpawnResult {
+    /// Operating system process identifier.
+    pub fn pid(&self) -> u32 {
+        self.result.pid
+    }
+
+    /// Binary that was used to start the process.
+    pub fn binary(&self) -> &PathBuf {
+        &self.result.binary
+    }
+
+    /// Convert the managed handle into a detached result after external checks succeed.
+    pub fn detach(mut self) -> SpawnResult {
+        let result = self.result.clone();
+        self.child.take();
+        result
+    }
+
+    /// Terminate the managed process and wait for it to exit.
+    pub fn terminate(mut self) {
+        if let Some(mut spawned) = self.child.take() {
+            terminate_child_group_gracefully(&mut spawned, Duration::from_millis(250));
+            let _ = spawned.child.wait();
+        }
+    }
+}
+
+impl Drop for ManagedSpawnResult {
+    fn drop(&mut self) {
+        if let Some(mut spawned) = self.child.take() {
+            terminate_child_group_gracefully(&mut spawned, Duration::from_millis(250));
+            let _ = spawned.child.wait();
+        }
+    }
+}
+
 /// Safety class applied by the process runner when interruption arrives mid-flight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessInterruptionSafety {
@@ -141,6 +183,9 @@ pub enum ProcessError {
 
     #[error("process timed out '{cmd}' after {timeout_ms}ms")]
     TimedOut { cmd: String, timeout_ms: u64 },
+
+    #[error("managed process spawn is not supported for '{cmd}'")]
+    ManagedSpawnUnsupported { cmd: String },
 }
 
 /// Boundary for synchronous and detached process execution.
@@ -169,6 +214,13 @@ pub trait ProcessRunner {
 
     /// Start a process in fire-and-forget mode without waiting for completion.
     fn spawn(&self, request: &ProcessRequest) -> Result<SpawnResult, ProcessError>;
+
+    /// Start a process and keep a handle until the caller detaches or terminates it.
+    fn spawn_managed(&self, request: &ProcessRequest) -> Result<ManagedSpawnResult, ProcessError> {
+        Err(ProcessError::ManagedSpawnUnsupported {
+            cmd: render_command(request),
+        })
+    }
 }
 
 /// Standard subprocess runner backed by `std::process::Command`.
@@ -205,36 +257,36 @@ impl ProcessRunner for ProcessExecutor {
     fn spawn(&self, request: &ProcessRequest) -> Result<SpawnResult, ProcessError> {
         let rendered_command = render_command(request);
         debug!(command = rendered_command.as_str(), "spawning process");
-        let child = spawn_command(request, ProcessIoMode::Detached, &rendered_command)?;
-        let pid = child.id();
-        let mut child = child;
-
-        if let Some(startup_probe) = request.startup_probe {
-            std::thread::sleep(startup_probe);
-            if let Some(status) =
-                child
-                    .try_wait()
-                    .map_err(|source| ProcessError::StartupCheckFailed {
-                        cmd: rendered_command.clone(),
-                        source,
-                    })?
-            {
-                warn!(
-                    command = rendered_command.as_str(),
-                    exit_code = status.code().unwrap_or(-1),
-                    "process exited during startup probe"
-                );
-                return Err(ProcessError::ExitedEarly {
-                    cmd: rendered_command,
-                    exit_code: status.code().unwrap_or(-1),
-                });
-            }
-        }
+        let spawned = spawn_checked_child(request, ProcessIoMode::Detached, &rendered_command)?;
+        let pid = spawned.child.id();
 
         debug!(command = rendered_command.as_str(), pid, "process started");
         Ok(SpawnResult {
             pid,
             binary: request.program.clone(),
+        })
+    }
+
+    fn spawn_managed(&self, request: &ProcessRequest) -> Result<ManagedSpawnResult, ProcessError> {
+        let rendered_command = render_command(request);
+        debug!(
+            command = rendered_command.as_str(),
+            "spawning managed process"
+        );
+        let spawned =
+            spawn_checked_child(request, ProcessIoMode::ManagedDetached, &rendered_command)?;
+        let pid = spawned.child.id();
+
+        debug!(
+            command = rendered_command.as_str(),
+            pid, "managed process started"
+        );
+        Ok(ManagedSpawnResult {
+            result: SpawnResult {
+                pid,
+                binary: request.program.clone(),
+            },
+            child: Some(spawned),
         })
     }
 }
@@ -263,8 +315,8 @@ impl ProcessExecutor {
                 timeout_ms: 0,
             });
         }
-        let child = spawn_command(request, ProcessIoMode::Captured, &rendered_command)?;
-        let output = wait_for_output(child, &rendered_command, policy)?;
+        let spawned = spawn_command(request, ProcessIoMode::Captured, &rendered_command)?;
+        let output = wait_for_output(spawned, &rendered_command, policy)?;
         debug!(
             command = rendered_command.as_str(),
             exit_code = output.status.code().unwrap_or(-1),
@@ -299,18 +351,116 @@ impl ProcessExecutor {
 #[derive(Debug, Clone, Copy)]
 enum ProcessIoMode {
     Detached,
+    ManagedDetached,
     Captured,
+}
+
+struct SpawnedChild {
+    child: ChildHandle,
+}
+
+enum ChildHandle {
+    Standard(std::process::Child),
+    #[cfg(windows)]
+    Wrapped(Box<dyn process_wrap::std::ChildWrapper>),
+}
+
+impl ChildHandle {
+    fn id(&self) -> u32 {
+        match self {
+            Self::Standard(child) => child.id(),
+            #[cfg(windows)]
+            Self::Wrapped(child) => child.id(),
+        }
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        match self {
+            Self::Standard(child) => child.try_wait(),
+            #[cfg(windows)]
+            Self::Wrapped(child) => child.try_wait(),
+        }
+    }
+
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        match self {
+            Self::Standard(child) => child.wait(),
+            #[cfg(windows)]
+            Self::Wrapped(child) => child.wait(),
+        }
+    }
+
+    fn start_kill(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Standard(child) => child.kill(),
+            #[cfg(windows)]
+            Self::Wrapped(child) => child.start_kill(),
+        }
+    }
+
+    fn stdout(&mut self) -> &mut Option<std::process::ChildStdout> {
+        match self {
+            Self::Standard(child) => &mut child.stdout,
+            #[cfg(windows)]
+            Self::Wrapped(child) => child.stdout(),
+        }
+    }
+
+    fn stderr(&mut self) -> &mut Option<std::process::ChildStderr> {
+        match self {
+            Self::Standard(child) => &mut child.stderr,
+            #[cfg(windows)]
+            Self::Wrapped(child) => child.stderr(),
+        }
+    }
+}
+
+fn spawn_checked_child(
+    request: &ProcessRequest,
+    io_mode: ProcessIoMode,
+    rendered_command: &str,
+) -> Result<SpawnedChild, ProcessError> {
+    let mut spawned = spawn_command(request, io_mode, rendered_command)?;
+
+    if let Some(startup_probe) = request.startup_probe {
+        std::thread::sleep(startup_probe);
+        if let Some(status) =
+            spawned
+                .child
+                .try_wait()
+                .map_err(|source| ProcessError::StartupCheckFailed {
+                    cmd: rendered_command.to_owned(),
+                    source,
+                })?
+        {
+            warn!(
+                command = rendered_command,
+                exit_code = status.code().unwrap_or(-1),
+                "process exited during startup probe"
+            );
+            if matches!(io_mode, ProcessIoMode::ManagedDetached) {
+                terminate_child_group_gracefully(&mut spawned, Duration::from_millis(250));
+                let _ = spawned.child.wait();
+            }
+            return Err(ProcessError::ExitedEarly {
+                cmd: rendered_command.to_owned(),
+                exit_code: status.code().unwrap_or(-1),
+            });
+        }
+    }
+
+    Ok(spawned)
 }
 
 fn spawn_command(
     request: &ProcessRequest,
     io_mode: ProcessIoMode,
     rendered_command: &str,
-) -> Result<std::process::Child, ProcessError> {
+) -> Result<SpawnedChild, ProcessError> {
     for attempt in 0..=EXECUTABLE_BUSY_MAX_RETRIES {
-        let mut cmd = build_command(request, io_mode);
-        match cmd.spawn() {
-            Ok(child) => return Ok(child),
+        let cmd = build_command(request, io_mode);
+        match spawn_child(cmd, io_mode) {
+            Ok(child) => return Ok(SpawnedChild { child }),
             Err(source) if is_executable_busy(&source) && attempt < EXECUTABLE_BUSY_MAX_RETRIES => {
                 warn!(
                     command = rendered_command,
@@ -333,6 +483,22 @@ fn spawn_command(
     unreachable!("spawn loop must return on success or final error");
 }
 
+fn spawn_child(mut cmd: Command, io_mode: ProcessIoMode) -> std::io::Result<ChildHandle> {
+    #[cfg(windows)]
+    {
+        if matches!(io_mode, ProcessIoMode::ManagedDetached) {
+            use process_wrap::std::{CommandWrap, JobObject};
+
+            let mut wrapped = CommandWrap::from(cmd);
+            wrapped.wrap(JobObject);
+            return wrapped.spawn().map(ChildHandle::Wrapped);
+        }
+    }
+
+    let _ = io_mode;
+    cmd.spawn().map(ChildHandle::Standard)
+}
+
 fn build_command(request: &ProcessRequest, io_mode: ProcessIoMode) -> Command {
     let mut cmd = Command::new(&request.program);
     cmd.args(&request.args);
@@ -345,24 +511,38 @@ fn build_command(request: &ProcessRequest, io_mode: ProcessIoMode) -> Command {
             cmd.stdout(Stdio::null());
             cmd.stderr(Stdio::null());
         }
+        ProcessIoMode::ManagedDetached => {
+            cmd.stdout(Stdio::null());
+            cmd.stderr(Stdio::null());
+            set_child_process_group(&mut cmd);
+        }
         ProcessIoMode::Captured => {
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::CommandExt;
-                unsafe {
-                    cmd.pre_exec(|| {
-                        if libc::setpgid(0, 0) != 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        Ok(())
-                    });
-                }
-            }
+            set_child_process_group(&mut cmd);
         }
     }
     cmd
+}
+
+fn set_child_process_group(cmd: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setpgid(0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = cmd;
+    }
 }
 
 fn is_executable_busy(error: &std::io::Error) -> bool {
@@ -380,24 +560,28 @@ fn is_executable_busy(error: &std::io::Error) -> bool {
 }
 
 fn wait_for_output(
-    mut child: std::process::Child,
+    mut spawned: SpawnedChild,
     rendered_command: &str,
     policy: &ProcessExecutionPolicy,
 ) -> Result<ObservedOutput, ProcessError> {
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| ProcessError::StartupCheckFailed {
-            cmd: rendered_command.to_owned(),
-            source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdout pipe missing"),
-        })?;
-    let mut stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| ProcessError::StartupCheckFailed {
-            cmd: rendered_command.to_owned(),
-            source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stderr pipe missing"),
-        })?;
+    let mut stdout =
+        spawned
+            .child
+            .stdout()
+            .take()
+            .ok_or_else(|| ProcessError::StartupCheckFailed {
+                cmd: rendered_command.to_owned(),
+                source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdout pipe missing"),
+            })?;
+    let mut stderr =
+        spawned
+            .child
+            .stderr()
+            .take()
+            .ok_or_else(|| ProcessError::StartupCheckFailed {
+                cmd: rendered_command.to_owned(),
+                source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stderr pipe missing"),
+            })?;
     let stdout_reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = stdout.read_to_end(&mut buf);
@@ -413,7 +597,8 @@ fn wait_for_output(
     let mut observed_interruption: Option<ProcessInterruptionReason> = None;
     loop {
         if let Some(status) =
-            child
+            spawned
+                .child
                 .try_wait()
                 .map_err(|source| ProcessError::StartupCheckFailed {
                     cmd: rendered_command.to_owned(),
@@ -460,7 +645,7 @@ fn wait_for_output(
             if policy.cancellation.is_cancelled() {
                 observed_interruption = Some(ProcessInterruptionReason::Cancelled);
                 if let Some(error) = interrupt_child(
-                    &mut child,
+                    &mut spawned,
                     rendered_command,
                     policy,
                     ProcessInterruptionReason::Cancelled,
@@ -473,7 +658,7 @@ fn wait_for_output(
                 if start.elapsed() >= limit {
                     observed_interruption = Some(ProcessInterruptionReason::TimedOut);
                     if let Some(error) = interrupt_child(
-                        &mut child,
+                        &mut spawned,
                         rendered_command,
                         policy,
                         ProcessInterruptionReason::TimedOut,
@@ -498,7 +683,7 @@ struct ObservedOutput {
 }
 
 fn interrupt_child(
-    child: &mut std::process::Child,
+    spawned: &mut SpawnedChild,
     rendered_command: &str,
     policy: &ProcessExecutionPolicy,
     reason: ProcessInterruptionReason,
@@ -513,8 +698,8 @@ fn interrupt_child(
             Ok(None)
         }
         ProcessInterruptionSafety::Interruptible => {
-            terminate_child_group(child);
-            let _ = child.wait();
+            terminate_child_group(spawned);
+            let _ = spawned.child.wait();
             Ok(Some(process_error_from_reason(
                 rendered_command,
                 policy.timeout,
@@ -522,8 +707,8 @@ fn interrupt_child(
             )))
         }
         ProcessInterruptionSafety::GracefulThenKill => {
-            terminate_child_group_gracefully(child, policy.graceful_shutdown_timeout);
-            let _ = child.wait();
+            terminate_child_group_gracefully(spawned, policy.graceful_shutdown_timeout);
+            let _ = spawned.child.wait();
             Ok(Some(process_error_from_reason(
                 rendered_command,
                 policy.timeout,
@@ -549,41 +734,84 @@ fn process_error_from_reason(
     }
 }
 
-fn terminate_child_group(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    unsafe {
-        let pgid = -(child.id() as i32);
-        let _ = libc::kill(pgid, libc::SIGKILL);
+fn terminate_child_group(spawned: &mut SpawnedChild) {
+    #[cfg(windows)]
+    {
+        terminate_windows_process_tree(spawned.child.id());
+        let _ = spawned.child.start_kill();
     }
 
-    #[cfg(not(unix))]
+    #[cfg(unix)]
     {
-        let _ = child.kill();
+        terminate_unix_process_group(spawned.child.id() as i32, libc::SIGKILL);
+    }
+
+    #[cfg(all(not(unix), not(windows)))]
+    {
+        let _ = spawned.child.start_kill();
     }
 }
 
-fn terminate_child_group_gracefully(child: &mut std::process::Child, timeout: Duration) {
-    #[cfg(unix)]
-    unsafe {
-        let pgid = -(child.id() as i32);
-        let _ = libc::kill(pgid, libc::SIGTERM);
-    }
-
-    #[cfg(not(unix))]
+fn terminate_child_group_gracefully(spawned: &mut SpawnedChild, timeout: Duration) {
+    #[cfg(windows)]
     {
-        let _ = child.kill();
-        return;
+        let _ = timeout;
+        terminate_windows_process_tree(spawned.child.id());
+        let _ = spawned.child.start_kill();
     }
 
-    let start = std::time::Instant::now();
-    while start.elapsed() < timeout {
-        match child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(_) => break,
+    #[cfg(unix)]
+    {
+        let pgid = spawned.child.id() as i32;
+        terminate_unix_process_group(pgid, libc::SIGTERM);
+
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            if spawned.child.try_wait().is_err() || !unix_process_group_exists(pgid) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        terminate_child_group(spawned);
+    }
+
+    #[cfg(all(not(unix), not(windows)))]
+    {
+        let _ = timeout;
+        let _ = spawned.child.start_kill();
+    }
+}
+
+#[cfg(unix)]
+fn terminate_unix_process_group(pgid: i32, signal: i32) {
+    unsafe {
+        let _ = libc::kill(-pgid, signal);
+    }
+}
+
+#[cfg(unix)]
+fn unix_process_group_exists(pgid: i32) -> bool {
+    unsafe {
+        if libc::kill(-pgid, 0) == 0 {
+            return true;
         }
     }
-    terminate_child_group(child);
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(windows)]
+fn terminate_windows_process_tree(pid: u32) {
+    let _ = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn terminate_windows_process_tree(pid: u32) {
+    let _ = pid;
 }
 
 fn render_command(request: &ProcessRequest) -> String {
@@ -608,8 +836,15 @@ fn render_command(request: &ProcessRequest) -> String {
 
 fn is_sensitive_flag(arg: &str) -> bool {
     const FLAGS: &[&str] = &[
+        "/N",
+        "-N",
         "/P",
         "-P",
+        "--user",
+        "--database-user",
+        "--db-user",
+        "--target-database-user",
+        "--target-db-user",
         "--password",
         "--database-password",
         "--db-pwd",
@@ -622,8 +857,15 @@ fn is_sensitive_flag(arg: &str) -> bool {
 
 fn split_sensitive_assignment(arg: &str) -> Option<(&str, &str)> {
     const FLAGS: &[&str] = &[
+        "/N",
+        "-N",
         "/P",
         "-P",
+        "--user",
+        "--database-user",
+        "--db-user",
+        "--target-database-user",
+        "--target-db-user",
         "--password",
         "--database-password",
         "--db-pwd",
@@ -647,7 +889,7 @@ mod tests {
         ProcessRequest, ProcessRunner,
     };
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::thread;
     use std::time::Duration;
     use tempfile::tempdir;
@@ -714,8 +956,11 @@ mod tests {
             args: vec![
                 "--user".to_owned(),
                 "admin".to_owned(),
+                "/N".to_owned(),
+                "operator".to_owned(),
                 "/p".to_owned(),
                 "secret".to_owned(),
+                "--database-user=postgres".to_owned(),
                 "--DATABASE-password=pg-secret".to_owned(),
                 "-p=legacy-secret".to_owned(),
                 "--target-db-pwd".to_owned(),
@@ -727,10 +972,16 @@ mod tests {
             startup_probe: None,
         });
 
+        assert!(rendered.contains("--user ***"));
+        assert!(rendered.contains("/N ***"));
         assert!(rendered.contains("/p ***"));
+        assert!(rendered.contains("--database-user=***"));
         assert!(rendered.contains("--DATABASE-password=***"));
         assert!(rendered.contains("-p=***"));
         assert!(rendered.contains("--target-db-pwd ***"));
+        assert!(!rendered.contains("admin"));
+        assert!(!rendered.contains("operator"));
+        assert!(!rendered.contains("postgres"));
         assert!(!rendered.contains("secret"));
         assert!(!rendered.contains("pg-secret"));
         assert!(!rendered.contains("legacy-secret"));
@@ -763,26 +1014,151 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn spawn_detects_immediate_exit_when_probe_is_requested() {
-        let dir = tempdir().expect("tempdir");
-        let script = dir.path().join("exit.sh");
-        write_script(&script, "exit 7");
+        let false_binary = PathBuf::from("/usr/bin/false");
+        assert!(false_binary.exists(), "/usr/bin/false must exist on Unix");
 
         let runner = ProcessExecutor;
         let err = runner
             .spawn(&ProcessRequest {
-                program: script,
+                program: false_binary,
                 args: vec![],
                 workdir: None,
                 stdout_log_path: None,
                 stderr_log_path: None,
-                startup_probe: Some(Duration::from_millis(50)),
+                startup_probe: Some(Duration::from_millis(250)),
             })
             .expect_err("expected early exit");
 
         assert!(matches!(
             err,
-            ProcessError::ExitedEarly { exit_code: 7, .. }
+            ProcessError::ExitedEarly { exit_code: 1, .. }
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_managed_cleans_process_group_when_startup_probe_detects_early_exit() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("fork-and-exit.sh");
+        let child_pid_path = dir.path().join("child.pid");
+        write_script(
+            &script,
+            &format!(
+                "sleep 5 &\nprintf '%s' \"$!\" > '{}'\nexit 0",
+                child_pid_path.display()
+            ),
+        );
+
+        let runner = ProcessExecutor;
+        let err = match runner.spawn_managed(&ProcessRequest {
+            program: script,
+            args: vec![],
+            workdir: None,
+            stdout_log_path: None,
+            stderr_log_path: None,
+            startup_probe: Some(Duration::from_millis(100)),
+        }) {
+            Ok(managed) => {
+                managed.terminate();
+                panic!("expected managed startup probe to detect early exit");
+            }
+            Err(error) => error,
+        };
+
+        assert!(matches!(err, ProcessError::ExitedEarly { .. }));
+        let child_pid = read_pid(&child_pid_path);
+        if process_exists(child_pid) {
+            unsafe {
+                let _ = libc::kill(child_pid, libc::SIGKILL);
+            }
+            panic!("managed startup failure should terminate process group child {child_pid}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn spawn_managed_terminates_windows_job_descendants() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("spawn-child.ps1");
+        let child_pid_path = dir.path().join("child.pid");
+        fs::write(
+            &script,
+            format!(
+                "$child = Start-Process -FilePath powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 30') -PassThru\nSet-Content -LiteralPath {} -Value $child.Id\nStart-Sleep -Seconds 30\n",
+                powershell_literal(&child_pid_path)
+            ),
+        )
+        .expect("write script");
+
+        let runner = ProcessExecutor;
+        let managed = runner
+            .spawn_managed(&ProcessRequest {
+                program: PathBuf::from("powershell.exe"),
+                args: vec![
+                    "-NoProfile".to_owned(),
+                    "-ExecutionPolicy".to_owned(),
+                    "Bypass".to_owned(),
+                    "-File".to_owned(),
+                    script.display().to_string(),
+                ],
+                workdir: None,
+                stdout_log_path: None,
+                stderr_log_path: None,
+                startup_probe: None,
+            })
+            .expect("spawn managed");
+
+        let child_pid = read_pid(&child_pid_path);
+        managed.terminate();
+        if !wait_for_process_exit(child_pid, Duration::from_secs(2)) {
+            terminate_windows_process_tree_for_test(child_pid);
+            panic!("managed termination should terminate Windows job child {child_pid}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn spawn_managed_cleans_windows_job_when_startup_probe_detects_early_exit() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("spawn-child-and-exit.ps1");
+        let child_pid_path = dir.path().join("child.pid");
+        fs::write(
+            &script,
+            format!(
+                "$child = Start-Process -FilePath powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 30') -PassThru\nSet-Content -LiteralPath {} -Value $child.Id\nexit 0\n",
+                powershell_literal(&child_pid_path)
+            ),
+        )
+        .expect("write script");
+
+        let runner = ProcessExecutor;
+        let err = match runner.spawn_managed(&ProcessRequest {
+            program: PathBuf::from("powershell.exe"),
+            args: vec![
+                "-NoProfile".to_owned(),
+                "-ExecutionPolicy".to_owned(),
+                "Bypass".to_owned(),
+                "-File".to_owned(),
+                script.display().to_string(),
+            ],
+            workdir: None,
+            stdout_log_path: None,
+            stderr_log_path: None,
+            startup_probe: Some(Duration::from_millis(200)),
+        }) {
+            Ok(managed) => {
+                managed.terminate();
+                panic!("expected managed startup probe to detect early exit");
+            }
+            Err(error) => error,
+        };
+
+        assert!(matches!(err, ProcessError::ExitedEarly { .. }));
+        let child_pid = read_pid(&child_pid_path);
+        if !wait_for_process_exit(child_pid, Duration::from_secs(2)) {
+            terminate_windows_process_tree_for_test(child_pid);
+            panic!("managed startup failure should terminate Windows job child {child_pid}");
+        }
     }
 
     #[cfg(unix)]
@@ -927,5 +1303,80 @@ mod tests {
 
         assert_eq!(result.exit_code, 0);
         assert!(result.stdout.contains("line19999"));
+    }
+
+    #[cfg(unix)]
+    fn read_pid(path: &Path) -> i32 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while std::time::Instant::now() < deadline {
+            if let Ok(pid) = fs::read_to_string(path) {
+                return pid.trim().parse().expect("child pid");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("child pid file was not written: {}", path.display());
+    }
+
+    #[cfg(unix)]
+    fn process_exists(pid: i32) -> bool {
+        unsafe {
+            if libc::kill(pid, 0) == 0 {
+                return true;
+            }
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+
+    #[cfg(windows)]
+    fn read_pid(path: &Path) -> u32 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if let Ok(pid) = fs::read_to_string(path) {
+                return pid.trim().parse().expect("child pid");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("child pid file was not written: {}", path.display());
+    }
+
+    #[cfg(windows)]
+    fn process_exists(pid: u32) -> bool {
+        std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}"
+                ),
+            ])
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[cfg(windows)]
+    fn wait_for_process_exit(pid: u32, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if !process_exists(pid) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        !process_exists(pid)
+    }
+
+    #[cfg(windows)]
+    fn terminate_windows_process_tree_for_test(pid: u32) {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
+    #[cfg(windows)]
+    fn powershell_literal(path: &Path) -> String {
+        format!("'{}'", path.display().to_string().replace('\'', "''"))
     }
 }

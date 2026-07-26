@@ -3,10 +3,11 @@ use serde::Serialize;
 use tracing::{debug, error};
 
 use crate::cli::args::{
-    Cli, Command, ConfigCommand, ConfigInitArgs, McpCommand, McpServeTransport, ToolsCommand,
+    BootstrapArgs, Cli, Command, ConfigCommand, ConfigInitArgs, McpCommand, McpServeTransport,
+    ToolsCommand,
 };
 use crate::cli::execute;
-use crate::cli::output::print_command_error;
+use crate::cli::output::{failure_envelope, print_command_error};
 use crate::command_envelope::Envelope;
 use crate::config::loader::{
     load_config, load_config_for_tools_download, resolve_primary_config_path,
@@ -15,8 +16,10 @@ use crate::output::presenter::Presenter;
 use crate::output::text::{TimelineItem, TimelineStatus};
 use crate::support::error::AppError;
 use crate::use_cases::config_init::{ConfigBuilderRequest, ConfigFormatRequest, ConfigInitRequest};
+use crate::use_cases::context::CommandName;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
+const BOOTSTRAP_COMMAND: &str = "bootstrap";
 const CONFIG_INIT_COMMAND: &str = "config init";
 const VERSION_COMMAND: &str = "version";
 
@@ -41,6 +44,10 @@ pub fn run() -> i32 {
 
     if let Command::Config(args) = &cli.command {
         return run_config_command(args, &presenter);
+    }
+
+    if let Command::Bootstrap(args) = &cli.command {
+        return run_bootstrap(args, &cli, &presenter);
     }
 
     let config = match load_cli_config(&cli) {
@@ -90,6 +97,7 @@ pub fn run() -> i32 {
 
     let result = match &cli.command {
         Command::Version => unreachable!("version command is handled before config loading"),
+        Command::Bootstrap(_) => unreachable!("bootstrap command is handled before config loading"),
         Command::Init
         | Command::Config(_)
         | Command::Tools(_)
@@ -148,6 +156,7 @@ fn load_cli_config(
 fn command_name(command: &Command) -> &'static str {
     match command {
         Command::Version => VERSION_COMMAND,
+        Command::Bootstrap(_) => BOOTSTRAP_COMMAND,
         Command::Config(_) => "config",
         _ => execute::command_name(command).as_str(),
     }
@@ -181,6 +190,106 @@ fn run_version_command(output_format: &str) -> i32 {
 fn run_config_command(args: &crate::cli::args::ConfigArgs, presenter: &Presenter) -> i32 {
     match &args.command {
         ConfigCommand::Init(init_args) => run_config_init(init_args, presenter),
+    }
+}
+
+fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 {
+    if config_flag_was_explicitly_set() {
+        let message =
+            "global --config flag is not supported for `bootstrap`; use `bootstrap --project-dir <DIR>` to choose where the generated project is written";
+        let error = UseCaseError::new(UseCaseErrorKind::Validation, message);
+        print_command_error(presenter, BOOTSTRAP_COMMAND, &error, message);
+        return error.exit_code();
+    }
+
+    let project_dir = match resolve_bootstrap_project_dir(args.project_dir.as_deref()) {
+        Ok(path) => path,
+        Err(error) => {
+            let message = error.to_string();
+            let error = UseCaseError::from(error);
+            print_command_error(presenter, BOOTSTRAP_COMMAND, &error, &message);
+            return error.exit_code();
+        }
+    };
+    let work_path = project_dir.join("build");
+    let level = cli.log_level.as_deref().unwrap_or("info");
+    if let Err(error) = crate::support::logging::init_action_logging(
+        level,
+        if presenter.is_json() { "json" } else { "text" },
+        !cli.no_color,
+        &work_path,
+    ) {
+        let message = error.to_string();
+        let error = UseCaseError::new(UseCaseErrorKind::Runtime, message.clone());
+        print_command_error(presenter, BOOTSTRAP_COMMAND, &error, &message);
+        return error.exit_code();
+    }
+
+    let request = crate::use_cases::bootstrap_project::BootstrapRequest {
+        project_dir,
+        connection: args.connection.clone(),
+        platform_version: args.platform_version.clone(),
+        platform_path: args.platform_path.clone().map(Into::into),
+        user: args.user.clone(),
+        password: args.password.clone(),
+        source_dir: args.source_dir.clone().into(),
+        force: args.force,
+    };
+    let context = crate::use_cases::context::ExecutionContext::cli(CommandName::Bootstrap);
+    match crate::use_cases::bootstrap_project::execute(&context, &request) {
+        Ok(result) => {
+            if presenter.is_json() {
+                presenter.print_envelope(&Envelope {
+                    ok: true,
+                    command: BOOTSTRAP_COMMAND.to_owned(),
+                    duration_ms: result.duration_ms,
+                    warnings: result.warnings.clone(),
+                    steps: Vec::new(),
+                    error: None,
+                    data: result,
+                });
+            } else {
+                render_bootstrap_text(&result, presenter, true);
+            }
+            0
+        }
+        Err(failure) => {
+            let error = failure.error;
+            if presenter.is_json() {
+                if let Some(result) = failure.payload {
+                    presenter.print_envelope(&failure_envelope(
+                        BOOTSTRAP_COMMAND,
+                        result.duration_ms,
+                        result,
+                        &error,
+                    ));
+                } else {
+                    presenter.print_envelope(&failure_envelope(
+                        BOOTSTRAP_COMMAND,
+                        0,
+                        serde_json::json!({ "message": error.message() }),
+                        &error,
+                    ));
+                }
+            } else {
+                if let Some(result) = failure.payload.as_ref() {
+                    render_bootstrap_text(result, presenter, false);
+                }
+                presenter.print_error(&error.to_string());
+            }
+            error.exit_code()
+        }
+    }
+}
+
+fn resolve_bootstrap_project_dir(
+    project_dir: Option<&str>,
+) -> Result<std::path::PathBuf, AppError> {
+    match project_dir {
+        Some(path) => Ok(path.into()),
+        None => std::env::current_dir().map_err(|error| {
+            AppError::Runtime(format!("failed to resolve current directory: {error}"))
+        }),
     }
 }
 
@@ -274,6 +383,55 @@ fn render_config_init_text(
     let timeline = vec![
         TimelineItem::new(TimelineStatus::Succeeded, "config:").with_detail(details.join("\n")),
         TimelineItem::new(TimelineStatus::Succeeded, completion),
+    ];
+    presenter.print_timeline(&timeline);
+}
+
+fn render_bootstrap_text(
+    result: &crate::domain::bootstrap::BootstrapResult,
+    presenter: &Presenter,
+    succeeded: bool,
+) {
+    let mut details = vec![
+        format!("path: {}", result.path.display()),
+        format!("local path: {}", result.local_path.display()),
+        format!("gitignore: {}", result.gitignore_path.display()),
+        format!("source dir: {}", result.source_dir.display()),
+        format!("dumped: {}", if result.dumped { "yes" } else { "no" }),
+    ];
+    if let Some(message) = result.message.as_deref() {
+        details.push(format!(
+            "{}: {message}",
+            if succeeded { "message" } else { "error" }
+        ));
+    }
+    for warning in &result.warnings {
+        details.push(format!("[warning] {warning}"));
+    }
+
+    let label = if succeeded {
+        "Project bootstrapped successfully"
+    } else {
+        "Project bootstrap failed"
+    };
+    let timeline = vec![
+        TimelineItem::new(
+            if succeeded {
+                TimelineStatus::Succeeded
+            } else {
+                TimelineStatus::Failed
+            },
+            "bootstrap:",
+        )
+        .with_detail(details.join("\n")),
+        TimelineItem::new(
+            if succeeded {
+                TimelineStatus::Succeeded
+            } else {
+                TimelineStatus::Failed
+            },
+            label,
+        ),
     ];
     presenter.print_timeline(&timeline);
 }

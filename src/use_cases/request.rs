@@ -81,6 +81,17 @@ impl TestRequest {
     }
 }
 
+pub(crate) fn effective_test_timeouts(
+    legacy_total_seconds: u64,
+    runner_timeouts: &ExecutionTimeouts,
+) -> ExecutionTimeouts {
+    let mut timeouts = runner_timeouts.clone();
+    if timeouts.total_ms.is_none() {
+        timeouts.total_ms = Some(legacy_total_seconds.saturating_mul(1_000));
+    }
+    timeouts
+}
+
 /// Transport-neutral test scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TestScopeRequest {
@@ -611,6 +622,7 @@ pub struct ClientMcpOptionsRequest {
     pub config_path: Option<String>,
     pub port: Option<u16>,
     pub addon: Option<ClientMcpAddonRequest>,
+    pub wait_ready: bool,
 }
 
 /// Transport-neutral request for the `launch` use case.

@@ -166,6 +166,17 @@ impl AppConfig {
     pub fn execution_timeout_duration(&self) -> Duration {
         Duration::from_millis(self.execution_timeout.max(1))
     }
+
+    /// Returns the client MCP wait-ready timeout as a duration.
+    pub fn client_mcp_wait_ready_timeout_duration(&self) -> Duration {
+        Duration::from_millis(
+            self.tools
+                .client_mcp
+                .wait_ready_timeout_ms
+                .unwrap_or(self.execution_timeout)
+                .max(1),
+        )
+    }
 }
 
 fn default_format() -> SourceFormat {
@@ -283,6 +294,9 @@ impl Default for McpConfig {
 pub struct ClientMcpToolConfig {
     /// Default port passed to onec-client-mcp-devkit via `/C"...;mcpPort=<PORT>"`.
     pub port: Option<u16>,
+
+    /// Optional wait-ready timeout in milliseconds. Defaults to `execution_timeout` when unset.
+    pub wait_ready_timeout_ms: Option<u64>,
 
     /// Optional tool extension prepared by `build` for client MCP launches.
     pub extension: Option<ToolExtensionConfig>,

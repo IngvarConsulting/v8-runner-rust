@@ -706,6 +706,26 @@ async fn mcp_stdio_exposes_expected_tools_and_capabilities() {
         .map(|tool| serde_json::to_value(&tool.input_schema).expect("launch schema"))
         .expect("launch tool");
     assert_eq!(launch_schema["properties"]["utilityType"]["type"], "string");
+    assert!(schema_supports_type(
+        &launch_schema["properties"]["mcpScenario"]["type"],
+        "string"
+    ));
+    assert!(schema_supports_type(
+        &launch_schema["properties"]["mode"]["type"],
+        "string"
+    ));
+    assert!(schema_supports_type(
+        &launch_schema["properties"]["mcpConfig"]["type"],
+        "string"
+    ));
+    assert!(schema_supports_type(
+        &launch_schema["properties"]["mcpPort"]["type"],
+        "integer"
+    ));
+    assert!(schema_supports_type(
+        &launch_schema["properties"]["waitReady"]["type"],
+        "boolean"
+    ));
 
     let module_schema = tools
         .iter()
@@ -739,6 +759,30 @@ async fn mcp_stdio_exposes_expected_tools_and_capabilities() {
     assert!(schema_supports_type(
         &tests_schema["properties"]["full"]["type"],
         "boolean"
+    ));
+    assert!(schema_supports_type(
+        &tests_schema["properties"]["runner"]["type"],
+        "string"
+    ));
+    assert!(schema_supports_type(
+        &tests_schema["properties"]["profile"]["type"],
+        "string"
+    ));
+    assert!(schema_supports_type(
+        &tests_schema["properties"]["feature"]["type"],
+        "array"
+    ));
+    assert!(schema_supports_type(
+        &tests_schema["properties"]["filterTag"]["type"],
+        "array"
+    ));
+    assert!(schema_supports_type(
+        &tests_schema["properties"]["ignoreTag"]["type"],
+        "array"
+    ));
+    assert!(schema_supports_type(
+        &tests_schema["properties"]["scenarioFilter"]["type"],
+        "array"
     ));
 
     let dump_schema = tools

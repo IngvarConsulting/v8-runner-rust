@@ -46,6 +46,8 @@ pub struct Cli {
 pub enum Command {
     /// Print application version
     Version,
+    /// Create a v8-runner project from an existing infobase
+    Bootstrap(BootstrapArgs),
     /// Generate project configuration and autodetect source-sets
     Config(ConfigArgs),
     /// Download YaXUnit, Vanessa Automation, and client MCP tool assets
@@ -73,6 +75,42 @@ pub enum Command {
     Launch(LaunchArgs),
     /// Serve Model Context Protocol transports
     Mcp(McpArgs),
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Command options")]
+pub struct BootstrapArgs {
+    /// Project directory to create. Defaults to the current directory.
+    #[arg(long)]
+    pub project_dir: Option<String>,
+
+    /// Existing infobase connection string used as bootstrap source
+    #[arg(long)]
+    pub connection: String,
+
+    /// 1C:Enterprise platform version written to project config
+    #[arg(long)]
+    pub platform_version: String,
+
+    /// Local platform binary, bin directory, or installation root
+    #[arg(long)]
+    pub platform_path: Option<String>,
+
+    /// Infobase user name stored in v8project.local.yaml
+    #[arg(long)]
+    pub user: Option<String>,
+
+    /// Infobase password stored in v8project.local.yaml
+    #[arg(long)]
+    pub password: Option<String>,
+
+    /// Source directory for the dumped main configuration
+    #[arg(long, default_value = "src/configuration")]
+    pub source_dir: String,
+
+    /// Overwrite generated config/local config/source targets
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Args, Debug)]
@@ -367,6 +405,10 @@ pub struct LaunchArgs {
     /// Port override for onec-client-mcp-devkit `/C"...;mcpPort=<PORT>"`
     #[arg(long = "mcp-port")]
     pub mcp_port: Option<u16>,
+
+    /// Wait until the client MCP HTTP endpoint is initialized and tools/list succeeds
+    #[arg(long = "wait-ready")]
+    pub wait_ready: bool,
 }
 
 #[derive(Args, Debug, Clone, Default, PartialEq, Eq)]
@@ -742,6 +784,7 @@ mod tests {
                 mcp_mode,
                 mcp_config,
                 mcp_port,
+                wait_ready,
             }) => {
                 assert_eq!(target, "ordinary");
                 assert_eq!(launch.c.as_deref(), Some("DoWork"));
@@ -753,6 +796,7 @@ mod tests {
                 assert_eq!(mcp_mode, None);
                 assert_eq!(mcp_config, None);
                 assert_eq!(mcp_port, None);
+                assert!(!wait_ready);
             }
             _ => panic!("unexpected command"),
         }
@@ -791,6 +835,7 @@ mod tests {
                 mcp_mode,
                 mcp_config,
                 mcp_port,
+                wait_ready,
             }) => {
                 assert_eq!(target, "designer");
                 assert_eq!(launch, LaunchOptionsArgs::default());
@@ -798,6 +843,7 @@ mod tests {
                 assert_eq!(mcp_mode, None);
                 assert_eq!(mcp_config, None);
                 assert_eq!(mcp_port, None);
+                assert!(!wait_ready);
             }
             _ => panic!("unexpected command"),
         }
@@ -816,6 +862,7 @@ mod tests {
             "mcp-conf.json",
             "--mcp-port",
             "9876",
+            "--wait-ready",
         ])
         .expect("parse launch");
 
@@ -827,6 +874,7 @@ mod tests {
                 mcp_mode,
                 mcp_config,
                 mcp_port,
+                wait_ready,
             }) => {
                 assert_eq!(target, "mcp");
                 assert_eq!(launch, LaunchOptionsArgs::default());
@@ -834,6 +882,7 @@ mod tests {
                 assert_eq!(mcp_mode.as_deref(), Some("ordinary"));
                 assert_eq!(mcp_config.as_deref(), Some("mcp-conf.json"));
                 assert_eq!(mcp_port, Some(9876));
+                assert!(wait_ready);
             }
             _ => panic!("unexpected command"),
         }

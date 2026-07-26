@@ -32,6 +32,8 @@ If the user points to a specific feature or profile, inspect `tests.va` in `v8pr
 
 `test va` uses the configured `tests.va.profile`; do not invent ad hoc feature paths without updating config or using the repo's established wrapper.
 
+When driving tests through the MCP `run_all_tests` tool, pass `runner: "vanessa"` plus optional `profile`, `feature`, `filterTag`, `ignoreTag`, or `scenarioFilter`; do not use the default YaXUnit runner for functional `.feature` acceptance scenarios.
+
 `tests.va.fail_fast` defaults to `false`.
 
 When setting `tests.va.profiles.<name>.filter_tags` or `ignore_tags`, or passing `--filter-tag` / `--ignore-tag`, a leading `@` is accepted for user convenience but the generated `СписокТеговОтбор` and `СписокТеговИсключение` in runtime `VAParams` must be written without that leading `@`.
@@ -45,9 +47,12 @@ v8-runner launch mcp va
 v8-runner launch mcp va --mode thin
 v8-runner launch mcp va --mcp-port <PORT>
 v8-runner launch mcp va --mcp-config <FILE>
+v8-runner launch mcp va --mcp-port <PORT> --wait-ready
 ```
 
-This starts the client-side MCP server in 1C and loads Vanessa Automation from `tools.va`. Prefer it for exploratory VA work; use `test va` for the configured automated test run.
+This starts the client-side MCP server in 1C and loads Vanessa Automation from `tools.va`. Prefer `--wait-ready` before an agent connects: it probes `/mcp`, runs MCP initialization, lists tools, and confirms VA tools such as `load_features`, `run_scenario`, and `get_test_results` are registered. Tune that readiness wait with `tools.client_mcp.wait_ready_timeout_ms`; it falls back to `execution_timeout` and remains capped by the command deadline.
+
+For functional `.feature` acceptance work, use Vanessa Automation (`test va` or `launch mcp va --wait-ready`), not bare `launch mcp`.
 
 ## Launch Options During Tests
 

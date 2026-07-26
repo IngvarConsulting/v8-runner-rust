@@ -7,12 +7,16 @@ Choose commands by user intent, not by listing every CLI surface.
 Use these when a project is missing `v8project.yaml` or generated runtime state:
 
 ```bash
+v8-runner bootstrap --connection "File=/path/to/ib" --platform-version 8.3.27
 v8-runner config init
 v8-runner config init --connection "File=build/ib"
 v8-runner config init --format edt
 v8-runner config init --builder IBCMD
 v8-runner init
 ```
+
+Use `bootstrap` when an existing infobase is the source of truth and source files need to be
+materialized. Use `config init` when supported source files are already present.
 
 Inspect `v8project.yaml` after `config init` and before commands that create or mutate infobases, workspaces, or source files.
 
@@ -81,10 +85,16 @@ Vanessa Automation:
 v8-runner test va
 ```
 
+Use Vanessa Automation for functional `.feature` acceptance scenarios: `v8-runner test va` for
+configured runs, MCP `run_all_tests` with `runner: "vanessa"` for agent-driven runs, or
+`launch mcp va --mcp-port <PORT> --wait-ready` for interactive debugging. If
+`tools.client_mcp.port` is configured, the explicit port can be omitted. Do not use bare
+`launch mcp` for these workflows.
+
 Interactive VA debugging and scenario authoring:
 
 ```bash
-v8-runner launch mcp va
+v8-runner launch mcp va --mcp-port <PORT> --wait-ready
 ```
 
 ## Extensions

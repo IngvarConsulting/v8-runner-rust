@@ -3,11 +3,16 @@
 mod support;
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
-use serde_json::Value;
-use support::{temp_workspace, v8_runner_command, write_shell_script_atomically};
+use serde_json::{json, Value};
+
+use support::{free_tcp_port, temp_workspace, v8_runner_command, write_shell_script_atomically};
 
 fn write_script(path: &Path) {
     write_shell_script_atomically(path, "sleep 1");
@@ -18,6 +23,225 @@ fn write_logging_script(path: &Path, args_log: &Path) {
         path,
         &format!("printf '%s\n' \"$@\" > '{}'\nsleep 1", args_log.display()),
     );
+}
+
+fn read_args_log(path: &Path) -> String {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut previous = None;
+    while Instant::now() < deadline {
+        if let Ok(args) = fs::read_to_string(path) {
+            if previous.as_ref().is_some_and(|last| last == &args) {
+                return args;
+            }
+            previous = (!args.is_empty()).then_some(args);
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    fs::read_to_string(path).expect("args log")
+}
+
+fn wait_for_file(path: &Path, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if path.exists() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    path.exists()
+}
+
+struct FakeHttpRequest {
+    method: String,
+    session_id: Option<String>,
+    body: Option<Value>,
+}
+
+fn start_fake_mcp_server(tools: &[&str]) -> (u16, JoinHandle<()>) {
+    let tools = tools
+        .iter()
+        .map(|tool| (*tool).to_owned())
+        .collect::<Vec<_>>();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind fake MCP server");
+    let port = listener.local_addr().expect("fake MCP local addr").port();
+    let handle = thread::spawn(move || {
+        listener
+            .set_nonblocking(true)
+            .expect("fake MCP nonblocking listener");
+        let started = Instant::now();
+        let mut last_request = Instant::now();
+        let mut accepted_requests = 0;
+        let mut initialize_count = 0;
+        let mut initialized_notification_seen = false;
+        let mut tools_list_seen = false;
+        loop {
+            let Ok((mut stream, _)) = listener.accept() else {
+                if accepted_requests > 0 && last_request.elapsed() > Duration::from_millis(250) {
+                    break;
+                }
+                assert!(
+                    started.elapsed() <= Duration::from_secs(5),
+                    "fake MCP server timed out waiting for requests"
+                );
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            };
+            accepted_requests += 1;
+            last_request = Instant::now();
+            stream
+                .set_nonblocking(false)
+                .expect("fake MCP blocking stream");
+            let http_request = read_http_json_request(&mut stream);
+            if http_request.method == "DELETE" {
+                assert_eq!(
+                    http_request.session_id.as_deref(),
+                    Some("fake-session"),
+                    "DELETE must reuse the initialized MCP session"
+                );
+                write!(stream, "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n",)
+                    .expect("write delete response");
+                continue;
+            }
+            let request = http_request.body.expect("json rpc body");
+            let method = request["method"].as_str().unwrap_or_default();
+            let result = match method {
+                "initialize" => {
+                    assert!(
+                        http_request.session_id.is_none(),
+                        "initialize must start without a previous MCP session"
+                    );
+                    json!({
+                        "protocolVersion": "2025-11-25",
+                        "capabilities": {},
+                        "serverInfo": { "name": "fake-client-mcp", "version": "1" }
+                    })
+                }
+                "tools/list" => json!({
+                    "tools": tools.iter().map(|name| {
+                        json!({
+                            "name": name,
+                            "description": "",
+                            "inputSchema": { "type": "object" }
+                        })
+                    }).collect::<Vec<_>>()
+                }),
+                "notifications/initialized" => {
+                    assert_eq!(
+                        http_request.session_id.as_deref(),
+                        Some("fake-session"),
+                        "notifications/initialized must use the initialized MCP session"
+                    );
+                    initialized_notification_seen = true;
+                    write!(stream, "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n",)
+                        .expect("write initialized response");
+                    continue;
+                }
+                _ => json!({}),
+            };
+            if method == "initialize" {
+                initialize_count += 1;
+            }
+            if method == "tools/list" {
+                assert_eq!(
+                    http_request.session_id.as_deref(),
+                    Some("fake-session"),
+                    "tools/list must use the initialized MCP session"
+                );
+                assert!(
+                    initialized_notification_seen,
+                    "tools/list must be requested after notifications/initialized"
+                );
+                tools_list_seen = true;
+            }
+            let body = serde_json::to_vec(&json!({
+                "jsonrpc": "2.0",
+                "id": request["id"].clone(),
+                "result": result,
+            }))
+            .expect("response json");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: fake-session\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            )
+            .expect("write response headers");
+            stream.write_all(&body).expect("write response body");
+        }
+        assert!(
+            initialized_notification_seen,
+            "fake MCP server expected notifications/initialized"
+        );
+        assert_eq!(
+            initialize_count, 1,
+            "readiness polling must reuse one MCP session"
+        );
+        assert!(tools_list_seen, "fake MCP server expected tools/list");
+    });
+    (port, handle)
+}
+
+fn read_http_json_request(stream: &mut TcpStream) -> FakeHttpRequest {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout");
+    let mut bytes = Vec::new();
+    let mut buffer = [0; 1024];
+    loop {
+        let read = stream.read(&mut buffer).expect("read request");
+        assert!(read > 0, "request closed before body");
+        bytes.extend_from_slice(&buffer[..read]);
+        if let Some((method, session_id, body_start, content_length)) = http_body_bounds(&bytes) {
+            if bytes.len() >= body_start + content_length {
+                let body = if content_length == 0 {
+                    None
+                } else {
+                    Some(
+                        serde_json::from_slice(&bytes[body_start..body_start + content_length])
+                            .expect("request json"),
+                    )
+                };
+                return FakeHttpRequest {
+                    method,
+                    session_id,
+                    body,
+                };
+            }
+        }
+    }
+}
+
+fn http_body_bounds(bytes: &[u8]) -> Option<(String, Option<String>, usize, usize)> {
+    let header_end = bytes.windows(4).position(|window| window == b"\r\n\r\n")?;
+    let headers = String::from_utf8_lossy(&bytes[..header_end]);
+    let method = headers
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().next())
+        .unwrap_or_default()
+        .to_owned();
+    let session_id = headers
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.eq_ignore_ascii_case("mcp-session-id"))
+        .map(|(_, value)| value.trim().to_owned());
+    let content_length = headers
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    Some((method, session_id, header_end + 4, content_length))
+}
+
+fn prepend_config(path: &Path, prefix: &str) {
+    let config = fs::read_to_string(path).expect("config");
+    fs::write(path, format!("{prefix}{config}")).expect("config");
+}
+
+fn insert_client_mcp_config(path: &Path, body: &str) {
+    let config = fs::read_to_string(path).expect("config");
+    let replacement = format!("tools:\n  client_mcp:\n{body}  platform:");
+    fs::write(path, config.replace("tools:\n  platform:", &replacement)).expect("config");
 }
 
 fn write_config(
@@ -40,6 +264,10 @@ fn write_config(
 }
 
 fn setup_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+    setup_project_with_thin_script("sleep 1")
+}
+
+fn setup_project_with_failing_thin_binary() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     let dir = temp_workspace();
     let base_path = dir.path().join("project");
     let work_path = dir.path().join("work");
@@ -49,10 +277,35 @@ fn setup_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     fs::create_dir_all(&base_path).expect("base");
     fs::create_dir_all(&work_path).expect("work");
     write_script(&install_dir.join("bin").join("1cv8"));
-    write_script(&install_dir.join("bin").join("1cv8c"));
+    write_false_executable(&install_dir.join("bin").join("1cv8c"));
     write_config(&config_path, &base_path, &work_path, &install_dir, None);
 
     (dir, config_path, install_dir, work_path)
+}
+
+fn setup_project_with_thin_script(
+    thin_script: &str,
+) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+    let dir = temp_workspace();
+    let base_path = dir.path().join("project");
+    let work_path = dir.path().join("work");
+    let install_dir = dir.path().join("platform");
+    let config_path = dir.path().join("v8project.yaml");
+
+    fs::create_dir_all(&base_path).expect("base");
+    fs::create_dir_all(&work_path).expect("work");
+    write_script(&install_dir.join("bin").join("1cv8"));
+    write_shell_script_atomically(&install_dir.join("bin").join("1cv8c"), thin_script);
+    write_config(&config_path, &base_path, &work_path, &install_dir, None);
+
+    (dir, config_path, install_dir, work_path)
+}
+
+fn write_false_executable(path: &Path) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("parent");
+    }
+    symlink("/usr/bin/false", path).expect("false symlink");
 }
 
 fn setup_versioned_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
@@ -269,9 +522,9 @@ fn launch_uses_versioned_root_hint() {
 
 #[test]
 fn launch_fails_when_process_exits_during_startup_probe() {
-    let (_dir, config_path, install_dir, _work_path) = setup_project();
+    let (_dir, config_path, install_dir, _work_path) = setup_project_with_failing_thin_binary();
     let thin = install_dir.join("bin").join("1cv8c");
-    write_shell_script_atomically(&thin, "exit 9");
+    let thin_target = fs::read_link(&thin).expect("thin symlink");
 
     let output = v8_runner_command()
         .args([
@@ -283,16 +536,23 @@ fn launch_fails_when_process_exits_during_startup_probe() {
         .output()
         .expect("run command");
 
-    assert!(!output.status.success());
+    assert!(
+        !output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}\nsymlink={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        thin_target.display()
+    );
     assert_eq!(output.status.code(), Some(4));
     assert!(String::from_utf8_lossy(&output.stderr).contains("exited before startup completed"));
 }
 
 #[test]
 fn launch_json_failure_returns_error_envelope_and_exit_code() {
-    let (_dir, config_path, install_dir, _work_path) = setup_project();
+    let (_dir, config_path, install_dir, _work_path) = setup_project_with_failing_thin_binary();
     let thin = install_dir.join("bin").join("1cv8c");
-    write_shell_script_atomically(&thin, "exit 9");
+    let thin_target = fs::read_link(&thin).expect("thin symlink");
 
     let output = v8_runner_command()
         .args([
@@ -305,7 +565,14 @@ fn launch_json_failure_returns_error_envelope_and_exit_code() {
         .output()
         .expect("run command");
 
-    assert!(!output.status.success());
+    assert!(
+        !output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}\nsymlink={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        thin_target.display()
+    );
     assert_eq!(output.status.code(), Some(4));
     assert!(output.stderr.is_empty());
     let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
@@ -352,7 +619,7 @@ fn launch_ordinary_supports_typed_keys_and_filters_reserved_raw_duplicates() {
         .expect("run command");
 
     assert!(output.status.success());
-    let args = fs::read_to_string(args_log).expect("args log");
+    let args = read_args_log(&args_log);
     assert!(args.contains("ENTERPRISE"));
     assert!(args.contains("/DisableStartupDialogs"));
     assert_eq!(args.matches("/RunModeOrdinaryApplication").count(), 1);
@@ -401,7 +668,7 @@ fn launch_mcp_va_builds_payload_from_configured_port_and_ordinary_mode() {
         install_dir.join("bin").join("1cv8").to_string_lossy()
     );
 
-    let args = fs::read_to_string(args_log).expect("args log");
+    let args = read_args_log(&args_log);
     assert!(args.contains("ENTERPRISE"));
     assert!(args.contains("/DisableStartupDialogs"));
     assert!(args.contains("/RunModeOrdinaryApplication"));
@@ -474,6 +741,277 @@ fn launch_mcp_va_builds_payload_from_configured_port_and_ordinary_mode() {
 }
 
 #[test]
+fn launch_mcp_va_wait_ready_returns_registered_vanessa_tools() {
+    let (_dir, config_path, install_dir, args_log) = setup_mcp_va_project();
+    prepend_config(&config_path, "execution_timeout: 2500\n");
+    let (port, server) = start_fake_mcp_server(&[
+        "infobase_info",
+        "load_features",
+        "open_feature_file",
+        "run_scenario",
+        "get_test_results",
+        "connect_test_client",
+    ]);
+    write_logging_script(&install_dir.join("bin").join("1cv8"), &args_log);
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "mcp",
+            "va",
+            "--mode",
+            "ordinary",
+            "--mcp-port",
+            &port.to_string(),
+            "--wait-ready",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["data"]["mode"], "mcp");
+    assert_eq!(payload["data"]["mcp_readiness"]["ok"], true);
+    assert_eq!(
+        payload["data"]["mcp_readiness"]["url"],
+        format!("http://127.0.0.1:{port}/mcp")
+    );
+    let tools = payload["data"]["mcp_readiness"]["tools"]
+        .as_array()
+        .expect("tools");
+    assert!(tools.iter().any(|tool| tool == "load_features"));
+    assert!(tools.iter().any(|tool| tool == "run_scenario"));
+    assert!(tools.iter().any(|tool| tool == "get_test_results"));
+    server.join().expect("fake MCP server exits");
+}
+
+#[test]
+fn launch_mcp_va_wait_ready_fails_when_vanessa_tools_are_missing() {
+    let (_dir, config_path, install_dir, args_log) = setup_mcp_va_project();
+    prepend_config(&config_path, "execution_timeout: 700\n");
+    let (port, server) = start_fake_mcp_server(&["infobase_info"]);
+    write_logging_script(&install_dir.join("bin").join("1cv8"), &args_log);
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "mcp",
+            "va",
+            "--mcp-port",
+            &port.to_string(),
+            "--wait-ready",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(3));
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["data"]["ok"], false);
+    assert_eq!(payload["data"]["mcp_readiness"]["ok"], false);
+    let missing_tools = payload["data"]["mcp_readiness"]["missing_tools"]
+        .as_array()
+        .expect("missing tools");
+    assert!(missing_tools.iter().any(|tool| tool == "load_features"));
+    assert!(missing_tools.iter().any(|tool| tool == "run_scenario"));
+    assert!(payload["error"]["message"]
+        .as_str()
+        .expect("error message")
+        .contains("Vanessa MCP tools were not registered"));
+    server.join().expect("fake MCP server exits");
+}
+
+#[test]
+fn launch_mcp_wait_ready_returns_client_mcp_tools_without_vanessa_requirements() {
+    let (_dir, config_path, _install_dir, _work_path) = setup_project();
+    prepend_config(&config_path, "execution_timeout: 2500\n");
+    let (port, server) = start_fake_mcp_server(&["infobase_info", "query_info"]);
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "mcp",
+            "--mcp-port",
+            &port.to_string(),
+            "--wait-ready",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["data"]["mode"], "mcp");
+    assert_eq!(payload["data"]["mcp_readiness"]["ok"], true);
+    assert_eq!(
+        payload["data"]["mcp_readiness"]["url"],
+        format!("http://127.0.0.1:{port}/mcp")
+    );
+    assert_eq!(
+        payload["data"]["mcp_readiness"]["missing_tools"]
+            .as_array()
+            .expect("missing tools")
+            .len(),
+        0
+    );
+    let tools = payload["data"]["mcp_readiness"]["tools"]
+        .as_array()
+        .expect("tools");
+    assert!(tools.iter().any(|tool| tool == "infobase_info"));
+    assert!(tools.iter().any(|tool| tool == "query_info"));
+    server.join().expect("fake MCP server exits");
+}
+
+#[test]
+fn launch_mcp_wait_ready_fails_when_endpoint_never_starts() {
+    let (_dir, config_path, _install_dir, _work_path) = setup_project();
+    prepend_config(&config_path, "execution_timeout: 700\n");
+    let port = free_tcp_port();
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "mcp",
+            "--mcp-port",
+            &port.to_string(),
+            "--wait-ready",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(3));
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["ok"], false);
+    assert_eq!(payload["data"]["ok"], false);
+    assert_eq!(payload["data"]["mcp_readiness"]["ok"], false);
+    assert_eq!(
+        payload["data"]["mcp_readiness"]["url"],
+        format!("http://127.0.0.1:{port}/mcp")
+    );
+    assert!(payload["error"]["message"]
+        .as_str()
+        .expect("error message")
+        .contains("MCP endpoint did not become ready"));
+}
+
+#[test]
+fn launch_mcp_wait_ready_text_failure_is_not_rendered_as_success() {
+    let (_dir, config_path, _install_dir, _work_path) = setup_project();
+    prepend_config(&config_path, "execution_timeout: 700\n");
+    let port = free_tcp_port();
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--no-color",
+            "launch",
+            "mcp",
+            "--mcp-port",
+            &port.to_string(),
+            "--wait-ready",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(3));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Launch failed"));
+    assert!(!stdout.contains("Launch completed successfully"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("runtime error"));
+}
+
+#[test]
+fn launch_mcp_wait_ready_terminates_process_on_readiness_failure() {
+    let marker = temp_workspace();
+    let started = marker.path().join("started");
+    let terminated = marker.path().join("terminated");
+    let script = format!(
+        "printf started > '{}'\ntrap 'printf terminated > \"{}\"; exit 0' TERM INT\nwhile true; do sleep 1; done",
+        started.display(),
+        terminated.display()
+    );
+    let (_dir, config_path, _install_dir, _work_path) = setup_project_with_thin_script(&script);
+    prepend_config(&config_path, "execution_timeout: 500\n");
+    let port = free_tcp_port();
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "mcp",
+            "--mcp-port",
+            &port.to_string(),
+            "--wait-ready",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!output.status.success());
+    assert!(started.exists(), "launch process should have started");
+    assert!(
+        wait_for_file(&terminated, Duration::from_secs(2)),
+        "wait-ready failure should terminate the launched client process"
+    );
+}
+
+#[test]
+fn launch_mcp_wait_ready_uses_configured_wait_timeout() {
+    let (_dir, config_path, _install_dir, _work_path) = setup_project();
+    prepend_config(&config_path, "execution_timeout: 5000\n");
+    insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 200\n");
+    let port = free_tcp_port();
+
+    let started = Instant::now();
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "mcp",
+            "--mcp-port",
+            &port.to_string(),
+            "--wait-ready",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!output.status.success());
+    assert!(
+        started.elapsed() < Duration::from_millis(1500),
+        "wait-ready should use tools.client_mcp.wait_ready_timeout_ms instead of the global execution_timeout"
+    );
+}
+
+#[test]
 fn launch_mcp_va_does_not_duplicate_explicit_testmanager_raw_key() {
     let (_dir, config_path, _install_dir, args_log) =
         setup_mcp_va_project_with_options("work", &["/TESTMANAGER"]);
@@ -500,7 +1038,7 @@ fn launch_mcp_va_does_not_duplicate_explicit_testmanager_raw_key() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let args = fs::read_to_string(args_log).expect("args log");
+    let args = read_args_log(&args_log);
     let test_manager_count = args
         .split_whitespace()
         .filter(|arg| arg.eq_ignore_ascii_case("/TESTMANAGER"))
@@ -536,7 +1074,7 @@ fn launch_mcp_va_adds_testmanager_when_raw_value_matches_name() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let args = fs::read_to_string(args_log).expect("args log");
+    let args = read_args_log(&args_log);
     assert!(args.contains("/VAUser"));
     assert!(args.contains("TESTMANAGER"));
     assert!(args
@@ -684,6 +1222,6 @@ fn launch_non_mcp_rejects_mcp_options() {
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains(
-        "--mcp-config, --mcp-port, --mode, and MCP_SCENARIO are supported only for `launch mcp`"
+        "--mcp-config, --mcp-port, --mode, --wait-ready, and MCP_SCENARIO are supported only for `launch mcp`"
     ));
 }

@@ -16,6 +16,7 @@ settings before CLI overrides.
 - `tests.yaxunit` and `tests.va`: test runner configuration.
 - `tools.client_mcp`, `tools.va`, and `tools.enterprise`: launch and client-side MCP integration hints.
 - `tools.client_mcp.extension`: optional tool extension prepared by `build`; it is not a project `source-set`.
+- `tools.client_mcp.wait_ready_timeout_ms`: optional readiness timeout for `launch mcp --wait-ready`; falls back to `execution_timeout` and is still capped by the command deadline.
 
 ## Format And Backend Rules
 
