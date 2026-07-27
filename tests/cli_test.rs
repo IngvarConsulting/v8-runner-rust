@@ -173,6 +173,15 @@ fn write_native_edt_project(
     .expect("module marker");
 }
 
+fn replace_once(body: &str, from: &str, to: &str) -> String {
+    let replaced = body.replacen(from, to, 1);
+    assert_ne!(
+        replaced, body,
+        "VA script fixture pattern not found: {from}"
+    );
+    replaced
+}
+
 fn write_va_test_script(
     path: &Path,
     calls_log: &Path,
@@ -188,7 +197,8 @@ fn write_va_test_script(
         report_xml,
         exit_code
     );
-    let body = body.replace(
+    let body = replace_once(
+        &body,
         r#"mkdir -p "$report_dir" "$(dirname "$out")" "$(dirname "$text_log")"
 cat <<'XML' > "$report_dir/result.xml""#,
         r#"allure_dir=$(python3 - <<'PY' "$cfg"
@@ -201,7 +211,8 @@ PY
 mkdir -p "$report_dir" "$allure_dir" "$(dirname "$out")" "$(dirname "$text_log")"
 cat <<'XML' > "$report_dir/result.xml""#,
     );
-    let body = body.replace(
+    let body = replace_once(
+        &body,
         "XML\nprintf 'va execute=%s\\n'",
         "XML\nprintf '%s\\n' '{\"uuid\":\"fixture\",\"name\":\"fixture\",\"status\":\"passed\",\"stage\":\"finished\"}' > \"$allure_dir/fixture-result.json\"\nprintf 'va execute=%s\\n'",
     );
@@ -209,18 +220,21 @@ cat <<'XML' > "$report_dir/result.xml""#,
     let allure_output = "printf '%s\\n' '{\"uuid\":\"fixture\",\"name\":\"fixture\",\"status\":\"passed\",\"stage\":\"finished\"}' > \"$allure_dir/fixture-result.json\"\n";
     let body = match native_reports {
         NativeReportFixture::Complete => body,
-        NativeReportFixture::MissingJunit => body.replace(&junit_output, ""),
-        NativeReportFixture::EmptyJunit => body.replace(
+        NativeReportFixture::MissingJunit => replace_once(&body, &junit_output, ""),
+        NativeReportFixture::EmptyJunit => replace_once(
+            &body,
             &junit_output,
             "cat <<'XML' > \"$report_dir/result.xml\"\nXML\n",
         ),
-        NativeReportFixture::MissingAllure => body
-            .replace(
+        NativeReportFixture::MissingAllure => {
+            let body = replace_once(
+                &body,
                 "mkdir -p \"$report_dir\" \"$allure_dir\"",
                 "mkdir -p \"$report_dir\"",
-            )
-            .replace(allure_output, "rmdir \"$allure_dir\"\n"),
-        NativeReportFixture::EmptyAllure => body.replace(allure_output, ""),
+            );
+            replace_once(&body, allure_output, "rmdir \"$allure_dir\"\n")
+        }
+        NativeReportFixture::EmptyAllure => replace_once(&body, allure_output, ""),
     };
     write_script(path, &body);
 }
@@ -263,7 +277,7 @@ fn setup_project(
     timeout_seconds: u64,
     sleep_seconds: Option<u64>,
 ) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, PathBuf) {
-    setup_project_with_additional_launch_keys(
+    setup_project_with_native_reports(
         work_dir_name,
         ProjectTestSetup {
             report_xml,
@@ -306,14 +320,6 @@ fn configure_server_infobase(config_path: &Path) {
         config.replace("File=/tmp/ib", "Srvr=cluster:1541;Ref=prepared"),
     )
     .expect("updated config");
-}
-
-fn setup_project_with_additional_launch_keys(
-    work_dir_name: &str,
-    setup: ProjectTestSetup<'_>,
-    additional_launch_keys: &[&str],
-) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, PathBuf) {
-    setup_project_with_native_reports(work_dir_name, setup, additional_launch_keys)
 }
 
 fn setup_project_with_native_reports(
@@ -465,22 +471,16 @@ fn setup_va_project_with_native_reports(
 fn scrub_snapshot(value: &mut Value) {
     value["duration_ms"] = Value::String("<duration>".to_owned());
     value["data"]["retained_paths"]["run_dir"] = Value::String("<run_dir>".to_owned());
-    if value["data"]["retained_paths"]["config_json"].is_string() {
-        value["data"]["retained_paths"]["config_json"] = Value::String("<config_json>".to_owned());
-    }
-    if value["data"]["retained_paths"]["junit_xml"].is_string() {
-        value["data"]["retained_paths"]["junit_xml"] = Value::String("<junit_xml>".to_owned());
-    }
-    if value["data"]["retained_paths"]["allure_results"].is_string() {
-        value["data"]["retained_paths"]["allure_results"] =
-            Value::String("<allure_results>".to_owned());
-    }
-    if value["data"]["retained_paths"]["yaxunit_log"].is_string() {
-        value["data"]["retained_paths"]["yaxunit_log"] = Value::String("<yaxunit_log>".to_owned());
-    }
-    if value["data"]["retained_paths"]["platform_log"].is_string() {
-        value["data"]["retained_paths"]["platform_log"] =
-            Value::String("<platform_log>".to_owned());
+    for key in [
+        "config_json",
+        "junit_xml",
+        "allure_results",
+        "yaxunit_log",
+        "platform_log",
+    ] {
+        if value["data"]["retained_paths"][key].is_string() {
+            value["data"]["retained_paths"][key] = Value::String(format!("<{key}>"));
+        }
     }
     if value["data"]["execution"]["artifacts"]["root_dir"].is_string() {
         value["data"]["execution"]["artifacts"]["root_dir"] = Value::String("<run_dir>".to_owned());
@@ -752,7 +752,7 @@ fn test_no_build_rejects_missing_file_infobase_before_platform_launch() {
 #[test]
 fn test_run_appends_enterprise_additional_launch_keys() {
     let (_dir, config_path, _build_calls, test_calls, _captured_config) =
-        setup_project_with_additional_launch_keys(
+        setup_project_with_native_reports(
             "work",
             ProjectTestSetup {
                 report_xml: JUNIT_SMOKE_REPORT_FIXTURE,
