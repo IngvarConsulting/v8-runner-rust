@@ -46,11 +46,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
+        include:
+          - os: ubuntu-latest
+            target_os: Linux
+          - os: windows-latest
+            target_os: Windows
     env:
-      V8TR_CI_TARGET_OS: ${{ runner.os }}
+      V8TR_CI_TARGET_OS: ${{ matrix.target_os }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
