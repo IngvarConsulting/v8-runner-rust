@@ -141,7 +141,7 @@ live-mcp-http.py
 | `V8TR_INFOBASE_PATH` | `ci-designer-config.sh`, `ci-ibsrv.sh` | Явный file infobase path, синхронизированный между config и `ibsrv --db-path` |
 | `V8TR_IBSRV_PATH` | `ci-platform-install.sh`, `ci-ibsrv.sh` | Путь до standalone `ibsrv`, извлечённый из platform bundle |
 | `V8TR_DESIGNER_TEST_MODE` | `live-cli-fixture.sh` | Opt-in запуск реального 1С test-stage: `none`, `va`, `yaxunit-all`, `module` |
-| `V8TR_DESIGNER_ALLOW_MISSING_CONFIG` | `live-cli-fixture.sh`, `.github/workflows/ci.yml` | Trusted/fork gating hook для soft-skip mandatory live contour на untrusted контексте |
+| `V8TR_DESIGNER_ALLOW_MISSING_CONFIG` | `live-cli-fixture.sh`, `.github/workflows/ci.yml` | Gating hook для soft-skip mandatory live contour на fork/untrusted контексте и на trusted CI без OS-specific platform bundle secrets |
 | `V8TR_REAL_CONFIG` | `live-mcp-http.py` | Реальный config для MCP HTTP smoke |
 
 ## Типовые сценарии запуска
@@ -159,6 +159,8 @@ V8_RUNNER_CI_SCOPE=happy-path bash scripts/test/ci-rust.sh
 ```
 
 ### Trusted CI wiring helpers
+
+`.github/workflows/ci.yml` запускает install/config/ibsrv/upload helpers only when `live_available=true`, то есть когда для текущей matrix OS настроены `V8TR_PLATFORM_BUNDLE_URL_*` и `V8TR_PLATFORM_BUNDLE_SHA256_*`. Без этой пары secrets happy-path остаётся blocking для Rust/non-live checks и soft-skips real 1C smoke.
 
 ```bash
 bash scripts/test/ci-platform-install.sh

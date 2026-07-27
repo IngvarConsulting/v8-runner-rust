@@ -992,15 +992,22 @@ mod tests {
     };
     use crate::use_cases::result::UseCaseErrorKind;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
 
     fn make_executable(path: &Path) {
-        let mut perms = fs::metadata(path).expect("metadata").permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(path, perms).expect("chmod");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut perms = fs::metadata(path).expect("metadata").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(path, perms).expect("chmod");
+        }
+
+        #[cfg(not(unix))]
+        let _ = path;
     }
 
     fn write_script(path: &Path, body: &str) {
@@ -1009,6 +1016,14 @@ mod tests {
         }
         fs::write(path, format!("#!/bin/sh\n{body}\n")).expect("write");
         make_executable(path);
+    }
+
+    fn utility_path(dir: &Path, name: &str) -> PathBuf {
+        if cfg!(windows) {
+            dir.join(format!("{name}.exe"))
+        } else {
+            dir.join(name)
+        }
     }
 
     fn write_designer_script(
@@ -1240,12 +1255,13 @@ mod tests {
         assert!(result.issues.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn clean_exit_returns_clean_status() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
-        let binary = dir.path().join("platform").join("bin").join("1cv8");
+        let binary = utility_path(&dir.path().join("platform").join("bin"), "1cv8");
         fs::create_dir_all(&base).expect("base");
         fs::create_dir_all(&work).expect("work");
         write_designer_script(&binary, None, None, 0);
@@ -1260,12 +1276,13 @@ mod tests {
         assert_eq!(result.exit_code, 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn validation_exit_preserves_parsed_issues() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
-        let binary = dir.path().join("platform").join("bin").join("1cv8");
+        let binary = utility_path(&dir.path().join("platform").join("bin"), "1cv8");
         fs::create_dir_all(&base).expect("base");
         fs::create_dir_all(&work).expect("work");
         write_designer_script(
@@ -1295,12 +1312,13 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn tool_failure_preserves_stderr_and_fallback_issue() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
-        let binary = dir.path().join("platform").join("bin").join("1cv8");
+        let binary = utility_path(&dir.path().join("platform").join("bin"), "1cv8");
         fs::create_dir_all(&base).expect("base");
         fs::create_dir_all(&work).expect("work");
         write_designer_script(&binary, None, Some("license error"), 1);
@@ -1326,12 +1344,13 @@ mod tests {
             .contains("license error"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn unreadable_out_log_keeps_structured_failure() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
-        let binary = dir.path().join("platform").join("bin").join("1cv8");
+        let binary = utility_path(&dir.path().join("platform").join("bin"), "1cv8");
         fs::create_dir_all(&base).expect("base");
         fs::create_dir_all(&work).expect("work");
         write_script(&binary, "exit 101");
@@ -1352,6 +1371,7 @@ mod tests {
         assert_eq!(result.issues.len(), 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn syntax_edt_runs_all_source_sets_when_projects_not_specified() {
         let dir = tempdir().expect("tempdir");
@@ -1359,7 +1379,7 @@ mod tests {
         let work = dir.path().join("work");
         let main_dir = base.join("main-edt");
         let ext_dir = base.join("ext-edt");
-        let binary = dir.path().join("edt").join("1cedtcli");
+        let binary = utility_path(&dir.path().join("edt"), "1cedtcli");
         fs::create_dir_all(&work).expect("work");
         fs::create_dir_all(&main_dir).expect("main");
         fs::create_dir_all(&ext_dir).expect("ext");
@@ -1392,7 +1412,7 @@ mod tests {
         let work = dir.path().join("work");
         let main_dir = base.join("main-edt");
         let ext_dir = base.join("ext-edt");
-        let binary = dir.path().join("edt").join("1cedtcli");
+        let binary = utility_path(&dir.path().join("edt"), "1cedtcli");
         fs::create_dir_all(&work).expect("work");
         fs::create_dir_all(&main_dir).expect("main");
         fs::create_dir_all(&ext_dir).expect("ext");
@@ -1413,6 +1433,7 @@ mod tests {
             .contains("unknown EDT project(s): unknown"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn syntax_edt_prefers_tool_failed_exit_code_in_aggregate() {
         let dir = tempdir().expect("tempdir");
@@ -1420,7 +1441,7 @@ mod tests {
         let work = dir.path().join("work");
         let main_dir = base.join("main-edt");
         let ext_dir = base.join("ext-edt");
-        let binary = dir.path().join("edt").join("1cedtcli");
+        let binary = utility_path(&dir.path().join("edt"), "1cedtcli");
         fs::create_dir_all(&work).expect("work");
         fs::create_dir_all(&main_dir).expect("main");
         fs::create_dir_all(&ext_dir).expect("ext");
@@ -1442,6 +1463,7 @@ mod tests {
         assert_eq!(result.exit_code, 17);
     }
 
+    #[cfg(unix)]
     #[test]
     fn syntax_edt_uses_mcp_timeout_budget_for_subprocess() {
         let dir = tempdir().expect("tempdir");
@@ -1449,7 +1471,7 @@ mod tests {
         let work = dir.path().join("work");
         let main_dir = base.join("main-edt");
         let ext_dir = base.join("ext-edt");
-        let binary = dir.path().join("edt").join("1cedtcli");
+        let binary = utility_path(&dir.path().join("edt"), "1cedtcli");
         fs::create_dir_all(&work).expect("work");
         fs::create_dir_all(&main_dir).expect("main");
         fs::create_dir_all(&ext_dir).expect("ext");
@@ -1476,6 +1498,7 @@ mod tests {
         assert_eq!(payload.exit_code, -1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn syntax_edt_recomputes_remaining_budget_for_each_project_in_one_shot_mode() {
         let dir = tempdir().expect("tempdir");
@@ -1483,7 +1506,7 @@ mod tests {
         let work = dir.path().join("work");
         let main_dir = base.join("main-edt");
         let ext_dir = base.join("ext-edt");
-        let binary = dir.path().join("edt").join("1cedtcli");
+        let binary = utility_path(&dir.path().join("edt"), "1cedtcli");
         fs::create_dir_all(&work).expect("work");
         fs::create_dir_all(&main_dir).expect("main");
         fs::create_dir_all(&ext_dir).expect("ext");
@@ -1507,6 +1530,7 @@ mod tests {
         assert_eq!(payload.exit_code, -1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn syntax_edt_uses_one_shot_execution_when_interactive_mode_is_disabled() {
         let dir = tempdir().expect("tempdir");
@@ -1514,7 +1538,7 @@ mod tests {
         let work = dir.path().join("work");
         let main_dir = base.join("main-edt");
         let ext_dir = base.join("ext-edt");
-        let binary = dir.path().join("edt").join("1cedtcli");
+        let binary = utility_path(&dir.path().join("edt"), "1cedtcli");
         let calls_log = dir.path().join("edt-calls.log");
         fs::create_dir_all(&work).expect("work");
         fs::create_dir_all(&main_dir).expect("main");
@@ -1544,7 +1568,7 @@ mod tests {
         let work = dir.path().join("work");
         let main_dir = base.join("main-edt");
         let ext_dir = base.join("ext-edt");
-        let binary = dir.path().join("edt").join("1cedtcli");
+        let binary = utility_path(&dir.path().join("edt"), "1cedtcli");
         let calls_log = dir.path().join("edt-calls.log");
         fs::create_dir_all(&work).expect("work");
         fs::create_dir_all(&main_dir).expect("main");
@@ -1572,7 +1596,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work_file = dir.path().join("work-file");
-        let binary = dir.path().join("platform").join("bin").join("1cv8");
+        let binary = utility_path(&dir.path().join("platform").join("bin"), "1cv8");
         fs::create_dir_all(&base).expect("base");
         fs::write(&work_file, "not a directory").expect("work file");
         write_designer_script(&binary, None, None, 0);
