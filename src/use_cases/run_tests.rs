@@ -33,6 +33,7 @@ use crate::use_cases::vanessa::{self, VanessaTestArtifacts};
 use tracing::debug;
 
 const STACK_TRACE_LIMIT: usize = 500;
+const OPTIONAL_DIAGNOSTIC_FILE_LIMIT: usize = 100;
 
 mod coordinator;
 mod helpers;
@@ -793,17 +794,20 @@ fn collect_run_artifacts(artifacts: &RunArtifacts) -> ArtifactSet {
         ARTIFACT_ROLE_ALLURE_RESULTS,
         &artifacts.allure_results_dir,
     );
+    let mut remaining_optional_diagnostics = OPTIONAL_DIAGNOSTIC_FILE_LIMIT;
     push_optional_diagnostics(
         &mut collected,
         ArtifactKind::ErrorDetails,
         ARTIFACT_ROLE_ERROR_DETAILS,
         &artifacts.error_details_dir,
+        &mut remaining_optional_diagnostics,
     );
     push_optional_diagnostics(
         &mut collected,
         ArtifactKind::Screenshot,
         ARTIFACT_ROLE_SCREENSHOT,
         &artifacts.screenshots_dir,
+        &mut remaining_optional_diagnostics,
     );
     push_existing_file(
         &mut collected,
@@ -850,12 +854,23 @@ fn collect_existing_junit_reports(root: &Path) -> Vec<PathBuf> {
     discover_junit_reports(root).unwrap_or_default()
 }
 
-fn push_optional_diagnostics(set: &mut ArtifactSet, kind: ArtifactKind, role: &str, root: &Path) {
+fn push_optional_diagnostics(
+    set: &mut ArtifactSet,
+    kind: ArtifactKind,
+    role: &str,
+    root: &Path,
+    remaining: &mut usize,
+) {
     let Ok(paths) = collect_regular_files(root) else {
         return;
     };
-    for path in paths {
-        set.push(ArtifactRef::new(kind.clone(), path).with_role(role));
+    let added = paths.len().min(*remaining);
+    for path in paths.iter().take(added) {
+        set.push(ArtifactRef::new(kind.clone(), path.clone()).with_role(role));
+    }
+    *remaining -= added;
+    if paths.len() > added {
+        set.push(ArtifactRef::new(kind, root.to_path_buf()).with_role(role));
     }
 }
 
@@ -1246,6 +1261,63 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn collect_run_artifacts_bounds_optional_diagnostics_across_categories() {
+        // Break caught: independently budgeting categories or serializing every discovered
+        // diagnostic file exceeds the shared inventory limit and loses the category fallback.
+        const OPTIONAL_DIAGNOSTIC_FILE_LIMIT: usize = 100;
+
+        let dir = tempdir().expect("tempdir");
+        let artifacts = create_artifacts(dir.path());
+        std::fs::create_dir_all(&artifacts.error_details_dir).expect("error details");
+        std::fs::create_dir_all(&artifacts.screenshots_dir).expect("screenshots");
+        for index in 0..=OPTIONAL_DIAGNOSTIC_FILE_LIMIT {
+            std::fs::write(
+                artifacts.error_details_dir.join(format!("{index:03}.txt")),
+                "detail",
+            )
+            .expect("error detail");
+        }
+        let screenshot = artifacts.screenshots_dir.join("failure.png");
+        std::fs::write(&screenshot, "png").expect("screenshot");
+
+        let collected = collect_run_artifacts(&artifacts);
+        let diagnostic_files = collected
+            .items
+            .iter()
+            .filter(|artifact| {
+                matches!(
+                    artifact.kind,
+                    ArtifactKind::ErrorDetails | ArtifactKind::Screenshot
+                ) && artifact.path.is_file()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(diagnostic_files.len(), OPTIONAL_DIAGNOSTIC_FILE_LIMIT);
+        assert!(collected.items.iter().any(|artifact| {
+            artifact.kind == ArtifactKind::ErrorDetails
+                && artifact.path == artifacts.error_details_dir
+                && artifact.role.as_deref() == Some(ARTIFACT_ROLE_ERROR_DETAILS)
+        }));
+        assert!(collected.items.iter().any(|artifact| {
+            artifact.kind == ArtifactKind::Screenshot
+                && artifact.path == artifacts.screenshots_dir
+                && artifact.role.as_deref() == Some(ARTIFACT_ROLE_SCREENSHOT)
+        }));
+        assert!(collected
+            .items
+            .iter()
+            .any(|artifact| artifact.path == artifacts.error_details_dir.join("000.txt")));
+        assert!(!collected
+            .items
+            .iter()
+            .any(|artifact| artifact.path == artifacts.error_details_dir.join("100.txt")));
+        assert!(!collected
+            .items
+            .iter()
+            .any(|artifact| artifact.path == screenshot));
     }
 
     #[cfg(unix)]

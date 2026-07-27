@@ -224,8 +224,10 @@ v8-runner test [--no-build] va --feature login --filter-tag @smoke
   точные kinds — в `data.execution.artifacts.items`; `data.retained_paths` остаётся compatibility
   projection основных путей.
 - Runner может дополнительно сохранить диагностические файлы в `error-details/` и снимки экрана
-  в `screenshots/` внутри run directory. Эти каталоги не создаются заранее; существующие обычные
-  файлы публикуются с kinds `error_details` и `screenshot`.
+  в `screenshots/` внутри run directory. Эти каталоги не создаются заранее; в inventory публикуются
+  не более 100 обычных файлов суммарно для обеих категорий, сначала `error-details`, затем
+  `screenshots`. При усечении категории публикуется и путь к её каталогу с тем же kind и role,
+  чтобы оставшиеся файлы были доступны без раздувания inventory.
 - Отсутствующий, пустой или некорректный JUnit либо отсутствующий/пустой Allure — это
   инфраструктурная ошибка `invalid_output`, а не успешный или обычный test failure.
 

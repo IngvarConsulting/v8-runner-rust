@@ -96,6 +96,7 @@ v8-runner init
 - Do not invent raw `1cv8`, `ibcmd`, or `1cedtcli` flags; prefer the `v8-runner` command surface.
 - Check `git status` before `dump` when the result may overwrite or mix with existing source changes.
 - Preserve successful and failed test artifacts under `workPath/temp/<runner-id>/runs/<run-id>/` for diagnosis; remove them only explicitly.
+- The artifact inventory includes at most 100 regular diagnostic files shared by `error-details/` then `screenshots/`; a truncated category is represented by its directory path with the same diagnostic kind and role.
 - Report missing local 1C utilities as environment/setup issues, not as project source failures.
 - Keep final answers concrete: command run, result, relevant artifact path, and any follow-up command.
 
