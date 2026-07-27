@@ -937,7 +937,28 @@ fn test_text_output_surfaces_failure_code_and_retained_artifacts() {
     assert!(stdout.contains("✗ enterprise run: runtime error: enterprise test run timed out"));
     assert!(stdout.contains("[warning] enterprise test run timed out"));
     assert!(stdout.contains("[artifact] run_dir -> "));
-    assert!(!stdout.contains("[diagnostic] platform_log -> "));
+    let run_dir = stdout
+        .lines()
+        .find_map(|line| {
+            line.split_once("[artifact] run_dir -> ")
+                .map(|(_, path)| path.trim())
+        })
+        .expect("retained run directory");
+    let expected_platform_log = Path::new(run_dir).join("enterprise.out.log");
+    let rendered_platform_log = stdout.lines().find_map(|line| {
+        line.split_once("[diagnostic] platform_log -> ")
+            .map(|(_, path)| Path::new(path.trim()))
+    });
+    match rendered_platform_log {
+        Some(platform_log) => {
+            assert_eq!(platform_log, expected_platform_log);
+            assert!(expected_platform_log.is_file());
+        }
+        None => assert!(
+            !expected_platform_log.is_file(),
+            "an existing platform log must be rendered as a diagnostic"
+        ),
+    }
 }
 
 #[test]
@@ -1971,6 +1992,21 @@ fn test_timeout_retains_artifacts() {
 
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["data"]["execution"]["status"], "timed_out");
-    assert!(payload["data"]["retained_paths"]["run_dir"].is_string());
-    assert!(payload["data"]["retained_paths"]["platform_log"].is_null());
+    let run_dir = payload["data"]["retained_paths"]["run_dir"]
+        .as_str()
+        .expect("retained run directory");
+    let expected_platform_log = Path::new(run_dir).join("enterprise.out.log");
+    match &payload["data"]["retained_paths"]["platform_log"] {
+        Value::String(platform_log) => {
+            assert_eq!(Path::new(platform_log), expected_platform_log);
+            assert!(expected_platform_log.is_file());
+        }
+        Value::Null => {
+            assert!(
+                !expected_platform_log.is_file(),
+                "an existing platform log must be published in retained_paths"
+            );
+        }
+        value => panic!("platform_log must be a string or null, got {value}"),
+    }
 }
