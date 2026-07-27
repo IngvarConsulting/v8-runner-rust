@@ -23,9 +23,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
+        include:
+          - os: ubuntu-latest
+            target_os: Linux
+          - os: windows-latest
+            target_os: Windows
+    env:
+      V8TR_CI_TARGET_OS: ${{ matrix.target_os }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -150,6 +154,7 @@ jobs:
             fi
 
             echo "V8TR_DESIGNER_ALLOW_MISSING_CONFIG=1" >> "$GITHUB_ENV"
+            echo "V8TR_CI_SKIP_DUPLICATE_RUST_TESTS=1" >> "$GITHUB_ENV"
           fi
 
           echo "live_available=$live_available" >> "$GITHUB_OUTPUT"

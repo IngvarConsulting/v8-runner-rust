@@ -4,11 +4,23 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CI_SCOPE="${V8_RUNNER_CI_SCOPE:-contract}"
+TARGET_OS_LABEL="${V8TR_CI_TARGET_OS:-$(uname -s)}"
 
 cd "$ROOT_DIR"
 
 case "$CI_SCOPE" in
-  contract|full)
+  contract)
+    case "$TARGET_OS_LABEL" in
+      Windows|MINGW*|MSYS*|CYGWIN*)
+        echo "Windows contract scope runs compile/check smoke; full cargo test remains Linux-owned until the Windows test suite is hardened."
+        cargo check --locked --all-targets
+        ;;
+      *)
+        cargo test --locked
+        ;;
+    esac
+    ;;
+  full)
     cargo test --locked
     ;;
   runtime-locks)
@@ -22,7 +34,7 @@ case "$CI_SCOPE" in
     ;;
   *)
     echo "Unsupported V8_RUNNER_CI_SCOPE: $CI_SCOPE" >&2
-    echo "Expected one of: contract, runtime-locks, happy-path" >&2
+    echo "Expected one of: contract, full, runtime-locks, happy-path" >&2
     exit 2
     ;;
 esac

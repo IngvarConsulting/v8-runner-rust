@@ -43,8 +43,8 @@ live-mcp-http.py
 
 | Файл | Роль | Назначение | Зона ответственности |
 | --- | --- | --- | --- |
-| `ci-rust.sh` | CI entrypoint | Диспетчер CI-контуров по `V8_RUNNER_CI_SCOPE` | Выбрать нужный scope и передать управление в `cargo test` или `ci-happy-path.sh` |
-| `ci-happy-path.sh` | CI helper | Canonical happy-path для trusted CI | Собрать бинарь, выполнить `cargo check/test`, затем запустить обязательный packaging/live contour |
+| `ci-rust.sh` | CI entrypoint | Диспетчер CI-контуров по `V8_RUNNER_CI_SCOPE` | Выбрать нужный scope и передать управление в `cargo test`, Windows contract `cargo check`, или `ci-happy-path.sh` |
+| `ci-happy-path.sh` | CI helper | Canonical happy-path для trusted CI | Собрать бинарь, выполнить `cargo check`, опционально `cargo test`, затем запустить обязательный packaging/live contour |
 | `ci-platform-install.sh` | CI helper | Установить 1С platform bundle на GitHub-hosted runner | Скачать secret-backed bundle, проверить checksum, распаковать и отдать `tools.platform.path`/`ibsrv` paths |
 | `ci-designer-config.sh` | CI helper | Материализовать dedicated live config для mandatory CI smoke | Подготовить `format=DESIGNER`, `builder=DESIGNER`, file `infobase.connection`, required source-set'ы и `tools.platform.path` |
 | `ci-ibsrv.sh` | CI helper | Поднять/остановить standalone `ibsrv` sidecar для trusted happy-path | Запустить `ibsrv` с `--data` и `--db-path`, синхронизированным с `V8TR_DESIGNER_REAL_CONFIG`, и корректно завершить процесс |
@@ -142,6 +142,7 @@ live-mcp-http.py
 | `V8TR_IBSRV_PATH` | `ci-platform-install.sh`, `ci-ibsrv.sh` | Путь до standalone `ibsrv`, извлечённый из platform bundle |
 | `V8TR_DESIGNER_TEST_MODE` | `live-cli-fixture.sh` | Opt-in запуск реального 1С test-stage: `none`, `va`, `yaxunit-all`, `module` |
 | `V8TR_DESIGNER_ALLOW_MISSING_CONFIG` | `live-cli-fixture.sh`, `.github/workflows/ci.yml` | Gating hook для soft-skip mandatory live contour на fork/untrusted контексте и на trusted CI без OS-specific platform bundle secrets |
+| `V8TR_CI_SKIP_DUPLICATE_RUST_TESTS` | `ci-happy-path.sh`, `.github/workflows/ci.yml` | Явный CI hook для пропуска дублирующего `cargo test` в happy-path, когда contract job уже владеет Rust test coverage |
 | `V8TR_REAL_CONFIG` | `live-mcp-http.py` | Реальный config для MCP HTTP smoke |
 
 ## Типовые сценарии запуска
@@ -160,7 +161,9 @@ V8_RUNNER_CI_SCOPE=happy-path bash scripts/test/ci-rust.sh
 
 ### Trusted CI wiring helpers
 
-`.github/workflows/ci.yml` запускает install/config/ibsrv/upload helpers only when `live_available=true`, то есть когда для текущей matrix OS настроены `V8TR_PLATFORM_BUNDLE_URL_*` и `V8TR_PLATFORM_BUNDLE_SHA256_*`. Без этой пары secrets happy-path остаётся blocking для Rust/non-live checks и soft-skips real 1C smoke.
+`.github/workflows/ci.yml` запускает install/config/ibsrv/upload helpers only when `live_available=true`, то есть когда для текущей matrix OS настроены `V8TR_PLATFORM_BUNDLE_URL_*` и `V8TR_PLATFORM_BUNDLE_SHA256_*`. Без этой пары secrets happy-path остаётся blocking для Rust build/check, получает `V8TR_CI_SKIP_DUPLICATE_RUST_TESTS=1`, полагается на contract job для Rust test coverage и soft-skips real 1C smoke.
+
+Windows contract scope currently runs `cargo check --locked --all-targets`; full `cargo test --locked` remains Linux-owned until the Windows-specific test suite is hardened. Exit criterion: switch Windows contract back to `cargo test --locked` after fixing the tracked path separator, fake-binary, ACL, and process-lifecycle failures in `spec/acceptance/real-environment-validation.md`.
 
 ```bash
 bash scripts/test/ci-platform-install.sh

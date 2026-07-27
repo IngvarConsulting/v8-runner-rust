@@ -45,9 +45,10 @@ bash scripts/test/ci-rust.sh
 
 Поведение:
 
-- `V8_RUNNER_CI_SCOPE=contract` или `full` запускает `cargo test --locked`
+- `V8_RUNNER_CI_SCOPE=contract` запускает `cargo test --locked` на Linux и `cargo check --locked --all-targets` на Windows, пока Windows test suite не hardened
+- `V8_RUNNER_CI_SCOPE=full` всегда запускает `cargo test --locked`
 - `V8_RUNNER_CI_SCOPE=runtime-locks` запускает только lock-focused regression subset
-- `V8_RUNNER_CI_SCOPE=happy-path` запускает Rust/non-live цепочку `build -> cargo check -> cargo test`, затем `live-cli-fixture`; real 1C `package -> deploy-ready artifacts` выполняются только когда workflow подготовил `V8TR_DESIGNER_REAL_CONFIG`
+- `V8_RUNNER_CI_SCOPE=happy-path` запускает Rust/non-live цепочку `build -> cargo check`, затем `live-cli-fixture`; `cargo test` пропускается только при явном `V8TR_CI_SKIP_DUPLICATE_RUST_TESTS=1`, когда этот же workflow полагается на contract job для full Linux test coverage
 
 ### 2. Mandatory Linux/Windows happy-path
 
@@ -63,7 +64,7 @@ V8_RUNNER_CI_SCOPE=happy-path bash scripts/test/ci-rust.sh
 
 1. `cargo build --locked --bin v8-runner`
 2. `cargo check --locked --all-targets`
-3. `cargo test --locked`
+3. `cargo test --locked`, unless `V8TR_CI_SKIP_DUPLICATE_RUST_TESTS=1`
 4. `bash scripts/test/live-cli-fixture.sh`
 
 `scripts/test/live-cli-fixture.sh` в mandatory профиле обязан выполнить одинаковые стадии для обеих ОС, когда `V8TR_DESIGNER_REAL_CONFIG` материализован:
@@ -110,7 +111,7 @@ Mandatory happy-path должен быть blocking live-smoke только дл
 - workflow может разрешить soft-skip только через `V8TR_DESIGNER_ALLOW_MISSING_CONFIG=1`
 - без этого hook `scripts/test/live-cli-fixture.sh` падает, если `V8TR_DESIGNER_REAL_CONFIG` не задан
 - trusted path with configured OS-specific bundle secrets устанавливает 1С, материализует dedicated `format: DESIGNER` + `builder: DESIGNER` config, запускает `ibsrv` sidecar на том же file-infobase path и только потом вызывает canonical entrypoint `V8_RUNNER_CI_SCOPE=happy-path bash scripts/test/ci-rust.sh`
-- trusted path without those secrets emits a GitHub Actions notice with `live_available=false`, sets `V8TR_DESIGNER_ALLOW_MISSING_CONFIG=1`, and keeps Rust/non-live happy-path checks blocking while the live smoke is skipped
+- trusted path without those secrets emits a GitHub Actions notice with `live_available=false`, sets `V8TR_DESIGNER_ALLOW_MISSING_CONFIG=1` and `V8TR_CI_SKIP_DUPLICATE_RUST_TESTS=1`, and keeps Rust build/check plus Linux contract tests blocking while the live smoke is skipped
 - fork PR и Dependabot не получают install/bootstrap/upload path: workflow передает только `V8TR_DESIGNER_ALLOW_MISSING_CONFIG=1`, а upload deploy-ready артефактов остаётся trusted-only
 
 ## Контракт `live-cli-fixture`
@@ -207,8 +208,8 @@ Windows runner contract for this helper layer is explicit:
 
 | Контур | Linux | Windows | Blocking | Build | Syntax/check | Test | Package | Deploy-ready artifacts |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `ci-rust contract` | yes | yes | yes | Rust | Rust | Rust | no | no |
-| `ci-rust happy-path` | yes | yes | yes for Rust/non-live checks; live smoke is blocking when OS bundle secrets exist | Rust + real 1C when available | real when available | Rust by default; real 1C opt-in | real when available | real when available |
+| `ci-rust contract` | yes | yes | yes | Rust | Rust | Linux full tests; Windows compile/check smoke | no | no |
+| `ci-rust happy-path` | yes | yes | yes for Rust/non-live checks; live smoke is blocking when OS bundle secrets exist | Rust + real 1C when available | real when available | Rust test repeats unless `V8TR_CI_SKIP_DUPLICATE_RUST_TESTS=1`; real 1C opt-in | real when available | real when available |
 | `live-mcp-http` | optional | optional | no | real via MCP | real via MCP | real via MCP | n/a | n/a |
 | `live-cli-ibcmd` | optional | optional | no | real (`IBCMD`) | n/a | n/a | diagnostic dump/export only | n/a |
 | `live-cli-designer` | optional | optional | no | real (`DESIGNER`) | real | real opt-in | real | real |
@@ -216,6 +217,7 @@ Windows runner contract for this helper layer is explicit:
 ## Ограничения и TODO hooks
 
 - Workflow `.github/workflows/ci.yml` уже зафиксировал contract/gating/upload wiring, но сам не умеет скачивать vendor installer публично: trusted live path ожидает готовый platform bundle по секретному URL и обязательному SHA256. Если OS-specific URL/SHA256 secrets отсутствуют, workflow явно сообщает degraded coverage через notice и soft-skips live smoke; восстановление blocking live coverage требует добавить соответствующую пару secrets.
+- Windows CI currently provides compile/check smoke, not full `cargo test`, until Windows-specific path, fake-binary, ACL, and process-lifecycle tests are hardened. Owner: CI contract docs in this file. Exit criterion: switch Windows contract back to `cargo test --locked` after those failure groups pass on `windows-latest`.
 - `ibsrv` в workflow запускается как sidecar на том же `--db-path`, который зашит в dedicated file-based Designer config; сам CLI harness по текущему контракту остаётся file-connection oriented и не переключается на server connection.
 - `live-cli-fixture` по умолчанию не запускает 1С test-stage; `va`, `yaxunit-all` и `module` остаются opt-in режимами для стендов, где установлен и проверен соответствующий headless runner.
 - `live-mcp-http` и `live-cli-ibcmd` остаются отдельными non-blocking контурами.
