@@ -41,7 +41,8 @@ use self::helpers::{
     build_enterprise_dsl, build_platform_launch, build_summary, capped_timeout_ms,
     collect_diagnostics, degraded_step, enterprise_error_kind, failed_step,
     interrupted_test_failure, make_test_result, prepare_runner_artifacts, prepared_run_summary,
-    succeeded_step, validate_runner_profile_id, validate_target, with_retained_artifacts,
+    skipped_step, succeeded_step, validate_runner_profile_id, validate_target,
+    with_retained_artifacts,
 };
 
 pub fn execute(
@@ -1724,6 +1725,7 @@ mod tests {
 
         let args = crate::use_cases::request::TestRequest {
             full: false,
+            build_policy: crate::use_cases::request::TestBuildPolicy::BuildFirst,
             scope: crate::use_cases::request::TestScopeRequest::All,
             execution: crate::domain::runner::ScenarioExecutionRequest {
                 profile: RunnerProfile {
@@ -1756,6 +1758,7 @@ mod tests {
         let context = ExecutionContext::cli(CommandName::Test).with_cancellation(cancellation);
         let args = TestRequest {
             full: false,
+            build_policy: crate::use_cases::request::TestBuildPolicy::BuildFirst,
             scope: TestScopeRequest::All,
             execution: ScenarioExecutionRequest {
                 profile: RunnerProfile {

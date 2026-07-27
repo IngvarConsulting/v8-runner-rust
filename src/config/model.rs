@@ -553,6 +553,15 @@ pub struct PlatformToolConfig {
     /// directory, or to a platform root that contains versioned subdirectories.
     pub path: Option<PathBuf>,
 
+    /// Enforce `version` for a configured `path`.
+    ///
+    /// `path` is always an explicit-only search boundary. When `strict` is `false`,
+    /// `version` is ignored for that path; when `strict` is `true`, the executable
+    /// found inside the path must match `version`. Without `path`, `version` is
+    /// applied to normal default-root and PATH discovery.
+    #[serde(default)]
+    pub strict: bool,
+
     /// Platform version requirement in `major.minor`, `major.minor.patch`, or
     /// `major.minor.patch.build` format.
     ///
@@ -650,4 +659,19 @@ const fn default_edt_cli_startup_timeout_ms() -> u64 {
 
 const fn default_edt_cli_command_timeout_ms() -> u64 {
     300_000
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PlatformToolConfig;
+
+    #[test]
+    fn platform_strict_defaults_to_false_and_deserializes_true() {
+        let default = PlatformToolConfig::default();
+        assert!(!default.strict);
+
+        let configured: PlatformToolConfig =
+            serde_yaml::from_str("strict: true\n").expect("deserialize strict platform config");
+        assert!(configured.strict);
+    }
 }

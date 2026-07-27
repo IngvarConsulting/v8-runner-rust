@@ -45,12 +45,20 @@ pub struct LoadRequest {
 }
 
 /// Transport-neutral request for the `test` use case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestBuildPolicy {
+    BuildFirst,
+    Skip,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestRequest {
     /// Shared runner execution block reused by future test/package scenarios.
     pub execution: ScenarioExecutionRequest,
     /// When `true`, the use case may request a full build before test execution.
     pub full: bool,
+    /// Whether the test coordinator prepares the infobase from configured sources.
+    pub build_policy: TestBuildPolicy,
     /// Selected test scope. Module targets require a non-empty module name.
     pub scope: TestScopeRequest,
 }

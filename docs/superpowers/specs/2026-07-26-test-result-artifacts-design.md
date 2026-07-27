@@ -22,7 +22,7 @@ result.
 
 ## Per-run Layout
 
-Every invocation allocates its existing unique directory:
+Every invocation that reaches runner preparation allocates its existing unique directory:
 
 ```text
 workPath/temp/<runner-id>/runs/<timestamp>-<pid>-<uuid>/
@@ -38,7 +38,9 @@ YaXUnit writes its JUnit report into `junit/report.xml`. Vanessa may create one
 or more XML files below `junit/`. Both runners write raw Allure result files
 below `allure-results/`.
 
-The run directory is retained for every terminal result. The internal
+The run directory is retained for every terminal result after allocation. A
+`--no-build` file-infobase preflight failure happens before allocation, as
+required by the no-build contract, and therefore has no run directory. The internal
 `run.inprogress` sentinel is removed when the in-process `RunArtifacts` guard
 is dropped and is not part of the public artifact inventory.
 

@@ -23,9 +23,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
+        include:
+          - os: ubuntu-latest
+            target_os: Linux
+          - os: windows-latest
+            target_os: Windows
+    env:
+      V8TR_CI_TARGET_OS: ${{ matrix.target_os }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -46,11 +50,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
+        include:
+          - os: ubuntu-latest
+            target_os: Linux
+          - os: windows-latest
+            target_os: Windows
     env:
-      V8TR_CI_TARGET_OS: ${{ runner.os }}
+      V8TR_CI_TARGET_OS: ${{ matrix.target_os }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -93,23 +99,30 @@ jobs:
           bash --version
           python3 --version
 
-      - name: Select platform bundle secret for trusted live path
-        if: steps.trust.outputs.trusted == 'true'
+      - name: Resolve platform bundle live mode
+        id: live
         env:
           MATRIX_OS: ${{ matrix.os }}
+          TRUSTED: ${{ steps.trust.outputs.trusted }}
           V8TR_PLATFORM_BUNDLE_URL_LINUX: ${{ secrets.V8TR_PLATFORM_BUNDLE_URL_LINUX }}
           V8TR_PLATFORM_BUNDLE_SHA256_LINUX: ${{ secrets.V8TR_PLATFORM_BUNDLE_SHA256_LINUX }}
           V8TR_PLATFORM_BUNDLE_URL_WINDOWS: ${{ secrets.V8TR_PLATFORM_BUNDLE_URL_WINDOWS }}
           V8TR_PLATFORM_BUNDLE_SHA256_WINDOWS: ${{ secrets.V8TR_PLATFORM_BUNDLE_SHA256_WINDOWS }}
         run: |
+          live_available="false"
+
           case "$MATRIX_OS" in
             ubuntu-latest)
               bundle_url="$V8TR_PLATFORM_BUNDLE_URL_LINUX"
               bundle_sha256="$V8TR_PLATFORM_BUNDLE_SHA256_LINUX"
+              url_secret_name="V8TR_PLATFORM_BUNDLE_URL_LINUX"
+              sha_secret_name="V8TR_PLATFORM_BUNDLE_SHA256_LINUX"
               ;;
             windows-latest)
               bundle_url="$V8TR_PLATFORM_BUNDLE_URL_WINDOWS"
               bundle_sha256="$V8TR_PLATFORM_BUNDLE_SHA256_WINDOWS"
+              url_secret_name="V8TR_PLATFORM_BUNDLE_URL_WINDOWS"
+              sha_secret_name="V8TR_PLATFORM_BUNDLE_SHA256_WINDOWS"
               ;;
             *)
               echo "Unsupported matrix.os: $MATRIX_OS" >&2
@@ -117,37 +130,47 @@ jobs:
               ;;
           esac
 
-          if [[ -z "$bundle_url" ]]; then
-            echo "Trusted happy-path requires a platform bundle URL secret for $MATRIX_OS" >&2
-            exit 2
+          if [[ "$TRUSTED" == "true" && -n "$bundle_url" && -n "$bundle_sha256" ]]; then
+            live_available="true"
+            {
+              echo "V8TR_PLATFORM_BUNDLE_URL<<__V8TR_ENV__"
+              echo "$bundle_url"
+              echo "__V8TR_ENV__"
+              echo "V8TR_PLATFORM_BUNDLE_SHA256<<__V8TR_ENV__"
+              echo "$bundle_sha256"
+              echo "__V8TR_ENV__"
+            } >> "$GITHUB_ENV"
+          else
+            missing=()
+            if [[ "$TRUSTED" == "true" ]]; then
+              [[ -n "$bundle_url" ]] || missing+=("$url_secret_name")
+              [[ -n "$bundle_sha256" ]] || missing+=("$sha_secret_name")
+            fi
+
+            if [[ "${#missing[@]}" -gt 0 ]]; then
+              printf -v missing_text '%s, ' "${missing[@]}"
+              missing_text="${missing_text%, }"
+              echo "::notice title=Live Designer smoke skipped::$MATRIX_OS platform bundle secrets are not configured: $missing_text. Rust contract and non-live happy-path checks remain blocking."
+            fi
+
+            echo "V8TR_DESIGNER_ALLOW_MISSING_CONFIG=1" >> "$GITHUB_ENV"
+            echo "V8TR_CI_SKIP_DUPLICATE_RUST_TESTS=1" >> "$GITHUB_ENV"
           fi
 
-          if [[ -z "$bundle_sha256" ]]; then
-            echo "Trusted happy-path requires a platform bundle SHA256 secret for $MATRIX_OS" >&2
-            exit 2
-          fi
-
-          {
-            echo "V8TR_PLATFORM_BUNDLE_URL<<__V8TR_ENV__"
-            echo "$bundle_url"
-            echo "__V8TR_ENV__"
-            echo "V8TR_PLATFORM_BUNDLE_SHA256<<__V8TR_ENV__"
-            echo "$bundle_sha256"
-            echo "__V8TR_ENV__"
-          } >> "$GITHUB_ENV"
+          echo "live_available=$live_available" >> "$GITHUB_OUTPUT"
 
       - name: Install 1C platform bundle
-        if: steps.trust.outputs.trusted == 'true'
+        if: steps.live.outputs.live_available == 'true'
         run: |
           bash scripts/test/ci-platform-install.sh
 
       - name: Materialize dedicated Designer config
-        if: steps.trust.outputs.trusted == 'true'
+        if: steps.live.outputs.live_available == 'true'
         run: |
           bash scripts/test/ci-designer-config.sh
 
       - name: Bootstrap file infobase through ibsrv
-        if: steps.trust.outputs.trusted == 'true'
+        if: steps.live.outputs.live_available == 'true'
         run: |
           bash scripts/test/ci-ibsrv.sh start
 
@@ -156,12 +179,12 @@ jobs:
           V8_RUNNER_CI_SCOPE=happy-path bash scripts/test/ci-rust.sh
 
       - name: Stop ibsrv sidecar
-        if: always() && steps.trust.outputs.trusted == 'true'
+        if: always() && steps.live.outputs.live_available == 'true'
         run: |
           bash scripts/test/ci-ibsrv.sh stop
 
       - name: Upload deploy-ready artifacts
-        if: success() && steps.trust.outputs.trusted == 'true'
+        if: success() && steps.live.outputs.live_available == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: deploy-ready-${{ runner.os }}

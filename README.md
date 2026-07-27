@@ -103,13 +103,25 @@ v8-runner syntax designer-modules --server
 v8-runner test yaxunit all
 ```
 
+Для уже подготовленной файловой или серверной ИБ можно явно пропустить build:
+
+```bash
+v8-runner test --no-build yaxunit all
+```
+
+Для файловой ИБ этот режим до запуска 1С проверяет наличие `1Cv8.1CD`.
+Проверка конфигурации не требует наличия project source-set: нужны только настройки ИБ,
+платформы и выбранного test engine. Для server connection отдельный portable preflight без
+запуска платформы пока недоступен, поэтому соединение проверяет сам test engine.
+
 ### Или тесты Vanessa Automation:
 
 ```bash
 v8-runner test va
 ```
 
-Команда сначала выполняет `build`, затем запускает настроенный профиль Vanessa Automation.
+По умолчанию команда сначала выполняет `build`, затем запускает настроенный профиль Vanessa
+Automation. Для подготовленной ИБ используйте `v8-runner test --no-build va`.
 
 Для отладки и написания тестов Vanessa Automation запустите ее в режиме MCP и, если агенту нужно
 сразу подключаться к endpoint, дождитесь готовности:
@@ -121,6 +133,10 @@ v8-runner launch mcp va --mcp-port 1550 --wait-ready
 Для функциональных `.feature`-сценариев, приемки и задач Vanessa Automation используйте
 `test va`, MCP `run_all_tests` с `runner=vanessa` или `launch mcp va --wait-ready`; голый
 `launch mcp` предназначен только для client MCP без загрузки Vanessa.
+
+Для автоматизации `v8-runner --json-message launch ...` сохраняет поле `binary` и добавляет
+canonical `platform_resolution` (path, version, source и installation root). Эта metadata
+публикуется только для результата `launch`, а не для всех команд.
 
 ### Поднимите MCP transport (MCP-транспорт) для AI-агентов:
 
