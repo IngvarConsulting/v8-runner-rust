@@ -5,7 +5,7 @@ mod support;
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -92,7 +92,7 @@ fn write_test_script(
     let (junit_output, allure_output) =
         output.fixture.materialization(output.report_xml, "$report");
     let body = format!(
-        "printf '%s\\n' \"$*\" >> '{}'\npayload=\"\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/C\" ]; then payload=\"$arg\"; fi\n  case \"$arg\" in /C*) payload=\"${{arg#/C}}\" ;; esac\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\ncfg=$(printf '%s' \"$payload\" | sed 's/^\"//; s/\"$//; s/^RunUnitTests=//')\ncp \"$cfg\" '{}'\nreport=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    reports = json.load(fh)['reports']\n    print(next(report['path'] for report in reports if report['format'] == 'jUnit'))\nPY\n)\nallure_dir=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    reports = json.load(fh)['reports']\n    print(next(report['path'] for report in reports if report['format'] == 'allure'))\nPY\n)\nylog=$(awk -F '\"' '/\"file\"/ {{print $4; exit}}' \"$cfg\")\nmkdir -p \"$(dirname \"$ylog\")\" \"$(dirname \"$out\")\"\n{}\n{}\ncat <<'LOG' > \"$ylog\"\n{}\nLOG\nprintf 'platform /P secret uri http://user:pass@example\\n' > \"$out\"\n{}\nexit {}",
+        "printf '%s\\n' \"$*\" >> '{}'\npayload=\"\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/C\" ]; then payload=\"$arg\"; fi\n  case \"$arg\" in /C*) payload=\"${{arg#/C}}\" ;; esac\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\ncfg=$(printf '%s' \"$payload\" | sed 's/^\"//; s/\"$//; s/^RunUnitTests=//')\ncp \"$cfg\" '{}'\nreport=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    reports = json.load(fh)['reports']\n    print(next(report['path'] for report in reports if report['format'] == 'jUnit'))\nPY\n) || exit $?\n[ -n \"$report\" ] || exit 1\nallure_dir=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    reports = json.load(fh)['reports']\n    print(next(report['path'] for report in reports if report['format'] == 'allure'))\nPY\n) || exit $?\n[ -n \"$allure_dir\" ] || exit 1\nylog=$(awk -F '\"' '/\"file\"/ {{print $4; exit}}' \"$cfg\")\n[ -n \"$ylog\" ] || exit 1\nmkdir -p \"$(dirname \"$ylog\")\" \"$(dirname \"$out\")\"\n{}\n{}\ncat <<'LOG' > \"$ylog\"\n{}\nLOG\nprintf 'platform /P secret uri http://user:pass@example\\n' > \"$out\"\n{}\nexit {}",
         calls_log.display(),
         captured_config.display(),
         junit_output,
@@ -854,7 +854,7 @@ fn test_command_streams_enterprise_stage_before_runner_finishes() {
     write_script(
         &dir.path().join("platform").join("bin").join("1cv8c"),
         &format!(
-            "printf '%s\\n' \"$*\" >> '{}'\npayload=\"\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/C\" ]; then payload=\"$arg\"; fi\n  case \"$arg\" in /C*) payload=\"${{arg#/C}}\" ;; esac\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\ncfg=$(printf '%s' \"$payload\" | sed 's/^\"//; s/\"$//; s/^RunUnitTests=//')\ncp \"$cfg\" '{}'\ntouch '{}'\nwhile [ ! -f '{}' ]; do sleep 0.05; done\nreport=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    reports = json.load(fh)['reports']\n    print(next(report['path'] for report in reports if report['format'] == 'jUnit'))\nPY\n)\nallure_dir=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    reports = json.load(fh)['reports']\n    print(next(report['path'] for report in reports if report['format'] == 'allure'))\nPY\n)\nylog=$(awk -F '\"' '/\"file\"/ {{print $4; exit}}' \"$cfg\")\nmkdir -p \"$(dirname \"$report\")\" \"$allure_dir\" \"$(dirname \"$ylog\")\" \"$(dirname \"$out\")\"\ncat <<'XML' > \"$report\"\n{}\nXML\nprintf '%s\\n' '{{\"uuid\":\"fixture\",\"name\":\"fixture\",\"status\":\"passed\",\"stage\":\"finished\"}}' > \"$allure_dir/fixture-result.json\"\ncat <<'LOG' > \"$ylog\"\n12:00:00.000 [INF] ok\nLOG\nprintf 'platform ok\\n' > \"$out\"\nexit 0",
+            "printf '%s\\n' \"$*\" >> '{}'\npayload=\"\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/C\" ]; then payload=\"$arg\"; fi\n  case \"$arg\" in /C*) payload=\"${{arg#/C}}\" ;; esac\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\ncfg=$(printf '%s' \"$payload\" | sed 's/^\"//; s/\"$//; s/^RunUnitTests=//')\ncp \"$cfg\" '{}'\ntouch '{}'\nwhile [ ! -f '{}' ]; do sleep 0.05; done\nreport=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    reports = json.load(fh)['reports']\n    print(next(report['path'] for report in reports if report['format'] == 'jUnit'))\nPY\n) || exit $?\n[ -n \"$report\" ] || exit 1\nallure_dir=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    reports = json.load(fh)['reports']\n    print(next(report['path'] for report in reports if report['format'] == 'allure'))\nPY\n) || exit $?\n[ -n \"$allure_dir\" ] || exit 1\nylog=$(awk -F '\"' '/\"file\"/ {{print $4; exit}}' \"$cfg\")\n[ -n \"$ylog\" ] || exit 1\nmkdir -p \"$(dirname \"$report\")\" \"$allure_dir\" \"$(dirname \"$ylog\")\" \"$(dirname \"$out\")\"\ncat <<'XML' > \"$report\"\n{}\nXML\nprintf '%s\\n' '{{\"uuid\":\"fixture\",\"name\":\"fixture\",\"status\":\"passed\",\"stage\":\"finished\"}}' > \"$allure_dir/fixture-result.json\"\ncat <<'LOG' > \"$ylog\"\n12:00:00.000 [INF] ok\nLOG\nprintf 'platform ok\\n' > \"$out\"\nexit 0",
             test_calls.display(),
             captured_config.display(),
             runner_started.display(),
@@ -1023,7 +1023,7 @@ fn test_accepts_explicit_client_mode_for_vanessa_and_yaxunit() {
     write_script(
         &dir.path().join("platform").join("bin").join("1cv8"),
         &format!(
-            "printf '%s\\n' \"$*\" >> '{}'\npayload=\"\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/C\" ]; then payload=\"$arg\"; fi\n  case \"$arg\" in /C*) payload=\"${{arg#/C}}\" ;; esac\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif printf '%s' \"$payload\" | grep -F -q -- 'RunUnitTests='; then\n  cfg=$(printf '%s' \"$payload\" | sed 's/^\"//; s/\"$//; s/^RunUnitTests=//')\n  report=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    reports = json.load(fh)['reports']\n    print(next(report['path'] for report in reports if report['format'] == 'jUnit'))\nPY\n)\nallure_dir=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    reports = json.load(fh)['reports']\n    print(next(report['path'] for report in reports if report['format'] == 'allure'))\nPY\n)\n  ylog=$(awk -F '\"' '/\"file\"/ {{print $4; exit}}' \"$cfg\")\n  mkdir -p \"$(dirname \"$report\")\" \"$allure_dir\" \"$(dirname \"$ylog\")\"\n  cat <<'XML' > \"$report\"\n{}\nXML\nprintf '%s\\n' '{{\"uuid\":\"fixture\",\"name\":\"fixture\",\"status\":\"passed\",\"stage\":\"finished\"}}' > \"$allure_dir/fixture-result.json\"\n  cat <<'LOG' > \"$ylog\"\n12:00:00.000 [INF] ok\nLOG\n  if [ -n \"$out\" ]; then mkdir -p \"$(dirname \"$out\")\" && : > \"$out\"; fi\n  exit 0\nfi\nif [ -n \"$out\" ]; then printf 'build /P secret\\n' > \"$out\"; fi\nexit 0",
+            "printf '%s\\n' \"$*\" >> '{}'\npayload=\"\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/C\" ]; then payload=\"$arg\"; fi\n  case \"$arg\" in /C*) payload=\"${{arg#/C}}\" ;; esac\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif printf '%s' \"$payload\" | grep -F -q -- 'RunUnitTests='; then\n  cfg=$(printf '%s' \"$payload\" | sed 's/^\"//; s/\"$//; s/^RunUnitTests=//')\n  report=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    reports = json.load(fh)['reports']\n    print(next(report['path'] for report in reports if report['format'] == 'jUnit'))\nPY\n) || exit $?\n[ -n \"$report\" ] || exit 1\nallure_dir=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    reports = json.load(fh)['reports']\n    print(next(report['path'] for report in reports if report['format'] == 'allure'))\nPY\n) || exit $?\n[ -n \"$allure_dir\" ] || exit 1\n  ylog=$(awk -F '\"' '/\"file\"/ {{print $4; exit}}' \"$cfg\")\n[ -n \"$ylog\" ] || exit 1\n  mkdir -p \"$(dirname \"$report\")\" \"$allure_dir\" \"$(dirname \"$ylog\")\"\n  cat <<'XML' > \"$report\"\n{}\nXML\nprintf '%s\\n' '{{\"uuid\":\"fixture\",\"name\":\"fixture\",\"status\":\"passed\",\"stage\":\"finished\"}}' > \"$allure_dir/fixture-result.json\"\n  cat <<'LOG' > \"$ylog\"\n12:00:00.000 [INF] ok\nLOG\n  if [ -n \"$out\" ]; then mkdir -p \"$(dirname \"$out\")\" && : > \"$out\"; fi\n  exit 0\nfi\nif [ -n \"$out\" ]; then printf 'build /P secret\\n' > \"$out\"; fi\nexit 0",
             test_calls.display(),
             JUNIT_SMOKE_REPORT_FIXTURE
         ),
@@ -1223,6 +1223,123 @@ fn test_yaxunit_nonzero_exit_with_failed_junit_reports_test_failures() {
     assert_eq!(payload["data"]["execution"]["status"], "failed");
     assert_eq!(payload["data"]["report"]["summary"]["total"], 2);
     assert_eq!(payload["data"]["report"]["summary"]["failed"], 1);
+}
+
+#[test]
+fn yaxunit_fixture_report_selectors_follow_format_after_reordering() {
+    // Mutation caught: selecting reports by array position writes each fixture to the wrong path.
+    let dir = temp_workspace();
+    let fixture_workspace = dir.path().join("fixture-workspace");
+    let script_path = dir.path().join("1cv8c");
+    let config_path = fixture_workspace.join("config.json");
+    let captured_config = fixture_workspace.join("captured-config.json");
+    let calls_log = fixture_workspace.join("calls.log");
+    let junit_path = fixture_workspace.join("junit").join("result.xml");
+    let allure_path = fixture_workspace.join("allure");
+    let yaxunit_log = fixture_workspace.join("runner.log");
+    let platform_log = fixture_workspace.join("platform.log");
+    fs::create_dir_all(&fixture_workspace).expect("fixture workspace");
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "reports": [
+                {"format": "allure", "path": allure_path},
+                {"format": "jUnit", "path": junit_path}
+            ],
+            "logging": {"file": yaxunit_log}
+        }))
+        .expect("serialize config"),
+    )
+    .expect("write config");
+    write_test_script(
+        &script_path,
+        &calls_log,
+        &captured_config,
+        NativeReportOutput {
+            report_xml: JUNIT_SMOKE_REPORT_FIXTURE,
+            fixture: NativeReportFixture::Complete,
+        },
+        "12:00:00.000 [INF] ok",
+        0,
+        None,
+    );
+
+    let output = Command::new(&script_path)
+        .current_dir(&fixture_workspace)
+        .args([
+            "/C",
+            &format!("RunUnitTests={}", config_path.display()),
+            "/Out",
+            &platform_log.display().to_string(),
+        ])
+        .output()
+        .expect("run fixture script");
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(junit_path).expect("junit report"),
+        format!("{JUNIT_SMOKE_REPORT_FIXTURE}\n")
+    );
+    assert!(allure_path.join("fixture-result.json").is_file());
+}
+
+#[test]
+fn yaxunit_fixture_report_selectors_fail_closed_before_writing_missing_format() {
+    // Mutation caught: removing selector failure propagation writes JUnit outside the fixture workspace.
+    let dir = temp_workspace();
+    let fixture_workspace = dir.path().join("fixture-workspace");
+    let outside_workspace = dir.path().join("outside-workspace");
+    let script_path = dir.path().join("1cv8c");
+    let config_path = fixture_workspace.join("config.json");
+    let captured_config = fixture_workspace.join("captured-config.json");
+    let calls_log = fixture_workspace.join("calls.log");
+    let outside_junit = outside_workspace.join("result.xml");
+    let yaxunit_log = fixture_workspace.join("runner.log");
+    let platform_log = fixture_workspace.join("platform.log");
+    fs::create_dir_all(&fixture_workspace).expect("fixture workspace");
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "reports": [{"format": "jUnit", "path": outside_junit}],
+            "logging": {"file": yaxunit_log}
+        }))
+        .expect("serialize config"),
+    )
+    .expect("write config");
+    write_test_script(
+        &script_path,
+        &calls_log,
+        &captured_config,
+        NativeReportOutput {
+            report_xml: JUNIT_SMOKE_REPORT_FIXTURE,
+            fixture: NativeReportFixture::Complete,
+        },
+        "12:00:00.000 [INF] ok",
+        0,
+        None,
+    );
+
+    let output = Command::new(&script_path)
+        .current_dir(&fixture_workspace)
+        .args([
+            "/C",
+            &format!("RunUnitTests={}", config_path.display()),
+            "/Out",
+            &platform_log.display().to_string(),
+        ])
+        .output()
+        .expect("run fixture script");
+
+    assert!(!output.status.success());
+    assert!(
+        !outside_workspace.exists(),
+        "fixture wrote outside its workspace"
+    );
 }
 
 #[test]
