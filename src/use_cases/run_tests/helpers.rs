@@ -175,9 +175,13 @@ mod tests {
         assert_eq!(result.execution.status, ExecutionStatus::Cancelled);
         assert_eq!(result.execution.interruptions.len(), 1);
         assert!(result.execution.errors.is_empty());
+        let retained = result.execution.artifacts.expect("retained artifacts");
+        assert_eq!(retained.root_dir, Some(run_dir.path().to_path_buf()));
+        assert_eq!(retained.items.len(), 1);
+        assert_eq!(retained.items[0].kind, ArtifactKind::RunDirectory);
         assert_eq!(
-            result.execution.artifacts.and_then(|set| set.root_dir),
-            Some(run_dir.path().to_path_buf())
+            retained.items[0].role.as_deref(),
+            Some(ARTIFACT_ROLE_RUN_DIR)
         );
     }
 }

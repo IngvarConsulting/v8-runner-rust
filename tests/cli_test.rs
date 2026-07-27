@@ -989,6 +989,23 @@ fn test_text_output_surfaces_success_log_findings_without_full_step_noise() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("● Tests completed with warnings"));
     assert!(stdout.contains("[error:test_report]"));
+    let run_dir = stdout
+        .lines()
+        .find_map(|line| {
+            line.split_once("[artifact] run_dir -> ")
+                .map(|(_, path)| path.trim())
+        })
+        .expect("retained run directory");
+    let allure_results = stdout
+        .lines()
+        .find_map(|line| {
+            line.split_once("[artifact] allure_results -> ")
+                .map(|(_, path)| Path::new(path.trim()))
+        })
+        .expect("retained Allure results");
+    let expected_allure_results = Path::new(run_dir).join("allure-results");
+    assert_eq!(allure_results, expected_allure_results);
+    assert!(expected_allure_results.is_dir());
     assert!(!stdout.contains("prepare artifacts"));
 }
 

@@ -1884,6 +1884,12 @@ fn append_retained_test_artifacts(details: &mut Vec<String>, result: &TestRunRes
             format!("[artifact] report -> {}", junit_xml.display()),
         );
     }
+    if let Some(allure_results) = paths.allure_results {
+        push_unique_detail(
+            details,
+            format!("[artifact] allure_results -> {}", allure_results.display()),
+        );
+    }
     if let Some(yaxunit_log) = paths.yaxunit_log {
         push_unique_detail(
             details,

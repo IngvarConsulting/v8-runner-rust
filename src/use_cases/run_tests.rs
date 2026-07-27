@@ -1014,7 +1014,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[cfg(windows)]
-    use super::replace_file;
+    use super::{open_file_no_follow, replace_file};
     use tokio_util::sync::CancellationToken;
 
     fn config(work_path: &std::path::Path) -> AppConfig {
@@ -1626,6 +1626,26 @@ mod tests {
             "replacement"
         );
         assert!(!source.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_materialize_vanessa_runner_log_rejects_reparse_source() {
+        use std::os::windows::fs::symlink_file;
+
+        let dir = tempdir().expect("tempdir");
+        let artifacts = create_artifacts(dir.path());
+        std::fs::create_dir_all(&artifacts.run_dir).expect("run dir");
+        let outside = dir.path().join("outside.log");
+        std::fs::write(&outside, "outside").expect("outside");
+        symlink_file(&outside, &artifacts.platform_log).expect("source symlink");
+
+        let warning = materialize_vanessa_runner_log(&artifacts).expect_err("warning");
+        assert!(warning.contains("symlink"));
+        assert!(!artifacts.runner_log.exists());
+
+        let error = open_file_no_follow(&artifacts.platform_log).expect_err("reparse point");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[cfg(unix)]
