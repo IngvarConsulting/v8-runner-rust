@@ -256,6 +256,8 @@ pub fn best_effort_fsync_dir(path: &Path) -> std::io::Result<()> {
     {
         let dir = File::open(path)?;
 
+        // SAFETY: `dir` owns a valid file descriptor for the duration of the call,
+        // and `fsync` does not retain it. The return code is checked below.
         unsafe {
             let rc = libc::fsync(std::os::fd::AsRawFd::as_raw_fd(&dir));
             if rc == 0 {
@@ -613,7 +615,7 @@ fn with_rollback_context(
 #[cfg(test)]
 mod tests {
     #[cfg(windows)]
-    use super::best_effort_fsync_dir;
+    use super::replace_dir_atomically;
     use super::{
         acquire_advisory_lock, advisory_lock_owner_id, publish_file_atomically,
         publish_file_atomically_impl, read_advisory_lock_metadata, remove_path_if_exists,
@@ -830,11 +832,29 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_fsync_ignores_missing_directory() {
+    fn windows_publishes_staged_directory_to_new_target() {
         let dir = tempdir().expect("tempdir");
-        let missing_path = dir.path().join("missing-directory");
+        let staging_dir = dir.path().join(".stage");
+        let target_dir = dir.path().join("target");
+        fs::create_dir(&staging_dir).expect("staging dir");
+        fs::write(staging_dir.join("payload.txt"), "payload").expect("payload");
+        assert!(!target_dir.exists());
 
-        best_effort_fsync_dir(&missing_path).expect("best-effort fsync");
+        let outcome = replace_dir_atomically(
+            &staging_dir,
+            &target_dir,
+            "test-run",
+            "test-target",
+            ".backup",
+        )
+        .expect("publish staged directory");
+
+        assert_eq!(outcome.cleanup_warning, None);
+        assert!(!staging_dir.exists());
+        assert_eq!(
+            fs::read_to_string(target_dir.join("payload.txt")).expect("target payload"),
+            "payload"
+        );
     }
 
     #[cfg(windows)]
