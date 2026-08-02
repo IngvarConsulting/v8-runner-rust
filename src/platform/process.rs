@@ -9,6 +9,8 @@ use tracing::{debug, warn};
 
 const EXECUTABLE_BUSY_MAX_RETRIES: usize = 5;
 const EXECUTABLE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(10);
+#[cfg(any(windows, test))]
+const WINDOWS_ERROR_INVALID_HANDLE: i32 = 6;
 
 /// Request for launching an external utility.
 #[derive(Debug, Clone)]
@@ -597,10 +599,11 @@ fn isolate_inherited_standard_handles() -> std::io::Result<()> {
             continue;
         }
 
-        // SAFETY: the standard handle remains owned by the process; this only clears a flag.
+        // SAFETY: the value is passed back to Win32 without dereferencing; stale handles are
+        // reported as errors, and changing the inherit flag does not transfer ownership.
         if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
             let error = std::io::Error::last_os_error();
-            if should_ignore_set_handle_information_error(standard_handle_kind(handle)) {
+            if is_invalid_standard_handle_error(&error) {
                 continue;
             }
             return Err(error);
@@ -610,27 +613,9 @@ fn isolate_inherited_standard_handles() -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(windows)]
-fn standard_handle_kind(handle: windows_sys::Win32::Foundation::HANDLE) -> StandardHandleKind {
-    let mut mode = 0;
-    // SAFETY: `handle` was returned by GetStdHandle; GetConsoleMode only writes `mode`.
-    if unsafe { windows_sys::Win32::System::Console::GetConsoleMode(handle, &mut mode) != 0 } {
-        StandardHandleKind::Console
-    } else {
-        StandardHandleKind::NonConsole
-    }
-}
-
 #[cfg(any(windows, test))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StandardHandleKind {
-    Console,
-    NonConsole,
-}
-
-#[cfg(any(windows, test))]
-fn should_ignore_set_handle_information_error(handle_kind: StandardHandleKind) -> bool {
-    matches!(handle_kind, StandardHandleKind::Console)
+fn is_invalid_standard_handle_error(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(WINDOWS_ERROR_INVALID_HANDLE)
 }
 
 #[cfg(not(windows))]
@@ -1068,10 +1053,10 @@ fn split_sensitive_assignment(arg: &str) -> Option<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        render_command, should_ignore_set_handle_information_error, ManagedSpawnMode, ProcessError,
+        is_invalid_standard_handle_error, render_command, ManagedSpawnMode, ProcessError,
         ProcessExecutionPolicy, ProcessExecutor, ProcessInterruptionAction,
         ProcessInterruptionReason, ProcessInterruptionSafety, ProcessIoMode, ProcessRequest,
-        ProcessRunner, StandardHandleKind,
+        ProcessRunner, WINDOWS_ERROR_INVALID_HANDLE,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1081,13 +1066,12 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     #[test]
-    fn ignores_handle_information_failures_only_for_console_handles() {
-        assert!(should_ignore_set_handle_information_error(
-            StandardHandleKind::Console
-        ));
-        assert!(!should_ignore_set_handle_information_error(
-            StandardHandleKind::NonConsole
-        ));
+    fn ignores_only_windows_invalid_handle_errors() {
+        let invalid_handle = std::io::Error::from_raw_os_error(WINDOWS_ERROR_INVALID_HANDLE);
+        let access_denied = std::io::Error::from_raw_os_error(5);
+
+        assert!(is_invalid_standard_handle_error(&invalid_handle));
+        assert!(!is_invalid_standard_handle_error(&access_denied));
     }
 
     #[test]
@@ -1354,30 +1338,70 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn detached_child_does_not_hold_redirected_stdout_open() {
-        const HELPER_ENV: &str = "V8_RUNNER_WINDOWS_STDIO_ISOLATION_HELPER";
-        const PID_FILE_ENV: &str = "V8_RUNNER_WINDOWS_STDIO_ISOLATION_PID_FILE";
-        const TEST_NAME: &str =
-            "platform::process::tests::detached_child_does_not_hold_redirected_stdout_open";
+        assert_redirected_stdout_reaches_eof(
+            RedirectedStdoutSpawnMode::Detached,
+            "V8_RUNNER_WINDOWS_STDIO_ISOLATION_DETACHED_HELPER",
+            "platform::process::tests::detached_child_does_not_hold_redirected_stdout_open",
+        );
+    }
 
-        if std::env::var_os(HELPER_ENV).is_some() {
+    #[cfg(windows)]
+    #[test]
+    fn managed_detached_child_does_not_hold_redirected_stdout_open() {
+        assert_redirected_stdout_reaches_eof(
+            RedirectedStdoutSpawnMode::ManagedDetached,
+            "V8_RUNNER_WINDOWS_STDIO_ISOLATION_MANAGED_HELPER",
+            "platform::process::tests::managed_detached_child_does_not_hold_redirected_stdout_open",
+        );
+    }
+
+    #[cfg(windows)]
+    #[derive(Debug, Clone, Copy)]
+    enum RedirectedStdoutSpawnMode {
+        Detached,
+        ManagedDetached,
+    }
+
+    #[cfg(windows)]
+    fn assert_redirected_stdout_reaches_eof(
+        spawn_mode: RedirectedStdoutSpawnMode,
+        helper_env: &str,
+        test_name: &str,
+    ) {
+        const PID_FILE_ENV: &str = "V8_RUNNER_WINDOWS_STDIO_ISOLATION_PID_FILE";
+
+        if std::env::var_os(helper_env).is_some() {
             let pid_file = PathBuf::from(
                 std::env::var_os(PID_FILE_ENV).expect("helper PID file environment variable"),
             );
-            let result = ProcessExecutor
-                .spawn(&ProcessRequest {
-                    program: PathBuf::from("powershell.exe"),
-                    args: vec![
-                        "-NoProfile".to_owned(),
-                        "-Command".to_owned(),
-                        "Start-Sleep -Seconds 30".to_owned(),
-                    ],
-                    workdir: None,
-                    stdout_log_path: None,
-                    stderr_log_path: None,
-                    startup_probe: None,
-                })
-                .expect("spawn detached helper child");
-            fs::write(pid_file, result.pid.to_string()).expect("write detached child PID");
+            let request = ProcessRequest {
+                program: PathBuf::from("powershell.exe"),
+                args: vec![
+                    "-NoProfile".to_owned(),
+                    "-Command".to_owned(),
+                    "Start-Sleep -Seconds 30".to_owned(),
+                ],
+                workdir: None,
+                stdout_log_path: None,
+                stderr_log_path: None,
+                startup_probe: None,
+            };
+            let pid = match spawn_mode {
+                RedirectedStdoutSpawnMode::Detached => {
+                    ProcessExecutor
+                        .spawn(&request)
+                        .expect("spawn detached helper child")
+                        .pid
+                }
+                RedirectedStdoutSpawnMode::ManagedDetached => {
+                    ProcessExecutor
+                        .spawn_managed(&request, ManagedSpawnMode::Detached)
+                        .expect("spawn managed-detached helper child")
+                        .detach()
+                        .pid
+                }
+            };
+            fs::write(pid_file, pid.to_string()).expect("write detached child PID");
             return;
         }
 
@@ -1386,8 +1410,8 @@ mod tests {
         let mut helper = std::process::Command::new(
             std::env::current_exe().expect("current unit-test executable"),
         )
-        .args(["--exact", TEST_NAME, "--nocapture"])
-        .env(HELPER_ENV, "1")
+        .args(["--exact", test_name, "--nocapture"])
+        .env(helper_env, "1")
         .env(PID_FILE_ENV, &pid_file)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

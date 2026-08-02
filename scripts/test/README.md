@@ -163,7 +163,7 @@ V8_RUNNER_CI_SCOPE=happy-path bash scripts/test/ci-rust.sh
 
 `.github/workflows/ci.yml` запускает install/config/ibsrv/upload helpers only when `live_available=true`, то есть когда для текущей matrix OS настроены `V8TR_PLATFORM_BUNDLE_URL_*` и `V8TR_PLATFORM_BUNDLE_SHA256_*`. Без этой пары secrets happy-path остаётся blocking для Rust build/check, получает `V8TR_CI_SKIP_DUPLICATE_RUST_TESTS=1`, полагается на contract job для Rust test coverage и soft-skips real 1C smoke.
 
-Windows contract scope currently runs `cargo check --locked --all-targets`; full `cargo test --locked` remains Linux-owned until the Windows-specific test suite is hardened. Exit criterion: switch Windows contract back to `cargo test --locked` after fixing the tracked path separator, fake-binary, ACL, and process-lifecycle failures in `spec/acceptance/real-environment-validation.md`.
+Windows contract scope runs `cargo check --locked --all-targets` and targeted detached and managed-detached stdio EOF regressions; it first verifies that both tests are present in the Windows test list. Full `cargo test --locked` remains Linux-owned until the Windows-specific test suite is hardened. Exit criterion: switch Windows contract back to `cargo test --locked` after fixing the tracked path separator, fake-binary, ACL, and process-lifecycle failures in `spec/acceptance/real-environment-validation.md`.
 
 ```bash
 bash scripts/test/ci-platform-install.sh
