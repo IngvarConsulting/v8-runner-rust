@@ -1,5 +1,6 @@
 use super::*;
 use crate::use_cases::progress::log_live_stage;
+use crate::use_cases::request::TestBuildPolicy;
 
 pub(super) fn run_tests(
     context: &ExecutionContext,
@@ -64,62 +65,104 @@ pub(super) fn run_tests(
         }
     };
 
-    debug!("running build prerequisite for tests");
-    log_live_stage(
-        "test: build prerequisite",
-        "[Build] preparing test infobase",
-    );
     let build_started = Instant::now();
-    let build_result = match build_project::execute(
-        context,
-        config,
-        &BuildArgs {
-            full_rebuild: false,
-            source_set: None,
-        },
-    ) {
-        Ok(result) => result,
-        Err(failure) => {
-            let summary = failure
-                .payload
-                .as_ref()
-                .map(build_summary)
-                .unwrap_or_else(|| failure.error.to_string());
-            steps.push(
-                failed_step(
-                    "build",
-                    ExecutionStepKind::PlatformCommand,
-                    build_started.elapsed().as_millis() as u64,
-                    summary.clone(),
-                )
-                .with_errors(vec![test_execution_error(
-                    TestErrorKind::BuildFailed,
-                    summary.clone(),
-                )]),
+    match args.build_policy {
+        TestBuildPolicy::BuildFirst => {
+            debug!("running build prerequisite for tests");
+            log_live_stage(
+                "test: build prerequisite",
+                "[Build] preparing test infobase",
             );
-            let outcome = ExecutionOutcome::new(ExecutionStatus::Failed)
-                .with_diagnostics(vec![summary.clone()])
-                .with_errors(vec![test_execution_error(
-                    TestErrorKind::BuildFailed,
-                    summary.clone(),
-                )]);
-            let result = make_test_result(
-                target,
-                mode,
-                outcome,
-                warnings,
-                steps,
-                started.elapsed().as_millis() as u64,
-            );
-            return Err(TestExecutionFailure::with_payload(failure.error, result));
+            let build_result = match build_project::execute(
+                context,
+                config,
+                &BuildArgs {
+                    full_rebuild: false,
+                    source_set: None,
+                },
+            ) {
+                Ok(result) => result,
+                Err(failure) => {
+                    let summary = failure
+                        .payload
+                        .as_ref()
+                        .map(build_summary)
+                        .unwrap_or_else(|| failure.error.to_string());
+                    steps.push(
+                        failed_step(
+                            "build",
+                            ExecutionStepKind::PlatformCommand,
+                            build_started.elapsed().as_millis() as u64,
+                            summary.clone(),
+                        )
+                        .with_errors(vec![test_execution_error(
+                            TestErrorKind::BuildFailed,
+                            summary.clone(),
+                        )]),
+                    );
+                    let outcome = ExecutionOutcome::new(ExecutionStatus::Failed)
+                        .with_diagnostics(vec![summary.clone()])
+                        .with_errors(vec![test_execution_error(
+                            TestErrorKind::BuildFailed,
+                            summary.clone(),
+                        )]);
+                    let result = make_test_result(
+                        target,
+                        mode,
+                        outcome,
+                        warnings,
+                        steps,
+                        started.elapsed().as_millis() as u64,
+                    );
+                    return Err(TestExecutionFailure::with_payload(failure.error, result));
+                }
+            };
+            steps.push(succeeded_step(
+                "build",
+                ExecutionStepKind::PlatformCommand,
+                build_started.elapsed().as_millis() as u64,
+                build_summary(&build_result),
+            ));
         }
-    };
-    steps.push(succeeded_step(
-        "build",
-        ExecutionStepKind::PlatformCommand,
-        build_started.elapsed().as_millis() as u64,
-        build_summary(&build_result),
-    ));
+        TestBuildPolicy::Skip => {
+            steps.push(skipped_step(
+                "build",
+                ExecutionStepKind::PlatformCommand,
+                build_started.elapsed().as_millis() as u64,
+                "build prerequisite explicitly skipped by --no-build",
+            ));
+            if let Err(error) = validate_prepared_infobase(config) {
+                let message = error.to_string();
+                steps.push(
+                    failed_step(
+                        "preflight_infobase",
+                        ExecutionStepKind::Validation,
+                        0,
+                        message.clone(),
+                    )
+                    .with_errors(vec![test_execution_error(
+                        TestErrorKind::InfobaseUnavailable,
+                        message.clone(),
+                    )]),
+                );
+                let outcome = ExecutionOutcome::new(ExecutionStatus::Failed)
+                    .with_diagnostics(vec![message.clone()])
+                    .with_errors(vec![test_execution_error(
+                        TestErrorKind::InfobaseUnavailable,
+                        message,
+                    )]);
+                let result = make_test_result(
+                    target,
+                    mode,
+                    outcome,
+                    warnings,
+                    steps,
+                    started.elapsed().as_millis() as u64,
+                );
+                return Err(TestExecutionFailure::with_payload(error, result));
+            }
+        }
+    }
 
     debug!("preparing test run artifacts");
     let prepare_artifacts_started = Instant::now();
@@ -486,4 +529,20 @@ pub(super) fn run_tests(
         steps,
         started.elapsed().as_millis() as u64,
     ))
+}
+
+fn validate_prepared_infobase(config: &AppConfig) -> Result<(), AppError> {
+    let connection = config.v8_connection();
+    let Some(file_path) = connection.file_path() else {
+        return Ok(());
+    };
+    let marker = Path::new(file_path).join("1Cv8.1CD");
+    if marker.is_file() {
+        Ok(())
+    } else {
+        Err(AppError::Runtime(format!(
+            "prepared file infobase is unavailable: expected '{}'",
+            marker.display()
+        )))
+    }
 }

@@ -11,7 +11,10 @@ settings before CLI overrides.
 - `builder`: `DESIGNER` or `IBCMD`.
 - `infobase.connection`: often `File=build/ib` for local automation.
 - `source-set`: ordered configuration and extension sources.
-- `tools.platform.path` or `tools.platform.version`: 1C platform discovery hints.
+- `tools.platform.path`, `version`, and `strict`: platform discovery hints. `path` is always an
+  explicit-only boundary with no default-root or `PATH` fallback. Without `path`, `version` filters
+  normal discovery. With `path`, `version` is ignored unless `strict: true`; strict path+version
+  resolution rejects unknown or mismatched versions and pins sibling utilities to one canonical root.
 - `tools.edt_cli.path`, `version`, and `interactive-mode`: EDT CLI discovery and execution mode.
 - `tests.yaxunit` and `tests.va`: test runner configuration.
 - `tools.client_mcp`, `tools.va`, and `tools.enterprise`: launch and client-side MCP integration hints.

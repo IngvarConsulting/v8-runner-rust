@@ -10,6 +10,7 @@ use crate::domain::execution::{
 };
 
 pub const TEST_ERROR_CODE_BUILD_FAILED: &str = "build_failed";
+pub const TEST_ERROR_CODE_INFOBASE_UNAVAILABLE: &str = "infobase_unavailable";
 pub const TEST_ERROR_CODE_TEST_SETUP_FAILED: &str = "test_setup_failed";
 pub const TEST_ERROR_CODE_ENTERPRISE_SPAWN_FAILED: &str = "enterprise_spawn_failed";
 pub const TEST_ERROR_CODE_ENTERPRISE_STARTUP_CHECK_FAILED: &str = "enterprise_startup_check_failed";
@@ -42,6 +43,7 @@ pub enum TestOutputMode {
 #[serde(rename_all = "snake_case")]
 pub enum TestErrorKind {
     BuildFailed,
+    InfobaseUnavailable,
     TestSetupFailed,
     EnterpriseSpawnFailed,
     EnterpriseStartupCheckFailed,
@@ -60,6 +62,7 @@ impl TestErrorKind {
     pub const fn code(self) -> &'static str {
         match self {
             Self::BuildFailed => TEST_ERROR_CODE_BUILD_FAILED,
+            Self::InfobaseUnavailable => TEST_ERROR_CODE_INFOBASE_UNAVAILABLE,
             Self::TestSetupFailed => TEST_ERROR_CODE_TEST_SETUP_FAILED,
             Self::EnterpriseSpawnFailed => TEST_ERROR_CODE_ENTERPRISE_SPAWN_FAILED,
             Self::EnterpriseStartupCheckFailed => TEST_ERROR_CODE_ENTERPRISE_STARTUP_CHECK_FAILED,
@@ -78,6 +81,7 @@ impl TestErrorKind {
     pub fn from_code(code: &str) -> Option<Self> {
         Some(match code {
             TEST_ERROR_CODE_BUILD_FAILED => Self::BuildFailed,
+            TEST_ERROR_CODE_INFOBASE_UNAVAILABLE => Self::InfobaseUnavailable,
             TEST_ERROR_CODE_TEST_SETUP_FAILED => Self::TestSetupFailed,
             TEST_ERROR_CODE_ENTERPRISE_SPAWN_FAILED => Self::EnterpriseSpawnFailed,
             TEST_ERROR_CODE_ENTERPRISE_STARTUP_CHECK_FAILED => Self::EnterpriseStartupCheckFailed,
@@ -289,6 +293,7 @@ pub fn test_execution_status(kind: Option<TestErrorKind>, ok: bool) -> Execution
         ) => ExecutionStatus::InvalidOutput,
         Some(
             TestErrorKind::BuildFailed
+            | TestErrorKind::InfobaseUnavailable
             | TestErrorKind::TestSetupFailed
             | TestErrorKind::EnterpriseSpawnFailed
             | TestErrorKind::EnterpriseStartupCheckFailed
@@ -330,6 +335,7 @@ mod tests {
     #[test]
     fn test_error_kind_codes_roundtrip_for_setup_and_process_failures() {
         let kinds = [
+            TestErrorKind::InfobaseUnavailable,
             TestErrorKind::TestSetupFailed,
             TestErrorKind::EnterpriseSpawnFailed,
             TestErrorKind::EnterpriseStartupCheckFailed,
@@ -348,6 +354,7 @@ mod tests {
     #[test]
     fn test_error_status_maps_new_process_failures_explicitly() {
         for kind in [
+            TestErrorKind::InfobaseUnavailable,
             TestErrorKind::TestSetupFailed,
             TestErrorKind::EnterpriseSpawnFailed,
             TestErrorKind::EnterpriseStartupCheckFailed,

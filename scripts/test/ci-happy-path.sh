@@ -37,7 +37,11 @@ stage "syntax/check cargo workspace"
 cargo check --locked --all-targets
 
 stage "test cargo workspace"
-cargo test --locked
+if [[ "${V8TR_CI_SKIP_DUPLICATE_RUST_TESTS:-0}" == "1" ]]; then
+    echo "SKIPPED: this CI workflow uses the contract job for full cargo test coverage."
+else
+    cargo test --locked
+fi
 
 export V8TR_BIN="${V8TR_BIN:-$(detect_bin_path)}"
 export V8TR_DESIGNER_SMOKE_PROFILE="${V8TR_DESIGNER_SMOKE_PROFILE:-mandatory}"

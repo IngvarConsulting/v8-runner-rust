@@ -67,6 +67,18 @@ fn build_help_exposes_source_set_selector() {
 }
 
 #[test]
+fn test_help_exposes_no_build_option() {
+    let output = v8_runner_command()
+        .args(["test", "--help"])
+        .output()
+        .expect("run command");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--no-build"));
+}
+
+#[test]
 fn dump_help_clarifies_object_selector_compatibility() {
     let output = v8_runner_command()
         .args(["dump", "--help"])

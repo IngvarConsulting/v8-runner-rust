@@ -30,7 +30,8 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `extensions` | `format=DESIGNER` или `format=EDT` | Обновляет свойства extension `source-set` |
 | `build` | `format=DESIGNER` + `builder=DESIGNER|IBCMD` | Выполняет incremental/full загрузку в ИБ |
 | `build` | `format=EDT` + `builder=DESIGNER|IBCMD` | Экспортирует изменённые EDT `source-set`, затем грузит generated Designer output |
-| `test` | Та же матрица, что и у `build` | Всегда сначала запускает `build` |
+| `test` | Та же матрица, что и у `build` | По умолчанию запускает `build` |
+| `test --no-build` | Подготовленная file/server ИБ; source-set и build tooling не требуются | Запускает выбранный test engine без build |
 | `dump` | `format=DESIGNER` + `builder=DESIGNER` | Полная, инкрементальная или object-scoped partial выгрузка |
 | `dump` | `format=DESIGNER` + `builder=IBCMD` | Полная и инкрементальная выгрузка; `partial` деградирует в incremental с warning; standalone-server state изолирован в `workPath/ibcmd-data` |
 | `dump` | `format=EDT` + `builder=DESIGNER|IBCMD` | Reverse sync из ИБ через internal Designer snapshot и EDT import |
@@ -193,13 +194,18 @@ v8-runner build [--source-set <NAME>] [--full-rebuild]
 ### `test`
 
 ```bash
-v8-runner test yaxunit [--full] all
-v8-runner test yaxunit [--full] module <NAME>
-v8-runner test va
-v8-runner test va --feature login --filter-tag @smoke
+v8-runner test [--full] [--no-build] yaxunit all
+v8-runner test [--full] [--no-build] yaxunit module <NAME>
+v8-runner test [--no-build] va
+v8-runner test [--no-build] va --feature login --filter-tag @smoke
 ```
 
-- Всегда сначала запускает `build`.
+- По умолчанию сначала запускает `build`. `--no-build` отмечает build-step как `skipped` и
+  запускает тесты на подготовленной ИБ; для file connection до запуска платформы требуется
+  `<infobase>/1Cv8.1CD`, для server connection доступность подтверждается запуском test engine.
+- В `--no-build` source-set и build tooling не проходят filesystem/layout validation: исходники
+  configuration могут отсутствовать. Валидация ИБ, платформы и настроек test engine сохраняется.
+- `--no-build` является CLI-only контрактом; MCP `run_all_tests` сохраняет build-first поведение.
 - `test yaxunit module <NAME>` требует непустое имя модуля.
 - `test va` использует профиль из `tests.va.profile`; `--feature`, `--filter-tag`,
   `--ignore-tag` и `--scenario-filter` переопределяют соответствующие списки выбранного профиля
@@ -341,6 +347,13 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--wait-ready] [FLAGS]
   `--raw-key` не может задавать `/C`, `/Execute` или `/Out`.
 - Для `designer`/`thin`/`thick`/`ordinary` дополнительные typed flags: `--c`, `--execute`, `--use-privileged-mode`, `--output`,
   повторяемый `--raw-key`.
+- Platform discovery использует `tools.platform.path` как explicit-only границу: если path задан,
+  default roots и `PATH` не используются. `tools.platform.version` без path фильтрует обычный
+  поиск; вместе с path проверяется только при `tools.platform.strict: true`, а при
+  `strict: false` игнорируется.
+- JSON-результат именно `launch` содержит legacy `binary` и `platform_resolution` с canonical
+  `path`, `version` (или `null`), `source` (`explicit`, `default-root` или `path`) и
+  `installation_root`. Это не общий metadata contract для остальных команд.
 
 ### `mcp serve`
 

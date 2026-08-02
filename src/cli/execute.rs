@@ -869,18 +869,25 @@ fn map_tools_download_force(args: &ToolsDownloadArgs) -> bool {
 
 fn map_test_request(config: &AppConfig, args: &TestArgs) -> Result<TestRequest, UseCaseError> {
     let client_mode = map_test_client_mode(args.client_mode.as_deref())?;
+    let build_policy = if args.no_build {
+        crate::use_cases::request::TestBuildPolicy::Skip
+    } else {
+        crate::use_cases::request::TestBuildPolicy::BuildFirst
+    };
     match &args.runner {
         TestRunner::Yaxunit(TestYaxunitArgs { scope }) => {
             let scope = map_yaxunit_scope(scope)?;
             Ok(TestRequest {
                 execution: build_yaxunit_execution(config, &args.launch, client_mode)?,
                 full: args.full,
+                build_policy,
                 scope,
             })
         }
         TestRunner::Va(_) => Ok(TestRequest {
             execution: build_vanessa_execution(config, &args.launch, client_mode)?,
             full: args.full,
+            build_policy,
             scope: TestScopeRequest::All,
         }),
     }
@@ -2484,7 +2491,7 @@ mod tests {
     use crate::use_cases::request::{
         ArtifactsModeRequest, ClientMcpAddonRequest, ClientMcpMode, ClientMcpOptionsRequest,
         DesignerClientScope, DesignerConfigCheck, DumpModeRequest, LaunchRequest,
-        LaunchTargetRequest, SyntaxTargetRequest, TestScopeRequest,
+        LaunchTargetRequest, SyntaxTargetRequest, TestBuildPolicy, TestScopeRequest,
     };
     use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
     use crate::use_cases::workspace_lock::workspace_lock_path;
@@ -2500,6 +2507,7 @@ mod tests {
             &config,
             &TestArgs {
                 full: true,
+                no_build: false,
                 client_mode: None,
                 launch: TestLaunchOptionsArgs::default(),
                 runner: TestRunner::Yaxunit(TestYaxunitArgs {
@@ -2512,12 +2520,34 @@ mod tests {
         .expect("request");
 
         assert!(request.full);
+        assert_eq!(request.build_policy, TestBuildPolicy::BuildFirst);
         assert_eq!(
             request.scope,
             TestScopeRequest::Module {
                 name: "ModuleA".to_owned()
             }
         );
+    }
+
+    #[test]
+    fn maps_no_build_yaxunit_request() {
+        let work = tempdir().expect("tempdir");
+        let config = sample_config(work.path());
+        let request = map_test_request(
+            &config,
+            &TestArgs {
+                full: false,
+                no_build: true,
+                client_mode: None,
+                launch: TestLaunchOptionsArgs::default(),
+                runner: TestRunner::Yaxunit(TestYaxunitArgs {
+                    scope: TestScope::All,
+                }),
+            },
+        )
+        .expect("request");
+
+        assert_eq!(request.build_policy, TestBuildPolicy::Skip);
     }
 
     #[test]
@@ -2528,6 +2558,7 @@ mod tests {
             &config,
             &TestArgs {
                 full: false,
+                no_build: false,
                 client_mode: None,
                 launch: TestLaunchOptionsArgs::default(),
                 runner: TestRunner::Yaxunit(TestYaxunitArgs {
@@ -2575,6 +2606,7 @@ mod tests {
             &config,
             &TestArgs {
                 full: false,
+                no_build: false,
                 client_mode: None,
                 launch: TestLaunchOptionsArgs::default(),
                 runner: TestRunner::Va(TestVaArgs::default()),
@@ -2584,8 +2616,23 @@ mod tests {
 
         assert_eq!(request.execution.profile.kind, RunnerKind::Vanessa);
         assert_eq!(request.execution.profile.id, "smoke");
+        assert_eq!(request.build_policy, TestBuildPolicy::BuildFirst);
         assert_eq!(request.scope, TestScopeRequest::All);
         assert_eq!(request.execution.timeouts.total_ms, Some(300_000));
+
+        let no_build_request = map_test_request(
+            &config,
+            &TestArgs {
+                full: false,
+                no_build: true,
+                client_mode: None,
+                launch: TestLaunchOptionsArgs::default(),
+                runner: TestRunner::Va(TestVaArgs::default()),
+            },
+        )
+        .expect("no-build request");
+
+        assert_eq!(no_build_request.build_policy, TestBuildPolicy::Skip);
     }
 
     #[test]
@@ -3011,6 +3058,7 @@ mod tests {
             &config,
             &Command::Test(TestArgs {
                 full: false,
+                no_build: false,
                 client_mode: None,
                 launch: TestLaunchOptionsArgs::default(),
                 runner: TestRunner::Yaxunit(TestYaxunitArgs {
@@ -3075,6 +3123,7 @@ mod tests {
             &config,
             &Command::Test(TestArgs {
                 full: false,
+                no_build: false,
                 client_mode: None,
                 launch: TestLaunchOptionsArgs::default(),
                 runner: TestRunner::Yaxunit(TestYaxunitArgs {

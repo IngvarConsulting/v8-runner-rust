@@ -31,6 +31,28 @@ fn assert_envelope_business_failure(payload: &Value, command: &str) {
     assert!(payload["error"]["message"].is_string());
 }
 
+fn assert_launch_platform_resolution(data: &Value) {
+    let binary = data["binary"].as_str().expect("launch binary");
+    let resolution = &data["platform_resolution"];
+    let path = resolution["path"].as_str().expect("resolution path");
+    let installation_root = resolution["installation_root"]
+        .as_str()
+        .expect("resolution installation root");
+
+    assert_eq!(path, binary);
+    assert!(Path::new(path).is_absolute());
+    assert!(resolution["version"].is_null());
+    assert_eq!(resolution["source"], "explicit");
+    assert_eq!(
+        Path::new(path)
+            .parent()
+            .and_then(Path::parent)
+            .expect("installation root from binary path")
+            .to_string_lossy(),
+        installation_root
+    );
+}
+
 fn reserve_local_address() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral listener");
     let address = listener.local_addr().expect("local addr");
@@ -678,6 +700,7 @@ async fn mcp_http_launch_app_returns_success_payload_over_live_session() {
     let structured = &payload["result"]["structuredContent"];
     assert_envelope_success(structured, "launch");
     assert_eq!(structured["data"]["ok"], true);
+    assert_launch_platform_resolution(&structured["data"]);
 
     server.shutdown().await;
 }

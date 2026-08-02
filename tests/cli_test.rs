@@ -189,6 +189,36 @@ fn setup_project(
     )
 }
 
+enum FileInfobaseState {
+    Prepared,
+    MissingMarker,
+}
+
+fn configure_file_infobase(config_path: &Path, infobase_path: &Path, state: FileInfobaseState) {
+    fs::create_dir_all(infobase_path).expect("infobase directory");
+    match state {
+        FileInfobaseState::Prepared => {
+            fs::write(infobase_path.join("1Cv8.1CD"), "prepared").expect("infobase marker");
+        }
+        FileInfobaseState::MissingMarker => {}
+    }
+    let config = fs::read_to_string(config_path).expect("config");
+    fs::write(
+        config_path,
+        config.replace("File=/tmp/ib", &format!("File={}", infobase_path.display())),
+    )
+    .expect("updated config");
+}
+
+fn configure_server_infobase(config_path: &Path) {
+    let config = fs::read_to_string(config_path).expect("config");
+    fs::write(
+        config_path,
+        config.replace("File=/tmp/ib", "Srvr=cluster:1541;Ref=prepared"),
+    )
+    .expect("updated config");
+}
+
 fn setup_project_with_additional_launch_keys(
     work_dir_name: &str,
     report_xml: &str,
@@ -410,6 +440,162 @@ fn test_all_full_json_runs_build_first_and_returns_report() {
         "ok"
     );
     assert_eq!(payload["data"]["retained_paths"], Value::Null);
+}
+
+#[test]
+fn test_yaxunit_no_build_skips_build_for_prepared_file_infobase() {
+    let (dir, config_path, build_calls, test_calls, _captured_config) = setup_project(
+        "work",
+        JUNIT_SMOKE_REPORT_FIXTURE,
+        "12:00:00.000 [INF] ok",
+        0,
+        false,
+        5,
+        None,
+    );
+    let infobase_path = dir.path().join("prepared-ib");
+    configure_file_infobase(&config_path, &infobase_path, FileInfobaseState::Prepared);
+    let database_path = infobase_path.join("1Cv8.1CD");
+    let database_before = fs::read(&database_path).expect("database contents before test");
+    let modified_before = fs::metadata(&database_path)
+        .and_then(|metadata| metadata.modified())
+        .expect("database timestamp before test");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "test",
+            "--no-build",
+            "yaxunit",
+            "all",
+        ])
+        .output()
+        .expect("run");
+
+    assert!(output.status.success());
+    assert!(
+        !build_calls.exists(),
+        "no-build must not invoke Designer build"
+    );
+    assert!(test_calls.exists(), "test engine must still run");
+    assert_eq!(
+        fs::read(&database_path).expect("database contents after test"),
+        database_before
+    );
+    assert_eq!(
+        fs::metadata(&database_path)
+            .and_then(|metadata| metadata.modified())
+            .expect("database timestamp after test"),
+        modified_before
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    let build_step = payload["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .find(|step| step["name"] == "build")
+        .expect("build step");
+    assert_eq!(build_step["status"], "skipped");
+}
+
+#[test]
+fn test_no_build_does_not_require_edt_source_tree() {
+    let (dir, config_path, build_calls, test_calls, _captured_config) =
+        setup_project("work", JUNIT_SMOKE_REPORT_FIXTURE, "", 0, false, 5, None);
+    configure_file_infobase(
+        &config_path,
+        &dir.path().join("prepared-edt-ib"),
+        FileInfobaseState::Prepared,
+    );
+    let config = fs::read_to_string(&config_path).expect("config");
+    fs::write(
+        &config_path,
+        config.replace("format: DESIGNER", "format: EDT"),
+    )
+    .expect("EDT config");
+    fs::remove_dir_all(dir.path().join("project").join("main")).expect("remove sources");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "test",
+            "--no-build",
+            "yaxunit",
+            "all",
+        ])
+        .output()
+        .expect("run");
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!build_calls.exists());
+    assert!(test_calls.exists());
+}
+
+#[test]
+fn test_yaxunit_no_build_runs_for_server_infobase() {
+    let (_dir, config_path, build_calls, test_calls, _captured_config) =
+        setup_project("work", JUNIT_SMOKE_REPORT_FIXTURE, "", 0, false, 5, None);
+    configure_server_infobase(&config_path);
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "test",
+            "--no-build",
+            "yaxunit",
+            "all",
+        ])
+        .output()
+        .expect("run");
+
+    assert!(output.status.success());
+    assert!(!build_calls.exists());
+    assert!(test_calls.exists());
+}
+
+#[test]
+fn test_no_build_rejects_missing_file_infobase_before_platform_launch() {
+    let (dir, config_path, build_calls, test_calls, _captured_config) =
+        setup_project("work", JUNIT_SMOKE_REPORT_FIXTURE, "", 0, false, 5, None);
+    configure_file_infobase(
+        &config_path,
+        &dir.path().join("missing-marker-ib"),
+        FileInfobaseState::MissingMarker,
+    );
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "test",
+            "--no-build",
+            "yaxunit",
+            "all",
+        ])
+        .output()
+        .expect("run");
+
+    assert!(!output.status.success());
+    assert!(!build_calls.exists());
+    assert!(!test_calls.exists());
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(
+        payload["data"]["execution"]["errors"][0]["code"],
+        "infobase_unavailable"
+    );
 }
 
 #[test]
@@ -806,6 +992,60 @@ fn test_va_builds_vanessa_command_and_overlay() {
         payload["data"]["report"]["extracted_errors"][0],
         "Ошибка VA из текстового лога"
     );
+}
+
+#[test]
+fn test_va_no_build_skips_build_for_prepared_file_infobase() {
+    let (dir, config_path, build_calls, test_calls, _captured_params) =
+        setup_va_project(JUNIT_SMOKE_REPORT_FIXTURE, &[]);
+    let infobase_path = dir.path().join("prepared-va-ib");
+    configure_file_infobase(&config_path, &infobase_path, FileInfobaseState::Prepared);
+    let database_path = infobase_path.join("1Cv8.1CD");
+    let database_before = fs::read(&database_path).expect("database contents before test");
+    let modified_before = fs::metadata(&database_path)
+        .and_then(|metadata| metadata.modified())
+        .expect("database timestamp before test");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "test",
+            "--no-build",
+            "va",
+        ])
+        .output()
+        .expect("run");
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !build_calls.exists(),
+        "no-build must not invoke Designer build"
+    );
+    assert!(test_calls.exists(), "Vanessa test engine must still run");
+    assert_eq!(
+        fs::read(&database_path).expect("database contents after test"),
+        database_before
+    );
+    assert_eq!(
+        fs::metadata(&database_path)
+            .and_then(|metadata| metadata.modified())
+            .expect("database timestamp after test"),
+        modified_before
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert!(payload["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .any(|step| step["name"] == "build" && step["status"] == "skipped"));
 }
 
 #[test]
