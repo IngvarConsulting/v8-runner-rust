@@ -45,7 +45,7 @@ bash scripts/test/ci-rust.sh
 
 Поведение:
 
-- `V8_RUNNER_CI_SCOPE=contract` запускает `cargo test --locked` на Linux и `cargo check --locked --all-targets` на Windows, пока Windows test suite не hardened
+- `V8_RUNNER_CI_SCOPE=contract` запускает `cargo test --locked` на Linux, а на Windows — `cargo check --locked --all-targets`, проверку наличия и точечный запуск регрессий detached/managed-detached stdio EOF, пока Windows test suite не hardened
 - `V8_RUNNER_CI_SCOPE=full` всегда запускает `cargo test --locked`
 - `V8_RUNNER_CI_SCOPE=runtime-locks` запускает только lock-focused regression subset
 - `V8_RUNNER_CI_SCOPE=happy-path` запускает Rust/non-live цепочку `build -> cargo check`, затем `live-cli-fixture`; `cargo test` пропускается только при явном `V8TR_CI_SKIP_DUPLICATE_RUST_TESTS=1`, когда этот же workflow полагается на contract job для full Linux test coverage
