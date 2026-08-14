@@ -503,7 +503,10 @@ fn classify_probe_failure(
     target_kind: LoadTargetKind,
     combined_output: &str,
 ) -> CompatibilityState {
-    let lower = combined_output.to_ascii_lowercase();
+    // Unicode-aware on purpose: the platform capitalises its Russian
+    // diagnostics, and `to_ascii_lowercase` leaves Cyrillic untouched, so every
+    // Russian branch below would silently never match.
+    let lower = combined_output.to_lowercase();
     match target_kind {
         LoadTargetKind::Configuration => {
             if lower.contains("vendorconfiguration")
@@ -517,15 +520,19 @@ fn classify_probe_failure(
             }
         }
         LoadTargetKind::Extension => {
-            if (lower.contains("extension") || lower.contains("расширен"))
-                && (lower.contains("not found") || lower.contains("не найден"))
-            {
-                CompatibilityState::NotSupported
-            } else if (lower.contains("extension") || lower.contains("расширен"))
-                && (lower.contains("not supported")
-                    || lower.contains("unsupported")
-                    || lower.contains("не поддерж"))
-            {
+            let mentions_extension = lower.contains("extension") || lower.contains("расширен");
+            // An extension the infobase does not carry yet. Designer reports it
+            // as "Конфигурация 'Расширение конфигурации' недоступна", which is
+            // the normal state before the very first load.
+            let absent = lower.contains("not found")
+                || lower.contains("не найден")
+                || lower.contains("unavailable")
+                || lower.contains("not available")
+                || lower.contains("недоступ");
+            let unsupported = lower.contains("not supported")
+                || lower.contains("unsupported")
+                || lower.contains("не поддерж");
+            if mentions_extension && (absent || unsupported) {
                 CompatibilityState::NotSupported
             } else {
                 CompatibilityState::Unknown
@@ -895,7 +902,7 @@ fn with_platform_log_artifact(
 
 #[cfg(test)]
 mod tests {
-    use super::{execute, resolve_request};
+    use super::{classify_probe_failure, execute, resolve_request};
     use crate::config::model::{
         AppConfig, BuildConfig, BuilderBackend, PlatformToolConfig, SourceFormat, TestsConfig,
         ToolsConfig,
@@ -979,6 +986,40 @@ mod tests {
             mcp: Default::default(),
             tests: TestsConfig::default(),
         }
+    }
+
+    /// Designer reports an absent extension as "Конфигурация 'Расширение
+    /// конфигурации' недоступна". A first load of an extension the infobase
+    /// does not have yet must classify as NotSupported so that `--mode load`
+    /// proceeds instead of failing the compatibility probe.
+    /// https://github.com/IngvarConsulting/unica/issues/355
+    #[test]
+    fn absent_extension_probe_failure_classifies_as_not_supported() {
+        let combined = "Конфигурация 'Расширение конфигурации' недоступна";
+        assert_eq!(
+            classify_probe_failure(LoadTargetKind::Extension, combined),
+            CompatibilityState::NotSupported
+        );
+    }
+
+    #[test]
+    fn absent_extension_probe_failure_classifies_as_not_supported_english() {
+        let combined = "Configuration 'Configuration extension' is unavailable";
+        assert_eq!(
+            classify_probe_failure(LoadTargetKind::Extension, combined),
+            CompatibilityState::NotSupported
+        );
+    }
+
+    /// The widened wording must not turn an unrelated extension probe failure
+    /// into a silent NotSupported verdict.
+    #[test]
+    fn unrelated_extension_probe_failure_stays_unknown() {
+        let combined = "Ошибка при выполнении операции сравнения";
+        assert_eq!(
+            classify_probe_failure(LoadTargetKind::Extension, combined),
+            CompatibilityState::Unknown
+        );
     }
 
     #[cfg(unix)]
