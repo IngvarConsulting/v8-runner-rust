@@ -34,7 +34,7 @@ v8-runner config init
 - добавляет modeline `yaml-language-server` со ссылкой на опубликованный schema artifact в
   ветке `master`;
 - создаёт рядом пустой `v8project.local.yaml` с modeline на
-  `https://raw.githubusercontent.com/alkoleft/v8-runner-rust/master/docs/schemas/v8project.local.schema.json`;
+  `https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.local.schema.json`;
 - добавляет `v8project.local.yaml` в `.gitignore`, если подходящий pattern еще не указан;
 - заполняет `source-set` по найденным исходникам;
 - не перезаписывает существующий файл без `--force`;
@@ -71,7 +71,7 @@ schema artifacts для редактирования `v8project.yaml` и `v8proj
 `v8-runner config init` пишет в начало `v8project.yaml` modeline:
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/alkoleft/v8-runner-rust/master/docs/schemas/v8project.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.schema.json
 ```
 
 В VS Code установите расширение `redhat.vscode-yaml`. Оно использует эту строку
@@ -80,7 +80,7 @@ schema artifacts для редактирования `v8project.yaml` и `v8proj
 Для `v8project.local.yaml` `config init` пишет отдельную modeline:
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/alkoleft/v8-runner-rust/master/docs/schemas/v8project.local.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.local.schema.json
 ```
 
 Если local overlay создаётся вручную, добавьте это в `.vscode/settings.json` проекта или в user
@@ -89,7 +89,7 @@ settings:
 ```json
 {
   "yaml.schemas": {
-    "https://raw.githubusercontent.com/alkoleft/v8-runner-rust/master/docs/schemas/v8project.local.schema.json": "v8project.local.yaml"
+    "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.local.schema.json": "v8project.local.yaml"
   }
 }
 ```

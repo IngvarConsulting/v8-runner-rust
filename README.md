@@ -1,5 +1,11 @@
 # v8-runner
 
+> **Maintained fork.** This repository is developed and released by
+> [Ingvar Consulting](https://github.com/IngvarConsulting). It was forked from
+> [`alkoleft/v8-runner-rust`](https://github.com/alkoleft/v8-runner-rust) on
+> 2026-09-02. See [FORK_NOTICE.md](FORK_NOTICE.md) for provenance, modification,
+> source, and AGPL information.
+
 `v8-runner` — CLI (командная строка) и MCP server (сервер Model Context Protocol) для
 локального 1C development workflow (цикла разработки 1С). Он собирает исходники, готовит
 информационную базу, запускает проверки и тесты, выгружает изменения обратно в файлы и дает

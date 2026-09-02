@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use support::{temp_workspace, v8_runner_command};
 
 const V8_EXTERNAL_OBJECTS_NATURE: &str = "com._1c.g5.v8.dt.core.V8ExternalObjectsNature";
-const LOCAL_CONFIG_SCHEMA_MODEL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/alkoleft/v8-runner-rust/master/docs/schemas/v8project.local.schema.json";
+const LOCAL_CONFIG_SCHEMA_MODEL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.local.schema.json";
 
 fn copy_dir_all(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).expect("create dst");
@@ -85,7 +85,7 @@ fn config_init_creates_yaml_with_detected_designer_sources() {
     assert!(output.status.success());
     let config = fs::read_to_string(dir.path().join("v8project.yaml")).expect("config");
     assert!(config.starts_with(
-        "# yaml-language-server: $schema=https://raw.githubusercontent.com/alkoleft/v8-runner-rust/master/docs/schemas/v8project.schema.json\n"
+        "# yaml-language-server: $schema=https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.schema.json\n"
     ));
     serde_yaml::from_str::<serde_yaml::Value>(&config).expect("generated config remains YAML");
     assert!(config.contains("format: DESIGNER"));

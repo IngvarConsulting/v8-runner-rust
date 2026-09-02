@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use support::{temp_workspace, v8_runner_command, write_shell_script as write_script};
 
-const LOCAL_CONFIG_SCHEMA_MODEL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/alkoleft/v8-runner-rust/master/docs/schemas/v8project.local.schema.json";
+const LOCAL_CONFIG_SCHEMA_MODEL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.local.schema.json";
 
 fn write_designer_dump_script(path: &Path, calls_log: &Path, exit_code: i32) {
     let body = format!(

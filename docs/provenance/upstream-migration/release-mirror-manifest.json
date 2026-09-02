@@ -1,0 +1,643 @@
+{
+  "source": "alkoleft/v8-runner-rust",
+  "target": "IngvarConsulting/v8-runner-rust",
+  "verified_archival_mirrors": [
+    {
+      "tag": "v0.2.0",
+      "source_release_id": 311068430,
+      "source_html_url": "https://github.com/alkoleft/v8-runner-rust/releases/tag/v0.2.0",
+      "source_author": "github-actions[bot]",
+      "source_created_at": "2026-04-20T08:24:51Z",
+      "source_published_at": "2026-04-20T09:17:01Z",
+      "source_tag_ref_sha": "fa25fd8d5830374a957dc55c0d25503745a69e27",
+      "target_tag_ref_sha": "fa25fd8d5830374a957dc55c0d25503745a69e27",
+      "prerelease": false,
+      "assets": [
+        {
+          "source_asset_id": 400556581,
+          "name": "v8-runner-linux-x86_64-musl.tar.gz",
+          "size": 2104760,
+          "sha256": "6fa474307f34975359c7304fe0c16516dd3a51e7f42f246b4479b25988f3a42a",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-04-20T08:29:48Z",
+          "source_updated_at": "2026-04-20T08:29:49Z"
+        },
+        {
+          "source_asset_id": 400556576,
+          "name": "v8-runner-linux-x86_64-musl.tar.gz.sha256",
+          "size": 101,
+          "sha256": "ca0b285cc4d31a8ff51b4bfd0b6c028e67797533101d8066053d015f9046925d",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-04-20T08:29:48Z",
+          "source_updated_at": "2026-04-20T08:29:48Z"
+        },
+        {
+          "source_asset_id": 400556579,
+          "name": "v8-runner-macos-aarch64.tar.gz",
+          "size": 1727207,
+          "sha256": "7e0513faa9dc99fe2cc9557dccffc82d3cc3eead54310d23b922b582ec161944",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-04-20T08:29:48Z",
+          "source_updated_at": "2026-04-20T08:29:49Z"
+        },
+        {
+          "source_asset_id": 400556578,
+          "name": "v8-runner-macos-aarch64.tar.gz.sha256",
+          "size": 97,
+          "sha256": "8215672cc8993551aefe1077360aa1348143f89f27f92202e7ad8e1fb0debe0f",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-04-20T08:29:48Z",
+          "source_updated_at": "2026-04-20T08:29:48Z"
+        },
+        {
+          "source_asset_id": 400556580,
+          "name": "v8-runner-macos-x86_64.tar.gz",
+          "size": 1817831,
+          "sha256": "6251f3f6ec5fc950b0c23cc9f481a8fca6018a5d84760756f6abbdf9fff5c82c",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-04-20T08:29:48Z",
+          "source_updated_at": "2026-04-20T08:29:49Z"
+        },
+        {
+          "source_asset_id": 400556575,
+          "name": "v8-runner-macos-x86_64.tar.gz.sha256",
+          "size": 96,
+          "sha256": "9a1a54203809afa46759cd1bd78918dca4b1cc5290f750c89a536c9e4b49685c",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-04-20T08:29:48Z",
+          "source_updated_at": "2026-04-20T08:29:48Z"
+        },
+        {
+          "source_asset_id": 400556577,
+          "name": "v8-runner-windows-x86_64.zip",
+          "size": 1697379,
+          "sha256": "bbb8c2d66f4b5dbd5b2cec4283a6c92a509c98f1480b6eb773266d4f180db6fa",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-04-20T08:29:48Z",
+          "source_updated_at": "2026-04-20T08:29:49Z"
+        },
+        {
+          "source_asset_id": 400556574,
+          "name": "v8-runner-windows-x86_64.zip.sha256",
+          "size": 95,
+          "sha256": "460cf08158fafb17e3a15cdcc1386afb1bf2d9cbd79a7b9856faaefb7f748d01",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-04-20T08:29:48Z",
+          "source_updated_at": "2026-04-20T08:29:48Z"
+        }
+      ],
+      "target_extra_license_sha256": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
+      "license_source": "d2427b12acbb50af1a01071c490720e89d2d4011",
+      "source_name": "v0.2.0",
+      "target_release_id": 381134722,
+      "target_html_url": "https://github.com/IngvarConsulting/v8-runner-rust/releases/tag/v0.2.0",
+      "target_published_at": "2026-09-02T09:46:02Z"
+    },
+    {
+      "tag": "v0.3.0",
+      "source_release_id": 311463449,
+      "source_html_url": "https://github.com/alkoleft/v8-runner-rust/releases/tag/v0.3.0",
+      "source_author": "github-actions[bot]",
+      "source_created_at": "2026-04-20T23:25:45Z",
+      "source_published_at": "2026-04-20T23:35:01Z",
+      "source_tag_ref_sha": "d6e3616fe572fe1f1c01b90ba9fc75b9e1a94e7c",
+      "target_tag_ref_sha": "d6e3616fe572fe1f1c01b90ba9fc75b9e1a94e7c",
+      "prerelease": false,
+      "assets": [
+        {
+          "source_asset_id": 401113246,
+          "name": "v8-runner-linux-x86_64-musl.tar.gz",
+          "size": 2524384,
+          "sha256": "a11925ab14e77bd82268b68d17cd35f7a5165a60cf229ca471447695bad58069",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-04-20T23:32:58Z",
+          "source_updated_at": "2026-04-20T23:32:58Z"
+        },
+        {
+          "source_asset_id": 401113244,
+          "name": "v8-runner-linux-x86_64-musl.tar.gz.sha256",
+          "size": 101,
+          "sha256": "8abf5679ea86f7dfaaf72d4b289a9b7427bed901dfc5fa1e62453f0556781a0c",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-04-20T23:32:58Z",
+          "source_updated_at": "2026-04-20T23:32:58Z"
+        },
+        {
+          "source_asset_id": 401113245,
+          "name": "v8-runner-macos-aarch64.tar.gz",
+          "size": 2167019,
+          "sha256": "2ac60264923eb17b8bd167a36d8de6d79ac605778ce988f3cfdc850016d15540",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-04-20T23:32:58Z",
+          "source_updated_at": "2026-04-20T23:32:58Z"
+        },
+        {
+          "source_asset_id": 401113242,
+          "name": "v8-runner-macos-aarch64.tar.gz.sha256",
+          "size": 97,
+          "sha256": "3f85c8fc3750d75447115d32176acadf2f4a2e6bc2043619a8c7e979cb94394a",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-04-20T23:32:58Z",
+          "source_updated_at": "2026-04-20T23:32:58Z"
+        },
+        {
+          "source_asset_id": 401113247,
+          "name": "v8-runner-macos-x86_64.tar.gz",
+          "size": 2202033,
+          "sha256": "f58bdec1f1693d154485172a8c2ae02a8bf0444554bfdd96a7a147b93c10e691",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-04-20T23:32:58Z",
+          "source_updated_at": "2026-04-20T23:32:58Z"
+        },
+        {
+          "source_asset_id": 401113240,
+          "name": "v8-runner-macos-x86_64.tar.gz.sha256",
+          "size": 96,
+          "sha256": "1e7fead22919e346d4e92a39846854237d976e751dceb0c48315b0c7d0ea21f5",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-04-20T23:32:58Z",
+          "source_updated_at": "2026-04-20T23:32:58Z"
+        },
+        {
+          "source_asset_id": 401113243,
+          "name": "v8-runner-windows-x86_64.zip",
+          "size": 1864169,
+          "sha256": "3e0e4eb25a85f3baaff07e2e9ca819c533252e2929dbc85c12bad6470611ec1c",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-04-20T23:32:58Z",
+          "source_updated_at": "2026-04-20T23:32:58Z"
+        },
+        {
+          "source_asset_id": 401113239,
+          "name": "v8-runner-windows-x86_64.zip.sha256",
+          "size": 95,
+          "sha256": "e19fdaf15ef91cdc8728e03798d1bb066ebdfc87426891f77fd313efd1f322e1",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-04-20T23:32:58Z",
+          "source_updated_at": "2026-04-20T23:32:58Z"
+        }
+      ],
+      "target_extra_license_sha256": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
+      "license_source": "d2427b12acbb50af1a01071c490720e89d2d4011",
+      "source_name": "v0.3.0",
+      "target_release_id": 381134754,
+      "target_html_url": "https://github.com/IngvarConsulting/v8-runner-rust/releases/tag/v0.3.0",
+      "target_published_at": "2026-09-02T09:46:03Z"
+    },
+    {
+      "tag": "v0.4.0",
+      "source_release_id": 316425360,
+      "source_html_url": "https://github.com/alkoleft/v8-runner-rust/releases/tag/v0.4.0",
+      "source_author": "github-actions[bot]",
+      "source_created_at": "2026-05-01T15:17:02Z",
+      "source_published_at": "2026-05-01T16:47:08Z",
+      "source_tag_ref_sha": "5c94f767775271598c142dd85c69aabaf196ada0",
+      "target_tag_ref_sha": "5c94f767775271598c142dd85c69aabaf196ada0",
+      "prerelease": false,
+      "assets": [
+        {
+          "source_asset_id": 409940117,
+          "name": "v8-runner-linux-x86_64-musl.tar.gz",
+          "size": 2652648,
+          "sha256": "f29421da785ad3a40210863843c6c7db2fb52f74dc92a3bd2ba4dec349a77b53",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-01T15:21:33Z",
+          "source_updated_at": "2026-05-01T15:21:33Z"
+        },
+        {
+          "source_asset_id": 409940116,
+          "name": "v8-runner-linux-x86_64-musl.tar.gz.sha256",
+          "size": 101,
+          "sha256": "553916d40e7ba4030c7a7d31ca113b86eb143513570a5cd8d9dee9ca3520a762",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-01T15:21:33Z",
+          "source_updated_at": "2026-05-01T15:21:33Z"
+        },
+        {
+          "source_asset_id": 409940115,
+          "name": "v8-runner-macos-aarch64.tar.gz",
+          "size": 2283302,
+          "sha256": "04e74a138467f5a0a2ba33553150a4768a7db8f42c8258efab9ab8ffc00c0597",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-01T15:21:33Z",
+          "source_updated_at": "2026-05-01T15:21:33Z"
+        },
+        {
+          "source_asset_id": 409940114,
+          "name": "v8-runner-macos-aarch64.tar.gz.sha256",
+          "size": 97,
+          "sha256": "cf48dca2b5354005a86b22def2e2daea674ec04583088c884c1daaf2fb5ccd41",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-01T15:21:33Z",
+          "source_updated_at": "2026-05-01T15:21:33Z"
+        },
+        {
+          "source_asset_id": 409940113,
+          "name": "v8-runner-macos-x86_64.tar.gz",
+          "size": 2316980,
+          "sha256": "ae9a3c356b4d068614a9f07d865e7ee107862df72f7270aa4442f6e5b38f49fb",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-01T15:21:33Z",
+          "source_updated_at": "2026-05-01T15:21:33Z"
+        },
+        {
+          "source_asset_id": 409940111,
+          "name": "v8-runner-macos-x86_64.tar.gz.sha256",
+          "size": 96,
+          "sha256": "9e4af3e5b6b852bc91a1c1a04cfe48e4bd83f0c66b9a2cc7a1ed874cd55aa726",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-01T15:21:33Z",
+          "source_updated_at": "2026-05-01T15:21:33Z"
+        },
+        {
+          "source_asset_id": 409940112,
+          "name": "v8-runner-windows-x86_64.zip",
+          "size": 1972441,
+          "sha256": "c463d9b702e5fe6dea0f56ecbcef65e48d7f9a53c9267a5bca8ad6b3ce03e0d3",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-01T15:21:33Z",
+          "source_updated_at": "2026-05-01T15:21:33Z"
+        },
+        {
+          "source_asset_id": 409940110,
+          "name": "v8-runner-windows-x86_64.zip.sha256",
+          "size": 95,
+          "sha256": "1aa9980d79205dc579e876156ace0d069fa7f95399cae7ad02ebea2f2641ca79",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-01T15:21:33Z",
+          "source_updated_at": "2026-05-01T15:21:33Z"
+        }
+      ],
+      "target_extra_license_sha256": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
+      "license_source": "v0.4.0",
+      "source_name": "v0.4.0",
+      "target_release_id": 381134794,
+      "target_html_url": "https://github.com/IngvarConsulting/v8-runner-rust/releases/tag/v0.4.0",
+      "target_published_at": "2026-09-02T09:46:04Z"
+    },
+    {
+      "tag": "v0.4.1",
+      "source_release_id": 316550160,
+      "source_html_url": "https://github.com/alkoleft/v8-runner-rust/releases/tag/v0.4.1",
+      "source_author": "github-actions[bot]",
+      "source_created_at": "2026-05-01T22:19:24Z",
+      "source_published_at": "2026-05-02T22:12:31Z",
+      "source_tag_ref_sha": "43966e1cb18be2213eb2ff90165fe318021f097a",
+      "target_tag_ref_sha": "43966e1cb18be2213eb2ff90165fe318021f097a",
+      "prerelease": false,
+      "assets": [
+        {
+          "source_asset_id": 410156222,
+          "name": "v8-runner-linux-x86_64-musl.tar.gz",
+          "size": 2652201,
+          "sha256": "a732f322dd0c3692eb5575f8421724f5ee9feb2e94e7e8d5a77f0079c6722ba3",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-01T22:23:21Z",
+          "source_updated_at": "2026-05-01T22:23:21Z"
+        },
+        {
+          "source_asset_id": 410156220,
+          "name": "v8-runner-linux-x86_64-musl.tar.gz.sha256",
+          "size": 101,
+          "sha256": "200eb90a49c9e4f9819f32f592e0f3267918adf257e334fca9f6da4050e1e936",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-01T22:23:21Z",
+          "source_updated_at": "2026-05-01T22:23:21Z"
+        },
+        {
+          "source_asset_id": 410156219,
+          "name": "v8-runner-macos-aarch64.tar.gz",
+          "size": 2287846,
+          "sha256": "c2682355ed92c49ee4695673bc46498a8e3156e2df159d017a9abfa37018ae6d",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-01T22:23:21Z",
+          "source_updated_at": "2026-05-01T22:23:21Z"
+        },
+        {
+          "source_asset_id": 410156217,
+          "name": "v8-runner-macos-aarch64.tar.gz.sha256",
+          "size": 97,
+          "sha256": "52b2fa7e362ec71daf6cbb79f8745d68b310ee95680318498342b1659a7b0bbd",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-01T22:23:21Z",
+          "source_updated_at": "2026-05-01T22:23:21Z"
+        },
+        {
+          "source_asset_id": 410156218,
+          "name": "v8-runner-macos-x86_64.tar.gz",
+          "size": 2329302,
+          "sha256": "6a9539ce4cf87da57601320f004bbe06e47e1363d772af2e701a16234c4d9e43",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-01T22:23:21Z",
+          "source_updated_at": "2026-05-01T22:23:21Z"
+        },
+        {
+          "source_asset_id": 410156216,
+          "name": "v8-runner-macos-x86_64.tar.gz.sha256",
+          "size": 96,
+          "sha256": "d66e59fb0745a9a9d47eed6dfad991c9037617aa1ff555086738c8db9060883b",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-01T22:23:21Z",
+          "source_updated_at": "2026-05-01T22:23:21Z"
+        },
+        {
+          "source_asset_id": 410156221,
+          "name": "v8-runner-windows-x86_64.zip",
+          "size": 1979924,
+          "sha256": "0232af02e9e330eb4900f2f26fa1b32813c94e4979526015760be7763a356057",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-01T22:23:21Z",
+          "source_updated_at": "2026-05-01T22:23:21Z"
+        },
+        {
+          "source_asset_id": 410156215,
+          "name": "v8-runner-windows-x86_64.zip.sha256",
+          "size": 95,
+          "sha256": "8af0a50e5694d92ee86efef99393900c08b83b054bdaa470d241aba7b7f80fef",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-01T22:23:21Z",
+          "source_updated_at": "2026-05-01T22:23:21Z"
+        }
+      ],
+      "target_extra_license_sha256": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
+      "license_source": "v0.4.1",
+      "source_name": "v0.4.1",
+      "target_release_id": 381134842,
+      "target_html_url": "https://github.com/IngvarConsulting/v8-runner-rust/releases/tag/v0.4.1",
+      "target_published_at": "2026-09-02T09:46:06Z"
+    },
+    {
+      "tag": "v0.5.0",
+      "source_release_id": 320838625,
+      "source_html_url": "https://github.com/alkoleft/v8-runner-rust/releases/tag/v0.5.0",
+      "source_author": "github-actions[bot]",
+      "source_created_at": "2026-05-11T23:29:48Z",
+      "source_published_at": "2026-05-11T23:34:35Z",
+      "source_tag_ref_sha": "b3542b1fa54e61f79f7c84f61b2d2c89d7775383",
+      "target_tag_ref_sha": "b3542b1fa54e61f79f7c84f61b2d2c89d7775383",
+      "prerelease": false,
+      "assets": [
+        {
+          "source_asset_id": 417862312,
+          "name": "v8-runner-linux-x86_64-musl.tar.gz",
+          "size": 3766813,
+          "sha256": "382df9a95e12a074fa78a4b21ee2e327edce98531b562bab6765a88d979a2037",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-11T23:34:14Z",
+          "source_updated_at": "2026-05-11T23:34:15Z"
+        },
+        {
+          "source_asset_id": 417862316,
+          "name": "v8-runner-linux-x86_64-musl.tar.gz.sha256",
+          "size": 101,
+          "sha256": "c8b722ce99bf1e40bb38787f1ed9a53956bb14b3840707df023f2808229ad631",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-11T23:34:14Z",
+          "source_updated_at": "2026-05-11T23:34:14Z"
+        },
+        {
+          "source_asset_id": 417862308,
+          "name": "v8-runner-macos-aarch64.tar.gz",
+          "size": 3325183,
+          "sha256": "09067d0928e3b3699816f87ebb029dd83c8f039feb7d2657297974deb7e17fba",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-11T23:34:14Z",
+          "source_updated_at": "2026-05-11T23:34:15Z"
+        },
+        {
+          "source_asset_id": 417862313,
+          "name": "v8-runner-macos-aarch64.tar.gz.sha256",
+          "size": 97,
+          "sha256": "2af6c613e0d3225078d219e2bac81fee6c8c2a72a1efa491614367b1d57f7b7f",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-11T23:34:14Z",
+          "source_updated_at": "2026-05-11T23:34:14Z"
+        },
+        {
+          "source_asset_id": 417862311,
+          "name": "v8-runner-macos-x86_64.tar.gz",
+          "size": 3387183,
+          "sha256": "b3de7e8e2d303e91f0f6e9217f3da5acc488e30d9c309bf16beb3fc540c176c9",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-11T23:34:14Z",
+          "source_updated_at": "2026-05-11T23:34:15Z"
+        },
+        {
+          "source_asset_id": 417862314,
+          "name": "v8-runner-macos-x86_64.tar.gz.sha256",
+          "size": 96,
+          "sha256": "58f54e472faa623118d3f2acf307e286a4e922b6308b480ccd60b572aeb147de",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-11T23:34:14Z",
+          "source_updated_at": "2026-05-11T23:34:14Z"
+        },
+        {
+          "source_asset_id": 417862309,
+          "name": "v8-runner-windows-x86_64.zip",
+          "size": 2891209,
+          "sha256": "5b0be077b865872c562ba733b8c7efdf92ad9e88f7da94aea3537f9e2799af86",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-11T23:34:14Z",
+          "source_updated_at": "2026-05-11T23:34:14Z"
+        },
+        {
+          "source_asset_id": 417862310,
+          "name": "v8-runner-windows-x86_64.zip.sha256",
+          "size": 95,
+          "sha256": "93cbf2018837ffb89df668351aa6f80d4c0566f8eabc2d5a92c6ca4e2dcc8810",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-11T23:34:14Z",
+          "source_updated_at": "2026-05-11T23:34:14Z"
+        }
+      ],
+      "target_extra_license_sha256": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
+      "license_source": "v0.5.0",
+      "source_name": "v0.5.0",
+      "target_release_id": 381134878,
+      "target_html_url": "https://github.com/IngvarConsulting/v8-runner-rust/releases/tag/v0.5.0",
+      "target_published_at": "2026-09-02T09:46:07Z"
+    },
+    {
+      "tag": "v0.5.1",
+      "source_release_id": 329040394,
+      "source_html_url": "https://github.com/alkoleft/v8-runner-rust/releases/tag/v0.5.1",
+      "source_author": "github-actions[bot]",
+      "source_created_at": "2026-05-25T19:39:38Z",
+      "source_published_at": "2026-05-25T19:45:40Z",
+      "source_tag_ref_sha": "6431662517a76a920d85fa4c3820f2e74717518b",
+      "target_tag_ref_sha": "6431662517a76a920d85fa4c3820f2e74717518b",
+      "prerelease": false,
+      "assets": [
+        {
+          "source_asset_id": 429606284,
+          "name": "v8-runner-linux-x86_64-musl.tar.gz",
+          "size": 3773697,
+          "sha256": "032c6fbfe6b9db0c3ad285ade12bfdf2c5265577274d23b80b685d49532a3866",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-25T19:45:08Z",
+          "source_updated_at": "2026-05-25T19:45:09Z"
+        },
+        {
+          "source_asset_id": 429606280,
+          "name": "v8-runner-linux-x86_64-musl.tar.gz.sha256",
+          "size": 101,
+          "sha256": "a324e26faf0ca8b31a905ee2ef44ce210124dc3f06522f57d5264a4f353a0407",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-25T19:45:08Z",
+          "source_updated_at": "2026-05-25T19:45:08Z"
+        },
+        {
+          "source_asset_id": 429606281,
+          "name": "v8-runner-macos-aarch64.tar.gz",
+          "size": 3323318,
+          "sha256": "6a5c30e67a354746c3b91586e4b59a45186b258293fe4b54057a1fd3b92c63b8",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-25T19:45:08Z",
+          "source_updated_at": "2026-05-25T19:45:08Z"
+        },
+        {
+          "source_asset_id": 429606282,
+          "name": "v8-runner-macos-aarch64.tar.gz.sha256",
+          "size": 97,
+          "sha256": "ce1c089d6293d99e8ad3cd8c616380df58dca7b9cc78f12a08d984f333361606",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-25T19:45:08Z",
+          "source_updated_at": "2026-05-25T19:45:08Z"
+        },
+        {
+          "source_asset_id": 429606283,
+          "name": "v8-runner-macos-x86_64.tar.gz",
+          "size": 3395766,
+          "sha256": "3e86c75b15991951526db5579b3d3e3f6947882df34857397480ffba6977feca",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-25T19:45:08Z",
+          "source_updated_at": "2026-05-25T19:45:08Z"
+        },
+        {
+          "source_asset_id": 429606279,
+          "name": "v8-runner-macos-x86_64.tar.gz.sha256",
+          "size": 96,
+          "sha256": "0f67376f57302379192f65e9e5857b6fd5cbc380f3e38432109fdb8a40ea3614",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-25T19:45:08Z",
+          "source_updated_at": "2026-05-25T19:45:08Z"
+        },
+        {
+          "source_asset_id": 429606278,
+          "name": "v8-runner-windows-x86_64.zip",
+          "size": 2891033,
+          "sha256": "0cf1b5b93f79dca19db79cad2610a2a611e73dc1d7b6f5a55879caf1e3b94b34",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-25T19:45:08Z",
+          "source_updated_at": "2026-05-25T19:45:08Z"
+        },
+        {
+          "source_asset_id": 429606277,
+          "name": "v8-runner-windows-x86_64.zip.sha256",
+          "size": 95,
+          "sha256": "62f12ba8f5c71d7a32fee910eb617d1bacef83220769aee71cd42366c0737f09",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-05-25T19:45:08Z",
+          "source_updated_at": "2026-05-25T19:45:08Z"
+        }
+      ],
+      "target_extra_license_sha256": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
+      "license_source": "v0.5.1",
+      "source_name": "v0.5.1",
+      "target_release_id": 381134920,
+      "target_html_url": "https://github.com/IngvarConsulting/v8-runner-rust/releases/tag/v0.5.1",
+      "target_published_at": "2026-09-02T09:46:09Z"
+    },
+    {
+      "tag": "v0.5.2-pre.1",
+      "source_release_id": 350199275,
+      "source_html_url": "https://github.com/alkoleft/v8-runner-rust/releases/tag/v0.5.2-pre.1",
+      "source_author": "github-actions[bot]",
+      "source_created_at": "2026-07-07T11:30:27Z",
+      "source_published_at": "2026-07-07T11:39:52Z",
+      "source_tag_ref_sha": "be558db1c456f2d3a828c0f4de121b980ba6ccdc",
+      "target_tag_ref_sha": "be558db1c456f2d3a828c0f4de121b980ba6ccdc",
+      "prerelease": true,
+      "assets": [
+        {
+          "source_asset_id": 469114480,
+          "name": "v8-runner-linux-x86_64-musl.tar.gz",
+          "size": 3813183,
+          "sha256": "6555593c9a111220907234a82f76c376b6e6ffed0581e871224f7fc0e1157af3",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-07-07T11:38:49Z",
+          "source_updated_at": "2026-07-07T11:38:49Z"
+        },
+        {
+          "source_asset_id": 469114477,
+          "name": "v8-runner-linux-x86_64-musl.tar.gz.sha256",
+          "size": 101,
+          "sha256": "17b4b1881d1ed628021b3dc4163901100557798aea55942ef3b07547b969f843",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-07-07T11:38:49Z",
+          "source_updated_at": "2026-07-07T11:38:49Z"
+        },
+        {
+          "source_asset_id": 469114483,
+          "name": "v8-runner-macos-aarch64.tar.gz",
+          "size": 3357608,
+          "sha256": "67aef3ca30467b9d3ef9954c574bb4e0e3bc9e807520b0f46d094a6f96109060",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-07-07T11:38:49Z",
+          "source_updated_at": "2026-07-07T11:38:49Z"
+        },
+        {
+          "source_asset_id": 469114478,
+          "name": "v8-runner-macos-aarch64.tar.gz.sha256",
+          "size": 97,
+          "sha256": "60b9b7eca509c0e1a303eacf3bd1caf7e197ca4800c9669526f0c8327cdbe3f9",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-07-07T11:38:49Z",
+          "source_updated_at": "2026-07-07T11:38:49Z"
+        },
+        {
+          "source_asset_id": 469114479,
+          "name": "v8-runner-macos-x86_64.tar.gz",
+          "size": 3423572,
+          "sha256": "df28522779cc751bc8c2b373ae242c2502d52db83425afd661c75872fcddf792",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-07-07T11:38:49Z",
+          "source_updated_at": "2026-07-07T11:38:49Z"
+        },
+        {
+          "source_asset_id": 469114482,
+          "name": "v8-runner-macos-x86_64.tar.gz.sha256",
+          "size": 96,
+          "sha256": "d1687aaa5707eb1eb49217f057187d744430ea67792a50f29a08d3977dad2f36",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-07-07T11:38:49Z",
+          "source_updated_at": "2026-07-07T11:38:49Z"
+        },
+        {
+          "source_asset_id": 469114475,
+          "name": "v8-runner-windows-x86_64.zip",
+          "size": 2932947,
+          "sha256": "063ed263918f94ba74c05ae5548fb3f3ffdd94a95506bf1868d99401217f64ff",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-07-07T11:38:49Z",
+          "source_updated_at": "2026-07-07T11:38:49Z"
+        },
+        {
+          "source_asset_id": 469114481,
+          "name": "v8-runner-windows-x86_64.zip.sha256",
+          "size": 95,
+          "sha256": "247db820bfe381843f4c22ec895b7c662b875d2d0402600064677b315aaa257b",
+          "source_uploader": "github-actions[bot]",
+          "source_created_at": "2026-07-07T11:38:49Z",
+          "source_updated_at": "2026-07-07T11:38:49Z"
+        }
+      ],
+      "target_extra_license_sha256": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
+      "license_source": "v0.5.2-pre.1",
+      "source_name": "v0.5.2-pre.1",
+      "target_release_id": 381134973,
+      "target_html_url": "https://github.com/IngvarConsulting/v8-runner-rust/releases/tag/v0.5.2-pre.1",
+      "target_published_at": "2026-09-02T09:46:10Z"
+    }
+  ]
+}
