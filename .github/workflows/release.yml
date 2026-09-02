@@ -1,13 +1,10 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to publish, for example v0.1.0"
+        description: "Existing release tag on the current protected master commit"
         required: true
         type: string
       prerelease:
@@ -16,24 +13,35 @@ on:
         default: false
         type: boolean
 
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
 env:
   BIN_NAME: v8-runner
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ inputs.tag }}
 
 jobs:
   preflight:
     name: Verify release contract
+    if: ${{ github.ref == 'refs/heads/master' }}
+    environment: release
     runs-on: ubuntu-latest
-    env:
-      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    permissions:
+      contents: write
     steps:
-      - name: Checkout release ref
+      - name: Checkout exact release tag
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Fetch protected master identity
+        run: git fetch --no-tags origin master:refs/remotes/origin/master
 
       - name: Install Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -42,9 +50,24 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: "1.95.0"
 
-      - name: Verify tag, license, source, and package metadata
+      - name: Verify tag, protected source, license, and package metadata
         run: python3 scripts/release/verify-release-contract.py "${RELEASE_TAG}"
+
+      - name: Refuse a published release and remove only a stale draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          existing_state="$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq .isDraft 2>/dev/null || true)"
+          if [[ "${existing_state}" == "false" ]]; then
+            echo "published release ${RELEASE_TAG} already exists" >&2
+            exit 1
+          fi
+          if [[ "${existing_state}" == "true" ]]; then
+            gh release delete "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --yes
+          fi
 
       - name: Run release tests
         run: cargo test --locked
@@ -53,6 +76,12 @@ jobs:
     name: Build ${{ matrix.artifact_name }}
     needs: preflight
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_deployment_target }}
     strategy:
       fail-fast: false
       matrix:
@@ -61,36 +90,44 @@ jobs:
             target: x86_64-unknown-linux-musl
             make_task: build-release-linux-musl
             artifact_name: v8-runner-linux-x86_64-musl
+            unica_asset_name: v8-runner-linux-x64
             bin_suffix: ""
             archive_ext: tar.gz
             linux_deps: musl-tools
+            macos_deployment_target: ""
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             make_task: build-release-windows-64
             artifact_name: v8-runner-windows-x86_64
+            unica_asset_name: v8-runner-win-x64.exe
             bin_suffix: ".exe"
             archive_ext: zip
             linux_deps: ""
+            macos_deployment_target: ""
           - os: macos-15-intel
             target: x86_64-apple-darwin
             make_task: build-release-macos-x64
             artifact_name: v8-runner-macos-x86_64
+            unica_asset_name: ""
             bin_suffix: ""
             archive_ext: tar.gz
             linux_deps: ""
+            macos_deployment_target: "10.12"
           - os: macos-latest
             target: aarch64-apple-darwin
             make_task: build-release-macos-arm64
             artifact_name: v8-runner-macos-aarch64
+            unica_asset_name: v8-runner-darwin-arm64
             bin_suffix: ""
             archive_ext: tar.gz
             linux_deps: ""
+            macos_deployment_target: "11.0"
 
     steps:
-      - name: Checkout release ref
+      - name: Checkout exact release tag
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ inputs.tag }}
 
       - name: Install Linux build dependencies
         if: ${{ matrix.linux_deps != '' }}
@@ -99,6 +136,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
+          toolchain: "1.95.0"
           targets: ${{ matrix.target }}
 
       - name: Cache cargo registry and build output
@@ -112,39 +150,59 @@ jobs:
       - name: Build release binary
         run: cargo make "${{ matrix.make_task }}"
 
+      - name: Verify native binary identity and version
+        shell: bash
+        run: |
+          python3 scripts/release/release_assets.py verify-binary \
+            --binary "target/${{ matrix.target }}/release/${BIN_NAME}${{ matrix.bin_suffix }}" \
+            --target "${{ matrix.target }}" \
+            --version "${RELEASE_TAG#v}"
+
       - name: Package portable artifact
         shell: bash
         run: |
           set -euo pipefail
-
           package_dir="dist/${{ matrix.artifact_name }}"
           binary_path="target/${{ matrix.target }}/release/${BIN_NAME}${{ matrix.bin_suffix }}"
           archive_name="${{ matrix.artifact_name }}.${{ matrix.archive_ext }}"
-
           mkdir -p "${package_dir}"
           cp "${binary_path}" "${package_dir}/"
           cp README.md "${package_dir}/"
           cp LICENSE "${package_dir}/"
           cp FORK_NOTICE.md "${package_dir}/"
           cp -R examples "${package_dir}/examples"
-
-          if [[ "${{ runner.os }}" != "Windows" ]]; then
-            chmod +x "${package_dir}/${BIN_NAME}"
-          fi
-
+          if [[ "${{ runner.os }}" != "Windows" ]]; then chmod +x "${package_dir}/${BIN_NAME}"; fi
           if [[ "${{ matrix.archive_ext }}" == "zip" ]]; then
             (cd dist && 7z a "${archive_name}" "${{ matrix.artifact_name }}")
           else
             (cd dist && tar -czf "${archive_name}" "${{ matrix.artifact_name }}")
           fi
-
           if command -v sha256sum >/dev/null 2>&1; then
             (cd dist && sha256sum "${archive_name}" > "${archive_name}.sha256")
           else
             (cd dist && shasum -a 256 "${archive_name}" > "${archive_name}.sha256")
           fi
 
-      - name: Upload workflow artifact
+      - name: Prepare direct Unica asset
+        if: ${{ matrix.unica_asset_name != '' }}
+        shell: bash
+        run: |
+          python3 scripts/release/release_assets.py prepare-direct \
+            --binary "target/${{ matrix.target }}/release/${BIN_NAME}${{ matrix.bin_suffix }}" \
+            --output "dist/${{ matrix.unica_asset_name }}" \
+            --target "${{ matrix.target }}" \
+            --asset-name "${{ matrix.unica_asset_name }}" \
+            --tag "${RELEASE_TAG}" \
+            --commit "${GITHUB_SHA}" \
+            --version "${RELEASE_TAG#v}"
+
+      - name: Attest direct Unica asset
+        if: ${{ matrix.unica_asset_name != '' }}
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: dist/${{ matrix.unica_asset_name }}
+
+      - name: Upload portable workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.artifact_name }}
@@ -153,30 +211,164 @@ jobs:
             dist/${{ matrix.artifact_name }}.${{ matrix.archive_ext }}.sha256
           if-no-files-found: error
 
+      - name: Upload direct Unica workflow artifact
+        if: ${{ matrix.unica_asset_name != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: direct-${{ matrix.unica_asset_name }}
+          path: |
+            dist/${{ matrix.unica_asset_name }}
+            dist/${{ matrix.unica_asset_name }}.sha256
+            dist/${{ matrix.unica_asset_name }}.provenance.json
+          if-no-files-found: error
+
   publish:
-    name: Publish draft release
+    name: Publish audited draft
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - name: Checkout exact release tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.tag }}
+
       - name: Download release artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist
           merge-multiple: true
 
+      - name: Complete and verify release asset set
+        run: |
+          cp LICENSE dist/license-v8-runner-AGPL-3.0-only.txt
+          cp FORK_NOTICE.md dist/notice-v8-runner-fork.txt
+          python3 scripts/release/release_assets.py write-manifest --dist dist --tag "${RELEASE_TAG}" --commit "${GITHUB_SHA}"
+          test -f dist/v8-runner-assets.json
+          python3 scripts/release/release_assets.py verify-assets --dist dist --tag "${RELEASE_TAG}" --commit "${GITHUB_SHA}"
+
       - name: Publish GitHub draft release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          name: ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ inputs.tag }}
+          name: ${{ inputs.tag }}
           draft: true
-          prerelease: ${{ github.event.inputs.prerelease || false }}
+          prerelease: ${{ inputs.prerelease }}
           generate_release_notes: true
           body: |
             Maintained fork: https://github.com/IngvarConsulting/v8-runner-rust
-            Corresponding source and build scripts: ${{ github.server_url }}/${{ github.repository }}/tree/${{ github.event.inputs.tag || github.ref_name }}
-            License and modification notice are included in every archive.
+            Corresponding source and build scripts: ${{ github.server_url }}/${{ github.repository }}/tree/${{ inputs.tag }}
+            Portable archives and direct Unica binaries are built from the same protected source commit.
+            Direct binaries have SHA-256, provenance metadata, and GitHub build attestations.
           files: |
             dist/*
+
+  audit-native:
+    name: Audit native ${{ matrix.asset }}
+    needs: publish
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset: v8-runner-linux-x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: v8-runner-win-x64.exe
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: v8-runner-darwin-arm64
+    steps:
+      - name: Checkout exact release tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Download draft release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release download "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --dir dist
+
+      - name: Verify exact asset set and native binary
+        shell: bash
+        run: |
+          python3 scripts/release/release_assets.py verify-assets --dist dist --tag "${RELEASE_TAG}" --commit "${GITHUB_SHA}"
+          if [[ "${{ runner.os }}" != "Windows" ]]; then chmod +x "dist/${{ matrix.asset }}"; fi
+          python3 scripts/release/release_assets.py verify-binary --binary "dist/${{ matrix.asset }}" --target "${{ matrix.target }}" --version "${RELEASE_TAG#v}"
+
+  audit-draft:
+    name: Audit draft release
+    needs: [publish, audit-native]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - name: Checkout exact release tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Download and verify draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --dir dist
+          python3 scripts/release/release_assets.py verify-assets --dist dist --tag "${RELEASE_TAG}" --commit "${GITHUB_SHA}"
+          for asset in v8-runner-darwin-arm64 v8-runner-linux-x64 v8-runner-win-x64.exe; do
+            gh attestation verify "dist/${asset}" --repo "${GITHUB_REPOSITORY}" \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+              --source-ref refs/heads/master --source-digest "${GITHUB_SHA}" --deny-self-hosted-runners
+          done
+          gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets \
+            --jq '.assets | map({name,size,digest}) | sort_by(.name)' > release-assets.snapshot.json
+
+      - name: Upload audited snapshot
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: audited-release-snapshot
+          path: release-assets.snapshot.json
+          if-no-files-found: error
+
+  freeze:
+    name: Freeze verified release
+    needs: audit-draft
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      attestations: read
+    steps:
+      - name: Checkout exact release tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Download audited snapshot
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: audited-release-snapshot
+
+      - name: Recheck and freeze the same draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq .isDraft)" = true
+          gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets \
+            --jq '.assets | map({name,size,digest}) | sort_by(.name)' > release-assets.current.json
+          diff -u release-assets.snapshot.json release-assets.current.json
+          gh release download "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --dir dist
+          python3 scripts/release/release_assets.py verify-assets --dist dist --tag "${RELEASE_TAG}" --commit "${GITHUB_SHA}"
+          for asset in v8-runner-darwin-arm64 v8-runner-linux-x64 v8-runner-win-x64.exe; do
+            gh attestation verify "dist/${asset}" --repo "${GITHUB_REPOSITORY}" \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+              --source-ref refs/heads/master --source-digest "${GITHUB_SHA}" --deny-self-hosted-runners
+          done
+          gh release edit "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --verify-tag --draft=false
+          test "$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json isImmutable --jq .isImmutable)" = true
+          gh release verify "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}"

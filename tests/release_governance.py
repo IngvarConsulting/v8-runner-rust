@@ -25,6 +25,57 @@ class ReleaseGovernanceTest(unittest.TestCase):
         self.assertIn('cp LICENSE "${package_dir}/"', workflow)
         self.assertIn('cp FORK_NOTICE.md "${package_dir}/"', workflow)
 
+    def test_release_has_one_protected_entrypoint_and_freezes_only_after_audit(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertNotIn("push:\n    tags:", workflow)
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn("group: release-${{ inputs.tag }}", workflow)
+        self.assertIn("environment: release", workflow)
+        self.assertIn("github.ref == 'refs/heads/master'", workflow)
+        self.assertIn("name: Audit draft release", workflow)
+        self.assertIn("needs: [publish, audit-native]", workflow)
+        self.assertIn("gh release edit", workflow)
+        self.assertIn("--draft=false", workflow)
+        self.assertIn('existing_state="$(gh release view', workflow)
+        self.assertIn('if [[ "${existing_state}" == "false" ]]', workflow)
+        self.assertIn('if [[ "${existing_state}" == "true" ]]', workflow)
+        self.assertIn('gh release delete "${RELEASE_TAG}"', workflow)
+
+    def test_release_publishes_attested_direct_unica_assets(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        for asset in (
+            "v8-runner-darwin-arm64",
+            "v8-runner-linux-x64",
+            "v8-runner-win-x64.exe",
+        ):
+            self.assertIn(asset, workflow)
+        self.assertIn("actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be", workflow)
+        self.assertIn("id-token: write", workflow)
+        self.assertIn("attestations: write", workflow)
+        self.assertIn("v8-runner-assets.json", workflow)
+        self.assertIn("test -f dist/v8-runner-assets.json", workflow)
+        self.assertIn("license-v8-runner-AGPL-3.0-only.txt", workflow)
+        self.assertIn("notice-v8-runner-fork.txt", workflow)
+        self.assertIn("gh attestation verify", workflow)
+        self.assertIn("--deny-self-hosted-runners", workflow)
+        self.assertIn('chmod +x "dist/${{ matrix.asset }}"', workflow)
+
+    def test_release_toolchain_and_source_identity_are_pinned(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        verifier = (ROOT / "scripts/release/verify-release-contract.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('toolchain: "1.95.0"', workflow)
+        self.assertIn("MACOSX_DEPLOYMENT_TARGET", workflow)
+        self.assertIn("refs/remotes/origin/master", verifier)
+        self.assertIn("refs/tags/{args.tag}^{{commit}}", verifier)
+        self.assertIn("GITHUB_SHA", verifier)
+
+    def test_pr_ci_runs_release_asset_contract_tests(self) -> None:
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("python3 tests/release_governance.py", ci)
+        self.assertIn("python3 tests/release_assets.py", ci)
+
     def test_all_actions_are_pinned_to_full_commit_sha(self) -> None:
         for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
             workflow = path.read_text(encoding="utf-8")

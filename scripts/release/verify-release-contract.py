@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -13,6 +14,16 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def fail(message: str) -> None:
     raise SystemExit(f"release contract violation: {message}")
+
+
+def git_revision(name: str) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", name],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    ).stdout.strip()
 
 
 def main() -> None:
@@ -40,7 +51,13 @@ def main() -> None:
     if package.get("repository") != "https://github.com/IngvarConsulting/v8-runner-rust":
         fail("Cargo package must name the maintained fork repository")
 
-    for required in ("Cargo.lock", "LICENSE", "FORK_NOTICE.md", ".github/workflows/release.yml"):
+    for required in (
+        "Cargo.lock",
+        "LICENSE",
+        "FORK_NOTICE.md",
+        ".github/workflows/release.yml",
+        "scripts/release/release_assets.py",
+    ):
         if not (ROOT / required).is_file():
             fail(f"required corresponding-source file is missing: {required}")
 
@@ -50,6 +67,18 @@ def main() -> None:
     ).stdout
     if status:
         fail("release checkout must be clean")
+
+    head = git_revision("HEAD")
+    tag_commit = git_revision(f"refs/tags/{args.tag}^{{commit}}")
+    master = git_revision("refs/remotes/origin/master")
+    workflow_commit = os.environ.get("GITHUB_SHA")
+    if not workflow_commit:
+        fail("GITHUB_SHA is required to bind the approved workflow commit")
+    if len({head, tag_commit, master, workflow_commit}) != 1:
+        fail(
+            "release source identity must match HEAD, tag commit, protected origin/master, "
+            f"and GITHUB_SHA: HEAD={head}, tag={tag_commit}, master={master}, workflow={workflow_commit}"
+        )
 
     print(f"release contract verified for {args.tag}")
 
