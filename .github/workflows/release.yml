@@ -269,7 +269,8 @@ jobs:
     needs: publish
     runs-on: ${{ matrix.os }}
     permissions:
-      contents: read
+      # GitHub exposes draft releases only to push-capable tokens.
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -307,7 +308,8 @@ jobs:
     needs: [publish, audit-native]
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # GitHub exposes draft releases only to push-capable tokens.
+      contents: write
       attestations: read
     steps:
       - name: Checkout exact release tag

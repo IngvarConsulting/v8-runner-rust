@@ -51,7 +51,7 @@ manifest и GitHub build attestations; `license-v8-runner-AGPL-3.0-only.txt` и
 Перед использованием проверьте release и конкретный бинарник:
 
 ```bash
-gh release verify v0.5.2-ic.3 --repo IngvarConsulting/v8-runner-rust
+gh release verify v0.5.2-ic.4 --repo IngvarConsulting/v8-runner-rust
 gh attestation verify v8-runner-linux-x64 \
   --repo IngvarConsulting/v8-runner-rust \
   --signer-workflow IngvarConsulting/v8-runner-rust/.github/workflows/release.yml \

@@ -60,6 +60,13 @@ class ReleaseGovernanceTest(unittest.TestCase):
         self.assertIn("--deny-self-hosted-runners", workflow)
         self.assertIn('chmod +x "dist/${{ matrix.asset }}"', workflow)
 
+    def test_draft_auditors_can_read_unpublished_release(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        native = workflow.split("  audit-native:\n", 1)[1].split("  audit-draft:\n", 1)[0]
+        draft = workflow.split("  audit-draft:\n", 1)[1].split("  freeze:\n", 1)[0]
+        self.assertIn("contents: write", native)
+        self.assertIn("contents: write", draft)
+
     def test_release_toolchain_and_source_identity_are_pinned(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         verifier = (ROOT / "scripts/release/verify-release-contract.py").read_text(
