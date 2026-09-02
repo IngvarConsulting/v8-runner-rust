@@ -5,6 +5,12 @@ use crate::use_cases::result::UseCaseError;
 use crate::use_cases::result::UseCaseFailure;
 use crate::use_cases::workspace_lock::acquire_workspace_lock;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkspaceBusyPolicy {
+    LegacyRuntime,
+    Typed,
+}
+
 /// Runs an adapter dispatch under the shared workspace-lock policy.
 pub fn dispatch_with_workspace_lock<TResult>(
     config: &AppConfig,
@@ -12,8 +18,36 @@ pub fn dispatch_with_workspace_lock<TResult>(
     before_dispatch: impl FnOnce() -> Result<(), UseCaseError>,
     run: impl FnOnce() -> TResult,
 ) -> Result<TResult, UseCaseError> {
-    let _workspace_lock =
-        acquire_workspace_lock(config, command.as_str()).map_err(UseCaseError::from)?;
+    dispatch_with_workspace_lock_policy(
+        config,
+        command,
+        WorkspaceBusyPolicy::LegacyRuntime,
+        before_dispatch,
+        run,
+    )
+}
+
+/// Runs the single workspace-lock policy while allowing new commands to opt into a typed
+/// contention code without changing the established contract of existing commands.
+pub(crate) fn dispatch_with_workspace_lock_policy<TResult>(
+    config: &AppConfig,
+    command: CommandName,
+    busy_policy: WorkspaceBusyPolicy,
+    before_dispatch: impl FnOnce() -> Result<(), UseCaseError>,
+    run: impl FnOnce() -> TResult,
+) -> Result<TResult, UseCaseError> {
+    let _workspace_lock = acquire_workspace_lock(config, command.as_str())
+        .map_err(UseCaseError::from)
+        .map_err(|error| match (busy_policy, error.kind()) {
+            (
+                WorkspaceBusyPolicy::LegacyRuntime,
+                crate::use_cases::result::UseCaseErrorKind::WorkspaceBusy,
+            ) => UseCaseError::new(
+                crate::use_cases::result::UseCaseErrorKind::Runtime,
+                error.message(),
+            ),
+            _ => error,
+        })?;
     before_dispatch()?;
     Ok(run())
 }

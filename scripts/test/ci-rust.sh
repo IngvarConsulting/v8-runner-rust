@@ -12,14 +12,19 @@ case "$CI_SCOPE" in
   contract)
     case "$TARGET_OS_LABEL" in
       Windows|MINGW*|MSYS*|CYGWIN*)
-        echo "Windows contract scope runs compile/check smoke plus the detached stdio regression; full cargo test remains Linux-owned until the Windows test suite is hardened."
+        echo "Windows contract scope runs compile/check smoke, native infobase export CLI smoke, and selected OS regressions; full cargo test remains Linux-owned until the Windows test suite is hardened."
         cargo check --locked --all-targets
-        windows_stdio_tests=(
+        cargo test --locked --test cli_infobase_cross_platform
+        cargo test --locked --bin v8-runner 'support::fs::tests::'
+        windows_contract_tests=(
           "platform::process::tests::detached_child_does_not_hold_redirected_stdout_open"
           "platform::process::tests::managed_detached_child_does_not_hold_redirected_stdout_open"
+          "support::path::tests::filesystem_object_identity_changes_when_directory_is_replaced"
+          "support::fs::tests::replace_file_restores_original_bytes_when_stage_disappeared"
+          "use_cases::staged_publication::tests::orphan_cleanup_requires_exact_target_kind_and_run_name_contract"
         )
         listed_tests="$(cargo test --locked -- --list)"
-        for test_name in "${windows_stdio_tests[@]}"; do
+        for test_name in "${windows_contract_tests[@]}"; do
           if ! grep -Fxq "$test_name: test" <<<"$listed_tests"; then
             echo "Windows detached stdio regression is missing: $test_name" >&2
             exit 2

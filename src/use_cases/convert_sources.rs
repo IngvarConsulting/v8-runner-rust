@@ -936,36 +936,7 @@ fn discover_edt_external_projects(
                         child.display(),
                         source_set_name
                     )),
-                    AppError::ValidationIbcmd(error) => AppError::ValidationIbcmd(error),
-                    AppError::ValidationIbcmdContext { context, source } => {
-                        AppError::ValidationIbcmdContext { context, source }
-                    }
-                    AppError::Runtime(message) => AppError::Runtime(message),
-                    AppError::Platform(message) => AppError::Platform(message),
-                    AppError::PlatformDesigner(error) => AppError::PlatformDesigner(error),
-                    AppError::PlatformDesignerContext { context, source } => {
-                        AppError::PlatformDesignerContext { context, source }
-                    }
-                    AppError::PlatformLocator(error) => AppError::PlatformLocator(error),
-                    AppError::PlatformProcess(error) => AppError::PlatformProcess(error),
-                    AppError::PlatformLocatorContext { context, source } => {
-                        AppError::PlatformLocatorContext { context, source }
-                    }
-                    AppError::PlatformProcessContext { context, source } => {
-                        AppError::PlatformProcessContext { context, source }
-                    }
-                    AppError::PlatformEdt(error) => AppError::PlatformEdt(error),
-                    AppError::PlatformEdtContext { context, source } => {
-                        AppError::PlatformEdtContext { context, source }
-                    }
-                    AppError::PlatformEdtSession(error) => AppError::PlatformEdtSession(error),
-                    AppError::PlatformEdtSessionContext { context, source } => {
-                        AppError::PlatformEdtSessionContext { context, source }
-                    }
-                    AppError::Config(error) => AppError::Config(error),
-                    AppError::ConfigContext { context, source } => {
-                        AppError::ConfigContext { context, source }
-                    }
+                    other => other,
                 })?;
         if descriptor.artifact_type != expected_kind {
             return Err(AppError::Validation(format!(

@@ -189,3 +189,33 @@ fn convert_help_uses_output_target_root_name() {
     assert!(stdout.contains("--source-set <SOURCE_SET>"));
     assert!(stdout.contains("--json-message"));
 }
+
+#[test]
+fn infobase_configuration_export_help_fixes_the_exact_grammar() {
+    let output = v8_runner_command()
+        .args(["infobase", "configuration", "export", "--help"])
+        .output()
+        .expect("run command");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--state <STATE>"));
+    assert!(stdout.contains("[possible values: working, database]"));
+    assert!(stdout.contains("--extension <EXTENSION>"));
+    assert!(stdout.contains("--output <OUTPUT>"));
+    assert!(!stdout.contains("--provider"));
+    assert!(!stdout.contains("--engine"));
+}
+
+#[test]
+fn infobase_dump_help_calls_dt_a_transfer_file_not_a_backup() {
+    let output = v8_runner_command()
+        .args(["infobase", "dump", "--help"])
+        .output()
+        .expect("run command");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--output <OUTPUT>"));
+    assert!(stdout.contains("not a backup"));
+}

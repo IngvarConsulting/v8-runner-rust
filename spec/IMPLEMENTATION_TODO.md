@@ -4,11 +4,13 @@ This file tracks open implementation work only.
 
 ## Current Status
 
-- Open tasks as of `2026-05-11`: 0.
+- Open tasks as of `2026-09-02`: 1.
 
 ## Open Tasks
 
-No open implementation tasks.
+1. Перевести IBCMD DT provider из `experimental` в `implemented` только после реализации и live
+   proof проверяемого no-active-connections или exclusive-access preflight; readiness при этом
+   остаётся отдельной проверкой конкретного окружения.
 
 ## Rules
 

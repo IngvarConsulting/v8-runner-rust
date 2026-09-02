@@ -30,11 +30,44 @@ pub fn init_action_logging(
     color_enabled: bool,
     work_path: &Path,
 ) -> Result<Option<PathBuf>, LoggingInitError> {
+    init_action_logging_impl(level, output_format, color_enabled, work_path, false)
+}
+
+pub fn init_action_logging_deferred(
+    level: &str,
+    output_format: &str,
+    color_enabled: bool,
+    work_path: &Path,
+) -> Result<Option<PathBuf>, LoggingInitError> {
+    init_action_logging_impl(level, output_format, color_enabled, work_path, true)
+}
+
+fn init_action_logging_impl(
+    level: &str,
+    output_format: &str,
+    color_enabled: bool,
+    work_path: &Path,
+    defer_file_open: bool,
+) -> Result<Option<PathBuf>, LoggingInitError> {
+    let log_path = resolve_action_log_path(output_format, work_path);
     let writer = ActionLogMakeWriter {
         stdout_enabled: output_format == "text",
-        file: open_log_file(resolve_action_log_path(output_format, work_path).as_deref())?,
+        file: if defer_file_open {
+            None
+        } else {
+            open_log_file(log_path.as_deref())?
+        },
+        deferred_file: if defer_file_open {
+            log_path.as_ref().map(|path| {
+                Arc::new(DeferredActionLog {
+                    path: path.clone(),
+                    file: Mutex::new(None),
+                })
+            })
+        } else {
+            None
+        },
     };
-    let log_path = resolve_action_log_path(output_format, work_path);
     let ansi_enabled = output_format == "text" && color_enabled;
     let env_filter = env_filter_with_live_progress(level);
 
@@ -113,11 +146,18 @@ fn open_log_file(path: Option<&Path>) -> Result<Option<Arc<Mutex<File>>>, Loggin
 struct ActionLogMakeWriter {
     stdout_enabled: bool,
     file: Option<Arc<Mutex<File>>>,
+    deferred_file: Option<Arc<DeferredActionLog>>,
 }
 
 struct ActionLogWriter {
     stdout_enabled: bool,
     file: Option<Arc<Mutex<File>>>,
+    deferred_file: Option<Arc<DeferredActionLog>>,
+}
+
+struct DeferredActionLog {
+    path: PathBuf,
+    file: Mutex<Option<File>>,
 }
 
 struct UtcTimer;
@@ -152,6 +192,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ActionLogMakeWriter {
         ActionLogWriter {
             stdout_enabled: self.stdout_enabled,
             file: self.file.clone(),
+            deferred_file: self.deferred_file.clone(),
         }
     }
 }
@@ -490,6 +531,9 @@ impl IoWrite for ActionLogWriter {
             file.write_all(buf)?;
             file.flush()?;
         }
+        if let Some(deferred) = &self.deferred_file {
+            deferred.write_all(buf)?;
+        }
 
         Ok(buf.len())
     }
@@ -505,8 +549,50 @@ impl IoWrite for ActionLogWriter {
                 .map_err(|_| io::Error::other("action log mutex poisoned"))?;
             file.flush()?;
         }
+        if let Some(deferred) = &self.deferred_file {
+            deferred.flush()?;
+        }
 
         Ok(())
+    }
+}
+
+impl DeferredActionLog {
+    fn with_file<T>(&self, operation: impl FnOnce(&mut File) -> io::Result<T>) -> io::Result<T> {
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| io::Error::other("deferred action log mutex poisoned"))?;
+        if file.is_none() {
+            if let Some(parent) = self.path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            *file = Some(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.path)?,
+            );
+        }
+        operation(file.as_mut().expect("deferred action log was opened"))
+    }
+
+    fn write_all(&self, buf: &[u8]) -> io::Result<()> {
+        self.with_file(|file| {
+            file.write_all(buf)?;
+            file.flush()
+        })
+    }
+
+    fn flush(&self) -> io::Result<()> {
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| io::Error::other("deferred action log mutex poisoned"))?;
+        match file.as_mut() {
+            Some(file) => file.flush(),
+            None => Ok(()),
+        }
     }
 }
 

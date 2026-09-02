@@ -304,6 +304,24 @@ impl<'a> IbcmdDsl<'a> {
         self.run(&args)
     }
 
+    /// Saves the working or database configuration to a CF/CFE artifact.
+    pub fn config_save(
+        &self,
+        target_file: &Path,
+        database: bool,
+        extension: Option<&str>,
+    ) -> Result<PlatformCommandResult, IbcmdError> {
+        let mut args = self.authenticated_infobase_args(&["config", "save"]);
+        if database {
+            args.push("--db".to_owned());
+        }
+        if let Some(extension) = extension {
+            push_option_value(&mut args, "--extension", extension);
+        }
+        args.push(target_file.display().to_string());
+        self.run(&args)
+    }
+
     /// Exports changes in sync mode relative to an existing target directory.
     pub fn config_export_incremental(
         &self,
@@ -611,6 +629,93 @@ mod tests {
         let args = fs::read_to_string(args_log).expect("args");
         assert!(args.contains("export"));
         assert!(args.contains("--force"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_save_builds_expected_args_for_database_extension() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("ibcmd");
+        let args_log = dir.path().join("args.log");
+        let target = dir.path().join("database.cfe");
+        write_script(
+            &script,
+            &format!("printf '%s\\n' \"$@\" > \"{}\"\nexit 0", args_log.display()),
+        );
+        let runner = ProcessExecutor;
+        let conn = file_connection("File=/ib");
+        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+
+        dsl.config_save(&target, true, Some("SalesAddon"))
+            .expect("save database extension");
+
+        let args = fs::read_to_string(args_log)
+            .expect("args")
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "infobase",
+                "--db-path",
+                "/ib",
+                "config",
+                "save",
+                "--db",
+                "--extension",
+                "SalesAddon",
+                target.to_str().expect("utf-8 target"),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_save_preserves_auth_and_data_path_conventions() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("ibcmd");
+        let args_log = dir.path().join("args.log");
+        let target = dir.path().join("working.cf");
+        let data_path = dir.path().join("ibcmd-data");
+        write_script(
+            &script,
+            &format!("printf '%s\\n' \"$@\" > \"{}\"\nexit 0", args_log.display()),
+        );
+        let runner = ProcessExecutor;
+        let conn = IbcmdConnection::from_infobase(
+            &InfobaseConfig::file("File=/ib")
+                .with_credentials(Some("admin".to_owned()), Some("secret".to_owned())),
+        )
+        .expect("connection");
+        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner)
+            .with_data_path(data_path.clone());
+
+        dsl.config_save(&target, false, None)
+            .expect("save working configuration");
+
+        let args = fs::read_to_string(args_log)
+            .expect("args")
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "infobase".to_owned(),
+                "--data".to_owned(),
+                data_path.display().to_string(),
+                "--db-path".to_owned(),
+                "/ib".to_owned(),
+                "config".to_owned(),
+                "save".to_owned(),
+                "--user".to_owned(),
+                "admin".to_owned(),
+                "--password".to_owned(),
+                "secret".to_owned(),
+                target.display().to_string(),
+            ]
+        );
     }
 
     #[cfg(unix)]

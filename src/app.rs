@@ -10,8 +10,8 @@ use crate::cli::execute;
 use crate::cli::output::{failure_envelope, print_command_error};
 use crate::command_envelope::Envelope;
 use crate::config::loader::{
-    load_config, load_config_for_prepared_test, load_config_for_tools_download,
-    resolve_primary_config_path,
+    load_config, load_config_for_infobase_export, load_config_for_prepared_test,
+    load_config_for_tools_download, resolve_primary_config_path,
 };
 use crate::output::presenter::Presenter;
 use crate::output::text::{TimelineItem, TimelineStatus};
@@ -51,14 +51,40 @@ pub fn run() -> i32 {
         return run_bootstrap(args, &cli, &presenter);
     }
 
+    if let Command::Infobase(args) = &cli.command {
+        if let Err(error) = execute::validate_infobase_request(args) {
+            let error = execute::render_invalid_infobase_request(args, &presenter, error);
+            return error.exit_code();
+        }
+    }
+
     let config = match load_cli_config(&cli) {
         Ok(c) => c,
         Err(e) => {
             let message = e.to_string();
             let error = UseCaseError::from(AppError::from(e));
+            if let Command::Infobase(args) = &cli.command {
+                let error = execute::render_infobase_pre_dispatch_failure(
+                    args,
+                    &presenter,
+                    error,
+                    "provider selection was not attempted because configuration loading failed",
+                    crate::domain::infobase_export::ExportPhase::ConfigurationLoad,
+                );
+                return error.exit_code();
+            }
             print_command_error(&presenter, command_name(&cli.command), &error, &message);
             return error.exit_code();
         }
+    };
+    let mut prepared_infobase = match &cli.command {
+        Command::Infobase(args) => {
+            match execute::prepare_infobase_cli_command(&config, args, &presenter) {
+                Ok(prepared) => Some(prepared),
+                Err(error) => return error.exit_code(),
+            }
+        }
+        _ => None,
     };
     let primary_config_path = match resolve_primary_config_path(cli.config.as_deref()) {
         Ok(path) => path,
@@ -71,12 +97,23 @@ pub fn run() -> i32 {
     };
 
     let level = cli.log_level.as_deref().unwrap_or("info");
-    let action_log_path = match crate::support::logging::init_action_logging(
-        level,
-        output_format,
-        !cli.no_color,
-        &config.work_path,
-    ) {
+    let is_infobase_command = matches!(&cli.command, Command::Infobase(_));
+    let logging_result = if is_infobase_command {
+        crate::support::logging::init_action_logging_deferred(
+            level,
+            output_format,
+            !cli.no_color,
+            &config.work_path,
+        )
+    } else {
+        crate::support::logging::init_action_logging(
+            level,
+            output_format,
+            !cli.no_color,
+            &config.work_path,
+        )
+    };
+    let action_log_path = match logging_result {
         Ok(path) => path,
         Err(e) => {
             let message = e.to_string();
@@ -86,14 +123,16 @@ pub fn run() -> i32 {
         }
     };
 
-    debug!(
-        command = command_name(&cli.command),
-        output = output_format,
-        work_path = %config.work_path.display(),
-        "starting command"
-    );
-    if let Some(path) = &action_log_path {
-        debug!(path = %path.display(), "action log file enabled");
+    if !is_infobase_command {
+        debug!(
+            command = command_name(&cli.command),
+            output = output_format,
+            work_path = %config.work_path.display(),
+            "starting command"
+        );
+        if let Some(path) = &action_log_path {
+            debug!(path = %path.display(), "action log file enabled");
+        }
     }
 
     let result = match &cli.command {
@@ -117,21 +156,31 @@ pub fn run() -> i32 {
             &presenter,
             cli.clean_before_execution,
         ),
+        Command::Infobase(_) => execute::execute_prepared_infobase_command(
+            &config,
+            prepared_infobase
+                .take()
+                .expect("infobase command was prepared before action logging"),
+            &presenter,
+            cli.clean_before_execution,
+        ),
         Command::Mcp(_) => unreachable!("mcp commands are handled before CLI presenter setup"),
     };
 
     match result {
         Ok(()) => {
-            debug!(
-                command = command_name(&cli.command),
-                "command finished successfully"
-            );
+            if !is_infobase_command {
+                debug!(
+                    command = command_name(&cli.command),
+                    "command finished successfully"
+                );
+            }
             0
         }
         Err(e) => {
             // Text command adapters have already rendered the error; text action logs
             // go to stdout, so logging here would duplicate user-facing output.
-            if presenter.is_json() {
+            if presenter.is_json() && !is_infobase_command {
                 error!("{e}");
             }
             e.exit_code()
@@ -149,6 +198,8 @@ fn load_cli_config(
         })
     ) {
         load_config_for_tools_download(cli.config.as_deref(), cli.workdir.as_deref())
+    } else if execute::uses_infobase_export_config(&cli.command) {
+        load_config_for_infobase_export(cli.config.as_deref(), cli.workdir.as_deref())
     } else if matches!(&cli.command, Command::Test(args) if args.no_build) {
         load_config_for_prepared_test(cli.config.as_deref(), cli.workdir.as_deref())
     } else {

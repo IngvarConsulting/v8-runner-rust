@@ -4,16 +4,19 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
+use tracing::info;
 
 use crate::cli::args::{
     ArtifactsArgs, BuildArgs, Command, ConvertArgs, DesignerConfigSyntaxArgs,
-    DesignerModulesSyntaxArgs, DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs, LaunchArgs,
+    DesignerModulesSyntaxArgs, DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs, InfobaseArgs,
+    InfobaseCommand, InfobaseConfigurationCommand, InfobaseConfigurationExportArgs, LaunchArgs,
     LaunchOptionsArgs, LoadArgs, SyntaxArgs, SyntaxTarget, TestArgs, TestLaunchOptionsArgs,
     TestRunner, TestScope, TestVaArgs, TestYaxunitArgs, ToolsArgs, ToolsCommand, ToolsDownloadArgs,
     ToolsDownloadCommand,
 };
 use crate::cli::output::{
-    failure_envelope, pre_dispatch_error_envelope, print_command_use_case_error, with_cli_error,
+    cli_error_contract, failure_envelope, pre_dispatch_error_envelope,
+    print_command_use_case_error, with_cli_error,
 };
 use crate::cli::signal::CliSignalGuard;
 use crate::command_envelope::{test_envelope, Envelope};
@@ -26,7 +29,13 @@ use crate::domain::build::{BuildMode, BuildResult};
 use crate::domain::convert::{ConvertDirection, ConvertResult, ConvertScope};
 use crate::domain::dump::{DumpMode, DumpResult};
 use crate::domain::execution::{
-    ExecutionError, ExecutionInterruptionDetails, ExecutionOutcome, ExecutionStepStatus, StepResult,
+    ExecutionError, ExecutionInterruptionDetails, ExecutionOutcome, ExecutionStatus,
+    ExecutionStepStatus, StepResult,
+};
+use crate::domain::infobase_export::{
+    ConfigurationState, ConfigurationSubject, ExportConfigurationPackageRequest,
+    ExportConfigurationPackageResult, ExportInfobaseSnapshotRequest, ExportInfobaseSnapshotResult,
+    ExportPhase, ExportProviderDecision,
 };
 use crate::domain::init::{InitResult, InitStep, InitStepStatus};
 use crate::domain::issue::{Issue, IssueSeverity};
@@ -59,6 +68,7 @@ use crate::use_cases::configure_extensions;
 use crate::use_cases::context::{CommandName, ExecutionContext};
 use crate::use_cases::convert_sources;
 use crate::use_cases::dump_config;
+use crate::use_cases::infobase_export;
 use crate::use_cases::init_project;
 use crate::use_cases::launch_app;
 use crate::use_cases::load_artifact;
@@ -74,7 +84,7 @@ use crate::use_cases::request::{
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
 use crate::use_cases::tools_download;
-use crate::use_cases::transport::dispatch_with_workspace_lock;
+use crate::use_cases::transport::{dispatch_with_workspace_lock_policy, WorkspaceBusyPolicy};
 
 const EXTERNAL_EPF_WAIT_CLEANUP_MARGIN: Duration = Duration::from_millis(500);
 
@@ -137,6 +147,13 @@ pub fn execute_command(
             clean_before_execution,
             cancellation,
         ),
+        Command::Infobase(args) => execute_infobase(
+            config,
+            args,
+            presenter,
+            clean_before_execution,
+            cancellation,
+        ),
         Command::Convert(args) => execute_convert(
             config,
             args,
@@ -184,12 +201,32 @@ pub fn command_name(command: &Command) -> CommandName {
         Command::Load(_) => CommandName::Load,
         Command::Test(_) => CommandName::Test,
         Command::Dump(_) => CommandName::Dump,
+        Command::Infobase(InfobaseArgs {
+            command:
+                InfobaseCommand::Configuration(crate::cli::args::InfobaseConfigurationArgs {
+                    command: InfobaseConfigurationCommand::Export(_),
+                }),
+        }) => CommandName::InfobaseConfigurationExport,
+        Command::Infobase(InfobaseArgs {
+            command: InfobaseCommand::Dump(_),
+        }) => CommandName::InfobaseDump,
         Command::Convert(_) => CommandName::Convert,
         Command::Artifacts(_) => CommandName::Artifacts,
         Command::Syntax(_) => CommandName::Syntax,
         Command::Launch(_) => CommandName::Launch,
         Command::Mcp(_) => unreachable!("mcp commands do not map to CLI command names"),
     }
+}
+
+pub fn uses_infobase_export_config(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Infobase(InfobaseArgs {
+            command: InfobaseCommand::Configuration(crate::cli::args::InfobaseConfigurationArgs {
+                command: InfobaseConfigurationCommand::Export(_),
+            }) | InfobaseCommand::Dump(_),
+        })
+    )
 }
 
 fn execute_tools(
@@ -569,6 +606,683 @@ fn execute_dump(
     )
 }
 
+pub enum PreparedInfobaseCommand {
+    Configuration {
+        request: ExportConfigurationPackageRequest,
+        provider: infobase_export::PreparedExportProvider,
+    },
+    Snapshot {
+        request: ExportInfobaseSnapshotRequest,
+        provider: infobase_export::PreparedExportProvider,
+    },
+}
+
+pub struct PreparedInfobaseCliCommand {
+    command: PreparedInfobaseCommand,
+    context: ExecutionContext,
+    _signal_guard: CliSignalGuard,
+}
+
+pub fn validate_infobase_request(args: &InfobaseArgs) -> Result<(), AppError> {
+    match &args.command {
+        InfobaseCommand::Configuration(configuration) => match &configuration.command {
+            InfobaseConfigurationCommand::Export(args) => {
+                let request = map_infobase_configuration_export_request(args);
+                infobase_export::validate_configuration_request(&request)
+            }
+        },
+        InfobaseCommand::Dump(args) => {
+            infobase_export::validate_snapshot_output(Path::new(&args.output))
+        }
+    }
+}
+
+pub fn render_invalid_infobase_request(
+    args: &InfobaseArgs,
+    presenter: &Presenter,
+    error: AppError,
+) -> UseCaseError {
+    let error = UseCaseError::from(error);
+    render_infobase_pre_dispatch_failure(
+        args,
+        presenter,
+        error,
+        "provider selection was not attempted because the request is invalid",
+        ExportPhase::Validation,
+    )
+}
+
+pub fn render_infobase_pre_dispatch_failure(
+    args: &InfobaseArgs,
+    presenter: &Presenter,
+    error: UseCaseError,
+    selection_reason: &str,
+    phase: ExportPhase,
+) -> UseCaseError {
+    let selection = ExportProviderDecision::unavailable(selection_reason, Vec::new());
+    match &args.command {
+        InfobaseCommand::Configuration(configuration) => match &configuration.command {
+            InfobaseConfigurationCommand::Export(args) => {
+                let request = map_infobase_configuration_export_request(args);
+                let result = configuration_pre_dispatch_failure(&request, selection, &error, phase);
+                render_configuration_failure(
+                    CommandName::InfobaseConfigurationExport,
+                    result,
+                    &error,
+                    presenter,
+                );
+            }
+        },
+        InfobaseCommand::Dump(args) => {
+            let request = ExportInfobaseSnapshotRequest {
+                output: PathBuf::from(&args.output),
+            };
+            let result = snapshot_pre_dispatch_failure(&request, selection, &error, phase);
+            render_snapshot_failure(CommandName::InfobaseDump, result, &error, presenter);
+        }
+    }
+    error
+}
+
+pub fn prepare_infobase_command(
+    config: &AppConfig,
+    args: &InfobaseArgs,
+    presenter: &Presenter,
+    context: &ExecutionContext,
+) -> Result<PreparedInfobaseCommand, UseCaseError> {
+    match &args.command {
+        InfobaseCommand::Configuration(configuration) => match &configuration.command {
+            InfobaseConfigurationCommand::Export(args) => {
+                let request = map_infobase_configuration_export_request(args);
+                let command = CommandName::InfobaseConfigurationExport;
+                infobase_export::validate_configuration_request(&request)
+                    .map_err(|error| render_pre_dispatch_error(presenter, command, error))?;
+                match infobase_export::prepare_configuration_export(context, config, &request) {
+                    Ok(provider) => {
+                        Ok(PreparedInfobaseCommand::Configuration { request, provider })
+                    }
+                    Err(failure) => {
+                        let error = failure.error;
+                        if let Some(result) = failure.payload {
+                            render_configuration_failure(command, result, &error, presenter);
+                        }
+                        Err(error)
+                    }
+                }
+            }
+        },
+        InfobaseCommand::Dump(args) => {
+            let request = ExportInfobaseSnapshotRequest {
+                output: PathBuf::from(&args.output),
+            };
+            let command = CommandName::InfobaseDump;
+            infobase_export::validate_snapshot_output(&request.output)
+                .map_err(|error| render_pre_dispatch_error(presenter, command, error))?;
+            match infobase_export::prepare_infobase_snapshot(context, config, &request) {
+                Ok(provider) => Ok(PreparedInfobaseCommand::Snapshot { request, provider }),
+                Err(failure) => {
+                    let error = failure.error;
+                    if let Some(result) = failure.payload {
+                        render_snapshot_failure(command, result, &error, presenter);
+                    }
+                    Err(error)
+                }
+            }
+        }
+    }
+}
+
+pub fn prepare_infobase_cli_command(
+    config: &AppConfig,
+    args: &InfobaseArgs,
+    presenter: &Presenter,
+) -> Result<PreparedInfobaseCliCommand, UseCaseError> {
+    let cancellation = CancellationToken::new();
+    let signal_guard = CliSignalGuard::install(cancellation.clone());
+    let context = cli_context(config, infobase_command_name(args), cancellation);
+    let command = prepare_infobase_command(config, args, presenter, &context)?;
+    Ok(PreparedInfobaseCliCommand {
+        command,
+        context,
+        _signal_guard: signal_guard,
+    })
+}
+
+fn infobase_command_name(args: &InfobaseArgs) -> CommandName {
+    match &args.command {
+        InfobaseCommand::Configuration(_) => CommandName::InfobaseConfigurationExport,
+        InfobaseCommand::Dump(_) => CommandName::InfobaseDump,
+    }
+}
+
+fn map_infobase_configuration_export_request(
+    args: &InfobaseConfigurationExportArgs,
+) -> ExportConfigurationPackageRequest {
+    let state = match args.state.as_str() {
+        "working" => ConfigurationState::Working,
+        "database" => ConfigurationState::Database,
+        _ => unreachable!("clap validates configuration state"),
+    };
+    let subject = args
+        .extension
+        .as_ref()
+        .map(|name| ConfigurationSubject::Extension { name: name.clone() })
+        .unwrap_or(ConfigurationSubject::Main);
+    ExportConfigurationPackageRequest {
+        state,
+        subject,
+        output: PathBuf::from(&args.output),
+    }
+}
+
+fn execute_infobase(
+    config: &AppConfig,
+    args: &InfobaseArgs,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    let context = cli_context(config, infobase_command_name(args), cancellation);
+    let prepared = prepare_infobase_command(config, args, presenter, &context)?;
+    execute_prepared_infobase(
+        config,
+        prepared,
+        &context,
+        presenter,
+        clean_before_execution,
+    )
+}
+
+pub fn execute_prepared_infobase(
+    config: &AppConfig,
+    prepared: PreparedInfobaseCommand,
+    context: &ExecutionContext,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+) -> Result<(), UseCaseError> {
+    match prepared {
+        PreparedInfobaseCommand::Configuration { request, provider } => {
+            execute_infobase_configuration_export(
+                config,
+                request,
+                provider,
+                context,
+                presenter,
+                clean_before_execution,
+            )
+        }
+        PreparedInfobaseCommand::Snapshot { request, provider } => execute_infobase_dump(
+            config,
+            request,
+            provider,
+            context,
+            presenter,
+            clean_before_execution,
+        ),
+    }
+}
+
+pub fn execute_prepared_infobase_command(
+    config: &AppConfig,
+    prepared: PreparedInfobaseCliCommand,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+) -> Result<(), UseCaseError> {
+    execute_prepared_infobase(
+        config,
+        prepared.command,
+        &prepared.context,
+        presenter,
+        clean_before_execution,
+    )
+}
+
+fn execute_infobase_configuration_export(
+    config: &AppConfig,
+    request: ExportConfigurationPackageRequest,
+    prepared: infobase_export::PreparedExportProvider,
+    context: &ExecutionContext,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+) -> Result<(), UseCaseError> {
+    let command = CommandName::InfobaseConfigurationExport;
+    let started = Instant::now();
+    let mut workspace_lock_acquired = false;
+    let mut dispatched = false;
+    let outcome = with_cli_workspace_lock_observed(
+        config,
+        presenter,
+        command,
+        clean_before_execution,
+        || workspace_lock_acquired = true,
+        || {
+            dispatched = true;
+            info!(
+                command = command.as_str(),
+                "starting command under workspace lock"
+            );
+            match infobase_export::execute_configuration_export(
+                context, config, &request, &prepared,
+            ) {
+                Ok(result) => {
+                    let duration_ms = started.elapsed().as_millis() as u64;
+                    if presenter.is_json() {
+                        let warnings = result.warnings.clone();
+                        let steps = result.steps.clone();
+                        let mut envelope = Envelope::ok(command.as_str(), duration_ms, result);
+                        envelope.warnings = warnings;
+                        envelope.steps = steps;
+                        presenter.print_envelope(&envelope);
+                    } else {
+                        render_configuration_export_text(command, &result, presenter);
+                    }
+                    Ok(())
+                }
+                Err(failure) => {
+                    let duration_ms = started.elapsed().as_millis() as u64;
+                    let error = failure.error;
+                    if presenter.is_json() {
+                        match failure.payload {
+                            Some(result) => {
+                                let warnings = result.warnings.clone();
+                                let steps = result.steps.clone();
+                                let mut envelope =
+                                    failure_envelope(command.as_str(), duration_ms, result, &error);
+                                envelope.warnings = warnings;
+                                envelope.steps = steps;
+                                presenter.print_envelope(&envelope);
+                            }
+                            None => presenter.print_envelope(&pre_dispatch_error_envelope(
+                                command.as_str(),
+                                &error,
+                            )),
+                        }
+                    } else {
+                        if let Some(result) = failure.payload.as_ref() {
+                            render_configuration_export_text(command, result, presenter);
+                        }
+                        presenter.print_error(&error.to_string());
+                    }
+                    Err(error)
+                }
+            }
+        },
+    );
+    if !dispatched {
+        if let Err(error) = &outcome {
+            let result = configuration_pre_dispatch_failure(
+                &request,
+                prepared.selection().clone(),
+                error,
+                infobase_pre_dispatch_execution_phase(workspace_lock_acquired),
+            );
+            render_configuration_failure(command, result, error, presenter);
+        }
+    }
+    outcome
+}
+
+fn execute_infobase_dump(
+    config: &AppConfig,
+    request: ExportInfobaseSnapshotRequest,
+    prepared: infobase_export::PreparedExportProvider,
+    context: &ExecutionContext,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+) -> Result<(), UseCaseError> {
+    let command = CommandName::InfobaseDump;
+    let started = Instant::now();
+    let mut workspace_lock_acquired = false;
+    let mut dispatched = false;
+    let outcome = with_cli_workspace_lock_observed(
+        config,
+        presenter,
+        command,
+        clean_before_execution,
+        || workspace_lock_acquired = true,
+        || {
+            dispatched = true;
+            info!(
+                command = command.as_str(),
+                "starting command under workspace lock"
+            );
+            match infobase_export::execute_infobase_snapshot(context, config, &request, &prepared) {
+                Ok(result) => {
+                    let duration_ms = started.elapsed().as_millis() as u64;
+                    if presenter.is_json() {
+                        let warnings = result.warnings.clone();
+                        let steps = result.steps.clone();
+                        let mut envelope = Envelope::ok(command.as_str(), duration_ms, result);
+                        envelope.warnings = warnings;
+                        envelope.steps = steps;
+                        presenter.print_envelope(&envelope);
+                    } else {
+                        render_snapshot_export_text(command, &result, presenter);
+                    }
+                    Ok(())
+                }
+                Err(failure) => {
+                    let duration_ms = started.elapsed().as_millis() as u64;
+                    let error = failure.error;
+                    if presenter.is_json() {
+                        match failure.payload {
+                            Some(result) => {
+                                let warnings = result.warnings.clone();
+                                let steps = result.steps.clone();
+                                let mut envelope =
+                                    failure_envelope(command.as_str(), duration_ms, result, &error);
+                                envelope.warnings = warnings;
+                                envelope.steps = steps;
+                                presenter.print_envelope(&envelope);
+                            }
+                            None => presenter.print_envelope(&pre_dispatch_error_envelope(
+                                command.as_str(),
+                                &error,
+                            )),
+                        }
+                    } else {
+                        if let Some(result) = failure.payload.as_ref() {
+                            render_snapshot_export_text(command, result, presenter);
+                        }
+                        presenter.print_error(&error.to_string());
+                    }
+                    Err(error)
+                }
+            }
+        },
+    );
+    if !dispatched {
+        if let Err(error) = &outcome {
+            let result = snapshot_pre_dispatch_failure(
+                &request,
+                prepared.selection().clone(),
+                error,
+                infobase_pre_dispatch_execution_phase(workspace_lock_acquired),
+            );
+            render_snapshot_failure(command, result, error, presenter);
+        }
+    }
+    outcome
+}
+
+fn infobase_pre_dispatch_execution_phase(workspace_lock_acquired: bool) -> ExportPhase {
+    if workspace_lock_acquired {
+        ExportPhase::WorkspacePreparation
+    } else {
+        ExportPhase::WorkspaceLock
+    }
+}
+
+fn annotate_pre_dispatch_failure(execution: &mut ExecutionOutcome<()>, error: &UseCaseError) {
+    let (code, _) = cli_error_contract(error.kind());
+    execution.status = match error.kind() {
+        UseCaseErrorKind::InvalidOutput => ExecutionStatus::InvalidOutput,
+        UseCaseErrorKind::Cancelled => ExecutionStatus::Cancelled,
+        UseCaseErrorKind::TimedOut => ExecutionStatus::TimedOut,
+        _ => ExecutionStatus::Failed,
+    };
+    execution
+        .errors
+        .push(ExecutionError::new(code, error.message()));
+}
+
+fn configuration_pre_dispatch_failure(
+    request: &ExportConfigurationPackageRequest,
+    selection: ExportProviderDecision,
+    error: &UseCaseError,
+    phase: ExportPhase,
+) -> ExportConfigurationPackageResult {
+    let mut result = ExportConfigurationPackageResult::new(request.clone(), selection);
+    annotate_pre_dispatch_failure(&mut result.execution, error);
+    result.steps.push(
+        StepResult::failed(phase.as_str(), phase.kind(), 0)
+            .with_message(error.message().to_owned()),
+    );
+    result
+}
+
+fn snapshot_pre_dispatch_failure(
+    request: &ExportInfobaseSnapshotRequest,
+    selection: ExportProviderDecision,
+    error: &UseCaseError,
+    phase: ExportPhase,
+) -> ExportInfobaseSnapshotResult {
+    let mut result = ExportInfobaseSnapshotResult::new(request.clone(), selection);
+    annotate_pre_dispatch_failure(&mut result.execution, error);
+    result.steps.push(
+        StepResult::failed(phase.as_str(), phase.kind(), 0)
+            .with_message(error.message().to_owned()),
+    );
+    result
+}
+
+fn render_configuration_failure(
+    command: CommandName,
+    result: ExportConfigurationPackageResult,
+    error: &UseCaseError,
+    presenter: &Presenter,
+) {
+    if presenter.is_json() {
+        let warnings = result.warnings.clone();
+        let steps = result.steps.clone();
+        let mut envelope = failure_envelope(command.as_str(), 0, result, error);
+        envelope.warnings = warnings;
+        envelope.steps = steps;
+        presenter.print_envelope(&envelope);
+    } else {
+        render_configuration_export_text(command, &result, presenter);
+        presenter.print_error(&error.to_string());
+    }
+}
+
+fn render_snapshot_failure(
+    command: CommandName,
+    result: ExportInfobaseSnapshotResult,
+    error: &UseCaseError,
+    presenter: &Presenter,
+) {
+    if presenter.is_json() {
+        let warnings = result.warnings.clone();
+        let steps = result.steps.clone();
+        let mut envelope = failure_envelope(command.as_str(), 0, result, error);
+        envelope.warnings = warnings;
+        envelope.steps = steps;
+        presenter.print_envelope(&envelope);
+    } else {
+        render_snapshot_export_text(command, &result, presenter);
+        presenter.print_error(&error.to_string());
+    }
+}
+
+struct InfobaseExportText<'a> {
+    command: &'a str,
+    label: &'a str,
+    state: Option<&'a str>,
+    subject: String,
+    implementation: &'a str,
+    readiness: &'a str,
+    evidence: &'a str,
+    artifact_kind: &'a str,
+    execution_status: &'a str,
+    output: &'a Path,
+    provider: Option<crate::domain::infobase_export::ExportProvider>,
+    provider_reason: &'a str,
+    published: bool,
+    target_state: &'a str,
+    candidates: &'a [crate::domain::infobase_export::ProviderCandidate],
+    warnings: &'a [String],
+}
+
+fn render_configuration_export_text(
+    command: CommandName,
+    result: &ExportConfigurationPackageResult,
+    presenter: &Presenter,
+) {
+    render_infobase_export_text(
+        InfobaseExportText {
+            command: command.as_str(),
+            label: "Configuration package export",
+            state: Some(result.state.as_str()),
+            subject: render_configuration_subject(&result.subject),
+            implementation: selected_candidate(&result.selection)
+                .map(|candidate| candidate.implementation.as_str())
+                .unwrap_or("none"),
+            readiness: selected_candidate(&result.selection)
+                .map(|candidate| candidate.readiness.as_str())
+                .unwrap_or("unavailable"),
+            evidence: selected_candidate(&result.selection)
+                .map(|candidate| candidate.evidence.as_str())
+                .unwrap_or("none"),
+            artifact_kind: result.artifact_kind.as_str(),
+            execution_status: execution_status_label(result.execution.status),
+            output: &result.output,
+            provider: result.selection.provider(),
+            provider_reason: result.selection.reason(),
+            published: result.published,
+            target_state: export_target_state_label(result.target_state),
+            candidates: result.selection.candidates(),
+            warnings: &result.warnings,
+        },
+        presenter,
+    );
+}
+
+fn render_snapshot_export_text(
+    command: CommandName,
+    result: &ExportInfobaseSnapshotResult,
+    presenter: &Presenter,
+) {
+    render_infobase_export_text(
+        InfobaseExportText {
+            command: command.as_str(),
+            label: "Infobase DT export",
+            state: None,
+            subject: "infobase".to_owned(),
+            implementation: selected_candidate(&result.selection)
+                .map(|candidate| candidate.implementation.as_str())
+                .unwrap_or("none"),
+            readiness: selected_candidate(&result.selection)
+                .map(|candidate| candidate.readiness.as_str())
+                .unwrap_or("unavailable"),
+            evidence: selected_candidate(&result.selection)
+                .map(|candidate| candidate.evidence.as_str())
+                .unwrap_or("none"),
+            artifact_kind: result.artifact_kind.as_str(),
+            execution_status: execution_status_label(result.execution.status),
+            output: &result.output,
+            provider: result.selection.provider(),
+            provider_reason: result.selection.reason(),
+            published: result.published,
+            target_state: export_target_state_label(result.target_state),
+            candidates: result.selection.candidates(),
+            warnings: &result.warnings,
+        },
+        presenter,
+    );
+}
+
+fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Presenter) {
+    let InfobaseExportText {
+        command,
+        label,
+        state,
+        subject,
+        implementation,
+        readiness,
+        evidence,
+        artifact_kind,
+        execution_status,
+        output,
+        provider,
+        provider_reason,
+        published,
+        target_state,
+        candidates,
+        warnings,
+    } = view;
+    let status = if published {
+        TimelineStatus::Succeeded
+    } else {
+        TimelineStatus::Failed
+    };
+    let provider = provider
+        .map(|value| value.as_str().to_owned())
+        .unwrap_or_else(|| "none".to_owned());
+    let mut details = vec![
+        format!("command: {command}"),
+        format!("subject: {subject}"),
+        format!("implementation: {implementation}"),
+        format!("readiness: {readiness}"),
+        format!("evidence: {evidence}"),
+        format!("artifact kind: {artifact_kind}"),
+        format!("provider: {provider}"),
+        format!("provider reason: {provider_reason}"),
+        format!("execution status: {execution_status}"),
+        format!("published: {published}"),
+        format!("target state: {target_state}"),
+        format!("output: {}", output.display()),
+    ];
+    for candidate in candidates {
+        details.push(format!(
+            "candidate {}: implementation={}, readiness={}, evidence={}; {}",
+            candidate.provider.as_str(),
+            candidate.implementation.as_str(),
+            candidate.readiness.as_str(),
+            candidate.evidence.as_str(),
+            candidate.reason
+        ));
+    }
+    if let Some(state) = state {
+        details.insert(0, format!("state: {state}"));
+    }
+    details.extend(warnings.iter().map(|warning| format!("warning: {warning}")));
+    presenter.print_timeline(&[TimelineItem::new(status, label).with_detail(details.join("\n"))]);
+}
+
+fn selected_candidate(
+    selection: &crate::domain::infobase_export::ExportProviderDecision,
+) -> Option<&crate::domain::infobase_export::ProviderCandidate> {
+    let provider = selection.provider()?;
+    selection
+        .candidates()
+        .iter()
+        .find(|candidate| candidate.provider == provider)
+}
+
+fn export_target_state_label(
+    state: crate::domain::infobase_export::ExportTargetState,
+) -> &'static str {
+    use crate::domain::infobase_export::ExportTargetState;
+    match state {
+        ExportTargetState::Unchanged => "unchanged",
+        ExportTargetState::Created => "created",
+        ExportTargetState::Replaced => "replaced",
+        ExportTargetState::Restored => "restored",
+        ExportTargetState::Uncertain => "uncertain",
+    }
+}
+
+fn render_configuration_subject(
+    subject: &crate::domain::infobase_export::ConfigurationSubject,
+) -> String {
+    match subject {
+        crate::domain::infobase_export::ConfigurationSubject::Main => "main".to_owned(),
+        crate::domain::infobase_export::ConfigurationSubject::Extension { name } => {
+            format!("extension:{name}")
+        }
+    }
+}
+
+fn execution_status_label(status: crate::domain::execution::ExecutionStatus) -> &'static str {
+    match status {
+        crate::domain::execution::ExecutionStatus::Succeeded => "succeeded",
+        crate::domain::execution::ExecutionStatus::Failed => "failed",
+        crate::domain::execution::ExecutionStatus::Cancelled => "cancelled",
+        crate::domain::execution::ExecutionStatus::TimedOut => "timed_out",
+        crate::domain::execution::ExecutionStatus::InvalidOutput => "invalid_output",
+    }
+}
+
 fn execute_convert(
     config: &AppConfig,
     args: &ConvertArgs,
@@ -791,10 +1505,38 @@ fn with_cli_workspace_lock<T>(
     clean_before_execution: bool,
     run: impl FnOnce() -> Result<T, UseCaseError>,
 ) -> Result<T, UseCaseError> {
-    dispatch_with_workspace_lock(
+    with_cli_workspace_lock_observed(
+        config,
+        presenter,
+        command,
+        clean_before_execution,
+        || {},
+        run,
+    )
+}
+
+fn with_cli_workspace_lock_observed<T>(
+    config: &AppConfig,
+    presenter: &Presenter,
+    command: CommandName,
+    clean_before_execution: bool,
+    workspace_lock_acquired: impl FnOnce(),
+    run: impl FnOnce() -> Result<T, UseCaseError>,
+) -> Result<T, UseCaseError> {
+    let busy_policy = if matches!(
+        command,
+        CommandName::InfobaseConfigurationExport | CommandName::InfobaseDump
+    ) {
+        WorkspaceBusyPolicy::Typed
+    } else {
+        WorkspaceBusyPolicy::LegacyRuntime
+    };
+    let result = dispatch_with_workspace_lock_policy(
         config,
         command,
+        busy_policy,
         || {
+            workspace_lock_acquired();
             if clean_before_execution {
                 clean_platform_logs_under_lock(config)
             } else {
@@ -802,8 +1544,14 @@ fn with_cli_workspace_lock<T>(
             }
         },
         run,
-    )
-    .map_err(|error| render_pre_dispatch_error(presenter, command, error))?
+    );
+    result.map_err(|error| {
+        if matches!(busy_policy, WorkspaceBusyPolicy::Typed) {
+            error
+        } else {
+            render_pre_dispatch_error(presenter, command, error)
+        }
+    })?
 }
 
 fn clean_platform_logs_under_lock(config: &AppConfig) -> Result<(), UseCaseError> {
@@ -2463,15 +3211,17 @@ fn status_label(status: &TestStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_load_envelope, command_name, execute_command, map_artifacts_request_with_config,
-        map_build_request, map_designer_config_request, map_dump_request, map_extensions_request,
-        map_launch_request, map_load_request, map_syntax_request, map_test_request,
+        build_load_envelope, command_name, execute_command, infobase_pre_dispatch_execution_phase,
+        map_artifacts_request_with_config, map_build_request, map_designer_config_request,
+        map_dump_request, map_extensions_request, map_launch_request, map_load_request,
+        map_syntax_request, map_test_request,
     };
     use crate::cli::args::{
         ArtifactsArgs, BuildArgs, Command, DesignerConfigSyntaxArgs, DesignerModulesSyntaxArgs,
-        DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs,
-        SyntaxArgs, SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope,
-        TestVaArgs, TestYaxunitArgs,
+        DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs, InfobaseArgs, InfobaseCommand,
+        InfobaseConfigurationArgs, InfobaseConfigurationCommand, InfobaseConfigurationExportArgs,
+        InfobaseDumpArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs, SyntaxArgs, SyntaxTarget,
+        TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope, TestVaArgs, TestYaxunitArgs,
     };
     use crate::cli::output::pre_dispatch_error_envelope;
     use crate::config::model::{
@@ -2480,6 +3230,7 @@ mod tests {
     };
     use crate::domain::artifacts::ArtifactBuildMode;
     use crate::domain::execution::{ExecutionOutcome, ExecutionStatus};
+    use crate::domain::infobase_export::ExportPhase;
     use crate::domain::load::{
         CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
     };
@@ -3077,6 +3828,63 @@ mod tests {
     }
 
     #[test]
+    fn infobase_commands_report_workspace_lock_conflict_before_provider_dispatch() {
+        let dir = tempdir().expect("tempdir");
+        let work = dir.path().join("work");
+        fs::create_dir_all(&work).expect("work dir");
+        let infobase = dir.path().join("ib");
+        fs::create_dir_all(&infobase).expect("infobase dir");
+        fs::write(infobase.join("1Cv8.1CD"), b"fixture").expect("infobase file");
+        let platform = dir
+            .path()
+            .join(format!("1cv8{}", std::env::consts::EXE_SUFFIX));
+        fs::write(&platform, b"fixture").expect("platform executable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&platform)
+                .expect("platform metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&platform, permissions).expect("platform permissions");
+        }
+        let mut config = sample_config(&work);
+        config.infobase =
+            crate::config::model::InfobaseConfig::file(format!("File={}", infobase.display()));
+        config.tools.platform.path = Some(platform);
+        let canonical_work = fs::canonicalize(&config.work_path).expect("canonical work");
+        let lock_path = workspace_lock_path(&canonical_work);
+        let _guard = acquire_advisory_lock(&lock_path).expect("workspace lock");
+        let presenter = Presenter::new("text".to_owned(), ColorMode::Disabled);
+        let commands = [
+            Command::Infobase(InfobaseArgs {
+                command: InfobaseCommand::Configuration(InfobaseConfigurationArgs {
+                    command: InfobaseConfigurationCommand::Export(
+                        InfobaseConfigurationExportArgs {
+                            state: "working".to_owned(),
+                            extension: None,
+                            output: dir.path().join("main.cf").display().to_string(),
+                        },
+                    ),
+                }),
+            }),
+            Command::Infobase(InfobaseArgs {
+                command: InfobaseCommand::Dump(InfobaseDumpArgs {
+                    output: dir.path().join("base.dt").display().to_string(),
+                }),
+            }),
+        ];
+
+        for command in commands {
+            let error = execute_command(&config, &command, None, &presenter, false)
+                .expect_err("busy workspace");
+            assert_eq!(error.kind(), UseCaseErrorKind::WorkspaceBusy);
+            assert!(error.to_string().contains("workspace"));
+            assert!(error.to_string().contains("already"));
+        }
+    }
+
+    #[test]
     fn execute_command_validates_before_trying_workspace_lock() {
         let dir = tempdir().expect("tempdir");
         let work = dir.path().join("work");
@@ -3190,6 +3998,18 @@ mod tests {
             assert_eq!(json["data"]["message"], "workspace is busy");
             assert_eq!(json["error"]["code"], "runtime_failure");
         }
+    }
+
+    #[test]
+    fn infobase_pre_dispatch_phase_distinguishes_lock_from_workspace_preparation() {
+        assert_eq!(
+            infobase_pre_dispatch_execution_phase(false),
+            ExportPhase::WorkspaceLock
+        );
+        assert_eq!(
+            infobase_pre_dispatch_execution_phase(true),
+            ExportPhase::WorkspacePreparation
+        );
     }
 
     #[test]

@@ -256,6 +256,11 @@ tests:
 - Тип: путь
 - Обязателен: да
 
+Для обычных project-команд список должен содержать поддерживаемый source-set. Исключение —
+`infobase configuration export` и `infobase dump`: они используют только ИБ и принимают
+`source-set: []`. Это command-specific validation, а не ослабление `build`, source `dump`,
+`convert`, `make` или остальных project workflows.
+
 Корень runtime state:
 
 - `workPath/hash-storages`
@@ -264,7 +269,8 @@ tests:
 - `workPath/edt-workspace`
 - `workPath/designer`
 
-Если каталога нет, он создаётся автоматически.
+Если каталога нет, он создаётся автоматически при захвате workspace lock. Pure provider
+selection для infobase export не создаёт `workPath` и runtime-файлы.
 
 ### `execution_timeout`
 
@@ -291,9 +297,14 @@ tests:
 
 Ограничения:
 
-- `builder=IBCMD` поддерживает `init`, `build`, `dump`, `extensions`;
-- для server connection с `builder=IBCMD` обязательны `infobase.dbms.kind`,
-  `infobase.dbms.server`, `infobase.dbms.name`;
+- `builder=IBCMD` поддерживает `init`, `build`, source `dump` и `extensions`; для infobase
+  export значение `builder` задаёт preferred provider, после чего runner выбирает первый
+  `implemented + ready` candidate до spawn;
+- IBCMD DT остаётся experimental до реализации exclusive-access preflight, поэтому
+  `infobase dump` использует готовый Designer, если он доступен;
+- для server connection IBCMD-кандидат готов только при наличии `infobase.dbms.kind`,
+  `infobase.dbms.server`, `infobase.dbms.name`; в infobase export отсутствие этих полей не
+  блокирует готовый Designer alternate;
 - для file connection секция `infobase.dbms` запрещена.
 
 ### `infobase`
@@ -305,8 +316,10 @@ tests:
 - Тип: строка
 - Обязателен: да
 
-Строка подключения к ИБ. Для file-based ИБ относительный `File=...` резолвится относительно
-каталога конфига.
+Строка подключения к ИБ. Поддерживается непустой `File=...`, server connection
+`Srvr=...;Ref=...` или аргументная форма `/S server\ref`. Для file-based ИБ относительный
+`File=...` резолвится относительно каталога конфига. Infobase export не считает произвольную
+непустую строку готовым server connection.
 
 #### `infobase.user` / `infobase.password`
 

@@ -48,6 +48,11 @@ impl McpBusinessErrorKind {
 impl From<UseCaseErrorKind> for McpBusinessErrorKind {
     fn from(value: UseCaseErrorKind) -> Self {
         match value {
+            UseCaseErrorKind::Capability => Self::Runtime,
+            UseCaseErrorKind::Environment | UseCaseErrorKind::WorkspaceBusy => Self::Runtime,
+            UseCaseErrorKind::InvalidOutput
+            | UseCaseErrorKind::Cancelled
+            | UseCaseErrorKind::TimedOut => Self::Platform,
             UseCaseErrorKind::Validation => Self::Validation,
             UseCaseErrorKind::Runtime => Self::Runtime,
             UseCaseErrorKind::Platform => Self::Platform,
@@ -68,6 +73,13 @@ impl McpBusinessError {
     pub fn from_use_case(error: &UseCaseError) -> Self {
         let kind = error.kind();
         let code = match kind {
+            UseCaseErrorKind::Capability => McpErrorCode::RuntimeFailure,
+            UseCaseErrorKind::Environment | UseCaseErrorKind::WorkspaceBusy => {
+                McpErrorCode::RuntimeFailure
+            }
+            UseCaseErrorKind::InvalidOutput
+            | UseCaseErrorKind::Cancelled
+            | UseCaseErrorKind::TimedOut => McpErrorCode::PlatformFailure,
             UseCaseErrorKind::Validation => McpErrorCode::InvalidArgument,
             UseCaseErrorKind::Runtime => McpErrorCode::RuntimeFailure,
             UseCaseErrorKind::Platform => McpErrorCode::PlatformFailure,

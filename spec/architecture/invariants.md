@@ -92,6 +92,19 @@
 
 См. [ADR-0015](../decisions/0015-atomarnaya-publikatsiya-dump-artifacts-cherez-staging-backup.md).
 
+## Infobase Export Capabilities
+
+1. Source `dump`, source-built `artifacts`, configuration package export и DT snapshot являются разными use case.
+2. Provider selection независимо сообщает implementation, current-environment readiness и evidence; только `implemented + ready` допускается к execution.
+3. Для infobase export `builder` задаёт preferred provider; runner может выбрать alternate только до первого spawn. Семантика существующих команд не меняется.
+4. После первого spawn provider не переключается ни при каком исходе.
+5. Provider возвращает private staged file, а final output публикует общий owner по ADR-0015.
+6. DT не называется backup; IBCMD DT недоступен без доказанного exclusive-access contract.
+7. `implemented` не выдаётся за live proof: evidence отдельно различает documented, argv-tested и live-verified состояния.
+8. Capability/readiness selection не создаёт runtime-файлы и предшествует workspace/target locks; отсутствие adapter и неготовое окружение имеют разные stable error codes.
+
+См. [ADR-0024](../decisions/0024-tipizirovat-eksport-konfiguratsii-i-snimka-ib.md).
+
 ## Pipeline Execution Outcome
 
 1. Runner-like и pipeline-like сценарии должны использовать `ExecutionOutcome<T>` как canonical domain outcome для статуса, structured errors, diagnostics, metrics, artifacts and typed payload.

@@ -27,12 +27,17 @@
 1. CLI adapter обязан брать workspace lock перед dispatch в use case для команд, работающих с `workPath`.
 2. MCP adapter обязан брать тот же workspace lock перед dispatch в use case.
 3. Lock берётся по canonical `workPath`, чтобы разные строковые представления одного каталога конкурировали за один lock.
-4. Lock file хранится внутри `workPath` как `.v8-runner.workspace.lock`.
+4. Стабильный OS file lock хранится внутри `workPath` как `.v8-runner.workspace.lock.system`.
+   Совместимый owner lock `.v8-runner.workspace.lock` публикуется атомарно и остаётся gate для
+   уже выпущенных процессов runner, которые ещё не используют OS lock.
 5. Diagnostic sidecar `.v8-runner.workspace.lock.json` содержит metadata (`pid`, owner, command, start time, canonical path), но не является источником истины для блокировки.
 6. Ошибка записи sidecar не должна снимать lock и не должна разрешать конкурентное выполнение.
 7. Вложенная orchestration не должна повторно брать lock; она должна использовать явно названные internal functions, например `run_build_unlocked`, когда внешний command boundary уже владеет `workPath`.
 8. `--clean-before-execution`, platform log cleanup, partial list generation, hash storage commits и generated EDT/Designer writes выполняются только внутри владения workspace lock.
 9. Workspace lock является local advisory file lock, а не distributed lock для сетевых машин или разных файловых систем с невалидной семантикой блокировок.
+10. Существующий owner lock без удерживаемого новым процессом OS lock трактуется fail-closed как
+    legacy/crash state и немедленно возвращает диагностику. Автоматическое удаление запрещено:
+    оператор может удалить owner lock только после остановки всех старых и новых процессов runner.
 
 ## Неграницы (Non-goals)
 
@@ -54,7 +59,8 @@
 
 Текущее состояние кода уже следует этому решению:
 
-1. `src/use_cases/workspace_lock.rs` реализует canonical path lock, lock file и diagnostic sidecar.
+1. `src/use_cases/workspace_lock.rs` реализует canonical path lock и diagnostic sidecar, а
+   `src/support/fs.rs` — общий OS/legacy lock protocol.
 2. `src/cli/execute.rs` берёт workspace lock на CLI command boundary.
 3. `src/mcp/port.rs` берёт workspace lock на MCP use-case port boundary.
 4. `src/use_cases/build_project.rs` содержит `run_build_unlocked` для вложенного вызова из `test`.
@@ -73,4 +79,5 @@
 - [x] ADR разделяет workspace lock и MCP admission semaphore.
 - [x] ADR фиксирует canonical `workPath` как ключ блокировки.
 - [x] ADR фиксирует sidecar metadata как diagnostic-only.
+- [x] ADR фиксирует OS lock, atomic legacy compatibility gate и fail-closed offline cleanup.
 - [x] ADR описывает nested `*_unlocked` pattern для сценариев вроде `test -> build`.

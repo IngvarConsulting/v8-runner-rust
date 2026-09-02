@@ -2,6 +2,91 @@ use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilesystemObjectIdentity {
+    #[cfg(unix)]
+    Unix { device: u64, inode: u64 },
+    #[cfg(windows)]
+    Windows { volume_serial: u32, file_index: u64 },
+    #[cfg(not(any(unix, windows)))]
+    Portable {
+        canonical_path: PathBuf,
+        created: Option<std::time::SystemTime>,
+    },
+}
+
+pub fn filesystem_object_identity(path: &Path) -> std::io::Result<FilesystemObjectIdentity> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path)?;
+        Ok(FilesystemObjectIdentity::Unix {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    #[cfg(windows)]
+    {
+        windows_filesystem_object_identity(path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let metadata = std::fs::metadata(path)?;
+        Ok(FilesystemObjectIdentity::Portable {
+            canonical_path: std::fs::canonicalize(path)?,
+            created: metadata.created().ok(),
+        })
+    }
+}
+
+#[cfg(windows)]
+fn windows_filesystem_object_identity(path: &Path) -> std::io::Result<FilesystemObjectIdentity> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    let wide_path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateFileW(
+            wide_path.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    let success = unsafe { GetFileInformationByHandle(handle, &mut information) };
+    let query_error = if success == 0 {
+        Some(std::io::Error::last_os_error())
+    } else {
+        None
+    };
+    unsafe {
+        CloseHandle(handle);
+    }
+    if let Some(error) = query_error {
+        return Err(error);
+    }
+    Ok(FilesystemObjectIdentity::Windows {
+        volume_serial: information.dwVolumeSerialNumber,
+        file_index: ((information.nFileIndexHigh as u64) << 32) | information.nFileIndexLow as u64,
+    })
+}
+
 /// Returns true when `value` can be safely used as a single file/path segment.
 pub fn is_safe_path_segment(value: &str) -> bool {
     if value.is_empty() {
@@ -72,7 +157,14 @@ pub fn nearest_existing_canonical_path(path: &Path) -> std::io::Result<PathBuf> 
 
 pub fn stable_path_identity(path: &Path) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(path.to_string_lossy().as_bytes());
+    let path = path.to_string_lossy();
+    #[cfg(any(windows, target_os = "macos"))]
+    let path = {
+        use unicode_casefold::UnicodeCaseFold;
+        use unicode_normalization::UnicodeNormalization;
+        path.nfd().case_fold().nfd().collect::<String>()
+    };
+    hasher.update(path.as_bytes());
     let digest = hasher.finalize();
     digest[..16]
         .iter()
@@ -113,7 +205,7 @@ pub fn normalize_windows_verbatim_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        hashed_lock_path, is_filesystem_root, is_safe_path_segment,
+        filesystem_object_identity, hashed_lock_path, is_filesystem_root, is_safe_path_segment,
         nearest_existing_canonical_path, normalize_windows_verbatim_path, stable_path_identity,
         strip_windows_verbatim_prefix,
     };
@@ -165,6 +257,20 @@ mod tests {
             .file_name()
             .and_then(|value| value.to_str())
             .is_some_and(|name| name.starts_with(".dump-") && name.ends_with(".lock")));
+    }
+
+    #[test]
+    fn filesystem_object_identity_changes_when_directory_is_replaced() {
+        let dir = tempdir().expect("tempdir");
+        let observed = dir.path().join("observed");
+        fs::create_dir(&observed).expect("observed");
+        let before = filesystem_object_identity(&observed).expect("before");
+
+        fs::rename(&observed, dir.path().join("original")).expect("move original");
+        fs::create_dir(&observed).expect("replace observed");
+        let after = filesystem_object_identity(&observed).expect("after");
+
+        assert_ne!(before, after);
     }
 
     #[test]

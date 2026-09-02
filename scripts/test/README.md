@@ -59,6 +59,10 @@ live-mcp-http.py
 ### `ci-rust.sh`
 
 - Отвечает только за выбор CI-scope.
+- Windows contract scope дополнительно запускает нативный CLI smoke выгрузок CFE и DT через
+  test-only platform fixture; это сохраняет end-to-end проверку маршрутизации, staging и
+  публикации на Windows без требования установленной платформы 1С. Тот же scope запускает
+  cross-process contention smoke и unit-регрессии общего OS/legacy lock protocol.
 - Не знает деталей live fixture и не должен дублировать live smoke-логику.
 
 ### `ci-happy-path.sh`
