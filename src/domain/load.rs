@@ -24,6 +24,7 @@ pub enum LoadTargetKind {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CompatibilityState {
+    Absent,
     Supported,
     NotSupported,
     Unknown,

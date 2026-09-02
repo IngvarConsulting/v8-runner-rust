@@ -286,6 +286,13 @@ v8-runner load --path <FILE> [--mode <load|merge>] [--settings <FILE>] [--extens
 - Работает только для `format=DESIGNER` и `builder=DESIGNER`.
 - `.cfe` требует `--extension`.
 - `--mode merge` требует `--settings <FILE>`.
+- Первая загрузка отсутствующего в ИБ расширения возвращает
+  `compatibility_state=absent` и выполняется через `--mode load`; `merge` для
+  такого расширения отклоняется с рекомендацией сначала выполнить `load`.
+- Неоднозначная ошибка compatibility probe не разрешает изменяющую операцию:
+  состояние остаётся `unknown`, команда возвращает platform failure, а артефакт
+  не загружается. Новая локализованная формулировка принимается как `absent`
+  только после фиксации реального вывода платформы и regression-теста.
 - `load --mode update` не поддержан; используйте `load` или `merge`.
 
 ### `make` / `artifacts`
