@@ -60,6 +60,40 @@ impl V8Connection {
         })
     }
 
+    /// Returns whether the raw value has a supported file or server connection shape.
+    pub fn has_supported_shape(&self) -> bool {
+        if let Some(path) = self.file_path() {
+            return !path.trim().is_empty();
+        }
+        if self.raw.starts_with('/') || self.raw.starts_with('-') {
+            let mut args = self.connection_args.iter();
+            while let Some(arg) = args.next() {
+                if arg.eq_ignore_ascii_case("/s") || arg.eq_ignore_ascii_case("-s") {
+                    return args.next().is_some_and(|value| {
+                        let value = value.trim();
+                        !value.is_empty() && value.contains('\\')
+                    });
+                }
+            }
+            return false;
+        }
+
+        let mut server = None;
+        let mut reference = None;
+        for part in self.raw.split(';') {
+            let Some((key, value)) = part.split_once('=') else {
+                return false;
+            };
+            match key.trim().to_ascii_lowercase().as_str() {
+                "srvr" => server = Some(value.trim()),
+                "ref" => reference = Some(value.trim()),
+                _ => {}
+            }
+        }
+        server.is_some_and(|value| !value.is_empty())
+            && reference.is_some_and(|value| !value.is_empty())
+    }
+
     /// Returns a stable file-based infobase connection string when available.
     pub fn create_infobase_arg(&self) -> Option<String> {
         self.file_path()
@@ -133,6 +167,18 @@ mod tests {
         let connection = V8Connection::from_connection_string("Srvr=demo;File=/tmp/ib;Ref=test");
 
         assert_eq!(connection.file_path(), Some("/tmp/ib"));
+    }
+
+    #[test]
+    fn validates_supported_file_and_server_connection_shapes() {
+        assert!(V8Connection::from_connection_string("File=/tmp/ib").has_supported_shape());
+        assert!(
+            V8Connection::from_connection_string("Srvr=cluster;Ref=demo").has_supported_shape()
+        );
+        assert!(V8Connection::from_connection_string(r#"/S "cluster\demo""#).has_supported_shape());
+        assert!(!V8Connection::from_connection_string("not a connection").has_supported_shape());
+        assert!(!V8Connection::from_connection_string("Srvr=cluster;Ref=").has_supported_shape());
+        assert!(!V8Connection::from_connection_string("File=").has_supported_shape());
     }
 
     #[test]

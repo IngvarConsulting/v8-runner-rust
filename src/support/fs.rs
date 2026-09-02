@@ -1,4 +1,4 @@
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -81,9 +81,11 @@ pub struct AdvisoryLockGuard {
 
 impl Drop for AdvisoryLockGuard {
     fn drop(&mut self) {
-        self.file.take();
-        if lock_file_owned_by(&self.path, &self.metadata.owner_id) {
-            let _ = std::fs::remove_file(&self.path);
+        if let Some(file) = self.file.take() {
+            if lock_file_owned_by(&self.path, &self.metadata.owner_id) {
+                let _ = std::fs::remove_file(&self.path);
+            }
+            let _ = file.unlock();
         }
     }
 }
@@ -96,6 +98,56 @@ pub struct ReplaceDirOutcome {
 #[derive(Debug)]
 pub struct ReplaceFileOutcome {
     pub cleanup_warning: Option<String>,
+    pub previous_target_present: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplaceFileFailureState {
+    Unchanged,
+    Restored,
+    Uncertain,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{source}")]
+pub struct ReplaceFileError {
+    #[source]
+    pub source: std::io::Error,
+    pub target_state: ReplaceFileFailureState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplaceFileTestPoint {
+    PublishStage,
+    RestoreBackup,
+}
+
+#[cfg(test)]
+thread_local! {
+    static REPLACE_FILE_TEST_HOOK: std::cell::RefCell<Option<Box<dyn Fn(ReplaceFileTestPoint) -> std::io::Result<()>>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn run_replace_file_test_hook(point: ReplaceFileTestPoint) -> std::io::Result<()> {
+    REPLACE_FILE_TEST_HOOK.with(|hook| match hook.borrow().as_ref() {
+        Some(hook) => hook(point),
+        None => Ok(()),
+    })
+}
+
+#[cfg(not(test))]
+fn run_replace_file_test_hook(_point: ReplaceFileTestPoint) -> std::io::Result<()> {
+    Ok(())
+}
+
+impl ReplaceFileError {
+    fn new(source: std::io::Error, target_state: ReplaceFileFailureState) -> Self {
+        Self {
+            source,
+            target_state,
+        }
+    }
 }
 
 pub fn acquire_advisory_lock(path: &Path) -> std::io::Result<AdvisoryLockGuard> {
@@ -115,9 +167,11 @@ pub fn try_acquire_advisory_lock(path: &Path) -> std::io::Result<AdvisoryLockGua
 }
 
 fn try_acquire_advisory_lock_impl(path: &Path) -> std::io::Result<AdvisoryLockGuard> {
-    if let Some(parent) = path.parent() {
-        ensure_dir(parent)?;
-    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    ensure_dir(parent)?;
 
     let metadata = AdvisoryLockMetadata {
         tool: TOOL_NAME.to_owned(),
@@ -127,43 +181,77 @@ fn try_acquire_advisory_lock_impl(path: &Path) -> std::io::Result<AdvisoryLockGu
     };
     let encoded = serde_json::to_vec_pretty(&metadata)
         .map_err(|error| std::io::Error::new(ErrorKind::InvalidData, error))?;
-    loop {
-        match OpenOptions::new().create_new(true).write(true).open(path) {
-            Ok(mut file) => {
-                #[cfg(test)]
-                TEST_LOCK_WRITE_HOOK.with(|cell| {
-                    if let Some(hook) = cell.borrow().as_ref() {
-                        hook();
-                    }
-                });
-
-                let write_result = file.write_all(&encoded).and_then(|()| file.sync_all());
-                if let Err(error) = write_result {
-                    let _ = std::fs::remove_file(path);
-                    return Err(error);
-                }
-                return Ok(AdvisoryLockGuard {
-                    file: Some(file),
-                    path: path.to_path_buf(),
-                    metadata,
-                });
-            }
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                if stale_advisory_lock_can_be_removed(path) {
-                    match std::fs::remove_file(path) {
-                        Ok(()) => continue,
-                        Err(remove_error) if remove_error.kind() == ErrorKind::NotFound => continue,
-                        Err(remove_error) => return Err(remove_error),
-                    }
-                }
-                return Err(std::io::Error::new(
-                    ErrorKind::WouldBlock,
-                    format!("lock is already held: {}", path.display()),
-                ));
-            }
-            Err(error) => return Err(error),
-        }
+    let system_lock_path = advisory_system_lock_path(path)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(system_lock_path)?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => return Err(lock_already_held(path)),
+        Err(TryLockError::Error(error)) => return Err(error),
     }
+
+    publish_advisory_lock_metadata(path, parent, &encoded)?;
+    Ok(AdvisoryLockGuard {
+        file: Some(file),
+        path: path.to_path_buf(),
+        metadata,
+    })
+}
+
+fn advisory_system_lock_path(path: &Path) -> std::io::Result<PathBuf> {
+    let name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("lock path has no file name: {}", path.display()),
+        )
+    })?;
+    let mut system_name = name.to_os_string();
+    system_name.push(".system");
+    Ok(path.with_file_name(system_name))
+}
+
+fn publish_advisory_lock_metadata(
+    path: &Path,
+    parent: &Path,
+    encoded: &[u8],
+) -> std::io::Result<()> {
+    let mut candidate = tempfile::Builder::new()
+        .prefix(".v8-runner-lock-candidate-")
+        .tempfile_in(parent)?;
+    write_advisory_lock_metadata(candidate.as_file_mut(), encoded)?;
+    candidate.as_file().sync_all()?;
+
+    match candidate.persist_noclobber(path) {
+        Ok(_) => {
+            let _ = best_effort_fsync_dir(parent);
+            Ok(())
+        }
+        Err(error) if error.error.kind() == ErrorKind::AlreadyExists => {
+            Err(legacy_lock_requires_offline_cleanup(path))
+        }
+        Err(error) => Err(error.error),
+    }
+}
+
+fn lock_already_held(path: &Path) -> std::io::Error {
+    std::io::Error::new(
+        ErrorKind::WouldBlock,
+        format!("lock is already held: {}", path.display()),
+    )
+}
+
+fn legacy_lock_requires_offline_cleanup(path: &Path) -> std::io::Error {
+    std::io::Error::new(
+        ErrorKind::AlreadyExists,
+        format!(
+            "legacy or crash owner lock remains at '{}'; stop all old and new v8-runner processes, then remove this file manually",
+            path.display()
+        ),
+    )
 }
 
 pub fn advisory_lock_owner_id(guard: &AdvisoryLockGuard) -> &str {
@@ -175,14 +263,30 @@ pub fn read_advisory_lock_metadata(path: &Path) -> std::io::Result<AdvisoryLockM
     serde_json::from_slice(&raw).map_err(|error| std::io::Error::new(ErrorKind::InvalidData, error))
 }
 
-fn stale_advisory_lock_can_be_removed(path: &Path) -> bool {
-    match read_advisory_lock_metadata(path) {
-        Ok(metadata) => !lock_holder_is_live(metadata.pid),
-        Err(error) if error.kind() == ErrorKind::NotFound => true,
-        Err(error) if error.kind() == ErrorKind::InvalidData => std::fs::metadata(path)
-            .map(|metadata| metadata.len() > 0)
-            .unwrap_or(true),
-        Err(_) => false,
+fn lock_file_owned_by(path: &Path, owner_id: &str) -> bool {
+    read_advisory_lock_metadata(path)
+        .map(|metadata| metadata.owner_id == owner_id)
+        .unwrap_or(false)
+}
+
+#[cfg(not(test))]
+fn write_advisory_lock_metadata(file: &mut File, encoded: &[u8]) -> std::io::Result<()> {
+    file.write_all(encoded)
+}
+
+#[cfg(test)]
+fn write_advisory_lock_metadata(file: &mut File, encoded: &[u8]) -> std::io::Result<()> {
+    let has_hook = TEST_LOCK_WRITE_HOOK.with(|cell| cell.borrow().is_some());
+    if has_hook && !encoded.is_empty() {
+        file.write_all(&encoded[..1])?;
+        TEST_LOCK_WRITE_HOOK.with(|cell| {
+            if let Some(hook) = cell.borrow().as_ref() {
+                hook();
+            }
+        });
+        file.write_all(&encoded[1..])
+    } else {
+        file.write_all(encoded)
     }
 }
 
@@ -202,53 +306,6 @@ where
         *cell.borrow_mut() = None;
     });
     result
-}
-
-#[cfg(unix)]
-fn lock_holder_is_live(pid: u32) -> bool {
-    let rc = unsafe { libc::kill(pid as i32, 0) };
-    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
-#[cfg(windows)]
-fn lock_holder_is_live(pid: u32) -> bool {
-    type Bool = i32;
-    type Dword = u32;
-    type Handle = *mut std::ffi::c_void;
-
-    const PROCESS_QUERY_LIMITED_INFORMATION: Dword = 0x1000;
-    const ERROR_INVALID_PARAMETER: Dword = 87;
-    const ERROR_ACCESS_DENIED: Dword = 5;
-    const STILL_ACTIVE: Dword = 259;
-
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn OpenProcess(desired_access: Dword, inherit_handle: Bool, process_id: Dword) -> Handle;
-        fn GetExitCodeProcess(process: Handle, exit_code: *mut Dword) -> Bool;
-        fn CloseHandle(handle: Handle) -> Bool;
-        fn GetLastError() -> Dword;
-    }
-
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle.is_null() {
-            return match GetLastError() {
-                ERROR_INVALID_PARAMETER => false,
-                ERROR_ACCESS_DENIED => true,
-                _ => true,
-            };
-        }
-
-        let mut exit_code = 0;
-        let ok = GetExitCodeProcess(handle, &mut exit_code);
-        let _ = CloseHandle(handle);
-        ok != 0 && exit_code == STILL_ACTIVE
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn lock_holder_is_live(_pid: u32) -> bool {
-    true
 }
 
 pub fn best_effort_fsync_dir(path: &Path) -> std::io::Result<()> {
@@ -337,12 +394,6 @@ fn publish_file_atomically_impl(
             }
         }
     }
-}
-
-fn lock_file_owned_by(path: &Path, owner_id: &str) -> bool {
-    read_advisory_lock_metadata(path)
-        .map(|metadata| metadata.owner_id == owner_id)
-        .unwrap_or(false)
 }
 
 pub fn metadata_sidecar_path(dir: &Path) -> PathBuf {
@@ -501,11 +552,14 @@ pub fn replace_file_atomically(
     target_file: &Path,
     run_id: &str,
     target_identity: &str,
-) -> std::io::Result<ReplaceFileOutcome> {
+) -> Result<ReplaceFileOutcome, ReplaceFileError> {
     let parent = target_file.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("target path has no parent: {}", target_file.display()),
+        ReplaceFileError::new(
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("target path has no parent: {}", target_file.display()),
+            ),
+            ReplaceFileFailureState::Unchanged,
         )
     })?;
     let backup_name = target_file
@@ -517,23 +571,35 @@ pub fn replace_file_atomically(
     let backup_metadata_path = metadata_sidecar_path(&backup_file);
 
     if !target_file.exists() {
-        publish_file_atomically(staging_file, target_file)?;
-        let fsync_result = best_effort_fsync_dir(parent);
+        publish_file_atomically(staging_file, target_file)
+            .map_err(|error| ReplaceFileError::new(error, ReplaceFileFailureState::Unchanged))?;
+        if let Err(error) = best_effort_fsync_dir(parent) {
+            let rollback_result = std::fs::rename(target_file, staging_file)
+                .and_then(|()| best_effort_fsync_dir(parent));
+            return Err(replace_file_rollback_error(
+                error,
+                rollback_result,
+                "failed to fsync parent after creating target file",
+                ReplaceFileFailureState::Unchanged,
+            ));
+        }
         let _ = remove_path_if_exists(&stage_metadata_path);
-        fsync_result?;
         return Ok(ReplaceFileOutcome {
             cleanup_warning: None,
+            previous_target_present: false,
         });
     }
 
-    std::fs::rename(target_file, &backup_file)?;
+    std::fs::rename(target_file, &backup_file)
+        .map_err(|error| ReplaceFileError::new(error, ReplaceFileFailureState::Unchanged))?;
     if let Err(error) = best_effort_fsync_dir(parent) {
         let rollback_result =
             std::fs::rename(&backup_file, target_file).and_then(|()| best_effort_fsync_dir(parent));
-        return Err(with_rollback_context(
+        return Err(replace_file_rollback_error(
             error,
-            rollback_result.err(),
+            rollback_result,
             "failed to fsync parent after moving target file to backup",
+            ReplaceFileFailureState::Restored,
         ));
     }
 
@@ -546,20 +612,25 @@ pub fn replace_file_atomically(
     ) {
         let rollback_result =
             std::fs::rename(&backup_file, target_file).and_then(|()| best_effort_fsync_dir(parent));
-        return Err(with_rollback_context(
+        return Err(replace_file_rollback_error(
             error,
-            rollback_result.err(),
+            rollback_result,
             "failed to write backup file metadata",
+            ReplaceFileFailureState::Restored,
         ));
     }
 
-    if let Err(error) = publish_file_atomically(staging_file, target_file) {
-        let rollback_result = publish_file_atomically(&backup_file, target_file)
+    if let Err(error) = run_replace_file_test_hook(ReplaceFileTestPoint::PublishStage)
+        .and_then(|()| publish_file_atomically(staging_file, target_file))
+    {
+        let rollback_result = run_replace_file_test_hook(ReplaceFileTestPoint::RestoreBackup)
+            .and_then(|()| publish_file_atomically(&backup_file, target_file))
             .and_then(|()| best_effort_fsync_dir(parent));
-        return Err(with_rollback_context(
+        return Err(replace_file_rollback_error(
             error,
-            rollback_result.err(),
+            rollback_result,
             "failed to publish staged artifact file",
+            ReplaceFileFailureState::Restored,
         ));
     }
 
@@ -567,10 +638,11 @@ pub fn replace_file_atomically(
         let rollback_result = std::fs::rename(target_file, staging_file)
             .and_then(|()| publish_file_atomically(&backup_file, target_file))
             .and_then(|()| best_effort_fsync_dir(parent));
-        return Err(with_rollback_context(
+        return Err(replace_file_rollback_error(
             error,
-            rollback_result.err(),
+            rollback_result,
             "failed to fsync parent after publishing staged artifact file",
+            ReplaceFileFailureState::Restored,
         ));
     }
 
@@ -595,7 +667,29 @@ pub fn replace_file_atomically(
         } else {
             Some(warnings.join("; "))
         },
+        previous_target_present: true,
     })
+}
+
+fn replace_file_rollback_error(
+    error: std::io::Error,
+    rollback_result: std::io::Result<()>,
+    context: &str,
+    restored_state: ReplaceFileFailureState,
+) -> ReplaceFileError {
+    match rollback_result {
+        Ok(()) => ReplaceFileError::new(
+            std::io::Error::new(error.kind(), format!("{context}: {error}")),
+            restored_state,
+        ),
+        Err(rollback_error) => ReplaceFileError::new(
+            std::io::Error::new(
+                error.kind(),
+                format!("{context}: {error}; rollback failed: {rollback_error}"),
+            ),
+            ReplaceFileFailureState::Uncertain,
+        ),
+    }
 }
 
 fn with_rollback_context(
@@ -617,10 +711,11 @@ mod tests {
     #[cfg(windows)]
     use super::replace_dir_atomically;
     use super::{
-        acquire_advisory_lock, advisory_lock_owner_id, publish_file_atomically,
-        publish_file_atomically_impl, read_advisory_lock_metadata, remove_path_if_exists,
+        acquire_advisory_lock, advisory_lock_owner_id, advisory_system_lock_path,
+        publish_file_atomically, publish_file_atomically_impl, read_advisory_lock_metadata,
+        remove_path_if_exists, replace_file_atomically, replace_file_rollback_error,
         try_acquire_advisory_lock, try_acquire_advisory_lock_with_hook, AdvisoryLockMetadata,
-        TOOL_NAME,
+        ReplaceFileFailureState, ReplaceFileTestPoint, REPLACE_FILE_TEST_HOOK, TOOL_NAME,
     };
     use std::fs;
     use std::io::ErrorKind;
@@ -655,6 +750,63 @@ mod tests {
 
         assert_eq!(metadata.pid, std::process::id());
         assert_eq!(metadata.owner_id, advisory_lock_owner_id(&guard));
+    }
+
+    #[test]
+    fn released_advisory_lock_keeps_system_file_and_can_be_reacquired() {
+        let dir = tempdir().expect("tempdir");
+        let lock_path = dir.path().join("persistent.lock");
+        let first = acquire_advisory_lock(&lock_path).expect("first lock");
+        drop(first);
+
+        assert!(!lock_path.exists());
+        assert!(advisory_system_lock_path(&lock_path)
+            .expect("system lock path")
+            .is_file());
+        let second = try_acquire_advisory_lock(&lock_path).expect("second lock");
+        assert!(!advisory_lock_owner_id(&second).is_empty());
+    }
+
+    #[test]
+    fn dead_legacy_lock_metadata_is_fail_closed() {
+        let dir = tempdir().expect("tempdir");
+        let lock_path = dir.path().join("stale.lock");
+        let stale = AdvisoryLockMetadata {
+            tool: TOOL_NAME.to_owned(),
+            pid: i32::MAX as u32,
+            owner_id: "stale-owner".to_owned(),
+            created_at: chrono::Utc::now(),
+        };
+        fs::write(
+            &lock_path,
+            serde_json::to_vec_pretty(&stale).expect("metadata"),
+        )
+        .expect("stale lock");
+
+        let error = try_acquire_advisory_lock(&lock_path).expect_err("legacy lock remains busy");
+
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert!(error.to_string().contains("remove this file manually"));
+        assert_eq!(
+            read_advisory_lock_metadata(&lock_path)
+                .expect("stale metadata")
+                .owner_id,
+            "stale-owner"
+        );
+    }
+
+    #[test]
+    fn blocking_acquisition_fails_fast_for_legacy_owner_lock() {
+        let dir = tempdir().expect("tempdir");
+        let lock_path = dir.path().join("legacy.lock");
+        fs::write(&lock_path, b"legacy owner").expect("legacy lock");
+        let started = std::time::Instant::now();
+
+        let error = acquire_advisory_lock(&lock_path).expect_err("legacy lock must fail fast");
+
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(error.to_string().contains("remove this file manually"));
     }
 
     #[test]
@@ -727,16 +879,143 @@ mod tests {
     }
 
     #[test]
-    fn stale_corrupt_lock_file_can_be_recovered() {
+    fn publish_file_atomically_reports_when_publish_and_rollback_both_fail() {
+        let dir = tempdir().expect("tempdir");
+        let temp = dir.path().join("temp.json");
+        let destination = dir.path().join("dest.json");
+        fs::write(&temp, "new").expect("temp");
+        fs::write(&destination, "old").expect("dest");
+
+        let calls = AtomicUsize::new(0);
+        let rename = |from: &Path, to: &Path| {
+            let count = calls.fetch_add(1, Ordering::SeqCst);
+            if count > 0 {
+                return Err(std::io::Error::new(
+                    ErrorKind::PermissionDenied,
+                    if count == 1 {
+                        "simulated publish failure"
+                    } else {
+                        "simulated rollback failure"
+                    },
+                ));
+            }
+            fs::rename(from, to)
+        };
+
+        let error = publish_file_atomically_impl(&temp, &destination, &rename, &|path| {
+            remove_path_if_exists(path)
+        })
+        .expect_err("publish and rollback must fail");
+
+        let message = error.to_string();
+        assert!(message.contains("simulated publish failure"));
+        assert!(message.contains("rollback failed"));
+        assert!(message.contains("simulated rollback failure"));
+        assert!(!destination.exists(), "target needs manual inspection");
+    }
+
+    #[test]
+    fn replace_file_rollback_failure_is_typed_as_uncertain() {
+        let error = replace_file_rollback_error(
+            std::io::Error::new(ErrorKind::PermissionDenied, "publish failed"),
+            Err(std::io::Error::new(
+                ErrorKind::PermissionDenied,
+                "rollback failed",
+            )),
+            "failed to publish staged artifact file",
+            ReplaceFileFailureState::Restored,
+        );
+
+        assert_eq!(error.target_state, ReplaceFileFailureState::Uncertain);
+        assert!(error.to_string().contains("rollback failed"));
+    }
+
+    #[test]
+    fn successful_replace_file_rollback_is_typed_as_restored() {
+        let error = replace_file_rollback_error(
+            std::io::Error::new(ErrorKind::PermissionDenied, "publish failed"),
+            Ok(()),
+            "failed to publish staged artifact file",
+            ReplaceFileFailureState::Restored,
+        );
+
+        assert_eq!(error.target_state, ReplaceFileFailureState::Restored);
+        assert!(!error.to_string().contains("rollback failed"));
+    }
+
+    #[test]
+    fn replace_file_restores_original_bytes_when_stage_disappeared() {
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("target.cf");
+        let missing_stage = dir.path().join("missing-stage.cf");
+        fs::write(&target, "original").expect("target");
+
+        let error = replace_file_atomically(&missing_stage, &target, "run-1", "identity")
+            .expect_err("publish must fail");
+
+        assert_eq!(error.target_state, ReplaceFileFailureState::Restored);
+        assert_eq!(
+            fs::read_to_string(&target).expect("restored target"),
+            "original"
+        );
+    }
+
+    #[test]
+    fn replace_file_reports_uncertain_and_retains_backup_when_rollback_fails() {
+        struct HookReset;
+        impl Drop for HookReset {
+            fn drop(&mut self) {
+                REPLACE_FILE_TEST_HOOK.with(|hook| *hook.borrow_mut() = None);
+            }
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("target.cf");
+        let stage = dir.path().join("stage.cf");
+        let backup = dir.path().join(".target.cf.backup-run-1");
+        fs::write(&target, "original").expect("target");
+        fs::write(&stage, "replacement").expect("stage");
+        REPLACE_FILE_TEST_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(|point| {
+                Err(std::io::Error::new(
+                    ErrorKind::PermissionDenied,
+                    match point {
+                        ReplaceFileTestPoint::PublishStage => "injected publish failure",
+                        ReplaceFileTestPoint::RestoreBackup => "injected rollback failure",
+                    },
+                ))
+            }));
+        });
+        let _reset = HookReset;
+
+        let error = replace_file_atomically(&stage, &target, "run-1", "identity")
+            .expect_err("publish and rollback must fail");
+
+        assert_eq!(error.target_state, ReplaceFileFailureState::Uncertain);
+        assert!(!target.exists());
+        assert_eq!(
+            fs::read_to_string(&backup).expect("retained backup"),
+            "original"
+        );
+        assert_eq!(
+            fs::read_to_string(&stage).expect("retained stage"),
+            "replacement"
+        );
+        assert!(error.to_string().contains("rollback failed"));
+    }
+
+    #[test]
+    fn fresh_corrupt_lock_file_cannot_be_stolen() {
         let dir = tempdir().expect("tempdir");
         let lock_path = dir.path().join("corrupt.lock");
         let original = b"{not valid json".to_vec();
         fs::write(&lock_path, &original).expect("lock");
 
-        let guard = try_acquire_advisory_lock(&lock_path).expect("recovered lock");
+        let error =
+            try_acquire_advisory_lock(&lock_path).expect_err("fresh malformed lock is busy");
 
-        assert_eq!(advisory_lock_owner_id(&guard).len(), 36);
-        assert_ne!(fs::read(&lock_path).expect("lock"), original);
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&lock_path).expect("lock"), original);
     }
 
     #[test]
@@ -757,7 +1036,7 @@ mod tests {
 
         let error = try_acquire_advisory_lock(&lock_path).expect_err("busy lock");
 
-        assert_eq!(error.kind(), ErrorKind::WouldBlock);
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
         assert_eq!(
             read_advisory_lock_metadata(&lock_path)
                 .expect("metadata")
@@ -767,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_acquisition_cannot_steal_lock_during_initial_publish() {
+    fn concurrent_acquisition_cannot_enter_during_metadata_write() {
         let dir = tempdir().expect("tempdir");
         let lock_path = dir.path().join("publish.lock");
         let (hook_ready_tx, hook_ready_rx) = mpsc::channel();
@@ -779,22 +1058,57 @@ mod tests {
                 hook_ready_tx.send(()).expect("signal hook");
                 release_rx.recv().expect("release hook");
             };
-            try_acquire_advisory_lock_with_hook(&lock_path_clone, hook).expect("first lock");
+            try_acquire_advisory_lock_with_hook(&lock_path_clone, hook)
         });
 
         hook_ready_rx.recv().expect("hook reached");
-        let contender = thread::spawn({
-            let lock_path = lock_path.clone();
-            move || try_acquire_advisory_lock(&lock_path)
-        });
-
-        thread::sleep(Duration::from_millis(100));
+        let contender = try_acquire_advisory_lock(&lock_path).expect_err("lock remains held");
+        assert_eq!(contender.kind(), ErrorKind::WouldBlock);
         release_tx.send(()).expect("release hook");
 
-        handle.join().expect("join first");
+        let first_guard = handle.join().expect("join first").expect("first lock");
+        let published = read_advisory_lock_metadata(&lock_path).expect("complete metadata");
+        assert_eq!(published.owner_id, advisory_lock_owner_id(&first_guard));
+    }
 
-        let second_result = contender.join().expect("join second");
-        assert!(matches!(second_result, Err(error) if error.kind() == ErrorKind::WouldBlock));
+    #[test]
+    fn legacy_writer_can_win_without_being_overwritten_by_new_protocol() {
+        let dir = tempdir().expect("tempdir");
+        let lock_path = dir.path().join("legacy-race.lock");
+        let (hook_ready_tx, hook_ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let lock_path_clone = lock_path.clone();
+
+        let handle = thread::spawn(move || {
+            let hook = move || {
+                hook_ready_tx.send(()).expect("signal hook");
+                release_rx.recv().expect("release hook");
+            };
+            try_acquire_advisory_lock_with_hook(&lock_path_clone, hook)
+        });
+
+        hook_ready_rx.recv().expect("hook reached");
+        let legacy = AdvisoryLockMetadata {
+            tool: TOOL_NAME.to_owned(),
+            pid: std::process::id(),
+            owner_id: "legacy-owner".to_owned(),
+            created_at: chrono::Utc::now(),
+        };
+        fs::write(
+            &lock_path,
+            serde_json::to_vec_pretty(&legacy).expect("legacy metadata"),
+        )
+        .expect("legacy lock");
+        release_tx.send(()).expect("release hook");
+
+        let result = handle.join().expect("join new protocol");
+        assert!(matches!(result, Err(error) if error.kind() == ErrorKind::AlreadyExists));
+        assert_eq!(
+            read_advisory_lock_metadata(&lock_path)
+                .expect("legacy metadata")
+                .owner_id,
+            "legacy-owner"
+        );
     }
 
     #[test]
@@ -855,11 +1169,5 @@ mod tests {
             fs::read_to_string(target_dir.join("payload.txt")).expect("target payload"),
             "payload"
         );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_reports_missing_process_as_not_live() {
-        assert!(!super::lock_holder_is_live(u32::MAX));
     }
 }

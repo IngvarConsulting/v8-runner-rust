@@ -53,11 +53,14 @@ pub(crate) fn acquire_workspace_lock(
     let sidecar_path = workspace_lock_sidecar_path(&canonical_work_path);
 
     let lock = try_acquire_advisory_lock(&lock_path).map_err(|error| match error.kind() {
-        ErrorKind::WouldBlock => AppError::Runtime(render_busy_message(
-            command_name,
-            &canonical_work_path,
-            &lock_path,
-            &sidecar_path,
+        ErrorKind::WouldBlock | ErrorKind::AlreadyExists => AppError::WorkspaceBusy(format!(
+            "{}; {error}",
+            render_busy_message(
+                command_name,
+                &canonical_work_path,
+                &lock_path,
+                &sidecar_path,
+            )
         )),
         _ => AppError::Runtime(format!(
             "failed to acquire {command_name} workspace lock '{}': {error}",

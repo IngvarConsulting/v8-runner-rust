@@ -48,10 +48,20 @@ pub fn with_cli_error<T: Serialize>(envelope: Envelope<T>, error: &UseCaseError)
 }
 
 fn cli_envelope_error(error: &UseCaseError) -> EnvelopeError {
-    let (code, kind) = match error.kind() {
+    let (code, kind) = cli_error_contract(error.kind());
+    EnvelopeError::new(code, kind, error.message())
+}
+
+pub(crate) const fn cli_error_contract(kind: UseCaseErrorKind) -> (&'static str, &'static str) {
+    match kind {
+        UseCaseErrorKind::Capability => ("capability_unavailable", "capability"),
+        UseCaseErrorKind::Environment => ("environment_unavailable", "environment"),
+        UseCaseErrorKind::WorkspaceBusy => ("workspace_busy", "workspace"),
+        UseCaseErrorKind::InvalidOutput => ("invalid_output", "invalid_output"),
+        UseCaseErrorKind::Cancelled => ("cancelled", "interruption"),
+        UseCaseErrorKind::TimedOut => ("timed_out", "interruption"),
         UseCaseErrorKind::Validation => ("invalid_argument", "validation"),
         UseCaseErrorKind::Runtime => ("runtime_failure", "runtime"),
         UseCaseErrorKind::Platform => ("platform_failure", "platform"),
-    };
-    EnvelopeError::new(code, kind, error.message())
+    }
 }

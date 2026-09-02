@@ -64,6 +64,8 @@ pub enum Command {
     Test(TestArgs),
     /// Dump infobase state back to project files
     Dump(DumpArgs),
+    /// Export configuration packages or a full DT snapshot from the configured infobase
+    Infobase(InfobaseArgs),
     /// Convert configured source-sets between EDT and Designer file formats
     Convert(ConvertArgs),
     /// Export release artifacts via Designer batch commands
@@ -345,6 +347,56 @@ pub struct DumpArgs {
     /// Objects for partial dump. Use canonical TYPE:NAME selectors; legacy TYPE.NAME selectors are accepted for compatibility.
     #[arg(long = "object")]
     pub objects: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct InfobaseArgs {
+    #[command(subcommand)]
+    pub command: InfobaseCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum InfobaseCommand {
+    /// Export working/database configuration state to CF or CFE
+    Configuration(InfobaseConfigurationArgs),
+    /// Export the complete infobase to a DT transfer file (not a backup)
+    Dump(InfobaseDumpArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct InfobaseConfigurationArgs {
+    #[command(subcommand)]
+    pub command: InfobaseConfigurationCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum InfobaseConfigurationCommand {
+    /// Export the selected configuration state to a package file
+    Export(InfobaseConfigurationExportArgs),
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Command options")]
+pub struct InfobaseConfigurationExportArgs {
+    /// Configuration state to export
+    #[arg(long, value_parser = ["working", "database"])]
+    pub state: String,
+
+    /// Extension name; omit to export the main configuration
+    #[arg(long)]
+    pub extension: Option<String>,
+
+    /// Final CF/CFE output path
+    #[arg(long)]
+    pub output: String,
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Command options")]
+pub struct InfobaseDumpArgs {
+    /// Final DT output path; a DT transfer image is not a database backup
+    #[arg(long)]
+    pub output: String,
 }
 
 #[derive(Args, Debug)]
@@ -1071,5 +1123,76 @@ mod tests {
             .expect("parse artifacts alias");
 
         assert!(matches!(cli.command, Command::Artifacts(_)));
+    }
+
+    #[test]
+    fn parses_infobase_configuration_export_contract() {
+        let cli = Cli::try_parse_from([
+            "v8-runner",
+            "infobase",
+            "configuration",
+            "export",
+            "--state",
+            "database",
+            "--extension",
+            "SalesAddon",
+            "--output",
+            "dist/sales.cfe",
+        ])
+        .expect("parse configuration export");
+
+        match cli.command {
+            Command::Infobase(args) => match args.command {
+                super::InfobaseCommand::Configuration(configuration) => {
+                    match configuration.command {
+                        super::InfobaseConfigurationCommand::Export(export) => {
+                            assert_eq!(export.state, "database");
+                            assert_eq!(export.extension.as_deref(), Some("SalesAddon"));
+                            assert_eq!(export.output, "dist/sales.cfe");
+                        }
+                    }
+                }
+                _ => panic!("unexpected infobase command"),
+            },
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parses_infobase_dump_contract() {
+        let cli = Cli::try_parse_from([
+            "v8-runner",
+            "infobase",
+            "dump",
+            "--output",
+            "dist/snapshot.dt",
+        ])
+        .expect("parse infobase dump");
+
+        match cli.command {
+            Command::Infobase(args) => match args.command {
+                super::InfobaseCommand::Dump(dump) => {
+                    assert_eq!(dump.output, "dist/snapshot.dt");
+                }
+                _ => panic!("unexpected infobase command"),
+            },
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn infobase_configuration_export_rejects_unknown_state() {
+        let result = Cli::try_parse_from([
+            "v8-runner",
+            "infobase",
+            "configuration",
+            "export",
+            "--state",
+            "current",
+            "--output",
+            "dist/main.cf",
+        ]);
+
+        assert!(result.is_err());
     }
 }

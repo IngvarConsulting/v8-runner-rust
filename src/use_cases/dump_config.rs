@@ -183,8 +183,9 @@ fn run_full_dump_designer(
         return Err(publication.cleanup_failure(error));
     }
 
-    let publish_phase =
-        publication.publish_dir(context, DUMP_BACKUP_PREFIX, "failed to publish staged dump")?;
+    let publish_phase = publication
+        .publish_dir(context, DUMP_BACKUP_PREFIX, "failed to publish staged dump")
+        .map_err(|error| publication.cleanup_failure(error))?;
     debug!(target = %resolved.platform_target_path.display(), "published staged dump");
 
     Ok((
@@ -258,8 +259,9 @@ fn run_full_dump_ibcmd(
         return Err(publication.cleanup_failure(error));
     }
 
-    let publish_phase =
-        publication.publish_dir(context, DUMP_BACKUP_PREFIX, "failed to publish staged dump")?;
+    let publish_phase = publication
+        .publish_dir(context, DUMP_BACKUP_PREFIX, "failed to publish staged dump")
+        .map_err(|error| publication.cleanup_failure(error))?;
     debug!(target = %resolved.platform_target_path.display(), "published staged dump");
 
     Ok((
@@ -599,8 +601,9 @@ fn finalize_edt_dump(
         return Err(publication.cleanup_failure(error));
     }
 
-    let publish_phase =
-        publication.publish_dir(context, DUMP_BACKUP_PREFIX, "failed to publish staged dump")?;
+    let publish_phase = publication
+        .publish_dir(context, DUMP_BACKUP_PREFIX, "failed to publish staged dump")
+        .map_err(|error| publication.cleanup_failure(error))?;
 
     Ok((
         platform_result,

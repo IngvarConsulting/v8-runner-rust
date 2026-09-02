@@ -238,6 +238,20 @@ pub fn validate_prepared_test(config: &AppConfig) -> Result<(), ConfigValidation
     Ok(())
 }
 
+/// Validate configuration for operations that read only the configured infobase.
+///
+/// Source trees, build settings, test runners, EDT and client MCP tooling are not inputs to
+/// CF/CFE/DT export and must not block an infobase-only workspace.
+pub fn validate_infobase_export(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    validate_base_path(&config.base_path)?;
+    // Export provider selection is intentionally side-effect free. workPath is
+    // created only when the selected command acquires its workspace lock.
+    validate_connection_contract(config)?;
+    validate_platform_version(config)?;
+    validate_execution_timeout(config)?;
+    Ok(())
+}
+
 fn validate_base_path(path: &Path) -> Result<(), ConfigValidationError> {
     if !path.exists() || !path.is_dir() {
         return Err(ConfigValidationError::BasePathInvalid(

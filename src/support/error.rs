@@ -10,6 +10,24 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AppError {
+    #[error("capability unavailable: {0}")]
+    CapabilityUnavailable(String),
+
+    #[error("environment unavailable: {0}")]
+    EnvironmentUnavailable(String),
+
+    #[error("workspace busy: {0}")]
+    WorkspaceBusy(String),
+
+    #[error("cancelled: {0}")]
+    Cancelled(String),
+
+    #[error("timed out: {0}")]
+    TimedOut(String),
+
+    #[error("invalid platform output: {0}")]
+    InvalidOutput(String),
+
     #[error("validation error: {0}")]
     Validation(String),
 
@@ -94,6 +112,16 @@ impl AppError {
     pub fn with_context(self, context: impl Into<String>) -> Self {
         let context = context.into();
         match self {
+            Self::CapabilityUnavailable(message) => {
+                Self::CapabilityUnavailable(format!("{context}; {message}"))
+            }
+            Self::EnvironmentUnavailable(message) => {
+                Self::EnvironmentUnavailable(format!("{context}; {message}"))
+            }
+            Self::WorkspaceBusy(message) => Self::WorkspaceBusy(format!("{context}; {message}")),
+            Self::Cancelled(message) => Self::Cancelled(format!("{context}; {message}")),
+            Self::TimedOut(message) => Self::TimedOut(format!("{context}; {message}")),
+            Self::InvalidOutput(message) => Self::InvalidOutput(format!("{context}; {message}")),
             Self::Validation(message) => Self::Validation(format!("{context}; {message}")),
             Self::ValidationIbcmd(source) => Self::ValidationIbcmdContext { context, source },
             Self::ValidationIbcmdContext {

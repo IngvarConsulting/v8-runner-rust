@@ -1,7 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
-
-use chrono::Utc;
+use std::time::Instant;
 use tracing::debug;
 
 use crate::config::model::{
@@ -20,10 +18,7 @@ use crate::platform::process::ProcessRunner;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
-use crate::support::fs::{
-    acquire_advisory_lock, is_known_tool_name, metadata_sidecar_path, read_temp_dir_metadata,
-    remove_path_if_exists, write_temp_dir_metadata, TempDirKind, TempDirMetadata,
-};
+use crate::support::fs::{acquire_advisory_lock, write_temp_dir_metadata, TempDirKind};
 use crate::support::path::{
     hashed_lock_path, is_filesystem_root, nearest_existing_canonical_path, stable_path_identity,
 };
@@ -45,11 +40,12 @@ use crate::use_cases::request::{ArtifactsModeRequest, ArtifactsRequest};
 use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 
-use super::staged_publication::{interruption_before_publish, StagedPublication};
+use super::staged_publication::{
+    cleanup_owned_orphan_files, interruption_before_publish, StagedPublication,
+};
 
 const SUPPORTED_ARTIFACTS_ERROR: &str =
     "artifacts currently supports only builder=DESIGNER with designer backend profile";
-const ORPHAN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const ARTIFACTS_BACKUP_PREFIX: &str = ".artifacts-backup";
 
 pub fn execute(
@@ -921,88 +917,14 @@ fn cleanup_orphan_files(resolved: &ResolvedArtifactsTarget) -> Result<(), AppErr
     if resolved.is_directory_output {
         scan_roots.push(resolved.output_path.clone());
     }
-    scan_roots.sort();
-    scan_roots.dedup();
-
-    for root in scan_roots {
-        if !root.exists() {
-            continue;
-        }
-        for entry in std::fs::read_dir(&root)
-            .map_err(|error| AppError::Runtime(format!("failed to read output dir: {error}")))?
-        {
-            let entry = entry
-                .map_err(|error| AppError::Runtime(format!("failed to read dir entry: {error}")))?;
-            let path = entry.path();
-            let (temp_path, metadata_path) = orphan_cleanup_paths(&path);
-            let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
-                continue;
-            };
-            if !file_name.starts_with(".artifacts-stage-")
-                && !file_name.starts_with(ARTIFACTS_BACKUP_PREFIX)
-                && !file_name.contains(".backup-")
-            {
-                continue;
-            }
-            let Ok(metadata) = read_orphan_metadata(&temp_path, &metadata_path) else {
-                continue;
-            };
-            if !is_known_tool_name(&metadata.tool)
-                || metadata.target_identity != resolved.target_identity
-            {
-                continue;
-            }
-            if (Utc::now() - metadata.created_at)
-                .to_std()
-                .unwrap_or_default()
-                < ORPHAN_TTL
-            {
-                continue;
-            }
-
-            remove_path_if_exists(&temp_path).map_err(|error| {
-                AppError::Runtime(format!(
-                    "failed to remove stale artifact temp '{}': {error}",
-                    temp_path.display()
-                ))
-            })?;
-            remove_path_if_exists(&metadata_path).map_err(|error| {
-                AppError::Runtime(format!(
-                    "failed to remove stale artifact metadata '{}': {error}",
-                    metadata_path.display()
-                ))
-            })?;
-        }
-    }
-    Ok(())
-}
-
-fn orphan_cleanup_paths(path: &Path) -> (PathBuf, PathBuf) {
-    let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
-        return (path.to_path_buf(), metadata_sidecar_path(path));
-    };
-    let Some(temp_name) = file_name.strip_suffix(".meta.json") else {
-        return (path.to_path_buf(), metadata_sidecar_path(path));
-    };
-    (
-        path.parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(temp_name),
-        path.to_path_buf(),
+    cleanup_owned_orphan_files(
+        &scan_roots,
+        &resolved.output_path,
+        &resolved.target_identity,
+        &[".artifacts-stage-"],
+        &[ARTIFACTS_BACKUP_PREFIX],
+        resolved.is_directory_output,
     )
-}
-
-fn read_orphan_metadata(
-    temp_path: &Path,
-    metadata_path: &Path,
-) -> std::io::Result<TempDirMetadata> {
-    if metadata_path == metadata_sidecar_path(temp_path) {
-        return read_temp_dir_metadata(temp_path);
-    }
-
-    let raw = std::fs::read(metadata_path)?;
-    serde_json::from_slice(&raw)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
 fn build_designer_dsl<'a>(
@@ -1813,7 +1735,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let output = dir.path().join("dist/external");
         fs::create_dir_all(&output).expect("output");
-        let stale = output.join(".artifacts-stage-old.epf");
+        let stale = output.join(".artifacts-stage-run-1.epf");
         fs::create_dir_all(&stale).expect("stale");
         write_temp_dir_metadata(
             &stale,
@@ -1857,7 +1779,7 @@ mod tests {
         let stage_dir = output
             .parent()
             .expect("parent")
-            .join(".artifacts-stage-old");
+            .join(".artifacts-stage-run-1");
         fs::create_dir_all(&stage_dir).expect("stage");
         write_temp_dir_metadata(&stage_dir, TempDirKind::Stage, "run-1", &output, "identity")
             .expect("metadata");
@@ -1897,7 +1819,7 @@ mod tests {
         let stage_file = output
             .parent()
             .expect("parent")
-            .join(".artifacts-stage-orphan.cf");
+            .join(".artifacts-stage-run-1.cf");
         write_temp_dir_metadata(
             &stage_file,
             TempDirKind::Stage,
@@ -1942,7 +1864,7 @@ mod tests {
         let backup_dir = output
             .parent()
             .expect("parent")
-            .join(".artifacts-backup-old");
+            .join(".artifacts-backup-run-1");
         fs::create_dir_all(&backup_dir).expect("backup");
         write_temp_dir_metadata(
             &backup_dir,
@@ -1988,7 +1910,7 @@ mod tests {
         let recent = output
             .parent()
             .expect("parent")
-            .join(".artifacts-stage-recent");
+            .join(".artifacts-stage-run-1");
         fs::create_dir_all(&recent).expect("stage");
         write_temp_dir_metadata(&recent, TempDirKind::Stage, "run-1", &output, "identity")
             .expect("metadata");
@@ -2020,7 +1942,7 @@ mod tests {
         let foreign = output
             .parent()
             .expect("parent")
-            .join(".artifacts-backup-foreign");
+            .join(".artifacts-backup-run-1");
         fs::create_dir_all(&foreign).expect("backup");
         write_temp_dir_metadata(&foreign, TempDirKind::Backup, "run-1", &output, "identity")
             .expect("metadata");

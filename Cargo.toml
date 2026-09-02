@@ -36,9 +36,13 @@ tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "proc
 tokio-util = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+unicode-casefold = "0.2"
+unicode-normalization = "0.1"
+
 [target.'cfg(windows)'.dependencies]
 process-wrap = { version = "9.1.0", default-features = false, features = ["std", "job-object", "creation-flags"] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console"] }
 
 [dev-dependencies]
 assert_cmd = "2"

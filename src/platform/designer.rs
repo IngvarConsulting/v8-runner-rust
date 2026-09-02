@@ -234,6 +234,33 @@ impl<'a> DesignerDsl<'a> {
         self.run(&args)
     }
 
+    /// `/DumpDBCfg <file> [-Extension <name>]`
+    pub fn dump_db_cfg(
+        &self,
+        target_file: &Path,
+        extension: Option<&str>,
+    ) -> Result<PlatformCommandResult, DesignerError> {
+        let mut args = self.base_args();
+        args.push("/DumpDBCfg".to_owned());
+        args.push(target_file.display().to_string());
+        if let Some(extension) = extension {
+            args.push("-Extension".to_owned());
+            args.push(extension.to_owned());
+        }
+        self.run(&args)
+    }
+
+    /// `/DumpIB <file>`
+    pub fn dump_infobase(
+        &self,
+        target_file: &Path,
+    ) -> Result<PlatformCommandResult, DesignerError> {
+        let mut args = self.base_args();
+        args.push("/DumpIB".to_owned());
+        args.push(target_file.display().to_string());
+        self.run(&args)
+    }
+
     /// `/DumpExternalDataProcessorOrReportToFiles <root-xml> <binary>`
     pub fn dump_external_data_processor_or_report_to_files(
         &self,
@@ -645,6 +672,89 @@ mod tests {
         assert!(args.contains("-Extension SalesAddon"));
         assert!(args.contains(&format!("/Out {}", log_path.display())));
         assert_eq!(result.platform_log_path, Some(log_path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dump_db_cfg_builds_expected_args_for_extension() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("1cv8");
+        let args_log = dir.path().join("args.log");
+        let target = dir.path().join("database.cfe");
+        write_script(
+            &script,
+            &format!("printf '%s\\n' \"$@\" > \"{}\"\nexit 0", args_log.display()),
+        );
+        let runner = ProcessExecutor;
+        let dsl = DesignerDsl::new(
+            script,
+            V8Connection::from_connection_string("File=/tmp/ib"),
+            &runner as &dyn ProcessRunner,
+            None,
+        );
+
+        dsl.dump_db_cfg(&target, Some("SalesAddon"))
+            .expect("dump database configuration");
+
+        let args = fs::read_to_string(args_log)
+            .expect("args log")
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "DESIGNER",
+                "/DisableStartupDialogs",
+                "/DisableStartupMessages",
+                "/IBConnectionString",
+                "File=/tmp/ib",
+                "/DumpDBCfg",
+                target.to_str().expect("utf-8 target"),
+                "-Extension",
+                "SalesAddon",
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dump_infobase_builds_expected_args() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("1cv8");
+        let args_log = dir.path().join("args.log");
+        let target = dir.path().join("snapshot.dt");
+        write_script(
+            &script,
+            &format!("printf '%s\\n' \"$@\" > \"{}\"\nexit 0", args_log.display()),
+        );
+        let runner = ProcessExecutor;
+        let dsl = DesignerDsl::new(
+            script,
+            V8Connection::from_connection_string("File=/tmp/ib"),
+            &runner as &dyn ProcessRunner,
+            None,
+        );
+
+        dsl.dump_infobase(&target).expect("dump infobase");
+
+        let args = fs::read_to_string(args_log)
+            .expect("args log")
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "DESIGNER",
+                "/DisableStartupDialogs",
+                "/DisableStartupMessages",
+                "/IBConnectionString",
+                "File=/tmp/ib",
+                "/DumpIB",
+                target.to_str().expect("utf-8 target"),
+            ]
+        );
     }
 
     #[cfg(unix)]

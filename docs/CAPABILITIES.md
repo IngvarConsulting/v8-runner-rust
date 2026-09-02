@@ -35,6 +35,8 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `dump` | `format=DESIGNER` + `builder=DESIGNER` | Полная, инкрементальная или object-scoped partial выгрузка |
 | `dump` | `format=DESIGNER` + `builder=IBCMD` | Полная и инкрементальная выгрузка; `partial` деградирует в incremental с warning; standalone-server state изолирован в `workPath/ibcmd-data` |
 | `dump` | `format=EDT` + `builder=DESIGNER|IBCMD` | Reverse sync из ИБ через internal Designer snapshot и EDT import |
+| `infobase configuration export` | Designer и IBCMD | Выгружает working/database configuration в `.cf` или named extension в `.cfe`; `builder` задаёт preferred provider, runner выбирает готовый до spawn |
+| `infobase dump` | Designer | Выгружает полную ИБ в переносимый `.dt`; это не backup; IBCMD остаётся experimental до exclusive-access preflight |
 | `convert` | CLI-only repo-aware конвертация текущих `source-set` | Не использует `builder` и не требует ИБ |
 | `load` | `format=DESIGNER` + `builder=DESIGNER` | Загрузка `.cf` / `.cfe` артефактов в ИБ |
 | `make` / `artifacts` | `format=DESIGNER` + `builder=DESIGNER` | Экспорт `.cf` / `.cfe` и публикация `.epf` / `.erf` |
@@ -275,6 +277,49 @@ v8-runner convert [--source-set <NAME>] [--output <DIR>]
 - Без `--output` публикует результат под `workPath/convert/out/<sourceSetName>/<designer|edt>/`.
 - `--output` задаёт только target root и зеркалит `source-set.path` относительно каталога primary config.
 - Публикация остаётся staged full replacement с overlap guardrails.
+
+### `infobase configuration export`
+
+```bash
+v8-runner infobase configuration export --state <working|database> --output <FILE.cf>
+v8-runner infobase configuration export --state <working|database> --extension <NAME> --output <FILE.cfe>
+```
+
+- Сохраняет состояние конфигурации из ИБ, а не собирает пакет из project sources.
+- Без `--extension` экспортирует main configuration и требует `.cf`; с extension требует `.cfe`.
+- `builder` задаёт preferred provider, но runner выбирает первый `implemented + ready` candidate.
+- Fallback допустим только во время pure preflight; после первого spawn provider не переключается.
+- Публикация идёт через sibling staging и target-specific lock; `published=true` означает, что
+  финальный файл уже заменён атомарно.
+- Target lock сериализует cooperating запуски runner. Параллельный внешний writer обязан
+  использовать тот же lock или быть остановлен: path revalidation не является filesystem CAS.
+- После аварийного завершения owner lock может остаться на диске. Для совместимости с уже
+  опубликованными версиями runner такой lock обрабатывается fail-closed: удалять его вручную можно
+  только при остановленных старых и новых процессах runner.
+- `execution.status` использует общий terminal vocabulary runner; он не заменяет `published`,
+  который отдельно отвечает только за commit финального файла.
+- `cancelled`, `timed_out` и `invalid_output` не сводятся к generic failure; ошибки считаются
+  non-retryable по умолчанию, а provider не переключается после dispatch.
+
+### `infobase dump`
+
+```bash
+v8-runner infobase dump --output <FILE.dt>
+```
+
+- Сохраняет полную ИБ с данными в переносимый DT-файл. DT не является резервной копией.
+- В первом slice implemented provider — Designer. При `builder=IBCMD` runner пропускает
+  experimental IBCMD DT и выбирает готовый Designer.
+- Если implemented provider есть, но binary/version/connection не готовы, возвращается
+  `environment_unavailable`; `capability_unavailable` означает отсутствие implemented adapter.
+- Для файловой ИБ readiness обоих process providers требует существующий файл
+  `<infobase>/1Cv8.1CD`; один каталог или найденный бинарник не считаются готовой ИБ.
+- Selection показывает каждого кандидата через независимые `implementation`, `readiness` и
+  `evidence`; `argv_tested` не выдаётся за live proof.
+- Безопасный IBCMD path требует проверки отсутствия активных сеансов.
+- Обе операции требуют существующий `v8project.yaml`, но используют infobase-only validation:
+  `source-set: []` допустим, а отсутствующие или сломанные project sources не блокируют чтение ИБ.
+  Build/source/test/EDT/client-MCP настройки для этих команд не валидируются.
 
 ### `load`
 

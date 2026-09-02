@@ -9,6 +9,12 @@ const PLATFORM_EXIT_CODE: i32 = 4;
 /// Stable use-case error class used by transport adapters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UseCaseErrorKind {
+    Capability,
+    Environment,
+    WorkspaceBusy,
+    InvalidOutput,
+    Cancelled,
+    TimedOut,
     Validation,
     Runtime,
     Platform,
@@ -18,6 +24,10 @@ impl UseCaseErrorKind {
     /// Maps the error kind to the CLI exit code.
     pub const fn exit_code(self) -> i32 {
         match self {
+            Self::Capability => VALIDATION_EXIT_CODE,
+            Self::Environment => VALIDATION_EXIT_CODE,
+            Self::WorkspaceBusy => RUNTIME_EXIT_CODE,
+            Self::InvalidOutput | Self::Cancelled | Self::TimedOut => PLATFORM_EXIT_CODE,
             Self::Validation => VALIDATION_EXIT_CODE,
             Self::Runtime => RUNTIME_EXIT_CODE,
             Self::Platform => PLATFORM_EXIT_CODE,
@@ -26,6 +36,12 @@ impl UseCaseErrorKind {
 
     const fn label(self) -> &'static str {
         match self {
+            Self::Capability => "capability unavailable",
+            Self::Environment => "environment unavailable",
+            Self::WorkspaceBusy => "workspace busy",
+            Self::InvalidOutput => "invalid output",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed out",
             Self::Validation => "validation error",
             Self::Runtime => "runtime error",
             Self::Platform => "platform error",
@@ -74,6 +90,16 @@ impl fmt::Display for UseCaseError {
 impl From<AppError> for UseCaseError {
     fn from(value: AppError) -> Self {
         match value {
+            AppError::CapabilityUnavailable(message) => {
+                Self::new(UseCaseErrorKind::Capability, message)
+            }
+            AppError::EnvironmentUnavailable(message) => {
+                Self::new(UseCaseErrorKind::Environment, message)
+            }
+            AppError::WorkspaceBusy(message) => Self::new(UseCaseErrorKind::WorkspaceBusy, message),
+            AppError::Cancelled(message) => Self::new(UseCaseErrorKind::Cancelled, message),
+            AppError::TimedOut(message) => Self::new(UseCaseErrorKind::TimedOut, message),
+            AppError::InvalidOutput(message) => Self::new(UseCaseErrorKind::InvalidOutput, message),
             AppError::Validation(message) => Self::new(UseCaseErrorKind::Validation, message),
             AppError::ValidationIbcmd(error) => {
                 Self::new(UseCaseErrorKind::Validation, error.to_string())
@@ -161,6 +187,12 @@ mod tests {
 
     #[test]
     fn use_case_error_kinds_keep_stable_cli_exit_codes() {
+        assert_eq!(UseCaseErrorKind::Capability.exit_code(), 2);
+        assert_eq!(UseCaseErrorKind::Environment.exit_code(), 2);
+        assert_eq!(UseCaseErrorKind::WorkspaceBusy.exit_code(), 3);
+        assert_eq!(UseCaseErrorKind::InvalidOutput.exit_code(), 4);
+        assert_eq!(UseCaseErrorKind::Cancelled.exit_code(), 4);
+        assert_eq!(UseCaseErrorKind::TimedOut.exit_code(), 4);
         assert_eq!(UseCaseErrorKind::Validation.exit_code(), 2);
         assert_eq!(UseCaseErrorKind::Runtime.exit_code(), 3);
         assert_eq!(UseCaseErrorKind::Platform.exit_code(), 4);
@@ -177,6 +209,16 @@ mod tests {
         assert_eq!(error.exit_code(), 4);
         assert!(error.message().contains("failed to spawn process"));
         assert!(error.message().contains("1cv8c ENTERPRISE"));
+    }
+
+    #[test]
+    fn generic_process_timeout_keeps_the_existing_platform_error_kind() {
+        let error = UseCaseError::from(AppError::PlatformProcess(ProcessError::TimedOut {
+            cmd: "1cv8 DESIGNER".to_owned(),
+            timeout_ms: 100,
+        }));
+
+        assert_eq!(error.kind(), UseCaseErrorKind::Platform);
     }
 
     #[test]

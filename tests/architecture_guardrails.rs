@@ -136,6 +136,8 @@ fn public_command_adapters_keep_workspace_lock_boundary() {
         "execute_test",
         "execute_load",
         "execute_dump",
+        "execute_infobase_configuration_export",
+        "execute_infobase_dump",
         "execute_convert",
         "execute_artifacts",
         "execute_syntax",
@@ -143,7 +145,8 @@ fn public_command_adapters_keep_workspace_lock_boundary() {
     ] {
         let window = free_function_tokens(repo_path("src/cli/execute.rs").as_path(), function);
         assert!(
-            window.contains("with_cli_workspace_lock("),
+            window.contains("with_cli_workspace_lock(")
+                || window.contains("with_cli_workspace_lock_observed("),
             "{function} must keep the CLI workspace-lock boundary"
         );
     }
