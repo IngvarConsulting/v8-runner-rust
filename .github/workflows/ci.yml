@@ -100,8 +100,10 @@ jobs:
           bash --version
           python3 --version
 
-      - name: Verify fork release governance
-        run: python3 tests/release_governance.py
+      - name: Verify fork release contracts
+        run: |
+          python3 tests/release_governance.py
+          python3 tests/release_assets.py
 
       - name: Resolve platform bundle live mode
         id: live

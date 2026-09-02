@@ -38,6 +38,26 @@ cargo build --release
 
 Команда компилирует `v8-runner` в `target/release/v8-runner`.
 
+### Release assets
+
+Каждый выпуск сохраняет portable `.tar.gz`/`.zip` archives для ручной установки
+и публикует из тех же matrix builds три готовых бинарника для Unica:
+`v8-runner-darwin-arm64`, `v8-runner-linux-x64` и
+`v8-runner-win-x64.exe`. Для них выпуск содержит SHA-256, компактный provenance
+manifest и GitHub build attestations; `license-v8-runner-AGPL-3.0-only.txt` и
+`notice-v8-runner-fork.txt` лежат рядом. Corresponding Source — неизменяемый tag
+того же release.
+
+Перед использованием проверьте release и конкретный бинарник:
+
+```bash
+gh release verify v0.5.2-ic.2 --repo IngvarConsulting/v8-runner-rust
+gh attestation verify v8-runner-linux-x64 \
+  --repo IngvarConsulting/v8-runner-rust \
+  --signer-workflow IngvarConsulting/v8-runner-rust/.github/workflows/release.yml \
+  --source-ref refs/heads/master --deny-self-hosted-runners
+```
+
 ### Создайте стартовый config (конфиг) в текущем репозитории:
 
 ```bash
