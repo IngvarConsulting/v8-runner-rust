@@ -13,7 +13,7 @@ const EDT_RUNTIME_VERSION: &str = "8.3.27";
 
 fn write_designer_script(path: &Path, calls_log: &Path) {
     let body = format!(
-        "args=\"$*\"\nout=\"\"\nreport=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"-ReportFile\" ]; then report=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"{}\"\nif [ -n \"$out\" ]; then mkdir -p \"$(dirname \"$out\")\"; printf 'designer log for %s\\n' \"$args\" > \"$out\"; fi\nif printf '%s' \"$args\" | grep -F -q -- '/CompareCfg'; then\n  if printf '%s' \"$args\" | grep -F -q -- 'VendorConfiguration'; then\n    printf 'configuration is not on support\\n' >&2\n    exit 17\n  fi\n  if printf '%s' \"$args\" | grep -F -q -- 'ExtensionDBConfiguration'; then\n    if printf '%s' \"$args\" | grep -F -q -- 'ExistingExt'; then\n      : > \"$report\"\n      exit 0\n    fi\n    printf 'extension not found\\n' >&2\n    exit 19\n  fi\nfi\nexit 0",
+        "args=\"$*\"\nout=\"\"\nreport=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"-ReportFile\" ]; then report=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"{}\"\nif [ -n \"$out\" ]; then mkdir -p \"$(dirname \"$out\")\"; : > \"$out\"; fi\nif printf '%s' \"$args\" | grep -F -q -- '/CompareCfg'; then\n  if printf '%s' \"$args\" | grep -F -q -- 'VendorConfiguration'; then\n    printf 'configuration is not on support\\n' > \"$out\"\n    exit 17\n  fi\n  if printf '%s' \"$args\" | grep -F -q -- 'ExtensionDBConfiguration'; then\n    if printf '%s' \"$args\" | grep -F -q -- 'ExistingExt'; then\n      : > \"$report\"\n      exit 0\n    fi\n    printf 'extension not found\\n' > \"$out\"\n    exit 19\n  fi\nfi\nexit 0",
         calls_log.display()
     );
     write_script(path, &body);
@@ -126,6 +126,45 @@ fn load_cf_json_success_runs_probe_load_and_update() {
     assert!(calls.contains("/CompareCfg"));
     assert!(calls.contains("/LoadCfg"));
     assert!(calls.contains("/UpdateDBCfg"));
+}
+
+#[test]
+fn first_extension_load_json_reports_absent_and_applies_in_order() {
+    let (_dir, config_path, binary_path, base_path, calls_log) = setup_project();
+    fs::write(base_path.join("release.cfe"), "cfe").expect("artifact");
+    let body = format!(
+        "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"{}\"\nif printf '%s' \"$args\" | grep -F -q -- '/CompareCfg'; then\n  printf \"Конфигурация 'Расширение конфигурации' недоступна\\n\" > \"$out\"\n  exit 19\nfi\nif [ -n \"$out\" ]; then : > \"$out\"; fi\nexit 0",
+        calls_log.display()
+    );
+    write_script(&binary_path, &body);
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "load",
+            "--path",
+            "release.cfe",
+            "--extension",
+            "FirstExt",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(output.status.success());
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["data"]["extension"], "FirstExt");
+    assert_eq!(payload["data"]["compatibility_state"], "absent");
+    assert_eq!(
+        payload["data"]["execution"]["payload"]["compatibility_state"],
+        "absent"
+    );
+    let calls = fs::read_to_string(calls_log).expect("calls");
+    let ordered = ["/CompareCfg", "/LoadCfg", "/UpdateDBCfg"]
+        .map(|needle| calls.find(needle).expect("expected call"));
+    assert!(ordered[0] < ordered[1] && ordered[1] < ordered[2]);
 }
 
 #[test]

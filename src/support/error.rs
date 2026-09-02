@@ -169,7 +169,9 @@ impl From<IbcmdError> for AppError {
 impl From<DesignerError> for AppError {
     fn from(error: DesignerError) -> Self {
         match error {
-            DesignerError::UtilityNotFound(_) => Self::PlatformDesigner(error),
+            DesignerError::UtilityNotFound(_) | DesignerError::StaleLogCleanup { .. } => {
+                Self::PlatformDesigner(error)
+            }
             DesignerError::Spawn(error) => Self::PlatformProcess(error),
         }
     }

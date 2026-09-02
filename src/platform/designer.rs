@@ -15,6 +15,12 @@ pub enum DesignerError {
 
     #[error("failed to execute designer process: {0}")]
     Spawn(ProcessError),
+
+    #[error("failed to remove previous designer /Out log '{path}': {source}")]
+    StaleLogCleanup {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 }
 
 /// Low-level DSL for invoking `1cv8` in `DESIGNER` mode.
@@ -307,7 +313,16 @@ impl<'a> DesignerDsl<'a> {
 
     fn run(&self, args: &[String]) -> Result<PlatformCommandResult, DesignerError> {
         if let Some(log_file) = &self.log_file {
-            let _ = std::fs::remove_file(log_file);
+            match std::fs::remove_file(log_file) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(DesignerError::StaleLogCleanup {
+                        path: log_file.clone(),
+                        source,
+                    });
+                }
+            }
         }
         let process = self
             .runner
@@ -377,6 +392,36 @@ mod tests {
         fs::write(&staged, format!("#!/bin/sh\n{body}\n")).expect("write script");
         make_executable(&staged);
         fs::rename(&staged, path).expect("rename script");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_to_run_when_previous_platform_log_cannot_be_removed() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("1cv8");
+        let marker = dir.path().join("designer-ran");
+        let log_path = dir.path().join("designer.log");
+        fs::create_dir(&log_path).expect("log path directory");
+        write_script(&script, &format!("touch \"{}\"\nexit 0", marker.display()));
+        let runner = ProcessExecutor;
+        let dsl = DesignerDsl::new(
+            script,
+            V8Connection::from_connection_string("File=/tmp/ib"),
+            &runner as &dyn ProcessRunner,
+            Some(log_path),
+        );
+
+        let error = dsl
+            .check_config(&[])
+            .expect_err("stale log cleanup must fail closed");
+
+        assert!(error
+            .to_string()
+            .contains("failed to remove previous designer /Out log"));
+        assert!(
+            !marker.exists(),
+            "Designer must not run with a stale /Out log"
+        );
     }
 
     #[cfg(unix)]

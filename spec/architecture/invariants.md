@@ -106,6 +106,20 @@
 
 См. [ADR-0016](../decisions/0016-edinyy-executionoutcome-i-pipeline-steps-dlya-runner-like-stsenariev.md).
 
+## Load Compatibility Probe
+
+1. Публичные состояния compatibility probe: `supported`, `not_supported`,
+   `absent`, `unknown`.
+2. Положительная классификация ненулевого probe использует только закрытый
+   allowlist целых чистых диагностик; независимые подстроки из stdout, stderr и
+   `/Out` не комбинируются.
+3. `unknown` является platform failure и не разрешает изменяющую операцию.
+4. Матрица режима загрузки и состояния перечисляется исчерпывающе, без
+   default-permit arm.
+5. Старый или нечитаемый `/Out` не является доказательством состояния.
+
+См. [ADR-0023](../decisions/0023-fail-closed-sostoyaniya-proverki-zagruzki.md).
+
 ## Use Case Layer
 
 1. `src/use_cases` остается транспортно-нейтральным orchestration-слоем.

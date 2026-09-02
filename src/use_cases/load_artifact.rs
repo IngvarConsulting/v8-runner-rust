@@ -34,6 +34,7 @@ const UNSUPPORTED_EXTERNAL_ARTIFACTS_ERROR: &str =
     "load currently supports only .cf and .cfe artifacts";
 const UNSUPPORTED_UPDATE_MODE_ERROR: &str =
     "load --mode update is not supported; use --mode load or --mode merge";
+const ABSENT_EXTENSION_PLATFORM_LOG: &str = "Конфигурация 'Расширение конфигурации' недоступна";
 
 pub fn execute(
     context: &ExecutionContext,
@@ -478,18 +479,10 @@ fn probe_compatibility(
         });
     }
 
-    let combined = format!(
-        "{}\n{}\n{}",
-        result.process.stdout,
-        result.process.stderr,
-        result.platform_log.as_deref().unwrap_or_default()
-    );
-    let state = classify_probe_failure(resolved.target_kind, &combined);
+    let state = classify_probe_failure(resolved.target_kind, &result);
     if state == CompatibilityState::Unknown {
-        let error = AppError::Validation(format!(
-            "failed to determine infobase compatibility state for {}",
-            target_label(resolved)
-        ));
+        let error = ensure_platform_success("compatibility probe", resolved, &result)
+            .expect_err("non-zero compatibility probe must be a platform failure");
         Err((error, result.platform_log_path))
     } else {
         Ok(ProbeResult {
@@ -501,45 +494,73 @@ fn probe_compatibility(
 
 fn classify_probe_failure(
     target_kind: LoadTargetKind,
-    combined_output: &str,
+    result: &PlatformCommandResult,
 ) -> CompatibilityState {
-    // Unicode-aware on purpose: the platform capitalises its Russian
-    // diagnostics, and `to_ascii_lowercase` leaves Cyrillic untouched, so every
-    // Russian branch below would silently never match.
-    let lower = combined_output.to_lowercase();
-    match target_kind {
-        LoadTargetKind::Configuration => {
-            if lower.contains("vendorconfiguration")
-                || lower.contains("vendor configuration")
-                || lower.contains("поддерж")
-                || lower.contains("поставщик")
-            {
-                CompatibilityState::NotSupported
-            } else {
-                CompatibilityState::Unknown
-            }
-        }
-        LoadTargetKind::Extension => {
-            let mentions_extension = lower.contains("extension") || lower.contains("расширен");
-            // An extension the infobase does not carry yet. Designer reports it
-            // as "Конфигурация 'Расширение конфигурации' недоступна", which is
-            // the normal state before the very first load.
-            let absent = lower.contains("not found")
-                || lower.contains("не найден")
-                || lower.contains("unavailable")
-                || lower.contains("not available")
-                || lower.contains("недоступ");
-            let unsupported = lower.contains("not supported")
-                || lower.contains("unsupported")
-                || lower.contains("не поддерж");
-            if mentions_extension && (absent || unsupported) {
-                CompatibilityState::NotSupported
-            } else {
-                CompatibilityState::Unknown
-            }
-        }
-        LoadTargetKind::Unknown => CompatibilityState::Unknown,
+    // Reintroduction guard (ADR-0023): this function is the single owner of
+    // positive probe classification. Never reconstruct substring matching
+    // across stdout, stderr and /Out; only whole clean diagnostics may permit
+    // a later mutating command.
+    if target_kind == LoadTargetKind::Extension && is_exact_absent_extension_result(result) {
+        return CompatibilityState::Absent;
     }
+
+    let Some(diagnostic) = exact_clean_probe_diagnostic(result) else {
+        return CompatibilityState::Unknown;
+    };
+    match (target_kind, diagnostic.as_str()) {
+        (LoadTargetKind::Configuration, "configuration is not on support")
+        | (LoadTargetKind::Extension, "extension is not supported") => {
+            CompatibilityState::NotSupported
+        }
+        _ => CompatibilityState::Unknown,
+    }
+}
+
+fn is_exact_absent_extension_result(result: &PlatformCommandResult) -> bool {
+    if result.process.exit_code == 0
+        || result.process.interruption.is_some()
+        || !result.process.stdout.trim().is_empty()
+        || !result.process.stderr.trim().is_empty()
+        || result.platform_log_read_error.is_some()
+    {
+        return false;
+    }
+
+    let Some(platform_log) = result.platform_log.as_deref() else {
+        return false;
+    };
+    let normalized = platform_log
+        .strip_prefix('\u{feff}')
+        .unwrap_or(platform_log)
+        .replace("\r\n", "\n");
+    let lines = normalized
+        .trim()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    lines.len() == 1 && lines[0].trim() == ABSENT_EXTENSION_PLATFORM_LOG
+}
+
+fn exact_clean_probe_diagnostic(result: &PlatformCommandResult) -> Option<String> {
+    if result.process.exit_code == 0
+        || result.process.interruption.is_some()
+        || result.platform_log_read_error.is_some()
+    {
+        return None;
+    }
+
+    let lines = [
+        Some(result.process.stdout.as_str()),
+        Some(result.process.stderr.as_str()),
+        result.platform_log.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(str::lines)
+    .map(|line| line.trim().trim_start_matches('\u{feff}'))
+    .filter(|line| !line.is_empty())
+    .collect::<Vec<_>>();
+    (lines.len() == 1).then(|| lines[0].to_ascii_lowercase())
 }
 
 fn validate_probe_mode_compatibility(
@@ -559,7 +580,15 @@ fn validate_probe_mode_compatibility(
             "{} is not ready for merge; use --mode load instead",
             target_label(resolved)
         ))),
-        _ => None,
+        (LoadMode::Merge, CompatibilityState::Absent) => Some(AppError::Validation(format!(
+            "{} is absent from the infobase; use --mode load for the first installation",
+            target_label(resolved)
+        ))),
+        (LoadMode::Load, CompatibilityState::Absent | CompatibilityState::NotSupported)
+        | (LoadMode::Merge, CompatibilityState::Supported) => None,
+        (LoadMode::Update, _) => Some(AppError::Validation(
+            UNSUPPORTED_UPDATE_MODE_ERROR.to_owned(),
+        )),
     }
 }
 
@@ -912,6 +941,8 @@ mod tests {
     use crate::domain::load::{
         CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
     };
+    use crate::platform::process::ProcessResult;
+    use crate::platform::result::PlatformCommandResult;
     use crate::use_cases::context::{CommandName, ExecutionContext};
     use crate::use_cases::request::LoadRequest;
     use crate::use_cases::result::UseCaseErrorKind;
@@ -932,6 +963,80 @@ mod tests {
             .map(|error| error.message.as_str())
             .or_else(|| result.execution.diagnostics.first().map(String::as_str))
             .expect("message")
+    }
+
+    fn probe_result(
+        stdout: &str,
+        stderr: &str,
+        platform_log: Option<&str>,
+        platform_log_read_error: Option<&str>,
+    ) -> PlatformCommandResult {
+        PlatformCommandResult {
+            process: ProcessResult {
+                exit_code: 19,
+                stdout: stdout.to_owned(),
+                stderr: stderr.to_owned(),
+                interruption: None,
+            },
+            platform_log_path: None,
+            platform_log: platform_log.map(str::to_owned),
+            platform_log_read_error: platform_log_read_error.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn exact_absent_platform_log_accepts_bom_and_crlf() {
+        let result = probe_result(
+            "",
+            "",
+            Some("\u{feff}Конфигурация 'Расширение конфигурации' недоступна\r\n"),
+            None,
+        );
+
+        assert_eq!(
+            classify_probe_failure(LoadTargetKind::Extension, &result),
+            CompatibilityState::Absent
+        );
+    }
+
+    #[test]
+    fn legacy_not_found_with_access_denied_is_not_authorized() {
+        let result = probe_result("", "extension not found; access denied", Some(""), None);
+
+        assert_eq!(
+            classify_probe_failure(LoadTargetKind::Extension, &result),
+            CompatibilityState::Unknown
+        );
+    }
+
+    #[test]
+    fn legacy_not_found_with_authentication_failure_is_not_authorized() {
+        let result = probe_result(
+            "extension not found",
+            "authentication failed",
+            Some(""),
+            None,
+        );
+
+        assert_eq!(
+            classify_probe_failure(LoadTargetKind::Extension, &result),
+            CompatibilityState::Unknown
+        );
+    }
+
+    #[test]
+    fn unverified_english_absent_wording_is_not_authorized() {
+        let result = probe_result(
+            "",
+            "",
+            Some("Configuration 'Configuration extension' is unavailable"),
+            None,
+        );
+
+        assert_eq!(
+            classify_probe_failure(LoadTargetKind::Extension, &result),
+            CompatibilityState::Unknown
+        );
     }
 
     #[cfg(unix)]
@@ -956,7 +1061,7 @@ mod tests {
             ""
         };
         let body = format!(
-            "args=\"$*\"\nout=\"\"\nreport=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"-ReportFile\" ]; then report=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"{}\"\nif [ -n \"$out\" ]; then mkdir -p \"$(dirname \"$out\")\"; printf 'designer log for %s\\n' \"$args\" > \"$out\"; fi\nif printf '%s' \"$args\" | grep -F -q -- '/CompareCfg'; then\n  if printf '%s' \"$args\" | grep -F -q -- 'VendorConfiguration'; then\n    printf 'configuration is not on support\\n' >&2\n    exit 17\n  fi\n  if printf '%s' \"$args\" | grep -F -q -- 'ExtensionDBConfiguration'; then\n    if printf '%s' \"$args\" | grep -F -q -- 'ExistingExt'; then\n      : > \"$report\"\n      exit 0\n    fi\n    if printf '%s' \"$args\" | grep -F -q -- 'UnsupportedExt'; then\n      printf 'extension is not supported\\n' >&2\n      exit 18\n    fi\n    printf 'extension not found\\n' >&2\n    exit 19\n  fi\nfi\n{merge_block}exit 0",
+            "args=\"$*\"\nout=\"\"\nreport=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"-ReportFile\" ]; then report=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"{}\"\nif [ -n \"$out\" ]; then mkdir -p \"$(dirname \"$out\")\"; : > \"$out\"; fi\nif printf '%s' \"$args\" | grep -F -q -- '/CompareCfg'; then\n  if printf '%s' \"$args\" | grep -F -q -- 'VendorConfiguration'; then\n    printf 'configuration is not on support\\n' > \"$out\"\n    exit 17\n  fi\n  if printf '%s' \"$args\" | grep -F -q -- 'ExtensionDBConfiguration'; then\n    if printf '%s' \"$args\" | grep -F -q -- 'ExistingExt'; then\n      : > \"$report\"\n      exit 0\n    fi\n    if printf '%s' \"$args\" | grep -F -q -- 'UnsupportedExt'; then\n      printf 'extension is not supported\\n' > \"$out\"\n      exit 18\n    fi\n    printf 'extension not found\\n' > \"$out\"\n    exit 19\n  fi\nfi\n{merge_block}exit 0",
             calls_log.display()
         );
         fs::write(path, format!("#!/bin/sh\n{body}\n")).expect("write script");
@@ -988,38 +1093,225 @@ mod tests {
         }
     }
 
-    /// Designer reports an absent extension as "Конфигурация 'Расширение
-    /// конфигурации' недоступна". A first load of an extension the infobase
-    /// does not have yet must classify as NotSupported so that `--mode load`
-    /// proceeds instead of failing the compatibility probe.
+    #[cfg(unix)]
+    fn write_absent_extension_designer_script(
+        path: &Path,
+        calls_log: &Path,
+        extra_stdout: Option<&str>,
+        extra_stderr: Option<&str>,
+        extra_log_line: Option<&str>,
+    ) {
+        let extra_stdout = extra_stdout.unwrap_or_default();
+        let extra_stderr = extra_stderr.unwrap_or_default();
+        let extra_log_line = extra_log_line.unwrap_or_default();
+        let body = format!(
+            "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"{}\"\nif printf '%s' \"$args\" | grep -F -q -- '/CompareCfg'; then\n  printf \"Конфигурация 'Расширение конфигурации' недоступна\\n{}\" > \"$out\"\n  printf '{}'\n  printf '{}' >&2\n  exit 19\nfi\nif [ -n \"$out\" ]; then : > \"$out\"; fi\nexit 0",
+            calls_log.display(), extra_log_line, extra_stdout, extra_stderr
+        );
+        fs::write(path, format!("#!/bin/sh\n{body}\n")).expect("write script");
+        make_executable(path);
+    }
+
     /// https://github.com/IngvarConsulting/unica/issues/355
+    #[cfg(unix)]
     #[test]
-    fn absent_extension_probe_failure_classifies_as_not_supported() {
-        let combined = "Конфигурация 'Расширение конфигурации' недоступна";
+    fn execute_first_load_of_absent_extension_uses_distinct_state_and_applies_artifact() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("work")).expect("work");
+        let binary = root.join("1cv8");
+        let calls = root.join("calls.log");
+        fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
+        write_absent_extension_designer_script(&binary, &calls, None, None, None);
+        let config = sample_config(root, &binary);
+        let request = LoadRequest {
+            mode: LoadMode::Load,
+            artifact_path: "ext.cfe".to_owned(),
+            settings_path: None,
+            extension: Some("FirstExt".to_owned()),
+        };
+
+        let result = execute(&ExecutionContext::cli(CommandName::Load), &config, &request)
+            .expect("first load should succeed");
+
         assert_eq!(
-            classify_probe_failure(LoadTargetKind::Extension, combined),
-            CompatibilityState::NotSupported
+            load_payload(&result).compatibility_state,
+            CompatibilityState::Absent
         );
+        assert_eq!(
+            serde_json::to_value(load_payload(&result)).expect("json")["compatibility_state"],
+            "absent"
+        );
+        let calls = fs::read_to_string(calls).expect("calls");
+        let ordered = ["/CompareCfg", "/LoadCfg", "/UpdateDBCfg"]
+            .map(|needle| calls.find(needle).expect("expected call"));
+        assert!(ordered[0] < ordered[1] && ordered[1] < ordered[2]);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn absent_extension_probe_failure_classifies_as_not_supported_english() {
-        let combined = "Configuration 'Configuration extension' is unavailable";
-        assert_eq!(
-            classify_probe_failure(LoadTargetKind::Extension, combined),
-            CompatibilityState::NotSupported
+    fn exact_absent_log_with_stdout_stays_unknown_and_never_loads() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("work")).expect("work");
+        let binary = root.join("1cv8");
+        let calls = root.join("calls.log");
+        fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
+        write_absent_extension_designer_script(
+            &binary,
+            &calls,
+            Some("Information base server is unavailable"),
+            None,
+            None,
         );
-    }
+        let config = sample_config(root, &binary);
+        let request = LoadRequest {
+            mode: LoadMode::Load,
+            artifact_path: "ext.cfe".to_owned(),
+            settings_path: None,
+            extension: Some("FirstExt".to_owned()),
+        };
 
-    /// The widened wording must not turn an unrelated extension probe failure
-    /// into a silent NotSupported verdict.
-    #[test]
-    fn unrelated_extension_probe_failure_stays_unknown() {
-        let combined = "Ошибка при выполнении операции сравнения";
+        let failure = execute(&ExecutionContext::cli(CommandName::Load), &config, &request)
+            .expect_err("mixed evidence must fail closed");
+
+        assert_eq!(failure.error.kind(), UseCaseErrorKind::Platform);
+        let payload = failure.payload.expect("payload");
         assert_eq!(
-            classify_probe_failure(LoadTargetKind::Extension, combined),
+            load_payload(&payload).compatibility_state,
             CompatibilityState::Unknown
         );
+        let calls = fs::read_to_string(calls).expect("calls");
+        assert!(calls.contains("/CompareCfg"));
+        assert!(!calls.contains("/LoadCfg"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_absent_log_with_stderr_stays_unknown_and_never_loads() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("work")).expect("work");
+        let binary = root.join("1cv8");
+        let calls = root.join("calls.log");
+        fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
+        write_absent_extension_designer_script(
+            &binary,
+            &calls,
+            None,
+            Some("License is unavailable"),
+            None,
+        );
+        let config = sample_config(root, &binary);
+        let request = LoadRequest {
+            mode: LoadMode::Load,
+            artifact_path: "ext.cfe".to_owned(),
+            settings_path: None,
+            extension: Some("FirstExt".to_owned()),
+        };
+
+        execute(&ExecutionContext::cli(CommandName::Load), &config, &request)
+            .expect_err("stderr evidence must fail closed");
+
+        let calls = fs::read_to_string(calls).expect("calls");
+        assert!(!calls.contains("/LoadCfg"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_absent_log_with_second_line_stays_unknown_and_never_loads() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("work")).expect("work");
+        let binary = root.join("1cv8");
+        let calls = root.join("calls.log");
+        fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
+        write_absent_extension_designer_script(
+            &binary,
+            &calls,
+            None,
+            None,
+            Some("License is unavailable\\n"),
+        );
+        let config = sample_config(root, &binary);
+        let request = LoadRequest {
+            mode: LoadMode::Load,
+            artifact_path: "ext.cfe".to_owned(),
+            settings_path: None,
+            extension: Some("FirstExt".to_owned()),
+        };
+
+        execute(&ExecutionContext::cli(CommandName::Load), &config, &request)
+            .expect_err("multi-line evidence must fail closed");
+
+        let calls = fs::read_to_string(calls).expect("calls");
+        assert!(!calls.contains("/LoadCfg"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_absent_platform_log_stays_unknown_and_never_loads() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("work")).expect("work");
+        let binary = root.join("1cv8");
+        let calls = root.join("calls.log");
+        fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
+        let body = format!(
+            "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"{}\"\nif printf '%s' \"$args\" | grep -F -q -- '/CompareCfg'; then\n  rm -f \"$out\"\n  mkdir \"$out\"\n  exit 19\nfi\nexit 0",
+            calls.display()
+        );
+        fs::write(&binary, format!("#!/bin/sh\n{body}\n")).expect("script");
+        make_executable(&binary);
+        let config = sample_config(root, &binary);
+        let request = LoadRequest {
+            mode: LoadMode::Load,
+            artifact_path: "ext.cfe".to_owned(),
+            settings_path: None,
+            extension: Some("FirstExt".to_owned()),
+        };
+
+        execute(&ExecutionContext::cli(CommandName::Load), &config, &request)
+            .expect_err("unreadable /Out must fail closed");
+
+        let calls = fs::read_to_string(calls).expect("calls");
+        assert!(!calls.contains("/LoadCfg"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_of_absent_extension_returns_first_installation_hint() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("work")).expect("work");
+        let binary = root.join("1cv8");
+        let calls = root.join("calls.log");
+        fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
+        fs::write(root.join("merge.xml"), "<settings/>").expect("settings");
+        write_absent_extension_designer_script(&binary, &calls, None, None, None);
+        let config = sample_config(root, &binary);
+        let request = LoadRequest {
+            mode: LoadMode::Merge,
+            artifact_path: "ext.cfe".to_owned(),
+            settings_path: Some("merge.xml".to_owned()),
+            extension: Some("FirstExt".to_owned()),
+        };
+
+        let failure = execute(&ExecutionContext::cli(CommandName::Load), &config, &request)
+            .expect_err("merge requires an installed extension");
+        let payload = failure.payload.expect("payload");
+
+        assert_eq!(
+            load_payload(&payload).compatibility_state,
+            CompatibilityState::Absent
+        );
+        assert_eq!(
+            load_message(&payload),
+            "validation error: extension 'FirstExt' is absent from the infobase; use --mode load for the first installation"
+        );
+        let calls = fs::read_to_string(calls).expect("calls");
+        assert!(!calls.contains("/MergeCfg"));
+        assert!(!calls.contains("/LoadCfg"));
     }
 
     #[cfg(unix)]
