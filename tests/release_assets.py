@@ -90,7 +90,7 @@ class ReleaseAssetsTest(unittest.TestCase):
                     "size": (dist / name).stat().st_size,
                     "sha256": module.digest(dist / name),
                     "sourceRepository": module.REPOSITORY,
-                    "sourceTag": "v0.5.2-ic.3",
+                    "sourceTag": "v0.5.2-ic.4",
                     "sourceCommit": "a" * 40,
                     "builderWorkflow": ".github/workflows/release.yml",
                     "runnerEnvironment": "github-hosted",
@@ -110,7 +110,7 @@ class ReleaseAssetsTest(unittest.TestCase):
             manifest_path.write_text(original, encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, "manifest"):
-                module.verify_assets(dist, "v0.5.2-ic.3", "a" * 40)
+                module.verify_assets(dist, "v0.5.2-ic.4", "a" * 40)
 
             self.assertEqual(manifest_path.read_text(encoding="utf-8"), original)
 
