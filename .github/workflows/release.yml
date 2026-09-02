@@ -17,15 +17,41 @@ on:
         type: boolean
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   BIN_NAME: v8-runner
   CARGO_TERM_COLOR: always
 
 jobs:
+  preflight:
+    name: Verify release contract
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout release ref
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.x"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+
+      - name: Verify tag, license, source, and package metadata
+        run: python3 scripts/release/verify-release-contract.py "${RELEASE_TAG}"
+
+      - name: Run release tests
+        run: cargo test --locked
+
   build:
     name: Build ${{ matrix.artifact_name }}
+    needs: preflight
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -62,7 +88,7 @@ jobs:
 
     steps:
       - name: Checkout release ref
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
@@ -71,17 +97,17 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.linux_deps }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           targets: ${{ matrix.target }}
 
       - name: Cache cargo registry and build output
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}
 
       - name: Install cargo-make
-        uses: taiki-e/install-action@cargo-make
+        uses: taiki-e/install-action@855644a7653423ffddd406c14064ba886514841d # cargo-make
 
       - name: Build release binary
         run: cargo make "${{ matrix.make_task }}"
@@ -98,6 +124,8 @@ jobs:
           mkdir -p "${package_dir}"
           cp "${binary_path}" "${package_dir}/"
           cp README.md "${package_dir}/"
+          cp LICENSE "${package_dir}/"
+          cp FORK_NOTICE.md "${package_dir}/"
           cp -R examples "${package_dir}/examples"
 
           if [[ "${{ runner.os }}" != "Windows" ]]; then
@@ -117,7 +145,7 @@ jobs:
           fi
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.artifact_name }}
           path: |
@@ -129,20 +157,26 @@ jobs:
     name: Publish draft release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download release artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist
           merge-multiple: true
 
       - name: Publish GitHub draft release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           name: ${{ github.event.inputs.tag || github.ref_name }}
           draft: true
           prerelease: ${{ github.event.inputs.prerelease || false }}
           generate_release_notes: true
+          body: |
+            Maintained fork: https://github.com/IngvarConsulting/v8-runner-rust
+            Corresponding source and build scripts: ${{ github.server_url }}/${{ github.repository }}/tree/${{ github.event.inputs.tag || github.ref_name }}
+            License and modification notice are included in every archive.
           files: |
             dist/*

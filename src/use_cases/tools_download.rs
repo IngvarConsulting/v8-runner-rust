@@ -22,7 +22,7 @@ use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::request::ToolsDownloadRequest;
 use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
 
-const LOCAL_CONFIG_SCHEMA_MODEL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/alkoleft/v8-runner-rust/master/docs/schemas/v8project.local.schema.json";
+const LOCAL_CONFIG_SCHEMA_MODEL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.local.schema.json";
 
 const YAXUNIT_REPO: &str = "bia-technologies/yaxunit";
 const VANESSA_REPO: &str = "Pr-Mex/vanessa-automation-single";

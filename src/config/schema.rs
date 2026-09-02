@@ -12,7 +12,7 @@ pub const MAIN_CONFIG_SCHEMA_PATH: &str = "docs/schemas/v8project.schema.json";
 pub const LOCAL_CONFIG_SCHEMA_PATH: &str = "docs/schemas/v8project.local.schema.json";
 
 const REPOSITORY_RAW_SCHEMA_BASE: &str =
-    "https://raw.githubusercontent.com/alkoleft/v8-runner-rust/master/docs/schemas";
+    "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas";
 
 pub fn main_config_schema_url() -> String {
     schema_url("v8project.schema.json")

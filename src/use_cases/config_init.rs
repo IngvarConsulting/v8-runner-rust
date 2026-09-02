@@ -13,7 +13,7 @@ use crate::support::source_descriptor::{
 };
 
 const LOCAL_CONFIG_FILE_NAME: &str = "v8project.local.yaml";
-const LOCAL_CONFIG_SCHEMA_MODEL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/alkoleft/v8-runner-rust/master/docs/schemas/v8project.local.schema.json";
+const LOCAL_CONFIG_SCHEMA_MODEL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.local.schema.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigInitRequest {
