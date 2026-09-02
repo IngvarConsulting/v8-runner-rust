@@ -23,6 +23,18 @@ def load_module():
 
 
 class ReleaseAssetsTest(unittest.TestCase):
+    def test_checksum_parser_accepts_gnu_binary_marker(self) -> None:
+        module = load_module()
+        checksum = "a" * 64
+        self.assertEqual(
+            module.parse_checksum(f"{checksum}  v8-runner-linux-x86_64-musl.tar.gz\n"),
+            (checksum, "v8-runner-linux-x86_64-musl.tar.gz"),
+        )
+        self.assertEqual(
+            module.parse_checksum(f"{checksum} *v8-runner-windows-x86_64.zip\n"),
+            (checksum, "v8-runner-windows-x86_64.zip"),
+        )
+
     def test_canonical_direct_asset_mapping_is_exact(self) -> None:
         module = load_module()
         self.assertEqual(

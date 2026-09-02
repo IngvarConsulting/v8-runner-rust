@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -94,6 +95,13 @@ def checksum_file(path: Path) -> Path:
     return output
 
 
+def parse_checksum(value: str) -> tuple[str, str]:
+    match = re.fullmatch(r"([0-9A-Fa-f]{64}) ([ *])([^\r\n]+)\r?\n?", value)
+    if match is None:
+        raise ValueError("invalid sha256sum file format")
+    return match.group(1).lower(), match.group(3)
+
+
 def prepare_direct(args: argparse.Namespace) -> None:
     expected = DIRECT_ASSETS.get(args.target)
     if expected != args.asset_name:
@@ -178,8 +186,8 @@ def verify_assets(dist: Path, tag: str, commit: str) -> None:
         raise ValueError(f"release asset set mismatch: missing={sorted(expected - actual)}, extra={sorted(actual - expected)}")
     for name in sorted(set(DIRECT_ASSETS.values()) | ARCHIVE_ASSETS):
         path = dist / name
-        checksum = (dist / f"{name}.sha256").read_text(encoding="utf-8").split()
-        if checksum != [digest(path), name]:
+        checksum = parse_checksum((dist / f"{name}.sha256").read_text(encoding="utf-8"))
+        if checksum != (digest(path), name):
             raise ValueError(f"checksum mismatch for {name}")
     manifest = json.loads((dist / "v8-runner-assets.json").read_text(encoding="utf-8"))
     if manifest != manifest_payload(dist, tag, commit):
