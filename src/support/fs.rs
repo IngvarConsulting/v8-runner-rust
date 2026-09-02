@@ -727,6 +727,42 @@ mod tests {
     }
 
     #[test]
+    fn publish_file_atomically_reports_when_publish_and_rollback_both_fail() {
+        let dir = tempdir().expect("tempdir");
+        let temp = dir.path().join("temp.json");
+        let destination = dir.path().join("dest.json");
+        fs::write(&temp, "new").expect("temp");
+        fs::write(&destination, "old").expect("dest");
+
+        let calls = AtomicUsize::new(0);
+        let rename = |from: &Path, to: &Path| {
+            let count = calls.fetch_add(1, Ordering::SeqCst);
+            if count > 0 {
+                return Err(std::io::Error::new(
+                    ErrorKind::PermissionDenied,
+                    if count == 1 {
+                        "simulated publish failure"
+                    } else {
+                        "simulated rollback failure"
+                    },
+                ));
+            }
+            fs::rename(from, to)
+        };
+
+        let error = publish_file_atomically_impl(&temp, &destination, &rename, &|path| {
+            remove_path_if_exists(path)
+        })
+        .expect_err("publish and rollback must fail");
+
+        let message = error.to_string();
+        assert!(message.contains("simulated publish failure"));
+        assert!(message.contains("rollback failed"));
+        assert!(message.contains("simulated rollback failure"));
+        assert!(!destination.exists(), "target needs manual inspection");
+    }
+
+    #[test]
     fn stale_corrupt_lock_file_can_be_recovered() {
         let dir = tempdir().expect("tempdir");
         let lock_path = dir.path().join("corrupt.lock");

@@ -26,6 +26,7 @@ pub mod extension_identity;
 pub mod external_artifacts;
 /// Shared formatting helpers for IBCMD diagnostics.
 pub mod ibcmd_diagnostics;
+pub mod infobase_export;
 /// Init orchestration use case.
 pub mod init_project;
 /// Shared command interruption status, metadata and message vocabulary.

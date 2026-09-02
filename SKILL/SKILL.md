@@ -48,10 +48,25 @@ Useful global flags:
 
 1. Check whether `v8project.yaml` exists in the 1C project root.
 2. If it is missing and source files already exist, run the narrowest `v8-runner config init ...` command that fits the project shape.
-3. If it is missing and the current source of truth is an existing infobase, run `v8-runner bootstrap --connection <CONNECTION> --platform-version <VERSION>`.
-4. Inspect generated `v8project.yaml` and keep machine-local overrides in generated `v8project.local.yaml`.
-5. Run `v8-runner init` only when the file infobase or EDT workspace needs to be created.
-6. Run the narrowest validation command that answers the user's goal.
+3. If it is missing and the only goal is to export CF/CFE/DT from an existing infobase, create a
+   minimal `v8project.yaml` with `workPath`, `builder`, `infobase`, platform discovery settings and
+   `source-set: []`; do not bootstrap project sources that the user did not request.
+4. If it is missing and the current source of truth is an existing infobase that must become
+   project sources, run `v8-runner bootstrap --connection <CONNECTION> --platform-version <VERSION>`.
+5. Inspect generated `v8project.yaml` and keep machine-local overrides in generated `v8project.local.yaml`.
+6. Run `v8-runner init` only when the file infobase or EDT workspace needs to be created.
+7. Run the narrowest validation command that answers the user's goal.
+
+Minimal infobase-only shape:
+
+```yaml
+workPath: build/v8-runner
+format: DESIGNER
+builder: DESIGNER
+infobase:
+  connection: "File=/absolute/path/to/ib"
+source-set: []
+```
 
 Useful bootstrap commands:
 
@@ -83,6 +98,13 @@ v8-runner init
 - Vanessa Automation debugging or scenario authoring: use `v8-runner launch mcp va --wait-ready ...` to start the client MCP server with VA loaded and verify the VA MCP tools before driving `.feature` workflows.
 - Extension properties need synchronization: use `v8-runner extensions` or `extensions --name <SOURCE_SET>`.
 - Infobase changes need to become Git-visible files: check `git status`, then run the relevant `v8-runner dump ...` command.
+- Need a CF/CFE package of the state currently stored in the infobase: use
+  `v8-runner infobase configuration export --state <working|database> --output <file.cf>`;
+  add `--extension <name>` and use `.cfe` for an extension. This is not `make`, which builds
+  artifacts from project sources.
+- Need a complete portable DT image including data: use `v8-runner infobase dump --output <file.dt>`
+  only with `builder=DESIGNER`. A DT is not a backup. With `builder=IBCMD`, report the capability
+  as unverified; do not switch to Designer implicitly.
 - Source files need conversion between Designer and EDT: use `v8-runner convert`; this is CLI-only and does not use the infobase.
 - Existing `.cf` or `.cfe` artifacts need to be applied to an infobase: use `v8-runner load ...`.
 - Release artifacts need to be exported or external artifacts published: use `v8-runner make ...` or the `artifacts` alias.

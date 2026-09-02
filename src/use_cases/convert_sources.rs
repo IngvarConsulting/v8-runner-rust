@@ -931,6 +931,10 @@ fn discover_edt_external_projects(
         let descriptor =
             parse_external_descriptor(&edt_project::external_root_descriptor_path(&child))
                 .map_err(|error| match error {
+                    AppError::CapabilityUnavailable(message) => {
+                        AppError::CapabilityUnavailable(message)
+                    }
+                    AppError::InvalidOutput(message) => AppError::InvalidOutput(message),
                     AppError::Validation(message) => AppError::Validation(format!(
                         "external EDT child project '{}' in source-set '{}' is invalid: {message}",
                         child.display(),

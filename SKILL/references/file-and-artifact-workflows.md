@@ -40,6 +40,34 @@ degrades to incremental.
 
 For `format=EDT`, dump uses an internal Designer snapshot under `workPath/designer/<sourceSetName>`, then imports the result into the EDT target.
 
+## Export From An Infobase
+
+Use configuration export when the artifact must reflect state already stored in the infobase:
+
+```bash
+v8-runner infobase configuration export --state working --output dist/main.cf
+v8-runner infobase configuration export --state database --output dist/main.cf
+v8-runner infobase configuration export --state database --extension Sales --output dist/sales.cfe
+```
+
+These commands accept `source-set: []` because project source trees are not inputs. If no config
+exists and sources are not requested, create the minimal infobase-only config described by the
+skill entrypoint instead of running `bootstrap`.
+
+This differs from `make`: `make` builds from project sources, while this command reads the
+working or database configuration from the configured infobase. The configured `builder` strictly
+selects Designer batch or IBCMD; never retry another provider after dispatch.
+
+Use a DT only as a portable full-infobase image, not as a backup:
+
+```bash
+v8-runner infobase dump --output dist/base.dt
+```
+
+DT export is verified only for `builder=DESIGNER`. For `builder=IBCMD`, the runner reports
+`unverified` and does not dispatch until a no-active-connections or exclusive-access preflight is
+implemented and proved.
+
 ## Convert
 
 `convert` is repo-aware file conversion between Designer and EDT source formats.

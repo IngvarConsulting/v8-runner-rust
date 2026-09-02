@@ -49,6 +49,7 @@ pub fn with_cli_error<T: Serialize>(envelope: Envelope<T>, error: &UseCaseError)
 
 fn cli_envelope_error(error: &UseCaseError) -> EnvelopeError {
     let (code, kind) = match error.kind() {
+        UseCaseErrorKind::Capability => ("capability_unavailable", "capability"),
         UseCaseErrorKind::Validation => ("invalid_argument", "validation"),
         UseCaseErrorKind::Runtime => ("runtime_failure", "runtime"),
         UseCaseErrorKind::Platform => ("platform_failure", "platform"),

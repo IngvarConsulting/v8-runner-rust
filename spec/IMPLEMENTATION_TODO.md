@@ -4,11 +4,12 @@ This file tracks open implementation work only.
 
 ## Current Status
 
-- Open tasks as of `2026-05-11`: 0.
+- Open tasks as of `2026-09-02`: 1.
 
 ## Open Tasks
 
-No open implementation tasks.
+1. Перевести IBCMD DT capability из `unverified` в `available` только после реализации и live
+   proof проверяемого no-active-connections или exclusive-access preflight.
 
 ## Rules
 

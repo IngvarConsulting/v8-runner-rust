@@ -256,6 +256,11 @@ tests:
 - Тип: путь
 - Обязателен: да
 
+Для обычных project-команд список должен содержать поддерживаемый source-set. Исключение —
+`infobase configuration export` и `infobase dump`: они используют только ИБ и принимают
+`source-set: []`. Это command-specific validation, а не ослабление `build`, source `dump`,
+`convert`, `make` или остальных project workflows.
+
 Корень runtime state:
 
 - `workPath/hash-storages`
@@ -291,7 +296,9 @@ tests:
 
 Ограничения:
 
-- `builder=IBCMD` поддерживает `init`, `build`, `dump`, `extensions`;
+- `builder=IBCMD` поддерживает `init`, `build`, source `dump`, `extensions` и
+  `infobase configuration export`; `infobase dump` остаётся `unverified` и отклоняется без
+  fallback до реализации exclusive-access preflight;
 - для server connection с `builder=IBCMD` обязательны `infobase.dbms.kind`,
   `infobase.dbms.server`, `infobase.dbms.name`;
 - для file connection секция `infobase.dbms` запрещена.

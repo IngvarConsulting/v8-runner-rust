@@ -136,6 +136,8 @@ fn public_command_adapters_keep_workspace_lock_boundary() {
         "execute_test",
         "execute_load",
         "execute_dump",
+        "execute_infobase_configuration_export",
+        "execute_infobase_dump",
         "execute_convert",
         "execute_artifacts",
         "execute_syntax",

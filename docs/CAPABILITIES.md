@@ -35,6 +35,9 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `dump` | `format=DESIGNER` + `builder=DESIGNER` | Полная, инкрементальная или object-scoped partial выгрузка |
 | `dump` | `format=DESIGNER` + `builder=IBCMD` | Полная и инкрементальная выгрузка; `partial` деградирует в incremental с warning; standalone-server state изолирован в `workPath/ibcmd-data` |
 | `dump` | `format=EDT` + `builder=DESIGNER|IBCMD` | Reverse sync из ИБ через internal Designer snapshot и EDT import |
+| `infobase configuration export` | `builder=DESIGNER|IBCMD` | Выгружает working/database configuration в `.cf` или named extension в `.cfe`; backend строго задаёт `builder` |
+| `infobase dump` | `builder=DESIGNER` | Выгружает полную ИБ в переносимый `.dt`; это не backup |
+| `infobase dump` | `builder=IBCMD` | Отклоняется как `unverified` до доказанного exclusive-access preflight; fallback на Designer отсутствует |
 | `convert` | CLI-only repo-aware конвертация текущих `source-set` | Не использует `builder` и не требует ИБ |
 | `load` | `format=DESIGNER` + `builder=DESIGNER` | Загрузка `.cf` / `.cfe` артефактов в ИБ |
 | `make` / `artifacts` | `format=DESIGNER` + `builder=DESIGNER` | Экспорт `.cf` / `.cfe` и публикация `.epf` / `.erf` |
@@ -275,6 +278,40 @@ v8-runner convert [--source-set <NAME>] [--output <DIR>]
 - Без `--output` публикует результат под `workPath/convert/out/<sourceSetName>/<designer|edt>/`.
 - `--output` задаёт только target root и зеркалит `source-set.path` относительно каталога primary config.
 - Публикация остаётся staged full replacement с overlap guardrails.
+
+### `infobase configuration export`
+
+```bash
+v8-runner infobase configuration export --state <working|database> --output <FILE.cf>
+v8-runner infobase configuration export --state <working|database> --extension <NAME> --output <FILE.cfe>
+```
+
+- Сохраняет состояние конфигурации из ИБ, а не собирает пакет из project sources.
+- Без `--extension` экспортирует main configuration и требует `.cf`; с extension требует `.cfe`.
+- `builder=DESIGNER` использует Designer batch; `builder=IBCMD` — `ibcmd config save`.
+- `builder` является строгим selector: после выбора backend нет fallback, включая spawn failure.
+- Публикация идёт через sibling staging и target-specific lock; `published=true` означает, что
+  финальный файл уже заменён атомарно.
+- `execution.status` использует общий terminal vocabulary runner; он не заменяет `published`,
+  который отдельно отвечает только за commit финального файла.
+- `cancelled`, `timed_out` и `invalid_output` не сводятся к generic failure; ошибки считаются
+  non-retryable по умолчанию, а provider не переключается после dispatch.
+
+### `infobase dump`
+
+```bash
+v8-runner infobase dump --output <FILE.dt>
+```
+
+- Сохраняет полную ИБ с данными в переносимый DT-файл. DT не является резервной копией.
+- В первом slice доступен только при `builder=DESIGNER`.
+- При `builder=IBCMD` возвращает `evidence=unverified`, `provider=null`, не запускает процесс и
+  не переходит на Designer: `error.code=capability_unavailable` подсказывает исправить окружение
+  или backend capability, а не корректные аргументы. Безопасный IBCMD path требует проверки
+  отсутствия активных сеансов.
+- Обе операции требуют существующий `v8project.yaml`, но используют infobase-only validation:
+  `source-set: []` допустим, а отсутствующие или сломанные project sources не блокируют чтение ИБ.
+  Build/source/test/EDT/client-MCP настройки для этих команд не валидируются.
 
 ### `load`
 

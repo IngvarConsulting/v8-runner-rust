@@ -9,6 +9,7 @@ const PLATFORM_EXIT_CODE: i32 = 4;
 /// Stable use-case error class used by transport adapters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UseCaseErrorKind {
+    Capability,
     Validation,
     Runtime,
     Platform,
@@ -18,6 +19,7 @@ impl UseCaseErrorKind {
     /// Maps the error kind to the CLI exit code.
     pub const fn exit_code(self) -> i32 {
         match self {
+            Self::Capability => VALIDATION_EXIT_CODE,
             Self::Validation => VALIDATION_EXIT_CODE,
             Self::Runtime => RUNTIME_EXIT_CODE,
             Self::Platform => PLATFORM_EXIT_CODE,
@@ -26,6 +28,7 @@ impl UseCaseErrorKind {
 
     const fn label(self) -> &'static str {
         match self {
+            Self::Capability => "capability unavailable",
             Self::Validation => "validation error",
             Self::Runtime => "runtime error",
             Self::Platform => "platform error",
@@ -74,6 +77,10 @@ impl fmt::Display for UseCaseError {
 impl From<AppError> for UseCaseError {
     fn from(value: AppError) -> Self {
         match value {
+            AppError::CapabilityUnavailable(message) => {
+                Self::new(UseCaseErrorKind::Capability, message)
+            }
+            AppError::InvalidOutput(message) => Self::new(UseCaseErrorKind::Platform, message),
             AppError::Validation(message) => Self::new(UseCaseErrorKind::Validation, message),
             AppError::ValidationIbcmd(error) => {
                 Self::new(UseCaseErrorKind::Validation, error.to_string())
@@ -161,6 +168,7 @@ mod tests {
 
     #[test]
     fn use_case_error_kinds_keep_stable_cli_exit_codes() {
+        assert_eq!(UseCaseErrorKind::Capability.exit_code(), 2);
         assert_eq!(UseCaseErrorKind::Validation.exit_code(), 2);
         assert_eq!(UseCaseErrorKind::Runtime.exit_code(), 3);
         assert_eq!(UseCaseErrorKind::Platform.exit_code(), 4);

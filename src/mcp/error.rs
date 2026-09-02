@@ -7,6 +7,7 @@ use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum McpErrorCode {
+    CapabilityUnavailable,
     InvalidArgument,
     UnsupportedValue,
     RuntimeFailure,
@@ -17,6 +18,7 @@ pub enum McpErrorCode {
 impl McpErrorCode {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::CapabilityUnavailable => "capability_unavailable",
             Self::InvalidArgument => "invalid_argument",
             Self::UnsupportedValue => "unsupported_value",
             Self::RuntimeFailure => "runtime_failure",
@@ -30,6 +32,7 @@ impl McpErrorCode {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum McpBusinessErrorKind {
+    Capability,
     Validation,
     Runtime,
     Platform,
@@ -38,6 +41,7 @@ pub enum McpBusinessErrorKind {
 impl McpBusinessErrorKind {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Capability => "capability",
             Self::Validation => "validation",
             Self::Runtime => "runtime",
             Self::Platform => "platform",
@@ -48,6 +52,7 @@ impl McpBusinessErrorKind {
 impl From<UseCaseErrorKind> for McpBusinessErrorKind {
     fn from(value: UseCaseErrorKind) -> Self {
         match value {
+            UseCaseErrorKind::Capability => Self::Capability,
             UseCaseErrorKind::Validation => Self::Validation,
             UseCaseErrorKind::Runtime => Self::Runtime,
             UseCaseErrorKind::Platform => Self::Platform,
@@ -68,6 +73,7 @@ impl McpBusinessError {
     pub fn from_use_case(error: &UseCaseError) -> Self {
         let kind = error.kind();
         let code = match kind {
+            UseCaseErrorKind::Capability => McpErrorCode::CapabilityUnavailable,
             UseCaseErrorKind::Validation => McpErrorCode::InvalidArgument,
             UseCaseErrorKind::Runtime => McpErrorCode::RuntimeFailure,
             UseCaseErrorKind::Platform => McpErrorCode::PlatformFailure,
@@ -120,3 +126,22 @@ pub enum McpServiceError<T> {
 
 /// Top-level MCP service result contract.
 pub type McpServiceResult<T> = Result<T, McpServiceError<T>>;
+
+#[cfg(test)]
+mod tests {
+    use super::{McpBusinessError, McpBusinessErrorKind, McpErrorCode};
+    use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
+
+    #[test]
+    fn capability_failure_keeps_its_distinct_mcp_channel() {
+        let error = UseCaseError::new(
+            UseCaseErrorKind::Capability,
+            "configured provider cannot perform this operation",
+        );
+
+        let mapped = McpBusinessError::from_use_case(&error);
+
+        assert_eq!(mapped.code, McpErrorCode::CapabilityUnavailable);
+        assert_eq!(mapped.kind, McpBusinessErrorKind::Capability);
+    }
+}

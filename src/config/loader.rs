@@ -6,7 +6,8 @@ use crate::config::schema::{
     validate_local_overlay_schema_boundary, validate_main_config_schema_boundary,
 };
 use crate::config::validate::{
-    validate, validate_prepared_test, validate_tools_download_bootstrap, ConfigValidationError,
+    validate, validate_infobase_export, validate_prepared_test, validate_tools_download_bootstrap,
+    ConfigValidationError,
 };
 use crate::support::path::normalize_windows_verbatim_path;
 
@@ -72,8 +73,20 @@ pub fn load_config_for_prepared_test(
     )
 }
 
+pub fn load_config_for_infobase_export(
+    config_path: Option<&str>,
+    workdir_override: Option<&str>,
+) -> Result<AppConfig, ConfigLoadError> {
+    load_config_with_mode(
+        config_path,
+        workdir_override,
+        ConfigValidationMode::InfobaseExport,
+    )
+}
+
 enum ConfigValidationMode {
     Full,
+    InfobaseExport,
     PreparedTest,
     ToolsDownload,
 }
@@ -117,6 +130,7 @@ fn load_config_with_mode(
 
     match validation_mode {
         ConfigValidationMode::Full => validate(&config)?,
+        ConfigValidationMode::InfobaseExport => validate_infobase_export(&config)?,
         ConfigValidationMode::PreparedTest => validate_prepared_test(&config)?,
         ConfigValidationMode::ToolsDownload => validate_tools_download_bootstrap(&config)?,
     }

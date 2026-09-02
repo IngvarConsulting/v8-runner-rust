@@ -10,8 +10,8 @@ use crate::cli::execute;
 use crate::cli::output::{failure_envelope, print_command_error};
 use crate::command_envelope::Envelope;
 use crate::config::loader::{
-    load_config, load_config_for_prepared_test, load_config_for_tools_download,
-    resolve_primary_config_path,
+    load_config, load_config_for_infobase_export, load_config_for_prepared_test,
+    load_config_for_tools_download, resolve_primary_config_path,
 };
 use crate::output::presenter::Presenter;
 use crate::output::text::{TimelineItem, TimelineStatus};
@@ -107,6 +107,7 @@ pub fn run() -> i32 {
         | Command::Load(_)
         | Command::Test(_)
         | Command::Dump(_)
+        | Command::Infobase(_)
         | Command::Convert(_)
         | Command::Artifacts(_)
         | Command::Syntax(_)
@@ -149,6 +150,8 @@ fn load_cli_config(
         })
     ) {
         load_config_for_tools_download(cli.config.as_deref(), cli.workdir.as_deref())
+    } else if matches!(&cli.command, Command::Infobase(_)) {
+        load_config_for_infobase_export(cli.config.as_deref(), cli.workdir.as_deref())
     } else if matches!(&cli.command, Command::Test(args) if args.no_build) {
         load_config_for_prepared_test(cli.config.as_deref(), cli.workdir.as_deref())
     } else {
