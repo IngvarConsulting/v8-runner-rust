@@ -341,7 +341,7 @@ struct MainConfigSchema {
     /// Target infobase connection, credentials, and optional DBMS settings.
     infobase: InfobaseSchema,
     /// Project source sets to build, test, dump, or materialize.
-    #[serde(rename = "source-set")]
+    #[serde(rename = "source-set", default)]
     source_sets: Vec<SourceSetSchema>,
     /// Build pipeline settings.
     #[serde(

@@ -34,7 +34,7 @@ pub struct AppConfig {
     pub infobase: InfobaseConfig,
 
     /// Source sets (configuration + extensions)
-    #[serde(rename = "source-set")]
+    #[serde(rename = "source-set", default)]
     pub source_sets: Vec<SourceSetConfig>,
 
     /// Build pipeline configuration

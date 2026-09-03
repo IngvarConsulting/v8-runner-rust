@@ -1241,7 +1241,7 @@ fn infobase_export_does_not_require_project_source_sets() {
     let yaml = fs::read_to_string(&config).expect("config");
     let source_set =
         "source-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\n";
-    fs::write(&config, yaml.replace(source_set, "source-set: []\n")).expect("source-free config");
+    fs::write(&config, yaml.replace(source_set, "")).expect("source-free config");
     let output = base.join("dist/main.cf");
 
     let command = v8_runner_command()
