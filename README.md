@@ -40,23 +40,45 @@ cargo build --release
 
 ### Release assets
 
-Каждый выпуск сохраняет portable `.tar.gz`/`.zip` archives для ручной установки
-и публикует из тех же matrix builds три готовых бинарника для Unica:
+Начиная с `v0.7.0`, каждый выпуск сохраняет portable `.tar.gz`/`.zip` archives
+для ручной установки и публикует из тех же matrix builds три готовых бинарника для Unica:
 `v8-runner-darwin-arm64`, `v8-runner-linux-x64` и
-`v8-runner-win-x64.exe`. Для них выпуск содержит SHA-256, компактный provenance
-manifest и GitHub build attestations; `license-v8-runner-AGPL-3.0-only.txt` и
-`notice-v8-runner-fork.txt` лежат рядом. Corresponding Source — неизменяемый tag
-того же release.
+`v8-runner-win-x64.exe`. Единый `v8-runner-assets.json` schema v2 связывает
+исходные tag/commit с ролью, target, размером и SHA-256 всех остальных assets,
+а для архивов — также с путём и SHA-256 вложенного бинарника. Все семь payload
+assets и manifest имеют GitHub build attestations, которые подтверждают их
+происхождение; `license-v8-runner-AGPL-3.0-only.txt` и
+`notice-v8-runner-fork.txt` лежат рядом и также входят в manifest. Corresponding
+Source — неизменяемый tag того же release.
+
+В `v0.6.x` публиковались отдельные `.sha256` и `.provenance.json`. С `v0.7.0`
+их заменяет единый manifest; имена бинарников, архивов и юридических файлов не
+изменились.
 
 Перед использованием проверьте release и конкретный бинарник:
 
 ```bash
-gh release verify v0.6.0 --repo IngvarConsulting/v8-runner-rust
-gh attestation verify v8-runner-linux-x64 \
-  --repo IngvarConsulting/v8-runner-rust \
-  --signer-workflow IngvarConsulting/v8-runner-rust/.github/workflows/release.yml \
-  --source-ref refs/heads/master --deny-self-hosted-runners
+gh release verify v0.7.0 --repo IngvarConsulting/v8-runner-rust
+gh release download v0.7.0 --repo IngvarConsulting/v8-runner-rust \
+  --pattern v8-runner-assets.json --pattern v8-runner-linux-x64
+gh release verify-asset v0.7.0 ./v8-runner-assets.json \
+  --repo IngvarConsulting/v8-runner-rust
+gh release verify-asset v0.7.0 ./v8-runner-linux-x64 \
+  --repo IngvarConsulting/v8-runner-rust
+source_commit="$(python3 -c 'import json; print(json.load(open("v8-runner-assets.json"))["release"]["sourceCommit"])')"
+for asset in v8-runner-assets.json v8-runner-linux-x64; do
+  gh attestation verify "$asset" \
+    --repo IngvarConsulting/v8-runner-rust \
+    --signer-workflow IngvarConsulting/v8-runner-rust/.github/workflows/release.yml \
+    --source-ref refs/heads/master --source-digest "$source_commit" \
+    --deny-self-hosted-runners
+done
 ```
+
+Для offline-проверки сначала проверьте и перенесите в изолированную среду
+`v8-runner-assets.json`, затем сравните SHA-256 нужного файла с соответствующей
+записью manifest. Manifest, скачанный вместе с бинарником без предварительной
+проверки `gh release verify-asset`, сам по себе не является корнем доверия.
 
 ### Создайте стартовый config (конфиг) в текущем репозитории:
 

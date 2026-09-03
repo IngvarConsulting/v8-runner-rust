@@ -177,8 +177,11 @@ jobs:
           else
             (cd dist && tar -czf "${archive_name}" "${{ matrix.artifact_name }}")
           fi
-          python3 scripts/release/release_assets.py write-checksum \
-            --file "dist/${archive_name}"
+
+      - name: Attest portable archive
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: dist/${{ matrix.artifact_name }}.${{ matrix.archive_ext }}
 
       - name: Prepare direct Unica asset
         if: ${{ matrix.unica_asset_name != '' }}
@@ -189,8 +192,6 @@ jobs:
             --output "dist/${{ matrix.unica_asset_name }}" \
             --target "${{ matrix.target }}" \
             --asset-name "${{ matrix.unica_asset_name }}" \
-            --tag "${RELEASE_TAG}" \
-            --commit "${GITHUB_SHA}" \
             --version "${RELEASE_TAG#v}"
 
       - name: Attest direct Unica asset
@@ -203,9 +204,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.artifact_name }}
-          path: |
-            dist/${{ matrix.artifact_name }}.${{ matrix.archive_ext }}
-            dist/${{ matrix.artifact_name }}.${{ matrix.archive_ext }}.sha256
+          path: dist/${{ matrix.artifact_name }}.${{ matrix.archive_ext }}
           if-no-files-found: error
 
       - name: Upload direct Unica workflow artifact
@@ -213,10 +212,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: direct-${{ matrix.unica_asset_name }}
-          path: |
-            dist/${{ matrix.unica_asset_name }}
-            dist/${{ matrix.unica_asset_name }}.sha256
-            dist/${{ matrix.unica_asset_name }}.provenance.json
+          path: dist/${{ matrix.unica_asset_name }}
           if-no-files-found: error
 
   publish:
@@ -225,6 +221,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout exact release tag
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -245,6 +243,11 @@ jobs:
           test -f dist/v8-runner-assets.json
           python3 scripts/release/release_assets.py verify-assets --dist dist --tag "${RELEASE_TAG}" --commit "${GITHUB_SHA}"
 
+      - name: Attest consolidated release manifest
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: dist/v8-runner-assets.json
+
       - name: Publish GitHub draft release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
@@ -257,7 +260,9 @@ jobs:
             Maintained fork: https://github.com/IngvarConsulting/v8-runner-rust
             Corresponding source and build scripts: ${{ github.server_url }}/${{ github.repository }}/tree/${{ inputs.tag }}
             Portable archives and direct Unica binaries are built from the same protected source commit.
-            Direct binaries have SHA-256, provenance metadata, and GitHub build attestations.
+            v8-runner-assets.json binds the source tag and commit to SHA-256 metadata for every other release asset.
+            All portable archives, direct binaries, and the manifest have GitHub build attestations.
+            Starting with v0.7.0, the consolidated manifest replaces per-asset .sha256 and .provenance.json sidecars.
           files: |
             dist/*
 
@@ -320,7 +325,7 @@ jobs:
         run: |
           gh release download "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --dir dist
           python3 scripts/release/release_assets.py verify-assets --dist dist --tag "${RELEASE_TAG}" --commit "${GITHUB_SHA}"
-          for asset in v8-runner-darwin-arm64 v8-runner-linux-x64 v8-runner-win-x64.exe; do
+          for asset in $(python3 scripts/release/release_assets.py attested-assets); do
             gh attestation verify "dist/${asset}" --repo "${GITHUB_REPOSITORY}" \
               --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
               --source-ref refs/heads/master --source-digest "${GITHUB_SHA}" --deny-self-hosted-runners
@@ -364,7 +369,7 @@ jobs:
           diff -u release-assets.snapshot.json release-assets.current.json
           gh release download "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --dir dist
           python3 scripts/release/release_assets.py verify-assets --dist dist --tag "${RELEASE_TAG}" --commit "${GITHUB_SHA}"
-          for asset in v8-runner-darwin-arm64 v8-runner-linux-x64 v8-runner-win-x64.exe; do
+          for asset in $(python3 scripts/release/release_assets.py attested-assets); do
             gh attestation verify "dist/${asset}" --repo "${GITHUB_REPOSITORY}" \
               --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
               --source-ref refs/heads/master --source-digest "${GITHUB_SHA}" --deny-self-hosted-runners
@@ -378,4 +383,7 @@ jobs:
               exit 1
             fi
             sleep 5
+          done
+          for asset_path in dist/*; do
+            gh release verify-asset "${RELEASE_TAG}" "${asset_path}" --repo "${GITHUB_REPOSITORY}"
           done
