@@ -879,7 +879,7 @@ mod tests {
         starts: Arc<AtomicUsize>,
         commands: Arc<Mutex<Vec<String>>>,
         pre_dispatches: Arc<AtomicUsize>,
-        pre_dispatch_delay: Duration,
+        first_pre_dispatch_waits_for_deadline: bool,
         post_mark_running_cancel: Option<CancellationToken>,
         shutdowns: Arc<AtomicUsize>,
     }
@@ -891,14 +891,14 @@ mod tests {
                 starts: Arc::new(AtomicUsize::new(0)),
                 commands: Arc::new(Mutex::new(Vec::new())),
                 pre_dispatches: Arc::new(AtomicUsize::new(0)),
-                pre_dispatch_delay: Duration::ZERO,
+                first_pre_dispatch_waits_for_deadline: false,
                 post_mark_running_cancel: None,
                 shutdowns: Arc::new(AtomicUsize::new(0)),
             }
         }
 
-        fn with_pre_dispatch_delay(mut self, delay: Duration) -> Self {
-            self.pre_dispatch_delay = delay;
+        fn with_first_pre_dispatch_wait_for_deadline(mut self) -> Self {
+            self.first_pre_dispatch_waits_for_deadline = true;
             self
         }
 
@@ -913,6 +913,10 @@ mod tests {
 
         fn commands(&self) -> Vec<String> {
             self.commands.lock().expect("commands lock").clone()
+        }
+
+        fn pre_dispatch_count(&self) -> usize {
+            self.pre_dispatches.load(Ordering::SeqCst)
         }
 
         fn shutdown_count(&self) -> usize {
@@ -946,11 +950,11 @@ mod tests {
         fn pre_dispatch(
             &self,
             _session: &mut dyn ManagedSession,
-            _request: &EdtSessionRequest,
+            request: &EdtSessionRequest,
         ) -> Result<(), EdtSessionError> {
-            self.pre_dispatches.fetch_add(1, Ordering::SeqCst);
-            if !self.pre_dispatch_delay.is_zero() {
-                thread::sleep(self.pre_dispatch_delay);
+            let invocation = self.pre_dispatches.fetch_add(1, Ordering::SeqCst);
+            if self.first_pre_dispatch_waits_for_deadline && invocation == 0 {
+                thread::sleep(request.deadline.saturating_duration_since(Instant::now()));
             }
             Ok(())
         }
@@ -1745,16 +1749,17 @@ mod tests {
                 stderr: String::new(),
             },
         ])])
-        .with_pre_dispatch_delay(Duration::from_millis(20));
+        .with_first_pre_dispatch_wait_for_deadline();
         let manager = manager(factory.clone(), 2, Duration::from_millis(100));
 
         assert_eq!(
-            manager.execute(request("cmd-1", 10)).await,
+            manager.execute(request("cmd-1", 1_000)).await,
             Err(EdtSessionError::QueuedTimeout)
         );
+        assert_eq!(factory.pre_dispatch_count(), 1);
         assert_eq!(
             manager
-                .execute(request("cmd-2", 200))
+                .execute(request("cmd-2", 10_000))
                 .await
                 .expect("second result")
                 .stdout,
