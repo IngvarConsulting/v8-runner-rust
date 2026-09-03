@@ -359,6 +359,7 @@ jobs:
       - name: Recheck and freeze the same draft
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_VERIFY_TIMEOUT_SECONDS: "120"
         run: |
           test "$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq .isDraft)" = true
           gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets \
@@ -373,4 +374,11 @@ jobs:
           done
           gh release edit "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --verify-tag --draft=false
           test "$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json isImmutable --jq .isImmutable)" = true
-          gh release verify "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}"
+          verify_deadline=$((SECONDS + RELEASE_VERIFY_TIMEOUT_SECONDS))
+          until gh release verify "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}"; do
+            if ((SECONDS >= verify_deadline)); then
+              echo "release attestation did not become verifiable within ${RELEASE_VERIFY_TIMEOUT_SECONDS}s" >&2
+              exit 1
+            fi
+            sleep 5
+          done
