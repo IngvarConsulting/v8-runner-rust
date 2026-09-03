@@ -68,6 +68,12 @@ class ReleaseGovernanceTest(unittest.TestCase):
         self.assertIn("--deny-self-hosted-runners", workflow)
         self.assertIn('chmod +x "dist/${{ matrix.asset }}"', workflow)
 
+    def test_all_checksum_sidecars_use_the_portable_writer(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn("release_assets.py write-checksum", workflow)
+        self.assertNotIn('sha256sum "${archive_name}"', workflow)
+        self.assertNotIn('shasum -a 256 "${archive_name}"', workflow)
+
     def test_draft_auditors_can_read_unpublished_release(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         native = workflow.split("  audit-native:\n", 1)[1].split("  audit-draft:\n", 1)[0]
