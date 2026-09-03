@@ -56,6 +56,12 @@ pub fn run() -> i32 {
             let error = execute::render_invalid_infobase_request(args, &presenter, error);
             return error.exit_code();
         }
+        if args.dry_run() && cli.clean_before_execution {
+            let message = "--clean-before-execution cannot be combined with infobase --dry-run because preview must not modify workPath";
+            let error = UseCaseError::new(UseCaseErrorKind::Validation, message);
+            print_command_error(&presenter, command_name(&cli.command), &error, message);
+            return error.exit_code();
+        }
     }
 
     let config = match load_cli_config(&cli) {
@@ -86,6 +92,17 @@ pub fn run() -> i32 {
         }
         _ => None,
     };
+    if let Command::Infobase(args) = &cli.command {
+        if args.dry_run() {
+            execute::preview_prepared_infobase_command(
+                prepared_infobase
+                    .take()
+                    .expect("infobase command was prepared before preview"),
+                &presenter,
+            );
+            return 0;
+        }
+    }
     let primary_config_path = match resolve_primary_config_path(cli.config.as_deref()) {
         Ok(path) => path,
         Err(e) => {

@@ -136,6 +136,16 @@ v8-runner build
 Команда выполняет incremental build (инкрементальную сборку) или full path (полную сборку) по
 текущим изменениям и настройкам проекта.
 
+### Спланируйте или выгрузите состояние ИБ:
+
+```bash
+v8-runner infobase configuration export --state working --output dist/main.cf --dry-run
+v8-runner infobase dump --output dist/base.dt --dry-run
+```
+
+`--dry-run` валидирует окружение и показывает выбранный provider без запуска платформы и без
+создания файлов. Уберите флаг, чтобы атомарно опубликовать CF/CFE или переносимый DT-файл.
+
 ### Проверьте синтаксис серверных модулей:
 
 ```bash

@@ -50,6 +50,9 @@ v8-runner infobase configuration export --state database --output dist/main.cf
 v8-runner infobase configuration export --state database --extension Sales --output dist/sales.cfe
 ```
 
+Append `--dry-run` when an orchestrator needs the selected provider and compact output plan before
+apply. Preview does not create `workPath`, locks, staging/output paths, or a provider process.
+
 These commands accept `source-set: []` because project source trees are not inputs. If no config
 exists and sources are not requested, create the minimal infobase-only config described by the
 skill entrypoint instead of running `bootstrap`.

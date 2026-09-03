@@ -203,6 +203,7 @@ fn infobase_configuration_export_help_fixes_the_exact_grammar() {
     assert!(stdout.contains("[possible values: working, database]"));
     assert!(stdout.contains("--extension <EXTENSION>"));
     assert!(stdout.contains("--output <OUTPUT>"));
+    assert!(stdout.contains("--dry-run"));
     assert!(!stdout.contains("--provider"));
     assert!(!stdout.contains("--engine"));
 }
@@ -216,6 +217,7 @@ fn infobase_dump_help_calls_dt_a_transfer_file_not_a_backup() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--dry-run"));
     assert!(stdout.contains("--output <OUTPUT>"));
     assert!(stdout.contains("not a backup"));
 }

@@ -490,6 +490,26 @@ pub fn prepare_infobase_snapshot(
     }
 }
 
+pub fn preview_configuration_export(
+    request: &ExportConfigurationPackageRequest,
+    prepared: &PreparedExportProvider,
+) -> ExportConfigurationPackageResult {
+    let mut result =
+        ExportConfigurationPackageResult::new(request.clone(), prepared.selection().clone());
+    result.mark_preview();
+    result
+}
+
+pub fn preview_infobase_snapshot(
+    request: &ExportInfobaseSnapshotRequest,
+    prepared: &PreparedExportProvider,
+) -> ExportInfobaseSnapshotResult {
+    let mut result =
+        ExportInfobaseSnapshotResult::new(request.clone(), prepared.selection().clone());
+    result.mark_preview();
+    result
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ExportIntent {
     Configuration,

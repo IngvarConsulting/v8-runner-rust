@@ -281,8 +281,8 @@ v8-runner convert [--source-set <NAME>] [--output <DIR>]
 ### `infobase configuration export`
 
 ```bash
-v8-runner infobase configuration export --state <working|database> --output <FILE.cf>
-v8-runner infobase configuration export --state <working|database> --extension <NAME> --output <FILE.cfe>
+v8-runner infobase configuration export --state <working|database> --output <FILE.cf> [--dry-run]
+v8-runner infobase configuration export --state <working|database> --extension <NAME> --output <FILE.cfe> [--dry-run]
 ```
 
 - Сохраняет состояние конфигурации из ИБ, а не собирает пакет из project sources.
@@ -300,11 +300,14 @@ v8-runner infobase configuration export --state <working|database> --extension <
   который отдельно отвечает только за commit финального файла.
 - `cancelled`, `timed_out` и `invalid_output` не сводятся к generic failure; ошибки считаются
   non-retryable по умолчанию, а provider не переключается после dispatch.
+- `--dry-run` возвращает выбранный provider и compact plan, но не создаёт `workPath`, locks,
+  staging/output и не запускает provider process. JSON явно сообщает
+  `mode=preview`, `provider_dispatched=false` и `published=false`.
 
 ### `infobase dump`
 
 ```bash
-v8-runner infobase dump --output <FILE.dt>
+v8-runner infobase dump --output <FILE.dt> [--dry-run]
 ```
 
 - Сохраняет полную ИБ с данными в переносимый DT-файл. DT не является резервной копией.
