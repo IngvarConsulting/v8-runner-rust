@@ -94,13 +94,16 @@ pub fn run() -> i32 {
     };
     if let Command::Infobase(args) = &cli.command {
         if args.dry_run() {
-            execute::preview_prepared_infobase_command(
+            return match execute::preview_prepared_infobase_command(
+                &config,
                 prepared_infobase
                     .take()
                     .expect("infobase command was prepared before preview"),
                 &presenter,
-            );
-            return 0;
+            ) {
+                Ok(()) => 0,
+                Err(error) => error.exit_code(),
+            };
         }
     }
     let primary_config_path = match resolve_primary_config_path(cli.config.as_deref()) {

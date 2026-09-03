@@ -851,39 +851,75 @@ pub fn execute_prepared_infobase_command(
 }
 
 pub fn preview_prepared_infobase_command(
+    config: &AppConfig,
     prepared: PreparedInfobaseCliCommand,
     presenter: &Presenter,
-) {
+) -> Result<(), UseCaseError> {
+    let context = prepared.context;
     match prepared.command {
         PreparedInfobaseCommand::Configuration { request, provider } => {
-            let result = infobase_export::preview_configuration_export(&request, &provider);
-            if presenter.is_json() {
-                presenter.print_envelope(&Envelope::ok(
-                    CommandName::InfobaseConfigurationExport.as_str(),
-                    0,
-                    result,
-                ));
-            } else {
-                render_configuration_export_text(
-                    CommandName::InfobaseConfigurationExport,
-                    &result,
-                    presenter,
-                );
+            match infobase_export::preview_configuration_export(
+                &context, config, &request, &provider,
+            ) {
+                Ok(result) => {
+                    if presenter.is_json() {
+                        presenter.print_envelope(&Envelope::ok(
+                            CommandName::InfobaseConfigurationExport.as_str(),
+                            0,
+                            result,
+                        ));
+                    } else {
+                        render_configuration_export_text(
+                            CommandName::InfobaseConfigurationExport,
+                            &result,
+                            presenter,
+                        );
+                    }
+                }
+                Err(failure) => {
+                    let error = failure.error;
+                    if let Some(result) = failure.payload {
+                        render_configuration_failure(
+                            CommandName::InfobaseConfigurationExport,
+                            result,
+                            &error,
+                            presenter,
+                        );
+                    }
+                    return Err(error);
+                }
             }
         }
         PreparedInfobaseCommand::Snapshot { request, provider } => {
-            let result = infobase_export::preview_infobase_snapshot(&request, &provider);
-            if presenter.is_json() {
-                presenter.print_envelope(&Envelope::ok(
-                    CommandName::InfobaseDump.as_str(),
-                    0,
-                    result,
-                ));
-            } else {
-                render_snapshot_export_text(CommandName::InfobaseDump, &result, presenter);
+            match infobase_export::preview_infobase_snapshot(&context, config, &request, &provider)
+            {
+                Ok(result) => {
+                    if presenter.is_json() {
+                        presenter.print_envelope(&Envelope::ok(
+                            CommandName::InfobaseDump.as_str(),
+                            0,
+                            result,
+                        ));
+                    } else {
+                        render_snapshot_export_text(CommandName::InfobaseDump, &result, presenter);
+                    }
+                }
+                Err(failure) => {
+                    let error = failure.error;
+                    if let Some(result) = failure.payload {
+                        render_snapshot_failure(
+                            CommandName::InfobaseDump,
+                            result,
+                            &error,
+                            presenter,
+                        );
+                    }
+                    return Err(error);
+                }
             }
         }
     }
+    Ok(())
 }
 
 fn execute_infobase_configuration_export(

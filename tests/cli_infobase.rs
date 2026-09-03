@@ -101,9 +101,12 @@ fn configuration_cf_dry_run_selects_provider_without_process_or_filesystem_mutat
     assert_eq!(envelope["data"]["published"], false);
     assert_eq!(envelope["data"]["target_state"], "unchanged");
     assert_eq!(envelope["data"]["execution"]["status"], "succeeded");
+    let expected_output = fs::canonicalize(&base)
+        .expect("canonical base")
+        .join("dist/main.cf");
     assert_eq!(
         envelope["data"]["plan"]["output"],
-        output.display().to_string()
+        expected_output.display().to_string()
     );
     assert_eq!(envelope["data"]["plan"]["provider"], "designer-batch");
     assert!(!calls.exists(), "preview must not start the platform");
@@ -227,6 +230,44 @@ fn unavailable_dry_run_is_typed_as_preview_failure_without_side_effects() {
     assert!(!calls.exists());
     assert!(!work.exists());
     assert!(!output.parent().expect("output parent").exists());
+}
+
+#[test]
+fn dry_run_rejects_an_existing_output_directory_before_runtime_mutation() {
+    let (dir, config, base, calls) = setup("DESIGNER");
+    let work = dir.path().join("work");
+    fs::remove_dir_all(&work).expect("remove setup work path");
+    let output = base.join("dist/main.cf");
+    fs::create_dir_all(&output).expect("directory masquerading as CF output");
+
+    let command = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "infobase",
+            "configuration",
+            "export",
+            "--state",
+            "working",
+            "--output",
+            &output.display().to_string(),
+            "--dry-run",
+        ])
+        .output()
+        .expect("preview invalid target");
+
+    assert!(!command.status.success());
+    let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+    assert_eq!(envelope["data"]["mode"], "preview");
+    assert_eq!(envelope["data"]["provider_dispatched"], false);
+    assert_eq!(envelope["steps"][0]["name"], "resolve target");
+    assert!(envelope["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("is a directory")));
+    assert!(!calls.exists());
+    assert!(!work.exists());
+    assert!(output.is_dir());
 }
 
 #[test]
