@@ -110,10 +110,12 @@ fn download_yaxunit(
     force: bool,
     config_path: &Path,
 ) -> Result<Vec<ToolDownloadDestination>, AppError> {
+    if mode == ToolExtensionInstallMode::Sources {
+        validate_yaxunit_source_set_config(config_path)?;
+    }
     let release = fetch_latest_release(context, YAXUNIT_REPO)?;
     match mode {
         ToolExtensionInstallMode::Sources => {
-            validate_yaxunit_source_set_config(config_path)?;
             let path = config.base_path.join("tests");
             let marker_path = config
                 .base_path
