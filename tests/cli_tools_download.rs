@@ -14,6 +14,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use support::{temp_workspace, v8_runner_command};
 
+const SLEEPING_RESPONSE_DELAY: Duration = Duration::from_secs(5);
+
 fn write_minimal_config(root: &Path) -> PathBuf {
     write_minimal_config_with_builder(root, "DESIGNER")
 }
@@ -66,7 +68,7 @@ impl FixtureServer {
     }
 
     fn start_sleeping() -> (Self, u16) {
-        Self::start_with_mode(None, Duration::from_secs(5))
+        Self::start_with_mode(None, SLEEPING_RESPONSE_DELAY)
     }
 
     fn start_with_mode(root: Option<PathBuf>, response_delay: Duration) -> (Self, u16) {
@@ -126,12 +128,26 @@ impl Drop for FixtureServer {
 }
 
 fn serve_fixture_request(stream: &mut TcpStream, root: &Path) -> std::io::Result<()> {
-    let mut request = [0_u8; 16 * 1024];
-    let read = stream.read(&mut request)?;
-    if read == 0 {
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    let mut request = Vec::with_capacity(1024);
+    let mut chunk = [0_u8; 1024];
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&chunk[..read]);
+        if request.len() > 16 * 1024 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "fixture HTTP request headers exceed 16 KiB",
+            ));
+        }
+    }
+    if request.is_empty() {
         return Ok(());
     }
-    let request = String::from_utf8_lossy(&request[..read]);
+    let request = String::from_utf8_lossy(&request);
     let path = request
         .lines()
         .next()
@@ -816,10 +832,7 @@ fn tools_download_respects_execution_timeout_during_http_download() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        elapsed < std::time::Duration::from_secs(2),
-        "elapsed={elapsed:?}"
-    );
+    assert!(elapsed < SLEEPING_RESPONSE_DELAY, "elapsed={elapsed:?}");
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),

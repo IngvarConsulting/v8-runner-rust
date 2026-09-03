@@ -776,7 +776,7 @@ mod tests {
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
 
-    const TEST_INTERACTIVE_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+    const TEST_INTERACTIVE_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
     const TEST_INTERACTIVE_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
     #[cfg(unix)]

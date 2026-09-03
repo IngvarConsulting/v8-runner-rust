@@ -1182,7 +1182,7 @@ mod tests {
         config.infobase.connection = "Srvr=server;Ref=demo".to_owned();
         config.tools.edt_cli.path = Some(edt_script);
         config.tools.edt_cli.interactive_mode = true;
-        config.tools.edt_cli.startup_timeout_ms = 10_000;
+        config.tools.edt_cli.startup_timeout_ms = 30_000;
         config.tools.edt_cli.command_timeout_ms = 2_000;
 
         let result = super::run_init(

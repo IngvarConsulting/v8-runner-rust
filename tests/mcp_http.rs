@@ -426,7 +426,14 @@ impl HttpServerProcess {
             if let Some(status) = child.try_wait().expect("poll HTTP server child") {
                 panic!("HTTP server exited before bind with status {status}");
             }
-            std::net::TcpStream::connect(authority.as_str()).is_ok()
+            if std::net::TcpStream::connect(authority.as_str()).is_err() {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            if let Some(status) = child.try_wait().expect("poll bound HTTP server child") {
+                panic!("HTTP server exited after readiness probe with status {status}");
+            }
+            true
         });
         drop(reservations);
         assert!(ready, "timed out waiting for HTTP server at {url}");

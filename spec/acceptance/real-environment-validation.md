@@ -111,7 +111,7 @@ Mandatory happy-path должен быть blocking live-smoke только дл
 - workflow может разрешить soft-skip только через `V8TR_DESIGNER_ALLOW_MISSING_CONFIG=1`
 - без этого hook `scripts/test/live-cli-fixture.sh` падает, если `V8TR_DESIGNER_REAL_CONFIG` не задан
 - trusted path with configured OS-specific bundle secrets устанавливает 1С, материализует dedicated `format: DESIGNER` + `builder: DESIGNER` config, запускает `ibsrv` sidecar на том же file-infobase path и только потом вызывает canonical entrypoint `V8_RUNNER_CI_SCOPE=happy-path bash scripts/test/ci-rust.sh`
-- trusted path without those secrets emits a GitHub Actions notice with `live_available=false`, sets `V8TR_DESIGNER_ALLOW_MISSING_CONFIG=1` and `V8TR_CI_SKIP_DUPLICATE_RUST_TESTS=1`, and keeps Rust build/check plus Linux contract tests blocking while the live smoke is skipped
+- trusted path without those secrets emits a GitHub Actions notice with `live_available=false`, sets `V8TR_DESIGNER_ALLOW_MISSING_CONFIG=1` and `V8TR_CI_SKIP_DUPLICATE_RUST_TESTS=1`, and keeps Rust build/check plus the OS-declared contract tests blocking while the live smoke is skipped
 - fork PR и Dependabot не получают install/bootstrap/upload path: workflow передает только `V8TR_DESIGNER_ALLOW_MISSING_CONFIG=1`, а upload deploy-ready артефактов остаётся trusted-only
 
 ## Контракт `live-cli-fixture`

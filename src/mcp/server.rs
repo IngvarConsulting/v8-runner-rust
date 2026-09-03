@@ -1207,14 +1207,16 @@ mod tests {
             .expect_err("queued call must time out");
         drop(permit);
 
-        assert_eq!(
-            error,
-            execution_error(
-                ErrorReason::Timeout,
-                ExecutionStage::Queued,
-                Some(Duration::from_millis(20))
-            )
-        );
+        assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        let data = error.data.as_ref().expect("queued timeout error data");
+        assert_eq!(data["reason"], "timeout");
+        assert_eq!(data["stage"], "queued");
+        assert_eq!(data["timeoutMs"], 20);
+        let wire = serde_json::to_value(&error).expect("serialize MCP error data");
+        assert_eq!(wire["code"], rmcp::model::ErrorCode::INTERNAL_ERROR.0);
+        assert_eq!(wire["data"]["reason"], "timeout");
+        assert_eq!(wire["data"]["stage"], "queued");
+        assert_eq!(wire["data"]["timeoutMs"], 20);
         assert_eq!(started.load(Ordering::SeqCst), 0);
         assert_eq!(execution_telemetry.snapshot().timeout_total, 1);
     }
