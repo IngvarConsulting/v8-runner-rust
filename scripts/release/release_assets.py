@@ -89,9 +89,13 @@ def verify_binary(path: Path, target: str, version: str) -> None:
         raise ValueError(f"{path.name} --version did not report {version!r}: {completed.stdout!r}")
 
 
+def checksum_payload(path: Path) -> bytes:
+    return f"{digest(path)}  {path.name}\n".encode("ascii")
+
+
 def checksum_file(path: Path) -> Path:
     output = path.with_name(f"{path.name}.sha256")
-    output.write_text(f"{digest(path)}  {path.name}\n", encoding="utf-8")
+    output.write_bytes(checksum_payload(path))
     return output
 
 
@@ -204,6 +208,8 @@ def parser() -> argparse.ArgumentParser:
     direct = commands.add_parser("prepare-direct")
     for name in ("binary", "output", "target", "asset-name", "tag", "commit", "version"):
         direct.add_argument(f"--{name}", required=True)
+    checksum = commands.add_parser("write-checksum")
+    checksum.add_argument("--file", required=True)
     manifest = commands.add_parser("write-manifest")
     manifest.add_argument("--dist", required=True)
     manifest.add_argument("--tag", required=True)
@@ -221,6 +227,8 @@ def main() -> None:
         verify_binary(Path(args.binary), args.target, args.version)
     elif args.command == "prepare-direct":
         prepare_direct(args)
+    elif args.command == "write-checksum":
+        checksum_file(Path(args.file))
     elif args.command == "write-manifest":
         write_manifest(Path(args.dist), args.tag, args.commit)
     else:

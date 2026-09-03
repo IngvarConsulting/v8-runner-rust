@@ -23,6 +23,17 @@ def load_module():
 
 
 class ReleaseAssetsTest(unittest.TestCase):
+    def test_checksum_payload_uses_portable_lf_line_ending(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            asset = Path(temp_dir) / "v8-runner-win-x64.exe"
+            asset.write_bytes(b"payload")
+
+            self.assertEqual(
+                module.checksum_payload(asset),
+                f"{module.digest(asset)}  {asset.name}\n".encode("ascii"),
+            )
+
     def test_checksum_parser_accepts_gnu_binary_marker(self) -> None:
         module = load_module()
         checksum = "a" * 64
