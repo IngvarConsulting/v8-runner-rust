@@ -870,7 +870,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
-    use tokio::time::sleep;
+    use tokio::time::{sleep, timeout};
     use tokio_util::sync::CancellationToken;
 
     #[derive(Clone)]
@@ -1874,11 +1874,16 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn execute_observed_can_surface_completed_running_cancellation_without_completion_handle()
-    {
+    async fn execute_observed_running_cancellation_recovers_capacity_across_completion_race() {
         let cancellation = CancellationToken::new();
-        let factory = FakeSessionFactory::new(vec![SessionPlan::Session(vec![])])
-            .with_post_mark_running_cancel(cancellation.clone());
+        let factory = FakeSessionFactory::new(vec![SessionPlan::Session(vec![
+            CommandBehavior::CompleteAfter {
+                delay: Duration::from_millis(1),
+                stdout: "second".to_owned(),
+                stderr: String::new(),
+            },
+        ])])
+        .with_post_mark_running_cancel(cancellation.clone());
         let manager = manager(factory, 1, Duration::from_millis(100));
 
         let execution = manager
@@ -1886,7 +1891,19 @@ mod tests {
             .await;
 
         assert_eq!(execution.result, Err(EdtSessionError::RunningCancelled));
-        assert!(execution.completion.is_none());
+        if let Some(completion) = execution.completion {
+            timeout(Duration::from_secs(1), completion.wait())
+                .await
+                .expect("running cancellation completion");
+        }
+        assert_eq!(
+            manager
+                .execute(request("cmd-2", 200))
+                .await
+                .expect("capacity recovers after cancellation")
+                .stdout,
+            "second"
+        );
     }
 
     #[test]
