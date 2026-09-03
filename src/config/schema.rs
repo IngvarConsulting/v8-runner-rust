@@ -1190,7 +1190,10 @@ mod tests {
         );
 
         let config = load_config(config_path.to_str(), None).expect("load config");
-        assert_eq!(config.base_path, dir.path());
+        assert_eq!(
+            config.base_path,
+            std::fs::canonicalize(dir.path()).expect("canonical config dir")
+        );
     }
 
     #[test]

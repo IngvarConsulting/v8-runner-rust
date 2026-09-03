@@ -43,7 +43,7 @@ live-mcp-http.py
 
 | Файл | Роль | Назначение | Зона ответственности |
 | --- | --- | --- | --- |
-| `ci-rust.sh` | CI entrypoint | Диспетчер CI-контуров по `V8_RUNNER_CI_SCOPE` | Выбрать нужный scope и передать управление в `cargo test`, Windows contract `cargo check`, или `ci-happy-path.sh` |
+| `ci-rust.sh` | CI entrypoint | Диспетчер CI-контуров по `V8_RUNNER_CI_SCOPE` | Выбрать нужный scope и передать управление в Linux/macOS `cargo test`, Windows contract или `ci-happy-path.sh` |
 | `ci-happy-path.sh` | CI helper | Canonical happy-path для trusted CI | Собрать бинарь, выполнить `cargo check`, опционально `cargo test`, затем запустить обязательный packaging/live contour |
 | `ci-platform-install.sh` | CI helper | Установить 1С platform bundle на GitHub-hosted runner | Скачать secret-backed bundle, проверить checksum, распаковать и отдать `tools.platform.path`/`ibsrv` paths |
 | `ci-designer-config.sh` | CI helper | Материализовать dedicated live config для mandatory CI smoke | Подготовить `format=DESIGNER`, `builder=DESIGNER`, file `infobase.connection`, required source-set'ы и `tools.platform.path` |
@@ -63,6 +63,8 @@ live-mcp-http.py
   test-only platform fixture; это сохраняет end-to-end проверку маршрутизации, staging и
   публикации на Windows без требования установленной платформы 1С. Тот же scope запускает
   cross-process contention smoke и unit-регрессии общего OS/legacy lock protocol.
+- Linux и macOS contract scope запускают полный `cargo test --locked`; неизвестный OS label
+  считается ошибкой конфигурации CI, а не неявным Linux/macOS fallback.
 - Не знает деталей live fixture и не должен дублировать live smoke-логику.
 
 ### `ci-happy-path.sh`

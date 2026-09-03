@@ -132,16 +132,17 @@ fn config_init_uses_json_envelope_and_output_override() {
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], true);
     assert_eq!(payload["command"], "config init");
+    let canonical_dir = fs::canonicalize(dir.path()).expect("canonical project dir");
     assert_eq!(
         payload["data"]["local_path"],
-        dir.path()
+        canonical_dir
             .join("v8project.local.yaml")
             .display()
             .to_string()
     );
     assert_eq!(
         payload["data"]["gitignore_path"],
-        dir.path().join(".gitignore").display().to_string()
+        canonical_dir.join(".gitignore").display().to_string()
     );
     assert_eq!(payload["data"]["source_sets"][0]["path"], ".");
     assert_eq!(payload["data"]["source_sets"][0]["type"], "CONFIGURATION");

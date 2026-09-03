@@ -2,7 +2,7 @@
 
 ## Цель
 
-Начиная с `2026-04-22`, source of truth для real-env happy-path является GitHub Actions workflow [`ci.yml`](../.github/workflows/ci.yml) с matrix на `ubuntu-latest` и `windows-latest`, а локальные скрипты в `scripts/test/*` остаются helper/entrypoint-слоем для этого workflow.
+Начиная с `2026-04-22`, source of truth для real-env happy-path является GitHub Actions workflow [`ci.yml`](../../.github/workflows/ci.yml), а локальные скрипты в `scripts/test/*` остаются helper/entrypoint-слоем для этого workflow. Contract matrix выполняется на `ubuntu-latest`, `windows-latest` и `macos-latest`; real-env happy-path пока ограничен Linux и Windows.
 
 Обязательный smoke-контур для обеих ОС один и тот же, когда для matrix OS настроены platform bundle secrets:
 
@@ -45,10 +45,10 @@ bash scripts/test/ci-rust.sh
 
 Поведение:
 
-- `V8_RUNNER_CI_SCOPE=contract` запускает `cargo test --locked` на Linux, а на Windows — `cargo check --locked --all-targets`, проверку наличия и точечный запуск регрессий detached/managed-detached stdio EOF, пока Windows test suite не hardened
+- `V8_RUNNER_CI_SCOPE=contract` запускает `cargo test --locked` на Linux и macOS, а на Windows — `cargo check --locked --all-targets`, native CLI/lock smoke и точечные OS-регрессии, пока Windows test suite не hardened
 - `V8_RUNNER_CI_SCOPE=full` всегда запускает `cargo test --locked`
 - `V8_RUNNER_CI_SCOPE=runtime-locks` запускает только lock-focused regression subset
-- `V8_RUNNER_CI_SCOPE=happy-path` запускает Rust/non-live цепочку `build -> cargo check`, затем `live-cli-fixture`; `cargo test` пропускается только при явном `V8TR_CI_SKIP_DUPLICATE_RUST_TESTS=1`, когда этот же workflow полагается на contract job для full Linux test coverage
+- `V8_RUNNER_CI_SCOPE=happy-path` запускает Rust/non-live цепочку `build -> cargo check`, затем `live-cli-fixture`; `cargo test` пропускается только при явном `V8TR_CI_SKIP_DUPLICATE_RUST_TESTS=1`, когда этот же workflow полагается на отдельный contract job с объявленным для данной ОС уровнем Rust coverage
 
 ### 2. Mandatory Linux/Windows happy-path
 
@@ -206,18 +206,19 @@ Windows runner contract for this helper layer is explicit:
 
 ## Матрица покрытия
 
-| Контур | Linux | Windows | Blocking | Build | Syntax/check | Test | Package | Deploy-ready artifacts |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `ci-rust contract` | yes | yes | yes | Rust | Rust | Linux full tests; Windows compile/check smoke | no | no |
-| `ci-rust happy-path` | yes | yes | yes for Rust/non-live checks; live smoke is blocking when OS bundle secrets exist | Rust + real 1C when available | real when available | Rust test repeats unless `V8TR_CI_SKIP_DUPLICATE_RUST_TESTS=1`; real 1C opt-in | real when available | real when available |
-| `live-mcp-http` | optional | optional | no | real via MCP | real via MCP | real via MCP | n/a | n/a |
-| `live-cli-ibcmd` | optional | optional | no | real (`IBCMD`) | n/a | n/a | diagnostic dump/export only | n/a |
-| `live-cli-designer` | optional | optional | no | real (`DESIGNER`) | real | real opt-in | real | real |
+| Контур | Linux | Windows | macOS | Blocking | Build | Syntax/check | Test | Package | Deploy-ready artifacts |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `ci-rust contract` | yes | yes | yes | yes | Rust | Rust | Linux/macOS full tests; Windows compile/check + native CLI/lock smoke | no | no |
+| `ci-rust happy-path` | yes | yes | no | yes for Rust/non-live checks; live smoke is blocking when OS bundle secrets exist | Rust + real 1C when available | real when available | Rust test repeats unless `V8TR_CI_SKIP_DUPLICATE_RUST_TESTS=1`; real 1C opt-in | real when available | real when available |
+| `live-mcp-http` | optional | optional | optional | no | real via MCP | real via MCP | real via MCP | n/a | n/a |
+| `live-cli-ibcmd` | optional | optional | optional | no | real (`IBCMD`) | n/a | n/a | diagnostic dump/export only | n/a |
+| `live-cli-designer` | optional | optional | optional | no | real (`DESIGNER`) | real | real opt-in | real | real |
 
 ## Ограничения и TODO hooks
 
 - Workflow `.github/workflows/ci.yml` уже зафиксировал contract/gating/upload wiring, но сам не умеет скачивать vendor installer публично: trusted live path ожидает готовый platform bundle по секретному URL и обязательному SHA256. Если OS-specific URL/SHA256 secrets отсутствуют, workflow явно сообщает degraded coverage через notice и soft-skips live smoke; восстановление blocking live coverage требует добавить соответствующую пару secrets.
 - Windows CI currently provides compile/check smoke, not full `cargo test`, until Windows-specific path, fake-binary, ACL, and process-lifecycle tests are hardened. Owner: CI contract docs in this file. Exit criterion: switch Windows contract back to `cargo test --locked` after those failure groups pass on `windows-latest`.
+- macOS contract выполняет полный Rust/CLI/MCP suite на `macos-latest`; x86_64 macOS остаётся build/package-only в release matrix. Real 1C happy-path для macOS потребует отдельного platform bundle/install/ibsrv контракта и не имитируется текущим contract job.
 - `ibsrv` в workflow запускается как sidecar на том же `--db-path`, который зашит в dedicated file-based Designer config; сам CLI harness по текущему контракту остаётся file-connection oriented и не переключается на server connection.
 - `live-cli-fixture` по умолчанию не запускает 1С test-stage; `va`, `yaxunit-all` и `module` остаются opt-in режимами для стендов, где установлен и проверен соответствующий headless runner.
 - `live-mcp-http` и `live-cli-ibcmd` остаются отдельными non-blocking контурами.

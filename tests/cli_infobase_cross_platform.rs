@@ -79,6 +79,39 @@ fn wait_for_file(path: &Path) {
     }
 }
 
+struct BlockedProcess {
+    child: Option<std::process::Child>,
+    release: PathBuf,
+}
+
+impl BlockedProcess {
+    fn new(child: std::process::Child, release: PathBuf) -> Self {
+        Self {
+            child: Some(child),
+            release,
+        }
+    }
+
+    fn release_and_wait(mut self) -> std::process::Output {
+        fs::write(&self.release, b"release").expect("release fake platform");
+        self.child
+            .take()
+            .expect("blocked child")
+            .wait_with_output()
+            .expect("wait for blocked v8-runner")
+    }
+}
+
+impl Drop for BlockedProcess {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            let _ = fs::write(&self.release, b"release");
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 #[test]
 fn designer_configuration_and_dt_exports_publish_through_native_cli() {
     let root = tempdir().expect("tempdir");
@@ -143,6 +176,7 @@ fn concurrent_native_cli_processes_observe_the_workspace_lock() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn first v8-runner");
+    let first = BlockedProcess::new(first, release.clone());
     wait_for_file(&ready);
 
     let second = Command::new(env!("CARGO_BIN_EXE_v8-runner"))
@@ -153,7 +187,6 @@ fn concurrent_native_cli_processes_observe_the_workspace_lock() {
         .arg(&second_dt)
         .output()
         .expect("run contending v8-runner");
-    fs::write(&release, b"release").expect("release first fake platform");
     assert!(!second.status.success(), "contender unexpectedly succeeded");
     let contender: Value = serde_json::from_slice(&second.stdout).unwrap_or_else(|error| {
         panic!(
@@ -167,7 +200,7 @@ fn concurrent_native_cli_processes_observe_the_workspace_lock() {
     assert_eq!(contender["steps"][0]["kind"], "prepare_workspace");
     assert!(!second_dt.exists());
 
-    let first_output = first.wait_with_output().expect("wait for first v8-runner");
+    let first_output = first.release_and_wait();
     assert!(
         first_output.status.success(),
         "first v8-runner failed: stdout={} stderr={}",

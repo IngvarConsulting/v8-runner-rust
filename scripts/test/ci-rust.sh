@@ -32,8 +32,13 @@ case "$CI_SCOPE" in
           cargo test --locked "$test_name" -- --exact --nocapture
         done
         ;;
-      *)
+      Linux|Darwin)
         cargo test --locked
+        ;;
+      *)
+        echo "Unsupported V8TR_CI_TARGET_OS: $TARGET_OS_LABEL" >&2
+        echo "Expected one of: Linux, Windows, Darwin" >&2
+        exit 2
         ;;
     esac
     ;;

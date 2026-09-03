@@ -1174,7 +1174,7 @@ mod tests {
         let edt_calls = dir.path().join("edt-calls.log");
         fs::create_dir_all(&main_dir).expect("main dir");
         fs::create_dir_all(&ext_dir).expect("ext dir");
-        write_interactive_edt_script_with_startup_delay(&edt_script, &edt_calls, 150);
+        write_interactive_edt_script_with_startup_delay(&edt_script, &edt_calls, 3_000);
 
         let mut config = sample_config();
         config.base_path = base;
@@ -1182,8 +1182,8 @@ mod tests {
         config.infobase.connection = "Srvr=server;Ref=demo".to_owned();
         config.tools.edt_cli.path = Some(edt_script);
         config.tools.edt_cli.interactive_mode = true;
-        config.tools.edt_cli.startup_timeout_ms = 500;
-        config.tools.edt_cli.command_timeout_ms = 50;
+        config.tools.edt_cli.startup_timeout_ms = 10_000;
+        config.tools.edt_cli.command_timeout_ms = 2_000;
 
         let result = super::run_init(
             &crate::use_cases::context::ExecutionContext::cli(

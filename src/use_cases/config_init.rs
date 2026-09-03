@@ -7,7 +7,7 @@ use crate::config::schema::main_config_schema_url;
 use crate::domain::config_init::{ConfigInitResult, ConfigInitSourceSet};
 use crate::support::edt_project::{self, EdtProjectKind};
 use crate::support::error::AppError;
-use crate::support::path::is_safe_path_segment;
+use crate::support::path::{is_safe_path_segment, nearest_existing_canonical_path};
 use crate::support::source_descriptor::{
     self, SourceDescriptorParseError, SourceDescriptorPurpose, SourceSetRootScanError,
 };
@@ -53,7 +53,12 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
         )));
     }
 
-    let output_path = resolve_output_path(&project_dir, &request.output_path);
+    let output_path = resolve_output_path(&project_dir, &request.output_path).map_err(|error| {
+        AppError::Runtime(format!(
+            "failed to resolve config output path '{}': {error}",
+            request.output_path.display()
+        ))
+    })?;
     let overwritten = output_path.exists();
     if overwritten && !request.force {
         return Err(AppError::Validation(format!(
@@ -238,12 +243,13 @@ fn gitignore_mentions_local_config(content: &str) -> bool {
     })
 }
 
-fn resolve_output_path(project_dir: &Path, output_path: &Path) -> PathBuf {
-    if output_path.is_absolute() {
+fn resolve_output_path(project_dir: &Path, output_path: &Path) -> std::io::Result<PathBuf> {
+    let output_path = if output_path.is_absolute() {
         output_path.to_path_buf()
     } else {
         project_dir.join(output_path)
-    }
+    };
+    nearest_existing_canonical_path(&output_path)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -996,6 +1002,10 @@ mod tests {
         std::fs::write(path, contents).expect("write file");
     }
 
+    fn canonical(path: &Path) -> std::path::PathBuf {
+        std::fs::canonicalize(path).expect("canonical test path")
+    }
+
     fn create_native_edt_external_project(
         project_dir: &Path,
         name: &str,
@@ -1244,14 +1254,17 @@ mod tests {
 
         assert_eq!(
             result.local_path,
-            dir.path()
+            canonical(dir.path())
                 .join("v8project.local.yaml")
                 .display()
                 .to_string()
         );
         assert_eq!(
             result.gitignore_path,
-            dir.path().join(".gitignore").display().to_string()
+            canonical(dir.path())
+                .join(".gitignore")
+                .display()
+                .to_string()
         );
         let local_config =
             std::fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("local config");
@@ -1987,7 +2000,7 @@ mod tests {
 
         assert_eq!(
             config.infobase.connection,
-            format!("File={}", dir.path().join("build/ib").display())
+            format!("File={}", canonical(dir.path()).join("build/ib").display())
         );
     }
 }

@@ -2,9 +2,11 @@
 
 mod support;
 
+use std::collections::HashMap;
 use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -16,6 +18,9 @@ use support::{
 const ACCEPT_BOTH: &str = "application/json, text/event-stream";
 const V8_CONFIGURATION_NATURE: &str = "com._1c.g5.v8.dt.core.V8ConfigurationNature";
 const EDT_RUNTIME_VERSION: &str = "8.3.27";
+const HTTP_CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
+const EDT_COMMAND_TIMEOUT_MS: u64 = 5_000;
+const EDT_TIMEOUT_TEST_MS: u64 = 5_000;
 
 fn assert_envelope_success(payload: &Value, command: &str) {
     assert_eq!(payload["ok"], true);
@@ -56,7 +61,17 @@ fn assert_launch_platform_resolution(data: &Value) {
 fn reserve_local_address() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral listener");
     let address = listener.local_addr().expect("local addr");
-    address.to_string()
+    let address = address.to_string();
+    port_reservations()
+        .lock()
+        .expect("port reservations lock")
+        .insert(address.clone(), listener);
+    address
+}
+
+fn port_reservations() -> &'static Mutex<HashMap<String, TcpListener>> {
+    static RESERVATIONS: OnceLock<Mutex<HashMap<String, TcpListener>>> = OnceLock::new();
+    RESERVATIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn write_interactive_edt_script(
@@ -72,6 +87,7 @@ fn write_interactive_edt_script(
          workspace='{}'\n\
          lifecycle_log='{}'\n\
          cwd=\"$workspace\"\n\
+         validate_count=0\n\
          printf 'startup\\n' >> \"$lifecycle_log\"\n\
          prompt\n\
          while IFS= read -r line; do\n\
@@ -89,6 +105,7 @@ fn write_interactive_edt_script(
                prompt\n\
                ;;\n\
              validate)\n\
+               validate_count=$((validate_count + 1))\n\
                out=\"\"\n\
                while [ \"$#\" -gt 0 ]; do\n\
                  case \"$1\" in\n\
@@ -383,7 +400,20 @@ struct HttpServerProcess {
 
 impl HttpServerProcess {
     async fn spawn(config_path: &Path, url: &str) -> Self {
-        let child = tokio::process::Command::new(v8_runner_binary())
+        let authority = url
+            .strip_prefix("http://")
+            .expect("http url")
+            .split('/')
+            .next()
+            .expect("authority")
+            .to_owned();
+        let mut reservations = port_reservations().lock().expect("port reservations lock");
+        let reservation = reservations
+            .remove(&authority)
+            .expect("reserved HTTP server address");
+        drop(reservation);
+
+        let mut child = tokio::process::Command::new(v8_runner_binary())
             .arg("--config")
             .arg(config_path)
             .arg("mcp")
@@ -392,7 +422,14 @@ impl HttpServerProcess {
             .spawn()
             .expect("spawn http server");
 
-        wait_for_server(url).await;
+        let ready = support::wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
+            if let Some(status) = child.try_wait().expect("poll HTTP server child") {
+                panic!("HTTP server exited before bind with status {status}");
+            }
+            std::net::TcpStream::connect(authority.as_str()).is_ok()
+        });
+        drop(reservations);
+        assert!(ready, "timed out waiting for HTTP server at {url}");
         Self { child }
     }
 
@@ -403,29 +440,6 @@ impl HttpServerProcess {
         self.child.kill().await.expect("kill child");
         let _ = self.child.wait().await.expect("wait child");
     }
-}
-
-async fn wait_for_server(url: &str) {
-    let authority = url
-        .strip_prefix("http://")
-        .expect("http url")
-        .split('/')
-        .next()
-        .expect("authority")
-        .to_owned();
-    if wait_until_async_condition(100, Duration::from_millis(20), || {
-        let authority = authority.clone();
-        async move {
-            tokio::net::TcpStream::connect(authority.as_str())
-                .await
-                .is_ok()
-        }
-    })
-    .await
-    {
-        return;
-    }
-    panic!("timed out waiting for HTTP server at {url}");
 }
 
 fn extract_sse_json(body: &str) -> Value {
@@ -599,7 +613,7 @@ async fn mcp_http_initialize_reuses_session_and_lists_tools() {
     let (_dir, config_path, url) = setup_http_designer_project(true, 4, 900);
     let mut server = HttpServerProcess::spawn(&config_path, &url).await;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
+        .timeout(HTTP_CLIENT_TIMEOUT)
         .build()
         .expect("http client");
 
@@ -645,7 +659,7 @@ async fn mcp_http_dump_config_full_ibcmd_server_contract_passes_dbms_and_infobas
     );
     let mut server = HttpServerProcess::spawn(&config_path, &url).await;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
+        .timeout(HTTP_CLIENT_TIMEOUT)
         .build()
         .expect("http client");
 
@@ -679,7 +693,7 @@ async fn mcp_http_launch_app_returns_success_payload_over_live_session() {
     let (_dir, config_path, url) = setup_http_designer_project_with_script("sleep 1", true, 4, 900);
     let mut server = HttpServerProcess::spawn(&config_path, &url).await;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
+        .timeout(HTTP_CLIENT_TIMEOUT)
         .build()
         .expect("http client");
 
@@ -710,7 +724,7 @@ async fn mcp_http_dump_config_partial_ibcmd_returns_degraded_success() {
     let (_dir, config_path, url, calls_log) = setup_http_ibcmd_dump_project(None, 4, 900);
     let mut server = HttpServerProcess::spawn(&config_path, &url).await;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
+        .timeout(HTTP_CLIENT_TIMEOUT)
         .build()
         .expect("http client");
 
@@ -751,7 +765,7 @@ async fn mcp_http_dump_config_partial_ibcmd_preserves_partial_mode_on_failure() 
     let (_dir, config_path, url, calls_log) = setup_http_ibcmd_dump_project(Some("--sync"), 4, 900);
     let mut server = HttpServerProcess::spawn(&config_path, &url).await;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
+        .timeout(HTTP_CLIENT_TIMEOUT)
         .build()
         .expect("http client");
 
@@ -795,7 +809,7 @@ async fn mcp_http_missing_and_expired_sessions_are_deterministic() {
     let (_dir, config_path, url) = setup_http_designer_project(true, 4, 1);
     let mut server = HttpServerProcess::spawn(&config_path, &url).await;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
+        .timeout(HTTP_CLIENT_TIMEOUT)
         .build()
         .expect("http client");
 
@@ -864,7 +878,7 @@ async fn mcp_http_delete_closes_session_and_reuse_returns_not_found() {
     let (_dir, config_path, url) = setup_http_designer_project(true, 4, 900);
     let mut server = HttpServerProcess::spawn(&config_path, &url).await;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
+        .timeout(HTTP_CLIENT_TIMEOUT)
         .build()
         .expect("http client");
 
@@ -890,7 +904,7 @@ async fn mcp_http_stateless_mode_stays_post_only_and_validates_headers() {
     let (_dir, config_path, url) = setup_http_designer_project(false, 4, 900);
     let mut server = HttpServerProcess::spawn(&config_path, &url).await;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
+        .timeout(HTTP_CLIENT_TIMEOUT)
         .build()
         .expect("http client");
 
@@ -958,7 +972,7 @@ async fn mcp_http_initialize_burst_respects_capacity_and_recovers_after_delete()
     let (_dir, config_path, url) = setup_http_designer_project(true, 2, 900);
     let mut server = HttpServerProcess::spawn(&config_path, &url).await;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
+        .timeout(HTTP_CLIENT_TIMEOUT)
         .build()
         .expect("http client");
 
@@ -1019,7 +1033,7 @@ async fn mcp_http_max_sessions_returns_503_and_non_initialize_stays_400() {
     let (_dir, config_path, url) = setup_http_designer_project(true, 1, 900);
     let mut server = HttpServerProcess::spawn(&config_path, &url).await;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
+        .timeout(HTTP_CLIENT_TIMEOUT)
         .build()
         .expect("http client");
 
@@ -1065,7 +1079,7 @@ async fn mcp_http_parallel_initialize_respects_max_sessions() {
     let (_dir, config_path, url) = setup_http_designer_project(true, 1, 900);
     let mut server = HttpServerProcess::spawn(&config_path, &url).await;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
+        .timeout(HTTP_CLIENT_TIMEOUT)
         .build()
         .expect("http client");
 
@@ -1084,10 +1098,10 @@ async fn mcp_http_parallel_initialize_respects_max_sessions() {
 async fn mcp_http_reuses_one_edt_process_across_sessions_and_shares_capacity() {
     let validate_handler = "printf 'start\\n' >> \"$lifecycle_log\"\nif [ -n \"$out\" ]; then : > \"$out\"; fi\nsleep 0.15\nprintf 'finish\\n' >> \"$lifecycle_log\"\nprompt";
     let (_dir, config_path, url, lifecycle_log) =
-        setup_http_edt_project(validate_handler, 4, 900, 1, 1000);
+        setup_http_edt_project(validate_handler, 4, 900, 1, EDT_COMMAND_TIMEOUT_MS);
     let mut server = HttpServerProcess::spawn(&config_path, &url).await;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
+        .timeout(HTTP_CLIENT_TIMEOUT)
         .build()
         .expect("http client");
 
@@ -1130,17 +1144,30 @@ async fn mcp_http_reuses_one_edt_process_across_sessions_and_shares_capacity() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_http_returns_terminal_business_failure_for_edt_syntax_timeout() {
-    let validate_handler = "if [ -n \"$out\" ]; then : > \"$out\"; fi\nsleep 1\nprompt";
+    let validate_handler = "if [ \"$validate_count\" -eq 1 ]; then\n  if [ -n \"$out\" ]; then : > \"$out\"; fi\n  prompt\nelse\n  sleep 8\n  prompt\nfi";
     let (_dir, config_path, url, _lifecycle_log) =
-        setup_http_edt_project(validate_handler, 4, 900, 1, 80);
+        setup_http_edt_project(validate_handler, 4, 900, 1, EDT_TIMEOUT_TEST_MS);
     let mut server = HttpServerProcess::spawn(&config_path, &url).await;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
+        .timeout(HTTP_CLIENT_TIMEOUT)
         .build()
         .expect("http client");
 
     let (session_id, _) = initialize_session(&client, &url).await;
     send_initialized(&client, &url, &session_id).await;
+
+    let ready = call_tool(
+        &client,
+        &url,
+        &session_id,
+        "check_syntax_edt",
+        json!({ "projectName": "main" }),
+        12,
+    )
+    .await;
+    assert_eq!(ready.status(), reqwest::StatusCode::OK);
+    let ready_payload = extract_sse_json(&ready.text().await.expect("EDT readiness body"));
+    assert_envelope_success(&ready_payload["result"]["structuredContent"], "syntax");
 
     let response = call_tool(
         &client,
@@ -1168,7 +1195,7 @@ async fn mcp_http_returns_terminal_business_failure_for_edt_syntax_timeout() {
 async fn mcp_http_edt_action_log_contains_runtime_telemetry_events() {
     let validate_handler = "if [ -n \"$out\" ]; then : > \"$out\"; fi\nsleep 0.05\nprompt";
     let (dir, config_path, url, _lifecycle_log) =
-        setup_http_edt_project(validate_handler, 4, 900, 1, 1000);
+        setup_http_edt_project(validate_handler, 4, 900, 1, EDT_COMMAND_TIMEOUT_MS);
     let action_log = dir
         .path()
         .join("work")
@@ -1177,7 +1204,7 @@ async fn mcp_http_edt_action_log_contains_runtime_telemetry_events() {
         .join("actions.log");
     let mut server = HttpServerProcess::spawn(&config_path, &url).await;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
+        .timeout(HTTP_CLIENT_TIMEOUT)
         .build()
         .expect("http client");
 

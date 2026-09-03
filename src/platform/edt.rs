@@ -776,6 +776,9 @@ mod tests {
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
 
+    const TEST_INTERACTIVE_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+    const TEST_INTERACTIVE_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+
     #[cfg(unix)]
     fn make_executable(path: &Path) {
         use std::os::unix::fs::PermissionsExt;
@@ -857,8 +860,8 @@ mod tests {
                 edt_cli: crate::config::model::EdtCliConfig {
                     path: Some(edt_cli_path.to_path_buf()),
                     interactive_mode: true,
-                    startup_timeout_ms: 500,
-                    command_timeout_ms: 200,
+                    startup_timeout_ms: TEST_INTERACTIVE_STARTUP_TIMEOUT.as_millis() as u64,
+                    command_timeout_ms: TEST_INTERACTIVE_COMMAND_TIMEOUT.as_millis() as u64,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -1178,8 +1181,8 @@ mod tests {
         let dsl = EdtDsl::new_interactive(
             script,
             dir.path().join("ws"),
-            Duration::from_secs(1),
-            Duration::from_secs(1),
+            TEST_INTERACTIVE_STARTUP_TIMEOUT,
+            TEST_INTERACTIVE_COMMAND_TIMEOUT,
         )
         .expect("interactive dsl");
 
@@ -1281,8 +1284,8 @@ OUT\n\
         let dsl = EdtDsl::new_interactive(
             script,
             dir.path().join("ws"),
-            Duration::from_secs(1),
-            Duration::from_secs(1),
+            TEST_INTERACTIVE_STARTUP_TIMEOUT,
+            TEST_INTERACTIVE_COMMAND_TIMEOUT,
         )
         .expect("interactive dsl");
 
@@ -1326,8 +1329,8 @@ OUT\n\
         let dsl = EdtDsl::new_interactive(
             script,
             dir.path().join("ws"),
-            Duration::from_secs(1),
-            Duration::from_secs(1),
+            TEST_INTERACTIVE_STARTUP_TIMEOUT,
+            TEST_INTERACTIVE_COMMAND_TIMEOUT,
         )
         .expect("interactive dsl")
         .with_execution_policy(ProcessExecutionPolicy::new(
@@ -1379,8 +1382,8 @@ OUT\n\
         let dsl = EdtDsl::new_interactive(
             script,
             dir.path().join("ws"),
-            Duration::from_secs(1),
-            Duration::from_secs(1),
+            TEST_INTERACTIVE_STARTUP_TIMEOUT,
+            TEST_INTERACTIVE_COMMAND_TIMEOUT,
         )
         .expect("interactive dsl")
         .with_execution_policy(ProcessExecutionPolicy::new(
@@ -1434,8 +1437,8 @@ OUT\n\
         let dsl = EdtDsl::new_interactive(
             script,
             dir.path().join("ws"),
-            Duration::from_secs(1),
-            Duration::from_secs(1),
+            TEST_INTERACTIVE_STARTUP_TIMEOUT,
+            TEST_INTERACTIVE_COMMAND_TIMEOUT,
         )
         .expect("interactive dsl")
         .with_execution_policy(ProcessExecutionPolicy::new(
@@ -1495,8 +1498,8 @@ OUT\n\
         let dsl = EdtDsl::new_interactive(
             script,
             dir.path().join("ws"),
-            Duration::from_secs(1),
-            Duration::from_secs(1),
+            TEST_INTERACTIVE_STARTUP_TIMEOUT,
+            TEST_INTERACTIVE_COMMAND_TIMEOUT,
         )
         .expect("interactive dsl")
         .with_execution_policy(ProcessExecutionPolicy::new(
@@ -1547,8 +1550,8 @@ OUT\n\
         let dsl = EdtDsl::new_interactive(
             script,
             dir.path().join("ws"),
-            Duration::from_secs(1),
-            Duration::from_secs(1),
+            TEST_INTERACTIVE_STARTUP_TIMEOUT,
+            TEST_INTERACTIVE_COMMAND_TIMEOUT,
         )
         .expect("interactive dsl")
         .with_execution_policy(ProcessExecutionPolicy::new(

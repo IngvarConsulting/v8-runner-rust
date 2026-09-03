@@ -455,7 +455,7 @@ mod tests {
     use super::{load_config, ConfigLoadError, LOCAL_CONFIG_FILE_NAME};
     use crate::change_detection::partial_load::DEFAULT_PARTIAL_LOAD_THRESHOLD;
     use crate::config::validate::ConfigValidationError;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
     fn write_minimal_project_config(config_dir: &Path, body: &str) -> std::path::PathBuf {
@@ -463,6 +463,10 @@ mod tests {
         let config_path = config_dir.join("v8project.yaml");
         std::fs::write(&config_path, body).expect("write config");
         config_path
+    }
+
+    fn canonical(path: &Path) -> PathBuf {
+        std::fs::canonicalize(path).expect("canonical test path")
     }
 
     fn minimal_config_without_base_path(extra: &str) -> String {
@@ -480,7 +484,7 @@ mod tests {
 
         let config = load_config(config_path.to_str(), None).expect("load config");
 
-        assert_eq!(config.base_path, config_dir);
+        assert_eq!(config.base_path, canonical(&config_dir));
         assert_eq!(config.work_path, config.base_path.join("work"));
         assert_eq!(
             config.infobase.connection,
@@ -504,7 +508,7 @@ mod tests {
 
         let config = load_config(config_path.to_str(), None).expect("load config");
 
-        assert_eq!(config.base_path, config_dir);
+        assert_eq!(config.base_path, canonical(&config_dir));
         assert_eq!(config.work_path, config.base_path.join("local-work"));
         assert_eq!(config.infobase.user.as_deref(), Some("LocalUser"));
         assert_eq!(config.infobase.password.as_deref(), Some("secret"));
@@ -544,7 +548,7 @@ mod tests {
 
         let config = load_config(config_path.to_str(), Some("cli-work")).expect("load config");
 
-        assert_eq!(config.work_path, config_dir.join("cli-work"));
+        assert_eq!(config.work_path, canonical(&config_dir).join("cli-work"));
     }
 
     #[test]
@@ -848,11 +852,11 @@ mod tests {
 
         assert_eq!(
             config.tools.va.epf_path.expect("epf"),
-            config_dir.join("va/runner.epf")
+            canonical(&config_dir).join("va/runner.epf")
         );
         assert_eq!(
             config.tests.va.params_path.expect("params"),
-            config_dir.join("va/params.json")
+            canonical(&config_dir).join("va/params.json")
         );
         assert_eq!(
             config
@@ -862,7 +866,7 @@ mod tests {
                 .get("smoke")
                 .and_then(|profile| profile.feature_path.clone())
                 .expect("feature path"),
-            config_dir.join("features")
+            canonical(&config_dir).join("features")
         );
     }
 
@@ -881,11 +885,12 @@ mod tests {
 
         let config = load_config(config_path.to_str(), None).expect("load config");
 
-        assert_eq!(config.base_path, config_dir);
-        assert_eq!(config.work_path, config_dir.join("build"));
+        let canonical_config_dir = canonical(&config_dir);
+        assert_eq!(config.base_path, canonical_config_dir);
+        assert_eq!(config.work_path, config.base_path.join("build"));
         assert_eq!(
             config.infobase.connection,
-            format!("File={}", config_dir.join("build/ib").display())
+            format!("File={}", config.base_path.join("build/ib").display())
         );
     }
 
@@ -1020,7 +1025,12 @@ mod tests {
 
         assert_eq!(
             config.v8_connection().file_path(),
-            Some(config_dir.join("build/my ib").to_string_lossy().as_ref())
+            Some(
+                canonical(&config_dir)
+                    .join("build/my ib")
+                    .to_string_lossy()
+                    .as_ref()
+            )
         );
     }
 
@@ -1074,7 +1084,7 @@ mod tests {
         assert_eq!(extension.name, "client_mcp");
         assert_eq!(
             extension.source().expect("source").path,
-            dir.path().join("exts").join("client-mcp")
+            canonical(dir.path()).join("exts").join("client-mcp")
         );
     }
 
