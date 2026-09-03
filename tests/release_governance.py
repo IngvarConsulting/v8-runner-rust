@@ -41,6 +41,14 @@ class ReleaseGovernanceTest(unittest.TestCase):
         self.assertIn('if [[ "${existing_state}" == "true" ]]', workflow)
         self.assertIn('gh release delete "${RELEASE_TAG}"', workflow)
 
+    def test_release_verification_waits_for_github_attestation_with_a_deadline(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        freeze = workflow.split("  freeze:\n", 1)[1]
+        self.assertIn("RELEASE_VERIFY_TIMEOUT_SECONDS", freeze)
+        self.assertIn('until gh release verify "${RELEASE_TAG}"', freeze)
+        self.assertIn("SECONDS >= verify_deadline", freeze)
+        self.assertIn("sleep 5", freeze)
+
     def test_release_publishes_attested_direct_unica_assets(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         for asset in (
