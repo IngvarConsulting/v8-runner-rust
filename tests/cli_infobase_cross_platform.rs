@@ -155,6 +155,37 @@ fn designer_configuration_and_dt_exports_publish_through_native_cli() {
 }
 
 #[test]
+fn infobase_dry_run_is_non_executing_on_the_host_platform() {
+    let root = tempdir().expect("tempdir");
+    let platform = compile_fake_designer(&root.path().join("platform"));
+    let config = write_config(root.path(), &platform);
+    let work = root.path().join("work");
+    fs::remove_dir_all(&work).expect("remove setup workPath");
+    let output = root.path().join("project/dist/main.cf");
+
+    let preview = run_json(
+        &config,
+        &[
+            "infobase",
+            "configuration",
+            "export",
+            "--state",
+            "working",
+            "--output",
+            output.to_str().expect("CF path"),
+            "--dry-run",
+        ],
+    );
+
+    assert_eq!(preview["data"]["mode"], "preview");
+    assert_eq!(preview["data"]["provider_dispatched"], false);
+    assert_eq!(preview["data"]["selection"]["provider"], "designer-batch");
+    assert!(!work.exists());
+    assert!(!output.exists());
+    assert!(!output.parent().expect("output parent").exists());
+}
+
+#[test]
 fn concurrent_native_cli_processes_observe_the_workspace_lock() {
     let root = tempdir().expect("tempdir");
     let platform = compile_fake_designer(&root.path().join("platform"));

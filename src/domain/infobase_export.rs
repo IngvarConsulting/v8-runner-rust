@@ -289,6 +289,22 @@ pub enum ExportTargetState {
     Uncertain,
 }
 
+/// Whether the command only proves its execution plan or applies it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InfobaseExportMode {
+    Preview,
+    Apply,
+}
+
+/// Compact machine-facing plan produced by a non-executing preflight.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InfobaseExportPlan {
+    pub provider: ExportProvider,
+    pub artifact_kind: InfobaseExportArtifactKind,
+    pub output: PathBuf,
+}
+
 /// Request to persist a working or database configuration into CF/CFE.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExportConfigurationPackageRequest {
@@ -300,6 +316,9 @@ pub struct ExportConfigurationPackageRequest {
 /// Typed presentation data for a configuration package export.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExportConfigurationPackageResult {
+    pub mode: InfobaseExportMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_dispatched: Option<bool>,
     pub state: ConfigurationState,
     pub subject: ConfigurationSubject,
     pub selection: ExportProviderDecision,
@@ -307,6 +326,8 @@ pub struct ExportConfigurationPackageResult {
     pub output: PathBuf,
     pub published: bool,
     pub target_state: ExportTargetState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<InfobaseExportPlan>,
     #[serde(skip)]
     pub warnings: Vec<String>,
     pub execution: ExecutionOutcome<()>,
@@ -321,6 +342,8 @@ impl ExportConfigurationPackageResult {
     ) -> Self {
         let artifact_kind = request.subject.artifact_kind();
         Self {
+            mode: InfobaseExportMode::Apply,
+            provider_dispatched: None,
             state: request.state,
             subject: request.subject,
             selection,
@@ -328,6 +351,7 @@ impl ExportConfigurationPackageResult {
             output: request.output,
             published: false,
             target_state: ExportTargetState::Unchanged,
+            plan: None,
             warnings: Vec::new(),
             execution: ExecutionOutcome::new(ExecutionStatus::Failed),
             steps: Vec::new(),
@@ -336,6 +360,25 @@ impl ExportConfigurationPackageResult {
 
     pub fn mark_succeeded(&mut self) {
         self.execution.status = ExecutionStatus::Succeeded;
+    }
+
+    pub fn mark_preview(&mut self) {
+        self.mode = InfobaseExportMode::Preview;
+        self.provider_dispatched = Some(false);
+        self.plan = self
+            .selection
+            .provider()
+            .map(|provider| InfobaseExportPlan {
+                provider,
+                artifact_kind: self.artifact_kind,
+                output: self.output.clone(),
+            });
+        self.execution.status = ExecutionStatus::Succeeded;
+    }
+
+    pub fn mark_preview_failure(&mut self) {
+        self.mode = InfobaseExportMode::Preview;
+        self.provider_dispatched = Some(false);
     }
 }
 
@@ -348,12 +391,17 @@ pub struct ExportInfobaseSnapshotRequest {
 /// Typed presentation data for an information-base snapshot export.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExportInfobaseSnapshotResult {
+    pub mode: InfobaseExportMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_dispatched: Option<bool>,
     pub subject: InfobaseSnapshotSubject,
     pub selection: ExportProviderDecision,
     pub artifact_kind: InfobaseExportArtifactKind,
     pub output: PathBuf,
     pub published: bool,
     pub target_state: ExportTargetState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<InfobaseExportPlan>,
     #[serde(skip)]
     pub warnings: Vec<String>,
     pub execution: ExecutionOutcome<()>,
@@ -364,12 +412,15 @@ pub struct ExportInfobaseSnapshotResult {
 impl ExportInfobaseSnapshotResult {
     pub fn new(request: ExportInfobaseSnapshotRequest, selection: ExportProviderDecision) -> Self {
         Self {
+            mode: InfobaseExportMode::Apply,
+            provider_dispatched: None,
             subject: InfobaseSnapshotSubject::Infobase,
             selection,
             artifact_kind: InfobaseExportArtifactKind::Dt,
             output: request.output,
             published: false,
             target_state: ExportTargetState::Unchanged,
+            plan: None,
             warnings: Vec::new(),
             execution: ExecutionOutcome::new(ExecutionStatus::Failed),
             steps: Vec::new(),
@@ -378,6 +429,25 @@ impl ExportInfobaseSnapshotResult {
 
     pub fn mark_succeeded(&mut self) {
         self.execution.status = ExecutionStatus::Succeeded;
+    }
+
+    pub fn mark_preview(&mut self) {
+        self.mode = InfobaseExportMode::Preview;
+        self.provider_dispatched = Some(false);
+        self.plan = self
+            .selection
+            .provider()
+            .map(|provider| InfobaseExportPlan {
+                provider,
+                artifact_kind: self.artifact_kind,
+                output: self.output.clone(),
+            });
+        self.execution.status = ExecutionStatus::Succeeded;
+    }
+
+    pub fn mark_preview_failure(&mut self) {
+        self.mode = InfobaseExportMode::Preview;
+        self.provider_dispatched = Some(false);
     }
 }
 
@@ -489,6 +559,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(result).expect("configuration result json"),
             json!({
+                "mode": "apply",
                 "state": "working",
                 "subject": {"kind": "main"},
                 "selection": {
@@ -561,6 +632,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(result).expect("snapshot result json"),
             json!({
+                "mode": "apply",
                 "subject": {"kind": "infobase"},
                 "selection": {
                     "provider": "designer-batch",

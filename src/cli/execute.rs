@@ -664,7 +664,11 @@ pub fn render_infobase_pre_dispatch_failure(
         InfobaseCommand::Configuration(configuration) => match &configuration.command {
             InfobaseConfigurationCommand::Export(args) => {
                 let request = map_infobase_configuration_export_request(args);
-                let result = configuration_pre_dispatch_failure(&request, selection, &error, phase);
+                let mut result =
+                    configuration_pre_dispatch_failure(&request, selection, &error, phase);
+                if args.dry_run {
+                    result.mark_preview_failure();
+                }
                 render_configuration_failure(
                     CommandName::InfobaseConfigurationExport,
                     result,
@@ -677,7 +681,10 @@ pub fn render_infobase_pre_dispatch_failure(
             let request = ExportInfobaseSnapshotRequest {
                 output: PathBuf::from(&args.output),
             };
-            let result = snapshot_pre_dispatch_failure(&request, selection, &error, phase);
+            let mut result = snapshot_pre_dispatch_failure(&request, selection, &error, phase);
+            if args.dry_run {
+                result.mark_preview_failure();
+            }
             render_snapshot_failure(CommandName::InfobaseDump, result, &error, presenter);
         }
     }
@@ -703,7 +710,10 @@ pub fn prepare_infobase_command(
                     }
                     Err(failure) => {
                         let error = failure.error;
-                        if let Some(result) = failure.payload {
+                        if let Some(mut result) = failure.payload {
+                            if args.dry_run {
+                                result.mark_preview_failure();
+                            }
                             render_configuration_failure(command, result, &error, presenter);
                         }
                         Err(error)
@@ -722,7 +732,10 @@ pub fn prepare_infobase_command(
                 Ok(provider) => Ok(PreparedInfobaseCommand::Snapshot { request, provider }),
                 Err(failure) => {
                     let error = failure.error;
-                    if let Some(result) = failure.payload {
+                    if let Some(mut result) = failure.payload {
+                        if args.dry_run {
+                            result.mark_preview_failure();
+                        }
                         render_snapshot_failure(command, result, &error, presenter);
                     }
                     Err(error)
@@ -835,6 +848,78 @@ pub fn execute_prepared_infobase_command(
         presenter,
         clean_before_execution,
     )
+}
+
+pub fn preview_prepared_infobase_command(
+    config: &AppConfig,
+    prepared: PreparedInfobaseCliCommand,
+    presenter: &Presenter,
+) -> Result<(), UseCaseError> {
+    let context = prepared.context;
+    match prepared.command {
+        PreparedInfobaseCommand::Configuration { request, provider } => {
+            match infobase_export::preview_configuration_export(
+                &context, config, &request, &provider,
+            ) {
+                Ok(result) => {
+                    if presenter.is_json() {
+                        presenter.print_envelope(&Envelope::ok(
+                            CommandName::InfobaseConfigurationExport.as_str(),
+                            0,
+                            result,
+                        ));
+                    } else {
+                        render_configuration_export_text(
+                            CommandName::InfobaseConfigurationExport,
+                            &result,
+                            presenter,
+                        );
+                    }
+                }
+                Err(failure) => {
+                    let error = failure.error;
+                    if let Some(result) = failure.payload {
+                        render_configuration_failure(
+                            CommandName::InfobaseConfigurationExport,
+                            result,
+                            &error,
+                            presenter,
+                        );
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        PreparedInfobaseCommand::Snapshot { request, provider } => {
+            match infobase_export::preview_infobase_snapshot(&context, config, &request, &provider)
+            {
+                Ok(result) => {
+                    if presenter.is_json() {
+                        presenter.print_envelope(&Envelope::ok(
+                            CommandName::InfobaseDump.as_str(),
+                            0,
+                            result,
+                        ));
+                    } else {
+                        render_snapshot_export_text(CommandName::InfobaseDump, &result, presenter);
+                    }
+                }
+                Err(failure) => {
+                    let error = failure.error;
+                    if let Some(result) = failure.payload {
+                        render_snapshot_failure(
+                            CommandName::InfobaseDump,
+                            result,
+                            &error,
+                            presenter,
+                        );
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn execute_infobase_configuration_export(
@@ -1111,6 +1196,8 @@ struct InfobaseExportText<'a> {
     target_state: &'a str,
     candidates: &'a [crate::domain::infobase_export::ProviderCandidate],
     warnings: &'a [String],
+    mode: crate::domain::infobase_export::InfobaseExportMode,
+    provider_dispatched: Option<bool>,
 }
 
 fn render_configuration_export_text(
@@ -1142,6 +1229,8 @@ fn render_configuration_export_text(
             target_state: export_target_state_label(result.target_state),
             candidates: result.selection.candidates(),
             warnings: &result.warnings,
+            mode: result.mode,
+            provider_dispatched: result.provider_dispatched,
         },
         presenter,
     );
@@ -1176,6 +1265,8 @@ fn render_snapshot_export_text(
             target_state: export_target_state_label(result.target_state),
             candidates: result.selection.candidates(),
             warnings: &result.warnings,
+            mode: result.mode,
+            provider_dispatched: result.provider_dispatched,
         },
         presenter,
     );
@@ -1199,8 +1290,13 @@ fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Present
         target_state,
         candidates,
         warnings,
+        mode,
+        provider_dispatched,
     } = view;
-    let status = if published {
+    let status = if published
+        || (mode == crate::domain::infobase_export::InfobaseExportMode::Preview
+            && execution_status == "succeeded")
+    {
         TimelineStatus::Succeeded
     } else {
         TimelineStatus::Failed
@@ -1210,6 +1306,13 @@ fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Present
         .unwrap_or_else(|| "none".to_owned());
     let mut details = vec![
         format!("command: {command}"),
+        format!(
+            "mode: {}",
+            match mode {
+                crate::domain::infobase_export::InfobaseExportMode::Preview => "preview",
+                crate::domain::infobase_export::InfobaseExportMode::Apply => "apply",
+            }
+        ),
         format!("subject: {subject}"),
         format!("implementation: {implementation}"),
         format!("readiness: {readiness}"),
@@ -1222,6 +1325,9 @@ fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Present
         format!("target state: {target_state}"),
         format!("output: {}", output.display()),
     ];
+    if let Some(provider_dispatched) = provider_dispatched {
+        details.insert(2, format!("provider dispatched: {provider_dispatched}"));
+    }
     for candidate in candidates {
         details.push(format!(
             "candidate {}: implementation={}, readiness={}, evidence={}; {}",
@@ -3864,6 +3970,7 @@ mod tests {
                             state: "working".to_owned(),
                             extension: None,
                             output: dir.path().join("main.cf").display().to_string(),
+                            dry_run: false,
                         },
                     ),
                 }),
@@ -3871,6 +3978,7 @@ mod tests {
             Command::Infobase(InfobaseArgs {
                 command: InfobaseCommand::Dump(InfobaseDumpArgs {
                     output: dir.path().join("base.dt").display().to_string(),
+                    dry_run: false,
                 }),
             }),
         ];

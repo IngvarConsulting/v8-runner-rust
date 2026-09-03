@@ -41,9 +41,10 @@ ExportInfobaseSnapshot { output } -> DT
 v8-runner infobase configuration export \
   --state <working|database> \
   [--extension <name>] \
-  --output <path.cf|path.cfe>
+  --output <path.cf|path.cfe> \
+  [--dry-run]
 
-v8-runner infobase dump --output <path.dt>
+v8-runner infobase dump --output <path.dt> [--dry-run]
 ```
 
 Canonical command identities: `infobase.configuration.export` и
@@ -53,6 +54,15 @@ subject extension при наличии. Для main обязателен `.cf`,
 являющееся идентификатором 1С имя extension, неизвестный `state`, неверный
 суффикс и параметры не своей команды отклоняются до workspace lock и provider
 dispatch. Публичного `--provider`/`--engine` нет.
+
+`--dry-run` выполняет ту же command-specific validation и тот же pure provider
+selection, но останавливается до workspace lock, action logging, staging и
+provider process. Успешный preview возвращает `mode=preview`,
+`provider_dispatched=false`, `published=false`, `target_state=unchanged` и
+compact `plan` с выбранными provider, artifact kind и output. Apply возвращает
+`mode=apply`; поле `provider_dispatched` относится только к preview и в apply
+не публикуется, потому что один boolean не может честно описать все
+pre-dispatch и post-dispatch terminal failures.
 
 Обе команды используют command-specific config validation: обязательны project/base path,
 `workPath`, `infobase` и общий execution timeout. Версия платформы необязательна, а её
@@ -73,6 +83,8 @@ payload сохраняет закрытые поля:
 
 ```text
 data = {
+  mode: preview | apply,
+  provider_dispatched: false,   # только preview
   state,                         # только configuration export
   subject: {kind: main} | {kind: extension, name},
   selection: {
@@ -91,6 +103,7 @@ data = {
   published,
   target_state: unchanged | created | replaced | restored | uncertain,
   execution: {status, diagnostics?, errors?, interruptions?}
+  plan?: {provider, artifact_kind, output} # только успешный preview
 }
 ```
 
@@ -247,6 +260,8 @@ publisher обязана координировать запись тем же l
 - [x] Target lock соблюдает deadline, а identity повторно проверяется перед publish.
 - [x] Infobase-only config с `source-set: []` не блокируется source validation.
 - [x] Provider selection завершается до workspace lock и filesystem side effects.
+- [x] `--dry-run` CF/CFE/DT возвращает выбранный provider без workPath, lock,
+      output parent или provider process.
 - [x] Preferred provider допускает только pre-spawn fallback; после dispatch fallback отсутствует.
 - [x] Outer error code совпадает с terminal/nested code для invalid output и interruption.
 - [x] MCP tool list не изменился.

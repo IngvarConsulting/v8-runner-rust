@@ -63,6 +63,214 @@ fn write_config(path: &Path, base: &Path, work: &Path, builder: &str, platform: 
 }
 
 #[test]
+fn configuration_cf_dry_run_selects_provider_without_process_or_filesystem_mutation() {
+    let (dir, config, base, calls) = setup("DESIGNER");
+    let work = dir.path().join("work");
+    fs::remove_dir_all(&work).expect("remove setup work path");
+    let output = base.join("dist/main.cf");
+
+    let command = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "infobase",
+            "configuration",
+            "export",
+            "--state",
+            "working",
+            "--output",
+            &output.display().to_string(),
+            "--dry-run",
+        ])
+        .output()
+        .expect("preview configuration export");
+
+    assert!(
+        command.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&command.stdout),
+        String::from_utf8_lossy(&command.stderr)
+    );
+    let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+    assert_eq!(envelope["command"], "infobase.configuration.export");
+    assert_eq!(envelope["data"]["mode"], "preview");
+    assert_eq!(envelope["data"]["provider_dispatched"], false);
+    assert_eq!(envelope["data"]["selection"]["provider"], "designer-batch");
+    assert_eq!(envelope["data"]["artifact_kind"], "cf");
+    assert_eq!(envelope["data"]["published"], false);
+    assert_eq!(envelope["data"]["target_state"], "unchanged");
+    assert_eq!(envelope["data"]["execution"]["status"], "succeeded");
+    let expected_output = fs::canonicalize(&base)
+        .expect("canonical base")
+        .join("dist/main.cf");
+    assert_eq!(
+        envelope["data"]["plan"]["output"],
+        expected_output.display().to_string()
+    );
+    assert_eq!(envelope["data"]["plan"]["provider"], "designer-batch");
+    assert!(!calls.exists(), "preview must not start the platform");
+    assert!(!work.exists(), "preview must not recreate workPath");
+    assert!(!output.exists(), "preview must not create the output");
+    assert!(!output.parent().expect("output parent").exists());
+}
+
+#[test]
+fn configuration_cfe_dry_run_preserves_extension_intent_without_dispatch() {
+    let (dir, config, base, calls) = setup("IBCMD");
+    let work = dir.path().join("work");
+    fs::remove_dir_all(&work).expect("remove setup work path");
+    let output = base.join("dist/sales.cfe");
+
+    let command = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "infobase",
+            "configuration",
+            "export",
+            "--state",
+            "database",
+            "--extension",
+            "SalesAddon",
+            "--output",
+            &output.display().to_string(),
+            "--dry-run",
+        ])
+        .output()
+        .expect("preview extension export");
+
+    assert!(command.status.success());
+    let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+    assert_eq!(envelope["data"]["mode"], "preview");
+    assert_eq!(envelope["data"]["subject"]["kind"], "extension");
+    assert_eq!(envelope["data"]["subject"]["name"], "SalesAddon");
+    assert_eq!(envelope["data"]["selection"]["provider"], "ibcmd-process");
+    assert_eq!(envelope["data"]["artifact_kind"], "cfe");
+    assert_eq!(envelope["data"]["provider_dispatched"], false);
+    assert!(!calls.exists());
+    assert!(!work.exists());
+    assert!(!output.parent().expect("output parent").exists());
+}
+
+#[test]
+fn dt_dry_run_reports_designer_fallback_without_dispatch() {
+    let dir = temp_workspace();
+    let base = dir.path().join("project");
+    let work = dir.path().join("work");
+    let config = dir.path().join("v8project.yaml");
+    let platform = dir.path().join("platform");
+    fs::create_dir_all(&platform).expect("platform");
+    let calls = dir.path().join("calls.log");
+    write_ibcmd(&platform.join("ibcmd"), &calls);
+    write_designer(&platform.join("1cv8"), &calls);
+    write_config(&config, &base, &work, "IBCMD", &platform);
+    fs::remove_dir_all(&work).expect("remove setup work path");
+    let output = base.join("dist/base.dt");
+
+    let command = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "infobase",
+            "dump",
+            "--output",
+            &output.display().to_string(),
+            "--dry-run",
+        ])
+        .output()
+        .expect("preview DT export");
+
+    assert!(command.status.success());
+    let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+    assert_eq!(envelope["command"], "infobase.dump");
+    assert_eq!(envelope["data"]["mode"], "preview");
+    assert_eq!(envelope["data"]["selection"]["provider"], "designer-batch");
+    assert_eq!(envelope["data"]["artifact_kind"], "dt");
+    assert_eq!(envelope["data"]["provider_dispatched"], false);
+    assert!(!calls.exists());
+    assert!(!work.exists());
+    assert!(!output.parent().expect("output parent").exists());
+}
+
+#[test]
+fn unavailable_dry_run_is_typed_as_preview_failure_without_side_effects() {
+    let (dir, config, base, calls) = setup("DESIGNER");
+    fs::remove_file(base.join("ib/1Cv8.1CD")).expect("remove infobase file");
+    let work = dir.path().join("work");
+    fs::remove_dir_all(&work).expect("remove setup work path");
+    let output = base.join("dist/main.cf");
+
+    let command = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "infobase",
+            "configuration",
+            "export",
+            "--state",
+            "working",
+            "--output",
+            &output.display().to_string(),
+            "--dry-run",
+        ])
+        .output()
+        .expect("preview unavailable export");
+
+    assert!(!command.status.success());
+    let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+    assert_eq!(envelope["error"]["code"], "environment_unavailable");
+    assert_eq!(envelope["data"]["mode"], "preview");
+    assert_eq!(envelope["data"]["provider_dispatched"], false);
+    assert_eq!(envelope["data"]["published"], false);
+    assert_eq!(envelope["data"]["target_state"], "unchanged");
+    assert!(!calls.exists());
+    assert!(!work.exists());
+    assert!(!output.parent().expect("output parent").exists());
+}
+
+#[test]
+fn dry_run_rejects_an_existing_output_directory_before_runtime_mutation() {
+    let (dir, config, base, calls) = setup("DESIGNER");
+    let work = dir.path().join("work");
+    fs::remove_dir_all(&work).expect("remove setup work path");
+    let output = base.join("dist/main.cf");
+    fs::create_dir_all(&output).expect("directory masquerading as CF output");
+
+    let command = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "infobase",
+            "configuration",
+            "export",
+            "--state",
+            "working",
+            "--output",
+            &output.display().to_string(),
+            "--dry-run",
+        ])
+        .output()
+        .expect("preview invalid target");
+
+    assert!(!command.status.success());
+    let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+    assert_eq!(envelope["data"]["mode"], "preview");
+    assert_eq!(envelope["data"]["provider_dispatched"], false);
+    assert_eq!(envelope["steps"][0]["name"], "resolve target");
+    assert!(envelope["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("is a directory")));
+    assert!(!calls.exists());
+    assert!(!work.exists());
+    assert!(output.is_dir());
+}
+
+#[test]
 fn missing_file_infobase_is_unavailable_before_designer_dispatch() {
     let (_dir, config, base, calls) = setup("DESIGNER");
     fs::remove_file(base.join("ib/1Cv8.1CD")).expect("remove infobase file");

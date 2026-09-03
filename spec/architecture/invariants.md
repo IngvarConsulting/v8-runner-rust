@@ -102,6 +102,8 @@
 6. DT не называется backup; IBCMD DT недоступен без доказанного exclusive-access contract.
 7. `implemented` не выдаётся за live proof: evidence отдельно различает documented, argv-tested и live-verified состояния.
 8. Capability/readiness selection не создаёт runtime-файлы и предшествует workspace/target locks; отсутствие adapter и неготовое окружение имеют разные stable error codes.
+9. `infobase ... --dry-run` использует тот же transport-neutral provider selection, что apply,
+   и завершается до action logging, workspace/target locks, staging, output parent и provider process.
 
 См. [ADR-0024](../decisions/0024-tipizirovat-eksport-konfiguratsii-i-snimka-ib.md).
 

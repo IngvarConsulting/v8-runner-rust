@@ -355,6 +355,17 @@ pub struct InfobaseArgs {
     pub command: InfobaseCommand,
 }
 
+impl InfobaseArgs {
+    pub fn dry_run(&self) -> bool {
+        match &self.command {
+            InfobaseCommand::Configuration(configuration) => match &configuration.command {
+                InfobaseConfigurationCommand::Export(args) => args.dry_run,
+            },
+            InfobaseCommand::Dump(args) => args.dry_run,
+        }
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum InfobaseCommand {
     /// Export working/database configuration state to CF or CFE
@@ -389,6 +400,10 @@ pub struct InfobaseConfigurationExportArgs {
     /// Final CF/CFE output path
     #[arg(long)]
     pub output: String,
+
+    /// Validate and select a provider without locks, files, or provider process dispatch
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
@@ -397,6 +412,10 @@ pub struct InfobaseDumpArgs {
     /// Final DT output path; a DT transfer image is not a database backup
     #[arg(long)]
     pub output: String,
+
+    /// Validate and select a provider without locks, files, or provider process dispatch
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1149,6 +1168,7 @@ mod tests {
                             assert_eq!(export.state, "database");
                             assert_eq!(export.extension.as_deref(), Some("SalesAddon"));
                             assert_eq!(export.output, "dist/sales.cfe");
+                            assert!(!export.dry_run);
                         }
                     }
                 }
@@ -1173,6 +1193,7 @@ mod tests {
             Command::Infobase(args) => match args.command {
                 super::InfobaseCommand::Dump(dump) => {
                     assert_eq!(dump.output, "dist/snapshot.dt");
+                    assert!(!dump.dry_run);
                 }
                 _ => panic!("unexpected infobase command"),
             },

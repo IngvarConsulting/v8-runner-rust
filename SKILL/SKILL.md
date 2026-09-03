@@ -108,6 +108,9 @@ v8-runner init
 - For infobase export failures, distinguish `capability_unavailable` (no implemented adapter)
   from `environment_unavailable` (adapter exists, but binary/version/connection is not ready).
   Never retry another provider after the selected provider has been spawned.
+- Before an orchestrator applies either infobase export, append `--dry-run` to obtain the exact
+  provider selection and output plan without creating `workPath`, locks, output paths, or a
+  platform process. Treat `mode=preview` and `provider_dispatched=false` as the non-execution proof.
 - Source files need conversion between Designer and EDT: use `v8-runner convert`; this is CLI-only and does not use the infobase.
 - Existing `.cf` or `.cfe` artifacts need to be applied to an infobase: use `v8-runner load ...`.
 - Release artifacts need to be exported or external artifacts published: use `v8-runner make ...` or the `artifacts` alias.
