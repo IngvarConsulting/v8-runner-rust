@@ -10,6 +10,15 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+MIN_CONSOLIDATED_MANIFEST_VERSION = (0, 7, 0)
+PRERELEASE_IDENTIFIER = (
+    r"(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+)
+SEMVER_PATTERN = re.compile(
+    r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    rf"(?:-{PRERELEASE_IDENTIFIER}(?:\.{PRERELEASE_IDENTIFIER})*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+)
 
 
 def fail(message: str) -> None:
@@ -24,6 +33,15 @@ def git_revision(name: str) -> str:
         text=True,
         stdout=subprocess.PIPE,
     ).stdout.strip()
+
+
+def require_consolidated_manifest_version(version: str) -> None:
+    match = SEMVER_PATTERN.fullmatch(version)
+    if match is None:
+        fail(f"Cargo package version {version!r} must be a valid semantic version")
+    package_version = tuple(int(component) for component in match.groups())
+    if package_version < MIN_CONSOLIDATED_MANIFEST_VERSION:
+        fail("consolidated release assets require v0.7.0 or newer")
 
 
 def main() -> None:
@@ -46,6 +64,7 @@ def main() -> None:
     expected_tag = f"v{package['version']}"
     if args.tag != expected_tag:
         fail(f"tag {args.tag!r} must equal Cargo package tag {expected_tag!r}")
+    require_consolidated_manifest_version(package["version"] or "")
     if package.get("license") != "AGPL-3.0-only":
         fail("Cargo package must declare AGPL-3.0-only")
     if package.get("repository") != "https://github.com/IngvarConsulting/v8-runner-rust":

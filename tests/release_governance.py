@@ -9,11 +9,22 @@ below. This test is the reintroduction guard for equivalent release paths.
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_release_verifier():
+    path = ROOT / "scripts/release/verify-release-contract.py"
+    spec = importlib.util.spec_from_file_location("verify_release_contract", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class ReleaseGovernanceTest(unittest.TestCase):
@@ -68,11 +79,23 @@ class ReleaseGovernanceTest(unittest.TestCase):
         self.assertIn("--deny-self-hosted-runners", workflow)
         self.assertIn('chmod +x "dist/${{ matrix.asset }}"', workflow)
 
-    def test_all_checksum_sidecars_use_the_portable_writer(self) -> None:
+    def test_release_publishes_one_manifest_instead_of_per_asset_sidecars(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-        self.assertIn("release_assets.py write-checksum", workflow)
-        self.assertNotIn('sha256sum "${archive_name}"', workflow)
-        self.assertNotIn('shasum -a 256 "${archive_name}"', workflow)
+        self.assertNotIn("write-checksum", workflow)
+        self.assertNotRegex(workflow, r"dist/[^\n]*(?:\.sha256|\.provenance\.json)")
+        self.assertIn("v8-runner-assets.json", workflow)
+
+    def test_portable_archive_documents_have_canonical_line_endings(self) -> None:
+        attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+        for name in ("README.md", "LICENSE", "FORK_NOTICE.md"):
+            self.assertIn(f"{name} text eol=lf", attributes)
+
+    def test_all_payload_assets_and_manifest_have_build_attestations(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn("Attest portable archive", workflow)
+        self.assertIn("Attest direct Unica asset", workflow)
+        self.assertIn("Attest consolidated release manifest", workflow)
+        self.assertIn("for asset in $(python3 scripts/release/release_assets.py attested-assets)", workflow)
 
     def test_draft_auditors_can_read_unpublished_release(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
@@ -91,6 +114,26 @@ class ReleaseGovernanceTest(unittest.TestCase):
         self.assertIn("refs/remotes/origin/master", verifier)
         self.assertIn("refs/tags/{args.tag}^{{commit}}", verifier)
         self.assertIn("GITHUB_SHA", verifier)
+        self.assertIn("MIN_CONSOLIDATED_MANIFEST_VERSION", verifier)
+        self.assertIn("consolidated release assets require", verifier)
+
+    def test_consolidated_contract_accepts_v07_prereleases_only(self) -> None:
+        verifier = load_release_verifier()
+
+        verifier.require_consolidated_manifest_version("0.7.0-pre.1")
+        verifier.require_consolidated_manifest_version("0.7.0-ic.1")
+        verifier.require_consolidated_manifest_version("0.8.0+build.1")
+        with self.assertRaisesRegex(SystemExit, "v0.7.0 or newer"):
+            verifier.require_consolidated_manifest_version("0.6.99")
+        with self.assertRaisesRegex(SystemExit, "semantic version"):
+            verifier.require_consolidated_manifest_version("0.7.0-01")
+
+    def test_documented_attestation_is_bound_to_verified_manifest_commit(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("gh release verify-asset v0.7.0 ./v8-runner-assets.json", readme)
+        self.assertIn('source_commit="$(python3', readme)
+        self.assertIn("for asset in v8-runner-assets.json v8-runner-linux-x64", readme)
+        self.assertIn('--source-digest "$source_commit"', readme)
 
     def test_pr_ci_runs_release_asset_contract_tests(self) -> None:
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
