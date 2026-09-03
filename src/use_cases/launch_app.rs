@@ -494,19 +494,31 @@ mod tests {
         make_executable(path);
     }
 
+    #[cfg(unix)]
+    fn write_logging_script(path: &Path, args_log: &Path) {
+        let staged_log = args_log.with_extension("tmp");
+        write_script(
+            path,
+            &format!(
+                "printf '%s\n' \"$@\" > '{}'\nmv '{}' '{}'\nsleep 1",
+                staged_log.display(),
+                staged_log.display(),
+                args_log.display()
+            ),
+        );
+    }
+
     fn read_args_log(path: &Path) -> String {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut previous = None;
+        let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
             if let Ok(args) = fs::read_to_string(path) {
-                if previous.as_ref().is_some_and(|last| last == &args) {
+                if !args.is_empty() {
                     return args;
                 }
-                previous = (!args.is_empty()).then_some(args);
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        fs::read_to_string(path).expect("args log")
+        panic!("timed out waiting for args log '{}'", path.display())
     }
 
     #[test]
@@ -565,10 +577,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let args_log = dir.path().join("thin.args.log");
         let platform_dir = dir.path().join("platform");
-        write_script(
-            &platform_dir.join("bin").join("1cv8c"),
-            &format!("printf '%s\n' \"$@\" > '{}'\nsleep 1", args_log.display()),
-        );
+        write_logging_script(&platform_dir.join("bin").join("1cv8c"), &args_log);
 
         let mut config = sample_config(dir.path(), dir.path(), &platform_dir);
         config.tools.enterprise.additional_launch_keys = vec!["/TESTMANAGER".to_owned()];
@@ -596,10 +605,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let args_log = dir.path().join("designer.args.log");
         let platform_dir = dir.path().join("platform");
-        write_script(
-            &platform_dir.join("bin").join("1cv8"),
-            &format!("printf '%s\n' \"$@\" > '{}'\nsleep 1", args_log.display()),
-        );
+        write_logging_script(&platform_dir.join("bin").join("1cv8"), &args_log);
 
         let mut config = sample_config(dir.path(), dir.path(), &platform_dir);
         config.tools.enterprise.additional_launch_keys = vec!["/TESTMANAGER".to_owned()];
@@ -628,10 +634,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let args_log = dir.path().join("ordinary.args.log");
         let platform_dir = dir.path().join("platform");
-        write_script(
-            &platform_dir.join("bin").join("1cv8"),
-            &format!("printf '%s\n' \"$@\" > '{}'\nsleep 1", args_log.display()),
-        );
+        write_logging_script(&platform_dir.join("bin").join("1cv8"), &args_log);
 
         let config = sample_config(dir.path(), dir.path(), &platform_dir);
 
@@ -659,10 +662,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let args_log = dir.path().join("mcp.args.log");
         let platform_dir = dir.path().join("platform");
-        write_script(
-            &platform_dir.join("bin").join("1cv8c"),
-            &format!("printf '%s\n' \"$@\" > '{}'\nsleep 1", args_log.display()),
-        );
+        write_logging_script(&platform_dir.join("bin").join("1cv8c"), &args_log);
 
         let mut config = sample_config(dir.path(), dir.path(), &platform_dir);
         config.tools.client_mcp.port = Some(9874);

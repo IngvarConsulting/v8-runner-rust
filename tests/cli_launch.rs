@@ -7,37 +7,56 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use support::{free_tcp_port, temp_workspace, v8_runner_command, write_shell_script_atomically};
+use support::{temp_workspace, v8_runner_command, write_shell_script_atomically};
 
 fn write_script(path: &Path) {
     write_shell_script_atomically(path, "sleep 1");
 }
 
 fn write_logging_script(path: &Path, args_log: &Path) {
+    let staged_log = args_log.with_extension("tmp");
     write_shell_script_atomically(
         path,
-        &format!("printf '%s\n' \"$@\" > '{}'\nsleep 1", args_log.display()),
+        &format!(
+            "printf '%s\n' \"$@\" > '{}'\nmv '{}' '{}'\nsleep 1",
+            staged_log.display(),
+            staged_log.display(),
+            args_log.display()
+        ),
+    );
+}
+
+fn write_bounded_logging_script(path: &Path, args_log: &Path) {
+    let staged_log = args_log.with_extension("tmp");
+    write_shell_script_atomically(
+        path,
+        &format!(
+            "printf '%s\n' \"$@\" > '{}'\nmv '{}' '{}'\nsleep 60",
+            staged_log.display(),
+            staged_log.display(),
+            args_log.display()
+        ),
     );
 }
 
 fn read_args_log(path: &Path) -> String {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let mut previous = None;
+    let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if let Ok(args) = fs::read_to_string(path) {
-            if previous.as_ref().is_some_and(|last| last == &args) {
+            if !args.is_empty() {
                 return args;
             }
-            previous = (!args.is_empty()).then_some(args);
         }
         thread::sleep(Duration::from_millis(20));
     }
-    fs::read_to_string(path).expect("args log")
+    panic!("timed out waiting for args log '{}'", path.display())
 }
 
 fn wait_for_file(path: &Path, timeout: Duration) -> bool {
@@ -69,25 +88,18 @@ fn start_fake_mcp_server(tools: &[&str]) -> (u16, JoinHandle<()>) {
             .set_nonblocking(true)
             .expect("fake MCP nonblocking listener");
         let started = Instant::now();
-        let mut last_request = Instant::now();
-        let mut accepted_requests = 0;
         let mut initialize_count = 0;
         let mut initialized_notification_seen = false;
         let mut tools_list_seen = false;
         loop {
             let Ok((mut stream, _)) = listener.accept() else {
-                if accepted_requests > 0 && last_request.elapsed() > Duration::from_millis(250) {
-                    break;
-                }
                 assert!(
-                    started.elapsed() <= Duration::from_secs(5),
+                    started.elapsed() <= Duration::from_secs(30),
                     "fake MCP server timed out waiting for requests"
                 );
                 thread::sleep(Duration::from_millis(10));
                 continue;
             };
-            accepted_requests += 1;
-            last_request = Instant::now();
             stream
                 .set_nonblocking(false)
                 .expect("fake MCP blocking stream");
@@ -98,9 +110,12 @@ fn start_fake_mcp_server(tools: &[&str]) -> (u16, JoinHandle<()>) {
                     Some("fake-session"),
                     "DELETE must reuse the initialized MCP session"
                 );
-                write!(stream, "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n",)
-                    .expect("write delete response");
-                continue;
+                write!(
+                    stream,
+                    "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .expect("write delete response");
+                break;
             }
             let request = http_request.body.expect("json rpc body");
             let method = request["method"].as_str().unwrap_or_default();
@@ -132,8 +147,11 @@ fn start_fake_mcp_server(tools: &[&str]) -> (u16, JoinHandle<()>) {
                         "notifications/initialized must use the initialized MCP session"
                     );
                     initialized_notification_seen = true;
-                    write!(stream, "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n",)
-                        .expect("write initialized response");
+                    write!(
+                        stream,
+                        "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .expect("write initialized response");
                     continue;
                 }
                 _ => json!({}),
@@ -161,7 +179,7 @@ fn start_fake_mcp_server(tools: &[&str]) -> (u16, JoinHandle<()>) {
             .expect("response json");
             write!(
                 stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: fake-session\r\nContent-Length: {}\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: fake-session\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             )
             .expect("write response headers");
@@ -180,9 +198,64 @@ fn start_fake_mcp_server(tools: &[&str]) -> (u16, JoinHandle<()>) {
     (port, handle)
 }
 
+struct UnresponsiveEndpoint {
+    address: std::net::SocketAddr,
+    shutdown: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl UnresponsiveEndpoint {
+    fn start() -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind unresponsive endpoint");
+        let address = listener
+            .local_addr()
+            .expect("unresponsive endpoint address");
+        listener
+            .set_nonblocking(true)
+            .expect("unresponsive endpoint nonblocking");
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let thread_shutdown = shutdown.clone();
+        let thread = thread::spawn(move || {
+            while !thread_shutdown.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            address,
+            shutdown,
+            thread: Some(thread),
+        }
+    }
+
+    fn port(&self) -> u16 {
+        self.address.port()
+    }
+}
+
+impl Drop for UnresponsiveEndpoint {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        let _ = TcpStream::connect(self.address);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 fn read_http_json_request(stream: &mut TcpStream) -> FakeHttpRequest {
     stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
+        .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("read timeout");
     let mut bytes = Vec::new();
     let mut buffer = [0; 1024];
@@ -783,7 +856,7 @@ fn launch_mcp_va_builds_payload_from_configured_port_and_ordinary_mode() {
 #[test]
 fn launch_mcp_va_wait_ready_returns_registered_vanessa_tools() {
     let (_dir, config_path, install_dir, args_log) = setup_mcp_va_project();
-    prepend_config(&config_path, "execution_timeout: 2500\n");
+    prepend_config(&config_path, "execution_timeout: 10000\n");
     let (port, server) = start_fake_mcp_server(&[
         "infobase_info",
         "load_features",
@@ -792,7 +865,8 @@ fn launch_mcp_va_wait_ready_returns_registered_vanessa_tools() {
         "get_test_results",
         "connect_test_client",
     ]);
-    write_logging_script(&install_dir.join("bin").join("1cv8"), &args_log);
+    write_bounded_logging_script(&install_dir.join("bin").join("1cv8"), &args_log);
+    write_bounded_logging_script(&install_dir.join("bin").join("1cv8c"), &args_log);
 
     let output = v8_runner_command()
         .args([
@@ -837,10 +911,11 @@ fn launch_mcp_va_wait_ready_returns_registered_vanessa_tools() {
 #[test]
 fn launch_mcp_va_wait_ready_fails_when_vanessa_tools_are_missing() {
     let (_dir, config_path, install_dir, args_log) = setup_mcp_va_project();
-    prepend_config(&config_path, "execution_timeout: 1500\n");
-    insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 700\n");
+    prepend_config(&config_path, "execution_timeout: 15000\n");
+    insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 5000\n");
     let (port, server) = start_fake_mcp_server(&["infobase_info"]);
-    write_logging_script(&install_dir.join("bin").join("1cv8"), &args_log);
+    write_bounded_logging_script(&install_dir.join("bin").join("1cv8"), &args_log);
+    write_bounded_logging_script(&install_dir.join("bin").join("1cv8c"), &args_log);
 
     let output = v8_runner_command()
         .args([
@@ -867,17 +942,18 @@ fn launch_mcp_va_wait_ready_fails_when_vanessa_tools_are_missing() {
         .expect("missing tools");
     assert!(missing_tools.iter().any(|tool| tool == "load_features"));
     assert!(missing_tools.iter().any(|tool| tool == "run_scenario"));
-    assert!(payload["error"]["message"]
-        .as_str()
-        .expect("error message")
-        .contains("Vanessa MCP tools were not registered"));
+    let error_message = payload["error"]["message"].as_str().expect("error message");
+    assert!(
+        error_message.contains("Vanessa MCP tools were not registered"),
+        "unexpected error message: {error_message}; payload={payload}"
+    );
     server.join().expect("fake MCP server exits");
 }
 
 #[test]
 fn launch_mcp_wait_ready_returns_client_mcp_tools_without_vanessa_requirements() {
     let (_dir, config_path, _install_dir, _work_path) = setup_project();
-    prepend_config(&config_path, "execution_timeout: 2500\n");
+    prepend_config(&config_path, "execution_timeout: 10000\n");
     let (port, server) = start_fake_mcp_server(&["infobase_info", "query_info"]);
 
     let output = v8_runner_command()
@@ -926,9 +1002,10 @@ fn launch_mcp_wait_ready_returns_client_mcp_tools_without_vanessa_requirements()
 #[test]
 fn launch_mcp_wait_ready_fails_when_endpoint_never_starts() {
     let (_dir, config_path, _install_dir, _work_path) = setup_project();
-    prepend_config(&config_path, "execution_timeout: 700\n");
-    insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 200\n");
-    let port = free_tcp_port();
+    prepend_config(&config_path, "execution_timeout: 5000\n");
+    insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 500\n");
+    let endpoint = UnresponsiveEndpoint::start();
+    let port = endpoint.port();
 
     let output = v8_runner_command()
         .args([
@@ -963,8 +1040,10 @@ fn launch_mcp_wait_ready_fails_when_endpoint_never_starts() {
 #[test]
 fn launch_mcp_wait_ready_text_failure_is_not_rendered_as_success() {
     let (_dir, config_path, _install_dir, _work_path) = setup_project();
-    prepend_config(&config_path, "execution_timeout: 700\n");
-    let port = free_tcp_port();
+    prepend_config(&config_path, "execution_timeout: 5000\n");
+    insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 500\n");
+    let endpoint = UnresponsiveEndpoint::start();
+    let port = endpoint.port();
 
     let output = v8_runner_command()
         .args([
@@ -999,8 +1078,10 @@ fn launch_mcp_wait_ready_terminates_process_on_readiness_failure() {
         terminated.display()
     );
     let (_dir, config_path, _install_dir, _work_path) = setup_project_with_thin_script(&script);
-    prepend_config(&config_path, "execution_timeout: 500\n");
-    let port = free_tcp_port();
+    prepend_config(&config_path, "execution_timeout: 15000\n");
+    insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 5000\n");
+    let endpoint = UnresponsiveEndpoint::start();
+    let port = endpoint.port();
 
     let output = v8_runner_command()
         .args([
@@ -1017,9 +1098,17 @@ fn launch_mcp_wait_ready_terminates_process_on_readiness_failure() {
         .expect("run command");
 
     assert!(!output.status.success());
-    assert!(started.exists(), "launch process should have started");
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json failure payload");
+    assert!(payload["error"]["message"]
+        .as_str()
+        .expect("error message")
+        .contains("MCP endpoint did not become ready"));
     assert!(
-        wait_for_file(&terminated, Duration::from_secs(2)),
+        wait_for_file(&started, Duration::from_secs(10)),
+        "launch process should have started before the readiness timeout"
+    );
+    assert!(
+        wait_for_file(&terminated, Duration::from_secs(10)),
         "wait-ready failure should terminate the launched client process"
     );
 }
@@ -1027,9 +1116,10 @@ fn launch_mcp_wait_ready_terminates_process_on_readiness_failure() {
 #[test]
 fn launch_mcp_wait_ready_uses_configured_wait_timeout() {
     let (_dir, config_path, _install_dir, _work_path) = setup_project();
-    prepend_config(&config_path, "execution_timeout: 5000\n");
-    insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 200\n");
-    let port = free_tcp_port();
+    prepend_config(&config_path, "execution_timeout: 15000\n");
+    insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 500\n");
+    let endpoint = UnresponsiveEndpoint::start();
+    let port = endpoint.port();
 
     let started = Instant::now();
     let output = v8_runner_command()
@@ -1047,8 +1137,13 @@ fn launch_mcp_wait_ready_uses_configured_wait_timeout() {
         .expect("run command");
 
     assert!(!output.status.success());
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json failure payload");
+    assert!(payload["error"]["message"]
+        .as_str()
+        .expect("error message")
+        .contains("MCP endpoint did not become ready"));
     assert!(
-        started.elapsed() < Duration::from_millis(1500),
+        started.elapsed() < Duration::from_secs(5),
         "wait-ready should use tools.client_mcp.wait_ready_timeout_ms instead of the global execution_timeout"
     );
 }
@@ -1077,7 +1172,7 @@ fn thin_external_epf_wait_returns_structured_exit_and_artifacts() {
             &stderr.display().to_string(),
             "--wait-for-exit",
             "--wait-timeout-ms",
-            "1000",
+            "5000",
         ])
         .output()
         .expect("run command");
@@ -1132,7 +1227,7 @@ fn thin_external_epf_wait_timeout_terminates_client_group() {
             &stderr.display().to_string(),
             "--wait-for-exit",
             "--wait-timeout-ms",
-            "2000",
+            "5000",
         ])
         .output()
         .expect("run command");
@@ -1142,7 +1237,10 @@ fn thin_external_epf_wait_timeout_terminates_client_group() {
     assert_eq!(payload["ok"], false);
     assert_eq!(payload["error"]["kind"], "runtime");
     assert_eq!(payload["data"]["external_epf_wait"]["timed_out"], true);
-    assert!(wait_for_file(&descendant_pid, Duration::from_secs(2)));
+    assert!(
+        wait_for_file(&descendant_pid, Duration::from_secs(10)),
+        "client fixture did not publish its descendant pid before the wait timeout"
+    );
     let pid = fs::read_to_string(descendant_pid).expect("descendant pid");
     assert!(
         !std::process::Command::new("kill")

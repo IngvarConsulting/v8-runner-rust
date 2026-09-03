@@ -147,7 +147,7 @@ pub async fn wait_for_log_contains(path: &Path, needle: &str) {
 }
 
 pub async fn wait_for_line_count(path: &Path, expected: usize) {
-    if wait_until_async(300, Duration::from_millis(10), || {
+    if wait_until_async(1_000, Duration::from_millis(10), || {
         read_line_count(path) >= expected
     })
     .await

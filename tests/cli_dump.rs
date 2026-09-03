@@ -315,7 +315,10 @@ fn dump_edt_full_json_success_updates_designer_mirror_and_edt_target() {
     assert_eq!(payload["command"], "dump");
     assert_eq!(
         payload["data"]["target_path"],
-        base_path.join("main").display().to_string()
+        fs::canonicalize(base_path.join("main"))
+            .expect("canonical dump target")
+            .display()
+            .to_string()
     );
     assert_native_edt_project(&base_path.join("main"));
     assert!(!base_path.join("main").join("old.txt").exists());

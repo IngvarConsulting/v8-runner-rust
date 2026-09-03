@@ -1296,25 +1296,21 @@ mod tests {
     #[test]
     fn spawn_managed_cleans_process_group_when_startup_probe_detects_early_exit() {
         let dir = tempdir().expect("tempdir");
-        let script = dir.path().join("fork-and-exit.sh");
         let child_pid_path = dir.path().join("child.pid");
-        write_script(
-            &script,
-            &format!(
-                "sleep 5 &\nprintf '%s' \"$!\" > '{}'\nexit 0",
-                child_pid_path.display()
-            ),
+        let script = format!(
+            "sleep 30 &\nprintf '%s' \"$!\" > '{}'\nexit 0",
+            child_pid_path.display()
         );
 
         let runner = ProcessExecutor;
         let err = match runner.spawn_managed(
             &ProcessRequest {
-                program: script,
-                args: vec![],
+                program: PathBuf::from("/bin/sh"),
+                args: vec!["-c".to_owned(), script],
                 workdir: None,
                 stdout_log_path: None,
                 stderr_log_path: None,
-                startup_probe: Some(Duration::from_millis(100)),
+                startup_probe: Some(Duration::from_secs(2)),
             },
             ManagedSpawnMode::Detached,
         ) {
@@ -1327,7 +1323,7 @@ mod tests {
 
         assert!(matches!(err, ProcessError::ExitedEarly { .. }));
         let child_pid = read_pid(&child_pid_path);
-        if process_exists(child_pid) {
+        if !wait_for_process_exit(child_pid, Duration::from_secs(5)) {
             unsafe {
                 let _ = libc::kill(child_pid, libc::SIGKILL);
             }
@@ -1720,6 +1716,18 @@ mod tests {
             }
         }
         std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+
+    #[cfg(unix)]
+    fn wait_for_process_exit(pid: i32, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if !process_exists(pid) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        !process_exists(pid)
     }
 
     #[cfg(windows)]

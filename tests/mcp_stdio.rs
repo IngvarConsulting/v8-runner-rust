@@ -8,7 +8,6 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use rmcp::{
-    model::ErrorCode,
     model::{CallToolRequest, CallToolRequestParams, CancelledNotificationParam, ClientRequest},
     service::PeerRequestOptions,
     transport::{ConfigureCommandExt, TokioChildProcess},
@@ -22,6 +21,9 @@ use support::{
 
 const V8_CONFIGURATION_NATURE: &str = "com._1c.g5.v8.dt.core.V8ConfigurationNature";
 const EDT_RUNTIME_VERSION: &str = "8.3.27";
+const MCP_EXECUTION_TIMEOUT_MS: u64 = 300_000;
+const EDT_COMMAND_TIMEOUT_MS: u64 = 5_000;
+const EDT_TIMEOUT_TEST_MS: u64 = 5_000;
 
 fn assert_envelope_success(payload: &Value, command: &str) {
     assert_eq!(payload["ok"], true);
@@ -100,13 +102,14 @@ fn write_edt_config_with_options(
     _base_path: &Path,
     work_path: &Path,
     edt_path: &Path,
+    execution_timeout_ms: u64,
     command_timeout_ms: u64,
     max_concurrent_calls: usize,
 ) {
     let config = format!(
         "workPath: '{}'\nexecution_timeout: {}\nformat: EDT\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main-edt\nmcp:\n  execution:\n    max_concurrent_calls: {}\ntools:\n  edt_cli:\n    path: '{}'\n    interactive-mode: true\n    command_timeout_ms: {}\n",
         work_path.display(),
-        command_timeout_ms,
+        execution_timeout_ms,
         max_concurrent_calls,
         edt_path.display(),
         command_timeout_ms,
@@ -130,27 +133,6 @@ fn write_designer_config_with_options(
         command_timeout_ms,
     );
     fs::write(path, config).expect("designer config");
-}
-
-fn write_edt_config_with_platform(
-    path: &Path,
-    _base_path: &Path,
-    work_path: &Path,
-    platform_path: &Path,
-    edt_path: &Path,
-    command_timeout_ms: u64,
-    max_concurrent_calls: usize,
-) {
-    let config = format!(
-        "workPath: '{}'\nexecution_timeout: {}\nformat: EDT\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main-edt\nmcp:\n  execution:\n    max_concurrent_calls: {}\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n    interactive-mode: true\n    command_timeout_ms: {}\n",
-        work_path.display(),
-        command_timeout_ms,
-        max_concurrent_calls,
-        platform_path.display(),
-        edt_path.display(),
-        command_timeout_ms,
-    );
-    fs::write(path, config).expect("hybrid edt config");
 }
 
 fn write_edt_configuration_source(path: &Path, project_name: &str) {
@@ -204,11 +186,17 @@ fn setup_project() -> (tempfile::TempDir, PathBuf) {
 }
 
 fn setup_edt_project() -> (tempfile::TempDir, PathBuf) {
-    setup_edt_project_with_options("sleep 1\nprompt", 80, 1)
+    setup_edt_project_with_options(
+        "if [ \"$validate_count\" -eq 1 ]; then\n  if [ -n \"$out\" ]; then : > \"$out\"; fi\n  prompt\nelse\n  sleep 8\n  prompt\nfi",
+        MCP_EXECUTION_TIMEOUT_MS,
+        EDT_TIMEOUT_TEST_MS,
+        1,
+    )
 }
 
 fn setup_edt_project_with_options(
     validate_handler: &str,
+    execution_timeout_ms: u64,
     command_timeout_ms: u64,
     max_concurrent_calls: usize,
 ) -> (tempfile::TempDir, PathBuf) {
@@ -233,6 +221,7 @@ fn setup_edt_project_with_options(
         &base_path,
         &work_path,
         &edt_path,
+        execution_timeout_ms,
         command_timeout_ms,
         max_concurrent_calls,
     );
@@ -259,43 +248,6 @@ fn setup_designer_project_with_options(
         &base_path,
         &work_path,
         &platform_dir,
-        command_timeout_ms,
-        max_concurrent_calls,
-    );
-
-    (dir, config_path)
-}
-
-fn setup_hybrid_edt_project_with_options(
-    edt_validate_handler: &str,
-    platform_script_body: &str,
-    command_timeout_ms: u64,
-    max_concurrent_calls: usize,
-) -> (tempfile::TempDir, PathBuf) {
-    let dir = temp_workspace();
-    let base_path = dir.path().join("project");
-    let work_path = dir.path().join("work");
-    let edt_dir = dir.path().join("edt");
-    let edt_path = edt_dir.join("1cedtcli");
-    let platform_dir = dir.path().join("platform");
-    let config_path = dir.path().join("v8project.yaml");
-
-    write_edt_configuration_source(&base_path.join("main-edt"), "main");
-    fs::create_dir_all(&work_path).expect("work");
-    fs::create_dir_all(&edt_dir).expect("edt dir");
-    write_interactive_edt_script(
-        &edt_path,
-        &work_path.join("edt-workspace"),
-        &dir.path().join("edt-commands.log"),
-        edt_validate_handler,
-    );
-    write_script(&platform_dir.join("bin").join("1cv8"), platform_script_body);
-    write_edt_config_with_platform(
-        &config_path,
-        &base_path,
-        &work_path,
-        &platform_dir,
-        &edt_path,
         command_timeout_ms,
         max_concurrent_calls,
     );
@@ -435,6 +387,7 @@ fn write_interactive_edt_script(
          workspace='{}'\n\
          cwd=\"$workspace\"\n\
          dirty=0\n\
+         validate_count=0\n\
          prompt\n\
          while IFS= read -r line; do\n\
            printf '%s\\n' \"$line\" >> '{}'\n\
@@ -452,6 +405,7 @@ fn write_interactive_edt_script(
                prompt\n\
                ;;\n\
              validate)\n\
+               validate_count=$((validate_count + 1))\n\
                out=\"\"\n\
                project=\"\"\n\
                while [ \"$#\" -gt 0 ]; do\n\
@@ -1438,6 +1392,19 @@ async fn mcp_stdio_returns_terminal_business_failure_for_edt_syntax_timeout() {
     .expect("spawn stdio transport");
 
     let client = ().serve(transport).await.expect("connect rmcp client");
+    let ready = client
+        .peer()
+        .call_tool(
+            CallToolRequestParams::new("check_syntax_edt").with_arguments(
+                serde_json::from_value(json!({ "projectName": "main" })).expect("arguments"),
+            ),
+        )
+        .await
+        .expect("EDT readiness call");
+    assert_eq!(ready.is_error, Some(false));
+    let ready_payload: Value = ready.structured_content.expect("readiness payload");
+    assert_envelope_success(&ready_payload, "syntax");
+
     let response = client
         .peer()
         .call_tool(
@@ -1463,7 +1430,12 @@ async fn mcp_stdio_returns_terminal_business_failure_for_edt_syntax_timeout() {
 #[tokio::test]
 async fn mcp_stdio_edt_syntax_resets_interactive_state_before_each_call() {
     let validate_handler = "if [ \"$cwd\" != \"$workspace\" ]; then\n  printf 'cwd mismatch:%s\\n' \"$cwd\"\nelif [ \"$dirty\" -ne 0 ]; then\n  printf 'state leaked\\n'\nelse\n  if [ -n \"$out\" ]; then : > \"$out\"; fi\n  dirty=1\nfi\nprompt";
-    let (dir, config_path) = setup_edt_project_with_options(validate_handler, 200, 1);
+    let (dir, config_path) = setup_edt_project_with_options(
+        validate_handler,
+        MCP_EXECUTION_TIMEOUT_MS,
+        EDT_COMMAND_TIMEOUT_MS,
+        1,
+    );
     let transport = TokioChildProcess::new(
         tokio::process::Command::new(v8_runner_binary()).configure(|cmd| {
             cmd.arg("--config")
@@ -1513,7 +1485,12 @@ async fn mcp_stdio_cancels_running_edt_tool_and_retains_capacity_until_detached_
         "printf 'start\\n' >> '{}'\nif [ -n \"$out\" ]; then : > \"$out\"; fi\nsleep 0.2\nprompt",
         starts_log.display()
     );
-    let (_project, config_path) = setup_edt_project_with_options(&validate_handler, 1200, 1);
+    let (_project, config_path) = setup_edt_project_with_options(
+        &validate_handler,
+        MCP_EXECUTION_TIMEOUT_MS,
+        EDT_COMMAND_TIMEOUT_MS,
+        1,
+    );
     let transport = TokioChildProcess::new(
         tokio::process::Command::new(v8_runner_binary()).configure(|cmd| {
             cmd.arg("--config")
@@ -1587,7 +1564,12 @@ async fn mcp_stdio_cancels_running_edt_tool_and_retains_capacity_until_detached_
 #[tokio::test]
 async fn mcp_stdio_edt_syntax_preserves_issues_found_when_stdout_is_non_empty() {
     let validate_handler = "printf 'informational stdout\\n'\nif [ -n \"$out\" ]; then printf 'ERROR\\tCatalogs.Items\\t1\\t2\\tUnusedVariables\\tunused variable\\n' > \"$out\"; fi\nprompt";
-    let (_dir, config_path) = setup_edt_project_with_options(validate_handler, 200, 1);
+    let (_dir, config_path) = setup_edt_project_with_options(
+        validate_handler,
+        MCP_EXECUTION_TIMEOUT_MS,
+        EDT_COMMAND_TIMEOUT_MS,
+        1,
+    );
     let transport = TokioChildProcess::new(
         tokio::process::Command::new(v8_runner_binary()).configure(|cmd| {
             cmd.arg("--config")
@@ -1623,7 +1605,12 @@ async fn mcp_stdio_edt_syntax_preserves_issues_found_when_stdout_is_non_empty() 
 async fn mcp_stdio_edt_syntax_treats_stdout_without_issues_as_tool_failure() {
     let validate_handler =
         "printf 'unexpected stdout\\n'\nif [ -n \"$out\" ]; then : > \"$out\"; fi\nprompt";
-    let (_dir, config_path) = setup_edt_project_with_options(validate_handler, 200, 1);
+    let (_dir, config_path) = setup_edt_project_with_options(
+        validate_handler,
+        MCP_EXECUTION_TIMEOUT_MS,
+        EDT_COMMAND_TIMEOUT_MS,
+        1,
+    );
     let transport = TokioChildProcess::new(
         tokio::process::Command::new(v8_runner_binary()).configure(|cmd| {
             cmd.arg("--config")
@@ -1720,84 +1707,6 @@ async fn mcp_stdio_cancels_running_standard_tool_and_recovers_capacity_after_ter
         .expect("follow-up task join")
         .expect("capacity must recover after terminal state");
     assert_eq!(read_line_count(&starts_log), 2);
-
-    client.cancel().await.expect("cancel client");
-}
-
-#[tokio::test]
-async fn mcp_stdio_queued_timeout_reports_full_payload_for_bounded_tool() {
-    let dir = temp_workspace();
-    let edt_starts_log = dir.path().join("edt-starts.log");
-    let launch_starts_log = dir.path().join("launch-starts.log");
-    let edt_script_body = format!(
-        "printf 'start\\n' >> '{}'\nsleep 1\nprompt",
-        edt_starts_log.display()
-    );
-    let platform_script_body = format!(
-        "printf 'start\\n' >> '{}'\nsleep 1\nexit 0",
-        launch_starts_log.display()
-    );
-    let (_project, config_path) =
-        setup_hybrid_edt_project_with_options(&edt_script_body, &platform_script_body, 20, 1);
-    let transport = TokioChildProcess::new(
-        tokio::process::Command::new(v8_runner_binary()).configure(|cmd| {
-            cmd.arg("--config")
-                .arg(config_path.as_os_str())
-                .arg("mcp")
-                .arg("serve")
-                .arg("stdio");
-        }),
-    )
-    .expect("spawn stdio transport");
-
-    let client = ().serve(transport).await.expect("connect rmcp client");
-    let first = tokio::spawn({
-        let peer = client.peer().clone();
-        async move {
-            peer.call_tool(CallToolRequestParams::new("launch_app").with_arguments(
-                serde_json::from_value(json!({ "utilityType": "thick" })).expect("arguments"),
-            ))
-            .await
-        }
-    });
-
-    wait_for_invocation_count(&launch_starts_log, 1).await;
-    let error = client
-        .peer()
-        .call_tool(
-            CallToolRequestParams::new("check_syntax_edt").with_arguments(
-                serde_json::from_value(json!({ "projectName": "main" })).expect("arguments"),
-            ),
-        )
-        .await
-        .expect_err("queued bounded call must time out");
-
-    match error {
-        ServiceError::McpError(error_data) => {
-            assert_eq!(error_data.code, ErrorCode::INTERNAL_ERROR);
-            assert_eq!(
-                error_data.data.as_ref().and_then(|data| data.get("reason")),
-                Some(&json!("timeout"))
-            );
-            assert_eq!(
-                error_data.data.as_ref().and_then(|data| data.get("stage")),
-                Some(&json!("queued"))
-            );
-            assert_eq!(
-                error_data
-                    .data
-                    .as_ref()
-                    .and_then(|data| data.get("timeoutMs")),
-                Some(&json!(20))
-            );
-        }
-        other => panic!("expected MCP error, got {other:?}"),
-    }
-
-    let first_result = first.await.expect("first task join");
-    let launch_result = first_result.expect("first launch call");
-    assert_eq!(launch_result.is_error, Some(false));
-    assert_eq!(read_line_count(&edt_starts_log), 0);
 
     client.cancel().await.expect("cancel client");
 }

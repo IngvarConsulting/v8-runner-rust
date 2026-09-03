@@ -1052,6 +1052,10 @@ mod tests {
     use std::time::Duration;
     use tempfile::tempdir;
 
+    const TEST_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+    const TEST_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+    const TEST_PROCESS_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+
     #[cfg(unix)]
     fn make_executable(path: &Path) {
         use std::os::unix::fs::PermissionsExt;
@@ -1072,13 +1076,23 @@ mod tests {
 
     #[cfg(unix)]
     fn repl_script(path: &Path, child_pid_path: &Path) {
+        repl_script_with_options(path, child_pid_path, "stdout", "");
+    }
+
+    #[cfg(unix)]
+    fn repl_script_with_options(
+        path: &Path,
+        child_pid_path: &Path,
+        startup_stream: &str,
+        prompt_suffix: &str,
+    ) {
         write_script(
             path,
             &format!(
-                "prompt_suffix=\"${{PROMPT_SUFFIX:-}}\"\n\
+                "prompt_suffix='{}'\n\
                  prompt_stdout() {{ printf '1C:EDT>%s' \"$prompt_suffix\"; }}\n\
                  prompt_stderr() {{ printf '1C:EDT>%s' \"$prompt_suffix\" >&2; }}\n\
-                 startup_stream=\"${{STARTUP_PROMPT_STREAM:-stdout}}\"\n\
+                 startup_stream='{}'\n\
                  case \"$startup_stream\" in\n\
                    stdout) prompt_stdout ;;\n\
                    stderr) prompt_stderr ;;\n\
@@ -1124,6 +1138,7 @@ mod tests {
                      prompt_exit)\n\
                        printf 'before-exit\\n'\n\
                        prompt_stdout\n\
+                       sleep 1 &\n\
                        exit 0\n\
                        ;;\n\
                      drop_pipes)\n\
@@ -1133,6 +1148,7 @@ mod tests {
                        ;;\n\
                      die)\n\
                        printf 'goodbye\\n'\n\
+                       sleep 1 &\n\
                        exit 7\n\
                        ;;\n\
                      spawn_child)\n\
@@ -1157,6 +1173,8 @@ mod tests {
                    esac\n\
                  done\n\
                  sleep 30\n",
+                prompt_suffix,
+                startup_stream,
                 child_pid_path.display()
             ),
         );
@@ -1168,13 +1186,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn exit_before_prompt_script(path: &Path) {
-        write_script(path, "printf 'booting\\n'\nexit 9\n");
-    }
-
-    #[cfg(unix)]
     fn prompt_then_exit_startup_script(path: &Path) {
-        write_script(path, "printf '1C:EDT>\\n'\nexit 0\n");
+        write_script(path, "printf '1C:EDT>\\n'\nsleep 1 &\nexit 0\n");
     }
 
     #[cfg(unix)]
@@ -1184,56 +1197,6 @@ mod tests {
             startup_timeout,
         )
         .expect("spawn executor")
-    }
-
-    #[cfg(unix)]
-    fn spawn_executor_with_startup_stream(
-        script: &Path,
-        startup_timeout: Duration,
-        stream: &str,
-    ) -> InteractiveProcessExecutor {
-        spawn_executor_with_wrapper(
-            script,
-            startup_timeout,
-            &format!(
-                "STARTUP_PROMPT_STREAM='{}' exec '{}'\n",
-                stream,
-                script.display()
-            ),
-        )
-    }
-
-    #[cfg(unix)]
-    fn spawn_executor_with_prompt_suffix(
-        script: &Path,
-        startup_timeout: Duration,
-        prompt_suffix: &str,
-    ) -> InteractiveProcessExecutor {
-        spawn_executor_with_wrapper(
-            script,
-            startup_timeout,
-            &format!(
-                "PROMPT_SUFFIX='{}' exec '{}'\n",
-                prompt_suffix,
-                script.display()
-            ),
-        )
-    }
-
-    #[cfg(unix)]
-    fn spawn_executor_with_wrapper(
-        script: &Path,
-        startup_timeout: Duration,
-        wrapper_body: &str,
-    ) -> InteractiveProcessExecutor {
-        let wrapper = script
-            .parent()
-            .expect("script parent")
-            .join(format!("wrapper-{}.sh", std::process::id()));
-        write_script(&wrapper, wrapper_body);
-
-        InteractiveProcessExecutor::spawn(InteractiveProcessRequest::new(wrapper), startup_timeout)
-            .expect("spawn executor")
     }
 
     #[cfg(unix)]
@@ -1304,13 +1267,25 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn wait_for_process_exit(pid: u32) -> bool {
+        let deadline = std::time::Instant::now() + TEST_PROCESS_EXIT_TIMEOUT;
+        while std::time::Instant::now() < deadline {
+            if !is_process_alive(pid) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        !is_process_alive(pid)
+    }
+
+    #[cfg(unix)]
     #[test]
     fn startup_waits_for_prompt() {
         let dir = tempdir().expect("tempdir");
         let script = dir.path().join("repl.sh");
         repl_script(&script, &dir.path().join("child.pid"));
 
-        let executor = spawn_executor(&script, Duration::from_millis(200));
+        let executor = spawn_executor(&script, TEST_STARTUP_TIMEOUT);
 
         assert!(executor.pid().expect("pid") > 0);
     }
@@ -1320,10 +1295,9 @@ mod tests {
     fn startup_prompt_on_stderr_is_supported() {
         let dir = tempdir().expect("tempdir");
         let script = dir.path().join("repl.sh");
-        repl_script(&script, &dir.path().join("child.pid"));
+        repl_script_with_options(&script, &dir.path().join("child.pid"), "stderr", "");
 
-        let executor =
-            spawn_executor_with_startup_stream(&script, Duration::from_millis(200), "stderr");
+        let executor = spawn_executor(&script, TEST_STARTUP_TIMEOUT);
 
         assert!(executor.pid().expect("pid") > 0);
     }
@@ -1333,9 +1307,9 @@ mod tests {
     fn startup_prompt_with_trailing_space_is_supported() {
         let dir = tempdir().expect("tempdir");
         let script = dir.path().join("repl.sh");
-        repl_script(&script, &dir.path().join("child.pid"));
+        repl_script_with_options(&script, &dir.path().join("child.pid"), "stdout", " ");
 
-        let executor = spawn_executor_with_prompt_suffix(&script, Duration::from_millis(200), " ");
+        let executor = spawn_executor(&script, TEST_STARTUP_TIMEOUT);
 
         assert!(executor.pid().expect("pid") > 0);
     }
@@ -1362,20 +1336,22 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn startup_reports_process_exit_before_prompt() {
-        let dir = tempdir().expect("tempdir");
-        let script = dir.path().join("exit.sh");
-        exit_before_prompt_script(&script);
+        let false_binary = Path::new("/usr/bin/false");
+        assert!(false_binary.exists(), "/usr/bin/false must exist on Unix");
 
         let err = InteractiveProcessExecutor::spawn(
-            InteractiveProcessRequest::new(script),
-            Duration::from_millis(200),
+            InteractiveProcessRequest::new(false_binary.to_path_buf()),
+            TEST_STARTUP_TIMEOUT,
         )
         .expect_err("startup must fail");
 
-        assert!(matches!(
-            err,
-            InteractiveProcessError::ProcessExited { exit_code: 9, .. }
-        ));
+        assert!(
+            matches!(
+                err,
+                InteractiveProcessError::ProcessExited { exit_code: 1, .. }
+            ),
+            "unexpected startup failure: {err:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -1387,14 +1363,17 @@ mod tests {
 
         let err = InteractiveProcessExecutor::spawn(
             InteractiveProcessRequest::new(script),
-            Duration::from_millis(200),
+            TEST_STARTUP_TIMEOUT,
         )
         .expect_err("startup prompt followed by exit must fail");
 
-        assert!(matches!(
-            err,
-            InteractiveProcessError::ProcessExited { exit_code: 0, .. }
-        ));
+        assert!(
+            matches!(
+                err,
+                InteractiveProcessError::ProcessExited { exit_code: 0, .. }
+            ),
+            "unexpected startup failure: {err:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -1403,10 +1382,10 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let script = dir.path().join("repl.sh");
         repl_script(&script, &dir.path().join("child.pid"));
-        let mut executor = spawn_executor(&script, Duration::from_millis(200));
+        let mut executor = spawn_executor(&script, TEST_STARTUP_TIMEOUT);
 
-        let first = run_command(&mut executor, "pid", Duration::from_millis(200));
-        let second = run_command(&mut executor, "pid", Duration::from_millis(200));
+        let first = run_command(&mut executor, "pid", TEST_COMMAND_TIMEOUT);
+        let second = run_command(&mut executor, "pid", TEST_COMMAND_TIMEOUT);
 
         assert_eq!(first.stdout.trim(), second.stdout.trim());
         assert_eq!(
@@ -1421,9 +1400,9 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let script = dir.path().join("repl.sh");
         repl_script(&script, &dir.path().join("child.pid"));
-        let mut executor = spawn_executor(&script, Duration::from_millis(200));
+        let mut executor = spawn_executor(&script, TEST_STARTUP_TIMEOUT);
 
-        let output = run_command(&mut executor, "split", Duration::from_millis(500));
+        let output = run_command(&mut executor, "split", TEST_COMMAND_TIMEOUT);
 
         assert_eq!(output.stdout, "chunk-one\n");
         assert!(output.stderr.is_empty());
@@ -1435,9 +1414,9 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let script = dir.path().join("repl.sh");
         repl_script(&script, &dir.path().join("child.pid"));
-        let mut executor = spawn_executor(&script, Duration::from_millis(200));
+        let mut executor = spawn_executor(&script, TEST_STARTUP_TIMEOUT);
 
-        let output = run_command(&mut executor, "prompt_newline", Duration::from_millis(200));
+        let output = run_command(&mut executor, "prompt_newline", TEST_COMMAND_TIMEOUT);
 
         assert_eq!(output.stdout, "line-before-prompt\n");
     }
@@ -1452,10 +1431,10 @@ mod tests {
 
         let mut executor = InteractiveProcessExecutor::spawn(
             InteractiveProcessRequest::new(script),
-            Duration::from_millis(200),
+            TEST_STARTUP_TIMEOUT,
         )
         .expect("spawn executor");
-        let output = run_command(&mut executor, "stderr_prompt", Duration::from_millis(200));
+        let output = run_command(&mut executor, "stderr_prompt", TEST_COMMAND_TIMEOUT);
 
         assert!(output.stdout.is_empty());
         assert_eq!(output.stderr, "warning\n");
@@ -1467,9 +1446,9 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let script = dir.path().join("repl.sh");
         repl_script(&script, &dir.path().join("child.pid"));
-        let mut executor = spawn_executor(&script, Duration::from_millis(200));
+        let mut executor = spawn_executor(&script, TEST_STARTUP_TIMEOUT);
 
-        let output = run_command(&mut executor, "literal_prompt", Duration::from_millis(200));
+        let output = run_command(&mut executor, "literal_prompt", TEST_COMMAND_TIMEOUT);
 
         assert_eq!(output.stdout, "payload 1C:EDT> text\nsecond line\n");
     }
@@ -1480,7 +1459,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let script = dir.path().join("repl.sh");
         repl_script(&script, &dir.path().join("child.pid"));
-        let mut executor = spawn_executor(&script, Duration::from_millis(200));
+        let mut executor = spawn_executor(&script, TEST_STARTUP_TIMEOUT);
 
         let err = executor
             .execute("hang", Duration::from_millis(50))
@@ -1502,16 +1481,19 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let script = dir.path().join("repl.sh");
         repl_script(&script, &dir.path().join("child.pid"));
-        let mut executor = spawn_executor(&script, Duration::from_millis(200));
+        let mut executor = spawn_executor(&script, TEST_STARTUP_TIMEOUT);
 
         let err = executor
-            .execute("die", Duration::from_secs(1))
+            .execute("die", TEST_COMMAND_TIMEOUT)
             .expect_err("child must exit");
 
-        assert!(matches!(
-            err,
-            InteractiveProcessError::ProcessExited { exit_code: 7, .. }
-        ));
+        assert!(
+            matches!(
+                err,
+                InteractiveProcessError::ProcessExited { exit_code: 7, .. }
+            ),
+            "unexpected command failure: {err:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -1520,10 +1502,10 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let script = dir.path().join("repl.sh");
         repl_script(&script, &dir.path().join("child.pid"));
-        let mut executor = spawn_executor(&script, Duration::from_millis(200));
+        let mut executor = spawn_executor(&script, TEST_STARTUP_TIMEOUT);
 
         let err = executor
-            .execute("prompt_exit", Duration::from_millis(200))
+            .execute("prompt_exit", TEST_COMMAND_TIMEOUT)
             .expect_err("prompt followed by exit must fail");
 
         assert!(matches!(
@@ -1538,7 +1520,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let script = dir.path().join("repl.sh");
         repl_script(&script, &dir.path().join("child.pid"));
-        let mut executor = spawn_executor(&script, Duration::from_millis(200));
+        let mut executor = spawn_executor(&script, TEST_STARTUP_TIMEOUT);
 
         let err = executor
             .execute("fake_prompt_tail", Duration::from_millis(50))
@@ -1555,11 +1537,10 @@ mod tests {
     fn command_prompt_with_trailing_space_is_supported() {
         let dir = tempdir().expect("tempdir");
         let script = dir.path().join("repl.sh");
-        repl_script(&script, &dir.path().join("child.pid"));
-        let mut executor =
-            spawn_executor_with_prompt_suffix(&script, Duration::from_millis(200), " ");
+        repl_script_with_options(&script, &dir.path().join("child.pid"), "stdout", " ");
+        let mut executor = spawn_executor(&script, TEST_STARTUP_TIMEOUT);
 
-        let output = run_command(&mut executor, "echo:ok", Duration::from_millis(200));
+        let output = run_command(&mut executor, "echo:ok", TEST_COMMAND_TIMEOUT);
 
         assert_eq!(output.stdout, "ok\n");
         assert_eq!(output.stderr, "");
@@ -1571,16 +1552,15 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let script = dir.path().join("repl.sh");
         repl_script(&script, &dir.path().join("child.pid"));
-        let mut executor = spawn_executor(&script, Duration::from_millis(200));
+        let mut executor = spawn_executor(&script, TEST_STARTUP_TIMEOUT);
         let pid = executor.pid().expect("pid");
 
         let err = executor
-            .execute("drop_pipes", Duration::from_millis(200))
+            .execute("drop_pipes", TEST_COMMAND_TIMEOUT)
             .expect_err("disconnect must fail");
         assert!(matches!(err, InteractiveProcessError::ProcessExited { .. }));
 
-        thread::sleep(Duration::from_millis(50));
-        assert!(!is_process_alive(pid));
+        assert!(wait_for_process_exit(pid), "child process {pid} must exit");
     }
 
     #[cfg(unix)]
@@ -1589,7 +1569,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let script = dir.path().join("repl.sh");
         repl_script(&script, &dir.path().join("child.pid"));
-        let mut executor = spawn_executor(&script, Duration::from_millis(200));
+        let mut executor = spawn_executor(&script, TEST_STARTUP_TIMEOUT);
 
         let outcome = executor
             .shutdown(Duration::from_millis(100))
@@ -1605,9 +1585,9 @@ mod tests {
         let script = dir.path().join("repl.sh");
         let child_pid_path = dir.path().join("child.pid");
         repl_script(&script, &child_pid_path);
-        let mut executor = spawn_executor(&script, Duration::from_millis(200));
+        let mut executor = spawn_executor(&script, TEST_STARTUP_TIMEOUT);
 
-        let _ = run_command(&mut executor, "spawn_child", Duration::from_millis(200));
+        let _ = run_command(&mut executor, "spawn_child", TEST_COMMAND_TIMEOUT);
         let child_pid: u32 = fs::read_to_string(&child_pid_path)
             .expect("child pid")
             .trim()
@@ -1616,9 +1596,10 @@ mod tests {
         assert!(is_process_alive(child_pid));
 
         executor.kill().expect("kill executor");
-        thread::sleep(Duration::from_millis(50));
-
-        assert!(!is_process_alive(child_pid));
+        assert!(
+            wait_for_process_exit(child_pid),
+            "background child process {child_pid} must exit"
+        );
     }
 
     #[cfg(unix)]
@@ -1627,14 +1608,14 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let script = dir.path().join("repl.sh");
         repl_script(&script, &dir.path().join("child.pid"));
-        let mut executor = spawn_executor(&script, Duration::from_millis(200));
+        let mut executor = spawn_executor(&script, TEST_STARTUP_TIMEOUT);
 
-        let output = run_command(&mut executor, "noisy", Duration::from_secs(2));
+        let output = run_command(&mut executor, "noisy", TEST_COMMAND_TIMEOUT);
 
         assert!(output.stdout.contains("stdout-1999"));
         assert!(output.stderr.contains("stderr-1999"));
 
-        let next = run_command(&mut executor, "echo:after", Duration::from_millis(200));
+        let next = run_command(&mut executor, "echo:after", TEST_COMMAND_TIMEOUT);
         assert_eq!(next.stdout, "after\n");
         assert!(next.stderr.is_empty());
     }

@@ -55,6 +55,7 @@ pub(in crate::use_cases) fn wait_for_readiness(
         .iter()
         .map(|tool| (*tool).to_owned())
         .collect::<Vec<_>>();
+    let mut has_successful_tools_response = false;
     let mut session: Option<McpProbeSession> = None;
 
     loop {
@@ -115,6 +116,7 @@ pub(in crate::use_cases) fn wait_for_readiness(
         };
         match list_mcp_tools(&client, url, active_session, deadline) {
             Ok(tools) => {
+                has_successful_tools_response = true;
                 let missing = missing_required_tools(&tools, required_tools);
                 if missing.is_empty() {
                     if let Some(session) = session.take() {
@@ -141,12 +143,14 @@ pub(in crate::use_cases) fn wait_for_readiness(
                 last_missing = missing;
             }
             Err(message) => {
-                last_message = format!("MCP endpoint did not become ready at {url}: {message}");
-                last_tools = Vec::new();
-                last_missing = required_tools
-                    .iter()
-                    .map(|tool| (*tool).to_owned())
-                    .collect();
+                if !has_successful_tools_response {
+                    last_message = format!("MCP endpoint did not become ready at {url}: {message}");
+                    last_tools = Vec::new();
+                    last_missing = required_tools
+                        .iter()
+                        .map(|tool| (*tool).to_owned())
+                        .collect();
+                }
                 if let Some(session) = session.take() {
                     delete_mcp_session(
                         &client,

@@ -29,6 +29,8 @@ jobs:
             target_os: Linux
           - os: windows-latest
             target_os: Windows
+          - os: macos-latest
+            target_os: Darwin
     env:
       V8TR_CI_TARGET_OS: ${{ matrix.target_os }}
     steps:

@@ -4,9 +4,17 @@ mod support;
 
 use serde_json::Value;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
-use support::{free_tcp_port, temp_workspace, v8_runner_command, wait_until};
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
+use support::{temp_workspace, v8_runner_command};
+
+const SLEEPING_RESPONSE_DELAY: Duration = Duration::from_secs(5);
 
 fn write_minimal_config(root: &Path) -> PathBuf {
     write_minimal_config_with_builder(root, "DESIGNER")
@@ -48,46 +56,143 @@ fn write_config_with_execution_timeout(root: &Path, timeout_ms: u64) -> PathBuf 
     config_path
 }
 
-fn fixture_server(root: &Path, port: u16) -> Child {
-    let script = format!(
-        "import http.server, socketserver\nclass Handler(http.server.SimpleHTTPRequestHandler):\n    def do_GET(self):\n        redirects = [('/redirect302/', 302), ('/redirect/', 301)]\n        for prefix, status in redirects:\n            if self.path.startswith(prefix):\n                self.send_response(status)\n                self.send_header('Location', self.path[len(prefix) - 1:])\n                self.end_headers()\n                return\n        super().do_GET()\nsocketserver.TCPServer.allow_reuse_address = True\nwith socketserver.TCPServer(('127.0.0.1', {port}), Handler) as httpd:\n    httpd.serve_forever()\n"
-    );
-    Command::new("python3")
-        .arg("-c")
-        .arg(script)
-        .current_dir(root)
-        .spawn()
-        .expect("fixture server")
-}
-
-fn sleeping_server(port: u16) -> Child {
-    let script = format!(
-        "import http.server, socketserver, time\nclass Handler(http.server.BaseHTTPRequestHandler):\n    def do_GET(self):\n        time.sleep(5)\n        self.send_response(200)\n        self.end_headers()\n        self.wfile.write(b'{{}}')\nsocketserver.TCPServer.allow_reuse_address = True\nwith socketserver.TCPServer(('127.0.0.1', {port}), Handler) as httpd:\n    httpd.serve_forever()\n"
-    );
-    Command::new("python3")
-        .arg("-c")
-        .arg(script)
-        .spawn()
-        .expect("sleeping server")
-}
-
 struct FixtureServer {
-    child: Child,
+    address: std::net::SocketAddr,
+    shutdown: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl FixtureServer {
-    fn start(root: &Path, port: u16) -> Self {
-        Self {
-            child: fixture_server(root, port),
-        }
+    fn start(root: &Path) -> (Self, u16) {
+        Self::start_with_mode(Some(root.to_path_buf()), Duration::ZERO)
+    }
+
+    fn start_sleeping() -> (Self, u16) {
+        Self::start_with_mode(None, SLEEPING_RESPONSE_DELAY)
+    }
+
+    fn start_with_mode(root: Option<PathBuf>, response_delay: Duration) -> (Self, u16) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind fixture server");
+        let address = listener.local_addr().expect("fixture server address");
+        listener
+            .set_nonblocking(true)
+            .expect("fixture server nonblocking");
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let thread_shutdown = shutdown.clone();
+        let thread = thread::spawn(move || {
+            while !thread_shutdown.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        if stream.set_nonblocking(false).is_err() {
+                            continue;
+                        }
+                        if !response_delay.is_zero() {
+                            thread::sleep(response_delay);
+                            if let Err(error) =
+                                write_http_response(&mut stream, "200 OK", &[], b"{}")
+                            {
+                                eprintln!("sleeping fixture response failed: {error}");
+                            }
+                        } else if let Some(root) = root.as_deref() {
+                            if let Err(error) = serve_fixture_request(&mut stream, root) {
+                                eprintln!("fixture response failed: {error}");
+                            }
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (
+            Self {
+                address,
+                shutdown,
+                thread: Some(thread),
+            },
+            address.port(),
+        )
     }
 }
 
 impl Drop for FixtureServer {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.shutdown.store(true, Ordering::Release);
+        let _ = TcpStream::connect(self.address);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
+}
+
+fn serve_fixture_request(stream: &mut TcpStream, root: &Path) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    let mut request = Vec::with_capacity(1024);
+    let mut chunk = [0_u8; 1024];
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&chunk[..read]);
+        if request.len() > 16 * 1024 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "fixture HTTP request headers exceed 16 KiB",
+            ));
+        }
+    }
+    if request.is_empty() {
+        return Ok(());
+    }
+    let request = String::from_utf8_lossy(&request);
+    let path = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("/");
+    for (prefix, status) in [
+        ("/redirect302/", "302 Found"),
+        ("/redirect/", "301 Moved Permanently"),
+    ] {
+        if let Some(suffix) = path.strip_prefix(prefix) {
+            let location = format!("/{suffix}");
+            return write_http_response(stream, status, &[("Location", location.as_str())], &[]);
+        }
+    }
+    let relative = path
+        .split('?')
+        .next()
+        .unwrap_or(path)
+        .trim_start_matches('/');
+    let file_path = root.join(relative);
+    match fs::read(file_path) {
+        Ok(body) => write_http_response(stream, "200 OK", &[], &body),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            write_http_response(stream, "404 Not Found", &[], b"not found")
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn write_http_response(
+    stream: &mut TcpStream,
+    status: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> std::io::Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Length: {}\r\n",
+        body.len()
+    )?;
+    for (name, value) in headers {
+        write!(stream, "{name}: {value}\r\n")?;
+    }
+    write!(stream, "Connection: close\r\n\r\n")?;
+    stream.write_all(body)
 }
 
 fn write_http_fixture(root: &Path, port: u16) {
@@ -205,14 +310,8 @@ fn tools_download_sources_writes_source_set_and_local_tool_settings() {
     let dir = temp_workspace();
     let config_path = write_minimal_config(dir.path());
     let server_root = dir.path().join("server");
-    let port = free_tcp_port();
+    let (_server, port) = FixtureServer::start(&server_root);
     write_http_fixture(&server_root, port);
-    let _server = FixtureServer::start(&server_root, port);
-    assert!(wait_until(
-        std::time::Duration::from_secs(5),
-        std::time::Duration::from_millis(50),
-        || std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
-    ));
 
     let output = v8_runner_command()
         .env(
@@ -373,14 +472,8 @@ fn tools_download_sources_rejects_legacy_tests_markers_outside_build() {
     .expect("legacy nested marker");
 
     let server_root = dir.path().join("server");
-    let port = free_tcp_port();
+    let (_server, port) = FixtureServer::start(&server_root);
     write_http_fixture(&server_root, port);
-    let _server = FixtureServer::start(&server_root, port);
-    assert!(wait_until(
-        std::time::Duration::from_secs(5),
-        std::time::Duration::from_millis(50),
-        || std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
-    ));
 
     let output = v8_runner_command()
         .env(
@@ -421,14 +514,8 @@ fn tools_download_repairs_pending_vanessa_configuration() {
     let dir = temp_workspace();
     let config_path = write_config_with_pending_va(dir.path());
     let server_root = dir.path().join("server");
-    let port = free_tcp_port();
+    let (_server, port) = FixtureServer::start(&server_root);
     write_http_fixture(&server_root, port);
-    let _server = FixtureServer::start(&server_root, port);
-    assert!(wait_until(
-        std::time::Duration::from_secs(5),
-        std::time::Duration::from_millis(50),
-        || std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
-    ));
 
     let output = v8_runner_command()
         .env(
@@ -463,14 +550,8 @@ fn tools_download_follows_latest_release_and_asset_redirects() {
     let dir = temp_workspace();
     let config_path = write_minimal_config(dir.path());
     let server_root = dir.path().join("server");
-    let port = free_tcp_port();
+    let (_server, port) = FixtureServer::start(&server_root);
     write_http_fixture_with_redirects(&server_root, port, true);
-    let _server = FixtureServer::start(&server_root, port);
-    assert!(wait_until(
-        std::time::Duration::from_secs(5),
-        std::time::Duration::from_millis(50),
-        || std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
-    ));
 
     let output = v8_runner_command()
         .env(
@@ -505,14 +586,8 @@ fn tools_download_follows_302_redirects() {
     let dir = temp_workspace();
     let config_path = write_minimal_config(dir.path());
     let server_root = dir.path().join("server");
-    let port = free_tcp_port();
+    let (_server, port) = FixtureServer::start(&server_root);
     write_http_fixture_with_redirect_prefix(&server_root, port, "/redirect302");
-    let _server = FixtureServer::start(&server_root, port);
-    assert!(wait_until(
-        std::time::Duration::from_secs(5),
-        std::time::Duration::from_millis(50),
-        || std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
-    ));
 
     let output = v8_runner_command()
         .env(
@@ -544,14 +619,8 @@ fn tools_download_artifacts_keeps_yaxunit_out_of_source_sets() {
     let dir = temp_workspace();
     let config_path = write_minimal_config(dir.path());
     let server_root = dir.path().join("server");
-    let port = free_tcp_port();
+    let (_server, port) = FixtureServer::start(&server_root);
     write_http_fixture(&server_root, port);
-    let _server = FixtureServer::start(&server_root, port);
-    assert!(wait_until(
-        std::time::Duration::from_secs(5),
-        std::time::Duration::from_millis(50),
-        || std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
-    ));
 
     let output = v8_runner_command()
         .env(
@@ -584,21 +653,15 @@ fn tools_download_artifacts_keeps_yaxunit_out_of_source_sets() {
 #[test]
 fn tools_download_artifacts_handles_large_assets_without_pipe_deadlock() {
     let dir = temp_workspace();
-    let config_path = write_config_with_execution_timeout(dir.path(), 3_000);
+    let config_path = write_config_with_execution_timeout(dir.path(), 15_000);
     let server_root = dir.path().join("server");
-    let port = free_tcp_port();
+    let (_server, port) = FixtureServer::start(&server_root);
     write_http_fixture(&server_root, port);
     fs::write(
         server_root.join("assets").join("YAxUnit-25.12.cfe"),
         vec![b'x'; 8 * 1024 * 1024],
     )
     .expect("large yax asset");
-    let _server = FixtureServer::start(&server_root, port);
-    assert!(wait_until(
-        std::time::Duration::from_secs(5),
-        std::time::Duration::from_millis(50),
-        || std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
-    ));
 
     let output = v8_runner_command()
         .env(
@@ -639,14 +702,8 @@ fn tools_download_sources_refuses_to_replace_unmanaged_tests_dir() {
     fs::write(&user_file, "user content").expect("user test");
 
     let server_root = dir.path().join("server");
-    let port = free_tcp_port();
+    let (_server, port) = FixtureServer::start(&server_root);
     write_http_fixture(&server_root, port);
-    let _server = FixtureServer::start(&server_root, port);
-    assert!(wait_until(
-        std::time::Duration::from_secs(5),
-        std::time::Duration::from_millis(50),
-        || std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
-    ));
 
     let output = v8_runner_command()
         .env(
@@ -716,14 +773,8 @@ fn tools_download_force_refuses_to_replace_unmanaged_tool_file() {
     fs::write(&user_file, "user epf").expect("user epf");
 
     let server_root = dir.path().join("server");
-    let port = free_tcp_port();
+    let (_server, port) = FixtureServer::start(&server_root);
     write_http_fixture(&server_root, port);
-    let _server = FixtureServer::start(&server_root, port);
-    assert!(wait_until(
-        std::time::Duration::from_secs(5),
-        std::time::Duration::from_millis(50),
-        || std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
-    ));
 
     let output = v8_runner_command()
         .env(
@@ -757,13 +808,7 @@ fn tools_download_force_refuses_to_replace_unmanaged_tool_file() {
 fn tools_download_respects_execution_timeout_during_http_download() {
     let dir = temp_workspace();
     let config_path = write_config_with_execution_timeout(dir.path(), 200);
-    let port = free_tcp_port();
-    let mut server = sleeping_server(port);
-    assert!(wait_until(
-        std::time::Duration::from_secs(5),
-        std::time::Duration::from_millis(50),
-        || std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
-    ));
+    let (_server, port) = FixtureServer::start_sleeping();
 
     let started = std::time::Instant::now();
     let output = v8_runner_command()
@@ -781,19 +826,13 @@ fn tools_download_respects_execution_timeout_during_http_download() {
         .output()
         .expect("run command");
     let elapsed = started.elapsed();
-    let _ = server.kill();
-    let _ = server.wait();
-
     assert!(
         !output.status.success(),
         "stdout={}\nstderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        elapsed < std::time::Duration::from_secs(2),
-        "elapsed={elapsed:?}"
-    );
+    assert!(elapsed < SLEEPING_RESPONSE_DELAY, "elapsed={elapsed:?}");
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),

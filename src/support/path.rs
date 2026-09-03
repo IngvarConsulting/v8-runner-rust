@@ -228,7 +228,13 @@ mod tests {
         let resolved =
             nearest_existing_canonical_path(&root.join("nested").join("target")).expect("resolved");
 
-        assert_eq!(resolved, root.join("nested").join("target"));
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(&root)
+                .expect("canonical root")
+                .join("nested")
+                .join("target")
+        );
     }
 
     #[cfg(unix)]

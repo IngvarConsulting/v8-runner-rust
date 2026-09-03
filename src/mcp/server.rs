@@ -1184,15 +1184,12 @@ mod tests {
         )
         .expect("server");
         let execution_telemetry = server.telemetry.execution();
-
-        let first = tokio::spawn(run_probe_call(
-            server.clone(),
-            McpTool::RunAllTests,
-            Arc::new(AtomicUsize::new(0)),
-            Arc::new(AtomicUsize::new(0)),
-            CancellationToken::new(),
-        ));
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        let permit = server
+            .concurrency_limit
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("reserve the only execution slot");
 
         let started = Arc::new(AtomicUsize::new(0));
         let started_clone = started.clone();
@@ -1208,17 +1205,18 @@ mod tests {
             )
             .await
             .expect_err("queued call must time out");
+        drop(permit);
 
-        first.await.expect("first task join").expect("first call");
-
-        assert_eq!(
-            error,
-            execution_error(
-                ErrorReason::Timeout,
-                ExecutionStage::Queued,
-                Some(Duration::from_millis(20))
-            )
-        );
+        assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        let data = error.data.as_ref().expect("queued timeout error data");
+        assert_eq!(data["reason"], "timeout");
+        assert_eq!(data["stage"], "queued");
+        assert_eq!(data["timeoutMs"], 20);
+        let wire = serde_json::to_value(&error).expect("serialize MCP error data");
+        assert_eq!(wire["code"], rmcp::model::ErrorCode::INTERNAL_ERROR.0);
+        assert_eq!(wire["data"]["reason"], "timeout");
+        assert_eq!(wire["data"]["stage"], "queued");
+        assert_eq!(wire["data"]["timeoutMs"], 20);
         assert_eq!(started.load(Ordering::SeqCst), 0);
         assert_eq!(execution_telemetry.snapshot().timeout_total, 1);
     }
