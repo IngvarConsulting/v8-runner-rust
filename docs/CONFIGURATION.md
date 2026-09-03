@@ -258,8 +258,9 @@ tests:
 
 Для обычных project-команд список должен содержать поддерживаемый source-set. Исключение —
 `infobase configuration export` и `infobase dump`: они используют только ИБ и принимают
-`source-set: []`. Это command-specific validation, а не ослабление `build`, source `dump`,
-`convert`, `make` или остальных project workflows.
+отсутствующий `source-set` как пустой список (явный `source-set: []` равнозначен). Это
+command-specific validation, а не ослабление `build`, source `dump`, `convert`, `make` или
+остальных project workflows.
 
 Корень runtime state:
 

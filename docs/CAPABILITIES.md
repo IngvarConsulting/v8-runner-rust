@@ -321,7 +321,7 @@ v8-runner infobase dump --output <FILE.dt> [--dry-run]
   `evidence`; `argv_tested` не выдаётся за live proof.
 - Безопасный IBCMD path требует проверки отсутствия активных сеансов.
 - Обе операции требуют существующий `v8project.yaml`, но используют infobase-only validation:
-  `source-set: []` допустим, а отсутствующие или сломанные project sources не блокируют чтение ИБ.
+  отсутствующий `source-set` равнозначен `source-set: []`, а сломанные project sources не блокируют чтение ИБ.
   Build/source/test/EDT/client-MCP настройки для этих команд не валидируются.
 
 ### `load`

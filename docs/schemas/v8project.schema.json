@@ -640,6 +640,7 @@
       "description": "MCP server transport and execution settings."
     },
     "source-set": {
+      "default": [],
       "description": "Project source sets to build, test, dump, or materialize.",
       "items": {
         "$ref": "#/$defs/SourceSetSchema"
@@ -661,8 +662,7 @@
   },
   "required": [
     "workPath",
-    "infobase",
-    "source-set"
+    "infobase"
   ],
   "title": "MainConfigSchema",
   "type": "object"
