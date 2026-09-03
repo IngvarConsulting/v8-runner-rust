@@ -110,8 +110,11 @@ fn start_fake_mcp_server(tools: &[&str]) -> (u16, JoinHandle<()>) {
                     Some("fake-session"),
                     "DELETE must reuse the initialized MCP session"
                 );
-                write!(stream, "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n",)
-                    .expect("write delete response");
+                write!(
+                    stream,
+                    "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .expect("write delete response");
                 break;
             }
             let request = http_request.body.expect("json rpc body");
@@ -144,8 +147,11 @@ fn start_fake_mcp_server(tools: &[&str]) -> (u16, JoinHandle<()>) {
                         "notifications/initialized must use the initialized MCP session"
                     );
                     initialized_notification_seen = true;
-                    write!(stream, "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n",)
-                        .expect("write initialized response");
+                    write!(
+                        stream,
+                        "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .expect("write initialized response");
                     continue;
                 }
                 _ => json!({}),
@@ -173,7 +179,7 @@ fn start_fake_mcp_server(tools: &[&str]) -> (u16, JoinHandle<()>) {
             .expect("response json");
             write!(
                 stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: fake-session\r\nContent-Length: {}\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: fake-session\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             )
             .expect("write response headers");

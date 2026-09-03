@@ -1414,6 +1414,7 @@ OUT\n\
             &script,
             "set -eu\n\
              prompt() { printf '1C:EDT>'; }\n\
+             export_count=0\n\
              prompt\n\
              while IFS= read -r line; do\n\
                eval \"set -- $line\"\n\
@@ -1424,7 +1425,8 @@ OUT\n\
                    prompt\n\
                    ;;\n\
                  export)\n\
-                   sleep 0.07\n\
+                   export_count=$((export_count + 1))\n\
+                   if [ \"$export_count\" -eq 1 ]; then sleep 0.05; else sleep 0.6; fi\n\
                    prompt\n\
                    ;;\n\
                  *)\n\
@@ -1442,7 +1444,7 @@ OUT\n\
         )
         .expect("interactive dsl")
         .with_execution_policy(ProcessExecutionPolicy::new(
-            Some(Duration::from_millis(120)),
+            Some(Duration::from_millis(400)),
             CancellationToken::new(),
             ProcessInterruptionSafety::GracefulThenKill,
         ));
@@ -1537,7 +1539,7 @@ OUT\n\
                    prompt\n\
                    ;;\n\
                  export)\n\
-                   sleep 0.1\n\
+                   sleep 0.5\n\
                    prompt\n\
                    ;;\n\
                  *)\n\
@@ -1555,7 +1557,7 @@ OUT\n\
         )
         .expect("interactive dsl")
         .with_execution_policy(ProcessExecutionPolicy::new(
-            Some(Duration::from_millis(50)),
+            Some(Duration::from_millis(250)),
             CancellationToken::new(),
             ProcessInterruptionSafety::CriticalNonAbortable,
         ));
