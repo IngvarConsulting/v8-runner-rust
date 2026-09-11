@@ -4,13 +4,21 @@ This file tracks open implementation work only.
 
 ## Current Status
 
-- Open tasks as of `2026-09-02`: 1.
+- Open tasks as of `2026-09-11`: 3.
 
 ## Open Tasks
 
 1. Перевести IBCMD DT provider из `experimental` в `implemented` только после реализации и live
    proof проверяемого no-active-connections или exclusive-access preflight; readiness при этом
-   остаётся отдельной проверкой конкретного окружения.
+   остаётся отдельной проверкой конкретного окружения. Это относится и к DT export, и к
+   `infobase restore`; адаптер IBCMD для загрузки добавляется вместе с preflight, а не раньше.
+2. Решить, как выглядит принудительное завершение сеансов для `infobase restore`: у IBCMD есть
+   `--force` и `--session-terminate-message`, у Designer `/RestoreIB` такого ключа нет. Нужен
+   публичный контракт расхождения возможностей, а не ключ, работающий у одного провайдера.
+3. Переименовать `Export*`-типы домена `infobase_export` в нейтральные к направлению: модуль
+   описывает перенос ИБ в обе стороны, а `infobase restore` переиспользует `ExportIntent`,
+   `ExportProvider` и `ExportTargetState`. Переименование не меняет провод (значения на нём
+   уже нейтральны), но затрагивает много файлов, поэтому идёт отдельной задачей.
 
 ## Rules
 

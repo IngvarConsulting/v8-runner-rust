@@ -9,7 +9,8 @@ use crate::domain::infobase_export::{
     ConfigurationState, ConfigurationSubject, ExportConfigurationPackageRequest,
     ExportConfigurationPackageResult, ExportInfobaseSnapshotRequest, ExportInfobaseSnapshotResult,
     ExportPhase, ExportProvider, ExportProviderDecision, ExportTargetState, ProviderCandidate,
-    ProviderEvidence, ProviderImplementation, ProviderReadiness,
+    ProviderEvidence, ProviderImplementation, ProviderReadiness, RestoreInfobaseSnapshotRequest,
+    RestoreInfobaseSnapshotResult, RestoreTargetMode,
 };
 use crate::platform::designer::DesignerDsl;
 use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
@@ -365,6 +366,263 @@ pub fn execute_infobase_snapshot(
     Ok(result)
 }
 
+/// Validates the restore request without touching the infobase.
+///
+/// The DT suffix and the readable input are checked here, before provider selection,
+/// so a typo never reaches a process that would replace an infobase.
+pub(crate) fn validate_restore_request(
+    request: &RestoreInfobaseSnapshotRequest,
+) -> Result<(), AppError> {
+    validate_output_suffix(&request.input, "dt")?;
+    let metadata = std::fs::symlink_metadata(&request.input).map_err(|error| {
+        AppError::Validation(format!(
+            "--input '{}' is not readable: {error}",
+            request.input.display()
+        ))
+    })?;
+    if !metadata.file_type().is_file() || metadata.len() == 0 {
+        return Err(AppError::Validation(format!(
+            "--input '{}' is not a non-empty regular file",
+            request.input.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Refuses a restore whose requested target mode does not match the observed infobase.
+///
+/// This runs before provider selection and again under the workspace lock, because the
+/// provider replaces the infobase in place and no staging step can undo it.
+pub(crate) fn validate_restore_target(
+    config: &AppConfig,
+    mode: RestoreTargetMode,
+) -> Result<bool, AppError> {
+    let target_present = observe_target_infobase(config)?;
+    match (mode, target_present) {
+        (RestoreTargetMode::Create, true) => Err(AppError::Validation(
+            "--create was requested but the target infobase already exists; pass --replace to discard its data"
+                .to_owned(),
+        )),
+        (RestoreTargetMode::Replace, false) => Err(AppError::Validation(
+            "--replace was requested but the target infobase does not exist; pass --create to create it"
+                .to_owned(),
+        )),
+        _ => Ok(target_present),
+    }
+}
+
+pub fn prepare_infobase_restore(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    request: &RestoreInfobaseSnapshotRequest,
+) -> Result<PreparedExportProvider, UseCaseFailure<RestoreInfobaseSnapshotResult>> {
+    if let Err(error) = validate_restore_request(request) {
+        let decision = ExportProviderDecision::unavailable(
+            "provider selection was not attempted because the request is invalid",
+            Vec::new(),
+        );
+        let result = RestoreInfobaseSnapshotResult::new(request.clone(), decision);
+        return Err(restore_failure(
+            context,
+            error,
+            result,
+            ExportPhase::Validation,
+        ));
+    }
+
+    if let Err(error) = validate_restore_target(config, request.target_mode) {
+        let decision = ExportProviderDecision::unavailable(
+            "provider selection was not attempted because the target mode does not match the infobase",
+            Vec::new(),
+        );
+        let result = RestoreInfobaseSnapshotResult::new(request.clone(), decision);
+        return Err(restore_failure(
+            context,
+            error,
+            result,
+            ExportPhase::Validation,
+        ));
+    }
+
+    let intent = ExportIntent::SnapshotRestore {
+        expects_absent_target: request.target_mode == RestoreTargetMode::Create,
+    };
+    match select_provider(context, config, intent) {
+        Ok(prepared) => Ok(prepared),
+        Err((error, decision)) => {
+            let result = RestoreInfobaseSnapshotResult::new(request.clone(), decision);
+            Err(restore_failure(
+                context,
+                error,
+                result,
+                ExportPhase::ProviderSelection,
+            ))
+        }
+    }
+}
+
+pub fn preview_infobase_restore(
+    _context: &ExecutionContext,
+    _config: &AppConfig,
+    request: &RestoreInfobaseSnapshotRequest,
+    prepared: &PreparedExportProvider,
+) -> UseCaseResult<RestoreInfobaseSnapshotResult> {
+    let mut result =
+        RestoreInfobaseSnapshotResult::new(request.clone(), prepared.selection().clone());
+    result.mark_preview();
+    Ok(result)
+}
+
+/// Loads the infobase from a DT file.
+///
+/// There is no staging step here, unlike an export: the provider writes straight into
+/// the infobase, so the target mode checked during provider selection is the only
+/// protection the caller gets, and it is checked again after the workspace lock.
+pub fn execute_infobase_restore(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    request: &RestoreInfobaseSnapshotRequest,
+    prepared: &PreparedExportProvider,
+) -> UseCaseResult<RestoreInfobaseSnapshotResult> {
+    let mut result =
+        RestoreInfobaseSnapshotResult::new(request.clone(), prepared.selection.clone());
+    if let Err(error) = validate_restore_request(request) {
+        return Err(restore_failure(
+            context,
+            error,
+            result,
+            ExportPhase::Validation,
+        ));
+    }
+    let target_present = match validate_restore_target(config, request.target_mode) {
+        Ok(present) => present,
+        Err(error) => {
+            return Err(restore_failure(
+                context,
+                error,
+                result,
+                ExportPhase::ResolveTarget,
+            ))
+        }
+    };
+    if let Some(error) = interruption_before_publish(context, "infobase DT restore") {
+        return Err(restore_failure(
+            context,
+            error,
+            result,
+            ExportPhase::BeforePublication,
+        ));
+    }
+
+    let provider_started = Instant::now();
+    let platform_result = match run_restore_provider(
+        context,
+        config,
+        prepared.provider,
+        &prepared.executable,
+        &request.input,
+    ) {
+        Ok(platform_result) => platform_result,
+        Err(error) => {
+            result.target_state = ExportTargetState::Uncertain;
+            record_uncertain_target_warning(&mut result.warnings, result.target_state);
+            return Err(restore_failure(
+                context,
+                error,
+                result,
+                ExportPhase::ProviderCommand,
+            ));
+        }
+    };
+    if let Err(error) = validate_platform_success(&platform_result) {
+        // The provider may have replaced part of the data before failing, and nothing
+        // here can tell how much, so the target state is reported as uncertain.
+        result.target_state = ExportTargetState::Uncertain;
+        record_uncertain_target_warning(&mut result.warnings, result.target_state);
+        return Err(restore_failure(
+            context,
+            error,
+            result,
+            ExportPhase::ProviderCommand,
+        ));
+    }
+    result.steps.push(
+        StepResult::succeeded(
+            ExportPhase::ProviderCommand.as_str(),
+            ExportPhase::ProviderCommand.kind(),
+            provider_started.elapsed().as_millis() as u64,
+        )
+        .with_target(request.input.display().to_string()),
+    );
+    record_deferred_process_interruption(
+        &platform_result,
+        "provider command",
+        "infobase DT restore",
+        &mut result.execution,
+        &mut result.warnings,
+    );
+    result.restored = true;
+    result.target_state = if target_present {
+        ExportTargetState::Replaced
+    } else {
+        ExportTargetState::Created
+    };
+    result.mark_succeeded();
+    Ok(result)
+}
+
+/// Reports whether the configured target infobase already holds data.
+///
+/// Only a file infobase can be observed without a process; for a server infobase the
+/// restore mode is taken on the caller's word and the platform has the final say.
+fn observe_target_infobase(config: &AppConfig) -> Result<bool, AppError> {
+    let connection = config.v8_connection();
+    let Some(file_path) = connection.file_path() else {
+        return Ok(true);
+    };
+    Ok(Path::new(file_path).join("1Cv8.1CD").is_file())
+}
+
+fn run_restore_provider(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    provider: ExportProvider,
+    executable: &Path,
+    source_file: &Path,
+) -> Result<PlatformCommandResult, AppError> {
+    match provider {
+        ExportProvider::DesignerBatch => {
+            let runner = crate::platform::process::ProcessExecutor;
+            let log = provider_log_path(config, "infobase-restore")?;
+            DesignerDsl::new(
+                executable.to_path_buf(),
+                config.v8_connection(),
+                &runner,
+                Some(log),
+            )
+            .with_execution_policy(
+                context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+            )
+            .restore_infobase(source_file)
+            .map_err(AppError::from)
+        }
+        ExportProvider::IbcmdProcess => Err(AppError::CapabilityUnavailable(
+            "IBCMD DT restore is experimental and cannot be dispatched".to_owned(),
+        )),
+    }
+}
+
+fn restore_failure(
+    context: &ExecutionContext,
+    error: AppError,
+    mut result: RestoreInfobaseSnapshotResult,
+    phase: ExportPhase,
+) -> UseCaseFailure<RestoreInfobaseSnapshotResult> {
+    record_execution_failure(context, &error, phase, &mut result.execution);
+    result.steps.push(failed_step(phase, &error));
+    UseCaseFailure::with_payload(infobase_use_case_error(error), result)
+}
+
 pub(crate) fn validate_configuration_output(
     subject: &ConfigurationSubject,
     output: &Path,
@@ -528,6 +786,7 @@ pub fn preview_infobase_snapshot(
 enum ExportIntent {
     Configuration,
     Snapshot,
+    SnapshotRestore { expects_absent_target: bool },
 }
 
 fn select_provider(
@@ -573,7 +832,7 @@ fn select_provider(
         }
 
         let utility = provider_utility(provider);
-        match readiness(config, &mut utilities, provider, utility) {
+        match readiness(config, &mut utilities, intent, provider, utility) {
             Ok(executable) => {
                 candidates.push(ProviderCandidate::new(
                     provider,
@@ -653,6 +912,16 @@ fn capability(
             ProviderEvidence::Documented,
             "IBCMD DT export is disabled until an exclusive-access preflight is implemented",
         ),
+        (ExportIntent::SnapshotRestore { .. }, ExportProvider::DesignerBatch) => (
+            ProviderImplementation::Implemented,
+            ProviderEvidence::LiveVerified,
+            "Designer DT restore is implemented and was verified against a live 8.3.27 file infobase",
+        ),
+        (ExportIntent::SnapshotRestore { .. }, ExportProvider::IbcmdProcess) => (
+            ProviderImplementation::Experimental,
+            ProviderEvidence::LiveVerified,
+            "IBCMD DT restore runs but stays experimental until an exclusive-access preflight is implemented",
+        ),
     }
 }
 
@@ -666,10 +935,16 @@ fn provider_utility(provider: ExportProvider) -> UtilityType {
 fn readiness(
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
+    intent: ExportIntent,
     provider: ExportProvider,
     utility: UtilityType,
 ) -> Result<PathBuf, String> {
-    validate_file_infobase_readiness(config)?;
+    match intent {
+        ExportIntent::SnapshotRestore {
+            expects_absent_target: true,
+        } => validate_restore_target_connection(config)?,
+        _ => validate_file_infobase_readiness(config)?,
+    }
     if provider == ExportProvider::IbcmdProcess {
         IbcmdConnection::from_infobase(&config.infobase)
             .map_err(|error| format!("connection is not ready for IBCMD: {error}"))?;
@@ -699,6 +974,19 @@ fn validate_file_infobase_readiness(config: &AppConfig) -> Result<(), String> {
         "file infobase is not ready: '{}' is missing or is not a file",
         database_file.display()
     ))
+}
+
+/// Readiness for a restore that creates its target: only the connection shape can be
+/// judged here, because the infobase is expected not to exist yet. Whether the observed
+/// target matches the requested mode is a request question, refused during validation.
+fn validate_restore_target_connection(config: &AppConfig) -> Result<(), String> {
+    if config.v8_connection().has_supported_shape() {
+        return Ok(());
+    }
+    Err(
+        "infobase connection is not ready: expected non-empty File=..., Srvr=...;Ref=..., or /S server\\ref"
+            .to_owned(),
+    )
 }
 
 #[derive(Debug)]

@@ -41,6 +41,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `load` | `format=DESIGNER` + `builder=DESIGNER` | Загрузка `.cf` / `.cfe` артефактов в ИБ |
 | `make` / `artifacts` | `format=DESIGNER` + `builder=DESIGNER` | Экспорт `.cf` / `.cfe` и публикация `.epf` / `.erf` |
 | `syntax` | `format=DESIGNER` или `format=EDT` | Designer checks для `DESIGNER`, EDT `validate` для `EDT` |
+| `infobase restore` | Не зависит от `format`; `builder` задаёт предпочтение | Загрузка полной ИБ из DT; обязателен `--create` или `--replace` |
 | `launch` | Не зависит от `format` | Прямой запуск 1C utility по позиционному mode |
 | MCP | `stdio` и `streamable HTTP` | Публикует 8 инструментов, уже более узкая поверхность, чем CLI |
 
@@ -323,6 +324,37 @@ v8-runner infobase dump --output <FILE.dt> [--dry-run]
 - Обе операции требуют существующий `v8project.yaml`, но используют infobase-only validation:
   отсутствующий `source-set` равнозначен `source-set: []`, а сломанные project sources не блокируют чтение ИБ.
   Build/source/test/EDT/client-MCP настройки для этих команд не валидируются.
+
+### `infobase restore`
+
+```bash
+v8-runner infobase restore --input <FILE.dt> --replace [--dry-run]
+v8-runner infobase restore --input <FILE.dt> --create  [--dry-run]
+```
+
+- Парная операция к `infobase dump`: загружает полную ИБ вместе с данными из DT-файла.
+- Ровно один режим цели обязателен. Ни один провайдер не спрашивает: Designer создаёт
+  отсутствующую ИБ и перезаписывает существующую, IBCMD перезаписывает существующую.
+  Поэтому шлюз ставит runner, и режим, не совпавший с наблюдаемой целью, — отказ
+  `invalid_argument`, а не молчаливый переход к другому случаю:
+  `--create` при существующей ИБ и `--replace` при отсутствующей отклоняются.
+- Для файловой ИБ наличие цели определяется файлом `<infobase>/1Cv8.1CD`. Серверную ИБ без
+  процесса наблюдать нельзя, поэтому там режим принимается на слово вызывающего, а последнее
+  слово остаётся за платформой.
+- Проверка цели идёт до выбора провайдера и повторяется под workspace lock: провайдер пишет
+  прямо в ИБ, staging-шага здесь нет, и отменить загрузку нечем.
+- `--input` проверяется до выбора провайдера: суффикс `.dt` и читаемый непустой файл.
+- Implemented provider — Designer (`/RestoreIB`), подтверждён живым прогоном на 8.3.27.
+  IBCMD `infobase restore` тоже запускается вживую, но остаётся `experimental`, пока нет
+  проверки отсутствия активных сеансов — как и IBCMD DT export.
+- `target_state` различает `created` и `replaced`. Если провайдер упал, `target_state` —
+  `uncertain`: сколько данных он успел заменить, отсюда не видно.
+- `restored=true` означает, что провайдер сообщил о завершённой загрузке.
+- `--dry-run` проверяет запрос и цель, выбирает провайдера и возвращает `mode=preview`,
+  `provider_dispatched=false`, `restored=false` и compact `plan` с `provider`, `input` и
+  `target_mode`, но процесс не запускает.
+- Принудительного завершения сеансов пока нет: ключ IBCMD `--force` не проброшен, у Designer
+  такого ключа нет. Занятая ИБ отвечает ошибкой платформы.
 
 ### `load`
 
