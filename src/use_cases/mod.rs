@@ -22,6 +22,7 @@ pub mod convert_sources;
 pub mod dump_config;
 /// Shared extension identity helpers.
 pub mod extension_identity;
+pub mod extension_inventory;
 /// Shared discovery and preparation helpers for external artifacts.
 pub mod external_artifacts;
 /// Shared formatting helpers for IBCMD diagnostics.

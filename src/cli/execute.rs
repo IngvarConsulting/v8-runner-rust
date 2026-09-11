@@ -8,11 +8,11 @@ use tracing::info;
 
 use crate::cli::args::{
     ArtifactsArgs, BuildArgs, Command, ConvertArgs, DesignerConfigSyntaxArgs,
-    DesignerModulesSyntaxArgs, DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs, InfobaseArgs,
-    InfobaseCommand, InfobaseConfigurationCommand, InfobaseConfigurationExportArgs,
-    InfobaseRestoreArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs, SyntaxArgs, SyntaxTarget,
-    TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope, TestVaArgs, TestYaxunitArgs, ToolsArgs,
-    ToolsCommand, ToolsDownloadArgs, ToolsDownloadCommand,
+    DesignerModulesSyntaxArgs, DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs,
+    ExtensionsCommand, InfobaseArgs, InfobaseCommand, InfobaseConfigurationCommand,
+    InfobaseConfigurationExportArgs, InfobaseRestoreArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs,
+    SyntaxArgs, SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope, TestVaArgs,
+    TestYaxunitArgs, ToolsArgs, ToolsCommand, ToolsDownloadArgs, ToolsDownloadCommand,
 };
 use crate::cli::output::{
     cli_error_contract, failure_envelope, pre_dispatch_error_envelope,
@@ -69,6 +69,8 @@ use crate::use_cases::configure_extensions;
 use crate::use_cases::context::{CommandName, ExecutionContext};
 use crate::use_cases::convert_sources;
 use crate::use_cases::dump_config;
+use crate::use_cases::extension_inventory;
+use crate::use_cases::extension_inventory::ExtensionChangeRequest;
 use crate::use_cases::infobase_export;
 use crate::use_cases::init_project;
 use crate::use_cases::launch_app;
@@ -78,9 +80,9 @@ use crate::use_cases::request::{
     ClientMcpAddonRequest, ClientMcpMode, ClientMcpOptionsRequest, ConfigureExtensionsRequest,
     ConvertRequest, ConvertScopeRequest, DesignerClientScope, DesignerClientScopes,
     DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest,
-    DesignerModulesSyntaxRequest, DumpRequest, InitRequest, LaunchRequest, LoadRequest,
-    SyntaxExtensionScope, SyntaxRequest, SyntaxTargetRequest, TestRequest, TestScopeRequest,
-    ToolsDownloadRequest,
+    DesignerModulesSyntaxRequest, DumpRequest, ExtensionInventoryRequest, ExtensionInventoryScope,
+    InitRequest, LaunchRequest, LoadRequest, SyntaxExtensionScope, SyntaxRequest,
+    SyntaxTargetRequest, TestRequest, TestScopeRequest, ToolsDownloadRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
@@ -329,6 +331,15 @@ fn execute_extensions(
     clean_before_execution: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
+    if let Some(command) = &args.command {
+        return execute_extension_command(
+            config,
+            command,
+            presenter,
+            clean_before_execution,
+            cancellation,
+        );
+    }
     let request = map_extensions_request(args);
     let context = cli_context(config, CommandName::Extensions, cancellation);
     with_cli_workspace_lock(
@@ -369,6 +380,210 @@ fn execute_extensions(
             }
         },
     )
+}
+
+/// Dispatches the infobase-side extension family.
+///
+/// Reads and writes share one workspace lock boundary: the composition can change under
+/// a read, and a listing taken across an install would report a half-state.
+fn execute_extension_command(
+    config: &AppConfig,
+    command: &ExtensionsCommand,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    let context = cli_context(config, CommandName::Extensions, cancellation);
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        CommandName::Extensions,
+        clean_before_execution,
+        || match command {
+            ExtensionsCommand::List => {
+                run_extension_inventory(config, &context, presenter, ExtensionInventoryScope::All)
+            }
+            ExtensionsCommand::Info(args) => run_extension_inventory(
+                config,
+                &context,
+                presenter,
+                ExtensionInventoryScope::Named {
+                    name: args.name.clone(),
+                },
+            ),
+            ExtensionsCommand::Create(args) => run_extension_change(
+                config,
+                &context,
+                presenter,
+                ExtensionChangeRequest::Create {
+                    name: args.name.clone(),
+                    name_prefix: args.name_prefix.clone(),
+                    synonym: args.synonym.clone(),
+                    purpose: args.purpose.clone(),
+                },
+            ),
+            ExtensionsCommand::Delete(args) => run_extension_change(
+                config,
+                &context,
+                presenter,
+                ExtensionChangeRequest::Delete {
+                    name: args.name.clone(),
+                },
+            ),
+            ExtensionsCommand::Activate(args) => run_extension_change(
+                config,
+                &context,
+                presenter,
+                ExtensionChangeRequest::SetActive {
+                    name: args.name.clone(),
+                    active: args.active == "yes",
+                },
+            ),
+        },
+    )
+}
+
+fn run_extension_inventory(
+    config: &AppConfig,
+    context: &ExecutionContext,
+    presenter: &Presenter,
+    scope: ExtensionInventoryScope,
+) -> Result<(), UseCaseError> {
+    let request = ExtensionInventoryRequest { scope };
+    match extension_inventory::execute(context, config, &request) {
+        Ok(result) => {
+            if presenter.is_json() {
+                presenter.print_envelope(&Envelope::ok(
+                    CommandName::Extensions.as_str(),
+                    result.duration_ms,
+                    result,
+                ));
+            } else {
+                render_extension_inventory_text(&result, presenter);
+            }
+            Ok(())
+        }
+        Err(failure) => {
+            let error = failure.error;
+            if presenter.is_json() {
+                presenter.print_envelope(&pre_dispatch_error_envelope(
+                    CommandName::Extensions.as_str(),
+                    &error,
+                ));
+            } else {
+                presenter.print_error(&error.to_string());
+            }
+            Err(error)
+        }
+    }
+}
+
+fn run_extension_change(
+    config: &AppConfig,
+    context: &ExecutionContext,
+    presenter: &Presenter,
+    request: ExtensionChangeRequest,
+) -> Result<(), UseCaseError> {
+    match extension_inventory::change(context, config, &request) {
+        Ok(result) => {
+            if presenter.is_json() {
+                presenter.print_envelope(&Envelope::ok(
+                    CommandName::Extensions.as_str(),
+                    result.duration_ms,
+                    result,
+                ));
+            } else {
+                render_extensions_text(&result, presenter);
+            }
+            Ok(())
+        }
+        Err(failure) => {
+            let error = failure.error;
+            if presenter.is_json() {
+                match failure.payload {
+                    Some(result) => presenter.print_envelope(&failure_envelope(
+                        CommandName::Extensions.as_str(),
+                        result.duration_ms,
+                        result,
+                        &error,
+                    )),
+                    None => presenter.print_envelope(&pre_dispatch_error_envelope(
+                        CommandName::Extensions.as_str(),
+                        &error,
+                    )),
+                }
+            } else {
+                presenter.print_error(&error.to_string());
+            }
+            Err(error)
+        }
+    }
+}
+
+fn render_extension_inventory_text(
+    result: &crate::domain::extensions::ExtensionInventoryResult,
+    presenter: &Presenter,
+) {
+    if result.extensions.is_empty() {
+        presenter.print_timeline(&[TimelineItem::new(
+            TimelineStatus::Succeeded,
+            "Infobase extensions",
+        )
+        .with_detail("no extensions are installed in the infobase".to_owned())]);
+        return;
+    }
+    let details = result
+        .extensions
+        .iter()
+        .map(|extension| {
+            format!(
+                "{}: purpose={}, active={}, safe mode={}, unsafe action protection={}, scope={}, version={}, hash={}",
+                extension.name,
+                extension.purpose,
+                extension.active,
+                extension.safe_mode,
+                extension.unsafe_action_protection,
+                extension.scope,
+                extension.version.as_deref().unwrap_or("none"),
+                extension.hash_sum,
+            )
+        })
+        .collect::<Vec<_>>();
+    presenter.print_timeline(&[TimelineItem::new(
+        TimelineStatus::Succeeded,
+        "Infobase extensions",
+    )
+    .with_detail(details.join("\n"))]);
+}
+
+fn render_extensions_text(
+    result: &crate::domain::extensions::ExtensionsResult,
+    presenter: &Presenter,
+) {
+    let details = result
+        .steps
+        .iter()
+        .map(|step| {
+            format!(
+                "{}: {} -> {}{}",
+                step.target,
+                step.action,
+                if step.ok { "ok" } else { "failed" },
+                step.message
+                    .as_deref()
+                    .map(|message| format!(" ({message})"))
+                    .unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>();
+    let status = if result.ok {
+        TimelineStatus::Succeeded
+    } else {
+        TimelineStatus::Failed
+    };
+    presenter.print_timeline(&[
+        TimelineItem::new(status, "Infobase extension change").with_detail(details.join("\n"))
+    ]);
 }
 
 fn execute_init(
@@ -3809,6 +4024,7 @@ mod tests {
         );
         assert_eq!(
             map_extensions_request(&ExtensionsArgs {
+                command: None,
                 names: vec!["client_mcp".to_owned()],
             })
             .names,
@@ -4096,7 +4312,10 @@ mod tests {
     fn resolves_command_name() {
         assert_eq!(command_name(&Command::Init), CommandName::Init);
         assert_eq!(
-            command_name(&Command::Extensions(ExtensionsArgs { names: vec![] })),
+            command_name(&Command::Extensions(ExtensionsArgs {
+                command: None,
+                names: vec![],
+            })),
             CommandName::Extensions
         );
         assert_eq!(

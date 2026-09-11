@@ -723,3 +723,18 @@ mod tests {
         );
     }
 }
+
+/// Which part of the infobase extension composition to read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtensionInventoryScope {
+    /// Every extension installed in the infobase.
+    All,
+    /// One extension by name; a reply without it is refused as an invalid result.
+    Named { name: String },
+}
+
+/// Request to read the extension composition of the configured infobase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionInventoryRequest {
+    pub scope: ExtensionInventoryScope,
+}

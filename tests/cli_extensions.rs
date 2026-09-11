@@ -114,6 +114,134 @@ fn setup_extensions_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) 
     (dir, config_path, calls_log, ibcmd_path)
 }
 
+/// Rewrites the fake `ibcmd` so a read command answers with the measured inventory text
+/// while every call is still logged.
+fn write_inventory_ibcmd(ibcmd_path: &Path, calls_log: &Path, inventory: &str) {
+    write_script(
+        ibcmd_path,
+        &format!(
+            "printf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  *\"extension list\"*|*\"extension info\"*) printf '%s' '{}' ;;\nesac\nexit 0",
+            calls_log.display(),
+            inventory
+        ),
+    );
+}
+
+const MEASURED_INVENTORY: &str = "name                         : \"Проба\"\nversion                      : \nactive                       : yes\npurpose                      : add-on\nsafe-mode                    : yes\nsecurity-profile-name        : \nunsafe-action-protection     : yes\nused-in-distributed-infobase : no\nscope                        : infobase\nhash-sum                     : \"9hfFb6YVX2OwLKZaL1L69Eq0Vrg=\"\n";
+
+#[test]
+fn extensions_list_reports_the_installed_composition() {
+    let (_dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
+    write_inventory_ibcmd(&ibcmd_path, &calls_log, MEASURED_INVENTORY);
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "extensions",
+            "list",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("json envelope");
+    let extensions = envelope["data"]["extensions"]
+        .as_array()
+        .expect("extensions");
+    assert_eq!(extensions.len(), 1);
+    assert_eq!(extensions[0]["name"], "Проба");
+    assert_eq!(extensions[0]["purpose"], "add-on");
+    assert_eq!(extensions[0]["active"], true);
+    // An empty platform field is an absent value, not an empty string.
+    assert!(extensions[0].get("version").is_none());
+    assert!(fs::read_to_string(calls_log)
+        .expect("calls")
+        .contains("extension list"));
+}
+
+#[test]
+fn extensions_info_refuses_a_reply_about_another_extension() {
+    let (_dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
+    write_inventory_ibcmd(&ibcmd_path, &calls_log, MEASURED_INVENTORY);
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--no-color",
+            "extensions",
+            "info",
+            "--name",
+            "Другая",
+        ])
+        .output()
+        .expect("run command");
+
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.status.success(), "{reported}");
+    assert!(reported.contains("Другая"), "{reported}");
+}
+
+#[test]
+fn extensions_create_delete_and_activate_reach_the_platform_verbs() {
+    for (arguments, expected) in [
+        (
+            vec![
+                "create",
+                "--name",
+                "Проба",
+                "--name-prefix",
+                "Пр_",
+                "--purpose",
+                "add-on",
+            ],
+            vec![
+                "extension create",
+                "--name Проба",
+                "--name-prefix Пр_",
+                "--purpose add-on",
+            ],
+        ),
+        (
+            vec!["delete", "--name", "Проба"],
+            vec!["extension delete", "--name Проба"],
+        ),
+        (
+            vec!["activate", "--name", "Проба", "--active", "no"],
+            vec!["extension update", "--name Проба", "--active no"],
+        ),
+    ] {
+        let (_dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+        let mut command = v8_runner_command();
+        command.args([
+            "--config",
+            &config_path.display().to_string(),
+            "--no-color",
+            "extensions",
+        ]);
+        command.args(&arguments);
+        let output = command.output().expect("run command");
+
+        assert!(output.status.success(), "{arguments:?}");
+        let calls = fs::read_to_string(calls_log).expect("calls");
+        for fragment in expected {
+            assert!(calls.contains(fragment), "{fragment} missing from {calls}");
+        }
+    }
+}
+
 #[test]
 fn extensions_command_updates_all_extension_properties() {
     let (_dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();

@@ -237,9 +237,70 @@ pub struct LoadArgs {
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Command options")]
 pub struct ExtensionsArgs {
+    /// Read or change the extension composition of the infobase.
+    ///
+    /// Omitting it keeps the published behaviour: update the security properties of the
+    /// configured extension source-sets.
+    #[command(subcommand)]
+    pub command: Option<ExtensionsCommand>,
+
     /// Extension source-set name to update. Repeat to target multiple extensions.
     #[arg(long = "name")]
     pub names: Vec<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ExtensionsCommand {
+    /// Report the extensions installed in the infobase
+    List,
+    /// Report one installed extension by its platform name
+    Info(ExtensionNameArgs),
+    /// Register a new extension in the infobase
+    Create(ExtensionCreateArgs),
+    /// Remove an extension from the infobase
+    Delete(ExtensionNameArgs),
+    /// Turn an installed extension on or off without removing it
+    Activate(ExtensionActivateArgs),
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Command options")]
+pub struct ExtensionNameArgs {
+    /// Extension name as the platform knows it
+    #[arg(long)]
+    pub name: String,
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Command options")]
+pub struct ExtensionCreateArgs {
+    /// Extension name as the platform will know it
+    #[arg(long)]
+    pub name: String,
+
+    /// Name prefix for objects the extension adds
+    #[arg(long = "name-prefix")]
+    pub name_prefix: String,
+
+    /// Synonym in `NStr()` format
+    #[arg(long)]
+    pub synonym: Option<String>,
+
+    /// Extension purpose
+    #[arg(long, value_parser = ["customization", "add-on", "patch"])]
+    pub purpose: Option<String>,
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Command options")]
+pub struct ExtensionActivateArgs {
+    /// Extension name as the platform knows it
+    #[arg(long)]
+    pub name: String,
+
+    /// Target activity state
+    #[arg(long, value_parser = ["yes", "no"])]
+    pub active: String,
 }
 
 #[derive(Args, Debug)]
@@ -728,7 +789,8 @@ mod tests {
         .expect("parse");
 
         match cli.command {
-            Command::Extensions(ExtensionsArgs { names }) => {
+            Command::Extensions(ExtensionsArgs { names, command }) => {
+                assert!(command.is_none());
                 assert_eq!(names, vec!["client_mcp", "tests"]);
             }
             _ => panic!("unexpected command"),
