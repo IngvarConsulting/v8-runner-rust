@@ -16,6 +16,8 @@ pub struct BuildRequest {
     pub full_rebuild: bool,
     /// Optional source-set selector. When absent, all configured source-sets are built.
     pub source_set: Option<String>,
+    /// Plan every step and locate the platform without dispatching it.
+    pub dry_run: bool,
 }
 
 /// Transport-neutral request for the `tools download` use case.
@@ -42,6 +44,8 @@ pub struct LoadRequest {
     pub settings_path: Option<String>,
     /// Optional extension target.
     pub extension: Option<String>,
+    /// Resolve the artifact and locate Designer without probing or applying anything.
+    pub dry_run: bool,
 }
 
 /// Transport-neutral request for the `test` use case.
@@ -129,6 +133,8 @@ pub struct DumpRequest {
     pub extension: Option<String>,
     /// Requested object filters for `Partial` dump mode.
     pub objects: Vec<String>,
+    /// Resolve the target and locate the platform without dumping anything.
+    pub dry_run: bool,
 }
 
 /// Transport-neutral convert scope.
@@ -145,6 +151,8 @@ pub struct ConvertRequest {
     pub scope: ConvertScopeRequest,
     /// Optional user-facing target root for converted source-set layout.
     pub output_root: Option<String>,
+    /// Resolve, validate and locate the EDT CLI without converting anything.
+    pub dry_run: bool,
 }
 
 /// Transport-neutral artifact export mode.
@@ -169,6 +177,8 @@ pub struct ArtifactsRequest {
     pub source_set: Option<String>,
     /// Requested extension name in the infobase for `-Extension`.
     pub extension: Option<String>,
+    /// Resolve the target and locate Designer without building or publishing anything.
+    pub dry_run: bool,
 }
 
 impl ArtifactsRequest {
@@ -648,7 +658,10 @@ pub struct LaunchRequest {
 
 /// Transport-neutral request for the `init` use case.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct InitRequest;
+pub struct InitRequest {
+    /// Decide every step and locate the platform without creating anything.
+    pub dry_run: bool,
+}
 
 /// Transport-neutral request for extension property updates.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -722,4 +735,21 @@ mod tests {
             "syntax designer-modules requires at least one mode flag"
         );
     }
+}
+
+/// Which part of the infobase extension composition to read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtensionInventoryScope {
+    /// Every extension installed in the infobase.
+    All,
+    /// One extension by name; a reply without it is refused as an invalid result.
+    Named { name: String },
+}
+
+/// Request to read the extension composition of the configured infobase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionInventoryRequest {
+    pub scope: ExtensionInventoryScope,
+    /// Locate the utility and name the target without starting the platform.
+    pub dry_run: bool,
 }

@@ -117,9 +117,25 @@ v8-runner init
   not match the observed target is refused before the platform starts; neither provider asks, and
   there is no staging step that could undo a load. Append `--dry-run` first to see the selected
   provider and the planned input without touching the infobase.
+- Before any command that starts the platform or touches the infobase, append `--dry-run` to see
+  what it would do: `init`, `build`, `load`, `dump`, `convert`, `artifacts`, `launch`,
+  `infobase restore` and both `infobase` exports accept it. A preview locates the platform first,
+  so a missing one is refused before the plan is approved, and it takes no locks and creates
+  nothing. Read `provider_dispatched: false` as the proof that nothing ran. Two limits are named
+  rather than guessed: `load` reports `compatibility_state: not_probed` because the probe is
+  itself a Designer run, and `init` against a server infobase cannot tell "created" from
+  "already existed" without creating it.
 - Source files need conversion between Designer and EDT: use `v8-runner convert`; this is CLI-only and does not use the infobase.
 - Existing `.cf` or `.cfe` artifacts need to be applied to an infobase: use `v8-runner load ...`.
 - Release artifacts need to be exported or external artifacts published: use `v8-runner make ...` or the `artifacts` alias.
+- Need to know which extensions are installed in an infobase, or to change that composition:
+  use `v8-runner extensions list|info|create|delete|activate`. These subcommands address the
+  infobase, not the workspace — bare `v8-runner extensions` still means "update the security
+  properties of the configured extension source-sets". The family is IBCMD-only because Designer
+  cannot report installed extensions, and the platform does not report a name prefix on read.
+  Every subcommand, reads included, accepts `--dry-run`: reading the composition starts the
+  platform, authenticates and leaves a journal trace, so it is an action. The preview names the
+  target infobase, the account and the utility, and never echoes the connection string.
 - Need a 1C UI session: use `v8-runner launch designer`, `launch thin`, `launch thick`, or `launch ordinary`.
 - Need to know which binary and arguments a launch would use without starting a client: append
   `--dry-run` to `launch designer|thin|thick|ordinary`. It returns `provider_dispatched=false`,

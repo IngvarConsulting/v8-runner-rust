@@ -158,7 +158,7 @@ pub fn run() -> i32 {
     let result = match &cli.command {
         Command::Version => unreachable!("version command is handled before config loading"),
         Command::Bootstrap(_) => unreachable!("bootstrap command is handled before config loading"),
-        Command::Init
+        Command::Init(_)
         | Command::Config(_)
         | Command::Tools(_)
         | Command::Extensions(_)

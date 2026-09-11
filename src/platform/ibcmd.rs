@@ -64,6 +64,34 @@ impl IbcmdConnection {
         })
     }
 
+    /// Names the target infobase and the account without echoing any secret.
+    ///
+    /// The raw connection string may carry `Pwd=`, so it is never reproduced here; only
+    /// the pieces a caller needs to recognise the target are named.
+    pub fn describe_target(&self) -> String {
+        let (target, user) = match self {
+            Self::File {
+                database_path,
+                user,
+                ..
+            } => (format!("file infobase '{}'", database_path.display()), user),
+            Self::Server {
+                dbms_kind,
+                database_server,
+                database_name,
+                user,
+                ..
+            } => (
+                format!("{dbms_kind} infobase '{database_name}' on '{database_server}'"),
+                user,
+            ),
+        };
+        match user.as_deref().filter(|user| !user.is_empty()) {
+            Some(user) => format!("{target} as '{user}'"),
+            None => format!("{target} with no configured infobase user"),
+        }
+    }
+
     #[cfg(test)]
     fn args(&self) -> Vec<String> {
         let mut args = self.infobase_args();
@@ -254,6 +282,64 @@ impl<'a> IbcmdDsl<'a> {
                 "no"
             },
         );
+        self.run(&args)
+    }
+
+    /// Reads the extension composition of the target infobase.
+    ///
+    /// `ibcmd config extension list` is the only way to read it: Designer has no batch
+    /// key that reports installed extensions.
+    pub fn infobase_extension_list(&self) -> Result<PlatformCommandResult, IbcmdError> {
+        let args = self.authenticated_infobase_args(&["config", "extension", "list"]);
+        self.run(&args)
+    }
+
+    /// Reads one extension of the target infobase by name.
+    pub fn infobase_extension_info(&self, name: &str) -> Result<PlatformCommandResult, IbcmdError> {
+        let mut args = self.authenticated_infobase_args(&["config", "extension", "info"]);
+        push_option_value(&mut args, "--name", name);
+        self.run(&args)
+    }
+
+    /// Registers a new extension in the target infobase.
+    pub fn infobase_extension_create(
+        &self,
+        name: &str,
+        name_prefix: &str,
+        synonym: Option<&str>,
+        purpose: Option<&str>,
+    ) -> Result<PlatformCommandResult, IbcmdError> {
+        let mut args = self.authenticated_infobase_args(&["config", "extension", "create"]);
+        push_option_value(&mut args, "--name", name);
+        push_option_value(&mut args, "--name-prefix", name_prefix);
+        if let Some(synonym) = synonym {
+            push_option_value(&mut args, "--synonym", synonym);
+        }
+        if let Some(purpose) = purpose {
+            push_option_value(&mut args, "--purpose", purpose);
+        }
+        self.run(&args)
+    }
+
+    /// Removes one extension from the target infobase.
+    pub fn infobase_extension_delete(
+        &self,
+        name: &str,
+    ) -> Result<PlatformCommandResult, IbcmdError> {
+        let mut args = self.authenticated_infobase_args(&["config", "extension", "delete"]);
+        push_option_value(&mut args, "--name", name);
+        self.run(&args)
+    }
+
+    /// Sets extension activity in the target infobase.
+    pub fn infobase_extension_set_active(
+        &self,
+        name: &str,
+        active: bool,
+    ) -> Result<PlatformCommandResult, IbcmdError> {
+        let mut args = self.authenticated_infobase_args(&["config", "extension", "update"]);
+        push_option_value(&mut args, "--name", name);
+        push_option_value(&mut args, "--active", if active { "yes" } else { "no" });
         self.run(&args)
     }
 

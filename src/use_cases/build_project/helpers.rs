@@ -605,6 +605,7 @@ pub(super) fn fail_with_remaining_steps(
     }
 
     BuildResult {
+        provider_dispatched: true,
         ok: false,
         steps: completed_steps,
         duration_ms: started.elapsed().as_millis() as u64,

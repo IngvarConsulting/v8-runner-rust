@@ -45,6 +45,49 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `launch` | Не зависит от `format` | Прямой запуск 1C utility по позиционному mode |
 | MCP | `stdio` и `streamable HTTP` | Публикует 8 инструментов, уже более узкая поверхность, чем CLI |
 
+## Превью у глаголов, работающих с платформой
+
+Восемь глаголов принимают `--dry-run`: `infobase configuration export`,
+`infobase dump`, `infobase restore`, `launch`, `convert`, `init`, `build`,
+`load`, `dump` и `artifacts`.
+
+**Форм превью две, и это не недосмотр.** У `infobase`-экспорта и `restore` есть
+настоящий выбор провайдера, поэтому их превью отвечает экспортным конвертом
+(`mode=preview`, `plan.provider`, `selection.candidates`). У остальных выбора нет
+— провайдер задан `builder` или единственной утилитой, — и набор кандидатов с
+одним элементом был бы вымышленной развилкой. Их превью отвечает парой
+**`provider_dispatched` + предмет глагола**:
+
+| Глагол | Что называет превью |
+|---|---|
+| `launch` | `plan.program` и составленный `plan.args` с замаскированными credential |
+| `convert` | `outputs` — что и куда было бы сконвертировано |
+| `init` | по шагу `status: planned` с тем, что было бы создано и чем |
+| `build` | по набору исходников планируемый `mode` и причину |
+| `load` | артефакт, режим, расширение; `compatibility_state: not_probed` |
+| `dump` | набор, режим, целевой путь |
+| `artifacts` | вид артефакта и выход, `published: false` |
+
+- `provider_dispatched` присутствует **всегда**, в обоих режимах: отсутствие поля
+  никогда не приходится читать как «ничего не запускали».
+- Превью возвращается **после** поиска утилиты: отсутствующая платформа
+  отказывает до одобрения плана, а не после.
+- Превью не берёт ни одной блокировки файлов и ничего не создаёт — ни целевых
+  каталогов, ни EDT-рабочего пространства, ни состояния обнаружения изменений.
+
+**Названные пределы, а не умолчания:**
+
+- `load` возвращается до зонда совместимости, потому что зонд сам запускает
+  конфигуратор. Поэтому состояние совместимости — `not_probed`, и это отдельное
+  значение от `unknown`: «не спрашивали» и «спросили и не получили ответа» —
+  разные факты для того, кто решает, применять ли.
+- `init` для серверной ИБ не различает «создана» и «уже была»: это различие даёт
+  сама `ibcmd infobase create`, то есть действие. Превью называет цель и утилиту
+  и на этом останавливается.
+- `build` в формате EDT планирует шаг экспорта целиком: выгрузка в файлы
+  конфигуратора и последующая загрузка в базу не разделяются, потому что вторая
+  зависит от результата первой.
+
 ## Глобальные CLI-опции
 
 | Опция | Значение |
@@ -118,7 +161,7 @@ v8-runner bootstrap --connection <CONNECTION> --platform-version <VERSION> [--pr
 ### `init`
 
 ```bash
-v8-runner init
+v8-runner init [--dry-run]
 ```
 
 - Всегда разделяет шаг подготовки ИБ и шаг EDT workspace.
@@ -168,10 +211,54 @@ v8-runner extensions [--name <SOURCE_SET>...]
 - Без `--name` обрабатывает все extension `source-set` из конфига.
 - Возвращает пошаговый результат по каждому целевому расширению.
 
+#### Состав расширений информационной базы
+
+```bash
+v8-runner extensions list [--dry-run]
+v8-runner extensions info --name <NAME> [--dry-run]
+v8-runner extensions create --name <NAME> --name-prefix <PREFIX> [--synonym <NSTR>] [--purpose <customization|add-on|patch>] [--dry-run]
+v8-runner extensions delete --name <NAME> [--dry-run]
+v8-runner extensions activate --name <NAME> --active <yes|no> [--dry-run]
+```
+
+- Предмет здесь другой: `extensions` без подкоманды правит свойства extension
+  `source-set` рабочего пространства, а подкоманды читают и меняют состав
+  расширений, **установленных в информационной базе**. Это разные вещи, и
+  совпадение имён их не объединяет.
+- **Семейство IBCMD-only.** У Designer нет батч-ключа, который перечисляет
+  установленные расширения, поэтому `builder` здесь ничего не выбирает; при
+  отсутствии `ibcmd` операция отказывает, а не уходит на Designer.
+- `list` и `info` отдают по расширению: `name`, `version`, `active`, `purpose`,
+  `safe_mode`, `security_profile_name`, `unsafe_action_protection`,
+  `used_in_distributed_infobase`, `scope`, `hash_sum`. Пустое поле платформы —
+  отсутствующее значение, а не пустая строка: в JSON его просто нет.
+- **Префикса имён на чтении нет.** Платформа не сообщает `name-prefix` ни в
+  `list`, ни в `info`; он живёт только в `Configuration.xml` самого расширения,
+  то есть достаётся выгрузкой.
+- **Порядок не обещается.** Платформа выдаёт записи не в порядке создания и
+  порядок не документирует, поэтому и runner его не обещает.
+- `info --name` проверяет, что платформа ответила про запрошенное расширение:
+  ответ про другое — `invalid_output`, а не тихая подмена.
+- Вывод платформы текстовый и разбирается runner-ом; запись без обязательного
+  поля и `yes/no`-поле с иным значением отклоняются, а не получают умолчание.
+- `activate` существует отдельно от подключения: платформа даёт активность
+  самостоятельным ключом `--active`.
+- Чтение и запись делят одну границу workspace lock: состав может измениться под
+  чтением, и перечень, снятый поперёк установки, показал бы половинное состояние.
+- **`--dry-run` есть и у читающих подкоманд.** «Просто прочитать» не бывает:
+  поднимается `ibcmd`, открывается соединение, проходит аутентификация, в журнале
+  остаётся след — значит чтение состава это действие, и превью ему нужно так же,
+  как изменению. Превью называет цель, учётку и утилиту, а `extensions` в нём пуст,
+  потому что у платформы ничего не спрашивали.
+- Сырая строка соединения в превью не воспроизводится: она может нести `Pwd=`,
+  поэтому называются только узнаваемые части цели и имя учётки.
+- Требуемое право превью не называет: платформа его не сообщает, и выдумывать имя
+  права оно не станет.
+
 ### `build`
 
 ```bash
-v8-runner build [--source-set <NAME>] [--full-rebuild]
+v8-runner build [--source-set <NAME>] [--full-rebuild] [--dry-run]
 ```
 
 - Без `--source-set` обрабатывает все configured `source-set` в canonical order.
@@ -249,7 +336,7 @@ v8-runner syntax edt [--project <PROJECT>...]
 ### `dump`
 
 ```bash
-v8-runner dump --mode <full|incremental|partial> [--source-set <NAME>] [--extension <EXTENSION>] [--object <TYPE:NAME>...]
+v8-runner dump --mode <full|incremental|partial> [--source-set <NAME>] [--extension <EXTENSION>] [--object <TYPE:NAME>...] [--dry-run]
 ```
 
 - `partial` требует хотя бы один `--object`.
@@ -269,7 +356,7 @@ v8-runner dump --mode <full|incremental|partial> [--source-set <NAME>] [--extens
 ### `convert`
 
 ```bash
-v8-runner convert [--source-set <NAME>] [--output <DIR>]
+v8-runner convert [--source-set <NAME>] [--output <DIR>] [--dry-run]
 ```
 
 - CLI-only; не публикуется как MCP tool.
@@ -359,7 +446,7 @@ v8-runner infobase restore --input <FILE.dt> --create  [--dry-run]
 ### `load`
 
 ```bash
-v8-runner load --path <FILE> [--mode <load|merge>] [--settings <FILE>] [--extension <NAME>]
+v8-runner load --path <FILE> [--mode <load|merge>] [--settings <FILE>] [--extension <NAME>] [--dry-run]
 ```
 
 - Поддерживает `.cf` и `.cfe`.
@@ -378,8 +465,8 @@ v8-runner load --path <FILE> [--mode <load|merge>] [--settings <FILE>] [--extens
 ### `make` / `artifacts`
 
 ```bash
-v8-runner make --output <TARGET> [--source-set <NAME>] [--extension <NAME>]
-v8-runner artifacts --output <TARGET> [--source-set <NAME>] [--extension <NAME>]
+v8-runner make --output <TARGET> [--source-set <NAME>] [--extension <NAME>] [--dry-run]
+v8-runner artifacts --output <TARGET> [--source-set <NAME>] [--extension <NAME>] [--dry-run]
 ```
 
 - Это один use case с двумя CLI names.

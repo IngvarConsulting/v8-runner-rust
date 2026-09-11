@@ -4,7 +4,7 @@ This file tracks open implementation work only.
 
 ## Current Status
 
-- Open tasks as of `2026-09-11`: 3.
+- Open tasks as of `2026-09-11`: 5.
 
 ## Open Tasks
 
@@ -15,7 +15,13 @@ This file tracks open implementation work only.
 2. Решить, как выглядит принудительное завершение сеансов для `infobase restore`: у IBCMD есть
    `--force` и `--session-terminate-message`, у Designer `/RestoreIB` такого ключа нет. Нужен
    публичный контракт расхождения возможностей, а не ключ, работающий у одного провайдера.
-3. Переименовать `Export*`-типы домена `infobase_export` в нейтральные к направлению: модуль
+3. Дополнить `extensions ... update` до полного набора свойств платформы: сейчас ставятся два из
+   шести (`--safe-mode`, `--unsafe-action-protection`), а платформа принимает ещё
+   `--security-profile-name`, `--used-in-distributed-infobase` и `--scope`; `--active` вынесен
+   отдельной подкомандой `activate`.
+4. Дать `init --dry-run` различать «создана» и «уже была» для серверной ИБ, если найдётся
+   способ наблюдать это без `ibcmd infobase create`.
+5. Переименовать `Export*`-типы домена `infobase_export` в нейтральные к направлению: модуль
    описывает перенос ИБ в обе стороны, а `infobase restore` переиспользует `ExportIntent`,
    `ExportProvider` и `ExportTargetState`. Переименование не меняет провод (значения на нём
    уже нейтральны), но затрагивает много файлов, поэтому идёт отдельной задачей.

@@ -53,7 +53,7 @@ pub enum Command {
     /// Download YaXUnit, Vanessa Automation, and client MCP tool assets
     Tools(ToolsArgs),
     /// Initialize the infobase and EDT workspace
-    Init,
+    Init(InitArgs),
     /// Update configured extension properties inside the infobase
     Extensions(ExtensionsArgs),
     /// Build configured source-sets into the infobase
@@ -212,6 +212,9 @@ pub struct BuildArgs {
     /// Limit build to one source-set from v8project.yaml
     #[arg(long)]
     pub source_set: Option<String>,
+    /// Plan every step and locate the platform without dispatching it
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
@@ -232,14 +235,107 @@ pub struct LoadArgs {
     /// Extension name required for .cfe artifacts
     #[arg(long)]
     pub extension: Option<String>,
+
+    /// Resolve the plan and locate the platform without probing or applying anything
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Command options")]
+pub struct InitArgs {
+    /// Decide every step and locate the platform without creating anything
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Command options")]
 pub struct ExtensionsArgs {
+    /// Read or change the extension composition of the infobase.
+    ///
+    /// Omitting it keeps the published behaviour: update the security properties of the
+    /// configured extension source-sets.
+    #[command(subcommand)]
+    pub command: Option<ExtensionsCommand>,
+
     /// Extension source-set name to update. Repeat to target multiple extensions.
     #[arg(long = "name")]
     pub names: Vec<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ExtensionsCommand {
+    /// Report the extensions installed in the infobase
+    List(ExtensionPreviewArgs),
+    /// Report one installed extension by its platform name
+    Info(ExtensionNameArgs),
+    /// Register a new extension in the infobase
+    Create(ExtensionCreateArgs),
+    /// Remove an extension from the infobase
+    Delete(ExtensionNameArgs),
+    /// Turn an installed extension on or off without removing it
+    Activate(ExtensionActivateArgs),
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Command options")]
+pub struct ExtensionNameArgs {
+    /// Extension name as the platform knows it
+    #[arg(long)]
+    pub name: String,
+
+    /// Name the target and the account without starting the platform
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Command options")]
+pub struct ExtensionPreviewArgs {
+    /// Name the target and the account without starting the platform
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Command options")]
+pub struct ExtensionCreateArgs {
+    /// Name the target and the account without starting the platform
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Extension name as the platform will know it
+    #[arg(long)]
+    pub name: String,
+
+    /// Name prefix for objects the extension adds
+    #[arg(long = "name-prefix")]
+    pub name_prefix: String,
+
+    /// Synonym in `NStr()` format
+    #[arg(long)]
+    pub synonym: Option<String>,
+
+    /// Extension purpose
+    #[arg(long, value_parser = ["customization", "add-on", "patch"])]
+    pub purpose: Option<String>,
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Command options")]
+pub struct ExtensionActivateArgs {
+    /// Name the target and the account without starting the platform
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Extension name as the platform knows it
+    #[arg(long)]
+    pub name: String,
+
+    /// Target activity state
+    #[arg(long, value_parser = ["yes", "no"])]
+    pub active: String,
 }
 
 #[derive(Args, Debug)]
@@ -347,6 +443,9 @@ pub struct DumpArgs {
     /// Objects for partial dump. Use canonical TYPE:NAME selectors; legacy TYPE.NAME selectors are accepted for compatibility.
     #[arg(long = "object")]
     pub objects: Vec<String>,
+    /// Resolve the target and locate the platform without dumping anything
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
@@ -448,6 +547,10 @@ pub struct ConvertArgs {
     #[arg(long)]
     pub source_set: Option<String>,
 
+    /// Resolve the plan and locate the platform without converting anything
+    #[arg(long)]
+    pub dry_run: bool,
+
     /// Target root for converted source-set layout. Defaults to workPath/convert/out
     #[arg(long)]
     pub output: Option<String>,
@@ -467,6 +570,9 @@ pub struct ArtifactsArgs {
     /// Extension name in the infobase for cfe export
     #[arg(long)]
     pub extension: Option<String>,
+    /// Resolve the target and locate the platform without building or publishing anything
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
@@ -672,8 +778,8 @@ pub struct DesignerModulesSyntaxArgs {
 mod tests {
     use super::{
         ArtifactsArgs, Cli, Command, ConvertArgs, DirectLaunchOptionsArgs, ExtensionsArgs,
-        LaunchArgs, LoadArgs, McpCommand, McpServeTransport, SyntaxTarget, TestLaunchOptionsArgs,
-        TestRunner, TestScope,
+        InitArgs, LaunchArgs, LoadArgs, McpCommand, McpServeTransport, SyntaxTarget,
+        TestLaunchOptionsArgs, TestRunner, TestScope,
     };
     use clap::Parser;
 
@@ -706,7 +812,10 @@ mod tests {
     #[test]
     fn parses_init_command() {
         let cli = Cli::try_parse_from(["v8-runner", "init"]).expect("parse");
-        assert!(matches!(cli.command, Command::Init));
+        assert!(matches!(
+            cli.command,
+            Command::Init(InitArgs { dry_run: false })
+        ));
     }
 
     #[test]
@@ -728,7 +837,8 @@ mod tests {
         .expect("parse");
 
         match cli.command {
-            Command::Extensions(ExtensionsArgs { names }) => {
+            Command::Extensions(ExtensionsArgs { names, command }) => {
+                assert!(command.is_none());
                 assert_eq!(names, vec!["client_mcp", "tests"]);
             }
             _ => panic!("unexpected command"),
@@ -743,11 +853,13 @@ mod tests {
         match cli.command {
             Command::Load(LoadArgs {
                 path,
+                dry_run,
                 mode,
                 settings,
                 extension,
             }) => {
                 assert_eq!(path, "dist/main.cf");
+                assert!(!dry_run);
                 assert_eq!(mode, "load");
                 assert!(settings.is_none());
                 assert!(extension.is_none());
@@ -775,11 +887,13 @@ mod tests {
         match cli.command {
             Command::Load(LoadArgs {
                 path,
+                dry_run,
                 mode,
                 settings,
                 extension,
             }) => {
                 assert_eq!(path, "dist/ext.cfe");
+                assert!(!dry_run);
                 assert_eq!(mode, "merge");
                 assert_eq!(settings.as_deref(), Some("merge.xml"));
                 assert_eq!(extension.as_deref(), Some("SalesAddon"));
@@ -1103,9 +1217,11 @@ mod tests {
         match cli.command {
             Command::Artifacts(ArtifactsArgs {
                 output,
+                dry_run,
                 source_set,
                 extension,
             }) => {
+                assert!(!dry_run);
                 assert_eq!(output, "dist/main.cf");
                 assert!(source_set.is_none());
                 assert!(extension.is_none());
@@ -1119,7 +1235,12 @@ mod tests {
         let cli = Cli::try_parse_from(["v8-runner", "convert"]).expect("parse convert");
 
         match cli.command {
-            Command::Convert(ConvertArgs { source_set, output }) => {
+            Command::Convert(ConvertArgs {
+                source_set,
+                output,
+                dry_run,
+            }) => {
+                assert!(!dry_run);
                 assert!(source_set.is_none());
                 assert!(output.is_none());
             }
@@ -1133,7 +1254,12 @@ mod tests {
             .expect("parse convert");
 
         match cli.command {
-            Command::Convert(ConvertArgs { source_set, output }) => {
+            Command::Convert(ConvertArgs {
+                source_set,
+                output,
+                dry_run,
+            }) => {
+                assert!(!dry_run);
                 assert_eq!(source_set.as_deref(), Some("ext-sales"));
                 assert!(output.is_none());
             }
@@ -1147,7 +1273,12 @@ mod tests {
             .expect("parse convert");
 
         match cli.command {
-            Command::Convert(ConvertArgs { source_set, output }) => {
+            Command::Convert(ConvertArgs {
+                source_set,
+                output,
+                dry_run,
+            }) => {
+                assert!(!dry_run);
                 assert!(source_set.is_none());
                 assert_eq!(output.as_deref(), Some("tests/fixtures/edt"));
             }
@@ -1172,9 +1303,11 @@ mod tests {
         match cli.command {
             Command::Artifacts(ArtifactsArgs {
                 output,
+                dry_run,
                 source_set,
                 extension,
             }) => {
+                assert!(!dry_run);
                 assert_eq!(output, "dist/ext.cfe");
                 assert_eq!(source_set.as_deref(), Some("ext-sales"));
                 assert_eq!(extension.as_deref(), Some("SalesAddon"));

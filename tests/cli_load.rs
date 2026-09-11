@@ -93,6 +93,47 @@ fn setup_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, PathBuf) {
 }
 
 #[test]
+fn load_dry_run_plans_without_probing_or_applying() {
+    let (_dir, config_path, _binary_path, base_path, calls_log) = setup_project();
+    fs::write(base_path.join("release.cf"), "cf").expect("artifact");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "load",
+            "--path",
+            "release.cf",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    let data = &payload["data"];
+    assert_eq!(data["provider_dispatched"], false);
+    assert_eq!(data["artifact_type"], "configuration_cf");
+    // The probe is itself a Designer run, so a preview reports that it was never asked.
+    assert_eq!(data["compatibility_state"], "not_probed");
+    assert_eq!(data["execution"]["payload"]["applied"], false);
+    assert_eq!(data["execution"]["payload"]["update_db_cfg_ran"], false);
+    let message = data["message"].as_str().expect("message");
+    assert!(message.contains("previewed; nothing applied"), "{message}");
+    assert!(!message.contains("applied successfully"), "{message}");
+    assert!(
+        !calls_log.exists(),
+        "preview must not dispatch the platform"
+    );
+}
+
+#[test]
 fn load_cf_json_success_runs_probe_load_and_update() {
     let (_dir, config_path, _binary_path, base_path, calls_log) = setup_project();
     fs::write(base_path.join("release.cf"), "cf").expect("artifact");

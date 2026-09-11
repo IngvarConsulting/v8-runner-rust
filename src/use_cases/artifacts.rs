@@ -155,6 +155,36 @@ fn run_artifacts(
         }
     };
 
+    if args.dry_run {
+        // The artifacts lock below is this command's first filesystem write, and Designer is
+        // already located, so an absent platform refuses in the preview.
+        let metadata = ArtifactBuildMetadata {
+            artifact_type: resolved.mode,
+            output_path: resolved.output_path.clone(),
+            file_names: resolved
+                .output_path
+                .file_name()
+                .map(|value| vec![value.to_string_lossy().into_owned()])
+                .unwrap_or_default(),
+            published: false,
+        };
+        return Ok(ArtifactsResult {
+            provider_dispatched: false,
+            mode: resolved.mode,
+            source_set: Some(resolved.source_set_name.clone()),
+            extension: resolved.extension.clone(),
+            duration_ms: started.elapsed().as_millis() as u64,
+            execution: ExecutionOutcome::new(ExecutionStatus::Succeeded)
+                .with_payload(metadata)
+                .with_diagnostics(vec![format!(
+                    "would build {:?} into '{}' via {}; nothing published",
+                    resolved.mode,
+                    resolved.output_path.display(),
+                    location.path.display()
+                )]),
+        });
+    }
+
     let lock_guard = match acquire_advisory_lock(&resolved.lock_path) {
         Ok(lock_guard) => lock_guard,
         Err(error) => {
@@ -238,6 +268,7 @@ fn run_artifacts(
                     )]);
             }
             Ok(ArtifactsResult {
+                provider_dispatched: true,
                 mode: resolved.mode,
                 source_set: Some(resolved.source_set_name),
                 extension: resolved.extension,
@@ -291,6 +322,7 @@ fn run_artifacts(
                 }]);
             }
             let payload = ArtifactsResult {
+                provider_dispatched: true,
                 mode: resolved.mode,
                 source_set: Some(resolved.source_set_name),
                 extension: resolved.extension,
@@ -1008,6 +1040,7 @@ fn empty_result(
             .with_errors(vec![ExecutionError::new("artifacts_failed", message)]);
     }
     ArtifactsResult {
+        provider_dispatched: true,
         mode,
         source_set,
         extension,
@@ -1282,6 +1315,7 @@ mod tests {
 
     fn cf_request(output: &str) -> ArtifactsRequest {
         ArtifactsRequest {
+            dry_run: false,
             execution: ArtifactsRequest::default_execution(ArtifactsModeRequest::ConfigurationCf),
             mode: ArtifactsModeRequest::ConfigurationCf,
             output_path: output.to_owned(),
@@ -1296,6 +1330,7 @@ mod tests {
         source_set: &str,
     ) -> ArtifactsRequest {
         ArtifactsRequest {
+            dry_run: false,
             execution: ArtifactsRequest::default_execution(mode),
             mode,
             output_path: output.to_owned(),
@@ -1346,6 +1381,7 @@ mod tests {
         );
         config.source_sets[1].name = "SalesAddon".to_owned();
         let request = ArtifactsRequest {
+            dry_run: false,
             execution: ArtifactsRequest::default_execution(ArtifactsModeRequest::ExtensionCfe),
             mode: ArtifactsModeRequest::ExtensionCfe,
             output_path: "dist/sales.cfe".to_owned(),
@@ -1370,6 +1406,7 @@ mod tests {
             SourceFormat::Designer,
         );
         let request = ArtifactsRequest {
+            dry_run: false,
             execution: ArtifactsRequest::default_execution(ArtifactsModeRequest::ExtensionCfe),
             mode: ArtifactsModeRequest::ExtensionCfe,
             output_path: "dist/sales.cfe".to_owned(),

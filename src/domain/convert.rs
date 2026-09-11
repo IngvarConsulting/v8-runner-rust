@@ -25,6 +25,12 @@ pub struct ConvertOutput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConvertResult {
     pub ok: bool,
+    /// `false` when the run stopped at a preview instead of dispatching the EDT CLI.
+    ///
+    /// Always present, so an absent field never has to be read as "nothing ran". In a
+    /// preview `outputs` names what would be written; the flag is what separates planned
+    /// from produced.
+    pub provider_dispatched: bool,
     pub direction: ConvertDirection,
     pub scope: ConvertScope,
     #[serde(skip_serializing_if = "Option::is_none")]

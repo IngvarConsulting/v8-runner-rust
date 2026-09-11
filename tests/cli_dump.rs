@@ -251,6 +251,48 @@ fn setup_edt_project() -> (
 }
 
 #[test]
+fn dump_dry_run_plans_the_target_without_writing_it() {
+    let (_dir, config_path, _binary_path, _work_path, base_path, calls_log) = setup_project();
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "dump",
+            "--mode",
+            "full",
+            "--source-set",
+            "main",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    let data = &payload["data"];
+    assert_eq!(data["provider_dispatched"], false);
+    assert_eq!(data["ok"], true);
+    assert_eq!(data["source_set"], "main");
+    let message = data["message"].as_str().expect("message");
+    assert!(message.contains("nothing written"), "{message}");
+    assert!(
+        message.contains(base_path.join("main").display().to_string().as_str()),
+        "{message}"
+    );
+    assert!(
+        !calls_log.exists(),
+        "preview must not dispatch the platform"
+    );
+}
+
+#[test]
 fn dump_ibcmd_full_json_success() {
     let (_dir, config_path, _binary_path, work_path, base_path, calls_log) = setup_project();
 

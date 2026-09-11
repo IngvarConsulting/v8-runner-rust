@@ -4,6 +4,8 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DumpResult {
     pub ok: bool,
+    /// `false` when the run stopped at a preview instead of dispatching the platform.
+    pub provider_dispatched: bool,
     pub source_set: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extension: Option<String>,

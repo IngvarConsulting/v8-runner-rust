@@ -8,11 +8,11 @@ use tracing::info;
 
 use crate::cli::args::{
     ArtifactsArgs, BuildArgs, Command, ConvertArgs, DesignerConfigSyntaxArgs,
-    DesignerModulesSyntaxArgs, DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs, InfobaseArgs,
-    InfobaseCommand, InfobaseConfigurationCommand, InfobaseConfigurationExportArgs,
-    InfobaseRestoreArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs, SyntaxArgs, SyntaxTarget,
-    TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope, TestVaArgs, TestYaxunitArgs, ToolsArgs,
-    ToolsCommand, ToolsDownloadArgs, ToolsDownloadCommand,
+    DesignerModulesSyntaxArgs, DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs,
+    ExtensionsCommand, InfobaseArgs, InfobaseCommand, InfobaseConfigurationCommand,
+    InfobaseConfigurationExportArgs, InfobaseRestoreArgs, InitArgs, LaunchArgs, LaunchOptionsArgs,
+    LoadArgs, SyntaxArgs, SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope,
+    TestVaArgs, TestYaxunitArgs, ToolsArgs, ToolsCommand, ToolsDownloadArgs, ToolsDownloadCommand,
 };
 use crate::cli::output::{
     cli_error_contract, failure_envelope, pre_dispatch_error_envelope,
@@ -69,6 +69,8 @@ use crate::use_cases::configure_extensions;
 use crate::use_cases::context::{CommandName, ExecutionContext};
 use crate::use_cases::convert_sources;
 use crate::use_cases::dump_config;
+use crate::use_cases::extension_inventory;
+use crate::use_cases::extension_inventory::ExtensionChangeRequest;
 use crate::use_cases::infobase_export;
 use crate::use_cases::init_project;
 use crate::use_cases::launch_app;
@@ -78,9 +80,9 @@ use crate::use_cases::request::{
     ClientMcpAddonRequest, ClientMcpMode, ClientMcpOptionsRequest, ConfigureExtensionsRequest,
     ConvertRequest, ConvertScopeRequest, DesignerClientScope, DesignerClientScopes,
     DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest,
-    DesignerModulesSyntaxRequest, DumpRequest, InitRequest, LaunchRequest, LoadRequest,
-    SyntaxExtensionScope, SyntaxRequest, SyntaxTargetRequest, TestRequest, TestScopeRequest,
-    ToolsDownloadRequest,
+    DesignerModulesSyntaxRequest, DumpRequest, ExtensionInventoryRequest, ExtensionInventoryScope,
+    InitRequest, LaunchRequest, LoadRequest, SyntaxExtensionScope, SyntaxRequest,
+    SyntaxTargetRequest, TestRequest, TestScopeRequest, ToolsDownloadRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
@@ -112,7 +114,13 @@ pub fn execute_command(
             clean_before_execution,
             cancellation,
         ),
-        Command::Init => execute_init(config, presenter, clean_before_execution, cancellation),
+        Command::Init(args) => execute_init(
+            config,
+            args,
+            presenter,
+            clean_before_execution,
+            cancellation,
+        ),
         Command::Extensions(args) => execute_extensions(
             config,
             args,
@@ -196,7 +204,7 @@ pub fn command_name(command: &Command) -> CommandName {
         Command::Tools(ToolsArgs {
             command: ToolsCommand::Download(_),
         }) => CommandName::ToolsDownload,
-        Command::Init => CommandName::Init,
+        Command::Init(_) => CommandName::Init,
         Command::Extensions(_) => CommandName::Extensions,
         Command::Build(_) => CommandName::Build,
         Command::Load(_) => CommandName::Load,
@@ -329,6 +337,15 @@ fn execute_extensions(
     clean_before_execution: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
+    if let Some(command) = &args.command {
+        return execute_extension_command(
+            config,
+            command,
+            presenter,
+            clean_before_execution,
+            cancellation,
+        );
+    }
     let request = map_extensions_request(args);
     let context = cli_context(config, CommandName::Extensions, cancellation);
     with_cli_workspace_lock(
@@ -371,13 +388,246 @@ fn execute_extensions(
     )
 }
 
-fn execute_init(
+/// Dispatches the infobase-side extension family.
+///
+/// Reads and writes share one workspace lock boundary: the composition can change under
+/// a read, and a listing taken across an install would report a half-state.
+fn execute_extension_command(
     config: &AppConfig,
+    command: &ExtensionsCommand,
     presenter: &Presenter,
     clean_before_execution: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    let request = InitRequest;
+    let context = cli_context(config, CommandName::Extensions, cancellation);
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        CommandName::Extensions,
+        clean_before_execution,
+        || match command {
+            ExtensionsCommand::List(args) => run_extension_inventory(
+                config,
+                &context,
+                presenter,
+                ExtensionInventoryScope::All,
+                args.dry_run,
+            ),
+            ExtensionsCommand::Info(args) => run_extension_inventory(
+                config,
+                &context,
+                presenter,
+                ExtensionInventoryScope::Named {
+                    name: args.name.clone(),
+                },
+                args.dry_run,
+            ),
+            ExtensionsCommand::Create(args) => run_extension_change(
+                config,
+                &context,
+                presenter,
+                ExtensionChangeRequest::Create {
+                    name: args.name.clone(),
+                    name_prefix: args.name_prefix.clone(),
+                    synonym: args.synonym.clone(),
+                    purpose: args.purpose.clone(),
+                },
+                args.dry_run,
+            ),
+            ExtensionsCommand::Delete(args) => run_extension_change(
+                config,
+                &context,
+                presenter,
+                ExtensionChangeRequest::Delete {
+                    name: args.name.clone(),
+                },
+                args.dry_run,
+            ),
+            ExtensionsCommand::Activate(args) => run_extension_change(
+                config,
+                &context,
+                presenter,
+                ExtensionChangeRequest::SetActive {
+                    name: args.name.clone(),
+                    active: args.active == "yes",
+                },
+                args.dry_run,
+            ),
+        },
+    )
+}
+
+fn run_extension_inventory(
+    config: &AppConfig,
+    context: &ExecutionContext,
+    presenter: &Presenter,
+    scope: ExtensionInventoryScope,
+    dry_run: bool,
+) -> Result<(), UseCaseError> {
+    let request = ExtensionInventoryRequest { scope, dry_run };
+    match extension_inventory::execute(context, config, &request) {
+        Ok(result) => {
+            if presenter.is_json() {
+                presenter.print_envelope(&Envelope::ok(
+                    CommandName::Extensions.as_str(),
+                    result.duration_ms,
+                    result,
+                ));
+            } else {
+                render_extension_inventory_text(&result, presenter);
+            }
+            Ok(())
+        }
+        Err(failure) => {
+            let error = failure.error;
+            if presenter.is_json() {
+                presenter.print_envelope(&pre_dispatch_error_envelope(
+                    CommandName::Extensions.as_str(),
+                    &error,
+                ));
+            } else {
+                presenter.print_error(&error.to_string());
+            }
+            Err(error)
+        }
+    }
+}
+
+fn run_extension_change(
+    config: &AppConfig,
+    context: &ExecutionContext,
+    presenter: &Presenter,
+    request: ExtensionChangeRequest,
+    dry_run: bool,
+) -> Result<(), UseCaseError> {
+    match extension_inventory::change(context, config, &request, dry_run) {
+        Ok(result) => {
+            if presenter.is_json() {
+                presenter.print_envelope(&Envelope::ok(
+                    CommandName::Extensions.as_str(),
+                    result.duration_ms,
+                    result,
+                ));
+            } else {
+                render_extensions_text(&result, presenter);
+            }
+            Ok(())
+        }
+        Err(failure) => {
+            let error = failure.error;
+            if presenter.is_json() {
+                match failure.payload {
+                    Some(result) => presenter.print_envelope(&failure_envelope(
+                        CommandName::Extensions.as_str(),
+                        result.duration_ms,
+                        result,
+                        &error,
+                    )),
+                    None => presenter.print_envelope(&pre_dispatch_error_envelope(
+                        CommandName::Extensions.as_str(),
+                        &error,
+                    )),
+                }
+            } else {
+                presenter.print_error(&error.to_string());
+            }
+            Err(error)
+        }
+    }
+}
+
+fn render_extension_inventory_text(
+    result: &crate::domain::extensions::ExtensionInventoryResult,
+    presenter: &Presenter,
+) {
+    if let Some(plan) = result.plan.as_deref() {
+        presenter.print_timeline(&[TimelineItem::new(
+            TimelineStatus::Succeeded,
+            "Infobase extensions preview",
+        )
+        .with_detail(plan.to_owned())]);
+        return;
+    }
+    if result.extensions.is_empty() {
+        presenter.print_timeline(&[TimelineItem::new(
+            TimelineStatus::Succeeded,
+            "Infobase extensions",
+        )
+        .with_detail("no extensions are installed in the infobase".to_owned())]);
+        return;
+    }
+    let details = result
+        .extensions
+        .iter()
+        .map(|extension| {
+            format!(
+                "{}: purpose={}, active={}, safe mode={}, unsafe action protection={}, scope={}, version={}, hash={}",
+                extension.name,
+                extension.purpose,
+                extension.active,
+                extension.safe_mode,
+                extension.unsafe_action_protection,
+                extension.scope,
+                extension.version.as_deref().unwrap_or("none"),
+                extension.hash_sum,
+            )
+        })
+        .collect::<Vec<_>>();
+    presenter.print_timeline(&[TimelineItem::new(
+        TimelineStatus::Succeeded,
+        "Infobase extensions",
+    )
+    .with_detail(details.join("\n"))]);
+}
+
+fn render_extensions_text(
+    result: &crate::domain::extensions::ExtensionsResult,
+    presenter: &Presenter,
+) {
+    let details = result
+        .steps
+        .iter()
+        .map(|step| {
+            format!(
+                "{}: {} -> {}{}",
+                step.target,
+                step.action,
+                // A preview performed nothing, so the step must not read as done.
+                match (result.provider_dispatched, step.ok) {
+                    (false, _) => "planned",
+                    (true, true) => "ok",
+                    (true, false) => "failed",
+                },
+                step.message
+                    .as_deref()
+                    .map(|message| format!(" ({message})"))
+                    .unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>();
+    let status = if result.ok {
+        TimelineStatus::Succeeded
+    } else {
+        TimelineStatus::Failed
+    };
+    let label = if result.provider_dispatched {
+        "Infobase extension change"
+    } else {
+        "Infobase extension change preview"
+    };
+    presenter.print_timeline(&[TimelineItem::new(status, label).with_detail(details.join("\n"))]);
+}
+
+fn execute_init(
+    config: &AppConfig,
+    args: &InitArgs,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    let request = InitRequest {
+        dry_run: args.dry_run,
+    };
     let context = cli_context(config, CommandName::Init, cancellation);
     with_cli_workspace_lock(
         config,
@@ -1952,6 +2202,7 @@ fn render_pre_dispatch_error(
 
 fn map_build_request(args: &BuildArgs) -> BuildRequest {
     BuildRequest {
+        dry_run: args.dry_run,
         full_rebuild: args.full_rebuild,
         source_set: args.source_set.clone(),
     }
@@ -2241,6 +2492,7 @@ fn launch_cli_context(
 
 fn map_load_request(args: &LoadArgs) -> Result<LoadRequest, UseCaseError> {
     Ok(LoadRequest {
+        dry_run: args.dry_run,
         mode: match args.mode.as_str() {
             "load" => LoadMode::Load,
             "merge" => LoadMode::Merge,
@@ -2260,6 +2512,7 @@ fn map_load_request(args: &LoadArgs) -> Result<LoadRequest, UseCaseError> {
 
 fn map_dump_request(args: &DumpArgs) -> Result<DumpRequest, UseCaseError> {
     Ok(DumpRequest {
+        dry_run: args.dry_run,
         mode: parse_required_dump_mode(&args.mode)?,
         source_set: args.source_set.clone(),
         extension: args.extension.clone(),
@@ -2276,6 +2529,7 @@ fn map_convert_request(args: &ConvertArgs) -> ConvertRequest {
             None => ConvertScopeRequest::All,
         },
         output_root: args.output.clone(),
+        dry_run: args.dry_run,
     }
 }
 
@@ -2309,6 +2563,7 @@ fn map_artifacts_request_with_config(
     };
 
     Ok(ArtifactsRequest {
+        dry_run: args.dry_run,
         execution: ArtifactsRequest::default_execution(mode),
         mode,
         output_path: args.output.clone(),
@@ -2607,6 +2862,8 @@ fn is_reserved_raw_launch_key(raw: &str) -> bool {
 #[derive(Debug, Serialize)]
 struct LoadJsonData<'a> {
     pub ok: bool,
+    /// `false` when the run stopped at a preview instead of dispatching the platform.
+    pub provider_dispatched: bool,
     pub mode: LoadMode,
     pub artifact_path: &'a Path,
     pub artifact_type: ArtifactBuildMode,
@@ -2627,6 +2884,7 @@ impl<'a> LoadJsonData<'a> {
         let metadata = load_metadata(result);
         Self {
             ok: result.execution.is_ok(),
+            provider_dispatched: result.provider_dispatched,
             mode: result.mode,
             artifact_path: result.artifact_path.as_path(),
             artifact_type: result.artifact_type,
@@ -2660,11 +2918,20 @@ fn load_message(result: &LoadResult) -> Option<String> {
         LoadMode::Merge => "merge",
         LoadMode::Update => "update",
     };
-    let mut message = format!(
-        "{mode} {} applied successfully after {:?} compatibility probe",
-        result.artifact_path.display(),
-        metadata.compatibility_state
-    );
+    // A preview applied nothing, so it must not claim a successful apply; its own
+    // diagnostics below say what it would have done.
+    let mut message = if result.provider_dispatched {
+        format!(
+            "{mode} {} applied successfully after {:?} compatibility probe",
+            result.artifact_path.display(),
+            metadata.compatibility_state
+        )
+    } else {
+        format!(
+            "{mode} {} previewed; nothing applied",
+            result.artifact_path.display()
+        )
+    };
     if !result.execution.diagnostics.is_empty() {
         message.push_str("; ");
         message.push_str(&result.execution.diagnostics.join("; "));
@@ -2687,6 +2954,8 @@ fn build_load_envelope(result: &LoadResult) -> Envelope<LoadJsonData<'_>> {
 #[derive(Debug, Serialize)]
 struct ArtifactsJsonData<'a> {
     pub ok: bool,
+    /// `false` when the run stopped at a preview instead of dispatching the platform.
+    pub provider_dispatched: bool,
     pub mode: ArtifactBuildMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_set: Option<&'a str>,
@@ -2707,6 +2976,7 @@ impl<'a> ArtifactsJsonData<'a> {
     fn from_result(result: &'a ArtifactsResult) -> Self {
         Self {
             ok: result.execution.is_ok(),
+            provider_dispatched: result.provider_dispatched,
             mode: result.mode,
             source_set: result.source_set.as_deref(),
             extension: result.extension.as_deref(),
@@ -2835,6 +3105,7 @@ fn step_status_detail(status: &InitStepStatus, message: impl AsRef<str>) -> Stri
         InitStepStatus::Ok => format!("✓ {}", message.as_ref()),
         InitStepStatus::Skipped => format!("○ {}", message.as_ref()),
         InitStepStatus::Failed => format!("✗ {}", message.as_ref()),
+        InitStepStatus::Planned => format!("→ {}", message.as_ref()),
     }
 }
 
@@ -3604,8 +3875,9 @@ mod tests {
         ArtifactsArgs, BuildArgs, Command, DesignerConfigSyntaxArgs, DesignerModulesSyntaxArgs,
         DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs, InfobaseArgs, InfobaseCommand,
         InfobaseConfigurationArgs, InfobaseConfigurationCommand, InfobaseConfigurationExportArgs,
-        InfobaseDumpArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs, SyntaxArgs, SyntaxTarget,
-        TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope, TestVaArgs, TestYaxunitArgs,
+        InfobaseDumpArgs, InitArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs, SyntaxArgs,
+        SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope, TestVaArgs,
+        TestYaxunitArgs,
     };
     use crate::cli::output::pre_dispatch_error_envelope;
     use crate::config::model::{
@@ -3802,6 +4074,7 @@ mod tests {
     fn maps_build_dump_launch_and_load_requests() {
         assert!(
             map_build_request(&BuildArgs {
+                dry_run: false,
                 full_rebuild: true,
                 source_set: None,
             })
@@ -3809,6 +4082,7 @@ mod tests {
         );
         assert_eq!(
             map_extensions_request(&ExtensionsArgs {
+                command: None,
                 names: vec!["client_mcp".to_owned()],
             })
             .names,
@@ -3816,6 +4090,7 @@ mod tests {
         );
         assert_eq!(
             map_dump_request(&DumpArgs {
+                dry_run: false,
                 mode: "incremental".to_owned(),
                 source_set: Some("main".to_owned()),
                 extension: Some("Ext".to_owned()),
@@ -3827,6 +4102,7 @@ mod tests {
         );
         assert_eq!(
             map_dump_request(&DumpArgs {
+                dry_run: false,
                 mode: "incremental".to_owned(),
                 source_set: Some("main".to_owned()),
                 extension: Some("Ext".to_owned()),
@@ -3936,6 +4212,7 @@ mod tests {
             }
         );
         let load = map_load_request(&LoadArgs {
+            dry_run: false,
             path: "dist/main.cf".to_owned(),
             mode: "merge".to_owned(),
             settings: Some("merge.xml".to_owned()),
@@ -3949,6 +4226,7 @@ mod tests {
         let artifacts = map_artifacts_request_with_config(
             &sample_config(Path::new("/tmp/work")),
             &ArtifactsArgs {
+                dry_run: false,
                 output: "dist/ext.cfe".to_owned(),
                 source_set: Some("ext-sales".to_owned()),
                 extension: Some("SalesAddon".to_owned()),
@@ -3965,6 +4243,7 @@ mod tests {
         let artifacts = map_artifacts_request_with_config(
             &sample_config(Path::new("/tmp/work")),
             &ArtifactsArgs {
+                dry_run: false,
                 output: "dist/main.cf".to_owned(),
                 source_set: Some("main".to_owned()),
                 extension: Some("   ".to_owned()),
@@ -3980,6 +4259,7 @@ mod tests {
     #[test]
     fn rejects_invalid_mode_mapping() {
         let dump_error = map_dump_request(&DumpArgs {
+            dry_run: false,
             mode: "garbage".to_owned(),
             source_set: None,
             extension: None,
@@ -4005,6 +4285,7 @@ mod tests {
     #[test]
     fn rejects_invalid_load_mode_mapping() {
         let error = map_load_request(&LoadArgs {
+            dry_run: false,
             path: "dist/main.cf".to_owned(),
             mode: "garbage".to_owned(),
             settings: None,
@@ -4094,13 +4375,20 @@ mod tests {
 
     #[test]
     fn resolves_command_name() {
-        assert_eq!(command_name(&Command::Init), CommandName::Init);
         assert_eq!(
-            command_name(&Command::Extensions(ExtensionsArgs { names: vec![] })),
+            command_name(&Command::Init(InitArgs { dry_run: false })),
+            CommandName::Init
+        );
+        assert_eq!(
+            command_name(&Command::Extensions(ExtensionsArgs {
+                command: None,
+                names: vec![],
+            })),
             CommandName::Extensions
         );
         assert_eq!(
             command_name(&Command::Build(BuildArgs {
+                dry_run: false,
                 full_rebuild: false,
                 source_set: None,
             })),
@@ -4108,6 +4396,7 @@ mod tests {
         );
         assert_eq!(
             command_name(&Command::Load(LoadArgs {
+                dry_run: false,
                 path: "dist/main.cf".to_owned(),
                 mode: "load".to_owned(),
                 settings: None,
@@ -4117,6 +4406,7 @@ mod tests {
         );
         assert_eq!(
             command_name(&Command::Artifacts(ArtifactsArgs {
+                dry_run: false,
                 output: "dist/main.cf".to_owned(),
                 source_set: None,
                 extension: None,
@@ -4171,6 +4461,7 @@ mod tests {
         let error = execute_command(
             &config,
             &Command::Build(BuildArgs {
+                dry_run: false,
                 full_rebuild: true,
                 source_set: None,
             }),
@@ -4362,6 +4653,7 @@ mod tests {
         let _ = execute_command(
             &config,
             &Command::Build(BuildArgs {
+                dry_run: false,
                 full_rebuild: true,
                 source_set: None,
             }),
@@ -4420,6 +4712,7 @@ mod tests {
     #[test]
     fn load_json_message_preserves_success_text_and_all_diagnostics() {
         let result = LoadResult {
+            provider_dispatched: true,
             mode: LoadMode::Load,
             artifact_path: PathBuf::from("main.cf"),
             artifact_type: ArtifactBuildMode::ConfigurationCf,

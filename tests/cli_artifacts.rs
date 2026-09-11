@@ -42,6 +42,46 @@ fn setup_project(fail: bool) -> (tempfile::TempDir, PathBuf, PathBuf) {
 }
 
 #[test]
+fn artifacts_dry_run_plans_the_package_without_building_it() {
+    let (_dir, config_path, base_path) = setup_project(false);
+    let output_path = base_path.join("dist").join("release.cf");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "artifacts",
+            "--output",
+            &output_path.display().to_string(),
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("json envelope");
+    let data = &envelope["data"];
+    assert_eq!(data["provider_dispatched"], false);
+    assert_eq!(data["mode"], "configuration_cf");
+    assert_eq!(data["source_set"], "main");
+    assert_eq!(data["execution"]["payload"]["published"], false);
+    assert_eq!(
+        data["output_path"].as_str().expect("output"),
+        output_path.display().to_string()
+    );
+    // Neither the package nor its lock may appear.
+    assert!(!output_path.exists());
+    assert!(!output_path.parent().expect("dist").exists());
+}
+
+#[test]
 fn artifacts_text_success_keeps_output_artifact_visible() {
     let (_dir, config_path, base_path) = setup_project(false);
     let output_path = base_path.join("dist").join("release.cf");

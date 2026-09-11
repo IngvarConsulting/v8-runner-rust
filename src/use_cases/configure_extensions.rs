@@ -65,6 +65,7 @@ pub fn execute(
                 "extension update",
             );
             let payload = ExtensionsResult {
+                provider_dispatched: true,
                 ok: false,
                 steps,
                 duration_ms: started.elapsed().as_millis() as u64,
@@ -125,6 +126,7 @@ pub fn execute(
                 steps.push(step);
                 log_extensions_summary(false);
                 let payload = ExtensionsResult {
+                    provider_dispatched: true,
                     ok: false,
                     steps,
                     duration_ms: started.elapsed().as_millis() as u64,
@@ -148,6 +150,7 @@ pub fn execute(
                 steps.push(step);
                 log_extensions_summary(false);
                 let payload = ExtensionsResult {
+                    provider_dispatched: true,
                     ok: false,
                     steps,
                     duration_ms: started.elapsed().as_millis() as u64,
@@ -159,6 +162,7 @@ pub fn execute(
 
     log_extensions_summary(true);
     Ok(ExtensionsResult {
+        provider_dispatched: true,
         ok: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,

@@ -155,6 +155,37 @@ fn run_convert_with_context(
         }
     };
 
+    if request.dry_run {
+        // The EDT CLI is already located above, so an absent platform refuses here rather
+        // than after the caller approved the plan. Nothing has touched the filesystem yet:
+        // resolution reads the config and the declared trees, and the EDT workspace is
+        // created by the session below.
+        let outputs = resolved
+            .items
+            .iter()
+            .map(|item| ConvertOutput {
+                source_set: item.source_set_name.clone(),
+                source_path: item.source_path.clone(),
+                target_path: item.target_path.clone(),
+            })
+            .collect();
+        let mut preview = result_snapshot(
+            true,
+            resolved.direction,
+            resolved.scope,
+            resolved.source_set.clone(),
+            resolved.workspace_path.clone(),
+            outputs,
+            started,
+            Some(format!(
+                "previewed conversion via {}; EDT CLI not dispatched",
+                location.path.display()
+            )),
+        );
+        preview.provider_dispatched = false;
+        return Ok(preview);
+    }
+
     let policy = context.process_policy(InterruptionSafetyClass::GracefulThenKill, None);
     if config.tools.edt_cli.interactive_mode {
         let manager = EdtSessionManager::for_config(
@@ -1336,6 +1367,7 @@ fn result_snapshot(
 ) -> ConvertResult {
     ConvertResult {
         ok,
+        provider_dispatched: true,
         direction,
         scope,
         source_set,

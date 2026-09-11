@@ -43,6 +43,8 @@ pub struct ArtifactBuildMetadata {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactsResult {
+    /// `false` when the run stopped at a preview instead of dispatching the platform.
+    pub provider_dispatched: bool,
     pub mode: ArtifactBuildMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_set: Option<String>,
@@ -67,6 +69,7 @@ mod tests {
     #[test]
     fn artifacts_result_serializes_canonical_execution_without_legacy_fields() {
         let result = ArtifactsResult {
+            provider_dispatched: true,
             mode: ArtifactBuildMode::ConfigurationCf,
             source_set: Some("main".to_owned()),
             extension: None,
