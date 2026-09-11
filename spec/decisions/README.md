@@ -28,6 +28,7 @@
 - [ADR-0022: Ввести общий механизм подготовки расширений и использовать его для `client_mcp`](0022-universalnyy-mehanizm-podgotovki-rasshireniy-i-client-mcp-extension.md) — `accepted`, `2026-05-02`
 - [ADR-0023: Fail-closed состояния проверки загрузки артефактов](0023-fail-closed-sostoyaniya-proverki-zagruzki.md) — `accepted`, `2026-09-02`
 - [ADR-0024: Типизировать экспорт конфигурации и снимка информационной базы](0024-tipizirovat-eksport-konfiguratsii-i-snimka-ib.md) — `accepted`, `2026-09-02`
+- [ADR-0025: Невыполняющее превью запуска клиента](0025-nevypolnyayuschee-prevyu-zapuska-klienta.md) — `accepted`, `2026-09-11`
 - [ADR-0026: Загрузка информационной базы из DT](0026-zagruzka-informatsionnoy-bazy-iz-dt.md) — `accepted`, `2026-09-11`
 
 ## Правила обновления

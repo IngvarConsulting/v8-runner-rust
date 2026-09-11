@@ -15,6 +15,11 @@ pub struct LaunchResult {
     pub binary: PathBuf,
     /// Canonical platform installation metadata for the selected binary.
     pub platform_resolution: PlatformResolution,
+    /// `false` when the run stopped at a preview instead of dispatching the client process.
+    pub provider_dispatched: bool,
+    /// Compact machine-facing plan produced by a non-executing preview.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<LaunchPlan>,
     /// Human-readable launch summary.
     pub message: Option<String>,
     /// Client-side MCP endpoint readiness details when readiness was requested.
@@ -23,6 +28,18 @@ pub struct LaunchResult {
     /// Direct external EPF wait outcome when explicitly requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_epf_wait: Option<ExternalEpfWaitResult>,
+}
+
+/// Compact machine-facing plan produced by a non-executing launch preview.
+///
+/// The plan names what the runner selected, because only the runner discovers a
+/// platform installation: a caller cannot compose these arguments itself.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaunchPlan {
+    /// Program the runner would have spawned.
+    pub program: PathBuf,
+    /// Composed arguments with every credential value masked.
+    pub args: Vec<String>,
 }
 
 /// Observed outcome of an opt-in bounded external EPF client launch.

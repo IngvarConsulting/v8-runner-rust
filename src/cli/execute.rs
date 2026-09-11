@@ -2452,6 +2452,7 @@ fn map_launch_request(args: &LaunchArgs) -> Result<LaunchRequest, UseCaseError> 
         target,
         launch: map_direct_launch_options(target, &args.launch, client_mcp.is_some())?,
         client_mcp,
+        dry_run: args.dry_run,
     })
 }
 
@@ -3407,12 +3408,12 @@ fn render_syntax_status(status: SyntaxCheckStatus) -> &'static str {
 }
 
 fn render_launch_text(result: &LaunchResult, presenter: &Presenter) {
-    render_launch_text_with_status(
-        result,
-        presenter,
-        TimelineStatus::Succeeded,
-        "Launch completed successfully",
-    );
+    let label = if result.provider_dispatched {
+        "Launch completed successfully"
+    } else {
+        "Launch preview completed successfully"
+    };
+    render_launch_text_with_status(result, presenter, TimelineStatus::Succeeded, label);
 }
 
 fn render_launch_text_with_status(
@@ -3434,6 +3435,13 @@ fn render_launch_text_with_status(
     );
     if let Some(pid) = result.pid {
         details.push(format!("pid: {pid}"));
+    }
+    if !result.provider_dispatched {
+        details.push("provider dispatched: false".to_owned());
+    }
+    if let Some(plan) = &result.plan {
+        details.push(format!("planned program: {}", plan.program.display()));
+        details.push(format!("planned args: {}", plan.args.join(" ")));
     }
     if let Some(readiness) = &result.mcp_readiness {
         details.push(format!("mcp endpoint: {}", readiness.url));
@@ -3847,6 +3855,7 @@ mod tests {
                 mcp_config: None,
                 mcp_port: None,
                 wait_ready: false,
+                dry_run: false,
             })
             .expect("request"),
             LaunchRequest {
@@ -3861,6 +3870,7 @@ mod tests {
                     external_epf_wait: None,
                 },
                 client_mcp: None,
+                dry_run: false,
             }
         );
         assert_eq!(
@@ -3872,6 +3882,7 @@ mod tests {
                 mcp_config: None,
                 mcp_port: None,
                 wait_ready: false,
+                dry_run: false,
             })
             .expect("request")
             .target,
@@ -3886,6 +3897,7 @@ mod tests {
                 mcp_config: None,
                 mcp_port: None,
                 wait_ready: false,
+                dry_run: false,
             })
             .expect("request")
             .target,
@@ -3900,6 +3912,7 @@ mod tests {
                 mcp_config: Some("C:\\tmp\\mcp-conf.json".to_owned()),
                 mcp_port: Some(123),
                 wait_ready: true,
+                dry_run: false,
             })
             .expect("request"),
             LaunchRequest {
@@ -3919,6 +3932,7 @@ mod tests {
                     addon: Some(ClientMcpAddonRequest::VanessaAutomation),
                     wait_ready: true,
                 }),
+                dry_run: false,
             }
         );
         let load = map_load_request(&LoadArgs {
@@ -3980,6 +3994,7 @@ mod tests {
             mcp_config: None,
             mcp_port: None,
             wait_ready: false,
+            dry_run: false,
         })
         .expect_err("launch mode should be rejected");
 
@@ -4283,6 +4298,7 @@ mod tests {
                 mcp_config: None,
                 mcp_port: None,
                 wait_ready: false,
+                dry_run: false,
             }),
             None,
             &presenter,

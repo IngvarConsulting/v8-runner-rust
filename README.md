@@ -207,6 +207,16 @@ v8-runner launch mcp va --mcp-port 1550 --wait-ready
 canonical `platform_resolution` (path, version, source и installation root). Эта metadata
 публикуется только для результата `launch`, а не для всех команд.
 
+Чтобы узнать, что именно будет запущено, не запуская клиент:
+
+```bash
+v8-runner --json-message launch thin --dry-run
+```
+
+Превью возвращает `provider_dispatched=false`, `pid=null` и `plan` с выбранной программой и уже
+составленными аргументами; значения credential в них замаскированы как `***`. Уберите флаг, чтобы
+запустить клиент.
+
 ### Поднимите MCP transport (MCP-транспорт) для AI-агентов:
 
 ```bash

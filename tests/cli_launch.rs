@@ -509,6 +509,102 @@ fn launch_json_returns_pid_and_selected_binary() {
 }
 
 #[test]
+fn launch_dry_run_json_returns_a_plan_without_dispatching_the_client() {
+    let dir = temp_workspace();
+    let base_path = dir.path().join("project");
+    let work_path = dir.path().join("work");
+    let install_dir = dir.path().join("platform");
+    let config_path = dir.path().join("v8project.yaml");
+    let args_log = dir.path().join("thin.args.log");
+
+    fs::create_dir_all(&base_path).expect("base");
+    fs::create_dir_all(&work_path).expect("work");
+    write_script(&install_dir.join("bin").join("1cv8"));
+    write_logging_script(&install_dir.join("bin").join("1cv8c"), &args_log);
+    write_config(&config_path, &base_path, &work_path, &install_dir, None);
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "thin",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(output.status.success());
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    let data = &payload["data"];
+    assert_eq!(payload["ok"], true);
+    assert_eq!(data["mode"], "thin");
+    assert_eq!(data["provider_dispatched"], false);
+    assert!(data["pid"].is_null());
+    assert_eq!(
+        data["plan"]["program"].as_str().expect("planned program"),
+        canonical_path_string(&install_dir.join("bin").join("1cv8c"))
+    );
+    let planned: Vec<&str> = data["plan"]["args"]
+        .as_array()
+        .expect("planned args")
+        .iter()
+        .map(|arg| arg.as_str().expect("arg"))
+        .collect();
+    assert_eq!(planned.first(), Some(&"ENTERPRISE"));
+    assert!(planned.contains(&"/DisableStartupDialogs"));
+    assert!(
+        !wait_for_file(&args_log, Duration::from_millis(500)),
+        "preview must not dispatch the client process"
+    );
+}
+
+#[test]
+fn launch_dry_run_text_masks_credentials_and_says_nothing_was_dispatched() {
+    let dir = temp_workspace();
+    let base_path = dir.path().join("project");
+    let work_path = dir.path().join("work");
+    let install_dir = dir.path().join("platform");
+    let config_path = dir.path().join("v8project.yaml");
+
+    fs::create_dir_all(&base_path).expect("base");
+    fs::create_dir_all(&work_path).expect("work");
+    write_script(&install_dir.join("bin").join("1cv8"));
+    write_script(&install_dir.join("bin").join("1cv8c"));
+    write_config(&config_path, &base_path, &work_path, &install_dir, None);
+    let config = fs::read_to_string(&config_path).expect("config");
+    fs::write(
+        &config_path,
+        config.replace(
+            "infobase:\n  connection: 'File=/tmp/ib'\n",
+            "infobase:\n  connection: 'File=/tmp/ib'\n  user: Admin\n  password: s3cret\n",
+        ),
+    )
+    .expect("config with credentials");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--no-color",
+            "launch",
+            "thin",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Launch preview completed successfully"));
+    assert!(stdout.contains("provider dispatched: false"));
+    assert!(stdout.contains("/N Admin"));
+    assert!(stdout.contains("/P ***"));
+    assert!(!stdout.contains("s3cret"), "{stdout}");
+}
+
+#[test]
 fn launch_text_includes_binary_pid_and_cleans_platform_logs() {
     let (_dir, config_path, install_dir, work_path) = setup_project();
     let logs_dir = work_path.join("logs").join("platform");

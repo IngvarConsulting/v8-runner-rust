@@ -130,6 +130,12 @@ v8-runner launch thick
 v8-runner launch ordinary
 ```
 
+Check what a launch would run before running it; the preview never spawns the client:
+
+```bash
+v8-runner --json-message launch thin --dry-run
+```
+
 Launch onec-client-mcp-devkit through the supported `launch mcp` surface instead of manually assembling `/C runMcp...`:
 
 ```bash

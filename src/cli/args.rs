@@ -507,6 +507,10 @@ pub struct LaunchArgs {
     #[command(flatten)]
     pub launch: DirectLaunchOptionsArgs,
 
+    /// Validate and select a provider without launching the client process
+    #[arg(long)]
+    pub dry_run: bool,
+
     /// JSON config path for onec-client-mcp-devkit `/C runMcp=<FILE>`
     #[arg(long = "mcp-config")]
     pub mcp_config: Option<String>,
@@ -906,6 +910,7 @@ mod tests {
                 mcp_config,
                 mcp_port,
                 wait_ready,
+                dry_run,
             }) => {
                 assert_eq!(target, "ordinary");
                 assert_eq!(launch.common.c.as_deref(), Some("DoWork"));
@@ -918,6 +923,7 @@ mod tests {
                 assert_eq!(mcp_config, None);
                 assert_eq!(mcp_port, None);
                 assert!(!wait_ready);
+                assert!(!dry_run);
             }
             _ => panic!("unexpected command"),
         }
@@ -957,6 +963,7 @@ mod tests {
                 mcp_config,
                 mcp_port,
                 wait_ready,
+                dry_run,
             }) => {
                 assert_eq!(target, "designer");
                 assert_eq!(launch, DirectLaunchOptionsArgs::default());
@@ -965,6 +972,21 @@ mod tests {
                 assert_eq!(mcp_config, None);
                 assert_eq!(mcp_port, None);
                 assert!(!wait_ready);
+                assert!(!dry_run);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parses_launch_dry_run_flag() {
+        let cli = Cli::try_parse_from(["v8-runner", "launch", "thin", "--dry-run"])
+            .expect("parse launch preview");
+
+        match cli.command {
+            Command::Launch(args) => {
+                assert_eq!(args.target, "thin");
+                assert!(args.dry_run);
             }
             _ => panic!("unexpected command"),
         }
@@ -996,6 +1018,7 @@ mod tests {
                 mcp_config,
                 mcp_port,
                 wait_ready,
+                dry_run,
             }) => {
                 assert_eq!(target, "mcp");
                 assert_eq!(launch, DirectLaunchOptionsArgs::default());
@@ -1004,6 +1027,7 @@ mod tests {
                 assert_eq!(mcp_config.as_deref(), Some("mcp-conf.json"));
                 assert_eq!(mcp_port, Some(9876));
                 assert!(wait_ready);
+                assert!(!dry_run);
             }
             _ => panic!("unexpected command"),
         }

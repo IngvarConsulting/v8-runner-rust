@@ -164,6 +164,13 @@ v8-runner launch thick
 v8-runner launch ordinary
 ```
 
+Inspect a launch without starting a client. The preview reports the selected program and the
+composed arguments with credential values replaced by `***`:
+
+```bash
+v8-runner --json-message launch thin --dry-run
+```
+
 Launch onec-client-mcp-devkit inside 1C without VA:
 
 ```bash

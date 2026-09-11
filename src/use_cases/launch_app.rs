@@ -3,11 +3,12 @@ use std::time::Duration;
 
 use crate::config::model::AppConfig;
 use crate::domain::launch::{
-    ExternalEpfWaitResult, LaunchMode, LaunchResult, PlatformResolution, PlatformResolutionSource,
+    ExternalEpfWaitResult, LaunchMode, LaunchPlan, LaunchResult, PlatformResolution,
+    PlatformResolutionSource,
 };
 use crate::domain::runner::{launch_key_alias_matches, LaunchOptions};
 use crate::platform::enterprise::{
-    build_launch_args, normalize_launch_payload_path, LaunchClientMode,
+    build_launch_args, mask_launch_args, normalize_launch_payload_path, LaunchClientMode,
 };
 use crate::platform::locator::{ResolutionSource, UtilityLocation, UtilityType, UtilityVersion};
 use crate::platform::process::{ManagedSpawnMode, ProcessRequest};
@@ -74,6 +75,25 @@ pub fn execute(
         external_epf_wait_plan(config, args, &launch).map_err(UseCaseFailure::without_payload)?;
     let readiness_url = client_mcp_readiness_url(config, args)
         .map_err(|error| UseCaseFailure::without_payload(error))?;
+    if args.dry_run {
+        // Both options report an outcome observed from a running client, which a preview
+        // never starts; answering them with a plan would be a fabricated observation.
+        let conflicting = if external_epf_wait.is_some() {
+            Some("--wait-for-exit")
+        } else if readiness_url.is_some() {
+            Some("--wait-ready")
+        } else {
+            None
+        };
+        if let Some(option) = conflicting {
+            return Err(UseCaseFailure::without_payload(AppError::Validation(
+                format!(
+                    "{option} cannot be combined with launch --dry-run because a preview never starts the client"
+                ),
+            )));
+        }
+    }
+
     let additional_launch_keys = effective_enterprise_launch_keys(config, args, &launch);
     let mut utilities = PlatformUtilities::from_config(config);
     let location = utilities
@@ -98,6 +118,31 @@ pub fn execute(
             .map(|_| None)
             .unwrap_or(Some(LAUNCH_STARTUP_PROBE)),
     };
+
+    if args.dry_run {
+        let connection = config.v8_connection();
+        let secrets: Vec<&str> = connection.password.as_deref().into_iter().collect();
+        let masked = mask_launch_args(&process_request.args, &secrets);
+        log_live_stage(
+            "launch: preview",
+            "[Launch] preview only, client process not dispatched",
+        );
+        return Ok(LaunchResult {
+            ok: true,
+            mode,
+            pid: None,
+            binary: location.path.clone(),
+            platform_resolution,
+            provider_dispatched: false,
+            plan: Some(LaunchPlan {
+                program: process_request.program.clone(),
+                args: masked,
+            }),
+            message: Some(preview_message(config, args, &location.path)),
+            mcp_readiness: None,
+            external_epf_wait: None,
+        });
+    }
 
     debug!("[Запуск] Приложение: {}", mode_label(args.target));
     log_live_stage("launch: start", "[Launch] starting client process");
@@ -131,6 +176,8 @@ pub fn execute(
             pid: Some(pid),
             binary: location.path,
             platform_resolution,
+            provider_dispatched: true,
+            plan: None,
             message: Some(message.clone()),
             mcp_readiness: None,
             external_epf_wait: Some(ExternalEpfWaitResult {
@@ -163,6 +210,8 @@ pub fn execute(
             pid: Some(pid),
             binary: binary.clone(),
             platform_resolution: platform_resolution.clone(),
+            provider_dispatched: true,
+            plan: None,
             message: Some(launch_message(config, args, &binary, pid)),
             mcp_readiness: None,
             external_epf_wait: None,
@@ -211,6 +260,8 @@ pub fn execute(
         pid: Some(spawned.pid),
         binary: spawned.binary.clone(),
         platform_resolution,
+        provider_dispatched: true,
+        plan: None,
         message: Some(launch_message(config, args, &spawned.binary, spawned.pid)),
         mcp_readiness: None,
         external_epf_wait: None,
@@ -329,6 +380,26 @@ fn required_mcp_tools(args: &LaunchArgs) -> &'static [&'static str] {
     }
 }
 
+fn append_client_mcp_build_hint(message: &mut String, config: &AppConfig, args: &LaunchArgs) {
+    if !is_client_mcp_launch(args) {
+        return;
+    }
+    if let Some(hint) = tool_extension::client_mcp_build_hint(config) {
+        message.push_str("; ");
+        message.push_str(hint);
+    }
+}
+
+fn preview_message(config: &AppConfig, args: &LaunchArgs, binary: &Path) -> String {
+    let mut message = format!(
+        "Previewed {} via {}; client process not dispatched",
+        mode_label(args.target),
+        binary.display()
+    );
+    append_client_mcp_build_hint(&mut message, config, args);
+    message
+}
+
 fn launch_message(config: &AppConfig, args: &LaunchArgs, binary: &Path, pid: u32) -> String {
     let mut message = format!(
         "Launched {} via {} (pid {})",
@@ -336,12 +407,7 @@ fn launch_message(config: &AppConfig, args: &LaunchArgs, binary: &Path, pid: u32
         binary.display(),
         pid
     );
-    if is_client_mcp_launch(args) {
-        if let Some(hint) = tool_extension::client_mcp_build_hint(config) {
-            message.push_str("; ");
-            message.push_str(hint);
-        }
-    }
+    append_client_mcp_build_hint(&mut message, config, args);
     message
 }
 
@@ -589,6 +655,7 @@ mod tests {
                 target: LaunchTargetRequest::thin_client(),
                 launch: Default::default(),
                 client_mcp: None,
+                dry_run: false,
             },
         )
         .expect("launch succeeds");
@@ -597,6 +664,110 @@ mod tests {
         let args = read_args_log(&args_log);
         assert!(args.contains("ENTERPRISE"));
         assert!(args.contains("/TESTMANAGER"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dry_run_launch_plans_the_client_without_spawning_it() {
+        let dir = tempdir().expect("tempdir");
+        let args_log = dir.path().join("preview.args.log");
+        let platform_dir = dir.path().join("platform");
+        write_logging_script(&platform_dir.join("bin").join("1cv8c"), &args_log);
+
+        let mut config = sample_config(dir.path(), dir.path(), &platform_dir);
+        config.tools.enterprise.additional_launch_keys = vec!["/TESTMANAGER".to_owned()];
+
+        let result = execute(
+            &ExecutionContext::cli(CommandName::Launch),
+            &config,
+            &LaunchRequest {
+                target: LaunchTargetRequest::thin_client(),
+                launch: Default::default(),
+                client_mcp: None,
+                dry_run: true,
+            },
+        )
+        .expect("preview succeeds");
+
+        assert!(result.ok);
+        assert!(!result.provider_dispatched);
+        assert!(result.pid.is_none());
+        let plan = result.plan.expect("preview plan");
+        assert!(
+            plan.program.ends_with("platform/bin/1cv8c"),
+            "{:?}",
+            plan.program
+        );
+        assert!(plan.args.contains(&"ENTERPRISE".to_owned()));
+        assert!(plan.args.contains(&"/TESTMANAGER".to_owned()));
+        assert!(
+            !args_log.exists(),
+            "preview must not dispatch the client process"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dry_run_launch_plan_masks_the_infobase_password() {
+        let dir = tempdir().expect("tempdir");
+        let platform_dir = dir.path().join("platform");
+        write_script(&platform_dir.join("bin").join("1cv8c"), "sleep 1");
+
+        let mut config = sample_config(dir.path(), dir.path(), &platform_dir);
+        config.infobase.user = Some("Администратор".to_owned());
+        config.infobase.password = Some("s3cret".to_owned());
+
+        let result = execute(
+            &ExecutionContext::cli(CommandName::Launch),
+            &config,
+            &LaunchRequest {
+                target: LaunchTargetRequest::thin_client(),
+                launch: Default::default(),
+                client_mcp: None,
+                dry_run: true,
+            },
+        )
+        .expect("preview succeeds");
+
+        let plan = result.plan.expect("preview plan");
+        let rendered = plan.args.join(" ");
+        assert!(
+            !rendered.contains("s3cret"),
+            "password leaked into the preview: {rendered}"
+        );
+        assert!(rendered.contains("/N Администратор"));
+        assert!(rendered.contains("/P ***"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dry_run_launch_refuses_options_that_observe_a_running_client() {
+        let dir = tempdir().expect("tempdir");
+        let platform_dir = dir.path().join("platform");
+        write_script(&platform_dir.join("bin").join("1cv8c"), "sleep 1");
+
+        let mut config = sample_config(dir.path(), dir.path(), &platform_dir);
+        config.tools.client_mcp.port = Some(9874);
+
+        let error = execute(
+            &ExecutionContext::cli(CommandName::Launch),
+            &config,
+            &LaunchRequest {
+                target: LaunchTargetRequest::client_mcp_with_mode(ClientMcpMode::Thin),
+                launch: Default::default(),
+                client_mcp: Some(ClientMcpOptionsRequest {
+                    wait_ready: true,
+                    ..ClientMcpOptionsRequest::default()
+                }),
+                dry_run: true,
+            },
+        )
+        .expect_err("preview cannot wait for a client it never starts");
+
+        assert!(error
+            .error
+            .to_string()
+            .contains("--wait-ready cannot be combined with launch --dry-run"));
     }
 
     #[cfg(unix)]
@@ -617,6 +788,7 @@ mod tests {
                 target: LaunchTargetRequest::designer(),
                 launch: Default::default(),
                 client_mcp: None,
+                dry_run: false,
             },
         )
         .expect("launch succeeds");
@@ -645,6 +817,7 @@ mod tests {
                 target: LaunchTargetRequest::ordinary_application(),
                 launch: Default::default(),
                 client_mcp: None,
+                dry_run: false,
             },
         )
         .expect("launch succeeds");
@@ -680,6 +853,7 @@ mod tests {
                 target: LaunchTargetRequest::client_mcp_with_mode(ClientMcpMode::Thin),
                 launch: Default::default(),
                 client_mcp: Some(ClientMcpOptionsRequest::default()),
+                dry_run: false,
             },
         )
         .expect("launch succeeds");
@@ -711,6 +885,7 @@ mod tests {
                 target: LaunchTargetRequest::client_mcp_with_mode(ClientMcpMode::Thin),
                 launch: Default::default(),
                 client_mcp: None,
+                dry_run: false,
             },
         )
         .expect_err("client_mcp options are required");
@@ -729,6 +904,7 @@ mod tests {
                 target: LaunchTargetRequest::thin_client(),
                 launch: Default::default(),
                 client_mcp: Some(ClientMcpOptionsRequest::default()),
+                dry_run: false,
             },
         )
         .expect_err("client_mcp options are rejected for non-mcp launch");
@@ -758,6 +934,7 @@ mod tests {
                     wait_ready: true,
                     ..ClientMcpOptionsRequest::default()
                 }),
+                dry_run: false,
             },
         )
         .expect_err("wait-ready without port should fail before platform lookup");
