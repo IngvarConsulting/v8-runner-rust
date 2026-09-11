@@ -458,6 +458,69 @@ fn assert_native_edt_external_project(path: &Path) {
 }
 
 #[test]
+fn convert_dry_run_plans_every_source_set_without_dispatching_the_edt_cli() {
+    let (_dir, config_path, base_path, work_path, edt_cli_path, calls_log) = setup_project();
+    write_config(
+        &config_path,
+        &base_path,
+        &work_path,
+        &edt_cli_path,
+        "DESIGNER",
+        &[
+            SourceSetSpec {
+                name: "main",
+                kind: "CONFIGURATION",
+                path: "main",
+            },
+            SourceSetSpec {
+                name: "ext-sales",
+                kind: "EXTENSION",
+                path: "ext-sales",
+            },
+        ],
+        Some("8.3.24"),
+    );
+    write_designer_source(&base_path.join("main"), "BaseProject", false);
+    write_designer_source(&base_path.join("ext-sales"), "SalesExtension", true);
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "convert",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run convert preview");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("json envelope");
+    let data = &envelope["data"];
+    assert_eq!(data["provider_dispatched"], false);
+    assert_eq!(data["direction"], "DESIGNER_TO_EDT");
+    let planned: Vec<&str> = data["outputs"]
+        .as_array()
+        .expect("outputs")
+        .iter()
+        .map(|output| output["source_set"].as_str().expect("source set"))
+        .collect();
+    assert_eq!(planned, vec!["main", "ext-sales"]);
+    assert!(!calls_log.exists(), "preview must not dispatch the EDT CLI");
+    // The preview names the targets; it must not create them.
+    for output in data["outputs"].as_array().expect("outputs") {
+        let target = Path::new(output["target_path"].as_str().expect("target"));
+        assert!(!target.exists(), "{}", target.display());
+    }
+    assert!(!work_path.join("convert").join("edt-workspace").exists());
+}
+
+#[test]
 fn convert_without_source_set_processes_all_source_sets_into_work_path_out() {
     let (_dir, config_path, base_path, work_path, edt_cli_path, calls_log) = setup_project();
     write_config(

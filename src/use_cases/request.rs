@@ -145,6 +145,8 @@ pub struct ConvertRequest {
     pub scope: ConvertScopeRequest,
     /// Optional user-facing target root for converted source-set layout.
     pub output_root: Option<String>,
+    /// Resolve, validate and locate the EDT CLI without converting anything.
+    pub dry_run: bool,
 }
 
 /// Transport-neutral artifact export mode.

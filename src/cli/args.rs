@@ -509,6 +509,10 @@ pub struct ConvertArgs {
     #[arg(long)]
     pub source_set: Option<String>,
 
+    /// Resolve the plan and locate the platform without converting anything
+    #[arg(long)]
+    pub dry_run: bool,
+
     /// Target root for converted source-set layout. Defaults to workPath/convert/out
     #[arg(long)]
     pub output: Option<String>,
@@ -1181,7 +1185,12 @@ mod tests {
         let cli = Cli::try_parse_from(["v8-runner", "convert"]).expect("parse convert");
 
         match cli.command {
-            Command::Convert(ConvertArgs { source_set, output }) => {
+            Command::Convert(ConvertArgs {
+                source_set,
+                output,
+                dry_run,
+            }) => {
+                assert!(!dry_run);
                 assert!(source_set.is_none());
                 assert!(output.is_none());
             }
@@ -1195,7 +1204,12 @@ mod tests {
             .expect("parse convert");
 
         match cli.command {
-            Command::Convert(ConvertArgs { source_set, output }) => {
+            Command::Convert(ConvertArgs {
+                source_set,
+                output,
+                dry_run,
+            }) => {
+                assert!(!dry_run);
                 assert_eq!(source_set.as_deref(), Some("ext-sales"));
                 assert!(output.is_none());
             }
@@ -1209,7 +1223,12 @@ mod tests {
             .expect("parse convert");
 
         match cli.command {
-            Command::Convert(ConvertArgs { source_set, output }) => {
+            Command::Convert(ConvertArgs {
+                source_set,
+                output,
+                dry_run,
+            }) => {
+                assert!(!dry_run);
                 assert!(source_set.is_none());
                 assert_eq!(output.as_deref(), Some("tests/fixtures/edt"));
             }
