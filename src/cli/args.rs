@@ -362,6 +362,7 @@ impl InfobaseArgs {
                 InfobaseConfigurationCommand::Export(args) => args.dry_run,
             },
             InfobaseCommand::Dump(args) => args.dry_run,
+            InfobaseCommand::Restore(args) => args.dry_run,
         }
     }
 }
@@ -372,6 +373,8 @@ pub enum InfobaseCommand {
     Configuration(InfobaseConfigurationArgs),
     /// Export the complete infobase to a DT transfer file (not a backup)
     Dump(InfobaseDumpArgs),
+    /// Load the complete infobase from a DT transfer file, discarding current data
+    Restore(InfobaseRestoreArgs),
 }
 
 #[derive(Args, Debug)]
@@ -412,6 +415,26 @@ pub struct InfobaseDumpArgs {
     /// Final DT output path; a DT transfer image is not a database backup
     #[arg(long)]
     pub output: String,
+
+    /// Validate and select a provider without locks, files, or provider process dispatch
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Command options")]
+pub struct InfobaseRestoreArgs {
+    /// Source DT transfer file
+    #[arg(long)]
+    pub input: String,
+
+    /// Create the target infobase; refuses when it already exists
+    #[arg(long, conflicts_with = "replace")]
+    pub create: bool,
+
+    /// Discard the data of the existing target infobase; refuses when it is absent
+    #[arg(long, conflicts_with = "create")]
+    pub replace: bool,
 
     /// Validate and select a provider without locks, files, or provider process dispatch
     #[arg(long)]
@@ -1199,6 +1222,55 @@ mod tests {
             },
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn parses_infobase_restore_contract() {
+        let cli = Cli::try_parse_from([
+            "v8-runner",
+            "infobase",
+            "restore",
+            "--input",
+            "dist/snapshot.dt",
+            "--replace",
+            "--dry-run",
+        ])
+        .expect("parse infobase restore");
+
+        match cli.command {
+            Command::Infobase(args) => match args.command {
+                super::InfobaseCommand::Restore(restore) => {
+                    assert_eq!(restore.input, "dist/snapshot.dt");
+                    assert!(!restore.create);
+                    assert!(restore.replace);
+                    assert!(restore.dry_run);
+                }
+                _ => panic!("unexpected infobase command"),
+            },
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn infobase_restore_rejects_both_target_modes_at_once() {
+        let result = Cli::try_parse_from([
+            "v8-runner",
+            "infobase",
+            "restore",
+            "--input",
+            "dist/snapshot.dt",
+            "--create",
+            "--replace",
+        ]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn infobase_restore_requires_an_input() {
+        let result = Cli::try_parse_from(["v8-runner", "infobase", "restore", "--replace"]);
+
+        assert!(result.is_err());
     }
 
     #[test]

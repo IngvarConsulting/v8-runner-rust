@@ -510,6 +510,271 @@ fn designer_dumps_dt_and_labels_it_as_transfer_snapshot() {
         .contains("/DumpIB"));
 }
 
+fn write_dt(path: &Path) -> PathBuf {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("dt parent");
+    }
+    fs::write(path, "payload").expect("dt");
+    path.to_path_buf()
+}
+
+#[test]
+fn restore_replaces_an_existing_infobase_through_designer() {
+    let (dir, config, base, calls) = setup("DESIGNER");
+    let input = write_dt(&dir.path().join("transfer/base.dt"));
+    let command = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "infobase",
+            "restore",
+            "--input",
+            &input.display().to_string(),
+            "--replace",
+        ])
+        .output()
+        .expect("run restore");
+
+    assert!(
+        command.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&command.stdout),
+        String::from_utf8_lossy(&command.stderr)
+    );
+    let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+    assert_eq!(envelope["command"], "infobase.restore");
+    assert_eq!(envelope["data"]["artifact_kind"], "dt");
+    assert_eq!(envelope["data"]["target_mode"], "replace");
+    assert_eq!(envelope["data"]["restored"], true);
+    assert_eq!(envelope["data"]["target_state"], "replaced");
+    let dispatched = fs::read_to_string(calls).expect("calls");
+    assert!(dispatched.contains("/RestoreIB"), "{dispatched}");
+    assert!(
+        dispatched.contains(input.display().to_string().as_str()),
+        "{dispatched}"
+    );
+    // The DT is the source, so it must survive the restore untouched.
+    assert_eq!(fs::read(&input).expect("input dt"), b"payload");
+    assert!(base.join("ib").join("1Cv8.1CD").is_file());
+}
+
+#[test]
+fn restore_creates_an_absent_infobase_through_designer() {
+    let (dir, config, base, calls) = setup("DESIGNER");
+    let input = write_dt(&dir.path().join("transfer/base.dt"));
+    fs::remove_file(base.join("ib").join("1Cv8.1CD")).expect("drop infobase file");
+    let command = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "infobase",
+            "restore",
+            "--input",
+            &input.display().to_string(),
+            "--create",
+        ])
+        .output()
+        .expect("run restore");
+
+    assert!(command.status.success(), "{:?}", command);
+    let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+    assert_eq!(envelope["data"]["target_mode"], "create");
+    assert_eq!(envelope["data"]["target_state"], "created");
+    assert!(fs::read_to_string(calls)
+        .expect("calls")
+        .contains("/RestoreIB"));
+}
+
+#[test]
+fn restore_dry_run_plans_the_provider_without_dispatching_it() {
+    let (dir, config, _base, calls) = setup("DESIGNER");
+    let input = write_dt(&dir.path().join("transfer/base.dt"));
+    let command = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "infobase",
+            "restore",
+            "--input",
+            &input.display().to_string(),
+            "--replace",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run restore preview");
+
+    assert!(command.status.success(), "{:?}", command);
+    let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+    let data = &envelope["data"];
+    assert_eq!(data["mode"], "preview");
+    assert_eq!(data["provider_dispatched"], false);
+    assert_eq!(data["restored"], false);
+    assert_eq!(data["target_state"], "unchanged");
+    assert_eq!(data["plan"]["provider"], "designer-batch");
+    assert_eq!(data["plan"]["target_mode"], "replace");
+    assert_eq!(
+        data["plan"]["input"].as_str().expect("planned input"),
+        input.display().to_string()
+    );
+    assert!(!calls.exists(), "preview must not dispatch a provider");
+}
+
+#[test]
+fn restore_without_a_target_mode_is_refused_before_provider_selection() {
+    let (dir, config, _base, calls) = setup("DESIGNER");
+    let input = write_dt(&dir.path().join("transfer/base.dt"));
+    let command = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "infobase",
+            "restore",
+            "--input",
+            &input.display().to_string(),
+        ])
+        .output()
+        .expect("run restore");
+
+    assert!(!command.status.success());
+    let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["error"]["code"], "invalid_argument");
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("exactly one of --create or --replace"),
+        "{envelope:#?}"
+    );
+    assert!(!calls.exists(), "a refused request must not dispatch");
+}
+
+#[test]
+fn restore_create_over_an_existing_infobase_is_refused_as_a_validation_error() {
+    let (dir, config, _base, calls) = setup("DESIGNER");
+    let input = write_dt(&dir.path().join("transfer/base.dt"));
+    let command = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "infobase",
+            "restore",
+            "--input",
+            &input.display().to_string(),
+            "--create",
+        ])
+        .output()
+        .expect("run restore");
+
+    assert!(!command.status.success());
+    let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+    assert_eq!(envelope["error"]["code"], "invalid_argument");
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("already exists"),
+        "{envelope:#?}"
+    );
+    assert_eq!(envelope["data"]["target_state"], "unchanged");
+    assert!(!calls.exists(), "a refused request must not dispatch");
+}
+
+#[test]
+fn restore_replace_of_an_absent_infobase_is_refused_as_a_validation_error() {
+    let (dir, config, base, calls) = setup("DESIGNER");
+    let input = write_dt(&dir.path().join("transfer/base.dt"));
+    fs::remove_file(base.join("ib").join("1Cv8.1CD")).expect("drop infobase file");
+    let command = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "infobase",
+            "restore",
+            "--input",
+            &input.display().to_string(),
+            "--replace",
+        ])
+        .output()
+        .expect("run restore");
+
+    assert!(!command.status.success());
+    let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+    assert_eq!(envelope["error"]["code"], "invalid_argument");
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("does not exist"),
+        "{envelope:#?}"
+    );
+    assert!(!calls.exists(), "a refused request must not dispatch");
+}
+
+#[test]
+fn restore_rejects_a_non_dt_input_and_an_unreadable_one_before_dispatch() {
+    let (dir, config, _base, calls) = setup("DESIGNER");
+    let wrong_suffix = write_dt(&dir.path().join("transfer/base.cf"));
+    for input in [wrong_suffix, dir.path().join("transfer/missing.dt")] {
+        let command = v8_runner_command()
+            .args([
+                "--config",
+                &config.display().to_string(),
+                "--json-message",
+                "infobase",
+                "restore",
+                "--input",
+                &input.display().to_string(),
+                "--replace",
+            ])
+            .output()
+            .expect("run restore");
+
+        assert!(!command.status.success(), "{}", input.display());
+        let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+        assert_eq!(envelope["error"]["code"], "invalid_argument");
+    }
+    assert!(!calls.exists(), "a refused request must not dispatch");
+}
+
+#[test]
+fn restore_is_not_dispatched_when_ibcmd_is_the_only_environment() {
+    let (dir, config, _base, calls) = setup("IBCMD");
+    let input = write_dt(&dir.path().join("transfer/base.dt"));
+    let command = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "infobase",
+            "restore",
+            "--input",
+            &input.display().to_string(),
+            "--replace",
+        ])
+        .output()
+        .expect("run restore");
+
+    assert!(!command.status.success());
+    let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+    let candidates = envelope["data"]["selection"]["candidates"]
+        .as_array()
+        .expect("candidates");
+    assert!(candidates.iter().any(|candidate| {
+        candidate["provider"] == "ibcmd-process" && candidate["implementation"] == "experimental"
+    }));
+    assert!(
+        !calls.exists(),
+        "experimental IBCMD restore must not dispatch"
+    );
+}
+
 #[test]
 fn dt_uses_designer_when_ibcmd_is_preferred_but_not_implemented() {
     let dir = temp_workspace();

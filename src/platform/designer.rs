@@ -261,6 +261,21 @@ impl<'a> DesignerDsl<'a> {
         self.run(&args)
     }
 
+    /// `/RestoreIB <file>`
+    ///
+    /// Loads infobase data from a DT file. The platform creates the file infobase
+    /// when it is absent and replaces its data when it is present, without asking;
+    /// the caller owns that decision.
+    pub fn restore_infobase(
+        &self,
+        source_file: &Path,
+    ) -> Result<PlatformCommandResult, DesignerError> {
+        let mut args = self.base_args();
+        args.push("/RestoreIB".to_owned());
+        args.push(source_file.display().to_string());
+        self.run(&args)
+    }
+
     /// `/DumpExternalDataProcessorOrReportToFiles <root-xml> <binary>`
     pub fn dump_external_data_processor_or_report_to_files(
         &self,

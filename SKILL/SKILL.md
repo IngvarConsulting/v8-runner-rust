@@ -111,6 +111,12 @@ v8-runner init
 - Before an orchestrator applies either infobase export, append `--dry-run` to obtain the exact
   provider selection and output plan without creating `workPath`, locks, output paths, or a
   platform process. Treat `mode=preview` and `provider_dispatched=false` as the non-execution proof.
+- Need to load a complete infobase back from a DT image: use
+  `v8-runner infobase restore --input <file.dt>` with exactly one target mode — `--replace` to
+  discard the data of an existing infobase, `--create` to create an absent one. A mode that does
+  not match the observed target is refused before the platform starts; neither provider asks, and
+  there is no staging step that could undo a load. Append `--dry-run` first to see the selected
+  provider and the planned input without touching the infobase.
 - Source files need conversion between Designer and EDT: use `v8-runner convert`; this is CLI-only and does not use the infobase.
 - Existing `.cf` or `.cfe` artifacts need to be applied to an infobase: use `v8-runner load ...`.
 - Release artifacts need to be exported or external artifacts published: use `v8-runner make ...` or the `artifacts` alias.
@@ -121,6 +127,7 @@ v8-runner init
 ## Guardrails
 
 - Do not delete or recreate an infobase, workspace, temp directory, or generated state unless the user explicitly asks or the command itself is the documented recovery path.
+- Never pass `infobase restore --replace` to recover from a failed command: it discards the data of the target infobase, and `target_state: uncertain` after a failed restore means an unknown amount of data was already replaced. Dump first.
 - Do not invent raw `1cv8`, `ibcmd`, or `1cedtcli` flags; prefer the `v8-runner` command surface.
 - Check `git status` before `dump` when the result may overwrite or mix with existing source changes.
 - Preserve failed test artifacts under `workPath/temp/<runner-id>/runs/<run-id>/` for diagnosis instead of cleaning them immediately.

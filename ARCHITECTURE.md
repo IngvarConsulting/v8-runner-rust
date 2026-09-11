@@ -116,6 +116,10 @@ Important staging note:
 - Infobase CF/CFE and DT export exposes a CLI-only `--dry-run` at the existing use-case boundary:
   request validation and provider selection are shared with apply, while preview returns before
   action logging, workspace/target locks, staging, output creation, and provider dispatch.
+- `infobase restore` is the paired inverse of DT export and deliberately has no staging step:
+  the provider writes straight into the infobase, so the requested target mode (`--create` or
+  `--replace`) is checked against the observed target before provider selection and again under
+  the workspace lock, and a failed provider leaves `target_state=uncertain`.
 - Builder backends are expected to stay interchangeable for implemented builder scenarios. Functionality added for the Designer builder should also be available through the IBCMD builder, or the gap must be documented explicitly. Future Designer agent mode should be added behind the same use-case contract.
 - Server infobase support is a target contract for all tools; file-only behavior must be documented as a current gap rather than treated as the permanent architecture.
 

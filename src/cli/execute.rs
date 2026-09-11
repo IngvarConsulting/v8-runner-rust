@@ -9,10 +9,10 @@ use tracing::info;
 use crate::cli::args::{
     ArtifactsArgs, BuildArgs, Command, ConvertArgs, DesignerConfigSyntaxArgs,
     DesignerModulesSyntaxArgs, DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs, InfobaseArgs,
-    InfobaseCommand, InfobaseConfigurationCommand, InfobaseConfigurationExportArgs, LaunchArgs,
-    LaunchOptionsArgs, LoadArgs, SyntaxArgs, SyntaxTarget, TestArgs, TestLaunchOptionsArgs,
-    TestRunner, TestScope, TestVaArgs, TestYaxunitArgs, ToolsArgs, ToolsCommand, ToolsDownloadArgs,
-    ToolsDownloadCommand,
+    InfobaseCommand, InfobaseConfigurationCommand, InfobaseConfigurationExportArgs,
+    InfobaseRestoreArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs, SyntaxArgs, SyntaxTarget,
+    TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope, TestVaArgs, TestYaxunitArgs, ToolsArgs,
+    ToolsCommand, ToolsDownloadArgs, ToolsDownloadCommand,
 };
 use crate::cli::output::{
     cli_error_contract, failure_envelope, pre_dispatch_error_envelope,
@@ -35,7 +35,8 @@ use crate::domain::execution::{
 use crate::domain::infobase_export::{
     ConfigurationState, ConfigurationSubject, ExportConfigurationPackageRequest,
     ExportConfigurationPackageResult, ExportInfobaseSnapshotRequest, ExportInfobaseSnapshotResult,
-    ExportPhase, ExportProviderDecision,
+    ExportPhase, ExportProviderDecision, RestoreInfobaseSnapshotRequest,
+    RestoreInfobaseSnapshotResult, RestoreTargetMode,
 };
 use crate::domain::init::{InitResult, InitStep, InitStepStatus};
 use crate::domain::issue::{Issue, IssueSeverity};
@@ -210,6 +211,9 @@ pub fn command_name(command: &Command) -> CommandName {
         Command::Infobase(InfobaseArgs {
             command: InfobaseCommand::Dump(_),
         }) => CommandName::InfobaseDump,
+        Command::Infobase(InfobaseArgs {
+            command: InfobaseCommand::Restore(_),
+        }) => CommandName::InfobaseRestore,
         Command::Convert(_) => CommandName::Convert,
         Command::Artifacts(_) => CommandName::Artifacts,
         Command::Syntax(_) => CommandName::Syntax,
@@ -224,7 +228,8 @@ pub fn uses_infobase_export_config(command: &Command) -> bool {
         Command::Infobase(InfobaseArgs {
             command: InfobaseCommand::Configuration(crate::cli::args::InfobaseConfigurationArgs {
                 command: InfobaseConfigurationCommand::Export(_),
-            }) | InfobaseCommand::Dump(_),
+            }) | InfobaseCommand::Dump(_)
+                | InfobaseCommand::Restore(_),
         })
     )
 }
@@ -615,6 +620,10 @@ pub enum PreparedInfobaseCommand {
         request: ExportInfobaseSnapshotRequest,
         provider: infobase_export::PreparedExportProvider,
     },
+    Restore {
+        request: RestoreInfobaseSnapshotRequest,
+        provider: infobase_export::PreparedExportProvider,
+    },
 }
 
 pub struct PreparedInfobaseCliCommand {
@@ -634,7 +643,32 @@ pub fn validate_infobase_request(args: &InfobaseArgs) -> Result<(), AppError> {
         InfobaseCommand::Dump(args) => {
             infobase_export::validate_snapshot_output(Path::new(&args.output))
         }
+        InfobaseCommand::Restore(args) => {
+            infobase_export::validate_restore_request(&map_infobase_restore_request(args)?)
+        }
     }
+}
+
+/// Maps restore CLI arguments into the transport-neutral request.
+///
+/// Exactly one target mode must be stated: neither provider asks before creating or
+/// overwriting an infobase, so the runner refuses to guess which one was meant.
+fn map_infobase_restore_request(
+    args: &InfobaseRestoreArgs,
+) -> Result<RestoreInfobaseSnapshotRequest, AppError> {
+    let target_mode = match (args.create, args.replace) {
+        (true, false) => RestoreTargetMode::Create,
+        (false, true) => RestoreTargetMode::Replace,
+        _ => {
+            return Err(AppError::Validation(
+                "infobase restore requires exactly one of --create or --replace".to_owned(),
+            ))
+        }
+    };
+    Ok(RestoreInfobaseSnapshotRequest {
+        input: PathBuf::from(&args.input),
+        target_mode,
+    })
 }
 
 pub fn render_invalid_infobase_request(
@@ -686,6 +720,21 @@ pub fn render_infobase_pre_dispatch_failure(
                 result.mark_preview_failure();
             }
             render_snapshot_failure(CommandName::InfobaseDump, result, &error, presenter);
+        }
+        InfobaseCommand::Restore(args) => {
+            let request = map_infobase_restore_request(args).unwrap_or_else(|_| {
+                // The mode is unreadable, so the rendered subject states the requested
+                // input and leaves the mode to the error text.
+                RestoreInfobaseSnapshotRequest {
+                    input: PathBuf::from(&args.input),
+                    target_mode: RestoreTargetMode::Replace,
+                }
+            });
+            let mut result = restore_pre_dispatch_failure(&request, selection, &error, phase);
+            if args.dry_run {
+                result.mark_preview_failure();
+            }
+            render_restore_failure(CommandName::InfobaseRestore, result, &error, presenter);
         }
     }
     error
@@ -742,6 +791,26 @@ pub fn prepare_infobase_command(
                 }
             }
         }
+        InfobaseCommand::Restore(args) => {
+            let command = CommandName::InfobaseRestore;
+            let request = map_infobase_restore_request(args)
+                .map_err(|error| render_pre_dispatch_error(presenter, command, error))?;
+            infobase_export::validate_restore_request(&request)
+                .map_err(|error| render_pre_dispatch_error(presenter, command, error))?;
+            match infobase_export::prepare_infobase_restore(context, config, &request) {
+                Ok(provider) => Ok(PreparedInfobaseCommand::Restore { request, provider }),
+                Err(failure) => {
+                    let error = failure.error;
+                    if let Some(mut result) = failure.payload {
+                        if args.dry_run {
+                            result.mark_preview_failure();
+                        }
+                        render_restore_failure(command, result, &error, presenter);
+                    }
+                    Err(error)
+                }
+            }
+        }
     }
 }
 
@@ -765,6 +834,7 @@ fn infobase_command_name(args: &InfobaseArgs) -> CommandName {
     match &args.command {
         InfobaseCommand::Configuration(_) => CommandName::InfobaseConfigurationExport,
         InfobaseCommand::Dump(_) => CommandName::InfobaseDump,
+        InfobaseCommand::Restore(_) => CommandName::InfobaseRestore,
     }
 }
 
@@ -825,6 +895,14 @@ pub fn execute_prepared_infobase(
             )
         }
         PreparedInfobaseCommand::Snapshot { request, provider } => execute_infobase_dump(
+            config,
+            request,
+            provider,
+            context,
+            presenter,
+            clean_before_execution,
+        ),
+        PreparedInfobaseCommand::Restore { request, provider } => execute_infobase_restore(
             config,
             request,
             provider,
@@ -918,8 +996,118 @@ pub fn preview_prepared_infobase_command(
                 }
             }
         }
+        PreparedInfobaseCommand::Restore { request, provider } => {
+            match infobase_export::preview_infobase_restore(&context, config, &request, &provider) {
+                Ok(result) => {
+                    if presenter.is_json() {
+                        presenter.print_envelope(&Envelope::ok(
+                            CommandName::InfobaseRestore.as_str(),
+                            0,
+                            result,
+                        ));
+                    } else {
+                        render_restore_text(CommandName::InfobaseRestore, &result, presenter);
+                    }
+                }
+                Err(failure) => {
+                    let error = failure.error;
+                    if let Some(result) = failure.payload {
+                        render_restore_failure(
+                            CommandName::InfobaseRestore,
+                            result,
+                            &error,
+                            presenter,
+                        );
+                    }
+                    return Err(error);
+                }
+            }
+        }
     }
     Ok(())
+}
+
+fn execute_infobase_restore(
+    config: &AppConfig,
+    request: RestoreInfobaseSnapshotRequest,
+    prepared: infobase_export::PreparedExportProvider,
+    context: &ExecutionContext,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+) -> Result<(), UseCaseError> {
+    let command = CommandName::InfobaseRestore;
+    let started = Instant::now();
+    let mut workspace_lock_acquired = false;
+    let mut dispatched = false;
+    let outcome = with_cli_workspace_lock_observed(
+        config,
+        presenter,
+        command,
+        clean_before_execution,
+        || workspace_lock_acquired = true,
+        || {
+            dispatched = true;
+            info!(
+                command = command.as_str(),
+                "starting command under workspace lock"
+            );
+            match infobase_export::execute_infobase_restore(context, config, &request, &prepared) {
+                Ok(result) => {
+                    let duration_ms = started.elapsed().as_millis() as u64;
+                    if presenter.is_json() {
+                        let warnings = result.warnings.clone();
+                        let steps = result.steps.clone();
+                        let mut envelope = Envelope::ok(command.as_str(), duration_ms, result);
+                        envelope.warnings = warnings;
+                        envelope.steps = steps;
+                        presenter.print_envelope(&envelope);
+                    } else {
+                        render_restore_text(command, &result, presenter);
+                    }
+                    Ok(())
+                }
+                Err(failure) => {
+                    let duration_ms = started.elapsed().as_millis() as u64;
+                    let error = failure.error;
+                    if presenter.is_json() {
+                        match failure.payload {
+                            Some(result) => {
+                                let warnings = result.warnings.clone();
+                                let steps = result.steps.clone();
+                                let mut envelope =
+                                    failure_envelope(command.as_str(), duration_ms, result, &error);
+                                envelope.warnings = warnings;
+                                envelope.steps = steps;
+                                presenter.print_envelope(&envelope);
+                            }
+                            None => presenter.print_envelope(&pre_dispatch_error_envelope(
+                                command.as_str(),
+                                &error,
+                            )),
+                        }
+                    } else {
+                        if let Some(result) = failure.payload.as_ref() {
+                            render_restore_text(command, result, presenter);
+                        }
+                        presenter.print_error(&error.to_string());
+                    }
+                    Err(error)
+                }
+            }
+        },
+    );
+    if !dispatched {
+        if let Err(error) = &outcome {
+            let result = restore_pre_dispatch_failure(
+                &request,
+                prepared.selection().clone(),
+                error,
+                infobase_pre_dispatch_execution_phase(workspace_lock_acquired),
+            );
+            render_restore_failure(command, result, error, presenter);
+        }
+    }
+    outcome
 }
 
 fn execute_infobase_configuration_export(
@@ -1141,6 +1329,40 @@ fn snapshot_pre_dispatch_failure(
     result
 }
 
+fn restore_pre_dispatch_failure(
+    request: &RestoreInfobaseSnapshotRequest,
+    selection: ExportProviderDecision,
+    error: &UseCaseError,
+    phase: ExportPhase,
+) -> RestoreInfobaseSnapshotResult {
+    let mut result = RestoreInfobaseSnapshotResult::new(request.clone(), selection);
+    annotate_pre_dispatch_failure(&mut result.execution, error);
+    result.steps.push(
+        StepResult::failed(phase.as_str(), phase.kind(), 0)
+            .with_message(error.message().to_owned()),
+    );
+    result
+}
+
+fn render_restore_failure(
+    command: CommandName,
+    result: RestoreInfobaseSnapshotResult,
+    error: &UseCaseError,
+    presenter: &Presenter,
+) {
+    if presenter.is_json() {
+        let warnings = result.warnings.clone();
+        let steps = result.steps.clone();
+        let mut envelope = failure_envelope(command.as_str(), 0, result, error);
+        envelope.warnings = warnings;
+        envelope.steps = steps;
+        presenter.print_envelope(&envelope);
+    } else {
+        render_restore_text(command, &result, presenter);
+        presenter.print_error(&error.to_string());
+    }
+}
+
 fn render_configuration_failure(
     command: CommandName,
     result: ExportConfigurationPackageResult,
@@ -1189,10 +1411,14 @@ struct InfobaseExportText<'a> {
     evidence: &'a str,
     artifact_kind: &'a str,
     execution_status: &'a str,
-    output: &'a Path,
+    /// Field name for `path`: an export names its output, a restore names its input.
+    path_label: &'a str,
+    path: &'a Path,
     provider: Option<crate::domain::infobase_export::ExportProvider>,
     provider_reason: &'a str,
-    published: bool,
+    /// Field name for `applied`: an export publishes, a restore loads.
+    applied_label: &'a str,
+    applied: bool,
     target_state: &'a str,
     candidates: &'a [crate::domain::infobase_export::ProviderCandidate],
     warnings: &'a [String],
@@ -1222,10 +1448,12 @@ fn render_configuration_export_text(
                 .unwrap_or("none"),
             artifact_kind: result.artifact_kind.as_str(),
             execution_status: execution_status_label(result.execution.status),
-            output: &result.output,
+            path_label: "output",
+            path: &result.output,
             provider: result.selection.provider(),
             provider_reason: result.selection.reason(),
-            published: result.published,
+            applied_label: "published",
+            applied: result.published,
             target_state: export_target_state_label(result.target_state),
             candidates: result.selection.candidates(),
             warnings: &result.warnings,
@@ -1258,10 +1486,50 @@ fn render_snapshot_export_text(
                 .unwrap_or("none"),
             artifact_kind: result.artifact_kind.as_str(),
             execution_status: execution_status_label(result.execution.status),
-            output: &result.output,
+            path_label: "output",
+            path: &result.output,
             provider: result.selection.provider(),
             provider_reason: result.selection.reason(),
-            published: result.published,
+            applied_label: "published",
+            applied: result.published,
+            target_state: export_target_state_label(result.target_state),
+            candidates: result.selection.candidates(),
+            warnings: &result.warnings,
+            mode: result.mode,
+            provider_dispatched: result.provider_dispatched,
+        },
+        presenter,
+    );
+}
+
+fn render_restore_text(
+    command: CommandName,
+    result: &RestoreInfobaseSnapshotResult,
+    presenter: &Presenter,
+) {
+    render_infobase_export_text(
+        InfobaseExportText {
+            command: command.as_str(),
+            label: "Infobase DT restore",
+            state: None,
+            subject: format!("infobase:{}", result.target_mode.as_str()),
+            implementation: selected_candidate(&result.selection)
+                .map(|candidate| candidate.implementation.as_str())
+                .unwrap_or("none"),
+            readiness: selected_candidate(&result.selection)
+                .map(|candidate| candidate.readiness.as_str())
+                .unwrap_or("unavailable"),
+            evidence: selected_candidate(&result.selection)
+                .map(|candidate| candidate.evidence.as_str())
+                .unwrap_or("none"),
+            artifact_kind: result.artifact_kind.as_str(),
+            execution_status: execution_status_label(result.execution.status),
+            path_label: "input",
+            path: &result.input,
+            provider: result.selection.provider(),
+            provider_reason: result.selection.reason(),
+            applied_label: "restored",
+            applied: result.restored,
             target_state: export_target_state_label(result.target_state),
             candidates: result.selection.candidates(),
             warnings: &result.warnings,
@@ -1283,17 +1551,19 @@ fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Present
         evidence,
         artifact_kind,
         execution_status,
-        output,
+        path_label,
+        path,
         provider,
         provider_reason,
-        published,
+        applied_label,
+        applied,
         target_state,
         candidates,
         warnings,
         mode,
         provider_dispatched,
     } = view;
-    let status = if published
+    let status = if applied
         || (mode == crate::domain::infobase_export::InfobaseExportMode::Preview
             && execution_status == "succeeded")
     {
@@ -1321,9 +1591,9 @@ fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Present
         format!("provider: {provider}"),
         format!("provider reason: {provider_reason}"),
         format!("execution status: {execution_status}"),
-        format!("published: {published}"),
+        format!("{applied_label}: {applied}"),
         format!("target state: {target_state}"),
-        format!("output: {}", output.display()),
+        format!("{path_label}: {}", path.display()),
     ];
     if let Some(provider_dispatched) = provider_dispatched {
         details.insert(2, format!("provider dispatched: {provider_dispatched}"));
