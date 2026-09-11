@@ -841,12 +841,35 @@ mod tests {
             .unwrap_or(0)
     }
 
+    /// Panics on every write failure except the ones a deliberately abandoned
+    /// connection produces.
+    ///
+    /// Several of these tests assert that the client gives up when its readiness budget
+    /// expires, and giving up means closing the socket. A response still in flight at
+    /// that moment fails with a broken pipe, which is the observed outcome of the
+    /// scenario rather than a defect of the fake server.
+    fn expect_write_or_peer_disconnect(result: std::io::Result<()>, what: &str) {
+        if let Err(error) = result {
+            assert!(
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                ),
+                "{what}: {error:?}"
+            );
+        }
+    }
+
     fn write_empty_response(stream: &mut TcpStream, status: &str) {
-        write!(
-            stream,
-            "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-        )
-        .expect("write response");
+        expect_write_or_peer_disconnect(
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            ),
+            "write response",
+        );
     }
 
     fn write_json_response(
@@ -859,13 +882,53 @@ mod tests {
         let session_header = session_id
             .map(|session_id| format!("Mcp-Session-Id: {session_id}\r\n"))
             .unwrap_or_default();
-        write!(
-            stream,
-            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{session_header}Content-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        )
-        .expect("write headers");
-        stream.write_all(&body).expect("write body");
+        expect_write_or_peer_disconnect(
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{session_header}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            ),
+            "write headers",
+        );
+        expect_write_or_peer_disconnect(stream.write_all(&body), "write body");
+    }
+
+    /// Reintroduction guard for the fake server's write contract.
+    ///
+    /// Every request the client sends carries the remaining readiness budget as its
+    /// timeout, so the client legitimately abandons a connection mid-response. A fake
+    /// server that treats such a write as fatal turns the scenario under test into a
+    /// panic on whichever machine is slow enough to hit the window. Both writers must
+    /// survive a peer that is already gone, and must still fail on anything else.
+    #[test]
+    fn fake_server_writers_survive_a_peer_that_already_went_away() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let port = listener.local_addr().expect("local addr").port();
+
+        for write in [
+            (|stream: &mut TcpStream| write_empty_response(stream, "202 Accepted"))
+                as fn(&mut TcpStream),
+            |stream: &mut TcpStream| {
+                write_json_response(stream, "200 OK", Some("fake-session"), &json!({"ok": true}))
+            },
+        ] {
+            let client = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            let (mut accepted, _) = listener.accept().expect("accept");
+            // Closing the client is what an expired readiness budget does to the socket.
+            drop(client);
+            // Some platforms only report the broken pipe on a later write, so write twice.
+            write(&mut accepted);
+            write(&mut accepted);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "write response")]
+    fn peer_disconnect_tolerance_does_not_hide_other_write_failures() {
+        expect_write_or_peer_disconnect(
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            "write response",
+        );
     }
 
     fn assert_session_header(request: &str) {
