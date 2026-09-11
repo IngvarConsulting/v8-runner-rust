@@ -128,6 +128,28 @@ pub(super) fn run_dump_with_context(
         None
     };
 
+    if args.dry_run {
+        // Both utilities are located above, so a missing platform refuses in the preview; the
+        // dump lock below is this command's first filesystem write.
+        let mut preview = empty_result(
+            mode.clone(),
+            started,
+            Some(resolved.source_set_name.clone()),
+            resolved.extension.clone(),
+            selectors.clone(),
+            Some(resolved.target_path.clone()),
+            Some(format!(
+                "would dump {:?} into '{}' via {}; nothing written",
+                mode.clone(),
+                resolved.target_path.display(),
+                location.path.display()
+            )),
+        );
+        preview.ok = true;
+        preview.provider_dispatched = false;
+        return Ok(preview);
+    }
+
     let lock_guard = match acquire_advisory_lock(&resolved.lock_path) {
         Ok(lock_guard) => lock_guard,
         Err(error) => {
@@ -375,6 +397,7 @@ pub(super) fn run_dump_with_context(
 
     match result {
         Ok((platform_result, cleanup_message)) => Ok(DumpResult {
+            provider_dispatched: true,
             ok: true,
             source_set: Some(resolved.source_set_name),
             extension: resolved.extension,
@@ -390,6 +413,7 @@ pub(super) fn run_dump_with_context(
             Err(DumpExecutionFailure::with_payload(
                 error,
                 DumpResult {
+                    provider_dispatched: true,
                     ok: false,
                     source_set: Some(resolved.source_set_name),
                     extension: resolved.extension,

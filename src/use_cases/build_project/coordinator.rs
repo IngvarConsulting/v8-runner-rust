@@ -20,6 +20,7 @@ pub(super) fn run_build_designer(
                 return Err(BuildExecutionFailure::with_payload(
                     error,
                     BuildResult {
+                        provider_dispatched: true,
                         ok: false,
                         steps: vec![],
                         duration_ms: started.elapsed().as_millis() as u64,
@@ -162,6 +163,18 @@ pub(super) fn run_build_designer(
                     }
                 };
 
+                if args.dry_run {
+                    push_build_step(
+                        &mut steps,
+                        &source_set.name,
+                        mode,
+                        true,
+                        format!("{message}; planned, Designer not dispatched"),
+                        0,
+                    );
+                    continue;
+                }
+
                 let step_started = Instant::now();
                 match execute_source_set_step(
                     context,
@@ -201,6 +214,7 @@ pub(super) fn run_build_designer(
     }
 
     Ok(BuildResult {
+        provider_dispatched: true,
         ok: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,
@@ -227,6 +241,7 @@ pub(super) fn run_build_ibcmd(
                 return Err(BuildExecutionFailure::with_payload(
                     error,
                     BuildResult {
+                        provider_dispatched: true,
                         ok: false,
                         steps: vec![],
                         duration_ms: started.elapsed().as_millis() as u64,
@@ -334,6 +349,18 @@ pub(super) fn run_build_ibcmd(
                     }
                 };
 
+                if args.dry_run {
+                    push_build_step(
+                        &mut steps,
+                        &source_set.name,
+                        mode,
+                        true,
+                        format!("{message}; planned, ibcmd not dispatched"),
+                        0,
+                    );
+                    continue;
+                }
+
                 let step_started = Instant::now();
                 match execute_source_set_step_ibcmd(
                     context,
@@ -372,6 +399,7 @@ pub(super) fn run_build_ibcmd(
     }
 
     Ok(BuildResult {
+        provider_dispatched: true,
         ok: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,
@@ -392,6 +420,7 @@ pub(super) fn run_build_edt(
         return Err(BuildExecutionFailure::with_payload(
             error,
             BuildResult {
+                provider_dispatched: true,
                 ok: false,
                 steps: vec![],
                 duration_ms: 0,
@@ -408,6 +437,7 @@ pub(super) fn run_build_edt(
                 return Err(BuildExecutionFailure::with_payload(
                     error,
                     BuildResult {
+                        provider_dispatched: true,
                         ok: false,
                         steps: vec![],
                         duration_ms: started.elapsed().as_millis() as u64,
@@ -677,6 +707,24 @@ pub(super) fn run_build_edt(
                         location.path
                     }
                 };
+
+                if args.dry_run {
+                    // The EDT export writes a Designer snapshot and the load step below then
+                    // touches the infobase; a preview stops before both.
+                    push_build_step(
+                        &mut steps,
+                        &source_set.name,
+                        BuildMode::EdtExport,
+                        true,
+                        format!(
+                            "would export '{}' to Designer files via {} and then load it; planned, nothing dispatched",
+                            source_set.name,
+                            edt.display()
+                        ),
+                        0,
+                    );
+                    continue;
+                }
 
                 let export_started = Instant::now();
                 log_timeline_stage(
@@ -956,6 +1004,7 @@ pub(super) fn run_build_edt(
     }
 
     Ok(BuildResult {
+        provider_dispatched: true,
         ok: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,

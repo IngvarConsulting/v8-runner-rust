@@ -3,6 +3,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BuildResult {
     pub ok: bool,
+    /// `false` when the run stopped at a preview instead of dispatching the platform.
+    ///
+    /// Always present. In a preview each step's `mode` is the mode that would be used and
+    /// its message says so; the flag is what separates planned from performed.
+    pub provider_dispatched: bool,
     pub steps: Vec<BuildStep>,
     pub duration_ms: u64,
 }

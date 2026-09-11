@@ -80,6 +80,26 @@ pub(crate) fn run_build_unlocked(
     config: &AppConfig,
     args: &BuildArgs,
 ) -> UseCaseResult<BuildResult> {
+    let mut outcome = run_build_branch(context, config, args);
+    // One place decides the flag for every branch, so a new branch cannot forget it.
+    if args.dry_run {
+        match &mut outcome {
+            Ok(result) => result.provider_dispatched = false,
+            Err(failure) => {
+                if let Some(result) = failure.payload.as_mut() {
+                    result.provider_dispatched = false;
+                }
+            }
+        }
+    }
+    outcome
+}
+
+fn run_build_branch(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &BuildArgs,
+) -> UseCaseResult<BuildResult> {
     if config.format == SourceFormat::Edt {
         return run_build_edt(context, config, args);
     }
@@ -88,6 +108,7 @@ pub(crate) fn run_build_unlocked(
         return Err(BuildExecutionFailure::with_payload(
             error,
             BuildResult {
+                provider_dispatched: true,
                 ok: false,
                 steps: vec![],
                 duration_ms: 0,
@@ -977,6 +998,7 @@ mod tests {
 
     fn build_args(full_rebuild: bool) -> BuildArgs {
         BuildArgs {
+            dry_run: false,
             full_rebuild,
             source_set: None,
         }
@@ -2844,6 +2866,7 @@ mod tests {
         let result = run_build(
             &config,
             &BuildArgs {
+                dry_run: false,
                 full_rebuild: false,
                 source_set: Some("ext".to_owned()),
             },
@@ -2895,6 +2918,7 @@ mod tests {
         let result = run_build(
             &config,
             &BuildArgs {
+                dry_run: false,
                 full_rebuild: false,
                 source_set: Some("ext".to_owned()),
             },
@@ -2933,6 +2957,7 @@ mod tests {
         let failure = run_build(
             &config,
             &BuildArgs {
+                dry_run: false,
                 full_rebuild: false,
                 source_set: Some("missing".to_owned()),
             },
@@ -3072,6 +3097,7 @@ mod tests {
     #[test]
     fn build_result_stays_json_serializable() {
         let result = crate::domain::build::BuildResult {
+            provider_dispatched: true,
             ok: true,
             steps: vec![
                 crate::domain::build::BuildStep {

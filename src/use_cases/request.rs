@@ -16,6 +16,8 @@ pub struct BuildRequest {
     pub full_rebuild: bool,
     /// Optional source-set selector. When absent, all configured source-sets are built.
     pub source_set: Option<String>,
+    /// Plan every step and locate the platform without dispatching it.
+    pub dry_run: bool,
 }
 
 /// Transport-neutral request for the `tools download` use case.
@@ -131,6 +133,8 @@ pub struct DumpRequest {
     pub extension: Option<String>,
     /// Requested object filters for `Partial` dump mode.
     pub objects: Vec<String>,
+    /// Resolve the target and locate the platform without dumping anything.
+    pub dry_run: bool,
 }
 
 /// Transport-neutral convert scope.
@@ -173,6 +177,8 @@ pub struct ArtifactsRequest {
     pub source_set: Option<String>,
     /// Requested extension name in the infobase for `-Extension`.
     pub extension: Option<String>,
+    /// Resolve the target and locate Designer without building or publishing anything.
+    pub dry_run: bool,
 }
 
 impl ArtifactsRequest {

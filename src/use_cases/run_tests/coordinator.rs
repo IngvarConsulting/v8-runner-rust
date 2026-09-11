@@ -77,6 +77,7 @@ pub(super) fn run_tests(
                 context,
                 config,
                 &BuildArgs {
+                    dry_run: false,
                     full_rebuild: false,
                     source_set: None,
                 },

@@ -1429,6 +1429,7 @@ exit 0"#,
         let failure = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Partial,
                 source_set: None,
                 extension: None,
@@ -1452,6 +1453,7 @@ exit 0"#,
         let failure = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Partial,
                 source_set: None,
                 extension: None,
@@ -1475,6 +1477,7 @@ exit 0"#,
         let failure = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Partial,
                 source_set: None,
                 extension: None,
@@ -1499,6 +1502,7 @@ exit 0"#,
         let result = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Partial,
                 source_set: None,
                 extension: None,
@@ -1531,6 +1535,7 @@ exit 0"#,
             let failure = run_dump(
                 &config,
                 &DumpArgs {
+                    dry_run: false,
                     mode: DumpModeRequest::Partial,
                     source_set: None,
                     extension: None,
@@ -1555,6 +1560,7 @@ exit 0"#,
         let failure = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Incremental,
                 source_set: None,
                 extension: None,
@@ -1578,6 +1584,7 @@ exit 0"#,
         let failure = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Full,
                 source_set: None,
                 extension: None,
@@ -1606,6 +1613,7 @@ exit 0"#,
         let error = resolve_target(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Full,
                 source_set: None,
                 extension: None,
@@ -1628,6 +1636,7 @@ exit 0"#,
         let error = resolve_target(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: Some("ext".to_owned()),
@@ -1657,6 +1666,7 @@ exit 0"#,
         let resolved = resolve_target(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -1898,6 +1908,7 @@ exit 0"#,
         let result = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Incremental,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -1928,6 +1939,7 @@ exit 0"#,
         let result = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Incremental,
                 source_set: Some("ext".to_owned()),
                 extension: Some("ext".to_owned()),
@@ -1961,6 +1973,7 @@ exit 0"#,
         let failure = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2027,6 +2040,7 @@ exit 0"#,
         let result = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2078,6 +2092,7 @@ exit 0"#,
         let result = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("ext".to_owned()),
                 extension: Some("ext".to_owned()),
@@ -2107,6 +2122,7 @@ exit 0"#,
         let failure = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2134,6 +2150,7 @@ exit 0"#,
         let result = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2167,6 +2184,7 @@ exit 0"#,
         let result = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2209,6 +2227,7 @@ exit 0"#,
         let result = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("ext".to_owned()),
                 extension: Some("ext".to_owned()),
@@ -2243,6 +2262,7 @@ exit 0"#,
         let failure = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2280,6 +2300,7 @@ exit 0"#,
         let failure = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2310,6 +2331,7 @@ exit 0"#,
         let result = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2337,6 +2359,7 @@ exit 0"#,
         let result = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2372,6 +2395,7 @@ exit 0"#,
         let result = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2406,6 +2430,7 @@ exit 0"#,
         let failure = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2436,6 +2461,7 @@ exit 0"#,
         let result = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Incremental,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2468,6 +2494,7 @@ exit 0"#,
         let result = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2516,6 +2543,7 @@ exit 0"#,
         let result = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2561,6 +2589,7 @@ exit 0"#,
         let result = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Incremental,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2603,6 +2632,7 @@ exit 0"#,
         let result = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("ext".to_owned()),
                 extension: Some("ext".to_owned()),
@@ -2637,6 +2667,7 @@ exit 0"#,
         let result = run_dump(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2672,6 +2703,7 @@ exit 0"#,
         let resolved = resolve_target(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Incremental,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2713,6 +2745,7 @@ exit 0"#,
         let resolved = resolve_target(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2756,6 +2789,7 @@ exit 0"#,
         let resolved = resolve_target(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Incremental,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2797,6 +2831,7 @@ exit 0"#,
         let resolved = resolve_target(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2843,6 +2878,7 @@ exit 0"#,
         let resolved = resolve_target(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -3000,6 +3036,7 @@ exit 0"#,
         let resolved = resolve_target(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -3062,6 +3099,7 @@ exit 0"#,
         let resolved = resolve_target(
             &config,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -3147,6 +3185,7 @@ exit 0"#,
         let resolved_real = resolve_target(
             &config_real,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -3157,6 +3196,7 @@ exit 0"#,
         let resolved_link = resolve_target(
             &config_link,
             &DumpArgs {
+                dry_run: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -3186,6 +3226,7 @@ exit 0"#,
     #[test]
     fn dump_result_json_contains_new_fields() {
         let result = crate::domain::dump::DumpResult {
+            provider_dispatched: true,
             ok: true,
             source_set: Some("main".to_owned()),
             extension: Some("ext".to_owned()),

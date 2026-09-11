@@ -377,6 +377,53 @@ fn setup_edt_extension_project() -> (tempfile::TempDir, PathBuf, PathBuf) {
 }
 
 #[test]
+fn build_dry_run_plans_every_source_set_without_dispatching_designer() {
+    let (dir, config_path, binary_path, work_path) = setup_project();
+    let marker = dir.path().join("designer-ran.marker");
+    // A fake that records the fact of being run at all.
+    write_script(
+        &binary_path,
+        &format!("printf 'ran' > '{}'\nexit 0", marker.display()),
+    );
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "build",
+            "--full-rebuild",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    let data = &payload["data"];
+    assert_eq!(data["provider_dispatched"], false);
+    assert_eq!(data["ok"], true);
+    let steps = data["steps"].as_array().expect("steps");
+    assert!(!steps.is_empty());
+    for step in steps {
+        assert_eq!(step["ok"], true);
+        let message = step["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("planned") || step["mode"] == "skipped",
+            "{step}"
+        );
+    }
+    assert!(!marker.exists(), "preview must not dispatch Designer");
+    // A planned build commits no change-detection state either.
+    assert!(!work_path.join("storage").exists());
+}
+
+#[test]
 fn build_json_failure_returns_step_payload() {
     let (_dir, config_path, binary_path, _work_path) = setup_project();
     write_build_script(&binary_path, Some("/UpdateDBCfg -Extension ext"));

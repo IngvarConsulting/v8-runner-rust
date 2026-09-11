@@ -65,6 +65,7 @@ pub fn execute(
         }
     };
     let dump_request = DumpRequest {
+        dry_run: false,
         mode: DumpModeRequest::Full,
         source_set: Some("main".to_owned()),
         extension: None,

@@ -62,6 +62,8 @@ where
         let context = execution_context(call_context, CommandName::Build)
             .map_err(McpServiceError::Internal)?;
         let use_case_request = BuildRequest {
+            // The MCP surface exposes no preview input, as for `infobase --dry-run`.
+            dry_run: false,
             full_rebuild: request.full_rebuild.unwrap_or(false),
             source_set: request.source_set.clone(),
         };
@@ -159,6 +161,8 @@ where
         let context = execution_context(call_context, CommandName::Dump)
             .map_err(McpServiceError::Internal)?;
         let use_case_request = DumpRequest {
+            // The MCP surface exposes no preview input, as for `infobase --dry-run`.
+            dry_run: false,
             mode: parse_optional_dump_mode(request.mode.as_deref(), DumpModeRequest::Incremental)
                 .map_err(|error| {
                 let message = error.message().to_owned();
@@ -1159,6 +1163,7 @@ mod tests {
     #[test]
     fn build_project_maps_success_request_and_response() {
         let port = StubPort::with_build_result(Ok(BuildResult {
+            provider_dispatched: true,
             ok: true,
             steps: vec![BuildStep {
                 source_set: "main".to_owned(),
@@ -1200,6 +1205,7 @@ mod tests {
         let port = StubPort::with_build_result(Err(UseCaseFailure::with_payload(
             UseCaseError::new(UseCaseErrorKind::Runtime, "builder failed"),
             BuildResult {
+                provider_dispatched: true,
                 ok: false,
                 steps: vec![BuildStep {
                     source_set: "main".to_owned(),
@@ -1487,6 +1493,7 @@ mod tests {
     #[test]
     fn dump_config_maps_success_and_incremental_default_mode() {
         let port = StubPort::with_dump_result(Ok(DumpResult {
+            provider_dispatched: true,
             ok: true,
             source_set: Some("main".to_owned()),
             extension: None,
@@ -1528,6 +1535,7 @@ mod tests {
             StubPort::with_dump_result(Err(UseCaseFailure::with_payload(
                 UseCaseError::new(UseCaseErrorKind::Runtime, "dump failed"),
                 DumpResult {
+                    provider_dispatched: true,
                     ok: false,
                     source_set: Some("main".to_owned()),
                     extension: None,
@@ -1605,6 +1613,7 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_dump_result(Ok(DumpResult {
+                provider_dispatched: true,
                 ok: true,
                 source_set: None,
                 extension: None,
@@ -1653,6 +1662,7 @@ mod tests {
     #[test]
     fn dump_config_partial_success_preserves_partial_mode_and_warning_message() {
         let port = StubPort::with_dump_result(Ok(DumpResult {
+            provider_dispatched: true,
             ok: true,
             source_set: Some("main".to_owned()),
             extension: None,
@@ -1702,6 +1712,7 @@ mod tests {
                     "IBCMD does not support object-scoped partial dump; export failed",
                 ),
                 DumpResult {
+                    provider_dispatched: true,
                     ok: false,
                     source_set: Some("main".to_owned()),
                     extension: None,
@@ -2495,6 +2506,7 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_build_result(Ok(BuildResult {
+                provider_dispatched: true,
                 ok: true,
                 steps: vec![],
                 duration_ms: 0,
@@ -2523,6 +2535,7 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_build_result(Ok(BuildResult {
+                provider_dispatched: true,
                 ok: true,
                 steps: vec![],
                 duration_ms: 0,

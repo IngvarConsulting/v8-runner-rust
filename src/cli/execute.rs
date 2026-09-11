@@ -2176,6 +2176,7 @@ fn render_pre_dispatch_error(
 
 fn map_build_request(args: &BuildArgs) -> BuildRequest {
     BuildRequest {
+        dry_run: args.dry_run,
         full_rebuild: args.full_rebuild,
         source_set: args.source_set.clone(),
     }
@@ -2485,6 +2486,7 @@ fn map_load_request(args: &LoadArgs) -> Result<LoadRequest, UseCaseError> {
 
 fn map_dump_request(args: &DumpArgs) -> Result<DumpRequest, UseCaseError> {
     Ok(DumpRequest {
+        dry_run: args.dry_run,
         mode: parse_required_dump_mode(&args.mode)?,
         source_set: args.source_set.clone(),
         extension: args.extension.clone(),
@@ -2535,6 +2537,7 @@ fn map_artifacts_request_with_config(
     };
 
     Ok(ArtifactsRequest {
+        dry_run: args.dry_run,
         execution: ArtifactsRequest::default_execution(mode),
         mode,
         output_path: args.output.clone(),
@@ -2925,6 +2928,8 @@ fn build_load_envelope(result: &LoadResult) -> Envelope<LoadJsonData<'_>> {
 #[derive(Debug, Serialize)]
 struct ArtifactsJsonData<'a> {
     pub ok: bool,
+    /// `false` when the run stopped at a preview instead of dispatching the platform.
+    pub provider_dispatched: bool,
     pub mode: ArtifactBuildMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_set: Option<&'a str>,
@@ -2945,6 +2950,7 @@ impl<'a> ArtifactsJsonData<'a> {
     fn from_result(result: &'a ArtifactsResult) -> Self {
         Self {
             ok: result.execution.is_ok(),
+            provider_dispatched: result.provider_dispatched,
             mode: result.mode,
             source_set: result.source_set.as_deref(),
             extension: result.extension.as_deref(),
@@ -4042,6 +4048,7 @@ mod tests {
     fn maps_build_dump_launch_and_load_requests() {
         assert!(
             map_build_request(&BuildArgs {
+                dry_run: false,
                 full_rebuild: true,
                 source_set: None,
             })
@@ -4057,6 +4064,7 @@ mod tests {
         );
         assert_eq!(
             map_dump_request(&DumpArgs {
+                dry_run: false,
                 mode: "incremental".to_owned(),
                 source_set: Some("main".to_owned()),
                 extension: Some("Ext".to_owned()),
@@ -4068,6 +4076,7 @@ mod tests {
         );
         assert_eq!(
             map_dump_request(&DumpArgs {
+                dry_run: false,
                 mode: "incremental".to_owned(),
                 source_set: Some("main".to_owned()),
                 extension: Some("Ext".to_owned()),
@@ -4191,6 +4200,7 @@ mod tests {
         let artifacts = map_artifacts_request_with_config(
             &sample_config(Path::new("/tmp/work")),
             &ArtifactsArgs {
+                dry_run: false,
                 output: "dist/ext.cfe".to_owned(),
                 source_set: Some("ext-sales".to_owned()),
                 extension: Some("SalesAddon".to_owned()),
@@ -4207,6 +4217,7 @@ mod tests {
         let artifacts = map_artifacts_request_with_config(
             &sample_config(Path::new("/tmp/work")),
             &ArtifactsArgs {
+                dry_run: false,
                 output: "dist/main.cf".to_owned(),
                 source_set: Some("main".to_owned()),
                 extension: Some("   ".to_owned()),
@@ -4222,6 +4233,7 @@ mod tests {
     #[test]
     fn rejects_invalid_mode_mapping() {
         let dump_error = map_dump_request(&DumpArgs {
+            dry_run: false,
             mode: "garbage".to_owned(),
             source_set: None,
             extension: None,
@@ -4350,6 +4362,7 @@ mod tests {
         );
         assert_eq!(
             command_name(&Command::Build(BuildArgs {
+                dry_run: false,
                 full_rebuild: false,
                 source_set: None,
             })),
@@ -4367,6 +4380,7 @@ mod tests {
         );
         assert_eq!(
             command_name(&Command::Artifacts(ArtifactsArgs {
+                dry_run: false,
                 output: "dist/main.cf".to_owned(),
                 source_set: None,
                 extension: None,
@@ -4421,6 +4435,7 @@ mod tests {
         let error = execute_command(
             &config,
             &Command::Build(BuildArgs {
+                dry_run: false,
                 full_rebuild: true,
                 source_set: None,
             }),
@@ -4612,6 +4627,7 @@ mod tests {
         let _ = execute_command(
             &config,
             &Command::Build(BuildArgs {
+                dry_run: false,
                 full_rebuild: true,
                 source_set: None,
             }),

@@ -229,6 +229,7 @@ mod tests {
                 &ExecutionContext::mcp_stdio(CommandName::Build),
                 &config,
                 &BuildRequest {
+                    dry_run: false,
                     full_rebuild: true,
                     source_set: None,
                 },

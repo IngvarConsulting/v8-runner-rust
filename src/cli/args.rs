@@ -212,6 +212,9 @@ pub struct BuildArgs {
     /// Limit build to one source-set from v8project.yaml
     #[arg(long)]
     pub source_set: Option<String>,
+    /// Plan every step and locate the platform without dispatching it
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
@@ -420,6 +423,9 @@ pub struct DumpArgs {
     /// Objects for partial dump. Use canonical TYPE:NAME selectors; legacy TYPE.NAME selectors are accepted for compatibility.
     #[arg(long = "object")]
     pub objects: Vec<String>,
+    /// Resolve the target and locate the platform without dumping anything
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
@@ -544,6 +550,9 @@ pub struct ArtifactsArgs {
     /// Extension name in the infobase for cfe export
     #[arg(long)]
     pub extension: Option<String>,
+    /// Resolve the target and locate the platform without building or publishing anything
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1188,9 +1197,11 @@ mod tests {
         match cli.command {
             Command::Artifacts(ArtifactsArgs {
                 output,
+                dry_run,
                 source_set,
                 extension,
             }) => {
+                assert!(!dry_run);
                 assert_eq!(output, "dist/main.cf");
                 assert!(source_set.is_none());
                 assert!(extension.is_none());
@@ -1272,9 +1283,11 @@ mod tests {
         match cli.command {
             Command::Artifacts(ArtifactsArgs {
                 output,
+                dry_run,
                 source_set,
                 extension,
             }) => {
+                assert!(!dry_run);
                 assert_eq!(output, "dist/ext.cfe");
                 assert_eq!(source_set.as_deref(), Some("ext-sales"));
                 assert_eq!(extension.as_deref(), Some("SalesAddon"));
