@@ -39,6 +39,27 @@ pub fn execute(
         .locate(UtilityType::Ibcmd)
         .map(|location| location.path)
         .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+    if request.dry_run {
+        // Reading the composition starts the platform, authenticates and leaves a journal
+        // trace, so the read is previewed like any change: the target and the account are
+        // named, and nothing is asked of the platform yet.
+        return Ok(ExtensionInventoryResult {
+            ok: true,
+            provider_dispatched: false,
+            plan: Some(format!(
+                "would read {} of {} via {}",
+                match &request.scope {
+                    ExtensionInventoryScope::All => "every installed extension".to_owned(),
+                    ExtensionInventoryScope::Named { name } => format!("extension '{name}'"),
+                },
+                connection.describe_target(),
+                binary.display()
+            )),
+            extensions: Vec::new(),
+            duration_ms: started.elapsed().as_millis() as u64,
+        });
+    }
+
     let dsl = IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
         .with_execution_policy(
             context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
@@ -56,6 +77,8 @@ pub fn execute(
 
     Ok(ExtensionInventoryResult {
         ok: true,
+        provider_dispatched: true,
+        plan: None,
         extensions,
         duration_ms: started.elapsed().as_millis() as u64,
     })
@@ -152,6 +175,7 @@ pub fn change(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &ExtensionChangeRequest,
+    dry_run: bool,
 ) -> UseCaseResult<ExtensionsResult> {
     debug!(
         command = context.command().as_str(),
@@ -166,6 +190,27 @@ pub fn change(
         .locate(UtilityType::Ibcmd)
         .map(|location| location.path)
         .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+    if dry_run {
+        return Ok(ExtensionsResult {
+            ok: true,
+            provider_dispatched: false,
+            steps: vec![ExtensionsStep {
+                target: request.target().to_owned(),
+                action: request.action().to_owned(),
+                ok: true,
+                message: Some(format!(
+                    "would {} '{}' in {} via {}",
+                    request.action(),
+                    request.target(),
+                    connection.describe_target(),
+                    binary.display()
+                )),
+                duration_ms: 0,
+            }],
+            duration_ms: started.elapsed().as_millis() as u64,
+        });
+    }
+
     let dsl = IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
         .with_execution_policy(
             context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
@@ -193,6 +238,7 @@ pub fn change(
     {
         Ok(()) => Ok(ExtensionsResult {
             ok: true,
+            provider_dispatched: true,
             steps: vec![ExtensionsStep {
                 target: request.target().to_owned(),
                 action: request.action().to_owned(),
@@ -205,6 +251,7 @@ pub fn change(
         Err(error) => {
             let payload = ExtensionsResult {
                 ok: false,
+                provider_dispatched: true,
                 steps: vec![ExtensionsStep {
                     target: request.target().to_owned(),
                     action: request.action().to_owned(),
@@ -248,6 +295,7 @@ mod tests {
     #[test]
     fn a_named_read_refuses_a_record_that_is_not_the_requested_one() {
         let request = ExtensionInventoryRequest {
+            dry_run: false,
             scope: ExtensionInventoryScope::Named {
                 name: "Другая".to_owned(),
             },
@@ -261,6 +309,7 @@ mod tests {
     #[test]
     fn a_named_read_accepts_the_requested_record() {
         let request = ExtensionInventoryRequest {
+            dry_run: false,
             scope: ExtensionInventoryScope::Named {
                 name: "Проба".to_owned(),
             },
@@ -275,6 +324,7 @@ mod tests {
     #[test]
     fn an_empty_infobase_reads_as_an_empty_inventory() {
         let request = ExtensionInventoryRequest {
+            dry_run: false,
             scope: ExtensionInventoryScope::All,
         };
 

@@ -406,9 +406,13 @@ fn execute_extension_command(
         CommandName::Extensions,
         clean_before_execution,
         || match command {
-            ExtensionsCommand::List => {
-                run_extension_inventory(config, &context, presenter, ExtensionInventoryScope::All)
-            }
+            ExtensionsCommand::List(args) => run_extension_inventory(
+                config,
+                &context,
+                presenter,
+                ExtensionInventoryScope::All,
+                args.dry_run,
+            ),
             ExtensionsCommand::Info(args) => run_extension_inventory(
                 config,
                 &context,
@@ -416,6 +420,7 @@ fn execute_extension_command(
                 ExtensionInventoryScope::Named {
                     name: args.name.clone(),
                 },
+                args.dry_run,
             ),
             ExtensionsCommand::Create(args) => run_extension_change(
                 config,
@@ -427,6 +432,7 @@ fn execute_extension_command(
                     synonym: args.synonym.clone(),
                     purpose: args.purpose.clone(),
                 },
+                args.dry_run,
             ),
             ExtensionsCommand::Delete(args) => run_extension_change(
                 config,
@@ -435,6 +441,7 @@ fn execute_extension_command(
                 ExtensionChangeRequest::Delete {
                     name: args.name.clone(),
                 },
+                args.dry_run,
             ),
             ExtensionsCommand::Activate(args) => run_extension_change(
                 config,
@@ -444,6 +451,7 @@ fn execute_extension_command(
                     name: args.name.clone(),
                     active: args.active == "yes",
                 },
+                args.dry_run,
             ),
         },
     )
@@ -454,8 +462,9 @@ fn run_extension_inventory(
     context: &ExecutionContext,
     presenter: &Presenter,
     scope: ExtensionInventoryScope,
+    dry_run: bool,
 ) -> Result<(), UseCaseError> {
-    let request = ExtensionInventoryRequest { scope };
+    let request = ExtensionInventoryRequest { scope, dry_run };
     match extension_inventory::execute(context, config, &request) {
         Ok(result) => {
             if presenter.is_json() {
@@ -489,8 +498,9 @@ fn run_extension_change(
     context: &ExecutionContext,
     presenter: &Presenter,
     request: ExtensionChangeRequest,
+    dry_run: bool,
 ) -> Result<(), UseCaseError> {
-    match extension_inventory::change(context, config, &request) {
+    match extension_inventory::change(context, config, &request, dry_run) {
         Ok(result) => {
             if presenter.is_json() {
                 presenter.print_envelope(&Envelope::ok(
@@ -530,6 +540,14 @@ fn render_extension_inventory_text(
     result: &crate::domain::extensions::ExtensionInventoryResult,
     presenter: &Presenter,
 ) {
+    if let Some(plan) = result.plan.as_deref() {
+        presenter.print_timeline(&[TimelineItem::new(
+            TimelineStatus::Succeeded,
+            "Infobase extensions preview",
+        )
+        .with_detail(plan.to_owned())]);
+        return;
+    }
     if result.extensions.is_empty() {
         presenter.print_timeline(&[TimelineItem::new(
             TimelineStatus::Succeeded,
@@ -574,7 +592,12 @@ fn render_extensions_text(
                 "{}: {} -> {}{}",
                 step.target,
                 step.action,
-                if step.ok { "ok" } else { "failed" },
+                // A preview performed nothing, so the step must not read as done.
+                match (result.provider_dispatched, step.ok) {
+                    (false, _) => "planned",
+                    (true, true) => "ok",
+                    (true, false) => "failed",
+                },
                 step.message
                     .as_deref()
                     .map(|message| format!(" ({message})"))
@@ -587,9 +610,12 @@ fn render_extensions_text(
     } else {
         TimelineStatus::Failed
     };
-    presenter.print_timeline(&[
-        TimelineItem::new(status, "Infobase extension change").with_detail(details.join("\n"))
-    ]);
+    let label = if result.provider_dispatched {
+        "Infobase extension change"
+    } else {
+        "Infobase extension change preview"
+    };
+    presenter.print_timeline(&[TimelineItem::new(status, label).with_detail(details.join("\n"))]);
 }
 
 fn execute_init(

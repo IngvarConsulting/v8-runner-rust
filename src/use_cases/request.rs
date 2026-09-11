@@ -750,4 +750,6 @@ pub enum ExtensionInventoryScope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionInventoryRequest {
     pub scope: ExtensionInventoryScope,
+    /// Locate the utility and name the target without starting the platform.
+    pub dry_run: bool,
 }

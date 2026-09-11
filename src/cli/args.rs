@@ -267,7 +267,7 @@ pub struct ExtensionsArgs {
 #[derive(Subcommand, Debug)]
 pub enum ExtensionsCommand {
     /// Report the extensions installed in the infobase
-    List,
+    List(ExtensionPreviewArgs),
     /// Report one installed extension by its platform name
     Info(ExtensionNameArgs),
     /// Register a new extension in the infobase
@@ -284,11 +284,27 @@ pub struct ExtensionNameArgs {
     /// Extension name as the platform knows it
     #[arg(long)]
     pub name: String,
+
+    /// Name the target and the account without starting the platform
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Command options")]
+pub struct ExtensionPreviewArgs {
+    /// Name the target and the account without starting the platform
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Command options")]
 pub struct ExtensionCreateArgs {
+    /// Name the target and the account without starting the platform
+    #[arg(long)]
+    pub dry_run: bool,
+
     /// Extension name as the platform will know it
     #[arg(long)]
     pub name: String,
@@ -309,6 +325,10 @@ pub struct ExtensionCreateArgs {
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Command options")]
 pub struct ExtensionActivateArgs {
+    /// Name the target and the account without starting the platform
+    #[arg(long)]
+    pub dry_run: bool,
+
     /// Extension name as the platform knows it
     #[arg(long)]
     pub name: String,

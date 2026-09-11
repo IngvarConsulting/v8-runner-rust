@@ -133,6 +133,9 @@ v8-runner init
   infobase, not the workspace — bare `v8-runner extensions` still means "update the security
   properties of the configured extension source-sets". The family is IBCMD-only because Designer
   cannot report installed extensions, and the platform does not report a name prefix on read.
+  Every subcommand, reads included, accepts `--dry-run`: reading the composition starts the
+  platform, authenticates and leaves a journal trace, so it is an action. The preview names the
+  target infobase, the account and the utility, and never echoes the connection string.
 - Need a 1C UI session: use `v8-runner launch designer`, `launch thin`, `launch thick`, or `launch ordinary`.
 - Need to know which binary and arguments a launch would use without starting a client: append
   `--dry-run` to `launch designer|thin|thick|ordinary`. It returns `provider_dispatched=false`,

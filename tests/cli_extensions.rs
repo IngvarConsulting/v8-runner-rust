@@ -130,6 +130,116 @@ fn write_inventory_ibcmd(ibcmd_path: &Path, calls_log: &Path, inventory: &str) {
 const MEASURED_INVENTORY: &str = "name                         : \"Проба\"\nversion                      : \nactive                       : yes\npurpose                      : add-on\nsafe-mode                    : yes\nsecurity-profile-name        : \nunsafe-action-protection     : yes\nused-in-distributed-infobase : no\nscope                        : infobase\nhash-sum                     : \"9hfFb6YVX2OwLKZaL1L69Eq0Vrg=\"\n";
 
 #[test]
+fn extensions_read_is_previewed_because_it_starts_the_platform() {
+    let (_dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
+    write_inventory_ibcmd(&ibcmd_path, &calls_log, MEASURED_INVENTORY);
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "extensions",
+            "list",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("json envelope");
+    let data = &envelope["data"];
+    assert_eq!(data["provider_dispatched"], false);
+    // Nothing was asked of the platform, so no record may be reported.
+    assert!(data["extensions"]
+        .as_array()
+        .expect("extensions")
+        .is_empty());
+    let plan = data["plan"].as_str().expect("plan");
+    assert!(
+        plan.contains("would read every installed extension"),
+        "{plan}"
+    );
+    assert!(plan.contains("file infobase"), "{plan}");
+    assert!(!calls_log.exists(), "preview must not dispatch ibcmd");
+}
+
+#[test]
+fn extension_change_preview_names_the_target_and_changes_nothing() {
+    let (_dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--no-color",
+            "extensions",
+            "activate",
+            "--name",
+            "Проба",
+            "--active",
+            "no",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Infobase extension change preview"),
+        "{stdout}"
+    );
+    // A preview performed nothing, so the step must not read as done.
+    assert!(stdout.contains("-> planned"), "{stdout}");
+    assert!(!stdout.contains("-> ok"), "{stdout}");
+    assert!(stdout.contains("would deactivate 'Проба'"), "{stdout}");
+    assert!(!calls_log.exists(), "preview must not dispatch ibcmd");
+}
+
+#[test]
+fn extension_preview_never_echoes_the_infobase_password() {
+    let (_dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+    let config = fs::read_to_string(&config_path).expect("config");
+    fs::write(
+        &config_path,
+        config.replace(
+            "infobase:\n  connection: '",
+            "infobase:\n  user: Админ\n  password: s3cret\n  connection: '",
+        ),
+    )
+    .expect("config with credentials");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--no-color",
+            "extensions",
+            "list",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(output.status.success());
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(reported.contains("as 'Админ'"), "{reported}");
+    assert!(!reported.contains("s3cret"), "{reported}");
+    assert!(!calls_log.exists());
+}
+
+#[test]
 fn extensions_list_reports_the_installed_composition() {
     let (_dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
     write_inventory_ibcmd(&ibcmd_path, &calls_log, MEASURED_INVENTORY);
@@ -278,9 +388,12 @@ fn extensions_command_updates_all_extension_properties() {
 #[test]
 fn extensions_command_streams_stage_before_pipeline_finishes() {
     let (_dir, config_path, _calls_log, ibcmd_path) = setup_extensions_project();
+    // The second extension blocks for far longer than the command needs to start, so the
+    // window in which the first stage must appear does not compete with process startup.
+    // The child is killed once the assertions hold, so the suite does not wait it out.
     write_script(
         &ibcmd_path,
-        "case \"$*\" in\n  *\"--name tests\"*) sleep 2 ;;\nesac\nexit 0",
+        "case \"$*\" in\n  *\"--name tests\"*) sleep 30 ;;\nesac\nexit 0",
     );
 
     let mut command = v8_runner_command();
@@ -306,19 +419,20 @@ fn extensions_command_streams_stage_before_pipeline_finishes() {
 
     let saw_first_stage = wait_for_received_line(
         &rx,
-        Duration::from_secs(1),
-        Duration::from_millis(100),
+        Duration::from_secs(15),
+        Duration::from_millis(50),
         |line| line.contains("● client_mcp: disable_safety"),
     );
 
+    let still_running = child.try_wait().expect("try wait").is_none();
+    let _ = child.kill();
+    let _ = child.wait();
+
     assert!(saw_first_stage, "first extension stage was not streamed");
     assert!(
-        child.try_wait().expect("try wait").is_none(),
+        still_running,
         "process finished before the delayed second extension"
     );
-
-    let status = child.wait().expect("wait");
-    assert!(status.success());
 }
 
 #[test]

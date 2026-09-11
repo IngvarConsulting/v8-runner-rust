@@ -214,11 +214,11 @@ v8-runner extensions [--name <SOURCE_SET>...]
 #### Состав расширений информационной базы
 
 ```bash
-v8-runner extensions list
-v8-runner extensions info --name <NAME>
-v8-runner extensions create --name <NAME> --name-prefix <PREFIX> [--synonym <NSTR>] [--purpose <customization|add-on|patch>]
-v8-runner extensions delete --name <NAME>
-v8-runner extensions activate --name <NAME> --active <yes|no>
+v8-runner extensions list [--dry-run]
+v8-runner extensions info --name <NAME> [--dry-run]
+v8-runner extensions create --name <NAME> --name-prefix <PREFIX> [--synonym <NSTR>] [--purpose <customization|add-on|patch>] [--dry-run]
+v8-runner extensions delete --name <NAME> [--dry-run]
+v8-runner extensions activate --name <NAME> --active <yes|no> [--dry-run]
 ```
 
 - Предмет здесь другой: `extensions` без подкоманды правит свойства extension
@@ -245,6 +245,15 @@ v8-runner extensions activate --name <NAME> --active <yes|no>
   самостоятельным ключом `--active`.
 - Чтение и запись делят одну границу workspace lock: состав может измениться под
   чтением, и перечень, снятый поперёк установки, показал бы половинное состояние.
+- **`--dry-run` есть и у читающих подкоманд.** «Просто прочитать» не бывает:
+  поднимается `ibcmd`, открывается соединение, проходит аутентификация, в журнале
+  остаётся след — значит чтение состава это действие, и превью ему нужно так же,
+  как изменению. Превью называет цель, учётку и утилиту, а `extensions` в нём пуст,
+  потому что у платформы ничего не спрашивали.
+- Сырая строка соединения в превью не воспроизводится: она может нести `Pwd=`,
+  поэтому называются только узнаваемые части цели и имя учётки.
+- Требуемое право превью не называет: платформа его не сообщает, и выдумывать имя
+  права оно не станет.
 
 ### `build`
 

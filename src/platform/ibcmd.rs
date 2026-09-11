@@ -64,6 +64,34 @@ impl IbcmdConnection {
         })
     }
 
+    /// Names the target infobase and the account without echoing any secret.
+    ///
+    /// The raw connection string may carry `Pwd=`, so it is never reproduced here; only
+    /// the pieces a caller needs to recognise the target are named.
+    pub fn describe_target(&self) -> String {
+        let (target, user) = match self {
+            Self::File {
+                database_path,
+                user,
+                ..
+            } => (format!("file infobase '{}'", database_path.display()), user),
+            Self::Server {
+                dbms_kind,
+                database_server,
+                database_name,
+                user,
+                ..
+            } => (
+                format!("{dbms_kind} infobase '{database_name}' on '{database_server}'"),
+                user,
+            ),
+        };
+        match user.as_deref().filter(|user| !user.is_empty()) {
+            Some(user) => format!("{target} as '{user}'"),
+            None => format!("{target} with no configured infobase user"),
+        }
+    }
+
     #[cfg(test)]
     fn args(&self) -> Vec<String> {
         let mut args = self.infobase_args();
