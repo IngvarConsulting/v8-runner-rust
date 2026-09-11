@@ -107,6 +107,17 @@
 
 См. [ADR-0024](../decisions/0024-tipizirovat-eksport-konfiguratsii-i-snimka-ib.md).
 
+## Client Launch Preview
+
+1. Платформу для запуска выбирает только runner; отдельной команды discovery нет, поэтому превью обязано назвать выбранную программу и составленные аргументы.
+2. `launch --dry-run` проходит ту же валидацию и тот же поиск платформы, что обычный запуск, и завершается до взятия runner-а и любого spawn.
+3. `provider_dispatched` присутствует в результате `launch` всегда и отвечает ровно на один вопрос: дошёл ли запуск до spawn клиентского процесса.
+4. В `plan.args` не попадает ни одно значение credential: маскируются значение ключа `/P`, сегмент `Pwd=` внутри connection string и известное значение `infobase.password`. Остальные аргументы остаются читаемыми.
+5. Превью несовместимо с опциями, сообщающими исход работающего клиента (`--wait-for-exit`, `--wait-ready`): план не выдаётся за наблюдение.
+6. Превью остаётся CLI-возможностью; MCP surface им не расширяется.
+
+См. [ADR-0025](../decisions/0025-nevypolnyayuschee-prevyu-zapuska-klienta.md).
+
 ## Pipeline Execution Outcome
 
 1. Runner-like и pipeline-like сценарии должны использовать `ExecutionOutcome<T>` как canonical domain outcome для статуса, structured errors, diagnostics, metrics, artifacts and typed payload.

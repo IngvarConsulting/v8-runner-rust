@@ -642,6 +642,8 @@ pub struct LaunchRequest {
     pub launch: LaunchOptions,
     /// Client-side MCP launch options. Present only for `LaunchTargetRequest::client_mcp*`.
     pub client_mcp: Option<ClientMcpOptionsRequest>,
+    /// Validate and select a provider without launching the client process.
+    pub dry_run: bool,
 }
 
 /// Transport-neutral request for the `init` use case.

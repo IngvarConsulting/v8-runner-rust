@@ -361,7 +361,7 @@ v8-runner artifacts --output <TARGET> [--source-set <NAME>] [--extension <NAME>]
 ### `launch`
 
 ```bash
-v8-runner launch <designer|thin|thick|ordinary> [FLAGS]
+v8-runner launch <designer|thin|thick|ordinary> [--dry-run] [FLAGS]
 v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--wait-ready] [FLAGS]
 ```
 
@@ -409,6 +409,17 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--wait-ready] [FLAGS]
 - JSON-результат именно `launch` содержит legacy `binary` и `platform_resolution` с canonical
   `path`, `version` (или `null`), `source` (`explicit`, `default-root` или `path`) и
   `installation_root`. Это не общий metadata contract для остальных команд.
+- `provider_dispatched` присутствует всегда и отвечает ровно на один вопрос: дошёл ли запуск до
+  spawn клиентского процесса.
+- `--dry-run` валидирует запрос, выбирает платформу и возвращает `provider_dispatched=false`,
+  `pid=null` и compact `plan` с `program` и уже составленным `args`, но не запускает клиент.
+  Превью обязано назвать провайдера, потому что платформу ищет только runner: вызывающая сторона
+  не может составить эти аргументы сама.
+- В `plan.args` каждое значение credential замаскировано как `***`: значение ключа `/P`, сегмент
+  `Pwd=` внутри connection string и любое известное значение `infobase.password`, где бы оно ни
+  встретилось. Остальные аргументы остаются читаемыми.
+- `--dry-run` несовместим с `--wait-for-exit` и `--wait-ready`: оба сообщают исход работающего
+  клиента, которого превью не запускает.
 
 ### `mcp serve`
 
