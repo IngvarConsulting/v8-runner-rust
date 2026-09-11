@@ -451,6 +451,113 @@ impl ExportInfobaseSnapshotResult {
     }
 }
 
+/// Which irreversible change to the target infobase the caller permits.
+///
+/// Neither provider asks: Designer creates an absent infobase and overwrites a
+/// present one, and IBCMD overwrites a present one. The mode is therefore a
+/// runner-side gate, and a mode that does not match the observed target is a
+/// refusal rather than a silent fallback to the other case.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoreTargetMode {
+    /// The target infobase must be absent; restoring creates it.
+    Create,
+    /// The target infobase must exist; restoring discards its current data.
+    Replace,
+}
+
+impl RestoreTargetMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Replace => "replace",
+        }
+    }
+}
+
+/// Request to load a complete information base from a DT transfer file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RestoreInfobaseSnapshotRequest {
+    pub input: PathBuf,
+    pub target_mode: RestoreTargetMode,
+}
+
+/// Compact machine-facing plan produced by a non-executing restore preflight.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InfobaseRestorePlan {
+    pub provider: ExportProvider,
+    pub artifact_kind: InfobaseExportArtifactKind,
+    pub input: PathBuf,
+    pub target_mode: RestoreTargetMode,
+}
+
+/// Typed presentation data for an information-base restore.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RestoreInfobaseSnapshotResult {
+    pub mode: InfobaseExportMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_dispatched: Option<bool>,
+    pub subject: InfobaseSnapshotSubject,
+    pub selection: ExportProviderDecision,
+    pub artifact_kind: InfobaseExportArtifactKind,
+    pub input: PathBuf,
+    pub target_mode: RestoreTargetMode,
+    /// `true` only after the provider reported a completed load.
+    pub restored: bool,
+    pub target_state: ExportTargetState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<InfobaseRestorePlan>,
+    #[serde(skip)]
+    pub warnings: Vec<String>,
+    pub execution: ExecutionOutcome<()>,
+    #[serde(skip)]
+    pub steps: Vec<StepResult>,
+}
+
+impl RestoreInfobaseSnapshotResult {
+    pub fn new(request: RestoreInfobaseSnapshotRequest, selection: ExportProviderDecision) -> Self {
+        Self {
+            mode: InfobaseExportMode::Apply,
+            provider_dispatched: None,
+            subject: InfobaseSnapshotSubject::Infobase,
+            selection,
+            artifact_kind: InfobaseExportArtifactKind::Dt,
+            input: request.input,
+            target_mode: request.target_mode,
+            restored: false,
+            target_state: ExportTargetState::Unchanged,
+            plan: None,
+            warnings: Vec::new(),
+            execution: ExecutionOutcome::new(ExecutionStatus::Failed),
+            steps: Vec::new(),
+        }
+    }
+
+    pub fn mark_succeeded(&mut self) {
+        self.execution.status = ExecutionStatus::Succeeded;
+    }
+
+    pub fn mark_preview(&mut self) {
+        self.mode = InfobaseExportMode::Preview;
+        self.provider_dispatched = Some(false);
+        self.plan = self
+            .selection
+            .provider()
+            .map(|provider| InfobaseRestorePlan {
+                provider,
+                artifact_kind: self.artifact_kind,
+                input: self.input.clone(),
+                target_mode: self.target_mode,
+            });
+        self.execution.status = ExecutionStatus::Succeeded;
+    }
+
+    pub fn mark_preview_failure(&mut self) {
+        self.mode = InfobaseExportMode::Preview;
+        self.provider_dispatched = Some(false);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
