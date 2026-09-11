@@ -53,7 +53,7 @@ pub enum Command {
     /// Download YaXUnit, Vanessa Automation, and client MCP tool assets
     Tools(ToolsArgs),
     /// Initialize the infobase and EDT workspace
-    Init,
+    Init(InitArgs),
     /// Update configured extension properties inside the infobase
     Extensions(ExtensionsArgs),
     /// Build configured source-sets into the infobase
@@ -232,6 +232,18 @@ pub struct LoadArgs {
     /// Extension name required for .cfe artifacts
     #[arg(long)]
     pub extension: Option<String>,
+
+    /// Resolve the plan and locate the platform without probing or applying anything
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Command options")]
+pub struct InitArgs {
+    /// Decide every step and locate the platform without creating anything
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
@@ -737,8 +749,8 @@ pub struct DesignerModulesSyntaxArgs {
 mod tests {
     use super::{
         ArtifactsArgs, Cli, Command, ConvertArgs, DirectLaunchOptionsArgs, ExtensionsArgs,
-        LaunchArgs, LoadArgs, McpCommand, McpServeTransport, SyntaxTarget, TestLaunchOptionsArgs,
-        TestRunner, TestScope,
+        InitArgs, LaunchArgs, LoadArgs, McpCommand, McpServeTransport, SyntaxTarget,
+        TestLaunchOptionsArgs, TestRunner, TestScope,
     };
     use clap::Parser;
 
@@ -771,7 +783,10 @@ mod tests {
     #[test]
     fn parses_init_command() {
         let cli = Cli::try_parse_from(["v8-runner", "init"]).expect("parse");
-        assert!(matches!(cli.command, Command::Init));
+        assert!(matches!(
+            cli.command,
+            Command::Init(InitArgs { dry_run: false })
+        ));
     }
 
     #[test]
@@ -809,11 +824,13 @@ mod tests {
         match cli.command {
             Command::Load(LoadArgs {
                 path,
+                dry_run,
                 mode,
                 settings,
                 extension,
             }) => {
                 assert_eq!(path, "dist/main.cf");
+                assert!(!dry_run);
                 assert_eq!(mode, "load");
                 assert!(settings.is_none());
                 assert!(extension.is_none());
@@ -841,11 +858,13 @@ mod tests {
         match cli.command {
             Command::Load(LoadArgs {
                 path,
+                dry_run,
                 mode,
                 settings,
                 extension,
             }) => {
                 assert_eq!(path, "dist/ext.cfe");
+                assert!(!dry_run);
                 assert_eq!(mode, "merge");
                 assert_eq!(settings.as_deref(), Some("merge.xml"));
                 assert_eq!(extension.as_deref(), Some("SalesAddon"));

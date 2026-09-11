@@ -10,9 +10,9 @@ use crate::cli::args::{
     ArtifactsArgs, BuildArgs, Command, ConvertArgs, DesignerConfigSyntaxArgs,
     DesignerModulesSyntaxArgs, DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs,
     ExtensionsCommand, InfobaseArgs, InfobaseCommand, InfobaseConfigurationCommand,
-    InfobaseConfigurationExportArgs, InfobaseRestoreArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs,
-    SyntaxArgs, SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope, TestVaArgs,
-    TestYaxunitArgs, ToolsArgs, ToolsCommand, ToolsDownloadArgs, ToolsDownloadCommand,
+    InfobaseConfigurationExportArgs, InfobaseRestoreArgs, InitArgs, LaunchArgs, LaunchOptionsArgs,
+    LoadArgs, SyntaxArgs, SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope,
+    TestVaArgs, TestYaxunitArgs, ToolsArgs, ToolsCommand, ToolsDownloadArgs, ToolsDownloadCommand,
 };
 use crate::cli::output::{
     cli_error_contract, failure_envelope, pre_dispatch_error_envelope,
@@ -114,7 +114,13 @@ pub fn execute_command(
             clean_before_execution,
             cancellation,
         ),
-        Command::Init => execute_init(config, presenter, clean_before_execution, cancellation),
+        Command::Init(args) => execute_init(
+            config,
+            args,
+            presenter,
+            clean_before_execution,
+            cancellation,
+        ),
         Command::Extensions(args) => execute_extensions(
             config,
             args,
@@ -198,7 +204,7 @@ pub fn command_name(command: &Command) -> CommandName {
         Command::Tools(ToolsArgs {
             command: ToolsCommand::Download(_),
         }) => CommandName::ToolsDownload,
-        Command::Init => CommandName::Init,
+        Command::Init(_) => CommandName::Init,
         Command::Extensions(_) => CommandName::Extensions,
         Command::Build(_) => CommandName::Build,
         Command::Load(_) => CommandName::Load,
@@ -588,11 +594,14 @@ fn render_extensions_text(
 
 fn execute_init(
     config: &AppConfig,
+    args: &InitArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    let request = InitRequest;
+    let request = InitRequest {
+        dry_run: args.dry_run,
+    };
     let context = cli_context(config, CommandName::Init, cancellation);
     with_cli_workspace_lock(
         config,
@@ -2456,6 +2465,7 @@ fn launch_cli_context(
 
 fn map_load_request(args: &LoadArgs) -> Result<LoadRequest, UseCaseError> {
     Ok(LoadRequest {
+        dry_run: args.dry_run,
         mode: match args.mode.as_str() {
             "load" => LoadMode::Load,
             "merge" => LoadMode::Merge,
@@ -2823,6 +2833,8 @@ fn is_reserved_raw_launch_key(raw: &str) -> bool {
 #[derive(Debug, Serialize)]
 struct LoadJsonData<'a> {
     pub ok: bool,
+    /// `false` when the run stopped at a preview instead of dispatching the platform.
+    pub provider_dispatched: bool,
     pub mode: LoadMode,
     pub artifact_path: &'a Path,
     pub artifact_type: ArtifactBuildMode,
@@ -2843,6 +2855,7 @@ impl<'a> LoadJsonData<'a> {
         let metadata = load_metadata(result);
         Self {
             ok: result.execution.is_ok(),
+            provider_dispatched: result.provider_dispatched,
             mode: result.mode,
             artifact_path: result.artifact_path.as_path(),
             artifact_type: result.artifact_type,
@@ -2876,11 +2889,20 @@ fn load_message(result: &LoadResult) -> Option<String> {
         LoadMode::Merge => "merge",
         LoadMode::Update => "update",
     };
-    let mut message = format!(
-        "{mode} {} applied successfully after {:?} compatibility probe",
-        result.artifact_path.display(),
-        metadata.compatibility_state
-    );
+    // A preview applied nothing, so it must not claim a successful apply; its own
+    // diagnostics below say what it would have done.
+    let mut message = if result.provider_dispatched {
+        format!(
+            "{mode} {} applied successfully after {:?} compatibility probe",
+            result.artifact_path.display(),
+            metadata.compatibility_state
+        )
+    } else {
+        format!(
+            "{mode} {} previewed; nothing applied",
+            result.artifact_path.display()
+        )
+    };
     if !result.execution.diagnostics.is_empty() {
         message.push_str("; ");
         message.push_str(&result.execution.diagnostics.join("; "));
@@ -3051,6 +3073,7 @@ fn step_status_detail(status: &InitStepStatus, message: impl AsRef<str>) -> Stri
         InitStepStatus::Ok => format!("✓ {}", message.as_ref()),
         InitStepStatus::Skipped => format!("○ {}", message.as_ref()),
         InitStepStatus::Failed => format!("✗ {}", message.as_ref()),
+        InitStepStatus::Planned => format!("→ {}", message.as_ref()),
     }
 }
 
@@ -3820,8 +3843,9 @@ mod tests {
         ArtifactsArgs, BuildArgs, Command, DesignerConfigSyntaxArgs, DesignerModulesSyntaxArgs,
         DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs, InfobaseArgs, InfobaseCommand,
         InfobaseConfigurationArgs, InfobaseConfigurationCommand, InfobaseConfigurationExportArgs,
-        InfobaseDumpArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs, SyntaxArgs, SyntaxTarget,
-        TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope, TestVaArgs, TestYaxunitArgs,
+        InfobaseDumpArgs, InitArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs, SyntaxArgs,
+        SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope, TestVaArgs,
+        TestYaxunitArgs,
     };
     use crate::cli::output::pre_dispatch_error_envelope;
     use crate::config::model::{
@@ -4153,6 +4177,7 @@ mod tests {
             }
         );
         let load = map_load_request(&LoadArgs {
+            dry_run: false,
             path: "dist/main.cf".to_owned(),
             mode: "merge".to_owned(),
             settings: Some("merge.xml".to_owned()),
@@ -4222,6 +4247,7 @@ mod tests {
     #[test]
     fn rejects_invalid_load_mode_mapping() {
         let error = map_load_request(&LoadArgs {
+            dry_run: false,
             path: "dist/main.cf".to_owned(),
             mode: "garbage".to_owned(),
             settings: None,
@@ -4311,7 +4337,10 @@ mod tests {
 
     #[test]
     fn resolves_command_name() {
-        assert_eq!(command_name(&Command::Init), CommandName::Init);
+        assert_eq!(
+            command_name(&Command::Init(InitArgs { dry_run: false })),
+            CommandName::Init
+        );
         assert_eq!(
             command_name(&Command::Extensions(ExtensionsArgs {
                 command: None,
@@ -4328,6 +4357,7 @@ mod tests {
         );
         assert_eq!(
             command_name(&Command::Load(LoadArgs {
+                dry_run: false,
                 path: "dist/main.cf".to_owned(),
                 mode: "load".to_owned(),
                 settings: None,
@@ -4640,6 +4670,7 @@ mod tests {
     #[test]
     fn load_json_message_preserves_success_text_and_all_diagnostics() {
         let result = LoadResult {
+            provider_dispatched: true,
             mode: LoadMode::Load,
             artifact_path: PathBuf::from("main.cf"),
             artifact_type: ArtifactBuildMode::ConfigurationCf,

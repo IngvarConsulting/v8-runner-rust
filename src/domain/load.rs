@@ -28,6 +28,12 @@ pub enum CompatibilityState {
     Supported,
     NotSupported,
     Unknown,
+    /// The compatibility probe was deliberately not run, because the run is a preview.
+    ///
+    /// Distinct from `Unknown`, which means the probe ran or was attempted and its answer
+    /// could not be established: "not asked" and "asked without an answer" are different
+    /// facts for a caller deciding whether to apply.
+    NotProbed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -40,6 +46,8 @@ pub struct LoadExecutionMetadata {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoadResult {
+    /// `false` when the run stopped at a preview instead of dispatching the platform.
+    pub provider_dispatched: bool,
     pub mode: LoadMode,
     pub artifact_path: PathBuf,
     pub artifact_type: ArtifactBuildMode,
@@ -59,6 +67,7 @@ mod tests {
     #[test]
     fn load_result_serializes_canonical_execution_without_legacy_fields() {
         let result = LoadResult {
+            provider_dispatched: true,
             mode: LoadMode::Load,
             artifact_path: PathBuf::from("/tmp/main.cf"),
             artifact_type: ArtifactBuildMode::ConfigurationCf,

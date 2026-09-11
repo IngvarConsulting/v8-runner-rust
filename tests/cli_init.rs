@@ -209,6 +209,52 @@ fn setup_ibcmd_server_init_project(
 }
 
 #[test]
+fn init_dry_run_plans_the_infobase_without_creating_it() {
+    let (_dir, config_path, work_path, infobase_path) = setup_designer_init_project();
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "init",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("json envelope");
+    let data = &envelope["data"];
+    assert_eq!(data["provider_dispatched"], false);
+    let infobase_step = data["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .find(|step| step["target"] == "infobase")
+        .expect("infobase step");
+    assert_eq!(infobase_step["status"], "planned");
+    let message = infobase_step["message"].as_str().expect("message");
+    assert!(
+        message.contains("would create a file infobase"),
+        "{message}"
+    );
+    assert!(
+        message.contains(infobase_path.display().to_string().as_str()),
+        "{message}"
+    );
+    // Nothing the step would create may exist afterwards.
+    assert!(!infobase_path.join("1Cv8.1CD").exists());
+    assert!(!work_path.join("edt-workspace").exists());
+}
+
+#[test]
 fn init_designer_creates_infobase_and_skips_edt_workspace() {
     let (_dir, config_path, work_path, infobase_path) = setup_designer_init_project();
 

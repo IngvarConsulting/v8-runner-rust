@@ -42,6 +42,8 @@ pub struct LoadRequest {
     pub settings_path: Option<String>,
     /// Optional extension target.
     pub extension: Option<String>,
+    /// Resolve the artifact and locate Designer without probing or applying anything.
+    pub dry_run: bool,
 }
 
 /// Transport-neutral request for the `test` use case.
@@ -650,7 +652,10 @@ pub struct LaunchRequest {
 
 /// Transport-neutral request for the `init` use case.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct InitRequest;
+pub struct InitRequest {
+    /// Decide every step and locate the platform without creating anything.
+    pub dry_run: bool,
+}
 
 /// Transport-neutral request for extension property updates.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

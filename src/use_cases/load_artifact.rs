@@ -146,6 +146,33 @@ fn run_load(
         }
     };
 
+    if args.dry_run {
+        // The next step is the compatibility probe, and the probe is a Designer run against
+        // the infobase. A preview must not dispatch it, so the compatibility state stays
+        // `not_probed` — a named case, not a guess — and nothing is reported as applied.
+        let execution = ExecutionOutcome::new(ExecutionStatus::Succeeded)
+            .with_payload(LoadExecutionMetadata {
+                applied: false,
+                target_kind: resolved.target_kind,
+                compatibility_state: CompatibilityState::NotProbed,
+                update_db_cfg_ran: false,
+            })
+            .with_diagnostics(vec![format!(
+                "would load {} via {}; compatibility not probed and nothing applied",
+                target_label(&resolved),
+                location.path.display()
+            )]);
+        return Ok(LoadResult {
+            provider_dispatched: false,
+            mode: resolved.mode,
+            artifact_path: resolved.artifact_path,
+            artifact_type: resolved.artifact_type,
+            extension: resolved.extension,
+            duration_ms: started.elapsed().as_millis() as u64,
+            execution,
+        });
+    }
+
     log_live_stage(
         "load: compatibility probe",
         "[Конфигуратор] comparing infobase compatibility",
@@ -405,6 +432,7 @@ fn run_load(
         execution = execution.with_interruptions(deferred_interruptions);
     }
     Ok(LoadResult {
+        provider_dispatched: true,
         mode: resolved.mode,
         artifact_path: resolved.artifact_path,
         artifact_type: resolved.artifact_type,
@@ -589,6 +617,13 @@ fn validate_probe_mode_compatibility(
         (LoadMode::Update, _) => Some(AppError::Validation(
             UNSUPPORTED_UPDATE_MODE_ERROR.to_owned(),
         )),
+        // A preview returns before the probe, so this validator never sees `NotProbed`.
+        (LoadMode::Load | LoadMode::Merge, CompatibilityState::NotProbed) => {
+            Some(AppError::Validation(format!(
+                "infobase compatibility for {} was never probed",
+                target_label(resolved)
+            )))
+        }
     }
 }
 
@@ -822,6 +857,7 @@ fn interrupted_result_from_resolved(
     platform_log_path: Option<PathBuf>,
 ) -> LoadResult {
     LoadResult {
+        provider_dispatched: true,
         mode: resolved.mode,
         artifact_path: resolved.artifact_path.clone(),
         artifact_type: resolved.artifact_type,
@@ -892,6 +928,7 @@ fn empty_result(
         .clone()
         .unwrap_or_else(|| "artifact load failed".to_owned());
     LoadResult {
+        provider_dispatched: true,
         mode,
         artifact_path,
         artifact_type,
@@ -1125,6 +1162,7 @@ mod tests {
         write_absent_extension_designer_script(&binary, &calls, None, None, None);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "ext.cfe".to_owned(),
             settings_path: None,
@@ -1166,6 +1204,7 @@ mod tests {
         );
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "ext.cfe".to_owned(),
             settings_path: None,
@@ -1204,6 +1243,7 @@ mod tests {
         );
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "ext.cfe".to_owned(),
             settings_path: None,
@@ -1235,6 +1275,7 @@ mod tests {
         );
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "ext.cfe".to_owned(),
             settings_path: None,
@@ -1265,6 +1306,7 @@ mod tests {
         make_executable(&binary);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "ext.cfe".to_owned(),
             settings_path: None,
@@ -1291,6 +1333,7 @@ mod tests {
         write_absent_extension_designer_script(&binary, &calls, None, None, None);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            dry_run: false,
             mode: LoadMode::Merge,
             artifact_path: "ext.cfe".to_owned(),
             settings_path: Some("merge.xml".to_owned()),
@@ -1326,6 +1369,7 @@ mod tests {
         let unsupported = resolve_request(
             &config,
             &LoadRequest {
+                dry_run: false,
                 mode: LoadMode::Load,
                 artifact_path: "tool.epf".to_owned(),
                 settings_path: None,
@@ -1338,6 +1382,7 @@ mod tests {
         let missing_extension = resolve_request(
             &config,
             &LoadRequest {
+                dry_run: false,
                 mode: LoadMode::Load,
                 artifact_path: "ext.cfe".to_owned(),
                 settings_path: None,
@@ -1362,6 +1407,7 @@ mod tests {
         write_designer_script(&binary, &calls);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "main.cf".to_owned(),
             settings_path: None,
@@ -1394,6 +1440,7 @@ mod tests {
         config.builder = BuilderBackend::Ibcmd;
 
         let request = LoadRequest {
+            dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "ext.cfe".to_owned(),
             settings_path: None,
@@ -1427,6 +1474,7 @@ mod tests {
         write_designer_script(&binary, &calls);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "main.cf".to_owned(),
             settings_path: None,
@@ -1459,6 +1507,7 @@ mod tests {
         write_designer_script(&binary, &calls);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            dry_run: false,
             mode: LoadMode::Merge,
             artifact_path: "ext.cfe".to_owned(),
             settings_path: Some("merge.xml".to_owned()),
@@ -1493,6 +1542,7 @@ mod tests {
         write_designer_script(&binary, &calls);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "ext.cfe".to_owned(),
             settings_path: None,
@@ -1526,6 +1576,7 @@ mod tests {
         write_designer_script(&binary, &calls);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            dry_run: false,
             mode: LoadMode::Merge,
             artifact_path: "ext.cfe".to_owned(),
             settings_path: Some("merge.xml".to_owned()),
@@ -1566,6 +1617,7 @@ mod tests {
         make_executable(&binary);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            dry_run: false,
             mode: LoadMode::Merge,
             artifact_path: "ext.cfe".to_owned(),
             settings_path: Some("merge.xml".to_owned()),
@@ -1594,6 +1646,7 @@ mod tests {
         let config = sample_config(root, &root.join("1cv8"));
 
         let request = LoadRequest {
+            dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "main.cf".to_owned(),
             settings_path: None,
@@ -1623,6 +1676,7 @@ mod tests {
         let config = sample_config(root, &root.join("1cv8"));
 
         let request = LoadRequest {
+            dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "ext.cfe".to_owned(),
             settings_path: None,
@@ -1651,6 +1705,7 @@ mod tests {
         let config = sample_config(root, &root.join("1cv8"));
 
         let request = LoadRequest {
+            dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "release.zip".to_owned(),
             settings_path: None,
@@ -1677,6 +1732,7 @@ mod tests {
         let config = sample_config(root, &root.join("1cv8"));
 
         let request = LoadRequest {
+            dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "tool.epf".to_owned(),
             settings_path: None,

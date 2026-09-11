@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InitResult {
     pub ok: bool,
+    /// `false` when the run stopped at a preview instead of dispatching the platform.
+    ///
+    /// Always present, so an absent field never has to be read as "nothing ran".
+    pub provider_dispatched: bool,
     pub steps: Vec<InitStep>,
     pub duration_ms: u64,
 }
@@ -22,4 +26,6 @@ pub enum InitStepStatus {
     Ok,
     Skipped,
     Failed,
+    /// The step was decided but not performed, because the run is a preview.
+    Planned,
 }

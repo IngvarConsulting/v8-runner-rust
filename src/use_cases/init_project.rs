@@ -29,20 +29,24 @@ use crate::use_cases::tool_extension;
 pub fn execute(
     context: &ExecutionContext,
     config: &AppConfig,
-    _args: &InitRequest,
+    args: &InitRequest,
 ) -> UseCaseResult<InitResult> {
     debug!(
         command = context.command().as_str(),
         transport = ?context.transport(),
         "executing init use case"
     );
-    run_init(context, config)
+    run_init(context, config, args.dry_run)
 }
 
 pub(crate) type InitExecutionFailure = UseCaseFailure<InitResult>;
 const EDT_WORKSPACE_MARKER: &str = ".v8tr-initialized";
 
-fn run_init(context: &ExecutionContext, config: &AppConfig) -> UseCaseResult<InitResult> {
+fn run_init(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    dry_run: bool,
+) -> UseCaseResult<InitResult> {
     let started = Instant::now();
     let mut utilities = PlatformUtilities::from_config(config);
     let mut steps = Vec::new();
@@ -51,15 +55,16 @@ fn run_init(context: &ExecutionContext, config: &AppConfig) -> UseCaseResult<Ini
     record_step(
         &mut steps,
         &mut first_error,
-        ensure_infobase(context, config, &mut utilities),
+        ensure_infobase(context, config, &mut utilities, dry_run),
     );
     record_step(
         &mut steps,
         &mut first_error,
-        ensure_edt_workspace(context, config, &mut utilities),
+        ensure_edt_workspace(context, config, &mut utilities, dry_run),
     );
 
-    let result = init_result(started, steps, first_error.is_none());
+    let mut result = init_result(started, steps, first_error.is_none());
+    result.provider_dispatched = !dry_run;
 
     match first_error {
         Some(error) => Err(InitExecutionFailure::with_payload(error, result)),
@@ -70,6 +75,7 @@ fn run_init(context: &ExecutionContext, config: &AppConfig) -> UseCaseResult<Ini
 fn init_result(started: Instant, steps: Vec<InitStep>, ok: bool) -> InitResult {
     InitResult {
         ok,
+        provider_dispatched: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,
     }
@@ -115,7 +121,7 @@ fn live_status_marker(status: &InitStepStatus) -> Option<(LiveStageStatus, &'sta
     match status {
         InitStepStatus::Ok => Some((LiveStageStatus::Succeeded, "✓")),
         InitStepStatus::Failed => Some((LiveStageStatus::Failed, "✗")),
-        InitStepStatus::Skipped => None,
+        InitStepStatus::Skipped | InitStepStatus::Planned => None,
     }
 }
 
@@ -152,6 +158,20 @@ impl StepOutcome {
         }
     }
 
+    /// Records a step that was decided but deliberately not performed.
+    fn planned(target: &str, action: &str, started: Instant, message: impl Into<String>) -> Self {
+        Self {
+            step: InitStep {
+                target: target.to_owned(),
+                action: action.to_owned(),
+                status: InitStepStatus::Planned,
+                message: Some(message.into()),
+                duration_ms: started.elapsed().as_millis() as u64,
+            },
+            error: None,
+        }
+    }
+
     fn failed(
         target: &str,
         action: &str,
@@ -176,6 +196,7 @@ fn ensure_infobase(
     context: &ExecutionContext,
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
+    dry_run: bool,
 ) -> StepOutcome {
     let Some(infobase_dir) = config.v8_connection().file_path().map(PathBuf::from) else {
         return match config.builder {
@@ -185,11 +206,11 @@ fn ensure_infobase(
                 Instant::now(),
                 "server infobase connection detected; automatic creation is not supported for builder=DESIGNER",
             ),
-            BuilderBackend::Ibcmd => ensure_server_infobase(context, config, utilities),
+            BuilderBackend::Ibcmd => ensure_server_infobase(context, config, utilities, dry_run),
         };
     };
 
-    ensure_file_infobase(context, config, utilities, &infobase_dir)
+    ensure_file_infobase(context, config, utilities, &infobase_dir, dry_run)
 }
 
 fn ensure_file_infobase(
@@ -197,6 +218,7 @@ fn ensure_file_infobase(
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
     infobase_dir: &Path,
+    dry_run: bool,
 ) -> StepOutcome {
     let started = Instant::now();
     let marker = infobase_marker_path(infobase_dir);
@@ -208,6 +230,24 @@ fn ensure_file_infobase(
             started,
             format!("infobase already exists: {}", marker.display()),
         );
+    }
+
+    if dry_run {
+        // The platform is located here so an absent one refuses during the preview; the
+        // parent directory below is the first thing this step would create.
+        return match locate_infobase_creator(config, utilities) {
+            Ok(binary) => StepOutcome::planned(
+                "infobase",
+                "create",
+                started,
+                format!(
+                    "would create a file infobase at '{}' via {}",
+                    infobase_dir.display(),
+                    binary.display()
+                ),
+            ),
+            Err(error) => StepOutcome::failed("infobase", "create", started, error),
+        };
     }
 
     if let Err(error) = prepare_infobase_parent(&infobase_dir) {
@@ -285,8 +325,27 @@ fn ensure_server_infobase(
     context: &ExecutionContext,
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
+    dry_run: bool,
 ) -> StepOutcome {
     let started = Instant::now();
+    if dry_run {
+        // A server infobase cannot be observed without acting: `ibcmd infobase create`
+        // is what distinguishes created from already-present. The preview therefore names
+        // the target and the binary and stops short of that distinction.
+        return match locate_infobase_creator(config, utilities) {
+            Ok(binary) => StepOutcome::planned(
+                "infobase",
+                "create",
+                started,
+                format!(
+                    "would ensure the server infobase '{}' via {}; whether it already exists is not observable without creating it",
+                    config.infobase.connection,
+                    binary.display()
+                ),
+            ),
+            Err(error) => StepOutcome::failed("infobase", "create", started, error),
+        };
+    }
     if let Some(outcome) =
         interruption_step_outcome(context, "infobase", "create", started, "infobase create")
     {
@@ -331,6 +390,7 @@ fn ensure_edt_workspace(
     context: &ExecutionContext,
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
+    dry_run: bool,
 ) -> StepOutcome {
     let started = Instant::now();
     let tool_extension_path = tool_extension::client_mcp_edt_source_path(config);
@@ -371,6 +431,25 @@ fn ensure_edt_workspace(
                 format!("workspace already initialized: {}", workspace.display()),
             );
         }
+    }
+
+    if dry_run {
+        return match utilities.locate(UtilityType::EdtCli) {
+            Ok(location) => StepOutcome::planned(
+                "edt_workspace",
+                "import",
+                started,
+                format!(
+                    "would import {} project(s) into '{}' via {}",
+                    projects.len(),
+                    workspace.display(),
+                    location.path.display()
+                ),
+            ),
+            Err(error) => {
+                StepOutcome::failed("edt_workspace", "import", started, AppError::from(error))
+            }
+        };
     }
 
     if let Err(error) = std::fs::create_dir_all(&workspace) {
@@ -557,6 +636,24 @@ fn create_infobase_via_ibcmd(
             context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
         )
         .ensure_infobase_create()
+        .map_err(AppError::from)
+}
+
+/// Locates the utility that would create the infobase, without creating it.
+///
+/// Mirrors the `builder` dispatch of [`create_infobase`] so a preview refuses on the same
+/// missing platform the apply would.
+fn locate_infobase_creator(
+    config: &AppConfig,
+    utilities: &mut PlatformUtilities,
+) -> Result<PathBuf, AppError> {
+    let utility = match config.builder {
+        BuilderBackend::Designer => UtilityType::V8,
+        BuilderBackend::Ibcmd => UtilityType::Ibcmd,
+    };
+    utilities
+        .locate(utility)
+        .map(|location| location.path)
         .map_err(AppError::from)
 }
 
@@ -877,6 +974,7 @@ mod tests {
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
+            false,
         )
         .expect("server init should skip infobase create");
 
@@ -911,6 +1009,7 @@ mod tests {
             )
             .with_cancellation(cancellation),
             &config,
+            false,
         )
         .expect_err("interrupted init");
         let payload = failure.payload.expect("payload");
@@ -949,6 +1048,7 @@ mod tests {
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
+            false,
         )
         .expect("init");
 
@@ -1001,6 +1101,7 @@ mod tests {
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
+            false,
         )
         .expect("init");
 
@@ -1054,6 +1155,7 @@ mod tests {
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
+            false,
         )
         .expect("init");
 
@@ -1109,6 +1211,7 @@ mod tests {
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
+            false,
         )
         .expect("init");
 
@@ -1148,6 +1251,7 @@ mod tests {
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
+            false,
         )
         .expect("init");
 
@@ -1190,6 +1294,7 @@ mod tests {
                 crate::use_cases::context::CommandName::Init,
             ),
             &config,
+            false,
         )
         .expect("init");
 
