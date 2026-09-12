@@ -974,14 +974,14 @@ fn fallback_edt_issue(
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_config_flags, normalize_modules_flags, run_syntax, run_syntax_with_context,
-        status_from_exit_code,
+        edt_status_from_result, normalize_config_flags, normalize_modules_flags, run_syntax,
+        run_syntax_with_context, status_from_exit_code,
     };
     use crate::config::model::{
         AppConfig, BuildConfig, BuilderBackend, SourceFormat, SourceSetConfig, SourceSetPurpose,
         TestsConfig, ToolsConfig,
     };
-    use crate::domain::issue::Issue;
+    use crate::domain::issue::{Issue, IssueSeverity};
     use crate::domain::syntax::SyntaxCheckStatus;
     use crate::use_cases::context::{CommandName, ExecutionContext};
     use crate::use_cases::request::{
@@ -995,6 +995,66 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
+
+    /// ADR-0029 admits prose as a *label* on a finding, never as a verdict, and that admission
+    /// rests on three properties. Two of them are proven here; the third — that the verdict comes
+    /// from the exit code — is `status_from_exit_code` having no other input.
+    #[test]
+    fn labels_can_only_make_a_verdict_stricter() {
+        // Designer: the verdict is the exit code and nothing else. No text reaches it, so no
+        // wording can turn a failure into a pass.
+        assert_eq!(status_from_exit_code(0), SyntaxCheckStatus::Clean);
+        assert_eq!(status_from_exit_code(101), SyntaxCheckStatus::IssuesFound);
+        assert_eq!(status_from_exit_code(1), SyntaxCheckStatus::ToolFailed);
+        assert_eq!(status_from_exit_code(-1), SyntaxCheckStatus::ToolFailed);
+
+        // EDT: findings may only tighten the answer. Recognising nothing keeps the exit code's
+        // verdict; recognising something can add `IssuesFound` but never `Clean`.
+        let finding = vec![Issue::Object(crate::domain::issue::ObjectIssue {
+            object: "Catalogs.Items".to_owned(),
+            message: "unreadable wording".to_owned(),
+            severity: IssueSeverity::Error,
+        })];
+        assert_eq!(
+            edt_status_from_result(0, &[]),
+            SyntaxCheckStatus::Clean,
+            "nothing recognised and the tool is happy: the exit code decides"
+        );
+        assert_eq!(
+            edt_status_from_result(0, &finding),
+            SyntaxCheckStatus::IssuesFound,
+            "a recognised finding may only tighten the verdict"
+        );
+        assert_eq!(
+            edt_status_from_result(7, &[]),
+            SyntaxCheckStatus::ToolFailed,
+            "nothing recognised and the tool failed: still a failure, never a pass"
+        );
+        assert_eq!(
+            edt_status_from_result(7, &finding),
+            SyntaxCheckStatus::IssuesFound
+        );
+    }
+
+    /// The unsafe side is the default: a line whose severity nobody recognises is an error.
+    #[test]
+    fn an_unrecognised_severity_is_an_error_not_a_warning() {
+        let issues = crate::parsers::designer_validation::parse(
+            "Catalogs.Items Ein unbekannter Fehlertext ohne bekannte Marker\n",
+        );
+        for issue in &issues {
+            let severity = match issue {
+                Issue::Module(issue) => &issue.severity,
+                Issue::Object(issue) => &issue.severity,
+                Issue::Edt(issue) => &issue.severity,
+            };
+            assert_eq!(
+                severity,
+                &IssueSeverity::Error,
+                "an unreadable label must fall to the unsafe side"
+            );
+        }
+    }
 
     fn make_executable(path: &Path) {
         #[cfg(unix)]
