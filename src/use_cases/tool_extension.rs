@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::change_detection::analyzer::{self, AnalysisOutcome};
-use crate::change_detection::hash_storage::{HashStorage, StorageError};
+use crate::change_detection::hash_storage::HashStorage;
 use crate::config::model::{
     AppConfig, BuilderBackend, SourceFormat, ToolExtensionConfig, ToolExtensionInput,
     ToolExtensionSourceConfig,
@@ -246,14 +246,7 @@ fn commit_tool_extension_full_rescan(
 }
 
 fn storage_needs_recovery(context: &SourceSetContext, work_path: &Path) -> bool {
-    match HashStorage::new(context.storage_path(work_path)).current_generation() {
-        Err(StorageError::Recoverable { .. }) => true,
-        Err(StorageError::Hard { reason, .. }) => {
-            let reason = reason.to_ascii_lowercase();
-            reason.contains("invalid data") || reason.contains("corrupt")
-        }
-        Err(StorageError::ConcurrentStateModified { .. }) | Ok(_) => false,
-    }
+    HashStorage::new(context.storage_path(work_path)).needs_recovery()
 }
 
 fn remove_storage_path(path: &Path) -> std::io::Result<()> {
