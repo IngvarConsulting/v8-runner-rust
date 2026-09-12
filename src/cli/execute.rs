@@ -282,6 +282,8 @@ fn execute_tools_download(
         presenter,
         CommandName::ToolsDownload,
         clean_before_execution,
+        // превью у загрузки инструментов нет.
+        false,
         || match tools_download::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -353,6 +355,8 @@ fn execute_extensions(
         presenter,
         CommandName::Extensions,
         clean_before_execution,
+        // у голого `extensions` превью нет: подкоманды его имеют.
+        false,
         || match configure_extensions::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -400,11 +404,19 @@ fn execute_extension_command(
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
     let context = cli_context(config, CommandName::Extensions, cancellation);
+    // Превью любой подкоманды платформу не поднимает, значит и `workPath` ему не нужен.
+    let preview = match command {
+        ExtensionsCommand::List(args) => args.dry_run,
+        ExtensionsCommand::Info(args) | ExtensionsCommand::Delete(args) => args.dry_run,
+        ExtensionsCommand::Create(args) => args.dry_run,
+        ExtensionsCommand::Activate(args) => args.dry_run,
+    };
     with_cli_workspace_lock(
         config,
         presenter,
         CommandName::Extensions,
         clean_before_execution,
+        preview,
         || match command {
             ExtensionsCommand::List(args) => run_extension_inventory(
                 config,
@@ -634,6 +646,7 @@ fn execute_init(
         presenter,
         CommandName::Init,
         clean_before_execution,
+        args.dry_run,
         || match init_project::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -684,6 +697,7 @@ fn execute_build(
         presenter,
         CommandName::Build,
         clean_before_execution,
+        args.dry_run,
         || match build_project::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -737,6 +751,8 @@ fn execute_test(
         presenter,
         CommandName::Test,
         clean_before_execution,
+        // превью у прогона тестов нет.
+        false,
         || match run_tests::execute(&context, &effective_config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -781,6 +797,7 @@ fn execute_load(
         presenter,
         CommandName::Load,
         clean_before_execution,
+        args.dry_run,
         || match load_artifact::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -825,6 +842,7 @@ fn execute_dump(
         presenter,
         CommandName::Dump,
         clean_before_execution,
+        args.dry_run,
         || match dump_config::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -1930,6 +1948,7 @@ fn execute_convert(
         presenter,
         CommandName::Convert,
         clean_before_execution,
+        args.dry_run,
         || match convert_sources::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -1981,6 +2000,7 @@ fn execute_artifacts(
         presenter,
         CommandName::Artifacts,
         clean_before_execution,
+        args.dry_run,
         || match artifacts::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -2025,6 +2045,8 @@ fn execute_syntax(
         presenter,
         CommandName::Syntax,
         clean_before_execution,
+        // превью у синтаксического контроля нет.
+        false,
         || match check_syntax::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -2077,6 +2099,7 @@ fn execute_launch(
         presenter,
         CommandName::Launch,
         clean_before_execution,
+        args.dry_run,
         || match launch_app::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -2124,13 +2147,37 @@ fn execute_launch(
     )
 }
 
+/// Граница владения `workPath` у CLI-адаптера.
+///
+/// `preview` говорит, что запуск ничего в `workPath` не изменит. Тогда блокировка не
+/// берётся: держать её не за что, а вред настоящий — «покажи план» упиралось бы в
+/// занятое пространство и отказывало `workspace_busy`, а два одновременных превью
+/// выстраивались бы в очередь. Прецедент — `infobase ... --dry-run` по ADR-0024,
+/// который возвращается до блокировок вообще.
+///
+/// Решение живёт здесь, а не в отдельном помощнике рядом: у границы один владелец,
+/// иначе её легко обойти новым вызовом.
 fn with_cli_workspace_lock<T>(
     config: &AppConfig,
     presenter: &Presenter,
     command: CommandName,
     clean_before_execution: bool,
+    preview: bool,
     run: impl FnOnce() -> Result<T, UseCaseError>,
 ) -> Result<T, UseCaseError> {
+    if preview {
+        // Чистка меняет `workPath`, поэтому с превью она отклоняется, а не
+        // пропускается молча: иначе флаг обещает одно, а делает другое.
+        if clean_before_execution {
+            let message = format!(
+                "--clean-before-execution cannot be combined with {} --dry-run because preview must not modify workPath",
+                command.as_str()
+            );
+            presenter.print_error(&message);
+            return Err(UseCaseError::new(UseCaseErrorKind::Validation, message));
+        }
+        return run();
+    }
     with_cli_workspace_lock_observed(
         config,
         presenter,

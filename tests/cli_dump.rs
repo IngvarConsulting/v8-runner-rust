@@ -250,6 +250,106 @@ fn setup_edt_project() -> (
     )
 }
 
+/// Страж: превью не берёт workspace lock и не ждёт его.
+///
+/// Корень прежнего поведения: превью шли через ту же границу блокировки, что
+/// применение, поэтому «покажи план» упиралось бы в занятое пространство и отказывало
+/// `workspace_busy`, а два одновременных превью выстраивались бы в очередь. Здесь
+/// блокировка занята заранее чужим владельцем: применение обязано упереться, превью —
+/// пройти.
+#[test]
+fn dry_run_neither_takes_nor_waits_for_the_workspace_lock() {
+    let (_dir, config_path, _binary_path, work_path, _base_path, _calls_log) = setup_project();
+    fs::create_dir_all(&work_path).expect("work");
+    fs::write(
+        work_path.join(".v8-runner.workspace.lock"),
+        format!(
+            "{{\"tool\":\"v8-runner\",\"pid\":{},\"owner_id\":\"another-owner\",\"created_at\":\"2026-09-12T00:00:00Z\"}}",
+            std::process::id()
+        ),
+    )
+    .expect("foreign workspace lock");
+
+    let preview = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "dump",
+            "--mode",
+            "full",
+            "--source-set",
+            "main",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run preview");
+
+    assert!(
+        preview.status.success(),
+        "preview must not wait for a foreign workspace lock: {}{}",
+        String::from_utf8_lossy(&preview.stdout),
+        String::from_utf8_lossy(&preview.stderr)
+    );
+
+    let apply = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "dump",
+            "--mode",
+            "full",
+            "--source-set",
+            "main",
+        ])
+        .output()
+        .expect("run apply");
+
+    assert!(
+        !apply.status.success(),
+        "apply must still honour the workspace lock"
+    );
+    let envelope: Value = serde_json::from_slice(&apply.stdout).expect("json");
+    let message = envelope["error"]["message"].as_str().expect("message");
+    assert!(message.contains("cannot start dump"), "{message}");
+    assert!(message.contains("workspace"), "{message}");
+}
+
+/// `--clean-before-execution` меняет `workPath`, поэтому с превью он отклоняется,
+/// а не пропускается молча.
+#[test]
+fn dry_run_refuses_clean_before_execution_instead_of_skipping_it() {
+    let (_dir, config_path, _binary_path, _work_path, _base_path, _calls_log) = setup_project();
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--no-color",
+            "--clean-before-execution",
+            "dump",
+            "--mode",
+            "full",
+            "--source-set",
+            "main",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!output.status.success());
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        reported.contains("preview must not modify workPath"),
+        "{reported}"
+    );
+}
+
 #[test]
 fn dump_dry_run_plans_the_target_without_writing_it() {
     let (_dir, config_path, _binary_path, _work_path, base_path, calls_log) = setup_project();
