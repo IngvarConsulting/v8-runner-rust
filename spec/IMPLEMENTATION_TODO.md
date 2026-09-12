@@ -19,8 +19,10 @@ This file tracks open implementation work only.
    шести (`--safe-mode`, `--unsafe-action-protection`), а платформа принимает ещё
    `--security-profile-name`, `--used-in-distributed-infobase` и `--scope`; `--active` вынесен
    отдельной подкомандой `activate`.
-4. Дать `init --dry-run` различать «создана» и «уже была» для серверной ИБ, если найдётся
-   способ наблюдать это без `ibcmd infobase create`.
+4. Дать `init --dry-run` различать «создана» и «уже была» для серверной ИБ — способ найден и
+   заведён задачей #100: `ibcmd config generation-id` ничего не создаёт и отвечает нулём только
+   когда база существует и читается этими учётными данными (замерено на 8.3.27.2074). Остаётся
+   один замер: что она отвечает на живой СУБД-базе; argv-паритет с `create` уже проверен.
 5. Переименовать `Export*`-типы домена `infobase_export` в нейтральные к направлению: модуль
    описывает перенос ИБ в обе стороны, а `infobase restore` переиспользует `ExportIntent`,
    `ExportProvider` и `ExportTargetState`. Переименование не меняет провод (значения на нём
