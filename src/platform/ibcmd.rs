@@ -244,13 +244,27 @@ impl<'a> IbcmdDsl<'a> {
         self.run(&args)
     }
 
-    /// Ensures the infobase exists and normalizes benign "already exists" outcomes.
+    /// Ensures the infobase exists, asking the infobase itself what a failed create means.
+    ///
+    /// `ibcmd infobase create` answers 255 both when the infobase is already registered and
+    /// when the path cannot be written (measured on 8.3.27.2074), so its exit code alone does
+    /// not separate the benign case. The separation comes from a second structural question
+    /// rather than from the complaint's wording (ADR-0029): `config generation-id` answers
+    /// zero only when the infobase exists **and** these credentials can read it — a missing
+    /// infobase and a wrong user both answer 255. So a create that failed over an infobase we
+    /// can still read is "already there", and anything else stays a failure, including the case
+    /// where the infobase exists but is not ours to touch.
     pub fn ensure_infobase_create(&self) -> Result<IbcmdInfobaseCreateOutcome, IbcmdError> {
         let args = self.create_infobase_args();
         let result = self.run(&args)?;
-        let status = if result.process.exit_code == 0 {
-            IbcmdInfobaseCreateStatus::Created
-        } else if is_benign_already_exists(&result.process.stdout, &result.process.stderr) {
+        if result.process.exit_code == 0 {
+            return Ok(IbcmdInfobaseCreateOutcome {
+                status: IbcmdInfobaseCreateStatus::Created,
+                result,
+            });
+        }
+        let probe = self.run(&self.authenticated_infobase_args(&["config", "generation-id"]))?;
+        let status = if probe.process.exit_code == 0 {
             IbcmdInfobaseCreateStatus::AlreadyExists
         } else {
             IbcmdInfobaseCreateStatus::Failed
@@ -493,47 +507,9 @@ fn required_dbms_field(field: &'static str, value: Option<&str>) -> Result<Strin
     }
 }
 
-fn is_benign_already_exists(stdout: &str, stderr: &str) -> bool {
-    let combined = format!("{stdout}\n{stderr}").to_lowercase();
-    if combined.trim().is_empty() {
-        return false;
-    }
-
-    const FATAL_PATTERNS: &[&str] = &[
-        "access denied",
-        "authentication",
-        "permission denied",
-        "timeout",
-        "connection refused",
-        "network",
-        "ошибка авторизации",
-        "доступ запрещен",
-        "доступ запрещён",
-        "недостаточно прав",
-        "не удалось подключ",
-        "таймаут",
-    ];
-    if FATAL_PATTERNS
-        .iter()
-        .any(|pattern| combined.contains(pattern))
-    {
-        return false;
-    }
-
-    const BENIGN_PATTERNS: &[&str] = &["already exists", "уже существует"];
-    combined
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .any(|line| BENIGN_PATTERNS.iter().any(|pattern| line.contains(pattern)))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        is_benign_already_exists, DynamicUpdateMode, IbcmdConnection, IbcmdDsl,
-        IbcmdInfobaseCreateStatus,
-    };
+    use super::{DynamicUpdateMode, IbcmdConnection, IbcmdDsl, IbcmdInfobaseCreateStatus};
     use crate::config::model::{InfobaseConfig, InfobaseDbmsConfig};
     use crate::platform::process::{ProcessExecutor, ProcessRunner};
     use std::fs;
@@ -932,14 +908,16 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn server_infobase_create_adds_create_database_and_normalizes_already_exists() {
+    fn server_infobase_create_adds_create_database_and_asks_the_infobase() {
         let dir = tempdir().expect("tempdir");
         let script = dir.path().join("ibcmd");
         let args_log = dir.path().join("args.log");
+        // The create fails and the infobase still reads, so it was already there. The message
+        // the platform prints plays no part.
         write_script(
             &script,
             &format!(
-                "printf '%s\\n' \"$@\" > \"{}\"\nprintf 'already exists\\n' >&2\nexit 17",
+                "printf '%s\\n' \"$@\" >> \"{}\"\nif printf '%s' \"$*\" | grep -F -q -- 'generation-id'; then exit 0; fi\nprintf 'already exists\\n' >&2\nexit 17",
                 args_log.display()
             ),
         );
@@ -964,17 +942,53 @@ mod tests {
         assert!(args.contains("--database-password\nsecret"));
     }
 
+    /// Two tests used to stand here, proving that the phrase «уже существует» was benign in
+    /// upper case and that «ошибка авторизации» next to it was not. Both read the platform's
+    /// wording, which ADR-0029 forbids, and the fact they protected is now asked of the
+    /// infobase instead.
+    #[cfg(unix)]
     #[test]
-    fn already_exists_detection_handles_uppercase_russian_messages() {
-        assert!(is_benign_already_exists("", "УЖЕ СУЩЕСТВУЕТ"));
+    fn a_failed_create_over_a_readable_infobase_is_already_there() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("ibcmd");
+        let args_log = dir.path().join("args.log");
+        // Creation fails; reading the generation id succeeds. No message says so.
+        write_script(
+            &script,
+            &format!(
+                "printf '%s\\n' \"$@\" >> \"{}\"\nif [ \"$2\" = \"create\" ] || [ \"$1\" = \"create\" ]; then exit 255; fi\nif printf '%s' \"$*\" | grep -F -q -- 'generation-id'; then exit 0; fi\nexit 255",
+                args_log.display()
+            ),
+        );
+        let runner = ProcessExecutor;
+        let conn = file_connection("File=/ib");
+        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+
+        let outcome = dsl.ensure_infobase_create().expect("create outcome");
+
+        assert_eq!(outcome.status, IbcmdInfobaseCreateStatus::AlreadyExists);
+        let args = fs::read_to_string(&args_log).expect("args");
+        assert!(
+            args.contains("generation-id"),
+            "the question is asked of the infobase: {args}"
+        );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn already_exists_detection_keeps_uppercase_russian_auth_failures_fatal() {
-        assert!(!is_benign_already_exists(
-            "",
-            "ОШИБКА АВТОРИЗАЦИИ: УЖЕ СУЩЕСТВУЕТ"
-        ));
+    fn a_failed_create_over_an_unreadable_infobase_stays_a_failure() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("ibcmd");
+        // Everything fails, including the read — an unwritable path and a wrong user both land
+        // here, and neither is silently turned into "already there".
+        write_script(&script, "exit 255");
+        let runner = ProcessExecutor;
+        let conn = file_connection("File=/ib");
+        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+
+        let outcome = dsl.ensure_infobase_create().expect("create outcome");
+
+        assert_eq!(outcome.status, IbcmdInfobaseCreateStatus::Failed);
     }
 
     #[cfg(unix)]

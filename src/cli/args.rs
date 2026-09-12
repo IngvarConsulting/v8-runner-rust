@@ -236,6 +236,10 @@ pub struct LoadArgs {
     #[arg(long)]
     pub extension: Option<String>,
 
+    /// Vendor configuration name, required to ask whether a configuration is on support
+    #[arg(long)]
+    pub vendor_name: Option<String>,
+
     /// Resolve the plan and locate the platform without probing or applying anything
     #[arg(long)]
     pub dry_run: bool,
@@ -857,12 +861,14 @@ mod tests {
                 mode,
                 settings,
                 extension,
+                vendor_name,
             }) => {
                 assert_eq!(path, "dist/main.cf");
                 assert!(!dry_run);
                 assert_eq!(mode, "load");
                 assert!(settings.is_none());
                 assert!(extension.is_none());
+                assert!(vendor_name.is_none());
             }
             _ => panic!("unexpected command"),
         }
@@ -891,6 +897,7 @@ mod tests {
                 mode,
                 settings,
                 extension,
+                vendor_name,
             }) => {
                 assert_eq!(path, "dist/ext.cfe");
                 assert!(!dry_run);

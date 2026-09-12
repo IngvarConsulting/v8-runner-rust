@@ -80,38 +80,6 @@ const PROSE_DEBT: &[(&str, &str)] = &[
         "src/platform/edt.rs",
         "Run '$exception printStackTrace' for error details",
     ),
-    // The load compatibility probe, the defect this decision came from: both literals are
-    // sentences, and the English pair is not what the platform writes in any language.
-    // Tracked by #86.
-    (
-        "src/use_cases/load_artifact.rs",
-        "configuration is not on support",
-    ),
-    (
-        "src/use_cases/load_artifact.rs",
-        "extension is not supported",
-    ),
-    (
-        "src/use_cases/load_artifact.rs",
-        "Конфигурация 'Расширение конфигурации' недоступна",
-    ),
-    // `ibcmd infobase create`: whether a failure means «already there» is read from
-    // fourteen message fragments in two languages. The exit code is 255 either way
-    // (measured), so the question has to be asked before creating. Tracked by #89.
-    ("src/platform/ibcmd.rs", "access denied"),
-    ("src/platform/ibcmd.rs", "already exists"),
-    ("src/platform/ibcmd.rs", "authentication"),
-    ("src/platform/ibcmd.rs", "connection refused"),
-    ("src/platform/ibcmd.rs", "network"),
-    ("src/platform/ibcmd.rs", "permission denied"),
-    ("src/platform/ibcmd.rs", "timeout"),
-    ("src/platform/ibcmd.rs", "доступ запрещен"),
-    ("src/platform/ibcmd.rs", "доступ запрещён"),
-    ("src/platform/ibcmd.rs", "не удалось подключ"),
-    ("src/platform/ibcmd.rs", "недостаточно прав"),
-    ("src/platform/ibcmd.rs", "ошибка авторизации"),
-    ("src/platform/ibcmd.rs", "таймаут"),
-    ("src/platform/ibcmd.rs", "уже существует"),
 ];
 
 /// Sites where the literal is ours by construction, so no tool can reword it.
