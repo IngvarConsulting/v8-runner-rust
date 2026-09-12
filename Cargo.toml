@@ -50,7 +50,7 @@ jsonschema = "0.33"
 predicates = "3"
 insta = "1"
 quote = "1"
-syn = { version = "2", features = ["full"] }
+syn = { version = "2", features = ["full", "visit"] }
 
 [profile.release]
 opt-level = "z"
