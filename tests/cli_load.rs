@@ -19,19 +19,22 @@ fn write_designer_script(path: &Path, calls_log: &Path) {
     write_script(path, &body);
 }
 
-/// A fake `ibcmd` answering the one structural question the load path asks: which extensions
-/// the infobase lists. Records carry the measured keyed shape, so the fake repeats the platform
-/// rather than inventing wording (ADR-0029).
+/// A fake `ibcmd` answering the one structural question the load path asks: which extensions the
+/// infobase lists. The records go to a file and the script only `cat`s it — shell escaping differs
+/// between `bash` and `dash`, and an escaped quote that survives on one and not the other turned a
+/// listed extension into an absent one on Linux.
 fn write_extension_list_ibcmd(path: &Path, installed: &[&str]) {
     let records = installed
         .iter()
         .map(|name| {
             format!(
-                "name                         : \\\"{name}\\\"\\nversion                      : \\nactive                       : yes\\npurpose                      : customization\\nsafe-mode                    : yes\\nsecurity-profile-name        : \\nunsafe-action-protection     : yes\\nused-in-distributed-infobase : no\\nscope                        : infobase\\nhash-sum                     : \\\"{name}-hash\\\"\\n\\n"
+                "name                         : \"{name}\"\nversion                      : \nactive                       : yes\npurpose                      : customization\nsafe-mode                    : yes\nsecurity-profile-name        : \nunsafe-action-protection     : yes\nused-in-distributed-infobase : no\nscope                        : infobase\nhash-sum                     : \"{name}-hash\"\n\n"
             )
         })
         .collect::<String>();
-    write_script(path, &format!("printf '{records}'\nexit 0"));
+    let records_path = path.with_extension("records");
+    fs::write(&records_path, records).expect("write records");
+    write_script(path, &format!("cat \"{}\"\nexit 0", records_path.display()));
 }
 
 fn write_edt_configuration_source(path: &Path, project_name: &str) {
