@@ -56,43 +56,10 @@ const TEXT_PREDICATES: &[&str] = &[
 /// entry may only leave the list. Shape is `(path from the repository root, the literal as
 /// written)`.
 ///
-/// What is left here is emptied by two changes in flight on their own branches — #86 for the
-/// load probe and #89 for `ibcmd infobase create` — so whichever merges last recounts this list.
-/// This change removes no verdict: it separates the verdicts from the labels below.
-const PROSE_DEBT: &[(&str, &str)] = &[
-    // The load compatibility probe. Removed by #86.
-    (
-        "src/use_cases/load_artifact.rs",
-        "configuration is not on support",
-    ),
-    (
-        "src/use_cases/load_artifact.rs",
-        "extension is not supported",
-    ),
-    (
-        "src/use_cases/load_artifact.rs",
-        "Конфигурация 'Расширение конфигурации' недоступна",
-    ),
-    // Whether a failed `ibcmd infobase create` means "already there". Removed by #89.
-    ("src/platform/ibcmd.rs", "access denied"),
-    ("src/platform/ibcmd.rs", "already exists"),
-    ("src/platform/ibcmd.rs", "authentication"),
-    ("src/platform/ibcmd.rs", "connection refused"),
-    ("src/platform/ibcmd.rs", "network"),
-    ("src/platform/ibcmd.rs", "permission denied"),
-    ("src/platform/ibcmd.rs", "timeout"),
-    ("src/platform/ibcmd.rs", "доступ запрещен"),
-    ("src/platform/ibcmd.rs", "доступ запрещён"),
-    ("src/platform/ibcmd.rs", "не удалось подключ"),
-    ("src/platform/ibcmd.rs", "недостаточно прав"),
-    ("src/platform/ibcmd.rs", "ошибка авторизации"),
-    ("src/platform/ibcmd.rs", "таймаут"),
-    ("src/platform/ibcmd.rs", "уже существует"),
-    // Our own prose carried as a verdict. Removed by #88.
-    ("src/use_cases/artifacts.rs", "critical phase"),
-    ("src/use_cases/build_project/helpers.rs", "invalid data"),
-    ("src/use_cases/tool_extension.rs", "invalid data"),
-];
+/// It is empty, and keeping it empty is this guard's job. #86 took the load probe's three sites,
+/// #89 took the fourteen of `ibcmd infobase create`, #88 took the three internal ones, and #87
+/// separated what was left — the labels below — from verdicts.
+const PROSE_DEBT: &[(&str, &str)] = &[];
 
 /// Prose that labels text the runner passes through, and never decides what it does.
 ///

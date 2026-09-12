@@ -245,16 +245,12 @@ fn run_artifacts(
                 file_names: published_file_names(&artifacts),
                 published: true,
             };
-            let diagnostics = message.clone().into_iter().collect::<Vec<_>>();
+            let diagnostics = message.message.clone().into_iter().collect::<Vec<_>>();
             let mut execution = ExecutionOutcome::new(ExecutionStatus::Succeeded)
                 .with_diagnostics(diagnostics)
                 .with_artifacts(artifacts.clone())
                 .with_payload(metadata);
-            if let Some(interruption) = context.interruption().filter(|_| {
-                message
-                    .as_deref()
-                    .is_some_and(|value| value.contains("critical phase"))
-            }) {
+            if let Some(interruption) = message.deferred_interruption {
                 execution =
                     execution.with_interruptions(vec![deferred_command_interruption_details(
                         interruption,
@@ -341,7 +337,7 @@ fn run_designer_export(
     binary: &Path,
     runner: &dyn ProcessRunner,
 ) -> Result<
-    (PlatformCommandResult, ArtifactSet, Option<String>),
+    (PlatformCommandResult, ArtifactSet, PublicationOutcome),
     (AppError, ArtifactSet, Option<PathBuf>),
 > {
     if matches!(
@@ -483,7 +479,7 @@ fn run_external_designer_export(
     binary: &Path,
     runner: &dyn ProcessRunner,
 ) -> Result<
-    (PlatformCommandResult, ArtifactSet, Option<String>),
+    (PlatformCommandResult, ArtifactSet, PublicationOutcome),
     (AppError, ArtifactSet, Option<PathBuf>),
 > {
     if let Some(error) = interruption_before_safe_point(
@@ -1058,15 +1054,29 @@ fn merge_optional_messages(left: Option<String>, right: Option<String>) -> Optio
     }
 }
 
+/// What the publish phase has to say, and whether an interruption was deferred through it.
+///
+/// The flag used to be recovered by searching the message for the words "critical phase" — a
+/// verdict taken from prose the runner itself had formatted (ADR-0029). The phase knows the
+/// fact, so the fact travels.
+#[derive(Debug)]
+struct PublicationOutcome {
+    message: Option<String>,
+    deferred_interruption: Option<crate::use_cases::context::ExecutionInterruption>,
+}
+
 fn publication_message(
     context: &ExecutionContext,
     cleanup_warning: Option<String>,
     deferred_interruption: Option<crate::use_cases::context::ExecutionInterruption>,
-) -> Option<String> {
-    merge_optional_messages(
-        cleanup_warning,
-        publication_warning(context.command(), deferred_interruption),
-    )
+) -> PublicationOutcome {
+    PublicationOutcome {
+        message: merge_optional_messages(
+            cleanup_warning,
+            publication_warning(context.command(), deferred_interruption),
+        ),
+        deferred_interruption,
+    }
 }
 
 fn publication_warning(
@@ -1574,15 +1584,17 @@ mod tests {
     fn publication_message_keeps_cleanup_warning_in_result_contract() {
         let context = ExecutionContext::cli(CommandName::Artifacts);
 
-        let message = publication_message(
+        let outcome = publication_message(
             &context,
             Some("cleanup warning".to_owned()),
             Some(crate::use_cases::context::ExecutionInterruption::Cancelled),
-        )
-        .expect("message");
+        );
+        let message = outcome.message.expect("message");
 
         assert!(message.contains("cleanup warning"));
         assert!(message.contains("cancellation request"));
+        // The fact travels beside the text, so nobody has to read the text to recover it.
+        assert!(outcome.deferred_interruption.is_some());
     }
 
     #[cfg(unix)]

@@ -73,6 +73,18 @@ impl HashStorage {
         &self.path
     }
 
+    /// Whether the stored state should be discarded and rebuilt from disk.
+    ///
+    /// One owner for a question two use cases used to answer with two copies of the same
+    /// substring search over an error message. Recoverability is a property of the error, and
+    /// the error knows it.
+    pub fn needs_recovery(&self) -> bool {
+        match self.current_generation() {
+            Err(error) => error.is_recoverable(),
+            Ok(_) => false,
+        }
+    }
+
     /// Load the current snapshot from storage.
     pub fn load_snapshot(&self) -> Result<StorageSnapshot, StorageError> {
         if !self.path.exists() {
@@ -326,6 +338,17 @@ fn map_database_error(path: &Path, err: DatabaseError) -> StorageError {
             path: path.to_path_buf(),
             reason: "previous I/O error in database".to_owned(),
         },
+        // `InvalidData` is redb saying the file's contents are unusable, which is the same
+        // fact as `Corrupted` above and is recoverable by rebuilding from disk. The kind says
+        // it; the message text must not be asked (ADR-0029).
+        DatabaseError::Storage(RedbStorageError::Io(e))
+            if e.kind() == std::io::ErrorKind::InvalidData =>
+        {
+            StorageError::Recoverable {
+                path: path.to_path_buf(),
+                reason: format!("I/O error: {e}"),
+            }
+        }
         DatabaseError::Storage(RedbStorageError::Io(e)) => StorageError::Hard {
             path: path.to_path_buf(),
             reason: format!("I/O error: {e}"),
@@ -343,6 +366,14 @@ fn map_database_error(path: &Path, err: DatabaseError) -> StorageError {
 
 fn map_table_error(path: &Path, err: TableError) -> StorageError {
     match err {
+        TableError::Storage(RedbStorageError::Io(e))
+            if e.kind() == std::io::ErrorKind::InvalidData =>
+        {
+            StorageError::Recoverable {
+                path: path.to_path_buf(),
+                reason: format!("table I/O error: {e}"),
+            }
+        }
         TableError::Storage(RedbStorageError::Io(e)) => StorageError::Hard {
             path: path.to_path_buf(),
             reason: format!("table I/O error: {e}"),
@@ -360,6 +391,14 @@ fn map_table_error(path: &Path, err: TableError) -> StorageError {
 
 fn map_tx_error(path: &Path, err: TransactionError, context: &str) -> StorageError {
     match err {
+        TransactionError::Storage(RedbStorageError::Io(e))
+            if e.kind() == std::io::ErrorKind::InvalidData =>
+        {
+            StorageError::Recoverable {
+                path: path.to_path_buf(),
+                reason: format!("{context}: {e}"),
+            }
+        }
         TransactionError::Storage(RedbStorageError::Io(e)) => StorageError::Hard {
             path: path.to_path_buf(),
             reason: format!("{context}: {e}"),

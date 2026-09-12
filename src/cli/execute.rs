@@ -2553,6 +2553,7 @@ fn map_load_request(args: &LoadArgs) -> Result<LoadRequest, UseCaseError> {
         },
         artifact_path: args.path.clone(),
         settings_path: args.settings.clone(),
+        vendor_name: args.vendor_name.clone(),
         extension: args.extension.clone(),
     })
 }
@@ -2940,7 +2941,7 @@ impl<'a> LoadJsonData<'a> {
                 .unwrap_or(LoadTargetKind::Unknown),
             compatibility_state: metadata
                 .map(|metadata| metadata.compatibility_state)
-                .unwrap_or(CompatibilityState::Unknown),
+                .unwrap_or(CompatibilityState::NotProbed),
             extension: result.extension.as_deref(),
             platform_log_path: platform_log_path_from_artifacts(&result.execution.artifacts),
             duration_ms: result.duration_ms,
@@ -4263,6 +4264,7 @@ mod tests {
             path: "dist/main.cf".to_owned(),
             mode: "merge".to_owned(),
             settings: Some("merge.xml".to_owned()),
+            vendor_name: None,
             extension: Some("Ext".to_owned()),
         })
         .expect("load request");
@@ -4336,6 +4338,7 @@ mod tests {
             path: "dist/main.cf".to_owned(),
             mode: "garbage".to_owned(),
             settings: None,
+            vendor_name: None,
             extension: None,
         })
         .expect_err("load mode should be rejected");
@@ -4447,6 +4450,7 @@ mod tests {
                 path: "dist/main.cf".to_owned(),
                 mode: "load".to_owned(),
                 settings: None,
+                vendor_name: None,
                 extension: None,
             })),
             CommandName::Load
@@ -4773,7 +4777,7 @@ mod tests {
                 .with_payload(LoadExecutionMetadata {
                     applied: true,
                     target_kind: LoadTargetKind::Configuration,
-                    compatibility_state: CompatibilityState::NotSupported,
+                    compatibility_state: CompatibilityState::NotEstablished,
                     update_db_cfg_ran: true,
                 }),
         };
@@ -4783,7 +4787,7 @@ mod tests {
 
         assert_eq!(json["ok"], true);
         assert_eq!(json["data"]["ok"], true);
-        assert!(message.contains("load main.cf applied successfully after NotSupported"));
+        assert!(message.contains("load main.cf applied successfully after NotEstablished"));
         assert!(message.contains("deferred cancellation during apply"));
         assert!(message.contains("deferred timeout during update_db_cfg"));
     }

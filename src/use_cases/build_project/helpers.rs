@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::change_detection::analyzer::{self, AnalysisOutcome, PreparedStateUpdate};
-use crate::change_detection::hash_storage::{HashStorage, StorageError};
+use crate::change_detection::hash_storage::HashStorage;
 use crate::change_detection::partial_load::{self, LoadDecision};
 use crate::config::model::{AppConfig, SourceSetConfig, SourceSetPurpose};
 use crate::domain::build::{BuildMode, BuildResult, BuildStep};
@@ -456,14 +456,7 @@ pub(super) fn commit_step_state(
 }
 
 fn storage_needs_recovery(context: &SourceSetContext, work_path: &Path) -> bool {
-    match HashStorage::new(context.storage_path(work_path)).current_generation() {
-        Err(StorageError::Recoverable { .. }) => true,
-        Err(StorageError::Hard { reason, .. }) => {
-            let reason = reason.to_ascii_lowercase();
-            reason.contains("invalid data") || reason.contains("corrupt")
-        }
-        Err(StorageError::ConcurrentStateModified { .. }) | Ok(_) => false,
-    }
+    HashStorage::new(context.storage_path(work_path)).needs_recovery()
 }
 
 pub(super) fn remove_storage_path(path: &Path) -> std::io::Result<()> {
