@@ -80,23 +80,6 @@ const PROSE_DEBT: &[(&str, &str)] = &[
         "src/platform/edt.rs",
         "Run '$exception printStackTrace' for error details",
     ),
-    // `ibcmd infobase create`: whether a failure means «already there» is read from
-    // fourteen message fragments in two languages. The exit code is 255 either way
-    // (measured), so the question has to be asked before creating. Tracked by #89.
-    ("src/platform/ibcmd.rs", "access denied"),
-    ("src/platform/ibcmd.rs", "already exists"),
-    ("src/platform/ibcmd.rs", "authentication"),
-    ("src/platform/ibcmd.rs", "connection refused"),
-    ("src/platform/ibcmd.rs", "network"),
-    ("src/platform/ibcmd.rs", "permission denied"),
-    ("src/platform/ibcmd.rs", "timeout"),
-    ("src/platform/ibcmd.rs", "доступ запрещен"),
-    ("src/platform/ibcmd.rs", "доступ запрещён"),
-    ("src/platform/ibcmd.rs", "не удалось подключ"),
-    ("src/platform/ibcmd.rs", "недостаточно прав"),
-    ("src/platform/ibcmd.rs", "ошибка авторизации"),
-    ("src/platform/ibcmd.rs", "таймаут"),
-    ("src/platform/ibcmd.rs", "уже существует"),
     // Our own prose, not a tool's, but the same disease: an internal signal carried as a
     // sentence instead of a typed value. Tracked by #88.
     ("src/use_cases/artifacts.rs", "critical phase"),

@@ -177,7 +177,11 @@ v8-runner init [--dry-run]
 - Для file connection и `builder=DESIGNER` использует `1cv8 CREATEINFOBASE`.
 - Для `builder=IBCMD` использует `ibcmd infobase create`; server path добавляет
   `--create-database`.
-- Для benign `already exists` при `IBCMD` возвращает non-fatal outcome.
+- При `IBCMD` неудачное создание считается «база уже есть» только если сама база
+  после этого читается: спрашивается `config generation-id`, и ноль она отвечает
+  лишь когда база существует и эти учётные данные её читают. Формулировка отказа
+  в решении не участвует (ADR-0029), поэтому отказ авторизации и незаписываемый
+  путь остаются ошибкой, а не «уже есть».
 - Для `format=EDT` использует `workPath/edt-workspace` и импортирует `CONFIGURATION`, затем
   `EXTENSION`.
 - Если настроен `tools.client_mcp.extension.source.format=EDT`, импортирует этот tool extension
