@@ -121,7 +121,10 @@ v8-runner init
   what it would do: `init`, `build`, `load`, `dump`, `convert`, `artifacts`, `launch`,
   `infobase restore` and both `infobase` exports accept it. A preview locates the platform first,
   so a missing one is refused before the plan is approved, and it takes no locks and creates
-  nothing. Read `provider_dispatched: false` as the proof that nothing ran. Two limits are named
+  nothing, and it neither takes nor waits for the workspace lock, so a preview works while
+  another command holds it. Proof that nothing ran: `provider_dispatched: false` for the
+  launch-shaped verbs, `mode: preview` for the `infobase` ones — each form carries its own
+  closed signal. Two limits are named
   rather than guessed: `load` reports `compatibility_state: not_probed` because the probe is
   itself a Designer run, and `init` against a server infobase cannot tell "created" from
   "already existed" without creating it.
