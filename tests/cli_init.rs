@@ -363,7 +363,7 @@ fn init_ibcmd_file_already_exists_without_marker_is_fatal() {
         setup_edt_init_project("DESIGNER", "IBCMD", "__AUTO_FILE__");
     write_script(
         &platform_path,
-        "if [ \"$1\" = \"infobase\" ]; then printf 'already exists\\n' >&2; exit 17; fi\nexit 0",
+        "if printf '%s' \"$*\" | grep -F -q -- 'generation-id'; then exit 0; fi\nif [ \"$1\" = \"infobase\" ]; then printf 'already exists\\n' >&2; exit 17; fi\nexit 0",
     );
 
     let output = v8_runner_command()
@@ -625,8 +625,11 @@ fn init_ibcmd_server_provisions_infobase_without_precheck() {
 
 #[test]
 fn init_ibcmd_server_already_exists_is_non_fatal() {
-    let (_dir, config_path, _work_path, _calls_log) =
-        setup_ibcmd_server_init_project("printf 'already exists\\n' >&2\nexit 17");
+    // The create fails and the infobase still answers a read, which is what makes it
+    // "already there" — the message it prints plays no part (ADR-0029).
+    let (_dir, config_path, _work_path, _calls_log) = setup_ibcmd_server_init_project(
+        "if printf '%s' \"$*\" | grep -F -q -- 'generation-id'; then exit 0; fi\nprintf 'already exists\\n' >&2\nexit 17",
+    );
 
     let output = v8_runner_command()
         .args([
