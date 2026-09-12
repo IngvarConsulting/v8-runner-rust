@@ -44,6 +44,12 @@ pub struct LoadRequest {
     pub settings_path: Option<String>,
     /// Optional extension target.
     pub extension: Option<String>,
+    /// Name of the vendor configuration to compare a configuration against.
+    ///
+    /// The platform refuses to compare a configuration with its vendor counterpart unless the
+    /// counterpart is named, so without this the support state of a configuration cannot be
+    /// established at all. An extension needs no such input: `extension` already names it.
+    pub vendor_name: Option<String>,
     /// Resolve the artifact and locate Designer without probing or applying anything.
     pub dry_run: bool,
 }

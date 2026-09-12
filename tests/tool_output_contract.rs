@@ -80,21 +80,6 @@ const PROSE_DEBT: &[(&str, &str)] = &[
         "src/platform/edt.rs",
         "Run '$exception printStackTrace' for error details",
     ),
-    // The load compatibility probe, the defect this decision came from: both literals are
-    // sentences, and the English pair is not what the platform writes in any language.
-    // Tracked by #86.
-    (
-        "src/use_cases/load_artifact.rs",
-        "configuration is not on support",
-    ),
-    (
-        "src/use_cases/load_artifact.rs",
-        "extension is not supported",
-    ),
-    (
-        "src/use_cases/load_artifact.rs",
-        "Конфигурация 'Расширение конфигурации' недоступна",
-    ),
     // Our own prose, not a tool's, but the same disease: an internal signal carried as a
     // sentence instead of a typed value. Tracked by #88.
     ("src/use_cases/artifacts.rs", "critical phase"),

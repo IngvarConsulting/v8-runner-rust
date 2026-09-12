@@ -11,6 +11,8 @@ use crate::domain::load::{
     CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
 };
 use crate::platform::designer::DesignerDsl;
+use crate::platform::extension_inventory::parse_extension_inventory;
+use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
 use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessRunner;
 use crate::platform::result::PlatformCommandResult;
@@ -34,7 +36,6 @@ const UNSUPPORTED_EXTERNAL_ARTIFACTS_ERROR: &str =
     "load currently supports only .cf and .cfe artifacts";
 const UNSUPPORTED_UPDATE_MODE_ERROR: &str =
     "load --mode update is not supported; use --mode load or --mode merge";
-const ABSENT_EXTENSION_PLATFORM_LOG: &str = "Конфигурация 'Расширение конфигурации' недоступна";
 
 pub fn execute(
     context: &ExecutionContext,
@@ -62,6 +63,23 @@ struct ResolvedLoadRequest {
     target_kind: LoadTargetKind,
     settings_path: Option<PathBuf>,
     extension: Option<String>,
+    /// Name of the vendor configuration, when the caller stated it.
+    vendor_name: Option<String>,
+}
+
+impl ResolvedLoadRequest {
+    /// The name the platform needs before it will compare the target with its counterpart.
+    ///
+    /// An extension names itself; a configuration is named by its vendor counterpart, and the
+    /// platform refuses the comparison without that name (measured on 8.3.27.2074). No name,
+    /// no probe — and no guess either.
+    fn comparison_name(&self) -> Option<&str> {
+        match self.target_kind {
+            LoadTargetKind::Configuration => self.vendor_name.as_deref(),
+            LoadTargetKind::Extension => self.extension.as_deref(),
+            LoadTargetKind::Unknown => None,
+        }
+    }
 }
 
 fn run_load(
@@ -70,17 +88,21 @@ fn run_load(
     args: &LoadRequest,
 ) -> UseCaseResult<LoadResult> {
     let started = Instant::now();
+    // One owner of the truth about the run: flipped where a platform process is actually
+    // started, and carried into every payload instead of a constant `true`.
+    let mut dispatched = false;
     let request_snapshot = request_snapshot_for_failure_payload(args);
 
     if let Some(error) = validate_supported_matrix(config) {
         return Err(LoadExecutionFailure::with_payload(
             error,
             empty_result(
+                dispatched,
                 args.mode,
                 PathBuf::from(&args.artifact_path),
                 request_snapshot.artifact_type,
                 request_snapshot.target_kind,
-                CompatibilityState::Unknown,
+                CompatibilityState::NotProbed,
                 request_snapshot.extension,
                 started,
                 Some(SUPPORTED_LOAD_ERROR.to_owned()),
@@ -97,11 +119,12 @@ fn run_load(
             return Err(LoadExecutionFailure::with_payload(
                 error,
                 empty_result(
+                    dispatched,
                     args.mode,
                     PathBuf::from(&args.artifact_path),
                     request_snapshot.artifact_type,
                     request_snapshot.target_kind,
-                    CompatibilityState::Unknown,
+                    CompatibilityState::NotProbed,
                     request_snapshot.extension,
                     started,
                     Some(message),
@@ -118,7 +141,7 @@ fn run_load(
             AppError::Runtime(message.clone()),
             interrupted_result_from_resolved(
                 &resolved,
-                CompatibilityState::Unknown,
+                CompatibilityState::NotProbed,
                 started,
                 interruption,
                 message,
@@ -135,8 +158,9 @@ fn run_load(
             return Err(LoadExecutionFailure::with_payload(
                 AppError::from(error),
                 empty_result_from_resolved(
+                    dispatched,
                     &resolved,
-                    CompatibilityState::Unknown,
+                    CompatibilityState::NotProbed,
                     started,
                     Some(message),
                     None,
@@ -181,7 +205,7 @@ fn run_load(
         context,
         config,
         location.path.as_path(),
-        utilities.runner_for(UtilityType::V8),
+        &mut utilities,
         &resolved,
     ) {
         Ok(result) => result,
@@ -190,8 +214,9 @@ fn run_load(
             return Err(LoadExecutionFailure::with_payload(
                 error,
                 empty_result_from_resolved(
+                    dispatched,
                     &resolved,
-                    CompatibilityState::Unknown,
+                    CompatibilityState::NotProbed,
                     started,
                     Some(message),
                     platform_log_path,
@@ -202,12 +227,17 @@ fn run_load(
     };
 
     let compatibility_state = probe_result.state;
+    dispatched = probe_result.dispatched;
     let probe_log_path = probe_result.platform_log_path;
-    if let Some(error) = validate_probe_mode_compatibility(&resolved, compatibility_state) {
+    let probe_evidence = probe_result.diagnostic;
+    if let Some(error) =
+        validate_probe_mode_compatibility(&resolved, compatibility_state, probe_evidence.as_deref())
+    {
         let message = error.to_string();
         return Err(LoadExecutionFailure::with_payload(
             error,
             empty_result_from_resolved(
+                dispatched,
                 &resolved,
                 compatibility_state,
                 started,
@@ -218,6 +248,7 @@ fn run_load(
         ));
     }
 
+    dispatched = true;
     let apply_dsl = match build_designer_dsl(
         context,
         config,
@@ -236,6 +267,7 @@ fn run_load(
             return Err(LoadExecutionFailure::with_payload(
                 error,
                 empty_result_from_resolved(
+                    dispatched,
                     &resolved,
                     compatibility_state,
                     started,
@@ -277,6 +309,7 @@ fn run_load(
             return Err(LoadExecutionFailure::with_payload(
                 error,
                 empty_result_from_resolved(
+                    dispatched,
                     &resolved,
                     compatibility_state,
                     started,
@@ -299,6 +332,7 @@ fn run_load(
         return Err(LoadExecutionFailure::with_payload(
             error,
             empty_result_from_resolved(
+                dispatched,
                 &resolved,
                 compatibility_state,
                 started,
@@ -339,6 +373,7 @@ fn run_load(
             return Err(LoadExecutionFailure::with_payload(
                 error,
                 empty_result_from_resolved(
+                    dispatched,
                     &resolved,
                     compatibility_state,
                     started,
@@ -367,6 +402,7 @@ fn run_load(
             return Err(LoadExecutionFailure::with_payload(
                 error,
                 empty_result_from_resolved(
+                    dispatched,
                     &resolved,
                     compatibility_state,
                     started,
@@ -383,6 +419,7 @@ fn run_load(
         return Err(LoadExecutionFailure::with_payload(
             error,
             empty_result_from_resolved(
+                dispatched,
                 &resolved,
                 compatibility_state,
                 started,
@@ -450,16 +487,53 @@ fn run_load(
 
 struct ProbeResult {
     state: CompatibilityState,
+    /// Whether asking actually started a platform process. `provider_dispatched` on the wire
+    /// must be the truth about the run, not a constant.
+    dispatched: bool,
     platform_log_path: Option<PathBuf>,
+    /// What the platform said about a probe that did not run — carried, never interpreted.
+    diagnostic: Option<String>,
 }
 
 fn probe_compatibility(
     context: &ExecutionContext,
     config: &AppConfig,
     binary: &Path,
-    runner: &dyn ProcessRunner,
+    utilities: &mut PlatformUtilities,
     resolved: &ResolvedLoadRequest,
 ) -> Result<ProbeResult, (AppError, Option<PathBuf>)> {
+    // An extension needs no comparison at all. The decision only asks whether there is
+    // something to merge into, and the infobase answers that structurally: `ibcmd config
+    // extension list` prints keyed records whose field names and values are the same in every
+    // interface language. Comparing the extension with its database copy told us nothing more
+    // and told it in prose.
+    if resolved.target_kind == LoadTargetKind::Extension {
+        let (state, diagnostic, dispatched) =
+            match installed_extension_state(context, config, utilities, resolved) {
+                ExtensionPresence::Absent => (CompatibilityState::Absent, None, true),
+                ExtensionPresence::Present => (CompatibilityState::Supported, None, true),
+                ExtensionPresence::NotEstablished(reason, dispatched) => {
+                    (CompatibilityState::NotEstablished, Some(reason), dispatched)
+                }
+            };
+        return Ok(ProbeResult {
+            state,
+            dispatched,
+            platform_log_path: None,
+            diagnostic,
+        });
+    }
+    let Some(comparison_name) = resolved.comparison_name() else {
+        // Nothing to ask with: the platform will not compare a configuration without the
+        // vendor configuration's name. Saying "not asked" is the honest answer; guessing the
+        // support state from the refusal text is what ADR-0029 forbids.
+        return Ok(ProbeResult {
+            state: CompatibilityState::NotProbed,
+            dispatched: false,
+            platform_log_path: None,
+            diagnostic: None,
+        });
+    };
     let report_dir = config.work_path.join("load-probe");
     std::fs::create_dir_all(&report_dir).map_err(|error| {
         (
@@ -477,7 +551,7 @@ fn probe_compatibility(
         context,
         config,
         binary,
-        runner,
+        utilities.runner_for(UtilityType::V8),
         "probe",
         InterruptionSafetyClass::GracefulThenKill,
     )?;
@@ -486,144 +560,179 @@ fn probe_compatibility(
             "MainConfiguration",
             None,
             "VendorConfiguration",
-            None,
+            Some(comparison_name),
             &report_file,
         ),
         LoadTargetKind::Extension => dsl.compare_cfg(
             "ExtensionConfiguration",
-            resolved.extension.as_deref(),
+            Some(comparison_name),
             "ExtensionDBConfiguration",
-            resolved.extension.as_deref(),
+            Some(comparison_name),
             &report_file,
         ),
         LoadTargetKind::Unknown => unreachable!("unknown targets are rejected during validation"),
     }
     .map_err(|error| (AppError::from(error), None))?;
 
-    if result.process.exit_code == 0 {
-        return Ok(ProbeResult {
-            state: CompatibilityState::Supported,
-            platform_log_path: result.platform_log_path,
-        });
-    }
-
-    let state = classify_probe_failure(resolved.target_kind, &result);
-    if state == CompatibilityState::Unknown {
-        let error = ensure_platform_success("compatibility probe", resolved, &result)
-            .expect_err("non-zero compatibility probe must be a platform failure");
-        Err((error, result.platform_log_path))
+    // The whole classification: the comparison either ran or it did not. Exit zero is the
+    // platform's own guarantee, and exactly then it writes the comparison report; every other
+    // outcome leaves the state unestablished, whatever sentence the log carries.
+    let state = if result.process.exit_code == 0 {
+        CompatibilityState::Supported
     } else {
-        Ok(ProbeResult {
-            state,
-            platform_log_path: result.platform_log_path,
-        })
-    }
+        CompatibilityState::NotEstablished
+    };
+    let diagnostic = probe_evidence(&result);
+    Ok(ProbeResult {
+        state,
+        dispatched: true,
+        platform_log_path: result.platform_log_path,
+        diagnostic,
+    })
 }
 
-fn classify_probe_failure(
-    target_kind: LoadTargetKind,
-    result: &PlatformCommandResult,
-) -> CompatibilityState {
-    // Reintroduction guard (ADR-0023): this function is the single owner of
-    // positive probe classification. Never reconstruct substring matching
-    // across stdout, stderr and /Out; only whole clean diagnostics may permit
-    // a later mutating command.
-    if target_kind == LoadTargetKind::Extension && is_exact_absent_extension_result(result) {
-        return CompatibilityState::Absent;
-    }
+enum ExtensionPresence {
+    Present,
+    Absent,
+    /// The list could not be read. Asked and not proven, so no change is permitted. The flag
+    /// says whether a platform process was started before the attempt gave up.
+    NotEstablished(String, bool),
+}
 
-    let Some(diagnostic) = exact_clean_probe_diagnostic(result) else {
-        return CompatibilityState::Unknown;
+/// Asks the infobase whether the extension is installed, by its own keyed list.
+fn installed_extension_state(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    utilities: &mut PlatformUtilities,
+    resolved: &ResolvedLoadRequest,
+) -> ExtensionPresence {
+    let Some(name) = resolved.extension.as_deref() else {
+        return ExtensionPresence::NotEstablished("the extension is not named".to_owned(), false);
     };
-    match (target_kind, diagnostic.as_str()) {
-        (LoadTargetKind::Configuration, "configuration is not on support")
-        | (LoadTargetKind::Extension, "extension is not supported") => {
-            CompatibilityState::NotSupported
+    let connection = match IbcmdConnection::from_infobase(&config.infobase) {
+        Ok(connection) => connection,
+        Err(error) => return ExtensionPresence::NotEstablished(error.to_string(), false),
+    };
+    let binary = match utilities.locate(UtilityType::Ibcmd) {
+        Ok(location) => location.path,
+        Err(error) => return ExtensionPresence::NotEstablished(error.to_string(), false),
+    };
+    let dsl = IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
+        .with_execution_policy(
+            context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+        );
+    let result = match dsl.infobase_extension_list() {
+        Ok(result) => result,
+        // The spawn itself failed, so nothing ran.
+        Err(error) => return ExtensionPresence::NotEstablished(error.to_string(), false),
+    };
+    if result.process.exit_code != 0 {
+        return ExtensionPresence::NotEstablished(
+            format!(
+                "reading the extension list exited with {}",
+                result.process.exit_code
+            ),
+            true,
+        );
+    }
+    match parse_extension_inventory(&result.process.stdout) {
+        Ok(extensions) => {
+            if extensions.iter().any(|extension| extension.name == name) {
+                ExtensionPresence::Present
+            } else {
+                ExtensionPresence::Absent
+            }
         }
-        _ => CompatibilityState::Unknown,
+        Err(error) => ExtensionPresence::NotEstablished(error, true),
     }
 }
 
-fn is_exact_absent_extension_result(result: &PlatformCommandResult) -> bool {
-    if result.process.exit_code == 0
-        || result.process.interruption.is_some()
-        || !result.process.stdout.trim().is_empty()
-        || !result.process.stderr.trim().is_empty()
-        || result.platform_log_read_error.is_some()
-    {
-        return false;
-    }
-
-    let Some(platform_log) = result.platform_log.as_deref() else {
-        return false;
-    };
-    let normalized = platform_log
-        .strip_prefix('\u{feff}')
-        .unwrap_or(platform_log)
-        .replace("\r\n", "\n");
-    let lines = normalized
-        .trim()
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect::<Vec<_>>();
-    lines.len() == 1 && lines[0].trim() == ABSENT_EXTENSION_PLATFORM_LOG
-}
-
-fn exact_clean_probe_diagnostic(result: &PlatformCommandResult) -> Option<String> {
-    if result.process.exit_code == 0
-        || result.process.interruption.is_some()
-        || result.platform_log_read_error.is_some()
-    {
+/// The platform's own words about a probe that did not run, kept as evidence for a human.
+///
+/// Evidence is not a decision: nothing reads this back. It exists so the caller can see which
+/// sentence the runner deliberately refused to interpret.
+fn probe_evidence(result: &PlatformCommandResult) -> Option<String> {
+    if result.process.exit_code == 0 {
         return None;
     }
-
-    let lines = [
-        Some(result.process.stdout.as_str()),
-        Some(result.process.stderr.as_str()),
-        result.platform_log.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .flat_map(str::lines)
-    .map(|line| line.trim().trim_start_matches('\u{feff}'))
-    .filter(|line| !line.is_empty())
-    .collect::<Vec<_>>();
-    (lines.len() == 1).then(|| lines[0].to_ascii_lowercase())
+    let log = result.platform_log.as_deref()?;
+    let text = log
+        .strip_prefix('\u{feff}')
+        .unwrap_or(log)
+        .replace("\r\n", "\n");
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    (!lines.is_empty()).then(|| lines.join("; "))
 }
 
+/// The whole decision, enumerated: target kind, requested mode, and what was established.
+///
+/// No default-permit arm (ADR-0023, point 6): a new target kind, mode or state cannot slip
+/// through as "allowed" by falling into a wildcard. Nothing here reads a platform message —
+/// `evidence` only travels into the refusal text so a human can see what was not interpreted.
 fn validate_probe_mode_compatibility(
     resolved: &ResolvedLoadRequest,
     state: CompatibilityState,
+    evidence: Option<&str>,
 ) -> Option<AppError> {
-    match (resolved.mode, state) {
-        (_, CompatibilityState::Unknown) => Some(AppError::Validation(format!(
-            "failed to determine infobase compatibility state for {}",
-            target_label(resolved)
-        ))),
-        (LoadMode::Load, CompatibilityState::Supported) => Some(AppError::Validation(format!(
-            "{} is already compatible with merge; use --mode merge instead",
-            target_label(resolved)
-        ))),
-        (LoadMode::Merge, CompatibilityState::NotSupported) => Some(AppError::Validation(format!(
-            "{} is not ready for merge; use --mode load instead",
-            target_label(resolved)
-        ))),
-        (LoadMode::Merge, CompatibilityState::Absent) => Some(AppError::Validation(format!(
+    use CompatibilityState::{Absent, NotEstablished, NotProbed, Supported};
+    use LoadMode::{Load, Merge, Update};
+    use LoadTargetKind::{Configuration, Extension, Unknown};
+
+    let unproven = || {
+        Some(AppError::Validation(format!(
+            "{} state was asked and not established, so nothing is changed{}",
+            target_label(resolved),
+            evidence
+                .map(|line| format!(". The platform said: {line}"))
+                .unwrap_or_default()
+        )))
+    };
+
+    match (resolved.target_kind, resolved.mode, state) {
+        (_, Update, _) => Some(AppError::Validation(
+            UNSUPPORTED_UPDATE_MODE_ERROR.to_owned(),
+        )),
+        // Asked and not proven permits no change, in either mode and for either target: the
+        // fail-closed rule carried from ADR-0023. An unreadable extension list or an
+        // infobase that will not open stops a load too.
+        (Configuration | Extension, Load | Merge, NotEstablished) => unproven(),
+        // An extension the infobase does not list is a first installation; merging into
+        // nothing is the caller's mistake.
+        (Extension, Load, Absent) => None,
+        (Extension, Merge, Absent) => Some(AppError::Validation(format!(
             "{} is absent from the infobase; use --mode load for the first installation",
             target_label(resolved)
         ))),
-        (LoadMode::Load, CompatibilityState::Absent | CompatibilityState::NotSupported)
-        | (LoadMode::Merge, CompatibilityState::Supported) => None,
-        (LoadMode::Update, _) => Some(AppError::Validation(
-            UNSUPPORTED_UPDATE_MODE_ERROR.to_owned(),
-        )),
-        // A preview returns before the probe, so this validator never sees `NotProbed`.
-        (LoadMode::Load | LoadMode::Merge, CompatibilityState::NotProbed) => {
-            Some(AppError::Validation(format!(
-                "infobase compatibility for {} was never probed",
-                target_label(resolved)
-            )))
-        }
+        // A listed extension may be replaced wholesale or merged into. Both are legitimate and
+        // which one is right is the caller's decision.
+        (Extension, Load | Merge, Supported) => None,
+        // Unreachable today — an extension is always asked — but a refusal is the safe answer
+        // if that ever changes, and it keeps the matrix free of a permitting wildcard.
+        (Extension, Load, NotProbed) => None,
+        (Extension, Merge, NotProbed) => unproven(),
+        // A configuration proven to be on support would silently lose that support to a full
+        // load, so the caller is steered to the mode that preserves it.
+        (Configuration, Load, Supported) => Some(AppError::Validation(format!(
+            "{} is already compatible with merge; use --mode merge instead",
+            target_label(resolved)
+        ))),
+        // Nobody asked, because the platform will not compare a configuration without naming
+        // its vendor counterpart. That is not an unknown answer: `--mode load` is the caller's
+        // stated fact, and a first installation is never blocked by an unasked question.
+        (Configuration, Load, NotProbed) => None,
+        // A configuration has no list to be absent from; the state is about support only.
+        (Configuration, Load | Merge, Absent) => unproven(),
+        (Configuration, Merge, Supported) => None,
+        (Configuration, Merge, NotProbed) => Some(AppError::Validation(format!(
+            "{} support state cannot be asked without the vendor configuration name; pass \
+             --vendor-name to merge, or use --mode load for a first installation",
+            target_label(resolved)
+        ))),
+        (Unknown, _, _) => unproven(),
     }
 }
 
@@ -650,6 +759,7 @@ fn request_snapshot_for_failure_payload(args: &LoadRequest) -> ResolvedLoadReque
 
     ResolvedLoadRequest {
         mode: args.mode,
+        vendor_name: args.vendor_name.clone(),
         artifact_path: PathBuf::from(&args.artifact_path),
         artifact_type,
         target_kind,
@@ -728,6 +838,7 @@ fn resolve_request(
         target_kind,
         settings_path,
         extension,
+        vendor_name: args.vendor_name.clone(),
     })
 }
 
@@ -891,6 +1002,7 @@ fn deferred_interruption_warning(action: &str, result: &PlatformCommandResult) -
 }
 
 fn empty_result_from_resolved(
+    provider_dispatched: bool,
     resolved: &ResolvedLoadRequest,
     compatibility_state: CompatibilityState,
     started: Instant,
@@ -899,6 +1011,7 @@ fn empty_result_from_resolved(
     update_db_cfg_ran: bool,
 ) -> LoadResult {
     empty_result(
+        provider_dispatched,
         resolved.mode,
         resolved.artifact_path.clone(),
         resolved.artifact_type,
@@ -913,6 +1026,7 @@ fn empty_result_from_resolved(
 }
 
 fn empty_result(
+    provider_dispatched: bool,
     mode: LoadMode,
     artifact_path: PathBuf,
     artifact_type: ArtifactBuildMode,
@@ -928,7 +1042,7 @@ fn empty_result(
         .clone()
         .unwrap_or_else(|| "artifact load failed".to_owned());
     LoadResult {
-        provider_dispatched: true,
+        provider_dispatched,
         mode,
         artifact_path,
         artifact_type,
@@ -968,7 +1082,7 @@ fn with_platform_log_artifact(
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_probe_failure, execute, resolve_request};
+    use super::{execute, resolve_request, ResolvedLoadRequest};
     use crate::config::model::{
         AppConfig, BuildConfig, BuilderBackend, PlatformToolConfig, SourceFormat, TestsConfig,
         ToolsConfig,
@@ -984,7 +1098,7 @@ mod tests {
     use crate::use_cases::request::LoadRequest;
     use crate::use_cases::result::UseCaseErrorKind;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
 
@@ -1022,57 +1136,155 @@ mod tests {
     }
 
     #[test]
-    fn exact_absent_platform_log_accepts_bom_and_crlf() {
-        let result = probe_result(
+    fn a_probe_that_ran_is_the_only_proof_of_support() {
+        // The whole classification, and the reason the four prose tests that used to stand
+        // here are gone (ADR-0029): exit zero means the comparison ran, and nothing else is
+        // guaranteed. The platform's sentence is carried as evidence, never read.
+        let ran = PlatformCommandResult {
+            process: ProcessResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                interruption: None,
+            },
+            platform_log_path: None,
+            platform_log: None,
+            platform_log_read_error: None,
+        };
+        assert!(super::probe_evidence(&ran).is_none());
+
+        let refused = probe_result(
             "",
             "",
-            Some("\u{feff}Конфигурация 'Расширение конфигурации' недоступна\r\n"),
+            Some("\u{feff}Конфигурация 'Конфигурация поставщика' недоступна\r\n"),
             None,
         );
-
         assert_eq!(
-            classify_probe_failure(LoadTargetKind::Extension, &result),
-            CompatibilityState::Absent
+            super::probe_evidence(&refused).as_deref(),
+            Some("Конфигурация 'Конфигурация поставщика' недоступна"),
+            "the platform's words travel as evidence, with BOM and CRLF stripped"
         );
     }
 
     #[test]
-    fn legacy_not_found_with_access_denied_is_not_authorized() {
-        let result = probe_result("", "extension not found; access denied", Some(""), None);
+    fn an_unestablished_state_refuses_a_merge_and_lets_a_first_load_through() {
+        let configuration = ResolvedLoadRequest {
+            mode: LoadMode::Load,
+            artifact_path: PathBuf::from("dist/main.cf"),
+            artifact_type: ArtifactBuildMode::ConfigurationCf,
+            target_kind: LoadTargetKind::Configuration,
+            settings_path: None,
+            extension: None,
+            vendor_name: None,
+        };
 
-        assert_eq!(
-            classify_probe_failure(LoadTargetKind::Extension, &result),
-            CompatibilityState::Unknown
+        // Asked and not proven permits no change, in either mode (ADR-0029, point 5).
+        assert!(
+            super::validate_probe_mode_compatibility(
+                &configuration,
+                CompatibilityState::NotEstablished,
+                Some("Vendor configuration is not available"),
+            )
+            .is_some(),
+            "an unproven state must not permit a load either"
         );
+        // A question nobody could ask is not an unknown answer: the caller's stated mode is
+        // the fact, and `--mode load` says "install or replace".
+        assert!(
+            super::validate_probe_mode_compatibility(
+                &configuration,
+                CompatibilityState::NotProbed,
+                None,
+            )
+            .is_none(),
+            "a first installation of a configuration is never blocked by an unasked question"
+        );
+        // A proven absence is the first installation of an extension.
+        assert!(super::validate_probe_mode_compatibility(
+            &ResolvedLoadRequest {
+                target_kind: LoadTargetKind::Extension,
+                extension: Some("SalesAddon".to_owned()),
+                ..configuration.clone()
+            },
+            CompatibilityState::Absent,
+            None,
+        )
+        .is_none());
+
+        let merge = ResolvedLoadRequest {
+            mode: LoadMode::Merge,
+            ..configuration.clone()
+        };
+        let refusal = super::validate_probe_mode_compatibility(
+            &merge,
+            CompatibilityState::NotEstablished,
+            Some("Vendor configuration is not available"),
+        )
+        .expect("merge must be refused on an unproven state")
+        .to_string();
+        assert!(refusal.contains("not established"), "{refusal}");
+        assert!(
+            refusal.contains("Vendor configuration is not available"),
+            "the evidence reaches the caller: {refusal}"
+        );
+
+        let refusal =
+            super::validate_probe_mode_compatibility(&merge, CompatibilityState::NotProbed, None)
+                .expect("merge without a name must be refused")
+                .to_string();
+        assert!(
+            refusal.contains("--vendor-name"),
+            "the refusal names the missing input: {refusal}"
+        );
+
+        assert!(super::validate_probe_mode_compatibility(
+            &merge,
+            CompatibilityState::Supported,
+            None
+        )
+        .is_none());
+        let refusal = super::validate_probe_mode_compatibility(
+            &configuration,
+            CompatibilityState::Supported,
+            None,
+        )
+        .expect("a proven support state steers a load to merge")
+        .to_string();
+        assert!(refusal.contains("--mode merge"), "{refusal}");
     }
 
     #[test]
-    fn legacy_not_found_with_authentication_failure_is_not_authorized() {
-        let result = probe_result(
-            "extension not found",
-            "authentication failed",
-            Some(""),
-            None,
-        );
-
+    fn a_configuration_without_a_vendor_name_is_never_asked() {
+        // The platform refuses to compare a configuration with its vendor counterpart unless
+        // the counterpart is named (measured on 8.3.27.2074), so there is no question to ask
+        // and `NotProbed` is the honest answer.
+        let configuration = ResolvedLoadRequest {
+            mode: LoadMode::Merge,
+            artifact_path: PathBuf::from("dist/main.cf"),
+            artifact_type: ArtifactBuildMode::ConfigurationCf,
+            target_kind: LoadTargetKind::Configuration,
+            settings_path: None,
+            extension: None,
+            vendor_name: None,
+        };
+        assert_eq!(configuration.comparison_name(), None);
         assert_eq!(
-            classify_probe_failure(LoadTargetKind::Extension, &result),
-            CompatibilityState::Unknown
+            ResolvedLoadRequest {
+                vendor_name: Some("УправлениеТорговлей".to_owned()),
+                ..configuration.clone()
+            }
+            .comparison_name(),
+            Some("УправлениеТорговлей")
         );
-    }
-
-    #[test]
-    fn unverified_english_absent_wording_is_not_authorized() {
-        let result = probe_result(
-            "",
-            "",
-            Some("Configuration 'Configuration extension' is unavailable"),
-            None,
-        );
-
+        // An extension names itself, so it is always askable.
         assert_eq!(
-            classify_probe_failure(LoadTargetKind::Extension, &result),
-            CompatibilityState::Unknown
+            ResolvedLoadRequest {
+                target_kind: LoadTargetKind::Extension,
+                extension: Some("SalesAddon".to_owned()),
+                ..configuration
+            }
+            .comparison_name(),
+            Some("SalesAddon")
         );
     }
 
@@ -1098,7 +1310,7 @@ mod tests {
             ""
         };
         let body = format!(
-            "args=\"$*\"\nout=\"\"\nreport=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"-ReportFile\" ]; then report=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"{}\"\nif [ -n \"$out\" ]; then mkdir -p \"$(dirname \"$out\")\"; : > \"$out\"; fi\nif printf '%s' \"$args\" | grep -F -q -- '/CompareCfg'; then\n  if printf '%s' \"$args\" | grep -F -q -- 'VendorConfiguration'; then\n    printf 'configuration is not on support\\n' > \"$out\"\n    exit 17\n  fi\n  if printf '%s' \"$args\" | grep -F -q -- 'ExtensionDBConfiguration'; then\n    if printf '%s' \"$args\" | grep -F -q -- 'ExistingExt'; then\n      : > \"$report\"\n      exit 0\n    fi\n    if printf '%s' \"$args\" | grep -F -q -- 'UnsupportedExt'; then\n      printf 'extension is not supported\\n' > \"$out\"\n      exit 18\n    fi\n    printf 'extension not found\\n' > \"$out\"\n    exit 19\n  fi\nfi\n{merge_block}exit 0",
+            "args=\"$*\"\nout=\"\"\nreport=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"-ReportFile\" ]; then report=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"{}\"\nif [ -n \"$out\" ]; then mkdir -p \"$(dirname \"$out\")\"; : > \"$out\"; fi\nif printf '%s' \"$args\" | grep -F -q -- '/CompareCfg'; then\n  if printf '%s' \"$args\" | grep -F -q -- 'VendorConfiguration'; then\n    printf 'Configuration Vendor configuration is not available\\n' > \"$out\"\n    exit 17\n  fi\n  if printf '%s' \"$args\" | grep -F -q -- 'ExtensionDBConfiguration'; then\n    if printf '%s' \"$args\" | grep -F -q -- 'ExistingExt'; then\n      : > \"$report\"\n      exit 0\n    fi\n    if printf '%s' \"$args\" | grep -F -q -- 'UnsupportedExt'; then\n      printf 'Configuration extension is not supported\\n' > \"$out\"\n      exit 18\n    fi\n    printf 'extension not found\\n' > \"$out\"\n    exit 19\n  fi\nfi\n{merge_block}exit 0",
             calls_log.display()
         );
         fs::write(path, format!("#!/bin/sh\n{body}\n")).expect("write script");
@@ -1128,6 +1340,30 @@ mod tests {
             mcp: Default::default(),
             tests: TestsConfig::default(),
         }
+    }
+
+    /// A fake `ibcmd` that answers the one structural question the load path asks: which
+    /// extensions the infobase lists. The records are written to a file and the script only
+    /// `cat`s it — shell escaping differs between `bash` and `dash`, and an escaped quote that
+    /// survives on one and not the other turned a listed extension into an absent one on Linux.
+    #[cfg(unix)]
+    fn write_extension_list_ibcmd(path: &Path, installed: &[&str]) {
+        let records = installed
+            .iter()
+            .map(|name| {
+                format!(
+                    "name                         : \"{name}\"\nversion                      : \nactive                       : yes\npurpose                      : customization\nsafe-mode                    : yes\nsecurity-profile-name        : \nunsafe-action-protection     : yes\nused-in-distributed-infobase : no\nscope                        : infobase\nhash-sum                     : \"{name}-hash\"\n\n"
+                )
+            })
+            .collect::<String>();
+        let records_path = path.with_extension("records");
+        fs::write(&records_path, records).expect("write records");
+        fs::write(
+            path,
+            format!("#!/bin/sh\ncat \"{}\"\nexit 0\n", records_path.display()),
+        )
+        .expect("write ibcmd");
+        make_executable(path);
     }
 
     #[cfg(unix)]
@@ -1160,8 +1396,10 @@ mod tests {
         let calls = root.join("calls.log");
         fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
         write_absent_extension_designer_script(&binary, &calls, None, None, None);
+        write_extension_list_ibcmd(&root.join("ibcmd"), &[]);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            vendor_name: None,
             dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "ext.cfe".to_owned(),
@@ -1181,143 +1419,55 @@ mod tests {
             "absent"
         );
         let calls = fs::read_to_string(calls).expect("calls");
-        let ordered = ["/CompareCfg", "/LoadCfg", "/UpdateDBCfg"]
-            .map(|needle| calls.find(needle).expect("expected call"));
-        assert!(ordered[0] < ordered[1] && ordered[1] < ordered[2]);
+        assert!(
+            !calls.contains("/CompareCfg"),
+            "absence is established from the infobase's own list, so nothing is compared: \
+             {calls}"
+        );
+        let ordered =
+            ["/LoadCfg", "/UpdateDBCfg"].map(|needle| calls.find(needle).expect("expected call"));
+        assert!(ordered[0] < ordered[1]);
     }
 
+    /// Four tests used to stand here, each proving that a particular mix of stdout, stderr and
+    /// `/Out` lines kept the state `unknown` and blocked the load. They classified the
+    /// platform's prose, which ADR-0029 forbids, so the rule they protected is proven with a
+    /// structural input instead: the infobase cannot be asked at all, and nothing is applied.
     #[cfg(unix)]
     #[test]
-    fn exact_absent_log_with_stdout_stays_unknown_and_never_loads() {
+    fn an_extension_whose_presence_cannot_be_read_blocks_the_load() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
         fs::create_dir_all(root.join("work")).expect("work");
         let binary = root.join("1cv8");
         let calls = root.join("calls.log");
         fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
-        write_absent_extension_designer_script(
-            &binary,
-            &calls,
-            Some("Information base server is unavailable"),
-            None,
-            None,
-        );
+        write_absent_extension_designer_script(&binary, &calls, None, None, None);
+        // The infobase cannot be asked, so nothing about the extension is established.
+        let ibcmd = root.join("ibcmd");
+        fs::write(&ibcmd, "#!/bin/sh\nexit 7\n").expect("write ibcmd");
+        make_executable(&ibcmd);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            vendor_name: None,
             dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "ext.cfe".to_owned(),
             settings_path: None,
-            extension: Some("FirstExt".to_owned()),
+            extension: Some("ListedExt".to_owned()),
         };
 
         let failure = execute(&ExecutionContext::cli(CommandName::Load), &config, &request)
-            .expect_err("mixed evidence must fail closed");
-
-        assert_eq!(failure.error.kind(), UseCaseErrorKind::Platform);
+            .expect_err("an unproven state must not permit a change");
         let payload = failure.payload.expect("payload");
         assert_eq!(
             load_payload(&payload).compatibility_state,
-            CompatibilityState::Unknown
+            CompatibilityState::NotEstablished
         );
-        let calls = fs::read_to_string(calls).expect("calls");
-        assert!(calls.contains("/CompareCfg"));
-        assert!(!calls.contains("/LoadCfg"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn exact_absent_log_with_stderr_stays_unknown_and_never_loads() {
-        let dir = tempdir().expect("tempdir");
-        let root = dir.path();
-        fs::create_dir_all(root.join("work")).expect("work");
-        let binary = root.join("1cv8");
-        let calls = root.join("calls.log");
-        fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
-        write_absent_extension_designer_script(
-            &binary,
-            &calls,
-            None,
-            Some("License is unavailable"),
-            None,
+        assert!(
+            !calls.exists(),
+            "nothing may be applied, or even started, on an unproven state"
         );
-        let config = sample_config(root, &binary);
-        let request = LoadRequest {
-            dry_run: false,
-            mode: LoadMode::Load,
-            artifact_path: "ext.cfe".to_owned(),
-            settings_path: None,
-            extension: Some("FirstExt".to_owned()),
-        };
-
-        execute(&ExecutionContext::cli(CommandName::Load), &config, &request)
-            .expect_err("stderr evidence must fail closed");
-
-        let calls = fs::read_to_string(calls).expect("calls");
-        assert!(!calls.contains("/LoadCfg"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn exact_absent_log_with_second_line_stays_unknown_and_never_loads() {
-        let dir = tempdir().expect("tempdir");
-        let root = dir.path();
-        fs::create_dir_all(root.join("work")).expect("work");
-        let binary = root.join("1cv8");
-        let calls = root.join("calls.log");
-        fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
-        write_absent_extension_designer_script(
-            &binary,
-            &calls,
-            None,
-            None,
-            Some("License is unavailable\\n"),
-        );
-        let config = sample_config(root, &binary);
-        let request = LoadRequest {
-            dry_run: false,
-            mode: LoadMode::Load,
-            artifact_path: "ext.cfe".to_owned(),
-            settings_path: None,
-            extension: Some("FirstExt".to_owned()),
-        };
-
-        execute(&ExecutionContext::cli(CommandName::Load), &config, &request)
-            .expect_err("multi-line evidence must fail closed");
-
-        let calls = fs::read_to_string(calls).expect("calls");
-        assert!(!calls.contains("/LoadCfg"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn unreadable_absent_platform_log_stays_unknown_and_never_loads() {
-        let dir = tempdir().expect("tempdir");
-        let root = dir.path();
-        fs::create_dir_all(root.join("work")).expect("work");
-        let binary = root.join("1cv8");
-        let calls = root.join("calls.log");
-        fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
-        let body = format!(
-            "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"{}\"\nif printf '%s' \"$args\" | grep -F -q -- '/CompareCfg'; then\n  rm -f \"$out\"\n  mkdir \"$out\"\n  exit 19\nfi\nexit 0",
-            calls.display()
-        );
-        fs::write(&binary, format!("#!/bin/sh\n{body}\n")).expect("script");
-        make_executable(&binary);
-        let config = sample_config(root, &binary);
-        let request = LoadRequest {
-            dry_run: false,
-            mode: LoadMode::Load,
-            artifact_path: "ext.cfe".to_owned(),
-            settings_path: None,
-            extension: Some("FirstExt".to_owned()),
-        };
-
-        execute(&ExecutionContext::cli(CommandName::Load), &config, &request)
-            .expect_err("unreadable /Out must fail closed");
-
-        let calls = fs::read_to_string(calls).expect("calls");
-        assert!(!calls.contains("/LoadCfg"));
     }
 
     #[cfg(unix)]
@@ -1331,8 +1481,10 @@ mod tests {
         fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
         fs::write(root.join("merge.xml"), "<settings/>").expect("settings");
         write_absent_extension_designer_script(&binary, &calls, None, None, None);
+        write_extension_list_ibcmd(&root.join("ibcmd"), &[]);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            vendor_name: None,
             dry_run: false,
             mode: LoadMode::Merge,
             artifact_path: "ext.cfe".to_owned(),
@@ -1352,9 +1504,11 @@ mod tests {
             load_message(&payload),
             "validation error: extension 'FirstExt' is absent from the infobase; use --mode load for the first installation"
         );
-        let calls = fs::read_to_string(calls).expect("calls");
-        assert!(!calls.contains("/MergeCfg"));
-        assert!(!calls.contains("/LoadCfg"));
+        // The infobase answered the question, so Designer was never started at all.
+        assert!(
+            !calls.exists(),
+            "a refusal established from the infobase list must dispatch no platform command"
+        );
     }
 
     #[cfg(unix)]
@@ -1369,6 +1523,7 @@ mod tests {
         let unsupported = resolve_request(
             &config,
             &LoadRequest {
+                vendor_name: None,
                 dry_run: false,
                 mode: LoadMode::Load,
                 artifact_path: "tool.epf".to_owned(),
@@ -1382,6 +1537,7 @@ mod tests {
         let missing_extension = resolve_request(
             &config,
             &LoadRequest {
+                vendor_name: None,
                 dry_run: false,
                 mode: LoadMode::Load,
                 artifact_path: "ext.cfe".to_owned(),
@@ -1397,7 +1553,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn execute_load_cf_runs_probe_load_and_update() {
+    fn execute_load_cf_loads_and_updates_without_asking() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
         fs::create_dir_all(root.join("work")).expect("work");
@@ -1407,6 +1563,7 @@ mod tests {
         write_designer_script(&binary, &calls);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            vendor_name: None,
             dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "main.cf".to_owned(),
@@ -1421,11 +1578,15 @@ mod tests {
         assert_eq!(result.artifact_type, ArtifactBuildMode::ConfigurationCf);
         assert_eq!(
             load_payload(&result).compatibility_state,
-            CompatibilityState::NotSupported
+            CompatibilityState::NotProbed
         );
         assert_eq!(load_payload(&result).update_db_cfg_ran, true);
         let calls_text = fs::read_to_string(calls).expect("calls");
-        assert!(calls_text.contains("/CompareCfg"));
+        assert!(
+            !calls_text.contains("/CompareCfg"),
+            "without --vendor-name there is no question to ask, so nothing is compared: \
+             {calls_text}"
+        );
         assert!(calls_text.contains("/LoadCfg"));
         assert!(calls_text.contains("/UpdateDBCfg"));
     }
@@ -1440,6 +1601,7 @@ mod tests {
         config.builder = BuilderBackend::Ibcmd;
 
         let request = LoadRequest {
+            vendor_name: None,
             dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "ext.cfe".to_owned(),
@@ -1474,6 +1636,7 @@ mod tests {
         write_designer_script(&binary, &calls);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            vendor_name: None,
             dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "main.cf".to_owned(),
@@ -1496,7 +1659,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn execute_merge_cfe_runs_probe_merge_and_update() {
+    fn execute_merge_cfe_merges_and_updates_after_the_list() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
         fs::create_dir_all(root.join("work")).expect("work");
@@ -1505,8 +1668,10 @@ mod tests {
         fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
         fs::write(root.join("merge.xml"), "<settings/>").expect("settings");
         write_designer_script(&binary, &calls);
+        write_extension_list_ibcmd(&root.join("ibcmd"), &["ExistingExt"]);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            vendor_name: None,
             dry_run: false,
             mode: LoadMode::Merge,
             artifact_path: "ext.cfe".to_owned(),
@@ -1523,7 +1688,10 @@ mod tests {
             CompatibilityState::Supported
         );
         let calls_text = fs::read_to_string(calls).expect("calls");
-        assert!(calls_text.contains("ExtensionConfiguration"));
+        assert!(
+            !calls_text.contains("/CompareCfg"),
+            "an extension is answered by the infobase list, not by a comparison: {calls_text}"
+        );
         assert!(calls_text.contains("/MergeCfg"));
         assert!(calls_text.contains("-Settings"));
         assert!(calls_text.contains("-Extension ExistingExt"));
@@ -1540,8 +1708,10 @@ mod tests {
         let calls = root.join("calls.log");
         fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
         write_designer_script(&binary, &calls);
+        write_extension_list_ibcmd(&root.join("ibcmd"), &["UnsupportedExt"]);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            vendor_name: None,
             dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "ext.cfe".to_owned(),
@@ -1555,44 +1725,54 @@ mod tests {
         assert!(result.execution.is_ok());
         assert_eq!(
             load_payload(&result).compatibility_state,
-            CompatibilityState::NotSupported
+            CompatibilityState::Supported
         );
         let calls_text = fs::read_to_string(calls).expect("calls");
-        assert!(calls_text.contains("/CompareCfg"));
+        assert!(!calls_text.contains("/CompareCfg"), "{calls_text}");
         assert!(calls_text.contains("/LoadCfg"));
         assert!(calls_text.contains("/UpdateDBCfg -Extension UnsupportedExt"));
     }
 
     #[cfg(unix)]
     #[test]
-    fn execute_merge_cfe_rejects_unsupported_extension_state() {
+    fn execute_merge_cf_without_a_vendor_name_is_refused_before_the_platform_starts() {
+        // The state that used to stand here — "extension is not supported" — was recognised by
+        // a sentence the platform writes in no language, so it never occurred. This is the
+        // refusal that does: a configuration merge cannot even be asked about without the
+        // vendor configuration's name.
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
         fs::create_dir_all(root.join("work")).expect("work");
         let binary = root.join("1cv8");
         let calls = root.join("calls.log");
-        fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
+        fs::write(root.join("main.cf"), "cf").expect("artifact");
         fs::write(root.join("merge.xml"), "<settings/>").expect("settings");
         write_designer_script(&binary, &calls);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            vendor_name: None,
             dry_run: false,
             mode: LoadMode::Merge,
-            artifact_path: "ext.cfe".to_owned(),
+            artifact_path: "main.cf".to_owned(),
             settings_path: Some("merge.xml".to_owned()),
-            extension: Some("UnsupportedExt".to_owned()),
+            extension: None,
         };
 
         let failure = execute(&ExecutionContext::cli(CommandName::Load), &config, &request)
-            .expect_err("merge should reject");
-
+            .expect_err("merge without a vendor name must be refused");
         assert_eq!(failure.error.kind(), UseCaseErrorKind::Validation);
         let payload = failure.payload.expect("payload");
         assert_eq!(
             load_payload(&payload).compatibility_state,
-            CompatibilityState::NotSupported
+            CompatibilityState::NotProbed
         );
-        assert!(load_message(&payload).contains("use --mode load instead"));
+        assert!(load_message(&payload).contains("--vendor-name"));
+        assert!(
+            !fs::read_to_string(&calls)
+                .unwrap_or_default()
+                .contains("/MergeCfg"),
+            "nothing is merged when the question could not be asked"
+        );
     }
 
     #[cfg(unix)]
@@ -1606,6 +1786,7 @@ mod tests {
         fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
         fs::write(root.join("merge.xml"), "<settings/>").expect("settings");
         write_designer_script(&binary, &calls);
+        write_extension_list_ibcmd(&root.join("ibcmd"), &["ExistingExt"]);
         fs::write(
             &binary,
             format!(
@@ -1617,6 +1798,7 @@ mod tests {
         make_executable(&binary);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            vendor_name: None,
             dry_run: false,
             mode: LoadMode::Merge,
             artifact_path: "ext.cfe".to_owned(),
@@ -1646,6 +1828,7 @@ mod tests {
         let config = sample_config(root, &root.join("1cv8"));
 
         let request = LoadRequest {
+            vendor_name: None,
             dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "main.cf".to_owned(),
@@ -1676,6 +1859,7 @@ mod tests {
         let config = sample_config(root, &root.join("1cv8"));
 
         let request = LoadRequest {
+            vendor_name: None,
             dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "ext.cfe".to_owned(),
@@ -1705,6 +1889,7 @@ mod tests {
         let config = sample_config(root, &root.join("1cv8"));
 
         let request = LoadRequest {
+            vendor_name: None,
             dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "release.zip".to_owned(),
@@ -1732,6 +1917,7 @@ mod tests {
         let config = sample_config(root, &root.join("1cv8"));
 
         let request = LoadRequest {
+            vendor_name: None,
             dry_run: false,
             mode: LoadMode::Load,
             artifact_path: "tool.epf".to_owned(),
