@@ -80,11 +80,6 @@ const PROSE_DEBT: &[(&str, &str)] = &[
         "src/platform/edt.rs",
         "Run '$exception printStackTrace' for error details",
     ),
-    // Our own prose, not a tool's, but the same disease: an internal signal carried as a
-    // sentence instead of a typed value. Tracked by #88.
-    ("src/use_cases/artifacts.rs", "critical phase"),
-    ("src/use_cases/build_project/helpers.rs", "invalid data"),
-    ("src/use_cases/tool_extension.rs", "invalid data"),
 ];
 
 /// Sites where the literal is ours by construction, so no tool can reword it.
