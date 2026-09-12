@@ -50,21 +50,40 @@ const TEXT_PREDICATES: &[&str] = &[
     "eq_ignore_ascii_case",
 ];
 
-/// Sites that still decide on prose, each with the work that removes it.
+/// Sites that still take a verdict from prose, each with the work that removes it.
 ///
-/// The ledger sizes the debt and stops it growing: a new prose decision fails this test,
-/// and an entry may only leave the list. Shape is `(path from the repository root, the
-/// literal as written)`.
-const PROSE_DEBT: &[(&str, &str)] = &[
-    // Designer syntax check: severity and the success verdict are read from the platform's
-    // sentences. The verdict must come from the exit code; findings keep the text as
-    // evidence. Tracked by #87.
+/// The ledger sizes the debt and stops it growing: a new prose verdict fails this test, and an
+/// entry may only leave the list. Shape is `(path from the repository root, the literal as
+/// written)`.
+///
+/// It is empty, and keeping it empty is this guard's job. #86 took the load probe's three sites,
+/// #89 took the fourteen of `ibcmd infobase create`, #88 took the three internal ones, and #87
+/// separated what was left — the labels below — from verdicts.
+const PROSE_DEBT: &[(&str, &str)] = &[];
+
+/// Prose that labels text the runner passes through, and never decides what it does.
+///
+/// The distinction is ADR-0029's, and it is narrow. A label is admitted only where all three
+/// hold, and `labels_can_only_make_a_verdict_stricter` in `check_syntax` proves the last two:
+///
+/// 1. the pass/fail verdict comes from a structural signal — the exit code;
+/// 2. an unrecognised line falls to the unsafe side: it is an error, never a success;
+/// 3. what prose adds can only make a verdict stricter, never laxer.
+///
+/// Syntax checking is where this lives, because there the platform's prose *is* the subject: a
+/// finding is a sentence the platform wrote for a human, and the runner carries it. Labelling it
+/// is not the same act as deciding whether to change an infobase.
+const LABELS_NOT_VERDICTS: &[(&str, &str)] = &[
+    // Designer syntax check. The verdict is `status_from_exit_code` alone (0 clean, 101 issues
+    // found, anything else tool failed); these markers decide whether a line is a finding and
+    // how severe it reads, and an unrecognised severity is an error.
     ("src/parsers/designer_validation.rs", "неразрешим"),
     ("src/parsers/designer_validation.rs", "ошиб"),
     ("src/parsers/designer_validation.rs", "ошибок не обнаружено"),
     ("src/parsers/designer_validation.rs", "предупреждение"),
-    // EDT validation: the same shape over EDT's own output, whose language EDT decides.
-    // Tracked by #87.
+    // EDT validation, over EDT's own output, whose language EDT decides. Findings can only make
+    // the verdict stricter: exit zero plus findings is `IssuesFound`, exit zero without them is
+    // `Clean`, and a non-zero exit without findings is `ToolFailed`.
     ("src/parsers/edt_validation.rs", "блокир"),
     ("src/parsers/edt_validation.rs", "значит"),
     ("src/parsers/edt_validation.rs", "инф"),
@@ -73,9 +92,9 @@ const PROSE_DEBT: &[(&str, &str)] = &[
     ("src/parsers/edt_validation.rs", "ошиб"),
     ("src/parsers/edt_validation.rs", "предупр"),
     ("src/parsers/edt_validation.rs", "триви"),
-    // Vanessa Automation log. Tracked by #87.
+    // Vanessa Automation log: lines are extracted into the report, and nothing reads them back.
     ("src/parsers/vanessa_log.rs", "ошибк"),
-    // EDT noise line dropped from captured output. Tracked by #87.
+    // One EDT line dropped from captured output so it does not read as a finding.
     (
         "src/platform/edt.rs",
         "Run '$exception printStackTrace' for error details",
@@ -289,6 +308,7 @@ fn relative_path(path: &PathBuf) -> String {
 fn prose_decisions() -> BTreeSet<(String, String)> {
     let excluded = NOT_TOOL_OUTPUT
         .iter()
+        .chain(LABELS_NOT_VERDICTS)
         .map(|(file, literal)| ((*file).to_owned(), (*literal).to_owned()))
         .collect::<BTreeSet<_>>();
     let mut sites = BTreeSet::new();
