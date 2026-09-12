@@ -239,3 +239,75 @@ fn impl_self_type(item_impl: &ItemImpl) -> Option<String> {
         _ => None,
     }
 }
+
+/// Production token text with literals kept verbatim.
+///
+/// [`production_tokens`] strips every whitespace character, which also collapses the
+/// inside of string literals: `"already exists"` becomes `"alreadyexists"`. A guard that
+/// has to tell a sentence from a structural token needs the literal as written, so this
+/// variant keeps token spacing instead of removing it. `#[cfg(test)]` items are skipped
+/// the same way.
+pub fn production_source(path: &Path) -> String {
+    let file = parse_rust_file(path);
+    let mut chunks = Vec::new();
+    for item in &file.items {
+        collect_item_source(item, &mut chunks);
+    }
+    chunks.join("\n")
+}
+
+fn collect_item_source(item: &Item, chunks: &mut Vec<String>) {
+    if item_has_cfg_test(item) {
+        return;
+    }
+
+    match item {
+        Item::Mod(item_mod) => {
+            if let Some((_, items)) = &item_mod.content {
+                for nested in items {
+                    collect_item_source(nested, chunks);
+                }
+            } else {
+                chunks.push(item_mod.to_token_stream().to_string());
+            }
+        }
+        Item::Impl(item_impl) => {
+            for impl_item in &item_impl.items {
+                if impl_item_has_cfg_test(impl_item) {
+                    continue;
+                }
+                chunks.push(impl_item.to_token_stream().to_string());
+            }
+        }
+        _ => chunks.push(item.to_token_stream().to_string()),
+    }
+}
+
+/// Production items of a file, `#[cfg(test)]` ones dropped.
+///
+/// A guard that walks the syntax tree needs the items themselves, not their text, and it
+/// must not read what only exists under `cargo test`.
+pub fn production_items(path: &Path) -> Vec<Item> {
+    let file = parse_rust_file(path);
+    let mut items = Vec::new();
+    for item in file.items {
+        collect_production_item(item, &mut items);
+    }
+    items
+}
+
+fn collect_production_item(item: Item, items: &mut Vec<Item>) {
+    if item_has_cfg_test(&item) {
+        return;
+    }
+    match item {
+        Item::Mod(item_mod) => {
+            if let Some((_, nested)) = item_mod.content {
+                for inner in nested {
+                    collect_production_item(inner, items);
+                }
+            }
+        }
+        other => items.push(other),
+    }
+}
