@@ -13,10 +13,25 @@ const EDT_RUNTIME_VERSION: &str = "8.3.27";
 
 fn write_designer_script(path: &Path, calls_log: &Path) {
     let body = format!(
-        "args=\"$*\"\nout=\"\"\nreport=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"-ReportFile\" ]; then report=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"{}\"\nif [ -n \"$out\" ]; then mkdir -p \"$(dirname \"$out\")\"; : > \"$out\"; fi\nif printf '%s' \"$args\" | grep -F -q -- '/CompareCfg'; then\n  if printf '%s' \"$args\" | grep -F -q -- 'VendorConfiguration'; then\n    printf 'configuration is not on support\\n' > \"$out\"\n    exit 17\n  fi\n  if printf '%s' \"$args\" | grep -F -q -- 'ExtensionDBConfiguration'; then\n    if printf '%s' \"$args\" | grep -F -q -- 'ExistingExt'; then\n      : > \"$report\"\n      exit 0\n    fi\n    printf 'extension not found\\n' > \"$out\"\n    exit 19\n  fi\nfi\nexit 0",
+        "args=\"$*\"\nout=\"\"\nreport=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"-ReportFile\" ]; then report=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"{}\"\nif [ -n \"$out\" ]; then mkdir -p \"$(dirname \"$out\")\"; : > \"$out\"; fi\nif printf '%s' \"$args\" | grep -F -q -- '/CompareCfg'; then\n  if printf '%s' \"$args\" | grep -F -q -- 'VendorConfiguration'; then\n    printf 'Configuration Vendor configuration is not available\\n' > \"$out\"\n    exit 17\n  fi\n  if printf '%s' \"$args\" | grep -F -q -- 'ExtensionDBConfiguration'; then\n    if printf '%s' \"$args\" | grep -F -q -- 'ExistingExt'; then\n      : > \"$report\"\n      exit 0\n    fi\n    printf 'extension not found\\n' > \"$out\"\n    exit 19\n  fi\nfi\nexit 0",
         calls_log.display()
     );
     write_script(path, &body);
+}
+
+/// A fake `ibcmd` answering the one structural question the load path asks: which extensions
+/// the infobase lists. Records carry the measured keyed shape, so the fake repeats the platform
+/// rather than inventing wording (ADR-0029).
+fn write_extension_list_ibcmd(path: &Path, installed: &[&str]) {
+    let records = installed
+        .iter()
+        .map(|name| {
+            format!(
+                "name                         : \\\"{name}\\\"\\nversion                      : \\nactive                       : yes\\npurpose                      : customization\\nsafe-mode                    : yes\\nsecurity-profile-name        : \\nunsafe-action-protection     : yes\\nused-in-distributed-infobase : no\\nscope                        : infobase\\nhash-sum                     : \\\"{name}-hash\\\"\\n\\n"
+            )
+        })
+        .collect::<String>();
+    write_script(path, &format!("printf '{records}'\nexit 0"));
 }
 
 fn write_edt_configuration_source(path: &Path, project_name: &str) {
@@ -81,6 +96,10 @@ fn setup_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, PathBuf) {
     fs::create_dir_all(base_path.join("main")).expect("main");
     fs::create_dir_all(&work_path).expect("work");
     write_designer_script(&binary_path, &calls_log);
+    write_extension_list_ibcmd(
+        &dir.path().join("ibcmd"),
+        &["ExistingExt", "UnsupportedExt"],
+    );
     write_config(
         &config_path,
         &base_path,
@@ -134,7 +153,7 @@ fn load_dry_run_plans_without_probing_or_applying() {
 }
 
 #[test]
-fn load_cf_json_success_runs_probe_load_and_update() {
+fn load_cf_json_success_loads_and_updates_without_asking() {
     let (_dir, config_path, _binary_path, base_path, calls_log) = setup_project();
     fs::write(base_path.join("release.cf"), "cf").expect("artifact");
 
@@ -155,7 +174,7 @@ fn load_cf_json_success_runs_probe_load_and_update() {
     assert_eq!(payload["ok"], true);
     assert_eq!(payload["command"], "load");
     assert_eq!(payload["data"]["artifact_type"], "configuration_cf");
-    assert_eq!(payload["data"]["compatibility_state"], "not_supported");
+    assert_eq!(payload["data"]["compatibility_state"], "not_probed");
     assert_eq!(payload["data"]["execution"]["payload"]["applied"], true);
     assert_eq!(
         payload["data"]["execution"]["payload"]["update_db_cfg_ran"],
@@ -164,7 +183,10 @@ fn load_cf_json_success_runs_probe_load_and_update() {
     assert!(payload["data"]["platform_log_path"].is_string());
 
     let calls = fs::read_to_string(calls_log).expect("calls");
-    assert!(calls.contains("/CompareCfg"));
+    assert!(
+        !calls.contains("/CompareCfg"),
+        "a configuration load states its mode and asks nothing: {calls}"
+    );
     assert!(calls.contains("/LoadCfg"));
     assert!(calls.contains("/UpdateDBCfg"));
 }
@@ -193,7 +215,12 @@ fn first_extension_load_json_reports_absent_and_applies_in_order() {
         .output()
         .expect("run command");
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], true);
     assert_eq!(payload["data"]["extension"], "FirstExt");
@@ -203,9 +230,13 @@ fn first_extension_load_json_reports_absent_and_applies_in_order() {
         "absent"
     );
     let calls = fs::read_to_string(calls_log).expect("calls");
-    let ordered = ["/CompareCfg", "/LoadCfg", "/UpdateDBCfg"]
-        .map(|needle| calls.find(needle).expect("expected call"));
-    assert!(ordered[0] < ordered[1] && ordered[1] < ordered[2]);
+    assert!(
+        !calls.contains("/CompareCfg"),
+        "absence comes from the infobase's own list, so nothing is compared: {calls}"
+    );
+    let ordered =
+        ["/LoadCfg", "/UpdateDBCfg"].map(|needle| calls.find(needle).expect("expected call"));
+    assert!(ordered[0] < ordered[1]);
 }
 
 #[test]
@@ -266,7 +297,10 @@ fn merge_cfe_json_success_requires_extension_and_settings() {
     assert_eq!(payload["data"]["extension"], "ExistingExt");
     assert_eq!(payload["data"]["compatibility_state"], "supported");
     let calls = fs::read_to_string(calls_log).expect("calls");
-    assert!(calls.contains("ExtensionConfiguration"));
+    assert!(
+        !calls.contains("/CompareCfg"),
+        "an extension is answered by the infobase list: {calls}"
+    );
     assert!(calls.contains("/MergeCfg"));
     assert!(calls.contains("-Settings"));
     assert!(calls.contains("-Extension ExistingExt"));

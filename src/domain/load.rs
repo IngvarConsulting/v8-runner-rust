@@ -21,18 +21,27 @@ pub enum LoadTargetKind {
     Extension,
 }
 
+/// What the compatibility probe established, and nothing more.
+///
+/// The probe asks the platform to compare the target with its counterpart, and the only part
+/// of the answer the platform guarantees is whether the comparison ran: exit code zero, and
+/// exactly then a comparison report appears. Why it did not run is said in prose, and prose is
+/// not a contract — see ADR-0029 — so this enum has no variant for a reason.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CompatibilityState {
-    Absent,
+    /// The comparison ran, so both sides exist: a configuration is on support, an extension
+    /// is installed and comparable.
     Supported,
-    NotSupported,
-    Unknown,
-    /// The compatibility probe was deliberately not run, because the run is a preview.
-    ///
-    /// Distinct from `Unknown`, which means the probe ran or was attempted and its answer
-    /// could not be established: "not asked" and "asked without an answer" are different
-    /// facts for a caller deciding whether to apply.
+    /// Proven absent from the infobase, by the infobase's own extension list — keyed output,
+    /// not a sentence. A first installation is exactly this state; a merge has nothing to
+    /// merge into.
+    Absent,
+    /// The comparison did not run, and the runner does not guess why. Never permits a merge,
+    /// never blocks a first installation.
+    NotEstablished,
+    /// Nobody asked. The run is a preview, or the target cannot be named — a configuration
+    /// needs the vendor configuration's name before the platform will compare it.
     NotProbed,
 }
 
@@ -77,7 +86,7 @@ mod tests {
                 LoadExecutionMetadata {
                     applied: true,
                     target_kind: LoadTargetKind::Configuration,
-                    compatibility_state: CompatibilityState::NotSupported,
+                    compatibility_state: CompatibilityState::NotEstablished,
                     update_db_cfg_ran: true,
                 },
             ),

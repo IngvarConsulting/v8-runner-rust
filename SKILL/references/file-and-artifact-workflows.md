@@ -125,10 +125,14 @@ Rules:
 - `.cfe` requires `--extension`;
 - `--mode merge` requires `--settings`;
 - use `--mode load` for the first installation of an extension; JSON reports
-  `compatibility_state: "absent"` when the infobase does not contain it yet;
-- do not retry a failed compatibility probe as a load: any ambiguous platform,
-  authentication, license, connection, or unverified localized diagnostic is a
-  platform failure and remains fail-closed;
+  `compatibility_state: "absent"` when the infobase does not list it yet, read from
+  `ibcmd config extension list` rather than from any platform message;
+- `--mode merge` of a configuration needs `--vendor-name <NAME>`: the platform will not
+  compare a configuration with its vendor counterpart unnamed, so the state stays
+  `not_probed` and the merge is refused. `--mode load` needs no name;
+- `not_established` permits nothing — neither a load nor a merge. An authorization
+  failure, an unreachable infobase and an unreadable extension list all land here,
+  because the platform reports them with a non-zero exit code;
 - `load --mode update` is rejected by the current command contract.
 
 ## Make And Artifacts
