@@ -27,7 +27,8 @@ settings before CLI overrides.
 - `format=DESIGNER`, `builder=IBCMD`: supports init, build, extensions, and dump for file infobases and server infobases with `infobase.dbms`.
 - `format=EDT`, `builder=DESIGNER`: supports init, build through EDT export to Designer files, EDT syntax checks, extensions, and tests.
 - `format=EDT`, `builder=IBCMD`: supports init and build through EDT export to Designer files followed by IBCMD import/apply; requires a file infobase.
-- `extensions` supports Designer and EDT projects, but only extension `source-set` entries are actionable.
+- `extensions` supports Designer and EDT projects through IBCMD: `--name` selects an
+  extension `source-set`, `--installed-name` selects an installed platform name without a matching source-set.
 - `syntax designer-config` and `syntax designer-modules` require Designer format with Designer backend.
 - `syntax edt` requires EDT format with Designer backend.
 - IBCMD dump uses project-local standalone-server data under `workPath/ibcmd-data`.

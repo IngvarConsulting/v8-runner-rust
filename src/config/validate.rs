@@ -192,6 +192,43 @@ pub enum ConfigValidationError {
 pub fn validate(config: &AppConfig) -> Result<(), ConfigValidationError> {
     validate_base_path(&config.base_path)?;
     validate_work_path(&config.work_path)?;
+    validate_project_checks(config)
+}
+
+/// Perform full project validation without creating the runtime workspace.
+/// Preview and apply share the semantic checks; only apply prepares workPath first.
+pub fn validate_read_only(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    validate_base_path(&config.base_path)?;
+    // Resolve without creating directories, even for Designer sources (which do
+    // not enter the EDT overlap checks). Inspect the resolved candidate so a
+    // missing component followed by `..` cannot hide an existing non-directory.
+    let work_path = crate::support::path::nearest_existing_canonical_path(&config.work_path)
+        .map_err(|error| {
+            ConfigValidationError::WorkPathInvalid(format!(
+                "cannot resolve '{}': {error}",
+                config.work_path.display()
+            ))
+        })?;
+    match std::fs::metadata(&work_path) {
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(ConfigValidationError::WorkPathInvalid(format!(
+                "'{}' is not a directory",
+                work_path.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(ConfigValidationError::WorkPathInvalid(format!(
+                "cannot inspect '{}': {error}",
+                work_path.display()
+            )));
+        }
+    }
+    validate_project_checks(config)
+}
+
+fn validate_project_checks(config: &AppConfig) -> Result<(), ConfigValidationError> {
     validate_matrix(config)?;
     validate_source_sets(config)?;
     validate_connection_contract(config)?;
@@ -669,8 +706,15 @@ fn validate_edt_runtime_paths(
     config: &AppConfig,
     edt_source_paths: &[(String, std::path::PathBuf)],
 ) -> Result<(), ConfigValidationError> {
-    let canonical_work_path =
-        std::fs::canonicalize(&config.work_path).unwrap_or_else(|_| config.work_path.clone());
+    let canonical_work_path = crate::support::path::nearest_existing_canonical_path(
+        &config.work_path,
+    )
+    .map_err(|error| {
+        ConfigValidationError::WorkPathInvalid(format!(
+            "cannot resolve '{}': {error}",
+            config.work_path.display()
+        ))
+    })?;
 
     for (generated_for, _) in edt_source_paths {
         let generated_path = canonical_work_path.join("designer").join(generated_for);
@@ -1005,8 +1049,13 @@ fn validate_tool_extension_edt_runtime_path(
     source: &ToolExtensionSourceConfig,
 ) -> Result<(), ConfigValidationError> {
     let source_path = std::fs::canonicalize(&source.path).unwrap_or_else(|_| source.path.clone());
-    let work_path =
-        std::fs::canonicalize(&config.work_path).unwrap_or_else(|_| config.work_path.clone());
+    let work_path = crate::support::path::nearest_existing_canonical_path(&config.work_path)
+        .map_err(|error| {
+            ConfigValidationError::WorkPathInvalid(format!(
+                "cannot resolve '{}': {error}",
+                config.work_path.display()
+            ))
+        })?;
     let generated_path = work_path
         .join("designer")
         .join("tool-extensions")
@@ -2639,6 +2688,60 @@ mod tests {
             ConfigValidationError::ToolExtensionSourceLayoutInvalid(details)
                 if details.contains("overlaps generated export target")
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preview_rejects_tool_source_overlap_through_missing_workspace_symlink() {
+        let base = tempdir().expect("base");
+        let source_dir = base.path().join("src");
+        let tool_source = base.path().join("tool-source");
+        write_native_edt_project(
+            &source_dir,
+            "main",
+            crate::support::edt_project::V8_CONFIGURATION_NATURE,
+            None,
+        );
+        write_native_edt_project(
+            &tool_source,
+            "client_mcp",
+            crate::support::edt_project::V8_EXTENSION_NATURE,
+            Some("main"),
+        );
+        let alias = base.path().join("tool-alias");
+        std::os::unix::fs::symlink(&tool_source, &alias).expect("alias");
+        let work = alias.join("new-work");
+        let mut config = single_source_set_config(
+            base.path(),
+            &work,
+            SourceFormat::Edt,
+            BuilderBackend::Designer,
+            SourceSetPurpose::Configuration,
+            "main",
+            &source_dir,
+        );
+        config.tools.client_mcp.extension = Some(ToolExtensionConfig {
+            name: "client_mcp".to_owned(),
+            input: ToolExtensionInput::Source(ToolExtensionSourceConfig {
+                path: tool_source,
+                format: Some(SourceFormat::Edt),
+            }),
+        });
+
+        let error = super::validate_read_only(&config).expect_err("preview overlap");
+        assert!(
+            matches!(error, ConfigValidationError::ToolExtensionSourceLayoutInvalid(details)
+            if details.contains("overlaps generated export target"))
+        );
+        assert!(
+            !work.exists(),
+            "preview must not create the aliased workspace"
+        );
+        let error = validate(&config).expect_err("apply overlap");
+        assert!(
+            matches!(error, ConfigValidationError::ToolExtensionSourceLayoutInvalid(details)
+            if details.contains("overlaps generated export target"))
+        );
     }
 
     #[test]

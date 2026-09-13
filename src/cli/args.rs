@@ -54,7 +54,7 @@ pub enum Command {
     Tools(ToolsArgs),
     /// Initialize the infobase and EDT workspace
     Init(InitArgs),
-    /// Update configured extension properties inside the infobase
+    /// Update extension security properties or manage installed extensions
     Extensions(ExtensionsArgs),
     /// Build configured source-sets into the infobase
     Build(BuildArgs),
@@ -258,14 +258,36 @@ pub struct InitArgs {
 pub struct ExtensionsArgs {
     /// Read or change the extension composition of the infobase.
     ///
-    /// Omitting it keeps the published behaviour: update the security properties of the
-    /// configured extension source-sets.
+    /// Without a subcommand, update security properties of the selected extensions.
+    /// Without selectors, update all configured extension source-sets.
     #[command(subcommand)]
     pub command: Option<ExtensionsCommand>,
 
     /// Extension source-set name to update. Repeat to target multiple extensions.
     #[arg(long = "name")]
     pub names: Vec<String>,
+
+    /// Installed extension's platform name; no matching source-set is required.
+    /// Repeat or combine with --name to update only the explicitly selected targets.
+    #[arg(long = "installed-name")]
+    pub installed_names: Vec<String>,
+
+    /// Plan security updates and locate ibcmd without starting the platform.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+impl ExtensionsArgs {
+    /// Parent property options must not be silently ignored by a composition subcommand.
+    /// Validate after parsing so global options remain legal around subcommands.
+    pub fn validate_property_options(&self) -> Result<(), &'static str> {
+        if self.command.is_some()
+            && (!self.names.is_empty() || !self.installed_names.is_empty() || self.dry_run)
+        {
+            return Err("extensions parent --name, --installed-name and --dry-run cannot be combined with a subcommand; place subcommand options after its name");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -841,12 +863,74 @@ mod tests {
         .expect("parse");
 
         match cli.command {
-            Command::Extensions(ExtensionsArgs { names, command }) => {
+            Command::Extensions(ExtensionsArgs {
+                names,
+                command,
+                installed_names,
+                dry_run,
+            }) => {
                 assert!(command.is_none());
                 assert_eq!(names, vec!["client_mcp", "tests"]);
+                assert!(installed_names.is_empty());
+                assert!(!dry_run);
             }
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn parses_explicit_extension_targets_and_preview() {
+        let cli = Cli::try_parse_from([
+            "v8-runner",
+            "extensions",
+            "--installed-name",
+            "YAXUNIT",
+            "--name",
+            "tests",
+            "--installed-name",
+            "Другое",
+            "--dry-run",
+        ])
+        .expect("parse");
+        let Command::Extensions(args) = cli.command else {
+            panic!("unexpected command");
+        };
+        assert_eq!(args.names, ["tests"]);
+        assert_eq!(args.installed_names, ["YAXUNIT", "Другое"]);
+        assert!(args.dry_run);
+        assert!(args.command.is_none());
+    }
+
+    #[test]
+    fn extension_parent_options_cannot_be_ignored_by_subcommands() {
+        for arguments in [
+            vec!["--name", "tests", "list"],
+            vec!["--installed-name", "YAXUNIT", "list"],
+            vec!["--installed-name", "YAXUNIT", "delete", "--name", "Other"],
+            vec!["--dry-run", "delete", "--name", "Other"],
+        ] {
+            let cli = Cli::try_parse_from(["v8-runner", "extensions"].into_iter().chain(arguments))
+                .expect("parse before semantic validation");
+            let Command::Extensions(args) = cli.command else {
+                panic!("unexpected command");
+            };
+            assert!(args.validate_property_options().is_err());
+        }
+        // Global transport/config options still work before and after a subcommand.
+        let cli = Cli::try_parse_from([
+            "v8-runner",
+            "extensions",
+            "--json-message",
+            "list",
+            "--config",
+            "v8project.yaml",
+            "--dry-run",
+        ])
+        .expect("global options with subcommand");
+        let Command::Extensions(args) = cli.command else {
+            panic!("unexpected command");
+        };
+        assert!(args.validate_property_options().is_ok());
     }
 
     #[test]

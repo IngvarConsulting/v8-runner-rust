@@ -11,7 +11,7 @@ use crate::cli::output::{failure_envelope, print_command_error};
 use crate::command_envelope::Envelope;
 use crate::config::loader::{
     load_config, load_config_for_infobase_export, load_config_for_prepared_test,
-    load_config_for_tools_download, resolve_primary_config_path,
+    load_config_for_preview, load_config_for_tools_download, resolve_primary_config_path,
 };
 use crate::output::presenter::Presenter;
 use crate::output::text::{TimelineItem, TimelineStatus};
@@ -58,6 +58,14 @@ pub fn run() -> i32 {
         }
         if args.dry_run() && cli.clean_before_execution {
             let message = "--clean-before-execution cannot be combined with infobase --dry-run because preview must not modify workPath";
+            let error = UseCaseError::new(UseCaseErrorKind::Validation, message);
+            print_command_error(&presenter, command_name(&cli.command), &error, message);
+            return error.exit_code();
+        }
+    }
+
+    if let Command::Extensions(args) = &cli.command {
+        if let Err(message) = args.validate_property_options() {
             let error = UseCaseError::new(UseCaseErrorKind::Validation, message);
             print_command_error(&presenter, command_name(&cli.command), &error, message);
             return error.exit_code();
@@ -115,6 +123,21 @@ pub fn run() -> i32 {
             return error.exit_code();
         }
     };
+
+    // Like infobase previews, security-update previews must finish before JSON
+    // action logging creates workPath. Keep the normal command/error dispatcher.
+    if matches!(&cli.command, Command::Extensions(args) if args.command.is_none() && args.dry_run) {
+        return match execute::execute_command(
+            &config,
+            &cli.command,
+            Some(primary_config_path),
+            &presenter,
+            cli.clean_before_execution,
+        ) {
+            Ok(()) => 0,
+            Err(error) => error.exit_code(),
+        };
+    }
 
     let level = cli.log_level.as_deref().unwrap_or("info");
     let is_infobase_command = matches!(&cli.command, Command::Infobase(_));
@@ -222,6 +245,9 @@ fn load_cli_config(
         load_config_for_infobase_export(cli.config.as_deref(), cli.workdir.as_deref())
     } else if matches!(&cli.command, Command::Test(args) if args.no_build) {
         load_config_for_prepared_test(cli.config.as_deref(), cli.workdir.as_deref())
+    } else if matches!(&cli.command, Command::Extensions(args) if args.command.is_none() && args.dry_run)
+    {
+        load_config_for_preview(cli.config.as_deref(), cli.workdir.as_deref())
     } else {
         load_config(cli.config.as_deref(), cli.workdir.as_deref())
     }
