@@ -27,7 +27,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `init` | `format=DESIGNER` + `builder=DESIGNER` | Создаёт файловую ИБ через Designer; server connection остаётся manual prerequisite |
 | `init` | `format=DESIGNER` + `builder=IBCMD` | Выполняет `ensure` файловой или серверной ИБ через `ibcmd infobase create` |
 | `init` | `format=EDT` + `builder=DESIGNER|IBCMD` | Готовит ИБ по правилам builder и импортирует EDT workspace |
-| `extensions` | `format=DESIGNER` или `format=EDT` | Обновляет свойства extension `source-set` |
+| `extensions` | `format=DESIGNER` или `format=EDT` | Обновляет свойства расширений по `source-set` или явному платформенному имени через IBCMD |
 | `build` | `format=DESIGNER` + `builder=DESIGNER|IBCMD` | Выполняет incremental/full загрузку в ИБ |
 | `build` | `format=EDT` + `builder=DESIGNER|IBCMD` | Экспортирует изменённые EDT `source-set`, затем грузит generated Designer output |
 | `test` | Та же матрица, что и у `build` | По умолчанию запускает `build` |
@@ -67,6 +67,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `load` | артефакт, режим, расширение; `compatibility_state: not_probed` |
 | `dump` | набор, режим, целевой путь |
 | `artifacts` | вид артефакта и выход, `published: false` |
+| `extensions` | целевые имена, отключаемые свойства безопасности, ИБ, учётку и путь `ibcmd` |
 
 - **Закрытый признак есть у обеих форм, но он разный.** У экспортной это `mode`
   (`preview` против `apply`), и `provider_dispatched` там появляется только в
@@ -217,12 +218,25 @@ v8-runner tools download client-mcp [--sources] [--force]
 ### `extensions`
 
 ```bash
-v8-runner extensions [--name <SOURCE_SET>...]
+v8-runner extensions [--name <SOURCE_SET>...] [--installed-name <PLATFORM_NAME>...] [--dry-run]
+v8-runner extensions --name TESTS --installed-name YAXUNIT
 ```
 
-- Работает только с `source-set`, у которых `type=EXTENSION`.
-- Без `--name` обрабатывает все extension `source-set` из конфига.
+- Отключает безопасный режим и защиту от опасных действий через IBCMD.
+- `--name` выбирает только `source-set` с `type=EXTENSION`; неизвестное имя — ошибка.
+- `--installed-name` передаёт платформенное имя установленного расширения без требования
+  соответствующего `source-set`. Валидный конфиг проекта всё равно нужен.
+- Без обоих селекторов обрабатывает все extension `source-set` из конфига. При наличии
+  любого селектора обрабатывает только явно выбранные цели: сначала `--name`, затем
+  `--installed-name`. Точные повторы выполняются один раз; регистр и пробелы сохраняются.
+- Пробельное/пустое имя, управляющие символы и начальный `-` в `--installed-name`
+  отклоняются до блокировки, очистки и вызова платформы. Селекторы нельзя смешивать с подкомандами.
 - Возвращает пошаговый результат по каждому целевому расширению.
+- `--dry-run` разрешает цели и находит `ibcmd`, возвращает планируемые `steps` с
+  `provider_dispatched=false`, не запускает платформу и не трогает `workPath`.
+  Наличие расширений в ИБ в превью не проверяется. С `--clean-before-execution` несовместим.
+- Ошибка обновления, в том числе отсутствующего расширения, возвращает platform error
+  и неуспешный шаг с целевым именем; следующие цели не выполняются.
 
 #### Состав расширений информационной базы
 
@@ -234,10 +248,9 @@ v8-runner extensions delete --name <NAME> [--dry-run]
 v8-runner extensions activate --name <NAME> --active <yes|no> [--dry-run]
 ```
 
-- Предмет здесь другой: `extensions` без подкоманды правит свойства extension
-  `source-set` рабочего пространства, а подкоманды читают и меняют состав
-  расширений, **установленных в информационной базе**. Это разные вещи, и
-  совпадение имён их не объединяет.
+- `extensions` без подкоманды правит свойства безопасности выбранных расширений;
+  подкоманды читают и меняют состав расширений, **установленных в информационной базе**.
+  Их `--name` всегда означает платформенное имя.
 - **Семейство IBCMD-only.** У Designer нет батч-ключа, который перечисляет
   установленные расширения, поэтому `builder` здесь ничего не выбирает; при
   отсутствии `ibcmd` операция отказывает, а не уходит на Designer.

@@ -96,7 +96,10 @@ v8-runner init
   `--sources` on `yaxunit` or `client-mcp` to download `.cfe` artifacts when
   `builder=DESIGNER`.
 - Vanessa Automation debugging or scenario authoring: use `v8-runner launch mcp va --wait-ready ...` to start the client MCP server with VA loaded and verify the VA MCP tools before driving `.feature` workflows.
-- Extension properties need synchronization: use `v8-runner extensions` or `extensions --name <SOURCE_SET>`.
+- Extension security properties: use `extensions --name <SOURCE_SET>` or
+  `extensions --installed-name <PLATFORM_NAME>` for a separately loaded CFE such as YAXUNIT.
+  Repeat/combine selectors for explicit targets; neither selector means all configured extensions.
+  Append `--dry-run` to preview without platform calls. Apply disables safe mode and unsafe action protection.
 - Infobase changes need to become Git-visible files: check `git status`, then run the relevant `v8-runner dump ...` command.
 - Need a CF/CFE package of the state currently stored in the infobase: use
   `v8-runner infobase configuration export --state <working|database> --output <file.cf>`;
