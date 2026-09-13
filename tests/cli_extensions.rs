@@ -842,14 +842,15 @@ fn extensions_parent_preview_rejects_clean_and_requires_the_platform_utility() {
             .expect("invalid preview");
         assert!(!output.status.success(), "{output:?}");
         let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
-        let message = if clean {
-            &payload["data"]["message"]
-        } else {
-            &payload["error"]["message"]
-        }
-        .as_str()
-        .unwrap_or_else(|| panic!("missing error message (clean={clean}): {payload}"));
+        assert_eq!(payload["command"], "extensions", "{payload}");
+        assert_eq!(payload["ok"], false, "{payload}");
+        let message = payload["error"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("missing error message (clean={clean}): {payload}"));
         if clean {
+            assert_eq!(output.status.code(), Some(2), "{output:?}");
+            assert_eq!(payload["error"]["code"], "invalid_argument", "{payload}");
+            assert_eq!(payload["error"]["kind"], "validation", "{payload}");
             assert!(
                 message.contains("preview must not modify workPath"),
                 "{message}"
@@ -866,6 +867,131 @@ fn extensions_parent_preview_rejects_clean_and_requires_the_platform_utility() {
                 "rejected preview must not create workPath"
             );
         }
+    }
+}
+
+#[test]
+fn init_preview_clean_rejection_uses_the_shared_canonical_error_envelope() {
+    let (_dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+    let output = v8_runner_command()
+        .arg("--config")
+        .arg(&config_path)
+        .args([
+            "--json-message",
+            "--clean-before-execution",
+            "init",
+            "--dry-run",
+        ])
+        .output()
+        .expect("reject init preview with clean");
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(output.status.code(), Some(2), "{payload}");
+    assert_eq!(payload["command"], "init", "{payload}");
+    assert_eq!(payload["ok"], false, "{payload}");
+    assert_eq!(payload["error"]["code"], "invalid_argument", "{payload}");
+    assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+    assert!(!calls_log.exists(), "rejection must not dispatch ibcmd");
+}
+
+#[test]
+fn extensions_parent_preview_validates_designer_work_path_without_mutation() {
+    let (dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+    let project = config_path.parent().expect("project root");
+    let config = fs::read_to_string(&config_path).expect("config");
+    fs::write(
+        &config_path,
+        config.replace("format: EDT", "format: DESIGNER"),
+    )
+    .expect("Designer config");
+    for source in ["configuration", "exts/client-mcp", "tests"] {
+        let source_path = project.join(source);
+        let descriptor = fs::read(source_path.join("metadata/Configuration.xml"))
+            .expect("configuration descriptor");
+        fs::remove_dir_all(&source_path).expect("remove EDT source");
+        fs::create_dir_all(&source_path).expect("Designer source directory");
+        fs::write(source_path.join("Configuration.xml"), descriptor).expect("Designer descriptor");
+    }
+
+    let sentinel = dir.path().join("work/logs/existing.log");
+    fs::create_dir_all(sentinel.parent().expect("logs parent")).expect("logs");
+    fs::write(&sentinel, "keep").expect("log");
+    let blocker = dir.path().join("blocker");
+    fs::write(&blocker, "keep file").expect("file work path");
+    let dangling = dir.path().join("dangling");
+    let missing_target = dir.path().join("missing-target");
+    std::os::unix::fs::symlink(&missing_target, &dangling).expect("dangling symlink");
+    let work_alias = dir.path().join("work-alias");
+    std::os::unix::fs::symlink(dir.path().join("work"), &work_alias)
+        .expect("valid directory alias");
+    let symlink_loop = dir.path().join("symlink-loop");
+    std::os::unix::fs::symlink(&symlink_loop, &symlink_loop).expect("symlink loop");
+
+    for (relative_path, valid) in [
+        ("work", true),
+        ("work-alias/new-work", true),
+        ("missing/work", true),
+        ("scratch/../parent-work", true),
+        ("blocker", false),
+        ("scratch/../blocker", false),
+        ("blocker/child", false),
+        ("dangling", false),
+        ("dangling/child", false),
+        ("symlink-loop/child", false),
+    ] {
+        let output = v8_runner_command()
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--workdir")
+            .arg(dir.path().join(relative_path))
+            .args([
+                "--json-message",
+                "extensions",
+                "--installed-name",
+                "YaXUnit",
+                "--dry-run",
+            ])
+            .output()
+            .expect("Designer preview");
+        let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+        assert_eq!(output.status.success(), valid, "{relative_path}: {payload}");
+        assert_eq!(
+            payload["command"], "extensions",
+            "{relative_path}: {payload}"
+        );
+        if valid {
+            assert_eq!(payload["data"]["provider_dispatched"], false, "{payload}");
+        } else {
+            assert_eq!(output.status.code(), Some(2), "{relative_path}: {payload}");
+            assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+            assert!(
+                payload["error"]["message"]
+                    .as_str()
+                    .expect("validation message")
+                    .contains("workPath"),
+                "{relative_path}: {payload}"
+            );
+        }
+        assert!(!calls_log.exists(), "preview must not dispatch ibcmd");
+        assert_eq!(
+            fs::read_to_string(&sentinel).expect("preserved log"),
+            "keep"
+        );
+        assert_eq!(
+            fs::read_to_string(&blocker).expect("preserved file"),
+            "keep file"
+        );
+        assert_eq!(
+            fs::read_link(&dangling).expect("preserved symlink"),
+            missing_target
+        );
+        for missing in ["missing", "scratch", "parent-work", "missing-target"] {
+            assert!(
+                !dir.path().join(missing).exists(),
+                "preview created {missing}"
+            );
+        }
+        assert!(!dir.path().join("work/new-work").exists());
+        assert!(!dir.path().join("work/.v8-runner.workspace.lock").exists());
     }
 }
 

@@ -2183,8 +2183,11 @@ fn with_cli_workspace_lock<T>(
                 "--clean-before-execution cannot be combined with {} --dry-run because preview must not modify workPath",
                 command.as_str()
             );
-            presenter.print_error(&message);
-            return Err(UseCaseError::new(UseCaseErrorKind::Validation, message));
+            return Err(render_pre_dispatch_error(
+                presenter,
+                command,
+                UseCaseError::new(UseCaseErrorKind::Validation, message),
+            ));
         }
         return run();
     }

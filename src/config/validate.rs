@@ -199,6 +199,32 @@ pub fn validate(config: &AppConfig) -> Result<(), ConfigValidationError> {
 /// Preview and apply share the semantic checks; only apply prepares workPath first.
 pub fn validate_read_only(config: &AppConfig) -> Result<(), ConfigValidationError> {
     validate_base_path(&config.base_path)?;
+    // Resolve without creating directories, even for Designer sources (which do
+    // not enter the EDT overlap checks). Inspect the resolved candidate so a
+    // missing component followed by `..` cannot hide an existing non-directory.
+    let work_path = crate::support::path::nearest_existing_canonical_path(&config.work_path)
+        .map_err(|error| {
+            ConfigValidationError::WorkPathInvalid(format!(
+                "cannot resolve '{}': {error}",
+                config.work_path.display()
+            ))
+        })?;
+    match std::fs::metadata(&work_path) {
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(ConfigValidationError::WorkPathInvalid(format!(
+                "'{}' is not a directory",
+                work_path.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(ConfigValidationError::WorkPathInvalid(format!(
+                "cannot inspect '{}': {error}",
+                work_path.display()
+            )));
+        }
+    }
     validate_project_checks(config)
 }
 
