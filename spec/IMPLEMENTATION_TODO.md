@@ -4,7 +4,7 @@ This file tracks open implementation work only.
 
 ## Current Status
 
-- Open tasks as of `2026-09-11`: 5.
+- Open tasks as of `2026-09-13`: 8.
 
 ## Open Tasks
 
@@ -32,6 +32,20 @@ This file tracks open implementation work only.
    описывает перенос ИБ в обе стороны, а `infobase restore` переиспользует `ExportIntent`,
    `ExportProvider` и `ExportTargetState`. Переименование не меняет провод (значения на нём
    уже нейтральны), но затрагивает много файлов, поэтому идёт отдельной задачей.
+
+6. Реализовать ADR-0030, шаг 1: матрица `domain/capability.rs` с цепочками умолчаний, ключ
+   `providers.<операция>` с тремя правилами валидации, единая квитанция о провайдере
+   (`selected`/`origin`/`skipped`) у всех операций включая экспортное семейство, снятие
+   `builder` (31 файл) и `init --builder`. Поведение на этом шаге не меняется: умолчания
+   повторяют сегодняшний выбор. Docs, схемы, `config init`, `bootstrap` — по чеклисту.
+7. Реализовать ADR-0030, шаг 2: провайдер `agent` для файловой и кластерной базы —
+   `tools.designer_agent` по образцу `tools.edt_cli`, SSH-клиент в процессе без pty, сессия
+   на время workspace lock, типы ответа с закрытым `error-type`, страж признаёт агентский JSON
+   структурным. Первыми через сессию идут `generation-id` (#99), `dump`, `build`.
+8. Реализовать ADR-0030, шаг 3: вид цели «автономный сервер» — `infobase.connection: ws=…`,
+   секция `infobase.standalone`, провайдер `agent` через шлюз `ibsrv`, `ibcmd --pid` только
+   для чтения после прогрева; при запуске `ibsrv` раннером — без extended-флага и с
+   `--ssh-host-key`.
 
 ## Rules
 

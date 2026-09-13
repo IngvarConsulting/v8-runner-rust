@@ -44,6 +44,21 @@
 
 См. [ADR-0017](../decisions/0017-v8project-yaml-source-set-kak-glavnyy-konfiguratsionnyy-kontrakt.md), [ADR-0018](../decisions/0018-perenesti-kontrakt-informatsionnoy-bazy-v-infobase.md), [ADR-0019](../decisions/0019-sozdavat-servernuyu-infobazu-cherez-ibcmd-pri-init-pri-otsutstvii.md), [ADR-0021](../decisions/0021-lokalnyy-overlay-config.md) и [ADR-0022](../decisions/0022-universalnyy-mehanizm-podgotovki-rasshireniy-i-client-mcp-extension.md).
 
+## Providers
+
+1. Выбор исполнителя пооперационный: матрица `(операция, вид цели) → цепочка провайдеров` живёт в `domain/capability.rs` и является единственным источником для валидации, выбора перед запуском и таблицы в `docs/CAPABILITIES.md`.
+2. Провайдеры закрытым набором: `designer-batch`, `agent`, `ibcmd`, `ibcmd-rs`. Онлайн- и офлайн-формы `ibcmd` — следствие вида цели, а не отдельные провайдеры.
+3. Цепочка умолчаний назначается владельцем проекта; `evidence` строки записывается как улика и не является воротами. Провайдер с `implementation: experimental` в цепочку умолчаний не входит.
+4. `providers.<операция>` в `v8project.yaml` или `v8project.local.yaml` — единственный способ переопределить провайдера: скаляр, строгий (неготовность — типизированный отказ без отката на умолчание), отклоняется для операции без развилки и для провайдера вне матрицы.
+5. Провайдер не является аргументом MCP tool, CLI-флагом или аргументом вызова.
+6. Квитанция о провайдере имеет одну форму у всех операций: `selected`, `origin` (`default` | `override`), `skipped[]` с причиной. Неиспользованные альтернативы не перечисляются.
+7. Сессия провайдера `agent` открывается при захвате workspace lock и закрывается при его освобождении; первая команда сессии — `options set --show-prompt=no --output-format=json`; решения принимаются по `type`/`error-type`, проза `message` — улика.
+8. Готовность `agent` устанавливается результатом SSH-аутентификации с настроенными учётными данными или пустой парой; `infobase.user` обязателен ровно тогда, когда он обязателен для пакетного Конфигуратора.
+9. Раннер никогда не передаёт `ibsrv` флаг `--enable-extended-designer-features` и не использует `ibcmd --remote`.
+10. Пункты разделов выше, говорящие о `builder`, действуют до реализации ADR-0030; по её завершении `builder` снимается, а эти пункты переписываются в терминах матрицы.
+
+См. [ADR-0030](../decisions/0030-provaydery-po-operatsiyam-s-umolchaniyami-v-kode.md).
+
 ## Workspace Lock
 
 1. Любая CLI/MCP команда, которая читает или пишет runtime state под `workPath`, должна владеть workspace lock на время выполнения.
