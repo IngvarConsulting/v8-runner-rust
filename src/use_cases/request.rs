@@ -678,8 +678,12 @@ pub struct InitRequest {
 /// Transport-neutral request for extension property updates.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ConfigureExtensionsRequest {
-    /// Optional source-set names to update. Empty means all extension source-sets.
+    /// Explicit source-set names. Both selector lists empty means all extension source-sets.
     pub names: Vec<String>,
+    /// Explicit installed platform names, independent of configured source-sets.
+    pub installed_names: Vec<String>,
+    /// Resolve targets and locate ibcmd without starting it or changing the infobase.
+    pub dry_run: bool,
 }
 
 #[cfg(test)]

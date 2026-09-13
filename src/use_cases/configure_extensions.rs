@@ -72,6 +72,38 @@ pub fn execute(
         }
     };
     let receipt = selected.receipt;
+    // Превью называет цели и исполнителя и ничего не трогает: установленное состояние
+    // расширения не опрашивается, потому что опрос — это уже запуск платформы.
+    if args.dry_run {
+        let executor = selected
+            .location
+            .as_ref()
+            .map(|location| location.path.display().to_string())
+            .unwrap_or_else(|| "the designer agent".to_owned());
+        let target_name = match connection.as_ref() {
+            Some(connection) => connection.describe_target(),
+            None => "the infobase".to_owned(),
+        };
+        return Ok(ExtensionsResult {
+            provider: Some(receipt),
+            provider_dispatched: false,
+            ok: true,
+            steps: targets
+                .into_iter()
+                .map(|target| ExtensionsStep {
+                    message: Some(format!(
+                        "would disable safe mode and unsafe action protection for '{target}' in {target_name} via {executor}; installed state is not probed"
+                    )),
+                    target,
+                    action: DISABLE_SAFETY_ACTION.to_owned(),
+                    ok: true,
+                    duration_ms: 0,
+                })
+                .collect(),
+            duration_ms: started.elapsed().as_millis() as u64,
+        });
+    }
+
     let mut setter = match (selected.provider, selected.location) {
         (Provider::Agent, location) => {
             match ExtensionAgent::open(context, config, location.map(|l| l.path).as_deref()) {
@@ -323,7 +355,9 @@ fn map_extension_update_error(target: &str, error: IbcmdError) -> AppError {
     ))
 }
 
-fn resolve_targets(
+/// Resolves and validates the entire selection before lock/cleanup or platform dispatch.
+/// The execution boundary repeats this pure check for non-CLI callers.
+pub(crate) fn resolve_targets(
     config: &AppConfig,
     args: &ConfigureExtensionsRequest,
 ) -> Result<Vec<String>, AppError> {
@@ -339,7 +373,7 @@ fn resolve_targets(
         })
         .collect::<Vec<_>>();
 
-    if args.names.is_empty() {
+    if args.names.is_empty() && args.installed_names.is_empty() {
         return Ok(available.into_iter().map(|(_, name)| name).collect());
     }
 
@@ -353,7 +387,19 @@ fn resolve_targets(
                 "unknown extension source-set '{requested}'"
             )));
         };
-        targets.push(resolved.clone());
+        if !targets.contains(resolved) {
+            targets.push(resolved.clone());
+        }
+    }
+    for name in &args.installed_names {
+        if name.trim().is_empty() || name.chars().any(char::is_control) || name.starts_with('-') {
+            return Err(AppError::Validation(
+                "installed extension name must be nonblank, contain no control characters, and not start with '-'".to_owned(),
+            ));
+        }
+        if !targets.contains(name) {
+            targets.push(name.clone());
+        }
     }
     Ok(targets)
 }
@@ -439,10 +485,74 @@ mod tests {
         .expect("project file");
         let config = sample_config(dir.path(), dir.path(), Path::new("/tmp/ibcmd"));
 
-        let targets = resolve_targets(&config, &ConfigureExtensionsRequest { names: vec![] })
-            .expect("targets");
+        let targets =
+            resolve_targets(&config, &ConfigureExtensionsRequest::default()).expect("targets");
 
         assert_eq!(targets, vec!["client_mcp"]);
+    }
+
+    #[test]
+    fn installed_targets_do_not_require_source_sets_or_normalize_names() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = sample_config(dir.path(), dir.path(), Path::new("/tmp/ibcmd"));
+        config.source_sets.clear();
+        let names = vec![
+            "YAXUNIT".to_owned(),
+            " Проба ".to_owned(),
+            "yaxunit".to_owned(),
+        ];
+        let request = ConfigureExtensionsRequest {
+            installed_names: names.clone(),
+            ..Default::default()
+        };
+        assert_eq!(resolve_targets(&config, &request).expect("targets"), names);
+    }
+
+    #[test]
+    fn explicit_selection_is_ordered_union_without_implicit_all() {
+        let dir = tempdir().expect("tempdir");
+        let config = sample_config(dir.path(), dir.path(), Path::new("/tmp/ibcmd"));
+        let mut request = ConfigureExtensionsRequest {
+            installed_names: vec!["YAXUNIT".to_owned()],
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_targets(&config, &request).expect("direct"),
+            ["YAXUNIT"]
+        );
+        request.names = vec!["client_mcp".to_owned(), "client_mcp".to_owned()];
+        request
+            .installed_names
+            .extend(["client_mcp".to_owned(), "YAXUNIT".to_owned()]);
+        assert_eq!(
+            resolve_targets(&config, &request).expect("mixed"),
+            ["client_mcp", "YAXUNIT"]
+        );
+    }
+
+    #[test]
+    fn invalid_direct_names_and_unknown_source_sets_fail_validation() {
+        let dir = tempdir().expect("tempdir");
+        let config = sample_config(dir.path(), dir.path(), Path::new("/tmp/ibcmd"));
+        for name in ["", "  ", "\t", "YAX\nUNIT", "YAX\0UNIT", "--all"] {
+            let request = ConfigureExtensionsRequest {
+                installed_names: vec!["YAXUNIT".to_owned(), name.to_owned()],
+                ..Default::default()
+            };
+            assert!(matches!(
+                resolve_targets(&config, &request),
+                Err(AppError::Validation(_))
+            ));
+        }
+        for name in ["YAXUNIT", "configuration"] {
+            let request = ConfigureExtensionsRequest {
+                names: vec![name.to_owned()],
+                installed_names: vec![name.to_owned()],
+                ..Default::default()
+            };
+            let error = resolve_targets(&config, &request).expect_err("unknown source-set");
+            assert!(error.to_string().contains("unknown extension source-set"));
+        }
     }
 
     #[test]
@@ -488,7 +598,7 @@ mod tests {
         let result = execute(
             &ExecutionContext::cli(CommandName::Extensions),
             &config,
-            &ConfigureExtensionsRequest { names: vec![] },
+            &ConfigureExtensionsRequest::default(),
         )
         .expect("execute");
 
@@ -527,7 +637,7 @@ mod tests {
         let result = execute(
             &ExecutionContext::cli(CommandName::Extensions),
             &config,
-            &ConfigureExtensionsRequest { names: vec![] },
+            &ConfigureExtensionsRequest::default(),
         )
         .expect("execute");
 
@@ -559,7 +669,7 @@ mod tests {
         let failure = execute(
             &ExecutionContext::cli(CommandName::Extensions),
             &config,
-            &ConfigureExtensionsRequest { names: vec![] },
+            &ConfigureExtensionsRequest::default(),
         )
         .expect_err("failure");
 
@@ -597,7 +707,7 @@ mod tests {
         let failure = execute(
             &ExecutionContext::cli(CommandName::Extensions).with_cancellation(cancellation),
             &config,
-            &ConfigureExtensionsRequest { names: vec![] },
+            &ConfigureExtensionsRequest::default(),
         )
         .expect_err("interrupted execution");
         let payload = failure.payload.expect("payload");

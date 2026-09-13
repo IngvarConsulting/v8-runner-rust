@@ -461,6 +461,13 @@ fn execute_extensions(
     clean_before_execution: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
+    args.validate_property_options().map_err(|message| {
+        render_pre_dispatch_error(
+            presenter,
+            CommandName::Extensions,
+            AppError::Validation(message.to_owned()),
+        )
+    })?;
     if let Some(command) = &args.command {
         return execute_extension_command(
             config,
@@ -471,14 +478,15 @@ fn execute_extensions(
         );
     }
     let request = map_extensions_request(args);
+    configure_extensions::resolve_targets(config, &request)
+        .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Extensions, error))?;
     let context = cli_context(config, CommandName::Extensions, cancellation);
     with_cli_workspace_lock(
         config,
         presenter,
         CommandName::Extensions,
         clean_before_execution,
-        // у голого `extensions` превью нет: подкоманды его имеют.
-        false,
+        args.dry_run,
         || match configure_extensions::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -487,6 +495,8 @@ fn execute_extensions(
                         result.duration_ms,
                         result,
                     ));
+                } else if !result.provider_dispatched {
+                    render_extensions_text(&result, presenter);
                 }
                 Ok(())
             }
@@ -2379,6 +2389,8 @@ fn map_build_request(args: &BuildArgs) -> BuildRequest {
 fn map_extensions_request(args: &ExtensionsArgs) -> ConfigureExtensionsRequest {
     ConfigureExtensionsRequest {
         names: args.names.clone(),
+        installed_names: args.installed_names.clone(),
+        dry_run: args.dry_run,
     }
 }
 
@@ -4306,6 +4318,8 @@ mod tests {
             map_extensions_request(&ExtensionsArgs {
                 command: None,
                 names: vec!["client_mcp".to_owned()],
+                installed_names: vec![],
+                dry_run: false,
             })
             .names,
             vec!["client_mcp"]
@@ -4607,6 +4621,8 @@ mod tests {
             command_name(&Command::Extensions(ExtensionsArgs {
                 command: None,
                 names: vec![],
+                installed_names: vec![],
+                dry_run: false,
             })),
             CommandName::Extensions
         );

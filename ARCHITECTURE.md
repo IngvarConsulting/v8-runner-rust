@@ -43,6 +43,10 @@ The CLI/runtime boundary is now split explicitly:
 - `app.rs` now also branches early for `mcp serve stdio` and `mcp serve http`, because those paths must bypass CLI presenters and run with MCP-specific bootstrap/logging behavior.
 - `cli::execute` converts `clap` args into transport-neutral request structs and renders command success/failure output.
 - `cli::execute` also owns the CLI workspace lock boundary for commands that use `workPath`; nested flows call explicit unlocked internals only while the outer command owns the lock.
+- Extension security updates keep one target resolver and executor in `configure_extensions`:
+  `--name` selects configured source-sets, `--installed-name` selects explicit platform names.
+  The CLI resolves the full selection before lock/cleanup; previews use the existing result
+  with `provider_dispatched=false` and return before action logging. See [ADR-0027](spec/decisions/0027-sostav-rasshireniy-informatsionnoy-bazy.md).
 - CLI-only maintenance commands like `convert` live on the same adapter boundary and do not imply a matching MCP tool.
 - `use_cases::{request,context,result}` define the transport-neutral contract that both CLI and future MCP adapters can consume.
 - `use_cases/*.rs` no longer depend on `clap`, `Presenter`, or `Envelope`.

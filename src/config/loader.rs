@@ -6,8 +6,8 @@ use crate::config::schema::{
     validate_local_overlay_schema_boundary, validate_main_config_schema_boundary,
 };
 use crate::config::validate::{
-    validate, validate_infobase_export, validate_prepared_test, validate_tools_download_bootstrap,
-    ConfigValidationError,
+    validate, validate_infobase_export, validate_prepared_test, validate_read_only,
+    validate_tools_download_bootstrap, ConfigValidationError,
 };
 use crate::support::path::normalize_windows_verbatim_path;
 
@@ -51,6 +51,14 @@ pub fn load_config(
     load_config_with_mode(config_path, workdir_override, ConfigValidationMode::Full)
 }
 
+/// Load and fully validate a project without creating workPath for a preview.
+pub fn load_config_for_preview(
+    config_path: Option<&str>,
+    workdir_override: Option<&str>,
+) -> Result<AppConfig, ConfigLoadError> {
+    load_config_with_mode(config_path, workdir_override, ConfigValidationMode::Preview)
+}
+
 pub fn load_config_for_tools_download(
     config_path: Option<&str>,
     workdir_override: Option<&str>,
@@ -86,6 +94,7 @@ pub fn load_config_for_infobase_export(
 
 enum ConfigValidationMode {
     Full,
+    Preview,
     InfobaseExport,
     PreparedTest,
     ToolsDownload,
@@ -142,6 +151,7 @@ fn load_config_with_mode(
 
     match validation_mode {
         ConfigValidationMode::Full => validate(&config)?,
+        ConfigValidationMode::Preview => validate_read_only(&config)?,
         ConfigValidationMode::InfobaseExport => validate_infobase_export(&config)?,
         ConfigValidationMode::PreparedTest => validate_prepared_test(&config)?,
         ConfigValidationMode::ToolsDownload => validate_tools_download_bootstrap(&config)?,
