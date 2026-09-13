@@ -255,6 +255,9 @@ Reintroduction guard для #24: причина — побочная запис�
 единственный владелец восстановления — `execute_source_set_step` в `use_cases/build_project`.
 Регрессии `cdfi_step_tests` и `cli_build_cdfi_recovery` проверяют точные байты/отсутствие до
 успеха update и запрет отката после него, включая позднюю ошибку записи hash state.
+Защита копии от расширения доступа принадлежит `CdfiRecovery::capture_path`: на Unix
+mode `0700` для каталога и `0600` для копии/маркера задаются при создании, до записи.
+CLI-регрессия с дочерним `umask 022/000` проверяет эти права у сохранённого recovery artifact.
 
 См. [ADR-0012](../decisions/0012-on-demand-change-detection-i-faylovaya-partial-load-strategiya.md).
 

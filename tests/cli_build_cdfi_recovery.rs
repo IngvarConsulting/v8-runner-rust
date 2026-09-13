@@ -3,10 +3,12 @@
 mod support;
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde_json::Value;
-use support::{temp_workspace, v8_runner_command, write_shell_script};
+use support::{temp_workspace, v8_runner_binary, v8_runner_command, write_shell_script};
 
 const BASELINE: &[u8] = include_bytes!("fixtures/designer/configuration/ConfigDumpInfo.xml");
 const PLATFORM_OUTPUT: &[u8] = b"<?xml version=\"1.0\"?>\n<ConfigDumpInfo><ConfigVersions><Metadata name=\"Catalog.Items\" id=\"new-id\" configVersion=\"new-version\"/></ConfigVersions></ConfigDumpInfo>\n";
@@ -219,6 +221,100 @@ fn obstructed_recovery_retains_readable_snapshot_and_platform_failure() {
         BASELINE
     );
     assert!(fixture.cdfi("main").join("owned-by-platform").is_file());
+}
+
+// Reintroduction guard: CdfiRecovery owns snapshot privacy; ambient umask must
+// never expose original bytes or absence markers through a shared workPath.
+#[test]
+fn obstructed_recovery_keeps_snapshots_private_regardless_of_umask() {
+    for umask in ["022", "000"] {
+        for original_mode in [Some(0o600), Some(0o644), None] {
+            let fixture = Fixture::new("block-recovery");
+            fs::create_dir(&fixture.work).expect("shared work directory");
+            for (path, mode) in [
+                (fixture.workspace.path(), 0o755),
+                (fixture.work.as_path(), 0o755),
+                (
+                    fixture.cdfi("main").parent().expect("source directory"),
+                    0o700,
+                ),
+            ] {
+                fs::set_permissions(path, fs::Permissions::from_mode(mode))
+                    .expect("directory permissions");
+            }
+            match original_mode {
+                Some(mode) => {
+                    fs::set_permissions(fixture.cdfi("main"), fs::Permissions::from_mode(mode))
+                        .expect("original CDFI permissions");
+                }
+                None => fs::remove_file(fixture.cdfi("main")).expect("remove baseline"),
+            }
+
+            // Set umask only in the child shell: changing it in the test process races
+            // other tests. Positional arguments keep executable/config paths literal.
+            let output = Command::new("/bin/sh")
+                .args(["-c", "umask \"$1\"; shift; exec \"$@\"", "cdfi-permissions"])
+                .arg(umask)
+                .arg(v8_runner_binary())
+                .arg("--config")
+                .arg(&fixture.config)
+                .args([
+                    "--json-message",
+                    "build",
+                    "--full-rebuild",
+                    "--source-set",
+                    "main",
+                ])
+                .output()
+                .expect("run build with explicit umask");
+            let payload: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+                panic!(
+                    "expected JSON: {error}; stdout={} stderr={}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            });
+            assert_platform_failure(output.status, &payload);
+            assert_recovery(&payload, 0, "failed", &fixture.cdfi("main"));
+            let receipt = &payload["data"]["steps"][0]["cdfi_recovery"];
+            assert_eq!(receipt["original_existed"], original_mode.is_some());
+            let snapshot = Path::new(
+                receipt["snapshot_path"]
+                    .as_str()
+                    .expect("retained snapshot"),
+            );
+            let expected = original_mode.map_or_else(
+                || {
+                    format!(
+                        "Original CDFI must be absent: {}\n",
+                        receipt["tracked_path"].as_str().expect("tracked path")
+                    )
+                    .into_bytes()
+                },
+                |_| BASELINE.to_vec(),
+            );
+            assert_eq!(
+                fs::read(snapshot).expect("retained snapshot bytes"),
+                expected
+            );
+            assert!(fixture.cdfi("main").join("owned-by-platform").is_file());
+            let directory_mode = fs::metadata(snapshot.parent().expect("snapshot directory"))
+                .expect("snapshot directory metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            let file_mode = fs::metadata(snapshot)
+                .expect("snapshot file metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(
+                (directory_mode, file_mode),
+                (0o700, 0o600),
+                "umask {umask}, original {original_mode:?}"
+            );
+        }
+    }
 }
 
 #[test]

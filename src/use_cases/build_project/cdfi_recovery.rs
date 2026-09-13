@@ -43,7 +43,14 @@ impl CdfiRecovery {
     fn capture_path(tracked_path: &Path, work_path: &Path) -> std::io::Result<Self> {
         let metadata = regular_file_metadata(tracked_path)?;
         let root = temp_root(work_path)?;
-        let snapshot_dir = Builder::new().prefix("cdfi-recovery-").tempdir_in(&root)?;
+        let mut directory = Builder::new();
+        directory.prefix("cdfi-recovery-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            directory.permissions(Permissions::from_mode(0o700));
+        }
+        let snapshot_dir = directory.tempdir_in(&root)?;
         let (original, snapshot_name, bytes) = match metadata {
             Some(metadata) => (
                 OriginalState::Present(metadata.permissions()),
@@ -57,7 +64,15 @@ impl CdfiRecovery {
             ),
         };
         let snapshot_path = snapshot_dir.path().join(snapshot_name);
-        let mut snapshot = fs::File::create(&snapshot_path)?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Restrict access at creation: chmod after writing would expose the backup.
+            options.mode(0o600);
+        }
+        let mut snapshot = options.open(&snapshot_path)?;
         snapshot.write_all(&bytes)?;
         snapshot.sync_all()?;
         best_effort_fsync_dir(snapshot_dir.path())?;
