@@ -176,6 +176,7 @@ pub(super) fn run_build_designer(
                 }
 
                 let step_started = Instant::now();
+                let step_position = steps.len();
                 match execute_source_set_step(
                     context,
                     config,
@@ -188,25 +189,30 @@ pub(super) fn run_build_designer(
                     partial_paths.as_deref(),
                     &commit,
                 ) {
-                    Ok(warnings) => push_build_step(
-                        &mut steps,
-                        &source_set.name,
-                        mode,
-                        true,
-                        merge_step_message(message, &warnings),
-                        step_started.elapsed().as_millis() as u64,
-                    ),
-                    Err(error) => {
-                        let result = fail_from_source_set_index(
+                    Ok(outcome) => {
+                        push_build_step(
+                            &mut steps,
+                            &source_set.name,
+                            mode,
+                            true,
+                            merge_step_message(message, &outcome.warnings),
+                            step_started.elapsed().as_millis() as u64,
+                        );
+                        steps[step_position].cdfi_recovery = outcome.cdfi_recovery;
+                    }
+                    Err(failure) => {
+                        let mut result = fail_from_source_set_index(
                             started,
                             steps,
                             &ordered_source_sets,
                             index,
                             source_set,
                             mode,
-                            error.to_string(),
+                            failure.error.to_string(),
                         );
-                        return Err(BuildExecutionFailure::with_payload(error, result));
+                        result.steps[step_position].cdfi_recovery =
+                            failure.payload.and_then(|outcome| outcome.cdfi_recovery);
+                        return Err(BuildExecutionFailure::with_payload(failure.error, result));
                     }
                 }
             }
@@ -898,6 +904,7 @@ pub(super) fn run_build_edt(
                 commit,
             } => {
                 let load_started = Instant::now();
+                let step_position = steps.len();
                 let load_result = match config.builder {
                     BuilderBackend::Designer => {
                         let designer = match designer_binary.clone() {
@@ -975,28 +982,38 @@ pub(super) fn run_build_edt(
                             partial_paths.as_deref(),
                             &commit,
                         )
+                        .map(|warnings| DesignerStepResult {
+                            warnings,
+                            cdfi_recovery: None,
+                        })
+                        .map_err(UseCaseFailure::without_payload)
                     }
                 };
                 match load_result {
-                    Ok(warnings) => push_build_step(
-                        &mut steps,
-                        &source_set.name,
-                        mode,
-                        true,
-                        merge_step_message(message, &warnings),
-                        load_started.elapsed().as_millis() as u64,
-                    ),
-                    Err(error) => {
-                        let result = fail_from_source_set_index(
+                    Ok(outcome) => {
+                        push_build_step(
+                            &mut steps,
+                            &source_set.name,
+                            mode,
+                            true,
+                            merge_step_message(message, &outcome.warnings),
+                            load_started.elapsed().as_millis() as u64,
+                        );
+                        steps[step_position].cdfi_recovery = outcome.cdfi_recovery;
+                    }
+                    Err(failure) => {
+                        let mut result = fail_from_source_set_index(
                             started,
                             steps,
                             &ordered_source_sets,
                             index,
                             source_set,
                             mode,
-                            error.to_string(),
+                            failure.error.to_string(),
                         );
-                        return Err(BuildExecutionFailure::with_payload(error, result));
+                        result.steps[step_position].cdfi_recovery =
+                            failure.payload.and_then(|outcome| outcome.cdfi_recovery);
+                        return Err(BuildExecutionFailure::with_payload(failure.error, result));
                     }
                 }
             }

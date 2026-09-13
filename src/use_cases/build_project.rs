@@ -7,7 +7,7 @@ use std::time::Instant;
 use crate::change_detection::analyzer::{self, AnalysisOutcome};
 use crate::change_detection::partial_load;
 use crate::config::model::{AppConfig, BuilderBackend, SourceFormat, SourceSetConfig};
-use crate::domain::build::{BuildMode, BuildResult};
+use crate::domain::build::{BuildMode, BuildResult, CdfiRecoverySummary};
 use crate::domain::source_set::SourceSetContext;
 use crate::platform::edt::EdtDsl;
 use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
@@ -32,6 +32,7 @@ use crate::use_cases::tool_extension;
 use tempfile::NamedTempFile;
 use tracing::debug;
 
+mod cdfi_recovery;
 mod coordinator;
 mod helpers;
 
@@ -438,6 +439,14 @@ fn recreate_directory(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(path)
 }
 
+/// Internal step data travels with failures as well as successes, so a later source-set
+/// cannot erase an earlier source-set's recovery receipt.
+#[derive(Debug)]
+struct DesignerStepResult {
+    warnings: Vec<String>,
+    cdfi_recovery: Option<CdfiRecoverySummary>,
+}
+
 fn execute_source_set_step(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -449,6 +458,93 @@ fn execute_source_set_step(
     step_index: usize,
     partial_paths: Option<&[PathBuf]>,
     commit: &StepCommit,
+) -> UseCaseResult<DesignerStepResult> {
+    if let Some(error) = interruption_before_safe_point(
+        context,
+        format!("build load for source-set '{}'", source_set.name),
+    ) {
+        return Err(UseCaseFailure::without_payload(error));
+    }
+    let recovery = cdfi_recovery::CdfiRecovery::capture(load_context.path(), &config.work_path)
+        .map_err(UseCaseFailure::without_payload)?;
+    let warnings = match load_and_update_designer_source_set(
+        context,
+        config,
+        binary,
+        runner,
+        source_set,
+        load_context,
+        step_index,
+        partial_paths,
+    ) {
+        Ok(warnings) => warnings,
+        Err(error) => {
+            // Recovery must complete even when the failure is a pending interruption.
+            let phase = context.run_no_process_critical_phase(|| {
+                Ok::<_, std::convert::Infallible>(recovery.rollback())
+            });
+            let summary = match phase {
+                Ok(phase) => phase.value,
+                Err(never) => match never {},
+            };
+            let error = error.with_context(cdfi_recovery_detail(&summary));
+            return Err(UseCaseFailure::with_payload(
+                error,
+                DesignerStepResult {
+                    warnings: vec![],
+                    cdfi_recovery: Some(summary),
+                },
+            ));
+        }
+    };
+
+    // UpdateDBCfg has succeeded: the database now owns the new generation. A later
+    // hash-storage error must not restore a version file describing the old one.
+    let summary = recovery.commit();
+    let mut outcome = DesignerStepResult {
+        warnings,
+        cdfi_recovery: Some(summary),
+    };
+    if let Some(warning) = outcome
+        .cdfi_recovery
+        .as_ref()
+        .and_then(|s| s.cleanup_warning.as_ref())
+    {
+        outcome.warnings.push(warning.clone());
+    }
+    if let Err(error) = commit_step_state(source_set, commit_context, &config.work_path, commit) {
+        return Err(UseCaseFailure::with_payload(error, outcome));
+    }
+    Ok(outcome)
+}
+
+fn cdfi_recovery_detail(summary: &CdfiRecoverySummary) -> String {
+    let mut detail = format!(
+        "CDFI recovery {:?}: {}",
+        summary.action,
+        summary.tracked_path.display()
+    );
+    if let Some(path) = &summary.snapshot_path {
+        detail.push_str(&format!("; recovery snapshot: {}", path.display()));
+    }
+    if let Some(failure) = &summary.failure {
+        detail.push_str(&format!("; {failure}"));
+    }
+    if let Some(warning) = &summary.cleanup_warning {
+        detail.push_str(&format!("; {warning}"));
+    }
+    detail
+}
+
+fn load_and_update_designer_source_set(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    binary: &Path,
+    runner: &dyn ProcessRunner,
+    source_set: &SourceSetConfig,
+    load_context: &SourceSetContext,
+    step_index: usize,
+    partial_paths: Option<&[PathBuf]>,
 ) -> Result<Vec<String>, AppError> {
     if let Some(error) = interruption_before_safe_point(
         context,
@@ -561,8 +657,6 @@ fn execute_source_set_step(
     .update_db_cfg(extension_name(source_set))
     .map_err(AppError::from)?;
     ensure_platform_success("update_db_cfg", source_set, &update_result)?;
-
-    commit_step_state(source_set, commit_context, &config.work_path, commit)?;
 
     Ok([
         deferred_interruption_warning("load", &load_result),
@@ -722,6 +816,7 @@ fn execute_source_set_step_ibcmd(
 
 #[cfg(test)]
 mod tests {
+    mod cdfi_step_tests;
     use super::{run_build, BUILD_COMMAND};
     use crate::change_detection::hash_storage::{HashStorage, FILES_MTIME};
     use crate::change_detection::source_sets::SourceSetsService;
@@ -818,6 +913,21 @@ mod tests {
         }
         fs::write(path, format!("#!/bin/sh\n{body}\n")).expect("write script");
         make_executable(path);
+    }
+
+    #[cfg(unix)]
+    fn mutate_cdfi_during_fake_load(script: &Path) {
+        let body = fs::read_to_string(script).expect("read fake Designer");
+        let mutation = r#"#!/bin/sh
+previous=""
+for arg in "$@"; do
+  if [ "$previous" = "/LoadConfigFromFiles" ]; then
+    printf '<ConfigDumpInfo version="changed"/>' > "$arg/ConfigDumpInfo.xml"
+  fi
+  previous="$arg"
+done
+"#;
+        fs::write(script, body.replacen("#!/bin/sh\n", mutation, 1)).expect("inject CDFI mutation");
     }
 
     #[cfg(unix)]
@@ -2574,6 +2684,9 @@ mod tests {
         )
         .expect("modify edt main");
 
+        let edt_cdfi = base.join("main/ConfigDumpInfo.xml");
+        fs::write(&edt_cdfi, b"EDT source stays untouched").expect("source CDFI");
+        mutate_cdfi_during_fake_load(&platform_script);
         let failure = run_build(&config, &build_args(false)).expect_err("expected failure");
         let result = failure
             .payload
@@ -2593,6 +2706,21 @@ mod tests {
         }));
         assert_eq!(edt_storage_generation(&config, "main"), 2);
         assert!(!designer_storage_path.exists());
+        let receipt = result
+            .steps
+            .iter()
+            .find_map(|step| step.cdfi_recovery.as_ref())
+            .expect("Designer recovery receipt");
+        assert_eq!(
+            receipt.action,
+            crate::domain::build::CdfiRecoveryAction::RemovedCreatedFile
+        );
+        assert!(receipt.tracked_path.starts_with(&work));
+        assert!(!receipt.tracked_path.exists());
+        assert_eq!(
+            fs::read(edt_cdfi).expect("EDT source"),
+            b"EDT source stays untouched"
+        );
     }
 
     #[cfg(unix)]
@@ -2697,6 +2825,10 @@ mod tests {
         )
         .expect("modify main");
 
+        let cdfi = base.join("main/ConfigDumpInfo.xml");
+        let original = b"\xef\xbb\xbf<ConfigDumpInfo/>\r\n";
+        fs::write(&cdfi, original).expect("baseline CDFI");
+        mutate_cdfi_during_fake_load(&script);
         let failure = run_build(&config, &build_args(false)).expect_err("partial load fails");
         let message = failure.error.message();
         let marker = "partial load list path: ";
@@ -2712,6 +2844,15 @@ mod tests {
             .as_ref()
             .expect("build failures should preserve a structured payload");
 
+        assert_eq!(fs::read(cdfi).expect("restored partial CDFI"), original);
+        assert_eq!(
+            payload.steps[0]
+                .cdfi_recovery
+                .as_ref()
+                .expect("receipt")
+                .action,
+            crate::domain::build::CdfiRecoveryAction::Restored
+        );
         assert_eq!(failure.error.kind(), UseCaseErrorKind::Platform);
         assert!(matches!(payload.steps[0].mode, BuildMode::Partial { .. }));
         assert!(!payload.steps[0].ok);
@@ -3106,6 +3247,7 @@ mod tests {
                     ok: true,
                     message: Some("forced full rebuild".to_owned()),
                     duration_ms: 1,
+                    cdfi_recovery: None,
                 },
                 crate::domain::build::BuildStep {
                     source_set: "ext".to_owned(),
@@ -3113,6 +3255,7 @@ mod tests {
                     ok: false,
                     message: Some("aborted after previous failure".to_owned()),
                     duration_ms: 0,
+                    cdfi_recovery: None,
                 },
             ],
             duration_ms: 42,

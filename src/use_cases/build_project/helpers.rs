@@ -403,6 +403,7 @@ pub(super) fn push_build_step(
         ok,
         message: Some(message),
         duration_ms,
+        cdfi_recovery: None,
     };
     log_build_step_timeline(&step);
     steps.push(step);
