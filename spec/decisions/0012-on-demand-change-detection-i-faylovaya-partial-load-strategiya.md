@@ -36,6 +36,7 @@
 12. Изменения `.bsl` расширяются только до существующих связанных XML-файлов, включая sibling XML и ancestor XML descriptors; каталоги в `-listFile` не добавляются, потому что Designer partial load должен получать file-only список.
 13. Designer partial-load `listFile` пишется как UTF-8 с ровно одним BOM `EF BB BF` перед payload; записи остаются относительными к source-set root, используют нативные разделители компонентов пути, разделяются `CRLF` без завершающего `CRLF`, а пустой payload представлен BOM-only файлом. Этот byte contract относится только к Designer `/LoadConfigFromFiles -partial -listFile` и не меняет IBCMD partial import или partial dump list files.
 14. Prepared snapshot коммитится только после успешного соответствующего export/load step.
+15. Уточнение #24: перед Designer load сохраняются байты/permissions или отсутствие `ConfigDumpInfo.xml`. Ошибка до успешного `UpdateDBCfg` восстанавливает исходное состояние; при невозможности восстановления остаётся отдельный backup под `workPath/temp`. Это относится и к Designer output EDT. После успешного update CDFI не откатывается, даже если запись hash snapshot не удалась. Результат каждого затронутого шага содержит `cdfi_recovery`; счётчик изменённых metadata entries диагностический и может быть неизвестен. Откат CDFI не отменяет изменения в самой ИБ и не делает multi-source build атомарным.
 
 ## Неграницы (Non-goals)
 

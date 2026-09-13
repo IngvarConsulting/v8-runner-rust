@@ -626,6 +626,7 @@ fn successful_build_step(
         ok: true,
         message: Some(message),
         duration_ms,
+        cdfi_recovery: None,
     }
 }
 
@@ -640,6 +641,7 @@ fn skipped_build_step(
         ok: true,
         message: Some(message),
         duration_ms,
+        cdfi_recovery: None,
     }
 }
 
@@ -650,6 +652,7 @@ fn failed_build_step(extension: &ToolExtensionConfig, message: String) -> BuildS
         ok: false,
         message: Some(message),
         duration_ms: 0,
+        cdfi_recovery: None,
     }
 }
 

@@ -1171,6 +1171,7 @@ mod tests {
                 ok: true,
                 message: Some("loaded".to_owned()),
                 duration_ms: 17,
+                cdfi_recovery: None,
             }],
             duration_ms: 42,
         }));
@@ -1213,6 +1214,17 @@ mod tests {
                     ok: false,
                     message: Some("broken".to_owned()),
                     duration_ms: 9,
+                    cdfi_recovery: Some(crate::domain::build::CdfiRecoverySummary {
+                        tracked_path: std::path::PathBuf::from("source/ConfigDumpInfo.xml"),
+                        original_existed: true,
+                        changed_entry_count: Some(2),
+                        action: crate::domain::build::CdfiRecoveryAction::Failed,
+                        snapshot_path: Some(std::path::PathBuf::from(
+                            "work/temp/cdfi-recovery/ConfigDumpInfo.xml",
+                        )),
+                        cleanup_warning: None,
+                        failure: Some("restore destination is a directory".to_owned()),
+                    }),
                 }],
                 duration_ms: 19,
             },
@@ -1231,6 +1243,18 @@ mod tests {
                 assert_eq!(failure.response.command, "build");
                 assert_eq!(failure.response.duration_ms, 19);
                 assert_eq!(failure.response.data["steps"][0]["ok"], false);
+                assert_eq!(
+                    failure.response.data["steps"][0]["cdfi_recovery"]["action"],
+                    "failed"
+                );
+                assert_eq!(
+                    failure.response.data["steps"][0]["cdfi_recovery"]["changed_entry_count"],
+                    2
+                );
+                assert_eq!(
+                    failure.response.data["steps"][0]["cdfi_recovery"]["snapshot_path"],
+                    "work/temp/cdfi-recovery/ConfigDumpInfo.xml"
+                );
                 assert_eq!(
                     failure
                         .response

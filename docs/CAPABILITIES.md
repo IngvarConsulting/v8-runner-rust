@@ -291,6 +291,19 @@ v8-runner build [--source-set <NAME>] [--full-rebuild] [--dry-run]
   project source-set.
 - Не является атомарной multi-source-set операцией: ранние успешные шаги не откатываются, если
   поздний шаг падает.
+- Перед загрузкой project source-set через Designer сохраняет точные байты и permissions
+  `ConfigDumpInfo.xml` (или его отсутствие), включая generated Designer files EDT. Ошибка,
+  отмена или таймаут до успешного `UpdateDBCfg` восстанавливает файл. После успешного update
+  поздняя ошибка hash storage не откатывает CDFI; изменения самой ИБ не восстанавливаются.
+- CLI JSON и MCP `build_project` возвращают `steps[].cdfi_recovery` для защищённых шагов:
+  `action` = `not_needed`, `restored`, `removed_created_file` или `failed`; `tracked_path`,
+  `original_existed`, `changed_entry_count` (число изменённых metadata entries либо `null`).
+  При ошибке восстановления `snapshot_path` указывает сохранённую копию под `workPath/temp`
+  или маркер исходного отсутствия, `failure` объясняет причину. Ошибка очистки сообщается
+  через `cleanup_warning`. Счётчик не влияет на восстановление исходных байтов.
+- `--dry-run` и пропущенные шаги не создают CDFI snapshot. Восстановление обрабатывает ошибки
+  внутри выполняющегося runner; автоматическое восстановление после аварийного завершения
+  самого runner не предусмотрено. Каталог или symlink вместо CDFI отклоняется без удаления.
 
 ## Проверка и валидация
 

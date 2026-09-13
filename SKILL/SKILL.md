@@ -155,6 +155,7 @@ v8-runner init
 - Do not invent raw `1cv8`, `ibcmd`, or `1cedtcli` flags; prefer the `v8-runner` command surface.
 - Check `git status` before `dump` when the result may overwrite or mix with existing source changes.
 - Preserve failed test artifacts under `workPath/temp/<runner-id>/runs/<run-id>/` for diagnosis instead of cleaning them immediately.
+- After a failed Designer build, inspect `steps[].cdfi_recovery`: `restored`/`removed_created_file` means the version file was recovered; `failed` retains a `snapshot_path` for recovery. Preserve that file. This recovery does not undo changes already made inside the infobase.
 - Report missing local 1C utilities as environment/setup issues, not as project source failures.
 - Keep final answers concrete: command run, result, relevant artifact path, and any follow-up command.
 
