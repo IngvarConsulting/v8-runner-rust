@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v8-runner · Сценарии</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="styles.css?v=12">
+<style>
+  .uc { border-top: 1px solid var(--line); padding: 20px 0 8px; }
+  .uc h3 { margin: 0 0 4px; font-size: 1.1rem; }
+  .uc .meta { color: var(--ink-3); font-size: 0.88rem; margin-bottom: 10px; }
+  .uc table { font-size: 0.9rem; }
+  .uc .mermaid { margin: 12px 0 4px; }
+  .io { color: var(--ink-2); }
+  .io .a { white-space: nowrap; }
+  .cov td.c { text-align: center; }
+  .cov .no { color: var(--no); font-weight: 700; }
+</style>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">v8-runner</a>
+  <nav>
+    <a href="index.html">Начало</a>
+    <a href="scenarios.html">Команды</a>
+    <a href="usecases.html" aria-current="page">Сценарии</a>
+    <a href="inside.html">Как устроено</a>
+    <a href="architecture.html">Архитектура</a>
+    <a href="https://github.com/IngvarConsulting/v8-runner-rust">GitHub</a>
+  </nav>
+</div></div>
+
+<main class="page">
+<h1>Сценарии</h1>
+<p class="lede">Зачем раннер запускают. У каждого сценария — поток данных: что на входе, что переходит между командами, что на выходе. Внизу — проверка, что каждая команда попала хотя бы в один сценарий.</p>
+<p class="hint">На схемах: прямоугольник — данные, цилиндр — база или хранилище, овал — команда раннера, шестиугольник — внешнее приложение.</p>
+
+<div id="list"></div>
+
+<h2>Покрытие команд</h2>
+<div class="tablewrap"><table class="cov">
+<thead><tr><th>Команда</th><th>Сценариев</th><th>Каких</th></tr></thead>
+<tbody id="cov"></tbody>
+</table></div>
+<p id="gap" class="hint"></p>
+</main>
+
+<script src="data.js?v=12"></script>
+<script src="usecases.js?v=4"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.12.0/mermaid.min.js"></script>
+<script>
+(function () {
+  var D = window.RUNNER_DATA, U = window.RUNNER_USECASES, A = window.RUNNER_ARTEFACTS;
+  var byId = {}; D.SCENARIOS.forEach(function (s) { byId[s.id] = s; });
+  var ctx = { format: 'DESIGNER', type: 'CONFIGURATION', target: 'file', tools: {} };
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function node(id, label, kind) {
+    if (kind === 'store') return id + '[("' + label + '")]';
+    if (kind === 'ext') return id + '{{"' + label + '"}}';
+    return id + '["' + label + '"]';
+  }
+
+  function dfd(u) {
+    var lines = ['flowchart LR'], seen = {};
+    function art(key) {
+      var nid = 'a_' + key;
+      if (!seen[nid]) { seen[nid] = 1; lines.push('  ' + node(nid, A[key].label, A[key].kind)); }
+      return nid;
+    }
+    var manual = [];
+    u.steps.forEach(function (st, i) {
+      var s = byId[st.id];
+      var cid = 'c' + i;
+      if (st.manual) manual.push(cid);
+      lines.push('  ' + cid + '(["' + (st.manual ? st.title : (s ? s.verb : st.id)) + '"])');
+      (st.in || []).forEach(function (k) { lines.push('  ' + art(k) + ' --> ' + cid); });
+      (st.out || []).forEach(function (k) { lines.push('  ' + cid + ' --> ' + art(k)); });
+    });
+    lines.push('  classDef cmd fill:#fdf1e2,stroke:#b45309,color:#7c2d12');
+    lines.push('  classDef manual stroke-dasharray: 4 3');
+    var cmds = u.steps.map(function (st, i) { return st.manual ? null : 'c' + i; }).filter(Boolean);
+    if (cmds.length) lines.push('  class ' + cmds.join(',') + ' cmd');
+    if (manual.length) lines.push('  class ' + manual.join(',') + ' manual');
+    return lines.join('\n');
+  }
+
+  var html = '';
+  U.forEach(function (u, i) {
+    html += '<div class="uc" id="' + u.id + '"><h3>' + (i + 1) + '. ' + esc(u.title) + '</h3>' +
+            '<div class="meta">' + esc(u.who) + ' · заранее: ' + esc(u.pre) + '</div>' +
+            '<pre class="mermaid">' + dfd(u) + '</pre>' +
+            '<div class="tablewrap"><table><thead><tr><th>Команда</th><th>Вход</th><th>Выход</th><th>Зачем</th></tr></thead><tbody>';
+    u.steps.forEach(function (st) {
+      var s = byId[st.id];
+      html += '<tr><td class="k">' + (st.manual ? '<span class="dash">не раннер: ' + esc(st.title) + '</span>'
+                                                 : '<code>' + esc(st.cmd || (s ? s.cmd(ctx) : st.id)) + '</code>') + '</td>' +
+              '<td class="io">' + (st.in || []).map(function (k) { return '<span class="a">' + esc(A[k].label) + '</span>'; }).join(', ') + '</td>' +
+              '<td class="io">' + (st.out || []).map(function (k) { return '<span class="a">' + esc(A[k].label) + '</span>'; }).join(', ') + '</td>' +
+              '<td>' + esc(st.note) + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+    if (u.warn) html += '<div class="note">' + esc(u.warn) + '</div>';
+    html += '</div>';
+  });
+  document.getElementById('list').innerHTML = html;
+
+  var used = {};
+  U.forEach(function (u) { u.steps.forEach(function (st) { if (st.manual) return; (used[st.id] = used[st.id] || []).push(u); }); });
+  var rows = '', gaps = [];
+  D.SCENARIOS.forEach(function (s) {
+    var list = (used[s.id] || []).filter(function (u, i, arr) { return arr.indexOf(u) === i; });
+    if (!list.length) gaps.push(s.verb);
+    rows += '<tr><td class="k"><code>' + esc(s.verb) + '</code></td>' +
+            '<td class="c' + (list.length ? '' : ' no') + '">' + list.length + '</td>' +
+            '<td>' + (list.length ? list.map(function (u) { return '<a href="#' + u.id + '">' + esc(u.title) + '</a>'; }).join(', ') : '—') + '</td></tr>';
+  });
+  document.getElementById('cov').innerHTML = rows;
+  document.getElementById('gap').textContent = gaps.length
+    ? 'Ни в один сценарий не попали: ' + gaps.join(', ')
+    : 'Все ' + D.SCENARIOS.length + ' команд покрыты сценариями.';
+
+  var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'neutral', securityLevel: 'loose', fontFamily: 'Golos Text, system-ui, sans-serif' });
+  mermaid.run({ querySelector: '.mermaid' });
+})();
+</script>
+</body>
+</html>

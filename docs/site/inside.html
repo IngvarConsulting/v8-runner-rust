@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v8-runner · Как устроено</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="styles.css?v=11">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">v8-runner</a>
+  <nav>
+    <a href="index.html">Начало</a>
+    <a href="scenarios.html">Команды</a>
+    <a href="usecases.html">Сценарии</a>
+    <a href="inside.html" aria-current="page">Как устроено</a>
+    <a href="architecture.html">Архитектура</a>
+    <a href="https://github.com/IngvarConsulting/v8-runner-rust">GitHub</a>
+  </nav>
+</div></div>
+
+<main class="page">
+<h1>Как устроено</h1>
+<p class="lede">Исполнителя выбирает не ключ в конфиге, а пара «операция и цель».</p>
+
+<div class="axes">
+  <div class="axis"><div class="axis-t">Исходники</div><div class="axis-b">формат и тип</div></div>
+  <div class="arr">→</div>
+  <div class="axis"><div class="axis-t">Операция</div><div class="axis-b">глагол раннера</div></div>
+  <div class="arr">→</div>
+  <div class="axis"><div class="axis-t">Цель</div><div class="axis-b">вид базы</div></div>
+  <div class="arr">→</div>
+  <div class="axis hot"><div class="axis-t">Провайдер</div><div class="axis-b">по матрице умолчаний</div></div>
+</div>
+
+<h2>Исходники</h2>
+<p><strong>Формат</strong> — XML платформы или проект EDT. EDT перед работой с базой экспортируется в XML.<br>
+<strong>Тип</strong> — конфигурация, расширение, внешняя обработка, внешний отчёт. Любой тип бывает в любом формате.</p>
+
+<h2>Провайдеры</h2>
+<div class="tablewrap"><table>
+<thead><tr><th>Провайдер</th><th>Что это</th><th>Решение по</th></tr></thead>
+<tbody>
+<tr><td class="k"><span class="pill batch">Designer</span></td><td>процесс Конфигуратора на команду</td><td>коду выхода и появлению артефакта</td></tr>
+<tr><td class="k"><span class="pill agent">agent</span></td><td>агентский shell по SSH: Конфигуратор в режиме агента или шлюз ibsrv — набор команд одинаковый</td><td>JSON: <code>type</code> и закрытый <code>error-type</code></td></tr>
+<tr><td class="k"><span class="pill ibcmd">ibcmd</span></td><td>утилита платформы; для автономного сервера — через <code>--pid</code></td><td>коду выхода и машинному выводу</td></tr>
+<tr><td class="k"><span class="pill rs">ibcmd-rs</span></td><td>конвертер XML ↔ CF без платформы</td><td>коду выхода</td></tr>
+<tr><td class="k"><span class="pill neutral">webinst</span></td><td>публикация базы на Apache или IIS</td><td>коду выхода и появлению публикации</td></tr>
+</tbody></table></div>
+<p class="hint">Проза инструмента никогда не решает — только переносится как улика.</p>
+
+<h2>Цели: два адреса</h2>
+<p>У базы всегда два адреса, и они разные. По одному раннер её <strong>администрирует</strong>, по другому её <strong>открывают</strong> клиентом или браузером. Строка подключения вида <code>ws=…</code> относится ко второму и не говорит, чем администрировать: за публикацией может стоять файловая база, кластер или автономный сервер.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Цель</th><th>Раннер администрирует</th><th>Клиент открывает</th></tr></thead>
+<tbody>
+<tr><td class="k">файловая</td><td><code>connection: File=…</code></td><td>адреса нет, пока не сделан <code>publish</code></td></tr>
+<tr><td class="k">кластер 1С</td><td><code>connection: Srvr=…;Ref=…</code></td><td>адреса нет, пока не сделан <code>publish</code></td></tr>
+<tr><td class="k">автономный сервер</td><td><code>standalone.gate</code> — SSH-шлюз</td><td>HTTP-адрес самого сервера</td></tr>
+</tbody></table></div>
+<p class="hint">Адрес для клиента живёт в <code>infobase.web.url</code>: у автономного сервера он известен сразу, у остальных появляется после публикации.</p>
+
+<h2>Выбор провайдера</h2>
+<ol>
+  <li>Умолчания заданы нами и живут в коде — матрица <code>(операция, цель) → цепочка</code>.</li>
+  <li>Раннер берёт первого готового в этом окружении.</li>
+  <li><code>providers.&lt;операция&gt;</code> в конфиге переопределяет жёстко: неготовый — отказ, без отката.</li>
+  <li>На проводе и в CLI провайдера нет: вызывающий не выбирает исполнителя.</li>
+  <li>Квитанция объясняет выбор: <code>selected</code>, <code>origin</code>, <code>skipped</code>.</li>
+</ol>
+
+<h2>Изменилась ли база</h2>
+<p>У раннера две независимые проверки. По файлам исходников он считает хеши и хранит их в <code>workPath</code> — это отвечает на вопрос «что изменилось у меня». У платформы он спрашивает <strong>идентификатор поколения</strong> конфигурации — это отвечает на вопрос «менялась ли база».</p>
+<div class="tablewrap"><table>
+<tbody>
+<tr><td class="k">что это</td><td>40-значный токен конфигурации; меняется при любом её изменении</td></tr>
+<tr><td class="k">как сравнивать</td><td>только на равно и не равно: «больше» и «меньше» смысла не имеют</td></tr>
+<tr><td class="k">у кого спросить</td><td>Конфигуратор <code>/GetConfigGenerationID</code>, <code>ibcmd config generation-id</code>, агентская сессия — около секунды</td></tr>
+<tr><td class="k">на что не отвечает</td><td>не говорит, что именно изменилось и кто менял; для этого нужно сравнение конфигураций</td></tr>
+<tr><td class="k">предмет</td><td>свой токен у основной конфигурации и у каждого расширения</td></tr>
+</tbody></table></div>
+<p class="hint">Замер: токен основной конфигурации у Конфигуратора и <code>ibcmd</code> совпадает, а токены расширений у них разные — сравнивать нужно значения, полученные одним и тем же инструментом.</p>
+
+<h2>Агент: два режима</h2>
+<div class="tablewrap"><table>
+<thead><tr><th></th><th>managed</th><th>attached</th></tr></thead>
+<tbody>
+<tr><td class="k">кто поднял</td><td>раннер</td><td>вы</td></tr>
+<tr><td class="k">признак в конфиге</td><td><code>launch</code> / <code>auto-start</code></td><td><code>gate</code> / <code>attach</code></td></tr>
+<tr><td class="k">флаги запуска</td><td>раннер плюс ваши</td><td>только ваши</td></tr>
+<tr><td class="k">если недоступен</td><td>ошибка запуска</td><td><code>endpoint_unreachable</code>, свой рядом не поднимает</td></tr>
+</tbody></table></div>
+
+<h2>Правила</h2>
+<div class="tablewrap"><table>
+<tbody>
+<tr><td class="k">замок</td><td>команда владеет <code>workPath</code> целиком; сессия агента живёт столько же</td></tr>
+<tr><td class="k">дедлайн</td><td>у каждой команды; отмена засчитывается только после терминального состояния процесса</td></tr>
+<tr><td class="k">публикация</td><td>полная замена цели идёт через staging и backup</td></tr>
+<tr><td class="k">превью</td><td><code>--dry-run</code> не берёт замок и ничего не создаёт</td></tr>
+<tr><td class="k">секреты</td><td>маскируются во всех выводах</td></tr>
+</tbody></table></div>
+
+<h2>Слои</h2>
+<pre class="mermaid">
+flowchart TB
+  IN["CLI · MCP"] --> UC["use_cases"]
+  UC --> CFG["config"]
+  UC --> PLAT["platform"]
+  UC --> CD["change_detection"]
+  UC --> DOM["domain"]
+</pre>
+<p class="hint">Unica вызывает CLI с <code>--json-message</code>. MCP — для хостов, подключающих раннер напрямую; там 8 инструментов.</p>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.12.0/mermaid.min.js"></script>
+<script>
+  var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  mermaid.initialize({ startOnLoad: true, theme: dark ? 'dark' : 'neutral', securityLevel: 'loose', fontFamily: 'Golos Text, system-ui, sans-serif' });
+</script>
+</body>
+</html>

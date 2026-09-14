@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v8-runner · Архитектура</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="styles.css?v=11">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">v8-runner</a>
+  <nav>
+    <a href="index.html">Начало</a>
+    <a href="scenarios.html">Команды</a>
+    <a href="usecases.html">Сценарии</a>
+    <a href="inside.html">Как устроено</a>
+    <a href="architecture.html" aria-current="page">Архитектура</a>
+    <a href="https://github.com/IngvarConsulting/v8-runner-rust">GitHub</a>
+  </nav>
+</div></div>
+
+<main class="page">
+<h1>Архитектура</h1>
+<p class="lede">Раннер сам ничего не делает с базой: он оркестрирует чужие процессы — утилиты платформы 1С и EDT. Поэтому архитектура состоит из двух частей: слои внутри процесса и внешние процессы с их временем жизни.</p>
+
+<h2>Слои</h2>
+<pre class="mermaid">
+flowchart TB
+  subgraph adapters["Адаптеры — знают транспорт"]
+    CLI["cli<br/>аргументы, текст и JSON"]
+    MCP["mcp<br/>8 инструментов, stdio и HTTP"]
+  end
+  UC["use_cases — оркестрация<br/>замок, пайплайн, дедлайн"]
+  subgraph shared["Общее"]
+    CFG["config"]
+    DOM["domain"]
+    CD["change_detection"]
+    PARS["parsers"]
+  end
+  PLAT["platform — вызов утилит"]
+  SUP["support — файлы, staging, журналы"]
+  CLI --> UC
+  MCP --> UC
+  UC --> CFG
+  UC --> DOM
+  UC --> CD
+  UC --> PARS
+  UC --> PLAT
+  PLAT --> SUP
+</pre>
+
+<div class="tablewrap"><table>
+<thead><tr><th>Слой</th><th>Отвечает за</th><th>Не знает про</th></tr></thead>
+<tbody>
+<tr><td class="k">cli</td><td>разбор аргументов, вывод текстом и JSON, взятие замка</td><td>как устроены утилиты платформы</td></tr>
+<tr><td class="k">mcp</td><td>инструменты, сессии HTTP, лимит одновременных вызовов</td><td>то же</td></tr>
+<tr><td class="k">use_cases</td><td>порядок шагов, замок, дедлайн, выбор провайдера</td><td>ни clap, ни MCP-типы</td></tr>
+<tr><td class="k">config</td><td>чтение и проверка <code>v8project.yaml</code> и overlay</td><td>исполнение</td></tr>
+<tr><td class="k">domain</td><td>типы результата, матрица провайдеров</td><td>процессы</td></tr>
+<tr><td class="k">change_detection</td><td>что изменилось с прошлого раза</td><td>чем грузить</td></tr>
+<tr><td class="k">parsers</td><td>журналы и отчёты → типы</td><td>решения</td></tr>
+<tr><td class="k">platform</td><td>аргументы, запуск, коды выхода утилит</td><td>бизнес-смысл команды</td></tr>
+</tbody></table></div>
+
+<h2>Процессы</h2>
+<pre class="mermaid">
+flowchart LR
+  R["раннер<br/>CLI или MCP-сервер"]
+  R -->|"процесс на операцию"| D["1cv8 DESIGNER"]
+  R -->|"процесс на операцию"| I["ibcmd"]
+  R -->|"сессия SSH"| A["агент: 1cv8 /AgentMode<br/>или шлюз ibsrv"]
+  R -->|"одна живая сессия"| E["1cedtcli"]
+  R -->|"процесс на запуск"| C["клиент 1С"]
+  R -->|"процесс на операцию"| W["webinst"]
+</pre>
+
+<h2>Сколько живёт</h2>
+<div class="tablewrap"><table>
+<thead><tr><th>Компонент</th><th>Где</th><th>Сколько живёт</th><th>Сколько штук</th></tr></thead>
+<tbody>
+<tr><td class="k">CLI-процесс</td><td>ОС</td><td>одна команда</td><td>1</td></tr>
+<tr><td class="k">MCP-сервер</td><td>ОС</td><td>до остановки хоста</td><td>1</td></tr>
+<tr><td class="k">замок <code>workPath</code></td><td>файл в <code>workPath</code></td><td>время команды</td><td>1 на каталог</td></tr>
+<tr><td class="k">поиск утилит</td><td>память процесса</td><td>время процесса, с кешем</td><td>1</td></tr>
+<tr><td class="k">состояние изменений</td><td><code>workPath/hash-storages</code></td><td>открыто на время команды, хранится между запусками</td><td>по набору исходников</td></tr>
+<tr><td class="k">сессия EDT</td><td>процесс <code>1cedtcli</code></td><td>в CLI — до конца команды; в MCP-сервере — до остановки, греется заранее</td><td>1 на хост</td></tr>
+<tr><td class="k">сессия агента</td><td>процесс агента или ibsrv</td><td>ровно столько, сколько раннер владеет <code>workPath</code></td><td>1 на цель</td></tr>
+<tr><td class="k">Designer, ibcmd, webinst</td><td>отдельный процесс</td><td>одна операция</td><td>1 одновременно</td></tr>
+<tr><td class="k">ibsrv managed</td><td>процесс, поднятый раннером</td><td>пока раннер держит замок</td><td>1</td></tr>
+<tr><td class="k">ibsrv attached</td><td>ваш процесс</td><td>не наш; раннер не перезапускает</td><td>—</td></tr>
+<tr><td class="k">клиент 1С</td><td>процесс</td><td>время теста или запуска</td><td>1</td></tr>
+<tr><td class="k">HTTP-сессии MCP</td><td>память сервера</td><td>до закрытия или простоя (<code>idle_ttl_secs</code>)</td><td>до <code>max_sessions</code></td></tr>
+</tbody></table></div>
+
+<h2>Что из этого следует</h2>
+<ul>
+  <li>Долгоживущее есть только у MCP-сервера: сессия EDT и HTTP-сессии. У CLI всё умирает вместе с командой.</li>
+  <li>Сессия агента привязана к замку: пока команда владеет <code>workPath</code>, живёт один процесс агента, и вложенные шаги идут в нём же.</li>
+  <li>Состояние изменений переживает процессы — оно лежит на диске под <code>workPath</code>.</li>
+  <li>Параллельные команды на одном <code>workPath</code> не выполняются: второй ждёт замок.</li>
+</ul>
+<p class="hint">Правила выбора провайдера и режимы агента — на странице <a href="inside.html">Как устроено</a>.</p>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.12.0/mermaid.min.js"></script>
+<script>
+  var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  mermaid.initialize({ startOnLoad: true, theme: dark ? 'dark' : 'neutral', securityLevel: 'loose', fontFamily: 'Golos Text, system-ui, sans-serif' });
+</script>
+</body>
+</html>
