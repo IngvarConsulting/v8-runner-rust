@@ -4,7 +4,7 @@ This file tracks open implementation work only.
 
 ## Current Status
 
-- Open tasks as of `2026-09-14`: 12.
+- Open tasks as of `2026-09-14`: 13.
 
 ## Open Tasks
 
@@ -64,6 +64,10 @@ This file tracks open implementation work only.
 12. Починить пробел, найденный при написании тестов: `dump --dry-run` создаёт файл журнала
    действий пустым, хотя превью обязано оставлять след вызова
    (`INV.CLI.PREVIEW-LEAVES-A-LOG-ENTRY`). Сначала правка поведения, потом фальсификатор.
+
+13. Реализовать `DEC.2026-09-14.THE-TARGET-MAY-LIVE-ON-ANOTHER-MACHINE` вместе с агентским
+   провайдером: локальность `workPath`, разрешение путей на стороне цели, объявленный канал
+   обмена и отказ managed-режима при удалённой точке входа. Четыре правила ждут кода.
 
 ## Rules
 
