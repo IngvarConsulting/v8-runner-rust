@@ -1,9 +1,9 @@
 ---
 id: INV.CONFIG.DBMS-IS-REJECTED-FOR-A-FILE-BASE
-status: planned
+status: active
 governs: product
-decision: DEC.2026-09-14.DBMS-SECTION-IS-DATABASE-ACCESS
-check: null
+decision: DEC.2026-04-21.INFOBASE-SECTION-OWNS-CONNECTION-AND-CREDENTIALS
+check: src/config/validate.rs::file_connection_rejects_dbms_contract
 scope: [config]
 ---
 

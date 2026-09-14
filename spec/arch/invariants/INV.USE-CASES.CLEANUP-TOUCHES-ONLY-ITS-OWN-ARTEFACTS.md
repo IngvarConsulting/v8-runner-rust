@@ -1,9 +1,9 @@
 ---
 id: INV.USE-CASES.CLEANUP-TOUCHES-ONLY-ITS-OWN-ARTEFACTS
-status: planned
+status: active
 governs: product
 decision: DEC.2026-04-21.FULL-REPLACEMENT-PUBLISHES-THROUGH-STAGING
-check: null
+check: src/support/fs.rs::publish_file_atomically_ignores_backup_cleanup_failure
 scope: [use-cases]
 ---
 

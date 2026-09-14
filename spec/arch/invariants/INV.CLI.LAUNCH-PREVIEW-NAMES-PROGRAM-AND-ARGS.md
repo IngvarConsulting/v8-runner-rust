@@ -1,9 +1,9 @@
 ---
 id: INV.CLI.LAUNCH-PREVIEW-NAMES-PROGRAM-AND-ARGS
-status: planned
+status: active
 governs: product
 decision: DEC.2026-09-11.PREVIEW-STOPS-BEFORE-THE-PROVIDER-IS-DISPATCHED
-check: null
+check: tests/cli_launch.rs::launch_dry_run_json_names_the_program_and_the_arguments_it_would_run
 scope: [cli]
 ---
 

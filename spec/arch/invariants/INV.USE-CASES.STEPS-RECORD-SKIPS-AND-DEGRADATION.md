@@ -1,9 +1,9 @@
 ---
 id: INV.USE-CASES.STEPS-RECORD-SKIPS-AND-DEGRADATION
-status: planned
+status: active
 governs: product
 decision: DEC.2026-04-21.EXECUTION-OUTCOME-IS-THE-CANONICAL-RESULT
-check: null
+check: tests/cli_dump.rs::dump_text_warning_shows_degraded_fallback_reason
 scope: [use-cases]
 ---
 

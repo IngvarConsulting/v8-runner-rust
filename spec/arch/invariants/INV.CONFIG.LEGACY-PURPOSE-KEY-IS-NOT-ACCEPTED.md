@@ -1,9 +1,9 @@
 ---
 id: INV.CONFIG.LEGACY-PURPOSE-KEY-IS-NOT-ACCEPTED
-status: planned
+status: active
 governs: product
 decision: DEC.2026-04-20.SOURCE-SET-IS-THE-UNIT-OF-ORCHESTRATION
-check: null
+check: src/config/loader.rs::load_config_rejects_legacy_source_set_purpose_key
 scope: [config]
 ---
 

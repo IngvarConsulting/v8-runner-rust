@@ -277,6 +277,43 @@ fn extensions_list_reports_the_installed_composition() {
         .contains("extension list"));
 }
 
+/// Пустое имя и имя, не являющееся идентификатором 1С, отклоняются до того, как
+/// раннер пойдёт в базу: цена ошибки не должна включать запуск утилиты.
+#[test]
+fn extensions_info_rejects_a_name_that_is_not_an_identifier_before_touching_the_infobase() {
+    for name in ["", "   ", "имя с пробелом", "1начинается-с-цифры"] {
+        let (_dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
+        write_inventory_ibcmd(&ibcmd_path, &calls_log, MEASURED_INVENTORY);
+
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--no-color",
+                "extensions",
+                "info",
+                "--name",
+                name,
+            ])
+            .output()
+            .expect("run command");
+
+        let reported = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !output.status.success(),
+            "name {name:?} must be refused: {reported}"
+        );
+        assert!(
+            !calls_log.exists(),
+            "name {name:?} must be refused before the platform is called: {reported}"
+        );
+    }
+}
+
 #[test]
 fn extensions_info_refuses_a_reply_about_another_extension() {
     let (_dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();

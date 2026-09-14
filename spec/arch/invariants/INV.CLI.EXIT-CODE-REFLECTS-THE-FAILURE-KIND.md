@@ -1,9 +1,9 @@
 ---
 id: INV.CLI.EXIT-CODE-REFLECTS-THE-FAILURE-KIND
-status: planned
+status: active
 governs: product
 decision: DEC.2026-04-20.BUSINESS-FAILURES-ARE-NOT-TRANSPORT-FAULTS
-check: null
+check: src/use_cases/result.rs::use_case_error_kinds_keep_stable_cli_exit_codes
 scope: [cli]
 ---
 

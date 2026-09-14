@@ -4,7 +4,7 @@ This file tracks open implementation work only.
 
 ## Current Status
 
-- Open tasks as of `2026-09-14`: 11.
+- Open tasks as of `2026-09-14`: 12.
 
 ## Open Tasks
 
@@ -54,10 +54,16 @@ This file tracks open implementation work only.
    для чтения после прогрева; при запуске `ibsrv` раннером — без extended-флага и с
    `--ssh-host-key`.
 
-11. Написать фальсификаторы для правил со `status: planned` в `spec/arch/invariants`:
-   сейчас их тридцать девять, и каждое объявляет `check: null`. Правило переводится в
-   `active` тем же изменением, которое приносит тест; список даёт `spec/arch/index.md`
-   по колонке «проверяется».
+11. Написать фальсификаторы для девяти правил, чьё поведение уже есть в коде, а теста нет:
+   `INV.CLI.NESTED-ORCHESTRATION-DOES-NOT-RELOCK`, `INV.CLI.SIDECAR-FAILURE-DOES-NOT-RELEASE-THE-LOCK`,
+   `INV.CLI.PREVIEW-RETURNS-AFTER-TOOL-LOOKUP`, `INV.CONFIG.UNSAFE-COMBINATIONS-ARE-REJECTED-BEFORE-DISPATCH`,
+   `INV.MCP.ADMISSION-IS-SHARED-BY-BOTH-TRANSPORTS`, `INV.USE-CASES.A-STALE-PROBE-LOG-IS-REMOVED-FIRST`,
+   `INV.USE-CASES.BLOCKS-EXCHANGE-TYPED-CONTEXT-ONLY`, `INV.USE-CASES.STAGING-SHARES-THE-PARENT-DIRECTORY`,
+   `INV.CLI.PREVIEW-LEAVES-A-LOG-ENTRY`. Остальные одиннадцать `planned` ждут не теста, а кода:
+   их решения сами `planned`. Список даёт `spec/arch/index.md` по колонке «проверяется».
+12. Починить пробел, найденный при написании тестов: `dump --dry-run` создаёт файл журнала
+   действий пустым, хотя превью обязано оставлять след вызова
+   (`INV.CLI.PREVIEW-LEAVES-A-LOG-ENTRY`). Сначала правка поведения, потом фальсификатор.
 
 ## Rules
 

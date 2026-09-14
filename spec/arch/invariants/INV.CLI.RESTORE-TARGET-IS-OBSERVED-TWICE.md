@@ -1,9 +1,9 @@
 ---
 id: INV.CLI.RESTORE-TARGET-IS-OBSERVED-TWICE
-status: planned
+status: active
 governs: product
 decision: DEC.2026-09-11.RESTORE-REQUIRES-AN-EXPLICIT-TARGET-MODE
-check: null
+check: [tests/cli_infobase.rs::restore_creates_an_absent_infobase_through_designer, tests/cli_infobase.rs::restore_replaces_an_existing_infobase_through_designer]
 scope: [cli]
 ---
 

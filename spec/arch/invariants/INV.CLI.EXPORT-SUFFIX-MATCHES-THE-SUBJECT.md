@@ -1,9 +1,9 @@
 ---
 id: INV.CLI.EXPORT-SUFFIX-MATCHES-THE-SUBJECT
-status: planned
+status: active
 governs: product
 decision: DEC.2026-09-02.EXPORT-INTENTS-ARE-TYPED-SEPARATELY
-check: null
+check: [tests/cli_infobase.rs::invalid_suffix_is_rejected_before_workspace_lock_and_provider_dispatch, src/use_cases/infobase_export.rs::configuration_output_suffix_is_derived_from_subject]
 scope: [cli]
 ---
 

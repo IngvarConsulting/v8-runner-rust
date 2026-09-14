@@ -604,6 +604,44 @@ fn launch_dry_run_text_masks_credentials_and_says_nothing_was_dispatched() {
     assert!(!stdout.contains("s3cret"), "{stdout}");
 }
 
+/// Превью называет выбранный бинарник и составленную строку аргументов — то же,
+/// что ушло бы в запуск. Иначе одобрять план пришлось бы вслепую.
+#[test]
+fn launch_dry_run_json_names_the_program_and_the_arguments_it_would_run() {
+    let (_dir, config_path, install_dir, _work_path) = setup_project();
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "thin",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(output.status.success());
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["data"]["provider_dispatched"], false);
+
+    let program = payload["data"]["plan"]["program"]
+        .as_str()
+        .expect("preview names the program");
+    assert!(
+        program.contains(&install_dir.display().to_string()),
+        "preview must name the located binary, found {program}"
+    );
+    let args = payload["data"]["plan"]["args"]
+        .as_array()
+        .expect("preview names the arguments");
+    assert!(
+        !args.is_empty(),
+        "preview must name the arguments it would pass"
+    );
+}
+
 #[test]
 fn launch_text_includes_binary_pid_and_cleans_platform_logs() {
     let (_dir, config_path, install_dir, work_path) = setup_project();

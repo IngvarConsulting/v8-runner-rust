@@ -1,9 +1,9 @@
 ---
 id: INV.USE-CASES.CANCELLED-MEANS-TERMINAL-CANCELLATION
-status: planned
+status: active
 governs: product
 decision: DEC.2026-04-20.A-MUTATING-CRITICAL-PHASE-IS-NOT-HARD-KILLED
-check: null
+check: src/use_cases/interruption.rs::command_interruption_status_preserves_terminal_state
 scope: [use-cases]
 ---
 

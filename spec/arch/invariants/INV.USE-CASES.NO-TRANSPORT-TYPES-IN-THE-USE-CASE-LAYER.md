@@ -1,9 +1,9 @@
 ---
 id: INV.USE-CASES.NO-TRANSPORT-TYPES-IN-THE-USE-CASE-LAYER
-status: planned
+status: active
 governs: process
 decision: DEC.2026-04-20.USE-CASES-STAY-TRANSPORT-NEUTRAL
-check: null
+check: tests/use_case_boundaries.rs::use_cases_do_not_depend_on_transport_or_presentation_types
 scope: [use-cases]
 ---
 

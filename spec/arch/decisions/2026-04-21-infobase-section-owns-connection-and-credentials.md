@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_bootstrap.rs::bootstrap_json_success_keeps_credentials_in_local_overlay_only
 supersedes: []
 superseded-by: null
-establishes: [INV.CONFIG.TOP-LEVEL-CONNECTION-IS-NOT-ACCEPTED]
+establishes: [INV.CONFIG.DBMS-IS-REJECTED-FOR-A-FILE-BASE, INV.CONFIG.TOP-LEVEL-CONNECTION-IS-NOT-ACCEPTED]
 ---
 
 # Подключение и учётные данные базы живут в одной секции

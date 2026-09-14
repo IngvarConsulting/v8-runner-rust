@@ -1,9 +1,9 @@
 ---
 id: INV.CONFIG.BASEPATH-IS-NOT-A-PUBLIC-KEY
-status: planned
+status: active
 governs: product
 decision: DEC.2026-04-20.V8PROJECT-YAML-IS-THE-PROJECT-CONTRACT
-check: null
+check: src/config/schema.rs::main_schema_and_loader_reject_unknown_keys
 scope: [config]
 ---
 

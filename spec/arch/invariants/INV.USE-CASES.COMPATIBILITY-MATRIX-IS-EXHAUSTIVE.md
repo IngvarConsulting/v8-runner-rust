@@ -1,9 +1,9 @@
 ---
 id: INV.USE-CASES.COMPATIBILITY-MATRIX-IS-EXHAUSTIVE
-status: planned
+status: active
 governs: product
 decision: DEC.2026-09-02.LOAD-COMPATIBILITY-STATES-ARE-CLOSED-AND-FAIL-CLOSED
-check: null
+check: src/use_cases/load_artifact.rs::the_compatibility_matrix_answers_every_combination_and_never_permits_an_unproven_one
 scope: [use-cases]
 ---
 
