@@ -102,6 +102,9 @@ jobs:
           bash --version
           python3 --version
 
+      - name: Verify architecture registry
+        run: python3 scripts/arch/registry.py --check
+
       - name: Verify fork release contracts
         run: |
           python3 tests/release_governance.py
