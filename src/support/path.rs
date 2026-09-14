@@ -117,13 +117,19 @@ pub fn nearest_existing_canonical_path(path: &Path) -> std::io::Result<PathBuf> 
     };
 
     let mut existing = absolute.as_path();
-    while !existing.exists() {
-        existing = existing.parent().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("no existing ancestor for path '{}'", path.display()),
-            )
-        })?;
+    loop {
+        match std::fs::symlink_metadata(existing) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                existing = existing.parent().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("no existing ancestor for path '{}'", path.display()),
+                    )
+                })?;
+            }
+            Err(error) => return Err(error),
+        }
     }
 
     let existing_canonical = std::fs::canonicalize(existing)?;
@@ -235,6 +241,16 @@ mod tests {
                 .join("nested")
                 .join("target")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nearest_existing_canonical_path_rejects_dangling_ancestor() {
+        let dir = tempdir().expect("tempdir");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(dir.path().join("missing"), &link).expect("dangling link");
+        assert!(nearest_existing_canonical_path(&link).is_err());
+        assert!(nearest_existing_canonical_path(&link.join("child")).is_err());
     }
 
     #[cfg(unix)]

@@ -105,3 +105,9 @@ Resolved follow-up к `2026-04-23`:
 - [x] ADR фиксирует cleanup warning как degraded success, а не failed publish.
 - [x] ADR связывает publication phase с critical filesystem mutation из ADR-0014.
 - [x] ADR фиксирует metadata-based orphan cleanup.
+
+## Уточнение #53: согласованность с change detection
+
+Прямая полная публикация Designer sources включает reconciliation prepared hash snapshot в ту же cancellation-deferred фазу. До замены каталога `HashStorage` фиксирует pending intent и проверяет generation/token в write transaction; callback использует существующий `StagedPublication`. После замены файлов та же транзакция коммитит prepared bytes и очищает intent. Между публикацией и commit нет проверки cancellation.
+
+Ошибки платформы, валидации и отмена до границы сохраняют target bytes и прежнюю snapshot generation. Ошибка после фиксации intent оставляет его как запрет skip, даже если фактическая замена не состоялась. Сбой процесса или commit после публикации не обещает откат уже заменённого каталога: pending требует успешного full rebuild, прежде чем снимку снова можно доверять. Повторный dump с сохранившимся intent отказывается публиковать до восстановления.

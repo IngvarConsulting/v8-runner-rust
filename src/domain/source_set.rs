@@ -11,6 +11,8 @@ pub struct SourceSetContext {
     path: PathBuf,
     /// Key used to name the redb hash-storage file (`workPath/hash-storages/<key>.redb`).
     storage_key: String,
+    /// Opaque binding of this snapshot to its source and runtime target.
+    runtime_binding: Option<String>,
 }
 
 impl SourceSetContext {
@@ -31,7 +33,17 @@ impl SourceSetContext {
             name,
             path,
             storage_key,
+            runtime_binding: None,
         }
+    }
+
+    pub fn with_runtime_binding(mut self, binding: String) -> Self {
+        self.runtime_binding = Some(binding);
+        self
+    }
+
+    pub fn runtime_binding(&self) -> Option<&str> {
+        self.runtime_binding.as_deref()
     }
 
     pub fn name(&self) -> &str {

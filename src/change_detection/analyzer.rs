@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::change_detection::hash_storage::{HashStorage, StorageError, StoredFileState};
+use crate::change_detection::hash_storage::{
+    HashStorage, SnapshotPublicationError, StorageError, StoredFileState,
+};
 use crate::change_detection::scanner::{self, ScanError};
 use crate::domain::source_set::SourceSetContext;
 
@@ -77,7 +79,8 @@ pub enum ChangeDetectionError {
 
 /// Analyze one source-set context and produce either concrete changes or a safe fallback.
 pub fn analyze_context(context: &SourceSetContext, work_path: &Path) -> ContextAnalysis {
-    let storage = HashStorage::new(context.storage_path(work_path));
+    let storage = HashStorage::new(context.storage_path(work_path))
+        .with_runtime_binding(context.runtime_binding());
     let snapshot = match storage.load_snapshot() {
         Ok(snapshot) => snapshot,
         Err(e) => {
@@ -98,6 +101,15 @@ pub fn analyze_context(context: &SourceSetContext, work_path: &Path) -> ContextA
             };
         }
     };
+
+    if snapshot.pending_publication.is_some()
+        || snapshot.runtime_binding.as_deref() != context.runtime_binding()
+    {
+        return ContextAnalysis {
+            context: context.clone(),
+            outcome: Ok(AnalysisOutcome::Fallback),
+        };
+    }
 
     let stored_keys: HashSet<String> = snapshot.entries.keys().cloned().collect();
     let scan = match scanner::scan(context.path(), snapshot.watermark, &stored_keys) {
@@ -159,7 +171,8 @@ pub fn commit_success(
     work_path: &Path,
     prepared: &PreparedStateUpdate,
 ) -> Result<(), ChangeDetectionError> {
-    let storage = HashStorage::new(context.storage_path(work_path));
+    let storage = HashStorage::new(context.storage_path(work_path))
+        .with_runtime_binding(context.runtime_binding());
     let snapshot = to_storage_snapshot(&prepared.snapshot);
     storage
         .commit_snapshot(
@@ -175,9 +188,10 @@ pub fn rescan_and_commit_full(
     context: &SourceSetContext,
     work_path: &Path,
 ) -> Result<(), ChangeDetectionError> {
-    let storage = HashStorage::new(context.storage_path(work_path));
-    let current_generation = match storage.current_generation() {
-        Ok(generation) => generation,
+    let storage = HashStorage::new(context.storage_path(work_path))
+        .with_runtime_binding(context.runtime_binding());
+    let current = match storage.load_snapshot() {
+        Ok(snapshot) => snapshot,
         Err(e) if e.is_recoverable() => {
             let full = full_snapshot(context, &StorageSnapshotInputs::empty())?;
             return storage
@@ -186,6 +200,9 @@ pub fn rescan_and_commit_full(
         }
         Err(e) => return Err(map_storage_hard(context, storage.path(), e)),
     };
+    // Only a successful full operation may reconcile a surviving publication intent.
+    let storage = storage.with_publication(current.pending_publication.as_deref());
+    let current_generation = current.generation;
 
     let full = full_snapshot(
         context,
@@ -202,6 +219,43 @@ pub fn rescan_and_commit_full(
             full.observed_generation,
         )
         .map_err(|e| map_commit_error(context, storage.path(), e))
+}
+
+/// Prepare exactly the bytes exported to a private stage, never user edits after publication.
+pub fn prepare_publication(
+    context: &SourceSetContext,
+    staging_path: &Path,
+    observed_generation: u64,
+) -> Result<PreparedStateUpdate, ChangeDetectionError> {
+    let scan = scanner::scan(staging_path, None, &HashSet::new())
+        .map_err(|error| map_scan_error(context, error))?;
+    Ok(build_prepared_state(
+        &scan,
+        &HashMap::new(),
+        observed_generation,
+    ))
+}
+
+/// Couple a prepared snapshot to publication, preserving the publisher's typed failure.
+/// The caller keeps this entire operation in its cancellation-deferred publication phase.
+pub fn publish_prepared<T, E>(
+    context: &SourceSetContext,
+    work_path: &Path,
+    prepared: &PreparedStateUpdate,
+    token: &str,
+    publish: impl FnOnce() -> Result<T, E>,
+) -> Result<T, SnapshotPublicationError<E>> {
+    let storage = HashStorage::new(context.storage_path(work_path))
+        .with_runtime_binding(context.runtime_binding());
+    storage
+        .begin_publication(prepared.observed_generation, token)
+        .map_err(SnapshotPublicationError::Storage)?;
+    storage.with_publication(Some(token)).commit_snapshot_with(
+        &to_storage_snapshot(&prepared.snapshot),
+        prepared.scan_started_at,
+        prepared.observed_generation,
+        publish,
+    )
 }
 
 fn detect_changes(
@@ -386,6 +440,179 @@ mod tests {
     use crate::change_detection::partial_load::decide;
     use crate::domain::source_set::SourceSetContext;
     use tempfile::tempdir;
+
+    fn publication_fixture() -> (tempfile::TempDir, SourceSetContext, std::path::PathBuf) {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("source");
+        let work = dir.path().join("work");
+        std::fs::create_dir(&root).expect("source");
+        std::fs::write(root.join("ObjectModule.bsl"), "same bytes").expect("module");
+        let source = SourceSetContext::new("main", root, "designer-main")
+            .with_runtime_binding("database-A".to_owned());
+        rescan_and_commit_full(&source, &work).expect("seed");
+        (dir, source, work)
+    }
+
+    #[test]
+    fn legacy_or_different_binding_requires_full_execution_even_for_identical_sources() {
+        let (_dir, source, work) = publication_fixture();
+        let other = source.clone().with_runtime_binding("database-B".to_owned());
+        assert!(matches!(
+            super::analyze_context(&source, &work).outcome,
+            Ok(super::AnalysisOutcome::NoChanges)
+        ));
+        assert!(matches!(
+            super::analyze_context(&other, &work).outcome,
+            Ok(super::AnalysisOutcome::Fallback)
+        ));
+        rescan_and_commit_full(&other, &work).expect("successful B load");
+        assert!(
+            matches!(
+                super::analyze_context(&source, &work).outcome,
+                Ok(super::AnalysisOutcome::Fallback)
+            ),
+            "single slot must not revive an old A cache"
+        );
+        let legacy = SourceSetContext::new("main", source.path().to_path_buf(), "designer-main");
+        rescan_and_commit_full(&legacy, &work).expect("legacy snapshot");
+        assert!(matches!(
+            super::analyze_context(&source, &work).outcome,
+            Ok(super::AnalysisOutcome::Fallback)
+        ));
+    }
+
+    #[test]
+    fn published_bytes_without_snapshot_commit_cannot_skip_even_if_old_hashes_match() {
+        let (dir, source, work) = publication_fixture();
+        let stage = dir.path().join("stage");
+        std::fs::create_dir(&stage).expect("stage");
+        std::fs::write(stage.join("ObjectModule.bsl"), "same bytes").expect("dump");
+        let storage = super::HashStorage::new(source.storage_path(&work));
+        let before = storage.load_snapshot().expect("before");
+        let prepared =
+            super::prepare_publication(&source, &stage, before.generation).expect("prepare");
+        let result =
+            super::publish_prepared(&source, &work, &prepared, "failed-publication", || {
+                std::fs::copy(
+                    stage.join("ObjectModule.bsl"),
+                    source.path().join("ObjectModule.bsl"),
+                )
+                .expect("publish");
+                Err::<(), _>("failure after filesystem publication")
+            });
+        assert!(matches!(
+            result,
+            Err(super::SnapshotPublicationError::Publication(_))
+        ));
+        let after = storage.load_snapshot().expect("after");
+        assert_eq!(after.generation, before.generation);
+        assert_eq!(
+            after.entries["ObjectModule.bsl"].hash,
+            before.entries["ObjectModule.bsl"].hash
+        );
+        assert_eq!(
+            after.pending_publication.as_deref(),
+            Some("failed-publication")
+        );
+        assert!(matches!(
+            super::analyze_context(&source, &work).outcome,
+            Ok(super::AnalysisOutcome::Fallback)
+        ));
+        // Only after a successful full load may its rescan recover this state.
+        rescan_and_commit_full(&source, &work).expect("recover after full load");
+        assert!(storage
+            .load_snapshot()
+            .expect("recovered")
+            .pending_publication
+            .is_none());
+        assert!(matches!(
+            super::analyze_context(&source, &work).outcome,
+            Ok(super::AnalysisOutcome::NoChanges)
+        ));
+    }
+
+    #[test]
+    fn generation_race_and_foreign_pending_prevent_publication() {
+        let (_dir, source, work) = publication_fixture();
+        let storage = super::HashStorage::new(source.storage_path(&work));
+        let generation = storage.current_generation().expect("generation");
+        let prepared =
+            super::prepare_publication(&source, source.path(), generation).expect("prepare");
+        rescan_and_commit_full(&source, &work).expect("concurrent commit");
+        let result = super::publish_prepared(&source, &work, &prepared, "stale", || {
+            panic!("stale generation must be rejected before publication");
+            #[allow(unreachable_code)]
+            Ok::<(), ()>(())
+        });
+        assert!(matches!(
+            result,
+            Err(super::SnapshotPublicationError::Storage(
+                super::StorageError::ConcurrentStateModified { .. }
+            ))
+        ));
+        let generation = storage.current_generation().expect("generation");
+        storage
+            .begin_publication(generation, "owner")
+            .expect("pending");
+        let prepared =
+            super::prepare_publication(&source, source.path(), generation).expect("prepare");
+        assert!(
+            super::commit_success(&source, &work, &prepared).is_err(),
+            "ordinary prepared commits cannot clear someone else's pending intent"
+        );
+        assert!(storage
+            .clone()
+            .with_publication(Some("intruder"))
+            .commit_snapshot(&std::collections::HashMap::new(), 0, generation)
+            .is_err());
+        assert_eq!(
+            storage
+                .load_snapshot()
+                .expect("snapshot")
+                .pending_publication
+                .as_deref(),
+            Some("owner")
+        );
+    }
+
+    #[test]
+    fn publication_commits_stage_hashes_and_defers_cancellation_through_commit() {
+        let (dir, source, work) = publication_fixture();
+        let stage = dir.path().join("stage");
+        std::fs::create_dir(&stage).expect("stage");
+        std::fs::write(stage.join("ObjectModule.bsl"), "dumped bytes").expect("dump");
+        let storage = super::HashStorage::new(source.storage_path(&work));
+        let generation = storage.current_generation().expect("generation");
+        let prepared = super::prepare_publication(&source, &stage, generation).expect("prepare");
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let context = crate::use_cases::context::ExecutionContext::cli(
+            crate::use_cases::context::CommandName::Dump,
+        )
+        .with_cancellation(cancellation.clone());
+        let result = context
+            .run_no_process_critical_phase(|| {
+                super::publish_prepared(&source, &work, &prepared, "owner", || {
+                    // A user edit after publication must not be adopted by a target rescan.
+                    std::fs::write(source.path().join("ObjectModule.bsl"), "user edit")
+                        .expect("edit");
+                    cancellation.cancel();
+                    Ok::<_, ()>(())
+                })
+            })
+            .expect("commit");
+        assert!(result.deferred_interruption.is_some());
+        let snapshot = storage.load_snapshot().expect("snapshot");
+        assert_eq!(snapshot.generation, generation + 1);
+        assert!(snapshot.pending_publication.is_none());
+        assert_eq!(snapshot.runtime_binding.as_deref(), Some("database-A"));
+        assert!(
+            matches!(
+                super::analyze_context(&source, &work).outcome,
+                Ok(super::AnalysisOutcome::Changes { .. })
+            ),
+            "post-publication edit must stay dirty"
+        );
+    }
 
     #[test]
     fn partial_load_contract_stays_compatible_with_file_change() {

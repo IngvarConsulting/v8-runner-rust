@@ -91,3 +91,11 @@
 - [ ] Отсутствие изменений в generated Designer output приводит к skip без load/apply.
 - [ ] Изменения в generated Designer output проходят через обычное partial/full decision.
 - [ ] `designer-*` snapshot не коммитится до successful load/apply.
+
+## Уточнение #53: full dump → build
+
+Для `format=DESIGNER` успешный full dump обоих backend обновляет snapshot того же source-set: следующая обычная сборка без пользовательских изменений возвращает `Skipped`. Полный snapshot готовится существующим scanner по staged bytes без mtime-фильтра до публикации; post-publication target rescan не используется, чтобы не принять последующие пользовательские правки за состояние ИБ. Expected generation захватывается до запуска платформы. Перед публикацией повторно проверяется binding, включая File/source aliases.
+
+`HashStorage` атомарно коммитит binding, hashes, watermark, generation и очистку pending publication. Durable pending записывается заранее, не меняя старые entries/generation; analyzer не разрешает `NoChanges`, пока pending существует. Ошибка публикации/commit сохраняет pending; только успешная полная операция с rescan может его погасить. Обычный prepared commit чужой pending не очищает.
+
+Reintroduction guard: единственные владельцы — `SourceSetsService` (binding), scanner/analyzer (prepared bytes), `HashStorage` (generation/pending transaction), `StagedPublication` (замена каталога). Регрессии проверяют реальный dump→ordinary build без platform calls, legacy/смену ИБ/root/alias, generation race, сохранившийся pending и пользовательскую правку после публикации. EDT reverse sync и non-atomic incremental/partial dump не получают этот fixed-point контракт: промежуточный Designer mirror не доказывает успешный EDT import.

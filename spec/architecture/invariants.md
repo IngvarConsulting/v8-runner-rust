@@ -247,7 +247,9 @@
 4. Для `format=EDT` используются два context на source-set: `edt-<sourceSetName>` для export decision и `designer-<sourceSetName>` для load decision.
 5. Recoverable scan/storage ошибки должны деградировать в full execution или full rescan; hard storage и concurrent generation errors должны surfaced as failures.
 6. Partial load является conservative file-level strategy: `Configuration.xml`, deletions, unsafe expansion, empty expanded set или превышение threshold ведут к full load.
-7. Prepared snapshot коммитится только после successful platform export/load step.
+7. Prepared snapshot коммитится только после successful platform export/load step либо публикации полного Designer source dump.
+8. `NoChanges` требует совпавшего runtime binding и отсутствующего pending publication. Binding вычисляет только `SourceSetsService`; single-slot storage сохраняется при смене ИБ/root, legacy без binding требует full execution.
+9. Full Designer dump готовит snapshot только по staged bytes; `HashStorage` проверяет generation/intent до filesystem publication и коммитит snapshot после неё. Pending intent переживает сбой и запрещает skip; успешный full rebuild восстанавливает согласованность. EDT intermediate mirror не считается завершённым source dump.
 
 См. [ADR-0012](../decisions/0012-on-demand-change-detection-i-faylovaya-partial-load-strategiya.md).
 

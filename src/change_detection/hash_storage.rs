@@ -16,6 +16,16 @@ pub const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 pub const META_KEY_WATERMARK: &str = "watermark";
 /// Metadata key storing optimistic-lock generation.
 pub const META_KEY_GENERATION: &str = "generation";
+const RUNTIME: TableDefinition<&str, &str> = TableDefinition::new("runtime");
+const RUNTIME_BINDING: &str = "binding";
+const PENDING_PUBLICATION: &str = "pending_publication";
+
+/// Keep filesystem publication errors distinct from storage failures.
+#[derive(Debug)]
+pub enum SnapshotPublicationError<E> {
+    Storage(StorageError),
+    Publication(E),
+}
 
 /// Persisted state for one file entry inside the storage snapshot.
 #[derive(Debug, Clone)]
@@ -30,6 +40,8 @@ pub struct StorageSnapshot {
     pub entries: HashMap<String, StoredFileState>,
     pub watermark: Option<u64>,
     pub generation: u64,
+    pub runtime_binding: Option<String>,
+    pub pending_publication: Option<String>,
 }
 
 /// Storage-layer failures split into recoverable and hard categories.
@@ -60,12 +72,28 @@ impl StorageError {
 #[derive(Debug, Clone)]
 pub struct HashStorage {
     path: PathBuf,
+    runtime_binding: Option<String>,
+    expected_publication: Option<String>,
 }
 
 impl HashStorage {
     /// Create a storage handle for the given `redb` file path.
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            runtime_binding: None,
+            expected_publication: None,
+        }
+    }
+
+    pub fn with_runtime_binding(mut self, binding: Option<&str>) -> Self {
+        self.runtime_binding = binding.map(str::to_owned);
+        self
+    }
+
+    pub fn with_publication(mut self, token: Option<&str>) -> Self {
+        self.expected_publication = token.map(str::to_owned);
+        self
     }
 
     /// Return the underlying storage file path.
@@ -111,6 +139,22 @@ impl HashStorage {
             Err(e) => return Err(map_table_error(&self.path, e)),
         };
 
+        let runtime = match tx.open_table(RUNTIME) {
+            Ok(table) => Some(table),
+            Err(TableError::TableDoesNotExist(_)) => None,
+            Err(error) => return Err(map_table_error(&self.path, error)),
+        };
+        let runtime_value = |key| -> Result<Option<String>, StorageError> {
+            match &runtime {
+                Some(table) => Ok(table
+                    .get(key)
+                    .map_err(|error| map_storage_error(&self.path, "read runtime binding", error))?
+                    .map(|value| value.value().to_owned())),
+                None => Ok(None),
+            }
+        };
+        let runtime_binding = runtime_value(RUNTIME_BINDING)?;
+        let pending_publication = runtime_value(PENDING_PUBLICATION)?;
         let mtime_exists = mtime_tbl.is_some();
         let hash_exists = hash_tbl.is_some();
         if !mtime_exists || !hash_exists {
@@ -119,6 +163,8 @@ impl HashStorage {
                     entries: HashMap::new(),
                     watermark: read_watermark(meta_tbl.as_ref(), &self.path)?,
                     generation: read_generation(meta_tbl.as_ref(), &self.path)?,
+                    runtime_binding,
+                    pending_publication,
                 });
             }
             return Err(StorageError::Recoverable {
@@ -174,6 +220,8 @@ impl HashStorage {
             entries,
             watermark: read_watermark(meta_tbl.as_ref(), &self.path)?,
             generation: read_generation(meta_tbl.as_ref(), &self.path)?,
+            runtime_binding,
+            pending_publication,
         })
     }
 
@@ -184,45 +232,140 @@ impl HashStorage {
         watermark: u64,
         expected_generation: u64,
     ) -> Result<(), StorageError> {
+        match self.commit_snapshot_with(snapshot, watermark, expected_generation, || {
+            Ok::<_, std::convert::Infallible>(())
+        }) {
+            Ok(()) => Ok(()),
+            Err(SnapshotPublicationError::Storage(error)) => Err(error),
+            Err(SnapshotPublicationError::Publication(never)) => match never {},
+        }
+    }
+
+    /// Persist an intent before filesystem publication. Entries and generation stay unchanged.
+    /// A surviving intent makes the analyzer refuse NoChanges, including after a process crash.
+    pub fn begin_publication(
+        &self,
+        expected_generation: u64,
+        token: &str,
+    ) -> Result<(), StorageError> {
         self.ensure_parent_dir()?;
         let db = Database::create(&self.path).map_err(|e| map_database_error(&self.path, e))?;
+        let mut tx = db
+            .begin_write()
+            .map_err(|e| map_tx_error(&self.path, e, "begin publication"))?;
+        tx.set_durability(redb::Durability::Immediate);
+        {
+            let meta = tx
+                .open_table(META)
+                .map_err(|e| map_table_error(&self.path, e))?;
+            self.check_generation(&meta, expected_generation)?;
+            let mut runtime = tx
+                .open_table(RUNTIME)
+                .map_err(|e| map_table_error(&self.path, e))?;
+            // A previous interrupted publication is deliberately not silently replaced.
+            self.check_publication(&runtime)?;
+            runtime
+                .insert(PENDING_PUBLICATION, token)
+                .map_err(|e| map_storage_error(&self.path, "record pending publication", e))?;
+        }
+        tx.commit()
+            .map_err(|e| map_storage_error(&self.path, "commit publication intent", e))
+    }
+
+    /// Reintroduction guard: one transaction owns binding, hashes, generation and pending intent.
+    /// Validate the generation and intent before invoking the publisher; commit only afterwards.
+    /// If publication or commit fails, the independently committed intent survives.
+    pub fn commit_snapshot_with<T, E>(
+        &self,
+        snapshot: &HashMap<String, StoredFileState>,
+        watermark: u64,
+        expected_generation: u64,
+        publish: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, SnapshotPublicationError<E>> {
+        use SnapshotPublicationError::{Publication, Storage};
+        self.ensure_parent_dir().map_err(Storage)?;
+        let db =
+            Database::create(&self.path).map_err(|e| Storage(map_database_error(&self.path, e)))?;
         let tx = db
             .begin_write()
-            .map_err(|e| map_tx_error(&self.path, e, "begin write"))?;
-
+            .map_err(|e| Storage(map_tx_error(&self.path, e, "begin write")))?;
         {
             let mut meta = tx
                 .open_table(META)
-                .map_err(|e| map_table_error(&self.path, e))?;
-            let current_generation = meta
-                .get(META_KEY_GENERATION)
-                .map_err(|e| map_storage_error(&self.path, "read generation", e))?
-                .map(|v| v.value())
-                .unwrap_or(0);
-            if current_generation != expected_generation {
-                return Err(StorageError::ConcurrentStateModified {
-                    path: self.path.clone(),
-                    expected: expected_generation,
-                    actual: current_generation,
-                });
+                .map_err(|e| Storage(map_table_error(&self.path, e)))?;
+            self.check_generation(&meta, expected_generation)
+                .map_err(Storage)?;
+            let mut runtime = tx
+                .open_table(RUNTIME)
+                .map_err(|e| Storage(map_table_error(&self.path, e)))?;
+            self.check_publication(&runtime).map_err(Storage)?;
+            match &self.runtime_binding {
+                Some(binding) => {
+                    runtime
+                        .insert(RUNTIME_BINDING, binding.as_str())
+                        .map_err(|e| {
+                            Storage(map_storage_error(&self.path, "write runtime binding", e))
+                        })?;
+                }
+                None => {
+                    runtime.remove(RUNTIME_BINDING).map_err(|e| {
+                        Storage(map_storage_error(&self.path, "clear runtime binding", e))
+                    })?;
+                }
             }
-
+            runtime.remove(PENDING_PUBLICATION).map_err(|e| {
+                Storage(map_storage_error(&self.path, "clear publication intent", e))
+            })?;
             let mut mtime = tx
                 .open_table(FILES_MTIME)
-                .map_err(|e| map_table_error(&self.path, e))?;
+                .map_err(|e| Storage(map_table_error(&self.path, e)))?;
             let mut hash = tx
                 .open_table(FILES_HASH)
-                .map_err(|e| map_table_error(&self.path, e))?;
-            sync_file_tables(&self.path, &mut mtime, &mut hash, snapshot)?;
-
+                .map_err(|e| Storage(map_table_error(&self.path, e)))?;
+            sync_file_tables(&self.path, &mut mtime, &mut hash, snapshot).map_err(Storage)?;
             meta.insert(META_KEY_WATERMARK, watermark)
-                .map_err(|e| map_storage_error(&self.path, "write watermark", e))?;
+                .map_err(|e| Storage(map_storage_error(&self.path, "write watermark", e)))?;
             meta.insert(META_KEY_GENERATION, expected_generation + 1)
-                .map_err(|e| map_storage_error(&self.path, "write generation", e))?;
+                .map_err(|e| Storage(map_storage_error(&self.path, "write generation", e)))?;
         }
-
+        let published = publish().map_err(Publication)?;
         tx.commit()
-            .map_err(|e| map_storage_error(&self.path, "commit transaction", e))?;
+            .map_err(|e| Storage(map_storage_error(&self.path, "commit transaction", e)))?;
+        Ok(published)
+    }
+
+    fn check_generation(
+        &self,
+        meta: &redb::Table<&str, u64>,
+        expected: u64,
+    ) -> Result<(), StorageError> {
+        let actual = meta
+            .get(META_KEY_GENERATION)
+            .map_err(|e| map_storage_error(&self.path, "read generation", e))?
+            .map(|v| v.value())
+            .unwrap_or(0);
+        if actual != expected {
+            return Err(StorageError::ConcurrentStateModified {
+                path: self.path.clone(),
+                expected,
+                actual,
+            });
+        }
+        Ok(())
+    }
+
+    fn check_publication(&self, runtime: &redb::Table<&str, &str>) -> Result<(), StorageError> {
+        let pending = runtime
+            .get(PENDING_PUBLICATION)
+            .map_err(|e| map_storage_error(&self.path, "read pending publication", e))?;
+        if pending.as_ref().map(|value| value.value()) != self.expected_publication.as_deref() {
+            return Err(StorageError::Hard {
+                path: self.path.clone(),
+                reason:
+                    "pending publication ownership changed; a successful full rebuild is required"
+                        .to_owned(),
+            });
+        }
         Ok(())
     }
 

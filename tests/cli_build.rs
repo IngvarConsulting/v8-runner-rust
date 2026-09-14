@@ -212,6 +212,33 @@ fn setup_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     (dir, config_path, binary_path, work_path)
 }
 
+fn seed_successful_build(config_path: &Path) {
+    let output = v8_runner_command()
+        .arg("--config")
+        .arg(config_path)
+        .args(["--json-message", "build", "--full-rebuild"])
+        .output()
+        .expect("seed build");
+    assert!(
+        output.status.success(),
+        "seed build stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn seed_build_then_edit_designer_module(config_path: &Path) {
+    seed_successful_build(config_path);
+    fs::write(
+        config_path
+            .parent()
+            .expect("config parent")
+            .join("project/main/Catalogs.Items/ObjectModule.bsl"),
+        "Procedure EditedAfterSuccessfulBuild()\nEndProcedure\n",
+    )
+    .expect("edit tracked module after baseline build");
+}
+
 fn setup_ibcmd_project() -> (
     tempfile::TempDir,
     PathBuf,
@@ -509,6 +536,7 @@ fn build_text_failure_does_not_print_success_footer() {
 #[test]
 fn build_text_stdout_includes_action_logs() {
     let (_dir, config_path, _binary_path, _work_path) = setup_project();
+    seed_build_then_edit_designer_module(&config_path);
 
     let output = v8_runner_command()
         .args([
@@ -535,6 +563,7 @@ fn build_text_stdout_includes_action_logs() {
 #[test]
 fn build_text_highlights_timeline_detail_prefixes() {
     let (_dir, config_path, _binary_path, _work_path) = setup_project();
+    seed_build_then_edit_designer_module(&config_path);
 
     let output = v8_runner_command()
         .args(["--config", &config_path.display().to_string(), "build"])
@@ -692,7 +721,27 @@ fn build_source_set_json_rejects_unknown_source_set() {
 
 #[test]
 fn build_edt_text_interleaves_export_stage_after_edt_log() {
-    let (_dir, config_path, ibcmd_calls_log, edt_calls_log) = setup_edt_ibcmd_project();
+    let (dir, config_path, ibcmd_calls_log, edt_calls_log) = setup_edt_ibcmd_project();
+    seed_successful_build(&config_path);
+    fs::write(
+        dir.path()
+            .join("project/configuration/src/Configuration/Configuration.mdo"),
+        "<Configuration><Properties /></Configuration>\n",
+    )
+    .expect("edit tracked EDT source after baseline build");
+    let edt_script = dir.path().join("edt/1cedtcli");
+    let script = fs::read_to_string(&edt_script).expect("EDT export fake");
+    assert!(script.contains("<Configuration />"));
+    fs::write(
+        &edt_script,
+        script.replace(
+            "<Configuration />",
+            "<Configuration><Properties /></Configuration>",
+        ),
+    )
+    .expect("export changed Configuration.xml for edited EDT source");
+    fs::write(&ibcmd_calls_log, "").expect("clear baseline IBCMD calls");
+    fs::write(&edt_calls_log, "").expect("clear baseline EDT calls");
 
     let output = v8_runner_command()
         .args([
@@ -795,6 +844,8 @@ fn build_text_groups_tool_extension_stages_under_single_build_node() {
 #[test]
 fn build_json_writes_action_log_file_without_polluting_stdout() {
     let (_dir, config_path, _binary_path, work_path) = setup_project();
+    seed_build_then_edit_designer_module(&config_path);
+    fs::remove_file(work_path.join("logs/mcp/actions.log")).expect("clear baseline action log");
 
     let output = v8_runner_command()
         .args([
