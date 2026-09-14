@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v8-runner · Команды</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="styles.css?v=11">
+<style>
+  tr.st-subject td, tr.st-soon td { color: var(--ink-3); }
+  tr.st-tool td.k, tr.st-soon td.k { color: var(--ink-2); }
+  .why.fix { color: var(--accent); }
+  tr.st-subject .why.fix { color: var(--ink-2); }
+  .chain .pill { opacity: 0.55; }
+  .chain .pill.sel { opacity: 1; outline: 2px solid currentColor; outline-offset: 1px; }
+  .why { font-size: 0.88rem; }
+  ul.cfg { margin: 0; padding-left: 16px; font-size: 0.86rem; }
+  .yaml { margin-top: 24px; }
+</style>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">v8-runner</a>
+  <nav>
+    <a href="index.html">Начало</a>
+    <a href="scenarios.html" aria-current="page">Команды</a>
+    <a href="usecases.html">Сценарии</a>
+    <a href="inside.html">Как устроено</a>
+    <a href="architecture.html">Архитектура</a>
+    <a href="https://github.com/IngvarConsulting/v8-runner-rust">GitHub</a>
+  </nav>
+</div></div>
+
+<main class="page">
+<h1>Команды под ваши условия</h1>
+<p class="lede">Отметьте свои условия — увидите команды и чем они исполнятся.</p>
+
+<div class="panel" id="panel"></div>
+
+<h2>Порядок</h2>
+<ol class="firstrun" id="firstrun"></ol>
+
+<h2>Все команды</h2>
+
+<div class="tablewrap"><table id="result">
+<thead><tr><th>Команда</th><th>Что делает</th><th>Состояние</th><th>Исполнит</th></tr></thead>
+<tbody></tbody>
+</table></div>
+
+<p class="hint">В цепочке ярче тот, кого раннер возьмёт при отмеченных инструментах.</p>
+
+<h2 class="yaml">Конфиг</h2>
+<pre><code id="yaml"></code></pre>
+<p class="hint">Пароли и пути машины — в <code>v8project.local.yaml</code> рядом, он не коммитится.</p>
+</main>
+
+<script src="data.js?v=12"></script>
+<script>
+(function () {
+  var D = window.RUNNER_DATA;
+  var state = { format: 'DESIGNER', type: 'CONFIGURATION', target: 'file', tools: {} };
+  D.AXES.tools.forEach(function (t) { state.tools[t.id] = t.def; });
+  try { var saved = JSON.parse(localStorage.getItem('v8runner-scenarios') || 'null'); if (saved) state = saved; } catch (e) {}
+
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function pill(p, sel) { return '<span class="pill ' + p.cls + (sel ? ' sel' : '') + '">' + esc(p.name) + '</span>'; }
+
+  function renderPanel() {
+    var groups = [
+      { axis: 'format', title: 'Исходники' },
+      { axis: 'type',   title: 'Что в них' },
+      { axis: 'target', title: 'База' }
+    ];
+    var html = '';
+    groups.forEach(function (g) {
+      var opts = D.AXES[g.axis];
+      var sel = opts.filter(function (o) { return o.id === state[g.axis]; })[0] || opts[0];
+      html += '<div class="pick"><div class="pick-t">' + esc(g.title) + '</div><div class="chips">';
+      opts.forEach(function (o) {
+        html += '<label class="chip' + (state[g.axis] === o.id ? ' on' : '') + '">' +
+                '<input type="radio" name="' + g.axis + '" value="' + o.id + '"' + (state[g.axis] === o.id ? ' checked' : '') + '>' +
+                esc(o.label) + '</label>';
+      });
+      html += '</div><div class="pick-h">' + esc(sel.hint) + '</div></div>';
+    });
+    html += '<div class="pick"><div class="pick-t">Установлено</div><div class="chips">';
+    D.AXES.tools.forEach(function (tl) {
+      html += '<label class="chip tool' + (state.tools[tl.id] ? ' on' : '') + '">' +
+              '<input type="checkbox" name="tool" value="' + tl.id + '"' + (state.tools[tl.id] ? ' checked' : '') + '>' +
+              esc(tl.short || tl.label) + '</label>';
+    });
+    html += '</div></div>';
+    document.getElementById('panel').innerHTML = html;
+  }
+
+  function renderTable() {
+    var ctx = { format: state.format, type: state.type, target: state.target, tools: state.tools };
+    var ctxRef = ctx;
+    var rows = D.compute(ctx, 'target');
+    var tb = document.querySelector('#result tbody'); var html = '';
+    rows.forEach(function (r) {
+      var s = r.s;
+      var badge = {
+        ok:      '<span class="pill ok">доступно</span>',
+        tool:    '<span class="pill warn">нужен инструмент</span>',
+        subject: '<span class="pill no">не про этот предмет</span>'
+      }[r.status];
+      var stateCell = badge + (r.why ? '<div class="why">' + esc(r.why) + '</div>' : '') +
+                  (r.fix ? '<div class="why fix">' + esc(r.fix) + '</div>' : '');
+
+      var chain;
+      if (r.noProvider) chain = '<span class="dash">платформа не нужна</span>';
+      else if (r.status === 'subject') chain = '<span class="dash">—</span>';
+      else {
+        chain = '<span class="chain">' + r.chain.map(function (p) {
+          return pill(p, r.selected && p.key === r.selected.key);
+        }).join(' → ') + '</span>';
+      }
+
+      html += '<tr class="st-' + r.status + '">' +
+              '<td class="k" data-l="команда"><code>' + esc(s.cmd(ctxRef)) + '</code></td>' +
+              '<td data-l="что делает">' + esc(s.what) + '</td>' +
+              '<td data-l="состояние">' + stateCell + '</td>' +
+              '<td data-l="исполнит">' + chain + '</td>' +
+              '</tr>';
+    });
+    tb.innerHTML = html;
+    renderFirstRun(rows, ctx);
+    renderYaml();
+  }
+
+  function renderFirstRun(rows, ctx) {
+    var byId = {};
+    rows.forEach(function (r) { byId[r.s.id] = r; });
+    var html = '';
+    D.FIRST_RUN(ctx).forEach(function (id) {
+      var r = byId[id]; if (!r) return;
+      var cmd = '<code>' + esc(r.s.cmd(ctx)) + '</code>';
+      if (r.status === 'ok') {
+        html += '<li>' + cmd + ' <span class="fr-what">' + esc(r.s.what) + '</span></li>';
+      } else {
+        html += '<li class="fr-off">' + cmd + ' <span class="fr-what">' + esc(r.why) + '</span></li>';
+      }
+    });
+    document.getElementById('firstrun').innerHTML = html;
+  }
+
+  function renderYaml() {
+    var lines = ['workPath: build', 'format: ' + state.format];
+    lines.push('infobase:');
+    if (state.target === 'file') lines.push('  connection: "File=build/ib"');
+    if (state.target === 'cluster') { lines.push('  connection: "Srvr=srv:1541;Ref=demo"'); lines.push('  user: Admin'); lines.push('  dbms:                    # нужна, чтобы раннер создал базу'); lines.push('    kind: PostgreSQL'); lines.push('    server: localhost'); lines.push('    name: demo'); }
+    if (state.target === 'standalone') {
+      lines.push('  user: Admin');
+      lines.push('  standalone:');
+      lines.push('    gate: 127.0.0.1:1543   # админим по SSH; либо launch: {…}, чтобы раннер поднял свой');
+      lines.push('  web:');
+      lines.push('    url: http://127.0.0.1:8314/demo   # открываем клиентом');
+    }
+    lines.push('source-set:');
+    if (state.type === 'CONFIGURATION') lines.push('  - { name: main, type: CONFIGURATION, path: ' + (state.format === 'EDT' ? 'src/main' : 'src/cf') + ' }');
+    if (state.type === 'EXTENSION') { lines.push('  - { name: main, type: CONFIGURATION, path: ' + (state.format === 'EDT' ? 'src/main' : 'src/cf') + ' }'); lines.push('  - { name: ext,  type: EXTENSION,     path: ' + (state.format === 'EDT' ? 'src/ext' : 'src/cfe') + ' }'); }
+    if (state.type === 'EXTERNAL') lines.push('  - { name: tools, type: EXTERNAL_DATA_PROCESSORS, path: src/epf }');
+    if (state.tools.web && state.target !== 'standalone') {
+      lines.splice(lines.indexOf('source-set:'), 0,
+        '  web:                     # публикация для веб-клиента',
+        '    server: apache24       # apache2 | apache22 | apache24 | iis',
+        '    wsdir: demo',
+        '    dir: /var/www/demo',
+        '    url: http://localhost/demo   # адрес после публикации');
+    }
+    if (state.format === 'EDT') { lines.push('tools:'); lines.push('  edt_cli:'); lines.push('    path: 2025.2.3          # версия или каталог EDT'); }
+    document.getElementById('yaml').textContent = lines.join('\n');
+  }
+
+  function persist() { try { localStorage.setItem('v8runner-scenarios', JSON.stringify(state)); } catch (e) {} }
+
+  document.getElementById('panel').addEventListener('change', function (e) {
+    var el = e.target;
+    if (el.name === 'tool') state.tools[el.value] = el.checked;
+    else state[el.name] = el.value;
+    persist(); renderPanel(); renderTable();
+  });
+  renderPanel(); renderTable();
+})();
+</script>
+</body>
+</html>

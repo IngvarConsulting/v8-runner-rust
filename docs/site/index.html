@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v8-runner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="styles.css?v=11">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">v8-runner</a>
+  <nav>
+    <a href="index.html" aria-current="page">Начало</a>
+    <a href="scenarios.html">Команды</a>
+    <a href="usecases.html">Сценарии</a>
+    <a href="inside.html">Как устроено</a>
+    <a href="architecture.html">Архитектура</a>
+    <a href="https://github.com/IngvarConsulting/v8-runner-rust">GitHub</a>
+  </nav>
+</div></div>
+
+<main class="page">
+<h1>Исходники 1С → действия над базой</h1>
+<p class="lede">Одна команда вместо связки Конфигуратора, ibcmd и EDT CLI. Раннер сам находит платформу и выбирает инструмент. Работает одинаково у человека, в CI и у ИИ-агента.</p>
+
+<pre><code>v8-runner config init     # найти исходники, записать конфиг
+v8-runner init            # создать базу
+v8-runner build           # загрузить изменения
+v8-runner test yaxunit all</code></pre>
+
+<p><a href="scenarios.html"><strong>Команды под ваши условия →</strong></a></p>
+
+<h2>С чем работает</h2>
+<div class="tablewrap"><table>
+<tbody>
+<tr><td class="k">формат исходников</td><td><ul class="opts"><li>XML платформы</li><li>проект EDT</li></ul></td></tr>
+<tr><td class="k">тип исходников</td><td><ul class="opts"><li>конфигурация</li><li>расширение</li><li>внешняя обработка</li><li>внешний отчёт</li></ul></td></tr>
+<tr><td class="k">где база</td><td><ul class="opts"><li>файловая</li><li>кластер 1С</li><li>автономный сервер</li></ul></td></tr>
+<tr><td class="k">что делаете</td><td><ul class="opts cmds">
+<li><code>config init</code> найти исходники, записать конфиг</li>
+<li><code>init</code> создать базу</li>
+<li><code>build</code> загрузить изменения</li>
+<li><code>test</code> прогнать тесты</li>
+<li><code>dump</code> выгрузить базу в исходники</li>
+<li><code>load</code> загрузить .cf или .cfe</li>
+<li><code>make</code> собрать .cf, .cfe, .epf, .erf</li>
+<li><code>infobase configuration export</code> конфигурацию базы в файл</li>
+<li><code>infobase dump</code> · <code>restore</code> снять базу в .dt и вернуть</li>
+<li><code>extensions</code> расширения базы</li>
+<li><code>syntax</code> проверка синтаксиса</li>
+<li><code>publish</code> опубликовать базу на Apache или IIS</li>
+<li><code>launch</code> запустить клиент или Конфигуратор</li>
+<li><code>launch web</code> открыть опубликованную базу в браузере</li>
+<li><code>convert</code> перевести исходники между форматами</li>
+</ul></td></tr>
+</tbody></table></div>
+
+<h2>Словарь</h2>
+<div class="tablewrap"><table>
+<tbody>
+<tr><td class="k">набор исходников</td><td>каталог с одним предметом: конфигурация, расширение или группа внешних обработок</td></tr>
+<tr><td class="k">цель</td><td>информационная база, с которой работаем</td></tr>
+<tr><td class="k">провайдер</td><td>чем платформа исполнит команду: Конфигуратор, агент, ibcmd</td></tr>
+<tr><td class="k">workPath</td><td>рабочий каталог: журналы, состояние, временные файлы</td></tr>
+<tr><td class="k">квитанция</td><td>ответ команды: что сделано, чем, что пропущено. Текстом или JSON</td></tr>
+<tr><td class="k">превью</td><td><code>--dry-run</code>: показать план, ничего не делая</td></tr>
+</tbody></table></div>
+</main>
+</body>
+</html>
