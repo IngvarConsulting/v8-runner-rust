@@ -1166,6 +1166,50 @@ mod tests {
         );
     }
 
+    /// Матрица «цель — режим — состояние» перебирается целиком: у каждой пары есть
+    /// названный исход, и ни одно неустановленное состояние не разрешает изменение.
+    /// Разрешающая ветка по умолчанию провалила бы именно этот перебор.
+    #[test]
+    fn the_compatibility_matrix_answers_every_combination_and_never_permits_an_unproven_one() {
+        use CompatibilityState::{Absent, NotEstablished, NotProbed, Supported};
+        use LoadMode::{Load, Merge, Update};
+        use LoadTargetKind::{Configuration, Extension, Unknown};
+
+        let states = [Supported, Absent, NotEstablished, NotProbed];
+        let modes = [Load, Merge, Update];
+        let kinds = [Configuration, Extension, Unknown];
+
+        for kind in kinds {
+            for mode in modes {
+                for state in states {
+                    let resolved = ResolvedLoadRequest {
+                        mode,
+                        artifact_path: PathBuf::from("dist/main.cf"),
+                        artifact_type: ArtifactBuildMode::ConfigurationCf,
+                        target_kind: kind,
+                        settings_path: None,
+                        extension: None,
+                        vendor_name: None,
+                    };
+                    let verdict = super::validate_probe_mode_compatibility(&resolved, state, None);
+
+                    if matches!(state, NotEstablished) || matches!(kind, Unknown) {
+                        assert!(
+                            verdict.is_some(),
+                            "{kind:?}/{mode:?}/{state:?} must refuse: an unproven state permits no change"
+                        );
+                    }
+                    if matches!(mode, Update) {
+                        assert!(
+                            verdict.is_some(),
+                            "{kind:?}/{mode:?}/{state:?} must refuse: update mode is not supported"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn an_unestablished_state_refuses_a_merge_and_lets_a_first_load_through() {
         let configuration = ResolvedLoadRequest {

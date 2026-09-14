@@ -4,7 +4,7 @@ This file tracks open implementation work only.
 
 ## Current Status
 
-- Open tasks as of `2026-09-13`: 8.
+- Open tasks as of `2026-09-14`: 13.
 
 ## Open Tasks
 
@@ -33,19 +33,41 @@ This file tracks open implementation work only.
    `ExportProvider` и `ExportTargetState`. Переименование не меняет провод (значения на нём
    уже нейтральны), но затрагивает много файлов, поэтому идёт отдельной задачей.
 
-6. Реализовать ADR-0030, шаг 1: матрица `domain/capability.rs` с цепочками умолчаний, ключ
+6. Реализовать матрицу провайдеров, шаг 1 (`DEC.2026-09-14.PROVIDER-CHOSEN-PER-OPERATION` и соседние): матрица `domain/capability.rs` с цепочками умолчаний, ключ
    `providers.<операция>` с тремя правилами валидации, единая квитанция о провайдере
    (`selected`/`origin`/`skipped`) у всех операций включая экспортное семейство, снятие
    `builder` (31 файл) и `init --builder`. Поведение на этом шаге не меняется: умолчания
    повторяют сегодняшний выбор. Docs, схемы, `config init`, `bootstrap` — по чеклисту.
-7. Реализовать ADR-0030, шаг 2: провайдер `agent` для файловой и кластерной базы —
+7. Реализовать агентский провайдер, шаг 2 (`DEC.2026-09-14.AGENT-*`): провайдер `agent` для файловой и кластерной базы —
    `tools.designer_agent` по образцу `tools.edt_cli`, SSH-клиент в процессе без pty, сессия
    на время workspace lock, типы ответа с закрытым `error-type`, страж признаёт агентский JSON
    структурным. Первыми через сессию идут `generation-id` (#99), `dump`, `build`.
-8. Реализовать ADR-0030, шаг 3: вид цели «автономный сервер» — `infobase.connection: ws=…`,
+8. Сверить требование полного `infobase.dbms` на серверном подключении с кодом: по
+   `DEC.2026-09-14.DBMS-SECTION-IS-DATABASE-ACCESS` секция нужна только там, где раннер идёт
+   в СУБД напрямую. Снять избыточное требование в `config::validate` и документации либо
+   назвать причину, по которой оно обосновано.
+9. Реализовать решения о цели и публикации: `DEC.2026-09-14.TARGET-KIND-IS-DECLARED-NOT-PARSED`,
+   `TARGET-HAS-TWO-ADDRESSES`, `RUNNER-PUBLISHES-TO-A-WEB-SERVER`, `LAUNCH-OPENS-THE-PUBLISHED-BASE`,
+   `PUBLICATION-IS-NEVER-A-DEFAULT-STEP`. Идёт после шага 1 матрицы провайдеров.
+10. Реализовать цель «автономный сервер», шаг 3: вид цели «автономный сервер» — `infobase.connection: ws=…`,
    секция `infobase.standalone`, провайдер `agent` через шлюз `ibsrv`, `ibcmd --pid` только
    для чтения после прогрева; при запуске `ibsrv` раннером — без extended-флага и с
    `--ssh-host-key`.
+
+11. Написать фальсификаторы для девяти правил, чьё поведение уже есть в коде, а теста нет:
+   `INV.CLI.NESTED-ORCHESTRATION-DOES-NOT-RELOCK`, `INV.CLI.SIDECAR-FAILURE-DOES-NOT-RELEASE-THE-LOCK`,
+   `INV.CLI.PREVIEW-RETURNS-AFTER-TOOL-LOOKUP`, `INV.CONFIG.UNSAFE-COMBINATIONS-ARE-REJECTED-BEFORE-DISPATCH`,
+   `INV.MCP.ADMISSION-IS-SHARED-BY-BOTH-TRANSPORTS`, `INV.USE-CASES.A-STALE-PROBE-LOG-IS-REMOVED-FIRST`,
+   `INV.USE-CASES.BLOCKS-EXCHANGE-TYPED-CONTEXT-ONLY`, `INV.USE-CASES.STAGING-SHARES-THE-PARENT-DIRECTORY`,
+   `INV.CLI.PREVIEW-LEAVES-A-LOG-ENTRY`. Остальные одиннадцать `planned` ждут не теста, а кода:
+   их решения сами `planned`. Список даёт `spec/arch/index.md` по колонке «проверяется».
+12. Починить пробел, найденный при написании тестов: `dump --dry-run` создаёт файл журнала
+   действий пустым, хотя превью обязано оставлять след вызова
+   (`INV.CLI.PREVIEW-LEAVES-A-LOG-ENTRY`). Сначала правка поведения, потом фальсификатор.
+
+13. Реализовать `DEC.2026-09-14.THE-TARGET-MAY-LIVE-ON-ANOTHER-MACHINE` вместе с агентским
+   провайдером: локальность `workPath`, разрешение путей на стороне цели, объявленный канал
+   обмена и отказ managed-режима при удалённой точке входа. Четыре правила ждут кода.
 
 ## Rules
 

@@ -15,7 +15,7 @@ to guess which Markdown file is authoritative.
    - `ARCHITECTURE.md`
 4. Active internal spec and architecture docs:
    - `spec/README.md`
-   - `spec/decisions/*`
+   - `spec/arch/*`
    - `spec/architecture/*`
    - `spec/acceptance/*`
 5. Historical notes and closed plans:

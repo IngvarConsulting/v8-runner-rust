@@ -632,9 +632,70 @@ async fn mcp_http_initialize_reuses_session_and_lists_tools() {
     let list_response = tools_list(&client, &url, &session_id).await;
     assert_eq!(list_response.status(), reqwest::StatusCode::OK);
     let list_payload = extract_sse_json(&list_response.text().await.expect("tools/list body"));
-    let mut names = list_payload["result"]["tools"]
+    // Форма поверхности закреплена артефактом: имя и схема входа каждого инструмента.
+    // Сверяется именно она, потому что клиент строит вызов по схеме, а не по имени.
+    // Обновление артефакта: UPDATE_MCP_SURFACE=1 cargo test --test mcp_http tools_list
+    if std::env::var_os("UPDATE_MCP_SURFACE").is_some() {
+        let mut map = serde_json::Map::new();
+        for tool in list_payload["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+        {
+            map.insert(
+                tool["name"].as_str().expect("tool name").to_owned(),
+                tool["inputSchema"].clone(),
+            );
+        }
+        let document = serde_json::json!({
+            "_comment": "Закреплённая форма поверхности MCP: имя инструмента и его схема входа. Порождается тестом при UPDATE_MCP_SURFACE=1, руками не правится.",
+            "tools": map,
+        });
+        std::fs::write(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/schemas/mcp-tools.json"),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&document).expect("pretty")
+            ),
+        )
+        .expect("write pinned surface");
+    }
+
+    let pinned: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/schemas/mcp-tools.json"),
+        )
+        .expect("pinned MCP surface artefact"),
+    )
+    .expect("pinned surface is valid json");
+
+    let live = list_payload["result"]["tools"]
         .as_array()
-        .expect("tools array")
+        .expect("tools array");
+    for tool in live {
+        let name = tool["name"].as_str().expect("tool name");
+        let expected = &pinned["tools"][name];
+        assert!(
+            !expected.is_null(),
+            "tool {name} is published but missing from docs/schemas/mcp-tools.json"
+        );
+        assert_eq!(
+            &tool["inputSchema"], expected,
+            "input schema of {name} drifted from the pinned form"
+        );
+    }
+    let pinned_names = pinned["tools"]
+        .as_object()
+        .expect("pinned tools object")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        live.len(),
+        pinned_names.len(),
+        "published surface and the pinned artefact must list the same tools"
+    );
+
+    let mut names = live
         .iter()
         .map(|tool| tool["name"].as_str().expect("tool name").to_owned())
         .collect::<Vec<_>>();

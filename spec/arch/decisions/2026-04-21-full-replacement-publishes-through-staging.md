@@ -1,0 +1,23 @@
+---
+id: DEC.2026-04-21.FULL-REPLACEMENT-PUBLISHES-THROUGH-STAGING
+status: active
+governs: product
+realized: tests/cli_artifacts.rs::artifacts_dry_run_plans_the_package_without_building_it
+supersedes: []
+superseded-by: null
+establishes: [INV.USE-CASES.A-FAILED-ROLLBACK-IS-NAMED, INV.USE-CASES.CLEANUP-TOUCHES-ONLY-ITS-OWN-ARTEFACTS, INV.USE-CASES.STAGING-SHARES-THE-PARENT-DIRECTORY]
+---
+
+# Полная замена цели идёт через staging и backup
+
+**Решение.** Операция, полностью заменяющая пользовательскую цель, сначала пишет
+результат рядом с целью, затем переносит прежнюю цель в резерв и ставит новую на
+её место переименованием. До успешного шага платформы прежняя цель не меняется.
+Перед публикацией путь цели перепроверяется; при неудаче раннер возвращает резерв,
+а если и это не удалось — отказ несёт контекст отката, чтобы человек знал, что
+цель требует ручной проверки.
+
+**Почему.** Запись прямо в цель оставляет её смешанной при любом сбое: часть
+старого, часть нового, и ни CI, ни человек не могут доверять результату.
+
+**Не затрагивает.** Инкрементальные операции: они цель не заменяют.

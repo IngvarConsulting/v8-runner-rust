@@ -1,0 +1,521 @@
+{
+  "_comment": "Закреплённая форма поверхности MCP: имя инструмента и его схема входа. Порождается тестом при UPDATE_MCP_SURFACE=1, руками не правится.",
+  "tools": {
+    "build_project": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "MCP request for `build_project`.",
+      "properties": {
+        "fullRebuild": {
+          "default": null,
+          "description": "Run a full rebuild instead of an incremental build.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "sourceSet": {
+          "default": null,
+          "description": "Source-set name to build. When omitted, all source-sets are built.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "McpBuildProjectRequest",
+      "type": "object"
+    },
+    "check_syntax_designer_config": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "MCP request for `check_syntax_designer_config`.",
+      "properties": {
+        "allExtensions": {
+          "default": null,
+          "description": "Check all extensions instead of a specific extension.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "checkUseModality": {
+          "default": null,
+          "description": "Enable modality usage checks.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "checkUseSynchronousCalls": {
+          "default": null,
+          "description": "Enable synchronous calls usage checks.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "configLogIntegrity": {
+          "default": null,
+          "description": "Enable Designer configuration log integrity checks.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "distributiveModules": {
+          "default": null,
+          "description": "Enable distributive modules checks.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "emptyHandlers": {
+          "default": null,
+          "description": "Enable empty handlers checks.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "extendedModulesCheck": {
+          "default": null,
+          "description": "Enable extended modules checks.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "extension": {
+          "default": null,
+          "description": "Extension name to check. Blank values are treated as absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "externalConnection": {
+          "default": null,
+          "description": "Run checks for external connection context.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "externalConnectionServer": {
+          "default": null,
+          "description": "Run checks for external connection server context.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "handlersExistence": {
+          "default": null,
+          "description": "Enable event handler existence checks.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "incorrectReferences": {
+          "default": null,
+          "description": "Enable incorrect references checks.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "mobileAppClient": {
+          "default": null,
+          "description": "Run checks for mobile application client context.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "mobileAppServer": {
+          "default": null,
+          "description": "Run checks for mobile application server context.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "mobileClient": {
+          "default": null,
+          "description": "Run checks for mobile client context.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "mobileClientDigiSign": {
+          "default": null,
+          "description": "Enable mobile client digital signature checks.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "server": {
+          "default": null,
+          "description": "Run checks for server context.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "thickClientManagedApplication": {
+          "default": null,
+          "description": "Run checks for thick client managed application context.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "thickClientOrdinaryApplication": {
+          "default": null,
+          "description": "Run checks for thick client ordinary application context.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "thickClientServerManagedApplication": {
+          "default": null,
+          "description": "Run checks for thick client server managed application context.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "thickClientServerOrdinaryApplication": {
+          "default": null,
+          "description": "Run checks for thick client server ordinary application context.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "thinClient": {
+          "default": null,
+          "description": "Run checks for thin client context.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "unreferenceProcedures": {
+          "default": null,
+          "description": "Enable unreferenced procedures checks.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "unsupportedFunctional": {
+          "default": null,
+          "description": "Enable unsupported functionality checks.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "webClient": {
+          "default": null,
+          "description": "Run checks for web client context.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "title": "McpCheckSyntaxDesignerConfigRequest",
+      "type": "object"
+    },
+    "check_syntax_designer_modules": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "MCP request for `check_syntax_designer_modules`.",
+      "properties": {
+        "allExtensions": {
+          "default": null,
+          "description": "Check all extensions instead of a specific extension.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "extendedModulesCheck": {
+          "default": null,
+          "description": "Enable extended modules checks.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "extension": {
+          "default": null,
+          "description": "Extension name to check. Blank values are treated as absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "externalConnection": {
+          "default": null,
+          "description": "Run checks for external connection context.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "mobileAppClient": {
+          "default": null,
+          "description": "Run checks for mobile application client context.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "mobileAppServer": {
+          "default": null,
+          "description": "Run checks for mobile application server context.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "mobileClient": {
+          "default": null,
+          "description": "Run checks for mobile client context.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "server": {
+          "default": null,
+          "description": "Run checks for server context.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "thickClientOrdinaryApplication": {
+          "default": null,
+          "description": "Run checks for thick client ordinary application context.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "thinClient": {
+          "default": null,
+          "description": "Run checks for thin client context.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "webClient": {
+          "default": null,
+          "description": "Run checks for web client context.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "title": "McpCheckSyntaxDesignerModulesRequest",
+      "type": "object"
+    },
+    "check_syntax_edt": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "MCP request for `check_syntax_edt`.",
+      "properties": {
+        "projectName": {
+          "default": null,
+          "description": "EDT project name to check. When omitted, all EDT projects are checked.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "McpCheckSyntaxEdtRequest",
+      "type": "object"
+    },
+    "dump_config": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "MCP request for `dump_config`.",
+      "properties": {
+        "extension": {
+          "default": null,
+          "description": "Extension name to dump. When omitted, the main configuration is dumped.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "default": null,
+          "description": "Dump mode, for example FULL or INCREMENTAL.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "objects": {
+          "default": [],
+          "description": "Metadata objects for PARTIAL dumps. Use canonical TYPE:NAME selectors (for example Catalog:Items); legacy TYPE.NAME selectors are accepted for compatibility. Selector syntax is validated before the platform is started.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "title": "McpDumpConfigRequest",
+      "type": "object"
+    },
+    "launch_app": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "MCP request for `launch_app`.",
+      "properties": {
+        "mcpConfig": {
+          "description": "Optional client MCP config path passed as runMcp=<FILE>.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mcpPort": {
+          "description": "Optional client MCP port override.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mcpScenario": {
+          "description": "Optional client MCP scenario. Use va for Vanessa Automation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "description": "Client mode for utilityType=mcp: thin, thick, or ordinary.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "utilityType": {
+          "description": "Client type to launch. Examples: mcp, client-mcp; thin-client, thin, tc; thick-client, thick; designer, configurator.",
+          "type": "string"
+        },
+        "waitReady": {
+          "description": "Wait until the client MCP endpoint responds to initialize and tools/list.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "utilityType"
+      ],
+      "title": "McpLaunchAppRequest",
+      "type": "object"
+    },
+    "run_all_tests": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "MCP request for `run_all_tests`.",
+      "properties": {
+        "feature": {
+          "default": [],
+          "description": "Vanessa feature names to run for runner=vanessa.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "filterTag": {
+          "default": [],
+          "description": "Vanessa tag expressions to include for runner=vanessa.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "full": {
+          "default": null,
+          "description": "Return the full test report instead of compact summary data.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "ignoreTag": {
+          "default": [],
+          "description": "Vanessa tag expressions to exclude for runner=vanessa.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "profile": {
+          "default": null,
+          "description": "Vanessa Automation profile override for runner=vanessa.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runner": {
+          "default": null,
+          "description": "Test runner to execute: yaxunit or vanessa. Defaults to yaxunit.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scenarioFilter": {
+          "default": [],
+          "description": "Vanessa scenario name filters for runner=vanessa.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "title": "McpRunAllTestsRequest",
+      "type": "object"
+    },
+    "run_module_tests": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "MCP request for `run_module_tests`.",
+      "properties": {
+        "full": {
+          "default": null,
+          "description": "Return the full test report instead of compact summary data.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "moduleName": {
+          "description": "Module name to execute tests for.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "moduleName"
+      ],
+      "title": "McpRunModuleTestsRequest",
+      "type": "object"
+    }
+  }
+}

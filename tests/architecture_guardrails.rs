@@ -101,21 +101,13 @@ fn mcp_surface_snapshot_stays_explicit_and_documented() {
         .map(|capture| capture[1].to_owned())
         .collect::<Vec<_>>();
 
-    let invariants = read("spec/architecture/invariants.md");
-    let invariants_section = extract_between(
-        &invariants,
-        "3. Текущая MCP-поверхность состоит из 8 tool-операций:",
-        "4. Добавление",
+    let contract = read("spec/arch/contracts/CTR.MCP.PUBLISHED-TOOL-SURFACE.md");
+    let contract_section = extract_between(
+        &contract,
+        "Опубликованы восемь инструментов:",
+        "Состав меняется только вместе с версией этой формы.",
     );
-    let invariants_tools = extract_backticked_items(invariants_section);
-
-    let adr = read("spec/decisions/0005-razdelit-cli-i-mcp-publichnye-poverhnosti.md");
-    let adr_section = extract_between(
-        &adr,
-        "2. Текущая MCP-поверхность состоит ровно из 8 опубликованных tool-операций:",
-        "3. CLI может иметь команды, не опубликованные в MCP.",
-    );
-    let adr_tools = extract_backticked_items(adr_section);
+    let contract_tools = extract_backticked_items(contract_section);
 
     let expected = EXPECTED_MCP_TOOLS
         .iter()
@@ -123,8 +115,7 @@ fn mcp_surface_snapshot_stays_explicit_and_documented() {
         .collect::<Vec<_>>();
 
     assert_eq!(source_tools, expected);
-    assert_eq!(invariants_tools, expected);
-    assert_eq!(adr_tools, expected);
+    assert_eq!(contract_tools, expected);
 }
 
 #[test]
@@ -180,7 +171,7 @@ fn change_checklist_covers_mcp_workspace_lock_and_config_contract() {
         "## Новый public config field, `source-set` type или `infobase` subtree",
         "src/config/model.rs",
         "src/config/validate.rs",
-        "spec/architecture/invariants.md",
+        "spec/arch/README.md",
     ] {
         assert!(
             checklist.contains(required),
