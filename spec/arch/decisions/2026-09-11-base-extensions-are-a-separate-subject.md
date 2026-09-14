@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_extensions.rs::extension_preview_never_echoes_the_infobase_password
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.CLI.EXTENSION-NAME-IS-VALIDATED]
 ---
 
 # Расширения базы и расширения проекта — разные предметы

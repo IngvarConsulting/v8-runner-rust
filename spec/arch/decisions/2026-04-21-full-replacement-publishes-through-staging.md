@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_artifacts.rs::artifacts_dry_run_plans_the_package_without_building_it
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.USE-CASES.A-FAILED-ROLLBACK-IS-NAMED, INV.USE-CASES.CLEANUP-TOUCHES-ONLY-ITS-OWN-ARTEFACTS, INV.USE-CASES.STAGING-SHARES-THE-PARENT-DIRECTORY]
 ---
 
 # Полная замена цели идёт через staging и backup

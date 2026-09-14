@@ -5,7 +5,7 @@ governs: process
 realized: tests/cli_test.rs::test_text_output_splits_pipeline_into_timeline_stages
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.USE-CASES.BLOCKS-EXCHANGE-TYPED-CONTEXT-ONLY]
 ---
 
 # Команда собирается из типизированных блоков

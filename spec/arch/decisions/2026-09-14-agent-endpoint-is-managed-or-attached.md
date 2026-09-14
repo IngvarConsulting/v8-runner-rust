@@ -5,7 +5,7 @@ governs: product
 realized: null
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.PLATFORM.LOCAL-AGENT-READS-RESULTS-FROM-DISK, INV.PLATFORM.READINESS-IS-PROBED-NOT-INFERRED, INV.PLATFORM.UNREACHABLE-ATTACHED-IS-A-TYPED-REFUSAL]
 ---
 
 # У точки входа агента два режима, и режим объявлен

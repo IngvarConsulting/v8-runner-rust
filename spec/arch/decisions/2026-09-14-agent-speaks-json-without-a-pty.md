@@ -5,7 +5,7 @@ governs: product
 realized: null
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.PLATFORM.AGENT-READINESS-IS-AUTHENTICATION, INV.PLATFORM.AGENT-SESSION-OPENS-IN-JSON-MODE]
 ---
 
 # Агентская сессия идёт без псевдотерминала и отвечает JSON

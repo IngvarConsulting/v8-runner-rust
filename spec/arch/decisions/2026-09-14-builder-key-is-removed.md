@@ -5,7 +5,7 @@ governs: product
 realized: null
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.CONFIG.BUILDER-KEY-IS-REJECTED]
 ---
 
 # Ключ `builder` снимается

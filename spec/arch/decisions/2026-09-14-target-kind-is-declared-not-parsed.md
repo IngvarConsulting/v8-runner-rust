@@ -5,7 +5,7 @@ governs: product
 realized: null
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.CONFIG.TARGET-DECLARATIONS-ARE-EXCLUSIVE]
 ---
 
 # Вид цели объявляется, а не выводится из строки подключения

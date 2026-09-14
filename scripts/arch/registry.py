@@ -178,10 +178,17 @@ def validation_errors(found: list[Record]) -> list[str]:
     errors: list[str] = []
     for record in found:
         for key in REQUIRED_PROPS[record.kind]:
+            # Правило, у которого фальсификатор ещё не написан, заводится со
+            # `status: planned` и `check: null`. Так долг виден в индексе, а не
+            # прячется в ненаписанной записи.
             realized_may_be_absent = (
                 record.kind == "decision"
                 and key == "realized"
                 and record.props.get("status") in {"planned", "superseded"}
+            ) or (
+                record.kind in {"invariant", "contract"}
+                and key == "check"
+                and record.props.get("status") == "planned"
             )
             if (
                 key not in record.props
@@ -250,16 +257,18 @@ def render_index(found: list[Record]) -> str:
         "",
         "# Индекс реестра",
         "",
-        "| Символ | Вид | Статус | Построено | Суть | Файл |",
+        "| Символ | Вид | Статус | Проверяется | Суть | Файл |",
         "| --- | --- | --- | --- | --- | --- |",
     ]
     for record in found:
-        # Построено отвечает только за решения: у инварианта и контракта
-        # свидетельство обязательно по схеме, а у решения — необязательно, и
-        # именно там читатель не отличает принятое от сделанного.
+        # Колонка отвечает за оба вида: у решения — есть ли свидетельство
+        # реализации, у правила — написан ли фальсификатор. И там и там читатель
+        # иначе не отличает принятое от действующего.
         built = ""
         if record.kind == "decision":
             built = "да" if evidence_names(record.props.get("realized")) else "нет"
+        else:
+            built = "да" if evidence_names(record.props.get("check")) else "нет"
         lines.append(
             f"| `{record.id}` | {kind_ru[record.kind]} · {record.props.get('governs', '')} "
             f"| {record.props.get('status', '')} "

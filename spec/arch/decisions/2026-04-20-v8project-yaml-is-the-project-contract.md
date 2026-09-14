@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_config_init.rs::config_init_creates_yaml_with_detected_designer_sources
 supersedes: []
 superseded-by: null
-establishes: [CTR.CONFIG.V8PROJECT-SCHEMA]
+establishes: [CTR.CONFIG.V8PROJECT-SCHEMA, INV.CONFIG.BASEPATH-IS-NOT-A-PUBLIC-KEY, INV.CONFIG.UNSAFE-COMBINATIONS-ARE-REJECTED-BEFORE-DISPATCH]
 ---
 
 # Проект описывает один типизированный файл

@@ -4,7 +4,7 @@ This file tracks open implementation work only.
 
 ## Current Status
 
-- Open tasks as of `2026-09-14`: 10.
+- Open tasks as of `2026-09-14`: 11.
 
 ## Open Tasks
 
@@ -53,6 +53,11 @@ This file tracks open implementation work only.
    секция `infobase.standalone`, провайдер `agent` через шлюз `ibsrv`, `ibcmd --pid` только
    для чтения после прогрева; при запуске `ibsrv` раннером — без extended-флага и с
    `--ssh-host-key`.
+
+11. Написать фальсификаторы для правил со `status: planned` в `spec/arch/invariants`:
+   сейчас их тридцать девять, и каждое объявляет `check: null`. Правило переводится в
+   `active` тем же изменением, которое приносит тест; список даёт `spec/arch/index.md`
+   по колонке «проверяется».
 
 ## Rules
 

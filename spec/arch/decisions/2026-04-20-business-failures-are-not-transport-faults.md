@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_build.rs::build_json_failure_returns_step_payload
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.CLI.EXIT-CODE-REFLECTS-THE-FAILURE-KIND]
 ---
 
 # Отказ сценария и сбой обвязки — разные категории

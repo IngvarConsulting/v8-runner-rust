@@ -5,7 +5,7 @@ governs: product
 realized: null
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.CLI.PROVIDER-IS-NOT-A-FLAG]
 ---
 
 # Провайдера нет ни на проводе, ни во флагах

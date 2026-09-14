@@ -41,10 +41,11 @@
 | [`0028-prevyu-u-glagolov-bez-vybora-provaydera.md`](adr-v1/0028-prevyu-u-glagolov-bez-vybora-provaydera.md) | superseded | `DEC.2026-09-11.PREVIEW-NAMES-THE-SUBJECT-NOT-A-FAKE-FORK`, `DEC.2026-09-11.PREVIEW-DOES-NOT-TAKE-THE-LOCK` | — |
 | [`0029-proza-instrumenta-ne-prinimaet-resheniy.md`](adr-v1/0029-proza-instrumenta-ne-prinimaet-resheniy.md) | superseded | `DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES`, `DEC.2026-09-12.A-LABEL-MAY-ONLY-MAKE-A-VERDICT-STRICTER` | — |
 | [`0030-provaydery-po-operatsiyam-s-umolchaniyami-v-kode.md`](adr-v1/0030-provaydery-po-operatsiyam-s-umolchaniyami-v-kode.md) | superseded | `DEC.2026-09-14.PROVIDER-CHOSEN-PER-OPERATION`, `DEC.2026-09-14.PROVIDER-DEFAULTS-LIVE-IN-CODE`, `DEC.2026-09-14.PROVIDER-OVERRIDE-IS-STRICT`, `DEC.2026-09-14.PROVIDER-IS-NOT-A-CALL-ARGUMENT`, `DEC.2026-09-14.BUILDER-KEY-IS-REMOVED`, `DEC.2026-09-14.RECEIPT-EXPLAINS-PROVIDER-CHOICE`, `DEC.2026-09-14.AGENT-SESSION-LIVES-WITH-THE-LOCK`, `DEC.2026-09-14.AGENT-SPEAKS-JSON-WITHOUT-A-PTY`, `DEC.2026-09-14.AGENT-ENDPOINT-IS-MANAGED-OR-ATTACHED`, `DEC.2026-09-14.DBMS-SECTION-IS-DATABASE-ACCESS` | — |
-| [`invariants.md`](adr-v1/invariants.md) | superseded | реестр `spec/arch/invariants` и `spec/arch/contracts`; утверждения без существующего фальсификатора остались внутри решений | — |
+| [`invariants.md`](adr-v1/invariants.md) | superseded | реестр `spec/arch/invariants` и `spec/arch/contracts` | — |
 
-## Что не перенеслось правилом
+## Правила без проверки
 
-Утверждения прежнего файла инвариантов, у которых не нашлось названного падающего
-теста, правилами не стали: по модели реестра правило заявляет ровно то, что проверяет.
-Они остались внутри решений и вернутся отдельными записями вместе со своими проверками.
+Утверждения прежнего файла, у которых не нашлось названного падающего теста, стали
+правилами со `status: planned` и `check: null`. Индекс показывает это колонкой
+«проверяется», поэтому долг виден и считается: сейчас таких правил тридцать девять.
+Правило переводится в действующее тем же изменением, которое приносит тест.

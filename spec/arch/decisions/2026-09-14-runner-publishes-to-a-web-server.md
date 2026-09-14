@@ -5,7 +5,7 @@ governs: product
 realized: null
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.CLI.PUBLISH-HAS-NO-PROVIDER-KEY]
 ---
 
 # Публикацию на веб-сервере делает раннер

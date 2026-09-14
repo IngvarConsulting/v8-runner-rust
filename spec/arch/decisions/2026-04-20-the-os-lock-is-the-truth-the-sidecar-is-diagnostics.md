@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_infobase_cross_platform.rs::concurrent_native_cli_processes_observe_the_workspace_lock
 supersedes: []
 superseded-by: null
-establishes: [INV.CLI.CONCURRENT-PROCESSES-ARE-SERIALIZED]
+establishes: [INV.CLI.CONCURRENT-PROCESSES-ARE-SERIALIZED, INV.CLI.SIDECAR-FAILURE-DOES-NOT-RELEASE-THE-LOCK]
 ---
 
 # Источник истины блокировки — файловая блокировка ОС

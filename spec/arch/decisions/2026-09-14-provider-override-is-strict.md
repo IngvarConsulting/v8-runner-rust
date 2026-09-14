@@ -5,7 +5,7 @@ governs: product
 realized: null
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.CONFIG.PROVIDERS-OVERRIDE-IS-A-SCALAR]
 ---
 
 # Переопределить провайдера можно только в файле и только жёстко

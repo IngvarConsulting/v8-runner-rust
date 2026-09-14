@@ -89,6 +89,56 @@ fn unresolved_evidence(root: &std::path::Path, dir: &str, prop: &str) -> Vec<Str
     unresolved
 }
 
+/// Правило со `status: planned` обязано объявлять отсутствие проверки полем
+/// `check: null`, а действующее — называть её. Пустое поле у действующего правила
+/// и названная проверка у запланированного одинаково прячут состояние долга.
+#[test]
+fn planned_rules_declare_a_missing_check() {
+    let root = repo_root();
+    let mut wrong = Vec::new();
+
+    for dir in ["spec/arch/invariants", "spec/arch/contracts"] {
+        let base = root.join(dir);
+        for entry in std::fs::read_dir(&base).expect("registry directory is readable") {
+            let path = entry.expect("directory entry").path();
+            if path.extension().and_then(|value| value.to_str()) != Some("md") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("record is readable");
+            let status = text
+                .lines()
+                .find_map(|line| line.strip_prefix("status: "))
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let check = text
+                .lines()
+                .find_map(|line| line.strip_prefix("check: "))
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+
+            match status.as_str() {
+                "planned" if check != "null" => wrong.push(format!(
+                    "{}: planned rule must declare `check: null`, found {check}",
+                    path.display()
+                )),
+                "active" if check == "null" || check.is_empty() => wrong.push(format!(
+                    "{}: active rule must name its falsifier",
+                    path.display()
+                )),
+                _ => {}
+            }
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "rules hide whether their falsifier exists:\n{}",
+        wrong.join("\n")
+    );
+}
+
 #[test]
 fn every_rule_names_a_falsifier_that_exists() {
     let root = repo_root();

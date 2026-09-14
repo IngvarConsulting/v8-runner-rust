@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_extensions.rs::extensions_command_streams_stage_before_pipeline_finishes
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.USE-CASES.STEPS-RECORD-SKIPS-AND-DEGRADATION]
 ---
 
 # Итог сценария имеет одну форму

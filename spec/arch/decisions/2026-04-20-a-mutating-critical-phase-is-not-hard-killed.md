@@ -5,7 +5,7 @@ governs: product
 realized: src/use_cases/interruption.rs
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.USE-CASES.CANCELLED-MEANS-TERMINAL-CANCELLATION, INV.USE-CASES.OPERATIONS-DECLARE-AN-INTERRUPTION-CLASS]
 ---
 
 # Изменяющую операцию в критической фазе не убивают

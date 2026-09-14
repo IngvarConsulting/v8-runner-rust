@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_build.rs::build_dry_run_plans_every_source_set_without_dispatching_designer
 supersedes: []
 superseded-by: null
-establishes: [INV.CLI.PREVIEW-DISPATCHES-NOTHING]
+establishes: [INV.CLI.LAUNCH-PREVIEW-NAMES-PROGRAM-AND-ARGS, INV.CLI.PREVIEW-DISPATCHES-NOTHING, INV.CLI.PREVIEW-LEAVES-A-LOG-ENTRY, INV.CLI.PREVIEW-RETURNS-AFTER-TOOL-LOOKUP]
 ---
 
 # Превью показывает план и останавливается до запуска

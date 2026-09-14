@@ -5,7 +5,7 @@ governs: product
 realized: null
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.CLI.LAUNCH-WEB-WITHOUT-AN-ADDRESS-IS-REFUSED]
 ---
 
 # `launch web` открывает опубликованную базу

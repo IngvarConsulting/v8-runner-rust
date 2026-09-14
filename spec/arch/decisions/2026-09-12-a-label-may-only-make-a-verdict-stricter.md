@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_syntax.rs::syntax_text_success_warning_includes_diagnostic_path
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.PLATFORM.A-LABEL-ONLY-TIGHTENS-A-VERDICT]
 ---
 
 # Помета на находке — не вердикт

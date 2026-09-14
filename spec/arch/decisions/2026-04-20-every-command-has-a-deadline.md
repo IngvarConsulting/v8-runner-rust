@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_launch.rs::launch_json_exposes_platform_resolution_metadata
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.USE-CASES.NESTED-WORK-INHERITS-THE-REMAINING-BUDGET]
 ---
 
 # У каждой команды есть срок

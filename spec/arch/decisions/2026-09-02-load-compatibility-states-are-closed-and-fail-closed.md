@@ -5,7 +5,7 @@ governs: product
 realized: src/use_cases/load_artifact.rs
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.USE-CASES.A-STALE-PROBE-LOG-IS-REMOVED-FIRST, INV.USE-CASES.COMPATIBILITY-MATRIX-IS-EXHAUSTIVE]
 ---
 
 # Состояния совместимости закрыты, а неизвестность запрещает изменение

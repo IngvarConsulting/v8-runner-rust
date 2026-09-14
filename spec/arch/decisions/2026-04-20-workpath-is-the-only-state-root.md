@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_build.rs::write_live_workspace_lock
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.CONFIG.GENERATED-TARGETS-DO-NOT-COLLIDE-WITH-SOURCES]
 ---
 
 # Всё runtime-состояние живёт под `workPath`

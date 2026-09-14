@@ -5,7 +5,7 @@ governs: product
 realized: null
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.CONFIG.DBMS-IS-REJECTED-FOR-A-FILE-BASE]
 ---
 
 # `infobase.dbms` — доступ к СУБД, а не к информационной базе
