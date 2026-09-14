@@ -116,3 +116,9 @@ EDT source-set
 - [ ] EDT build запускает Designer analysis после successful или skipped EDT stage независимо от наличия EDT-изменений.
 - [ ] EDT build коммитит `designer-*` snapshot только после successful Designer/IBCMD load/apply.
 - [ ] Ошибка на EDT stage останавливает pipeline до Designer stage.
+
+## Уточнение #53: привязка снимка
+
+Пути `hash-storages/{designer,edt}-<name>.redb` сохраняются как один текущий слот. Снимок содержит непрозрачный binding целевой ИБ, канонических source/config roots, формата, backend, назначения и логического контекста. Для EDT учитывается также исходный EDT root; для файловой ИБ — канонический effective File path, для IBCMD — DBMS target. Смена binding, старый снимок без binding или незавершённая публикация требуют full execution. Возврат A → B → A не восстанавливает старый кэш A.
+
+Binding вычисляется только `SourceSetsService`, включая tool extensions; ошибки разрешения путей возвращаются явно. Точная строка подключения дополнительно хешируется консервативно: эквивалентное написание может вызвать лишний full build. Отдельные credentials не входят в binding; исходная строка и fingerprint не выводятся в диагностику. Это привязка к настроенной цели, не отслеживание внешних изменений содержимого ИБ. Source-only contexts внешних обработок/отчётов не включают ИБ в binding; metadata-only inventory и syntax/artifact selection не разрешают пути ИБ.

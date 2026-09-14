@@ -453,6 +453,33 @@ fn write_minimal_config(dir: &Path) -> PathBuf {
     config_path
 }
 
+fn add_fake_build_platform(dir: &Path) {
+    let base_path = dir.join("project");
+    let platform_path = dir.join("1cv8");
+    fs::write(base_path.join("Configuration.xml"), "<Configuration />\n")
+        .expect("configuration source");
+    write_script(
+        &platform_path,
+        &format!(
+            r#"printf '%s\n' "$*" >> "{}"
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "/Out" ]; then printf 'fake Designer completed\n' > "$argument"; fi
+  previous="$argument"
+done
+exit 0"#,
+            dir.join("platform-calls.log").display()
+        ),
+    );
+    let config_path = dir.join("v8project.yaml");
+    let mut config = fs::read_to_string(&config_path).expect("minimal config");
+    config.push_str(&format!(
+        "tools:\n  platform:\n    path: '{}'\n",
+        platform_path.display()
+    ));
+    fs::write(config_path, config).expect("config with fake platform");
+}
+
 #[test]
 fn missing_config_in_text_mode_returns_validation_error_on_stderr() {
     let output = v8_runner_command()
@@ -497,6 +524,7 @@ fn missing_config_in_json_mode_keeps_error_envelope_shape() {
 fn default_config_path_uses_v8project_yaml_from_current_dir() {
     let dir = temp_workspace();
     let _config_path = write_minimal_config(dir.path());
+    add_fake_build_platform(dir.path());
 
     let output = v8_runner_command()
         .current_dir(dir.path())
@@ -508,12 +536,17 @@ fn default_config_path_uses_v8project_yaml_from_current_dir() {
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], true);
     assert_eq!(payload["command"], "build");
+    let calls =
+        fs::read_to_string(dir.path().join("platform-calls.log")).expect("fake platform calls");
+    assert!(calls.contains("/LoadConfigFromFiles"));
+    assert!(calls.contains("/UpdateDBCfg"));
 }
 
 #[test]
 fn default_config_path_applies_sibling_local_overlay() {
     let dir = temp_workspace();
     let _config_path = write_minimal_config(dir.path());
+    add_fake_build_platform(dir.path());
     let local_work_path = dir.path().join("local-work");
     fs::write(
         dir.path().join("v8project.local.yaml"),
@@ -532,6 +565,10 @@ fn default_config_path_applies_sibling_local_overlay() {
     assert_eq!(payload["ok"], true);
     assert_eq!(payload["command"], "build");
     assert!(local_work_path.exists());
+    let calls =
+        fs::read_to_string(dir.path().join("platform-calls.log")).expect("fake platform calls");
+    assert!(calls.contains("/LoadConfigFromFiles"));
+    assert!(calls.contains("/UpdateDBCfg"));
 }
 
 #[test]

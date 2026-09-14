@@ -780,15 +780,6 @@ fn resolve_target(
         }
     };
 
-    let _runtime_context = inventory
-        .designer_context(&source_set.name)
-        .ok_or_else(|| {
-            AppError::Runtime(format!(
-                "missing runtime context for source-set '{}'",
-                source_set.name
-            ))
-        })?;
-
     let canonical_output_path = nearest_existing_canonical_path(&output_path).map_err(|error| {
         AppError::Runtime(format!("failed to canonicalize output path: {error}"))
     })?;

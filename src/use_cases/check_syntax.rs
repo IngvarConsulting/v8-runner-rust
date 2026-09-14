@@ -1465,6 +1465,45 @@ mod tests {
         assert!(result.platform_log_path.is_none());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn syntax_edt_does_not_resolve_unused_infobase_binding() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let binary = utility_path(&dir.path().join("edt"), "1cedtcli");
+        let calls = dir.path().join("edt-calls.log");
+        fs::create_dir_all(base.join("main-edt")).expect("main");
+        fs::create_dir_all(base.join("ext-edt")).expect("extension");
+        write_edt_script_with_calls(&binary, &calls);
+        let mut config = sample_edt_config(&base, &work, &binary);
+        let alias = dir.path().join("unavailable-ib");
+        std::os::unix::fs::symlink(dir.path().join("missing-ib"), &alias)
+            .expect("dangling infobase");
+        config.infobase.connection = format!("File={}", alias.display());
+        assert!(
+            crate::change_detection::source_sets::SourceSetsService::new(&config)
+                .designer_contexts()
+                .is_err(),
+            "runtime operations must still fail closed"
+        );
+        let result = run_syntax(
+            &config,
+            &SyntaxArgs {
+                target: SyntaxTarget::Edt { projects: vec![] },
+            },
+        )
+        .expect("source-only syntax remains available");
+        assert_eq!(result.status, SyntaxCheckStatus::Clean);
+        assert_eq!(
+            fs::read_to_string(calls)
+                .expect("EDT calls")
+                .lines()
+                .count(),
+            2
+        );
+    }
+
     #[test]
     fn syntax_edt_rejects_unknown_project_names() {
         let dir = tempdir().expect("tempdir");

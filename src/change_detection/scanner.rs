@@ -33,10 +33,11 @@ pub enum ScanError {
     RelativePath { root: PathBuf, path: PathBuf },
 }
 
-/// Directory/file names that are always excluded from scanning.
+/// Child directory names excluded from scanning; the selected root is always scanned.
 const IGNORED_DIRS: &[&str] = &[
     ".git", ".gradle", "build", "target", "temp", "tmp", ".yaxunit",
 ];
+/// File names excluded at every depth.
 const IGNORED_FILES: &[&str] = &["ConfigDumpInfo.xml"];
 
 /// Coarse filesystem mtime guard (2 seconds).
@@ -173,11 +174,38 @@ fn rel_path(root: &Path, path: &Path) -> Result<String, ScanError> {
 }
 
 fn is_ignored_dir(entry: &walkdir::DirEntry) -> bool {
-    if !entry.file_type().is_dir() {
+    // Exclusions apply to children, never the selected source root. Staged and
+    // published trees must have identical coverage regardless of their root names.
+    if entry.depth() == 0 || !entry.file_type().is_dir() {
         return false;
     }
     let Some(name) = entry.file_name().to_str() else {
         return false;
     };
     IGNORED_DIRS.contains(&name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{scan, IGNORED_DIRS};
+    use std::collections::HashSet;
+
+    #[test]
+    fn selected_roots_are_scanned_while_ignored_descendants_stay_excluded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for root_name in IGNORED_DIRS {
+            let root = dir.path().join(root_name);
+            std::fs::create_dir(&root).expect("root");
+            std::fs::write(root.join("Module.bsl"), "source").expect("source");
+            for child_name in IGNORED_DIRS {
+                let child = root.join(child_name);
+                std::fs::create_dir(&child).expect("ignored child");
+                std::fs::write(child.join("Module.bsl"), "generated").expect("child source");
+            }
+            let scanned = scan(&root, None, &HashSet::new()).expect("scan");
+            assert_eq!(scanned.seen_files.len(), 1, "root {root_name}");
+            assert_eq!(scanned.candidates.len(), 1, "root {root_name}");
+            assert_eq!(scanned.candidates[0].rel_path, "Module.bsl");
+        }
+    }
 }

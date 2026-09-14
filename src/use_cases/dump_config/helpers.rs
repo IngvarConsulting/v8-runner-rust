@@ -85,6 +85,13 @@ fn validate_publish_target_path(
             "dump target must not equal workPath".to_owned(),
         ));
     }
+    // Publication must not rename/unlink its own snapshot storage or workspace lock.
+    // The reverse nesting is valid for generated Designer trees beneath workPath.
+    if canonical_work_path.starts_with(canonical_target_path) {
+        return Err(AppError::Validation(
+            "workPath must not be inside dump target".to_owned(),
+        ));
+    }
     if is_filesystem_root(canonical_target_path) {
         return Err(AppError::Validation(
             "dump target must not equal filesystem root".to_owned(),

@@ -366,7 +366,8 @@ fn normalize_raw_connection_args(connection: &str, config_dir: &Path) -> String 
     }
 }
 
-fn normalize_connection_file_path(path: &str, config_dir: &Path) -> String {
+/// Shared File-path normalization for loaded configurations and runtime identity resolution.
+pub(crate) fn normalize_connection_file_path(path: &str, config_dir: &Path) -> String {
     let path = path.trim();
     let path = strip_matching_quotes(path).unwrap_or(path);
     let path = Path::new(path);

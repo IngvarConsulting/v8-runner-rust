@@ -4,9 +4,10 @@ use std::time::{Duration, Instant};
 
 use crate::change_detection::analyzer::{self, AnalysisOutcome};
 use crate::change_detection::hash_storage::HashStorage;
+use crate::change_detection::source_sets::SourceSetsService;
 use crate::config::model::{
-    AppConfig, BuilderBackend, SourceFormat, ToolExtensionConfig, ToolExtensionInput,
-    ToolExtensionSourceConfig,
+    AppConfig, BuilderBackend, SourceFormat, SourceSetConfig, SourceSetPurpose,
+    ToolExtensionConfig, ToolExtensionInput, ToolExtensionSourceConfig,
 };
 use crate::domain::build::{BuildMode, BuildStep};
 use crate::domain::source_set::SourceSetContext;
@@ -193,11 +194,19 @@ fn tool_extension_source_context(
     } else {
         base_path.join(&source.path)
     };
-    Ok(SourceSetContext::new(
-        format!("tool:{}", extension.name),
-        source_path,
-        format!("tool-{}-source", extension.name),
-    ))
+    SourceSetsService::new(config).bind_context(
+        SourceSetContext::new(
+            format!("tool:{}", extension.name),
+            source_path,
+            format!("tool-{}-source", extension.name),
+        ),
+        &SourceSetConfig {
+            name: extension.name.clone(),
+            purpose: SourceSetPurpose::Extension,
+            path: source.path.clone(),
+        },
+        source.format.unwrap_or(config.format),
+    )
 }
 
 fn absolutize_path(path: &Path) -> Result<PathBuf, AppError> {

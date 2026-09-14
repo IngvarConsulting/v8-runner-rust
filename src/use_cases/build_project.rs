@@ -239,32 +239,36 @@ fn selected_ordered_source_sets<'a>(
 fn designer_contexts_for_source_sets(
     inventory: &SourceSetInventory<'_>,
     source_sets: &[&SourceSetConfig],
-) -> Vec<SourceSetContext> {
-    inventory
-        .designer_contexts()
+) -> Result<Vec<SourceSetContext>, AppError> {
+    source_sets
         .iter()
-        .filter(|context| {
-            source_sets
-                .iter()
-                .any(|source_set| source_set.name == context.name())
+        .map(|source_set| {
+            inventory
+                .designer_context(&source_set.name)?
+                .ok_or_else(|| {
+                    AppError::Runtime(format!(
+                        "missing designer context for source-set '{}'",
+                        source_set.name
+                    ))
+                })
         })
-        .cloned()
         .collect()
 }
 
 fn edt_contexts_for_source_sets(
     inventory: &SourceSetInventory<'_>,
     source_sets: &[&SourceSetConfig],
-) -> Vec<SourceSetContext> {
-    inventory
-        .edt_contexts()
+) -> Result<Vec<SourceSetContext>, AppError> {
+    source_sets
         .iter()
-        .filter(|context| {
-            source_sets
-                .iter()
-                .any(|source_set| source_set.name == context.name())
+        .map(|source_set| {
+            inventory.edt_context(&source_set.name)?.ok_or_else(|| {
+                AppError::Runtime(format!(
+                    "missing EDT context for source-set '{}'",
+                    source_set.name
+                ))
+            })
         })
-        .cloned()
         .collect()
 }
 
@@ -1298,7 +1302,7 @@ mod tests {
 
     fn prime_snapshots(config: &AppConfig) {
         let service = SourceSetsService::new(config);
-        for context in service.designer_contexts() {
+        for context in service.designer_contexts().expect("designer contexts") {
             crate::change_detection::analyzer::rescan_and_commit_full(&context, &config.work_path)
                 .expect("prime snapshot");
         }
@@ -1306,7 +1310,7 @@ mod tests {
 
     fn prime_edt_snapshots(config: &AppConfig) {
         let service = SourceSetsService::new(config);
-        for context in service.edt_contexts() {
+        for context in service.edt_contexts().expect("edt contexts") {
             crate::change_detection::analyzer::rescan_and_commit_full(&context, &config.work_path)
                 .expect("prime edt snapshot");
         }
@@ -1316,6 +1320,7 @@ mod tests {
         let service = SourceSetsService::new(config);
         let context = service
             .designer_contexts()
+            .expect("designer contexts")
             .into_iter()
             .find(|context| context.name() == source_set_name)
             .expect("context");
@@ -1365,6 +1370,7 @@ mod tests {
         let service = SourceSetsService::new(config);
         let context = service
             .edt_contexts()
+            .expect("edt contexts")
             .into_iter()
             .find(|context| context.name() == source_set_name)
             .expect("edt context");
@@ -2340,6 +2346,7 @@ mod tests {
             .expect("build failures should preserve a structured payload");
         let designer_storage_path = SourceSetsService::new(&config)
             .designer_contexts()
+            .expect("designer contexts")
             .into_iter()
             .find(|context| context.name() == "client_mcp")
             .expect("designer context")
@@ -2580,6 +2587,7 @@ mod tests {
             .expect("build failures should preserve a structured payload");
         let designer_storage_path = SourceSetsService::new(&config)
             .designer_contexts()
+            .expect("designer contexts")
             .into_iter()
             .find(|context| context.name() == "main")
             .expect("designer context")
@@ -2853,6 +2861,7 @@ mod tests {
         let service = SourceSetsService::new(&config);
         let main_context = service
             .designer_contexts()
+            .expect("designer contexts")
             .into_iter()
             .find(|context| context.name() == "main")
             .expect("main context");
@@ -2990,7 +2999,7 @@ mod tests {
         prime_snapshots(&config);
 
         let service = SourceSetsService::new(&config);
-        for context in service.designer_contexts() {
+        for context in service.designer_contexts().expect("designer contexts") {
             let storage_path = context.storage_path(&config.work_path);
             fs::write(storage_path, "corrupt").expect("corrupt storage");
         }
@@ -3029,6 +3038,7 @@ mod tests {
         let service = SourceSetsService::new(&config);
         let main_context = service
             .designer_contexts()
+            .expect("designer contexts")
             .into_iter()
             .find(|context| context.name() == "main")
             .expect("main context");

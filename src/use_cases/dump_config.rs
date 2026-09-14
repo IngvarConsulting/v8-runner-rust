@@ -2,6 +2,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::change_detection::{
+    analyzer,
+    hash_storage::{HashStorage, SnapshotPublicationError},
+};
 use crate::config::model::{AppConfig, BuilderBackend, SourceFormat, SourceSetPurpose};
 use crate::domain::dump::{DumpMode, DumpResult, DumpSelectorResult};
 use crate::domain::partial_dump_selector::PartialDumpSelector;
@@ -9,6 +13,7 @@ use crate::domain::partial_dump_selector::PartialDumpSelector;
 use crate::domain::partial_dump_selector::{
     PARTIAL_OBJECT_BLANK_ERROR, PARTIAL_OBJECT_CONTROL_ERROR,
 };
+use crate::domain::source_set::SourceSetContext;
 use crate::platform::designer::DesignerDsl;
 use crate::platform::edt::EdtDsl;
 use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
@@ -104,6 +109,67 @@ fn run_dump_with_context(
     coordinator::run_dump_with_context(context, config, args)
 }
 
+// EDT helpers publish an intermediate mirror; only direct Designer source publication
+// establishes the source bytes against which the next load can safely be skipped.
+fn capture_dump_snapshot(
+    config: &AppConfig,
+    resolved: &ResolvedDumpTarget,
+) -> Result<Option<(SourceSetContext, u64)>, AppError> {
+    if config.format != SourceFormat::Designer {
+        return Ok(None);
+    }
+    let inventory = SourceSetInventory::new(config);
+    let source = inventory
+        .designer_context(&resolved.source_set_name)?
+        .ok_or_else(|| AppError::Runtime("missing dump source context".to_owned()))?
+        .clone();
+    let generation = HashStorage::new(source.storage_path(&config.work_path))
+        .current_generation()
+        .map_err(|error| AppError::Runtime(error.to_string()))?;
+    Ok(Some((source, generation)))
+}
+
+fn publish_full_dump(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    resolved: &ResolvedDumpTarget,
+    publication: &StagedPublication,
+    snapshot_context: Option<(SourceSetContext, u64)>,
+) -> Result<super::staged_publication::StagedPublicationOutcome, AppError> {
+    let Some((source, generation)) = snapshot_context else {
+        return publication.publish_dir(
+            context,
+            DUMP_BACKUP_PREFIX,
+            "failed to publish staged dump",
+        );
+    };
+    let prepared = analyzer::prepare_publication(&source, publication.staging_path(), generation)
+        .map_err(|error| AppError::Runtime(error.to_string()))?;
+    if let Some(error) = interruption_before_publish(context, "dump snapshot publication") {
+        return Err(error);
+    }
+    let phase = context.run_no_process_critical_phase(|| {
+        analyzer::publish_prepared(&source, &config.work_path, &prepared, publication.run_id(), || {
+            // Re-resolve aliases at the boundary; a retargeted IB/source is not the one exported.
+            let inventory = SourceSetInventory::new(config);
+            let current = inventory.designer_context(&resolved.source_set_name)?
+                .ok_or_else(|| AppError::Runtime("missing dump source context".to_owned()))?;
+            if current.runtime_binding() != source.runtime_binding() {
+                return Err(AppError::Runtime("runtime identity changed before dump publication".to_owned()));
+            }
+            validate_platform_target(resolved)?;
+            publication.publish_dir(context, DUMP_BACKUP_PREFIX, "failed to publish staged dump")
+        }).map_err(|error| match error {
+            SnapshotPublicationError::Storage(error) => AppError::Runtime(format!(
+                "dump snapshot reconciliation failed; a successful full rebuild is required: {error}")),
+            SnapshotPublicationError::Publication(error) => error,
+        })
+    })?;
+    let mut outcome = phase.value;
+    outcome.deferred_interruption = phase.deferred_interruption;
+    Ok(outcome)
+}
+
 fn run_incremental_dump_designer(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -152,6 +218,7 @@ fn run_full_dump_designer(
         target = %resolved.platform_target_path.display(),
         "running full dump via staging directory"
     );
+    let snapshot_context = capture_dump_snapshot(config, resolved)?;
     let publication = StagedPublication::prepare_dir(
         &resolved.platform_target_path,
         &resolved.platform_target_identity,
@@ -183,9 +250,9 @@ fn run_full_dump_designer(
         return Err(publication.cleanup_failure(error));
     }
 
-    let publish_phase = publication
-        .publish_dir(context, DUMP_BACKUP_PREFIX, "failed to publish staged dump")
-        .map_err(|error| publication.cleanup_failure(error))?;
+    let publish_phase =
+        publish_full_dump(context, config, resolved, &publication, snapshot_context)
+            .map_err(|error| publication.cleanup_failure(error))?;
     debug!(target = %resolved.platform_target_path.display(), "published staged dump");
 
     Ok((
@@ -235,6 +302,7 @@ fn run_full_dump_ibcmd(
         target = %resolved.platform_target_path.display(),
         "running full ibcmd dump via staging directory"
     );
+    let snapshot_context = capture_dump_snapshot(config, resolved)?;
     let publication = StagedPublication::prepare_dir(
         &resolved.platform_target_path,
         &resolved.platform_target_identity,
@@ -259,9 +327,9 @@ fn run_full_dump_ibcmd(
         return Err(publication.cleanup_failure(error));
     }
 
-    let publish_phase = publication
-        .publish_dir(context, DUMP_BACKUP_PREFIX, "failed to publish staged dump")
-        .map_err(|error| publication.cleanup_failure(error))?;
+    let publish_phase =
+        publish_full_dump(context, config, resolved, &publication, snapshot_context)
+            .map_err(|error| publication.cleanup_failure(error))?;
     debug!(target = %resolved.platform_target_path.display(), "published staged dump");
 
     Ok((
@@ -891,16 +959,8 @@ fn resolve_target(config: &AppConfig, args: &DumpArgs) -> Result<ResolvedDumpTar
 
     let target_path = inventory.source_path(source_set);
     let platform_target_path = if config.format == SourceFormat::Edt {
-        inventory
-            .designer_context(&source_set.name)
-            .ok_or_else(|| {
-                AppError::Runtime(format!(
-                    "missing designer runtime context for source-set '{}'",
-                    source_set.name
-                ))
-            })?
-            .path()
-            .to_path_buf()
+        crate::change_detection::source_sets::SourceSetsService::new(config)
+            .designer_path(source_set)?
     } else {
         target_path.clone()
     };
@@ -1703,6 +1763,29 @@ exit 0"#,
     }
 
     #[test]
+    fn validate_publish_target_allows_source_target_inside_work_path() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        fs::create_dir(&base).expect("base");
+        let mut config = build_config(&base, &work, &dir.path().join("1cv8"));
+        config.source_sets[0].path = work.join("designer/main");
+        let resolved = resolve_target(
+            &config,
+            &DumpArgs {
+                dry_run: false,
+                mode: DumpModeRequest::Full,
+                source_set: Some("main".to_owned()),
+                extension: None,
+                objects: vec![],
+            },
+        )
+        .expect("resolved");
+
+        validate_publish_target(&resolved).expect("target inside workPath remains supported");
+    }
+
+    #[test]
     fn nearest_existing_canonical_path_uses_existing_ancestor() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path().join("root");
@@ -2287,6 +2370,10 @@ exit 0"#,
 
     #[test]
     fn dump_full_preserves_old_dump_on_platform_failure() {
+        use crate::change_detection::analyzer::rescan_and_commit_full;
+        use crate::change_detection::hash_storage::HashStorage;
+        use crate::change_detection::source_sets::SourceSetsService;
+
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
@@ -2296,6 +2383,17 @@ exit 0"#,
         write_dump_script(&script, &calls, Some("/DumpConfigToFiles"), 0);
         let config = build_config(&base, &work, &script);
         fs::write(base.join("main").join("old.txt"), "keep me").expect("old");
+        let contexts = SourceSetsService::new(&config)
+            .designer_contexts()
+            .expect("contexts");
+        rescan_and_commit_full(&contexts[0], &work).expect("seed snapshot");
+        let storage = HashStorage::new(contexts[0].storage_path(&work));
+        let generation = storage
+            .current_generation()
+            .expect("generation before failure");
+        let snapshot_bytes = fs::read(storage.path()).expect("snapshot bytes before failure");
+        let source_bytes = fs::read(base.join("main/Catalogs.Items/ObjectModule.bsl"))
+            .expect("source before failure");
 
         let failure = run_dump(
             &config,
@@ -2310,6 +2408,21 @@ exit 0"#,
         .expect_err("failure");
 
         assert_eq!(failure.error.kind(), UseCaseErrorKind::Platform);
+        assert_eq!(
+            storage
+                .current_generation()
+                .expect("generation after failure"),
+            generation
+        );
+        assert_eq!(
+            fs::read(storage.path()).expect("snapshot after failure"),
+            snapshot_bytes
+        );
+        assert_eq!(
+            fs::read(base.join("main/Catalogs.Items/ObjectModule.bsl"))
+                .expect("source after failure"),
+            source_bytes
+        );
         assert_eq!(
             fs::read_to_string(base.join("main").join("old.txt")).expect("old"),
             "keep me"
@@ -2342,6 +2455,456 @@ exit 0"#,
 
         assert!(result.ok);
         assert!(!base.join("main").join("old.txt").exists());
+    }
+
+    fn assert_full_dump_build_contract(
+        builder: BuilderBackend,
+        purpose: SourceSetPurpose,
+        source_dir: &str,
+    ) {
+        use crate::change_detection::analyzer::rescan_and_commit_full;
+        use crate::change_detection::source_sets::SourceSetsService;
+        use crate::domain::build::BuildMode;
+        use crate::use_cases::build_project::run_build;
+        use crate::use_cases::request::BuildRequest;
+
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let script = dir.path().join(match builder {
+            BuilderBackend::Designer => "1cv8",
+            BuilderBackend::Ibcmd => "ibcmd",
+        });
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        let source = base.join(source_dir);
+        if source_dir != "main" {
+            fs::rename(base.join("main"), &source).expect("rename source root");
+        }
+        write_script(
+            &script,
+            &format!(
+                r#"printf '%s\n' "$*" >> "{}"
+dump_target=""
+output=""
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "/DumpConfigToFiles" ]; then dump_target="$argument"; fi
+  if [ "$previous" = "/Out" ]; then output="$argument"; fi
+  previous="$argument"
+done
+case "$*" in *"config export"*) dump_target="$previous" ;; esac
+if [ -n "$output" ]; then printf 'fake Designer completed\n' > "$output"; fi
+if [ -n "$dump_target" ]; then
+  mkdir -p "$dump_target/Catalogs.Items"
+  printf 'Procedure FromInfobase()\nEndProcedure\n' > "$dump_target/Catalogs.Items/ObjectModule.bsl"
+fi
+exit 0"#,
+                calls.display()
+            ),
+        );
+        let mut config = build_config_with_builder(&base, &work, &script, builder);
+        config
+            .source_sets
+            .retain(|source_set| source_set.name == "main");
+        config.source_sets[0].purpose = purpose;
+        config.source_sets[0].path = source.clone();
+        config.infobase = crate::config::model::InfobaseConfig::file(format!(
+            "File={}",
+            dir.path().join("ib").display()
+        ));
+        let contexts = SourceSetsService::new(&config)
+            .designer_contexts()
+            .expect("contexts");
+        assert_eq!(contexts.len(), 1);
+        rescan_and_commit_full(&contexts[0], &work).expect("seed pre-dump snapshot");
+        let build_args = BuildRequest {
+            full_rebuild: false,
+            source_set: None,
+            dry_run: false,
+        };
+        let before_dump = run_build(&config, &build_args).expect("unchanged baseline build");
+        assert_eq!(before_dump.steps[0].mode, BuildMode::Skipped);
+        assert!(
+            !calls.exists(),
+            "baseline build must not invoke the platform"
+        );
+
+        let dumped = run_dump(
+            &config,
+            &DumpArgs {
+                dry_run: false,
+                mode: DumpModeRequest::Full,
+                source_set: Some("main".to_owned()),
+                extension: (purpose == SourceSetPurpose::Extension).then(|| "main".to_owned()),
+                objects: vec![],
+            },
+        )
+        .expect("successful full dump");
+        assert!(dumped.ok);
+        assert_eq!(
+            fs::read_to_string(source.join("Catalogs.Items/ObjectModule.bsl"))
+                .expect("published source"),
+            "Procedure FromInfobase()\nEndProcedure\n"
+        );
+        let dump_calls = fs::read_to_string(&calls).expect("dump platform calls");
+        assert_eq!(dump_calls.lines().count(), 1);
+        if purpose == SourceSetPurpose::Extension {
+            let extension_flag = match builder {
+                BuilderBackend::Designer => "-Extension main",
+                BuilderBackend::Ibcmd => "--extension main",
+            };
+            assert!(dump_calls.contains(extension_flag), "{dump_calls}");
+        }
+
+        // The next ordinary build must recognize its own infobase's published dump.
+        let after_dump = run_build(&config, &build_args).expect("build after successful dump");
+        assert!(after_dump.ok);
+        assert_eq!(after_dump.steps.len(), 1);
+        assert_eq!(
+            after_dump.steps[0].mode,
+            BuildMode::Skipped,
+            "a successful full dump must reconcile the snapshot used by ordinary build"
+        );
+        assert_eq!(
+            fs::read_to_string(&calls).expect("platform calls after build"),
+            dump_calls,
+            "ordinary build must not reload the source tree just published by dump"
+        );
+        let module = source.join("Catalogs.Items/ObjectModule.bsl");
+        fs::write(&module, "Procedure UserEditAfterDump()\nEndProcedure\n").expect("user edit");
+        let edited = run_build(&config, &build_args).expect("build user edit after dump");
+        assert!(edited.ok);
+        assert_ne!(edited.steps[0].mode, BuildMode::Skipped);
+        let edited_calls = fs::read_to_string(&calls).expect("edited build calls");
+        assert!(edited_calls.lines().count() > dump_calls.lines().count());
+
+        config.infobase = crate::config::model::InfobaseConfig::file(format!(
+            "File={}",
+            dir.path().join("other-ib").display()
+        ));
+        let switched_ib = run_build(&config, &build_args).expect("build switched infobase");
+        assert_eq!(switched_ib.steps[0].mode, BuildMode::Full);
+        let ib_calls = fs::read_to_string(&calls).expect("switched infobase calls");
+        assert!(ib_calls.lines().count() > edited_calls.lines().count());
+
+        let other_source = base.join("other-source");
+        fs::create_dir_all(other_source.join("Catalogs.Items")).expect("other source");
+        fs::copy(
+            &module,
+            other_source.join("Catalogs.Items/ObjectModule.bsl"),
+        )
+        .expect("same bytes in different source root");
+        config.source_sets[0].path = other_source;
+        let switched_source = run_build(&config, &build_args).expect("build switched source root");
+        assert_eq!(switched_source.steps[0].mode, BuildMode::Full);
+        assert!(
+            fs::read_to_string(&calls)
+                .expect("switched source calls")
+                .lines()
+                .count()
+                > ib_calls.lines().count()
+        );
+    }
+
+    #[test]
+    fn successful_full_designer_dump_makes_next_ordinary_build_skip() {
+        assert_full_dump_build_contract(
+            BuilderBackend::Designer,
+            SourceSetPurpose::Configuration,
+            "main",
+        );
+    }
+
+    #[test]
+    fn full_ibcmd_dump_preserves_build_fixed_point_and_detects_new_changes() {
+        assert_full_dump_build_contract(
+            BuilderBackend::Ibcmd,
+            SourceSetPurpose::Configuration,
+            "main",
+        );
+    }
+
+    #[test]
+    fn full_designer_extension_dump_preserves_build_fixed_point_and_detects_new_changes() {
+        assert_full_dump_build_contract(
+            BuilderBackend::Designer,
+            SourceSetPurpose::Extension,
+            "main",
+        );
+    }
+
+    #[test]
+    fn full_ibcmd_extension_dump_preserves_build_fixed_point_and_detects_new_changes() {
+        assert_full_dump_build_contract(BuilderBackend::Ibcmd, SourceSetPurpose::Extension, "main");
+    }
+
+    #[test]
+    fn full_dump_build_contract_keeps_ignored_directory_names_as_source_roots() {
+        for builder in [BuilderBackend::Designer, BuilderBackend::Ibcmd] {
+            for purpose in [SourceSetPurpose::Configuration, SourceSetPurpose::Extension] {
+                for source_dir in ["build", "target", "tmp", "temp"] {
+                    assert_full_dump_build_contract(builder, purpose, source_dir);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn full_dump_rejects_nested_work_path_before_touching_sources_or_snapshot() {
+        use crate::change_detection::analyzer::rescan_and_commit_full;
+        use crate::change_detection::hash_storage::HashStorage;
+        use crate::change_detection::source_sets::SourceSetsService;
+
+        for builder in [BuilderBackend::Designer, BuilderBackend::Ibcmd] {
+            let dir = tempdir().expect("tempdir");
+            let base = dir.path().join("base");
+            let work = base.join("main/target");
+            let script = dir.path().join(match builder {
+                BuilderBackend::Designer => "1cv8",
+                BuilderBackend::Ibcmd => "ibcmd",
+            });
+            let calls = dir.path().join("calls.log");
+            create_source_tree(&base);
+            write_dump_script(&script, &calls, None, 0);
+            let mut config = build_config_with_builder(&base, &work, &script, builder);
+            let source = SourceSetsService::new(&config)
+                .designer_contexts()
+                .expect("contexts")
+                .remove(0);
+            rescan_and_commit_full(&source, &work).expect("seed snapshot");
+            let storage = HashStorage::new(source.storage_path(&work));
+            storage
+                .begin_publication(
+                    storage.current_generation().expect("generation"),
+                    "interrupted-dump",
+                )
+                .expect("seed pending publication");
+            let snapshot_bytes = fs::read(storage.path()).expect("snapshot before dump");
+            let module = base.join("main/Catalogs.Items/ObjectModule.bsl");
+            let source_bytes = fs::read(&module).expect("source before dump");
+            let work_paths = {
+                #[cfg(unix)]
+                {
+                    let alias = dir.path().join("work-alias");
+                    symlink(&work, &alias).expect("workPath alias");
+                    vec![work.clone(), alias]
+                }
+                #[cfg(not(unix))]
+                {
+                    vec![work.clone()]
+                }
+            };
+
+            for work_path in work_paths {
+                config.work_path = work_path;
+                let failure = run_dump(
+                    &config,
+                    &DumpArgs {
+                        dry_run: false,
+                        mode: DumpModeRequest::Full,
+                        source_set: Some("main".to_owned()),
+                        extension: None,
+                        objects: vec![],
+                    },
+                )
+                .expect_err("nested workPath must be rejected before publication");
+
+                assert_eq!(failure.error.kind(), UseCaseErrorKind::Validation);
+                assert!(
+                    failure
+                        .error
+                        .to_string()
+                        .contains("workPath must not be inside dump target"),
+                    "{}",
+                    failure.error
+                );
+                assert!(
+                    !calls.exists(),
+                    "invalid target must not invoke the platform"
+                );
+                assert_eq!(
+                    fs::read(&module).expect("source after rejection"),
+                    source_bytes
+                );
+                assert_eq!(
+                    fs::read(storage.path()).expect("snapshot after rejection"),
+                    snapshot_bytes
+                );
+                assert_eq!(
+                    storage
+                        .load_snapshot()
+                        .expect("retained snapshot")
+                        .pending_publication
+                        .as_deref(),
+                    Some("interrupted-dump")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn full_dump_cancellation_before_publish_preserves_source_and_snapshot() {
+        use crate::change_detection::analyzer::rescan_and_commit_full;
+        use crate::change_detection::hash_storage::HashStorage;
+        use crate::change_detection::source_sets::SourceSetsService;
+
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let designer = dir.path().join("1cv8");
+        create_source_tree(&base);
+        let config = build_config(&base, &work, &designer);
+        let contexts = SourceSetsService::new(&config)
+            .designer_contexts()
+            .expect("contexts");
+        rescan_and_commit_full(&contexts[0], &work).expect("seed snapshot");
+        let storage = HashStorage::new(contexts[0].storage_path(&work));
+        let generation = storage
+            .current_generation()
+            .expect("generation before cancellation");
+        let snapshot_bytes = fs::read(storage.path()).expect("snapshot before cancellation");
+        let source = base.join("main/Catalogs.Items/ObjectModule.bsl");
+        let source_bytes = fs::read(&source).expect("source before cancellation");
+        let resolved = resolve_target(
+            &config,
+            &DumpArgs {
+                dry_run: false,
+                mode: DumpModeRequest::Full,
+                source_set: Some("main".to_owned()),
+                extension: None,
+                objects: vec![],
+            },
+        )
+        .expect("resolved target");
+        let cancellation = CancellationToken::new();
+        let runner = TestProcessRunner {
+            cancel_after_call: Some((1, cancellation.clone())),
+            ..TestProcessRunner::with_on_run(|request| {
+                let target = request
+                    .args
+                    .windows(2)
+                    .find(|pair| pair[0] == "/DumpConfigToFiles")
+                    .expect("dump target");
+                fs::write(
+                    Path::new(&target[1]).join("new.bsl"),
+                    "published only on success",
+                )
+                .expect("staged source");
+            })
+        };
+        let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump)
+            .with_cancellation(cancellation);
+        super::run_full_dump_designer(&context, &config, &resolved, &designer, &runner)
+            .expect_err("cancellation must precede publication");
+        assert_eq!(runner.call_count(), 1);
+        assert_eq!(
+            fs::read(&source).expect("source after cancellation"),
+            source_bytes
+        );
+        assert!(!base.join("main/new.bsl").exists());
+        assert_eq!(
+            storage
+                .current_generation()
+                .expect("generation after cancellation"),
+            generation
+        );
+        assert_eq!(
+            fs::read(storage.path()).expect("snapshot after cancellation"),
+            snapshot_bytes
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_dump_rejects_infobase_alias_retargeted_during_platform_call() {
+        use crate::change_detection::analyzer::{
+            analyze_context, rescan_and_commit_full, AnalysisOutcome,
+        };
+        use crate::change_detection::hash_storage::HashStorage;
+        use crate::change_detection::source_sets::SourceSetsService;
+
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let designer = dir.path().join("1cv8");
+        let first_ib = dir.path().join("first-ib");
+        let second_ib = dir.path().join("second-ib");
+        let ib_alias = dir.path().join("ib-alias");
+        fs::create_dir_all(&first_ib).expect("first infobase");
+        fs::create_dir_all(&second_ib).expect("second infobase");
+        symlink(&first_ib, &ib_alias).expect("infobase alias");
+        create_source_tree(&base);
+        let mut config = build_config(&base, &work, &designer);
+        config.infobase =
+            crate::config::model::InfobaseConfig::file(format!("File={}", ib_alias.display()));
+        let contexts = SourceSetsService::new(&config)
+            .designer_contexts()
+            .expect("contexts");
+        rescan_and_commit_full(&contexts[0], &work).expect("seed snapshot");
+        let storage = HashStorage::new(contexts[0].storage_path(&work));
+        let before = storage.load_snapshot().expect("snapshot before retarget");
+        let source = base.join("main/Catalogs.Items/ObjectModule.bsl");
+        let source_bytes = fs::read(&source).expect("source before retarget");
+        let resolved = resolve_target(
+            &config,
+            &DumpArgs {
+                dry_run: false,
+                mode: DumpModeRequest::Full,
+                source_set: Some("main".to_owned()),
+                extension: None,
+                objects: vec![],
+            },
+        )
+        .expect("resolved target");
+        let runner = TestProcessRunner::with_on_run(move |request| {
+            let target = request
+                .args
+                .windows(2)
+                .find(|pair| pair[0] == "/DumpConfigToFiles")
+                .expect("dump target");
+            fs::write(Path::new(&target[1]).join("new.bsl"), "from first infobase")
+                .expect("staged source");
+            fs::remove_file(&ib_alias).expect("remove old alias");
+            symlink(&second_ib, &ib_alias).expect("retarget infobase alias");
+        });
+        let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump);
+        let error = super::run_full_dump_designer(&context, &config, &resolved, &designer, &runner)
+            .expect_err("retargeted identity must not publish");
+        assert!(
+            error.to_string().contains("runtime identity changed"),
+            "{error}"
+        );
+        assert_eq!(runner.call_count(), 1);
+        assert_eq!(
+            fs::read(&source).expect("source after retarget"),
+            source_bytes
+        );
+        assert!(!base.join("main/new.bsl").exists());
+        let after = storage.load_snapshot().expect("snapshot after retarget");
+        assert_eq!(after.generation, before.generation);
+        assert_eq!(after.runtime_binding, before.runtime_binding);
+        assert_eq!(after.entries.len(), before.entries.len());
+        for (path, entry) in &before.entries {
+            let actual = after
+                .entries
+                .get(path)
+                .expect("old snapshot entry retained");
+            assert_eq!(actual.hash, entry.hash);
+            assert_eq!(actual.mtime_ns, entry.mtime_ns);
+        }
+        let current = SourceSetsService::new(&config)
+            .designer_contexts()
+            .expect("retargeted contexts");
+        assert!(
+            !matches!(
+                analyze_context(&current[0], &work)
+                    .outcome
+                    .expect("analysis"),
+                AnalysisOutcome::NoChanges
+            ),
+            "retargeted infobase must never skip build"
+        );
     }
 
     #[test]

@@ -29,7 +29,17 @@ pub(super) fn run_build_designer(
             }
         };
     let selected_designer_contexts =
-        designer_contexts_for_source_sets(&inventory, &ordered_source_sets);
+        designer_contexts_for_source_sets(&inventory, &ordered_source_sets).map_err(|error| {
+            BuildExecutionFailure::with_payload(
+                error,
+                BuildResult {
+                    provider_dispatched: true,
+                    ok: false,
+                    steps: vec![],
+                    duration_ms: started.elapsed().as_millis() as u64,
+                },
+            )
+        })?;
 
     let analysis_by_name = if args.full_rebuild {
         None
@@ -45,7 +55,11 @@ pub(super) fn run_build_designer(
     let mut steps = Vec::new();
 
     for (index, source_set) in ordered_source_sets.iter().enumerate() {
-        let Some(source_context) = inventory.designer_context(&source_set.name).cloned() else {
+        let Some(source_context) = selected_designer_contexts
+            .iter()
+            .find(|source| source.name() == source_set.name)
+            .cloned()
+        else {
             continue;
         };
 
@@ -250,7 +264,17 @@ pub(super) fn run_build_ibcmd(
             }
         };
     let selected_designer_contexts =
-        designer_contexts_for_source_sets(&inventory, &ordered_source_sets);
+        designer_contexts_for_source_sets(&inventory, &ordered_source_sets).map_err(|error| {
+            BuildExecutionFailure::with_payload(
+                error,
+                BuildResult {
+                    provider_dispatched: true,
+                    ok: false,
+                    steps: vec![],
+                    duration_ms: started.elapsed().as_millis() as u64,
+                },
+            )
+        })?;
 
     let analysis_by_name = if args.full_rebuild {
         None
@@ -266,7 +290,11 @@ pub(super) fn run_build_ibcmd(
     let mut steps = Vec::new();
 
     for (index, source_set) in ordered_source_sets.iter().enumerate() {
-        let Some(source_context) = inventory.designer_context(&source_set.name).cloned() else {
+        let Some(source_context) = selected_designer_contexts
+            .iter()
+            .find(|source| source.name() == source_set.name)
+            .cloned()
+        else {
             continue;
         };
 
@@ -445,7 +473,30 @@ pub(super) fn run_build_edt(
                 ));
             }
         };
-    let selected_edt_contexts = edt_contexts_for_source_sets(&inventory, &ordered_source_sets);
+    let selected_edt_contexts = edt_contexts_for_source_sets(&inventory, &ordered_source_sets)
+        .map_err(|error| {
+            BuildExecutionFailure::with_payload(
+                error,
+                BuildResult {
+                    provider_dispatched: true,
+                    ok: false,
+                    steps: vec![],
+                    duration_ms: started.elapsed().as_millis() as u64,
+                },
+            )
+        })?;
+    let selected_designer_contexts =
+        designer_contexts_for_source_sets(&inventory, &ordered_source_sets).map_err(|error| {
+            BuildExecutionFailure::with_payload(
+                error,
+                BuildResult {
+                    provider_dispatched: true,
+                    ok: false,
+                    steps: vec![],
+                    duration_ms: started.elapsed().as_millis() as u64,
+                },
+            )
+        })?;
 
     let edt_analysis_by_name = if args.full_rebuild {
         None
@@ -461,10 +512,18 @@ pub(super) fn run_build_edt(
     let mut steps = Vec::new();
 
     for (index, source_set) in ordered_source_sets.iter().enumerate() {
-        let Some(edt_context) = inventory.edt_context(&source_set.name).cloned() else {
+        let Some(edt_context) = selected_edt_contexts
+            .iter()
+            .find(|source| source.name() == source_set.name)
+            .cloned()
+        else {
             continue;
         };
-        let Some(designer_context) = inventory.designer_context(&source_set.name).cloned() else {
+        let Some(designer_context) = selected_designer_contexts
+            .iter()
+            .find(|source| source.name() == source_set.name)
+            .cloned()
+        else {
             continue;
         };
 
