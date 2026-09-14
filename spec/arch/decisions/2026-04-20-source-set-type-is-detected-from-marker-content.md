@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_config_init.rs::config_init_detects_edt_extension_without_base_project_and_warns
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.CONFIG.TYPE-COMES-FROM-MARKER-CONTENT]
 ---
 
 # Тип набора определяется по содержимому маркеров

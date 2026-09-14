@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_dump.rs::dump_ibcmd_partial_json_success_uses_degraded_fallback
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.USE-CASES.DEGRADATION-IS-VISIBLE]
 ---
 
 # Сомнение переводит частичную загрузку в полную

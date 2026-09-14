@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_config_init.rs::config_init_uses_json_envelope_and_output_override
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [CTR.WIRE.COMMAND-ENVELOPE]
 ---
 
 # Структурный вывод включается одним флагом

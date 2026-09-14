@@ -5,7 +5,7 @@ governs: product
 realized: tests/mcp_http.rs::mcp_http_missing_and_expired_sessions_are_deterministic
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.MCP.SESSION-LIFECYCLE-IS-DETERMINISTIC]
 ---
 
 # Нагрузка и ёмкость сессий ограничиваются порознь

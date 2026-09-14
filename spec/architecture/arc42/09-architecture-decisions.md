@@ -27,7 +27,7 @@
 | [ADR-0023: Fail-closed состояния проверки загрузки артефактов](../../decisions/0023-fail-closed-sostoyaniya-proverki-zagruzki.md) | `accepted`, `2026-09-02` | Compatibility probe использует закрытый allowlist целых диагностик; `absent` отделён от `not_supported`, `unknown` остаётся platform failure и не разрешает mutation. |
 | [ADR-0024: Типизировать экспорт конфигурации и снимка информационной базы](../../decisions/0024-tipizirovat-eksport-konfiguratsii-i-snimka-ib.md) | `accepted`, `2026-09-02` | IB→CF/CFE и IB→DT являются разными CLI-only use case; runner выбирает готовый provider до блокировок и публикует результат через общий staged-publication contract. |
 
-Архитектурные инварианты для агентов и контрибьюторов зафиксированы в [spec/architecture/invariants.md](../invariants.md).
+Архитектурные правила для агентов и контрибьюторов живут в реестре [spec/arch](../../arch/README.md).
 
 ### Сквозные выводы из ADR
 

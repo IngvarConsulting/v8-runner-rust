@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_syntax.rs::syntax_text_clean_success_stays_compact
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.CLI.DIAGNOSTIC-PATH-IS-VISIBLE]
 ---
 
 # Один вывод для человека и для агента

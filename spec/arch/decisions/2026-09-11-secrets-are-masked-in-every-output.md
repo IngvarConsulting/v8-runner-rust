@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_launch.rs::launch_dry_run_text_masks_credentials_and_says_nothing_was_dispatched
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.CLI.SECRETS-NEVER-REACH-THE-OUTPUT]
 ---
 
 # Секреты маскируются во всех выводах

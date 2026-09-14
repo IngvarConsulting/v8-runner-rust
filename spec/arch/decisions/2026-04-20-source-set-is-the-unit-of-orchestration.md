@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_build.rs::build_source_set_json_limits_steps_to_requested_source_set
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.USE-CASES.SOURCE-SET-SELECTION-IS-HONORED]
 ---
 
 # Набор исходников — минимальная единица оркестрации

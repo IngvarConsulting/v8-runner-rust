@@ -5,7 +5,7 @@ governs: product
 realized: tests/tool_output_contract.rs::tool_prose_never_decides_and_the_declared_debt_only_shrinks
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.PLATFORM.PROSE-DEBT-ONLY-SHRINKS]
 ---
 
 # Проза инструмента не принимает решений

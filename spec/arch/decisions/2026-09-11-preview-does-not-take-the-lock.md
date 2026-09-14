@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_dump.rs::dry_run_neither_takes_nor_waits_for_the_workspace_lock
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.CLI.PREVIEW-TAKES-NO-LOCK]
 ---
 
 # Превью не берёт блокировку и не ждёт её

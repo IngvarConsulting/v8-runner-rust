@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_build.rs::build_text_workspace_lock_conflict_prints_single_error
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.CLI.LOCK-BOUNDARY-IS-THE-ADAPTER, INV.CLI.LOCK-CONFLICT-IS-ONE-ERROR]
 ---
 
 # Команда владеет рабочим каталогом целиком

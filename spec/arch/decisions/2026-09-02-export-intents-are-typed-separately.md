@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_help.rs::infobase_configuration_export_help_fixes_the_exact_grammar
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.CLI.EXPORT-GRAMMAR-IS-FIXED]
 ---
 
 # Сохранить конфигурацию и сохранить базу — разные намерения

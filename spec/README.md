@@ -8,7 +8,8 @@ acceptance.
 - `IMPLEMENTATION_TODO.md`: open implementation tasks only.
 - `ADR_DERIVED_BACKLOG.md`: open ADR-derived gaps that still need planning or execution.
 - `decisions/README.md`: accepted architecture decisions and their owning ADR files.
-- `architecture/invariants.md`: non-negotiable rules that changes must preserve.
+- `arch/`: атомарный реестр решений, инвариантов и контрактов; читать с `arch/index.md`.
+- `archive/FATE.md`: судьба записей замороженного прежнего слоя.
 - `architecture/change-checklist.md`: required sync/checklist for contract and boundary changes.
 - `architecture/arc42/`: detailed architecture and risk set for maintainers.
 - `acceptance/real-environment-validation.md`: active real-environment acceptance and smoke plan.

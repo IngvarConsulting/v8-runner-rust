@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_bootstrap.rs::default_config_path_applies_sibling_local_overlay
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.CONFIG.CREDENTIALS-STAY-IN-THE-OVERLAY]
 ---
 
 # Машинные настройки живут в локальном слое рядом

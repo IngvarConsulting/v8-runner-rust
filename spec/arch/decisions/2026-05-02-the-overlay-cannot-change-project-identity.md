@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_bootstrap.rs::unsupported_local_overlay_shape_is_rejected_in_json_mode
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.CONFIG.OVERLAY-KEEPS-ITS-SCOPE]
 ---
 
 # Локальный слой не меняет, что это за проект

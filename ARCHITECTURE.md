@@ -6,7 +6,7 @@
 
 `v8-runner` is a Rust CLI for orchestrating local 1C platform operations. The current codebase is organized into eight main layers:
 
-Architecture decisions live in [spec/decisions](spec/decisions/README.md), and agent-facing invariants are summarized in [spec/architecture/invariants.md](spec/architecture/invariants.md).
+Architecture decisions, invariants and contracts live in one atomic registry: [spec/arch](spec/arch/README.md). Its index is [spec/arch/index.md](spec/arch/index.md); the frozen previous layer and the fate of every old record are in [spec/archive/FATE.md](spec/archive/FATE.md).
 Практический checklist для изменений MCP surface, public command boundary и config contract вынесен в [spec/architecture/change-checklist.md](spec/architecture/change-checklist.md).
 
 1. `cli` parses arguments, maps them into transport-neutral requests, and owns command-level text/json rendering.
@@ -23,7 +23,7 @@ Architecture decisions live in [spec/decisions](spec/decisions/README.md), and a
 The platform layer is intentionally split so responsibilities do not bleed into use cases:
 
 - `platform::process` defines `ProcessRunner`, `ProcessExecutor`, `ProcessRequest`, `ProcessResult`, and `SpawnResult`.
-- `platform::locator` resolves concrete executables (`1cv8`, `1cv8c`, `ibcmd`, `1cedtcli`) and caches results per `Locator` instance. Platform component discovery by version mask is governed by [ADR-0004](spec/decisions/0004-avtoobnaruzhivat-komponenty-platformy-1s-po-versii-maske.md).
+- `platform::locator` resolves concrete executables (`1cv8`, `1cv8c`, `ibcmd`, `1cedtcli`) and caches results per `Locator` instance. Platform component discovery by version mask is governed by [решение 0004 в реестре](spec/arch/index.md).
 - `platform::connection` builds reusable V8 connection/auth arguments from `infobase.connection`.
 - `platform::utilities` is the current facade used by use cases. It owns the stateful `Locator` and exposes the standard execution path.
 - `platform::designer` is the low-level batch DSL for `1cv8 DESIGNER`, returning `PlatformCommandResult` so `/Out` logs stay separate from runner-captured stdio.
@@ -49,7 +49,7 @@ The CLI/runtime boundary is now split explicitly:
 - Новые public CLI/MCP команды с runtime state под `workPath` должны сохранять этот boundary и проходить checklist из `spec/architecture/change-checklist.md`.
 
 This keeps current CLI behavior intact while reserving a stable internal API for MCP stdio/HTTP adapters.
-Workspace ownership is governed by [ADR-0011](spec/decisions/0011-eksklyuzivnoe-vladenie-workpath-na-vremya-komandy.md).
+Workspace ownership is governed by [решение 0011 в реестре](spec/arch/index.md).
 
 ## Command Execution Policy
 
@@ -57,17 +57,17 @@ CLI and MCP commands must share the same timeout/cancellation semantics.
 The target contract is that every public command has a deadline, cancellation is routed through a transport-neutral execution context, and a cancelled/timed-out operation is reported only after the underlying operation reaches a terminal state.
 Mutating DB operations must mark critical phases where hard kill is not allowed by default.
 Cancellation representation фиксируется на command boundary: фактическая terminal cancellation использует `ExecutionStatus::Cancelled`, а cancellation/shutdown/timeout внутри successful critical phase возвращается как `Succeeded` с warning, без per-step cancellation state machine.
-This policy is governed by [ADR-0014](spec/decisions/0014-edinaya-timeout-cancellation-policy-dlya-cli-i-mcp-komand.md).
+This policy is governed by [решение 0014 в реестре](spec/arch/index.md).
 
 Runner-like and pipeline-like commands should be assembled in the use-case layer as transport-neutral pipelines of validation, target resolution, workspace preparation, platform execution, output parsing, publication, cleanup, and diagnostics blocks.
 Those blocks exchange typed context/input/output, leave step entries for skipped/degraded/failure behavior, and report domain execution through `ExecutionOutcome<T>`.
-This result grammar is governed by [ADR-0016](spec/decisions/0016-edinyy-executionoutcome-i-pipeline-steps-dlya-runner-like-stsenariev.md).
+This result grammar is governed by [решение 0016 в реестре](spec/arch/index.md).
 
 ## Configuration Surface
 
 `v8project.yaml`, loaded into `AppConfig` and accepted by `config::validate`, is the main project configuration contract.
 `source-set.name` is a stable identity for runtime state, generated directories, diagnostics, and source-set selection.
-The supported `source-set[].type` contract and validation boundary are governed by [ADR-0017](spec/decisions/0017-v8project-yaml-source-set-kak-glavnyy-konfiguratsionnyy-kontrakt.md).
+The supported `source-set[].type` contract and validation boundary are governed by [решение 0017 в реестре](spec/arch/index.md).
 `config init` must autodetect source-set types only from marker content: Designer `CONFIGURATION` / `EXTENSION` come from `Configuration.xml`, ordinary EDT `CONFIGURATION` / `EXTENSION` come from `.project` natures plus `DT-INF/PROJECT.PMF` (`EXTENSION` also requires `Base-Project`) and `src/Configuration/Configuration.mdo`, while EDT external `.epf`/`.erf` sources are discovered only through homogeneous aggregate roots of valid child projects classified by canonical `src/root.xml`, never through recursive descriptor scans, per-artifact fallback, or phantom source-set generation.
 
 The typed config model now splits MCP knobs into active HTTP/session settings and shared execution guardrails:
@@ -92,7 +92,7 @@ The MCP adapter no longer needs to talk to `cli::execute` or to reuse domain ser
 - `mcp::server::McpToolServer` is the shared rmcp handler used by both transports. It exposes tools-only capabilities, maps incoming `camelCase` params into MCP DTOs, gates every tool call through a global semaphore, calls the synchronous `McpService` via `tokio::task::spawn_blocking` for non-EDT tools, and routes live `check_syntax_edt` through `mcp::edt_syntax` plus the shared `EdtSessionManager`.
 - `mcp::port` owns the MCP workspace lock boundary before dispatching requests into transport-neutral use cases; the global MCP semaphore remains an admission limit, not a replacement for per-`workPath` ownership.
 - Изменение MCP tool surface должно оставаться явным архитектурным событием: список опубликованных tools синхронизируется между `src/mcp/server.rs`, `ADR-0005`, invariants и checklist-документом.
-- MCP execution admission and HTTP session capacity are separate guardrails governed by [ADR-0013](spec/decisions/0013-mcp-execution-admission-timeout-cancellation-routing-i-http-session-capacity.md).
+- MCP execution admission and HTTP session capacity are separate guardrails governed by [решение 0013 в реестре](spec/arch/index.md).
 - MCP runtime telemetry is intentionally implemented as structured `tracing` events rather than a separate metrics backend: semaphore acquisition emits `mcp_execution_semaphore_wait`, while the shared EDT actor emits `mcp_edt_queue_depth`, `mcp_edt_startup_failure`, `mcp_edt_session_restart`, and `mcp_edt_shutdown_drain`.
 - The stdio adapter still reserves `stdout` for MCP frames and enforces an absolute deadline for bounded EDT syntax calls: queue wait plus actor-side baseline/reset plus the interactive `validate` command all consume the same `tools.edt_cli.command_timeout_ms` budget.
 - The HTTP adapter is built on `axum` + `rmcp::transport::StreamableHttpService`. A thin wrapper around the rmcp service enforces transport-level overload semantics for new `initialize` requests (`503` when `max_sessions` is exhausted), translates stateful non-`initialize` POSTs without `Mcp-Session-Id` into deterministic `400`, and eagerly releases tracked capacity after `DELETE`.
@@ -125,7 +125,7 @@ Important staging note:
 
 Constraints to keep in mind:
 
-- Граница поддержки `IBCMD` как ограниченного backend формально закреплена в [ADR-0001](spec/decisions/0001-granitsy-podderzhki-ibcmd-kak-ogranichennogo-backend.md).
+- Граница поддержки `IBCMD` как ограниченного backend формально закреплена в [решение 0001 в реестре](spec/arch/index.md).
 - Для реализованных builder-сценариев `IBCMD` уже поддерживает file и server infobase connections; server path требует полный `infobase.dbms` contract. Оставшиеся file-only или unsupported сценарии считаются явными gaps, а не нормой архитектуры.
 - `builder=DESIGNER` supports object-level partial dump via `/DumpConfigToFiles -partial -listFile`.
 - `builder=IBCMD` does not support object-scoped partial dump directly; `PARTIAL` degrades to
@@ -135,7 +135,7 @@ Constraints to keep in mind:
 
 ## Dump And Artifact Publication
 
-Full replacement outputs are published through a staging/backup contract governed by [ADR-0015](spec/decisions/0015-atomarnaya-publikatsiya-dump-artifacts-cherez-staging-backup.md).
+Full replacement outputs are published through a staging/backup contract governed by [решение 0015 в реестре](spec/arch/index.md).
 Full dump writes to a sibling staging directory before replacing the resolved target directory.
 Package artifacts write to a sibling staging file before replacing the output file, and external EPF/ERF publication stages the whole output directory before replacing it.
 Incremental and partial dump modes remain direct non-atomic update modes.
@@ -163,6 +163,6 @@ Use cases now return transport-neutral payloads or structured failures.
 - `workPath/hash-storages/` remains reserved for change detection state.
 - `workPath/designer/<sourceSetName>/` is used by the EDT export/build flow as the generated Designer-format output area for a source-set.
 
-The `source-set` and `workPath` state boundary is formalized in [ADR-0002](spec/decisions/0002-izolirovat-runtime-state-po-source-set-pod-workpath.md): `DESIGNER` format uses one `designer-<sourceSetName>` change-detection context, while `EDT` format uses both `edt-<sourceSetName>` for export decisions and `designer-<sourceSetName>` for load decisions.
-Exclusive command ownership of `workPath` is governed by [ADR-0011](spec/decisions/0011-eksklyuzivnoe-vladenie-workpath-na-vremya-komandy.md).
-On-demand change detection and conservative file-level partial load rules are governed by [ADR-0012](spec/decisions/0012-on-demand-change-detection-i-faylovaya-partial-load-strategiya.md).
+The `source-set` and `workPath` state boundary is formalized in [решение 0002 в реестре](spec/arch/index.md): `DESIGNER` format uses one `designer-<sourceSetName>` change-detection context, while `EDT` format uses both `edt-<sourceSetName>` for export decisions and `designer-<sourceSetName>` for load decisions.
+Exclusive command ownership of `workPath` is governed by [решение 0011 в реестре](spec/arch/index.md).
+On-demand change detection and conservative file-level partial load rules are governed by [решение 0012 в реестре](spec/arch/index.md).

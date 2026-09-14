@@ -5,7 +5,7 @@ governs: product
 realized: tests/architecture_guardrails.rs::mcp_surface_snapshot_stays_explicit_and_documented
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [CTR.MCP.PUBLISHED-TOOL-SURFACE, INV.MCP.SURFACE-STAYS-EXPLICIT]
 ---
 
 # MCP не зеркалит CLI

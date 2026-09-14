@@ -5,7 +5,7 @@ governs: process
 realized: tests/architecture_guardrails.rs::raw_process_spawn_apis_stay_inside_platform_layer
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.PLATFORM.PROCESS-SPAWN-STAYS-IN-PLATFORM]
 ---
 
 # Детали процессов живут в слое платформы

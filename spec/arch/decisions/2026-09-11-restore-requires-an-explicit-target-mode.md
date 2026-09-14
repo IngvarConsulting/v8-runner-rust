@@ -5,7 +5,7 @@ governs: product
 realized: tests/cli_infobase.rs::restore_without_a_target_mode_is_refused_before_provider_selection
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.CLI.RESTORE-MODE-IS-MANDATORY]
 ---
 
 # Загрузка базы требует названного режима цели
