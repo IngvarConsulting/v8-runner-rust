@@ -44,6 +44,10 @@ REQUIRED_PROPS = {
         "version",
         "decision",
         "producer",
+        # Форма контракта закреплена файлом: схемой, снимком или фикстурой. Без него
+        # запись описывает форму словами, и сломать её можно, не задев ни строчки
+        # документации.
+        "artifact",
         "consumers",
         "check",
         "scope",
@@ -215,6 +219,9 @@ def validation_errors(found: list[Record]) -> list[str]:
                     f"{owner.relative}: does not establish its rule {record.id}"
                 )
         if record.kind == "contract":
+            artifact = str(record.props.get("artifact", ""))
+            if artifact and not (REPO_ROOT / artifact).is_file():
+                errors.append(f"{record.relative}: artifact {artifact} does not exist")
             version = str(record.props.get("version", ""))
             if not version.isdecimal() or int(version) < 1:
                 errors.append(f"{record.relative}: version must be a positive integer")

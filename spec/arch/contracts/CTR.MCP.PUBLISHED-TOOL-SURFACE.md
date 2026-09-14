@@ -4,16 +4,19 @@ status: active
 governs: product
 version: 1
 decision: DEC.2026-04-20.MCP-DOES-NOT-MIRROR-CLI
+artifact: docs/schemas/mcp-tools.json
 producer: src/mcp/service.rs
 consumers: [mcp, docs]
-check: tests/architecture_guardrails.rs::mcp_surface_snapshot_stays_explicit_and_documented
+check: tests/mcp_http.rs::mcp_http_initialize_reuses_session_and_lists_tools
 scope: [mcp, wire]
 ---
 
 # Состав опубликованных инструментов MCP
 
-Перечень инструментов — наблюдаемая форма: клиент видит именно его. Состав объявлен
-здесь, сверяется с кодом и с документацией, а его изменение меняет версию формы.
+Перечень инструментов — наблюдаемая форма: клиент видит именно его. Форма закреплена артефактом `docs/schemas/mcp-tools.json`: имя каждого инструмента и
+его схема входа целиком. Проверка сверяет с ним ответ живого сервера, поэтому
+добавленное обязательное поле ломает её при неизменном имени. Артефакт порождается
+командой `UPDATE_MCP_SURFACE=1 cargo test --test mcp_http`, а не правится руками.
 
 Опубликованы восемь инструментов:
 
