@@ -308,8 +308,8 @@
     "ExportProvider": {
       "description": "Process provider selected for an information-base export.",
       "enum": [
-        "designer-batch",
-        "ibcmd-process"
+        "designer",
+        "ibcmd"
       ],
       "type": "string"
     },

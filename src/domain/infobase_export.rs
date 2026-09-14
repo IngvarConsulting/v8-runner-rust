@@ -158,15 +158,15 @@ impl ProviderEvidence {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExportProvider {
-    DesignerBatch,
-    IbcmdProcess,
+    Designer,
+    Ibcmd,
 }
 
 impl ExportProvider {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::DesignerBatch => "designer-batch",
-            Self::IbcmdProcess => "ibcmd-process",
+            Self::Designer => "designer",
+            Self::Ibcmd => "ibcmd",
         }
     }
 }
@@ -631,8 +631,8 @@ mod tests {
             })
         );
         assert_eq!(
-            serde_json::to_value(ExportProvider::DesignerBatch).expect("provider json"),
-            json!("designer-batch")
+            serde_json::to_value(ExportProvider::Designer).expect("provider json"),
+            json!("designer")
         );
         assert_eq!(
             serde_json::to_value(ProviderImplementation::Experimental)
@@ -653,9 +653,9 @@ mod tests {
             output: PathBuf::from("/tmp/main.cf"),
         };
         let selection = ExportProviderDecision::selected(
-            ExportProvider::IbcmdProcess,
+            ExportProvider::Ibcmd,
             "selected ready provider",
-            vec![ready(ExportProvider::IbcmdProcess)],
+            vec![ready(ExportProvider::Ibcmd)],
         );
 
         let result = ExportConfigurationPackageResult::new(request, selection);
@@ -670,10 +670,10 @@ mod tests {
                 "state": "working",
                 "subject": {"kind": "main"},
                 "selection": {
-                    "provider": "ibcmd-process",
+                    "provider": "ibcmd",
                     "reason": "selected ready provider",
                     "candidates": [{
-                        "provider": "ibcmd-process",
+                        "provider": "ibcmd",
                         "implementation": "implemented",
                         "readiness": "ready",
                         "evidence": "argv_tested",
@@ -694,7 +694,7 @@ mod tests {
         let decision = ExportProviderDecision::unavailable(
             "no implemented provider is ready for DT export",
             vec![ProviderCandidate::new(
-                ExportProvider::IbcmdProcess,
+                ExportProvider::Ibcmd,
                 ProviderImplementation::Experimental,
                 ProviderReadiness::NotChecked,
                 ProviderEvidence::Documented,
@@ -709,7 +709,7 @@ mod tests {
                 "provider": null,
                 "reason": "no implemented provider is ready for DT export",
                 "candidates": [{
-                    "provider": "ibcmd-process",
+                    "provider": "ibcmd",
                     "implementation": "experimental",
                     "readiness": "not_checked",
                     "evidence": "documented",
@@ -725,9 +725,9 @@ mod tests {
             output: PathBuf::from("/tmp/base.dt"),
         };
         let selection = ExportProviderDecision::selected(
-            ExportProvider::DesignerBatch,
+            ExportProvider::Designer,
             "selected ready provider",
-            vec![ready(ExportProvider::DesignerBatch)],
+            vec![ready(ExportProvider::Designer)],
         );
         let mut result = ExportInfobaseSnapshotResult::new(request, selection);
         result.published = true;
@@ -742,10 +742,10 @@ mod tests {
                 "mode": "apply",
                 "subject": {"kind": "infobase"},
                 "selection": {
-                    "provider": "designer-batch",
+                    "provider": "designer",
                     "reason": "selected ready provider",
                     "candidates": [{
-                        "provider": "designer-batch",
+                        "provider": "designer",
                         "implementation": "implemented",
                         "readiness": "ready",
                         "evidence": "argv_tested",

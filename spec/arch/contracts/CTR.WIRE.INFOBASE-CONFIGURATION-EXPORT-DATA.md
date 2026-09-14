@@ -2,8 +2,8 @@
 id: CTR.WIRE.INFOBASE-CONFIGURATION-EXPORT-DATA
 status: active
 governs: product
-version: 1
-decision: DEC.2026-09-14.EVERY-COMMAND-PINS-THE-FORM-OF-ITS-DATA
+version: 2
+decision: DEC.2026-09-14.A-PROVIDER-IS-NAMED-BY-WHO-EXECUTES
 artifact: docs/schemas/command-data/infobase-configuration-export.schema.json
 producer: src/domain/infobase_export.rs
 consumers: [cli, unica]
@@ -36,7 +36,7 @@ scope: [wire, cli]
     "reason": "designer: file infobase is not ready: 'build/ib/1Cv8.1CD' is missing or is not a file",
     "candidates": [
       {
-        "provider": "designer-batch",
+        "provider": "designer",
         "implementation": "implemented",
         "readiness": "unavailable",
         "evidence": "argv_tested",

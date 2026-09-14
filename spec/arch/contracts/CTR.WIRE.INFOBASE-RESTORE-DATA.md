@@ -2,8 +2,8 @@
 id: CTR.WIRE.INFOBASE-RESTORE-DATA
 status: active
 governs: product
-version: 1
-decision: DEC.2026-09-14.EVERY-COMMAND-PINS-THE-FORM-OF-ITS-DATA
+version: 2
+decision: DEC.2026-09-14.A-PROVIDER-IS-NAMED-BY-WHO-EXECUTES
 artifact: docs/schemas/command-data/infobase-restore.schema.json
 producer: src/domain/infobase_export.rs
 consumers: [cli, unica]

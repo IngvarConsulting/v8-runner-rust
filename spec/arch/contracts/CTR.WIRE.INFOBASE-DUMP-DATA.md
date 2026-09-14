@@ -2,8 +2,8 @@
 id: CTR.WIRE.INFOBASE-DUMP-DATA
 status: active
 governs: product
-version: 1
-decision: DEC.2026-09-14.EVERY-COMMAND-PINS-THE-FORM-OF-ITS-DATA
+version: 2
+decision: DEC.2026-09-14.A-PROVIDER-IS-NAMED-BY-WHO-EXECUTES
 artifact: docs/schemas/command-data/infobase-dump.schema.json
 producer: src/domain/infobase_export.rs
 consumers: [cli, unica]
@@ -28,10 +28,10 @@ scope: [wire, cli]
   },
   "selection": {
     "provider": null,
-    "reason": "ibcmd-process: IBCMD DT export is disabled until an exclusive-access preflight is implemented",
+    "reason": "ibcmd: IBCMD DT export is disabled until an exclusive-access preflight is implemented",
     "candidates": [
       {
-        "provider": "ibcmd-process",
+        "provider": "ibcmd",
         "implementation": "experimental",
         "readiness": "not_checked",
         "evidence": "documented",
