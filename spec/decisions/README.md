@@ -34,7 +34,6 @@
 - [ADR-0028: Превью у глаголов без выбора провайдера](0028-prevyu-u-glagolov-bez-vybora-provaydera.md) — `accepted`, `2026-09-11`
 - [ADR-0029: Проза инструмента не принимает решений](0029-proza-instrumenta-ne-prinimaet-resheniy.md) — `accepted`, `2026-09-12`
 - [ADR-0030: Провайдеры назначаются по операциям, умолчания живут в коде](0030-provaydery-po-operatsiyam-s-umolchaniyami-v-kode.md) — `accepted`, `2026-09-13`
-- [ADR-0031: У цели два адреса, и публикацию на веб-сервере делает раннер](0031-publikatsiya-bazy-na-veb-servere.md) — `accepted`, `2026-09-14`
 
 ## Правила обновления
 
