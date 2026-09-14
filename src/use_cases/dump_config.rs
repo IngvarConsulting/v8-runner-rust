@@ -1763,6 +1763,29 @@ exit 0"#,
     }
 
     #[test]
+    fn validate_publish_target_allows_source_target_inside_work_path() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        fs::create_dir(&base).expect("base");
+        let mut config = build_config(&base, &work, &dir.path().join("1cv8"));
+        config.source_sets[0].path = work.join("designer/main");
+        let resolved = resolve_target(
+            &config,
+            &DumpArgs {
+                dry_run: false,
+                mode: DumpModeRequest::Full,
+                source_set: Some("main".to_owned()),
+                extension: None,
+                objects: vec![],
+            },
+        )
+        .expect("resolved");
+
+        validate_publish_target(&resolved).expect("target inside workPath remains supported");
+    }
+
+    #[test]
     fn nearest_existing_canonical_path_uses_existing_ancestor() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path().join("root");
@@ -2434,7 +2457,11 @@ exit 0"#,
         assert!(!base.join("main").join("old.txt").exists());
     }
 
-    fn assert_full_dump_build_contract(builder: BuilderBackend, purpose: SourceSetPurpose) {
+    fn assert_full_dump_build_contract(
+        builder: BuilderBackend,
+        purpose: SourceSetPurpose,
+        source_dir: &str,
+    ) {
         use crate::change_detection::analyzer::rescan_and_commit_full;
         use crate::change_detection::source_sets::SourceSetsService;
         use crate::domain::build::BuildMode;
@@ -2450,6 +2477,10 @@ exit 0"#,
         });
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
+        let source = base.join(source_dir);
+        if source_dir != "main" {
+            fs::rename(base.join("main"), &source).expect("rename source root");
+        }
         write_script(
             &script,
             &format!(
@@ -2477,6 +2508,7 @@ exit 0"#,
             .source_sets
             .retain(|source_set| source_set.name == "main");
         config.source_sets[0].purpose = purpose;
+        config.source_sets[0].path = source.clone();
         config.infobase = crate::config::model::InfobaseConfig::file(format!(
             "File={}",
             dir.path().join("ib").display()
@@ -2511,7 +2543,7 @@ exit 0"#,
         .expect("successful full dump");
         assert!(dumped.ok);
         assert_eq!(
-            fs::read_to_string(base.join("main/Catalogs.Items/ObjectModule.bsl"))
+            fs::read_to_string(source.join("Catalogs.Items/ObjectModule.bsl"))
                 .expect("published source"),
             "Procedure FromInfobase()\nEndProcedure\n"
         );
@@ -2539,7 +2571,7 @@ exit 0"#,
             dump_calls,
             "ordinary build must not reload the source tree just published by dump"
         );
-        let module = base.join("main/Catalogs.Items/ObjectModule.bsl");
+        let module = source.join("Catalogs.Items/ObjectModule.bsl");
         fs::write(&module, "Procedure UserEditAfterDump()\nEndProcedure\n").expect("user edit");
         let edited = run_build(&config, &build_args).expect("build user edit after dump");
         assert!(edited.ok);
@@ -2577,22 +2609,138 @@ exit 0"#,
 
     #[test]
     fn successful_full_designer_dump_makes_next_ordinary_build_skip() {
-        assert_full_dump_build_contract(BuilderBackend::Designer, SourceSetPurpose::Configuration);
+        assert_full_dump_build_contract(
+            BuilderBackend::Designer,
+            SourceSetPurpose::Configuration,
+            "main",
+        );
     }
 
     #[test]
     fn full_ibcmd_dump_preserves_build_fixed_point_and_detects_new_changes() {
-        assert_full_dump_build_contract(BuilderBackend::Ibcmd, SourceSetPurpose::Configuration);
+        assert_full_dump_build_contract(
+            BuilderBackend::Ibcmd,
+            SourceSetPurpose::Configuration,
+            "main",
+        );
     }
 
     #[test]
     fn full_designer_extension_dump_preserves_build_fixed_point_and_detects_new_changes() {
-        assert_full_dump_build_contract(BuilderBackend::Designer, SourceSetPurpose::Extension);
+        assert_full_dump_build_contract(
+            BuilderBackend::Designer,
+            SourceSetPurpose::Extension,
+            "main",
+        );
     }
 
     #[test]
     fn full_ibcmd_extension_dump_preserves_build_fixed_point_and_detects_new_changes() {
-        assert_full_dump_build_contract(BuilderBackend::Ibcmd, SourceSetPurpose::Extension);
+        assert_full_dump_build_contract(BuilderBackend::Ibcmd, SourceSetPurpose::Extension, "main");
+    }
+
+    #[test]
+    fn full_dump_build_contract_keeps_ignored_directory_names_as_source_roots() {
+        for builder in [BuilderBackend::Designer, BuilderBackend::Ibcmd] {
+            for purpose in [SourceSetPurpose::Configuration, SourceSetPurpose::Extension] {
+                for source_dir in ["build", "target", "tmp", "temp"] {
+                    assert_full_dump_build_contract(builder, purpose, source_dir);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn full_dump_rejects_nested_work_path_before_touching_sources_or_snapshot() {
+        use crate::change_detection::analyzer::rescan_and_commit_full;
+        use crate::change_detection::hash_storage::HashStorage;
+        use crate::change_detection::source_sets::SourceSetsService;
+
+        for builder in [BuilderBackend::Designer, BuilderBackend::Ibcmd] {
+            let dir = tempdir().expect("tempdir");
+            let base = dir.path().join("base");
+            let work = base.join("main/target");
+            let script = dir.path().join(match builder {
+                BuilderBackend::Designer => "1cv8",
+                BuilderBackend::Ibcmd => "ibcmd",
+            });
+            let calls = dir.path().join("calls.log");
+            create_source_tree(&base);
+            write_dump_script(&script, &calls, None, 0);
+            let mut config = build_config_with_builder(&base, &work, &script, builder);
+            let source = SourceSetsService::new(&config)
+                .designer_contexts()
+                .expect("contexts")
+                .remove(0);
+            rescan_and_commit_full(&source, &work).expect("seed snapshot");
+            let storage = HashStorage::new(source.storage_path(&work));
+            storage
+                .begin_publication(
+                    storage.current_generation().expect("generation"),
+                    "interrupted-dump",
+                )
+                .expect("seed pending publication");
+            let snapshot_bytes = fs::read(storage.path()).expect("snapshot before dump");
+            let module = base.join("main/Catalogs.Items/ObjectModule.bsl");
+            let source_bytes = fs::read(&module).expect("source before dump");
+            let work_paths = {
+                #[cfg(unix)]
+                {
+                    let alias = dir.path().join("work-alias");
+                    symlink(&work, &alias).expect("workPath alias");
+                    vec![work.clone(), alias]
+                }
+                #[cfg(not(unix))]
+                {
+                    vec![work.clone()]
+                }
+            };
+
+            for work_path in work_paths {
+                config.work_path = work_path;
+                let failure = run_dump(
+                    &config,
+                    &DumpArgs {
+                        dry_run: false,
+                        mode: DumpModeRequest::Full,
+                        source_set: Some("main".to_owned()),
+                        extension: None,
+                        objects: vec![],
+                    },
+                )
+                .expect_err("nested workPath must be rejected before publication");
+
+                assert_eq!(failure.error.kind(), UseCaseErrorKind::Validation);
+                assert!(
+                    failure
+                        .error
+                        .to_string()
+                        .contains("workPath must not be inside dump target"),
+                    "{}",
+                    failure.error
+                );
+                assert!(
+                    !calls.exists(),
+                    "invalid target must not invoke the platform"
+                );
+                assert_eq!(
+                    fs::read(&module).expect("source after rejection"),
+                    source_bytes
+                );
+                assert_eq!(
+                    fs::read(storage.path()).expect("snapshot after rejection"),
+                    snapshot_bytes
+                );
+                assert_eq!(
+                    storage
+                        .load_snapshot()
+                        .expect("retained snapshot")
+                        .pending_publication
+                        .as_deref(),
+                    Some("interrupted-dump")
+                );
+            }
+        }
     }
 
     #[test]

@@ -179,4 +179,6 @@ v8-runner launch mcp --mode thin --mcp-port <PORT>
 v8-runner launch mcp --mcp-config <FILE>
 ```
 
+Keep `workPath` outside the dump target directory, including through symlinks; dump rejects a target containing its runtime state. Generated Designer mirrors beneath `workPath` remain supported.
+
 For full source dumps with `format=DESIGNER`, both backends reconcile the source-set hash snapshot: the next ordinary build against the same target skips unchanged sources. Switching the infobase/source identity, or upgrading from an unbound legacy snapshot, requires a full build. If dump snapshot reconciliation fails with a pending publication, run a successful `build --full-rebuild` before retrying dump; the pending state prevents an unsafe skip. This guarantee does not cover EDT reverse sync or incremental/partial dump.
