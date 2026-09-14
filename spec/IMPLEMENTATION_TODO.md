@@ -4,7 +4,7 @@ This file tracks open implementation work only.
 
 ## Current Status
 
-- Open tasks as of `2026-09-13`: 8.
+- Open tasks as of `2026-09-14`: 10.
 
 ## Open Tasks
 
@@ -42,7 +42,14 @@ This file tracks open implementation work only.
    `tools.designer_agent` по образцу `tools.edt_cli`, SSH-клиент в процессе без pty, сессия
    на время workspace lock, типы ответа с закрытым `error-type`, страж признаёт агентский JSON
    структурным. Первыми через сессию идут `generation-id` (#99), `dump`, `build`.
-8. Реализовать ADR-0030, шаг 3: вид цели «автономный сервер» — `infobase.connection: ws=…`,
+8. Сверить требование полного `infobase.dbms` для `builder=IBCMD` на серверном подключении с
+   кодом: по ADR-0030 пункт 9 секция нужна только там, где раннер идёт в СУБД напрямую
+   (создание базы). Снять избыточное требование в `config::validate`, `docs/CONFIGURATION.md`
+   и пункте 4 ADR-0018 либо назвать причину, по которой оно обосновано.
+9. Реализовать ADR-0031: отклонение `ws=` в `infobase.connection`, секция `infobase.web`,
+   команда `publish` с провайдером `webinst`, `launch web`, превью у обеих. Идёт после шага 1
+   ADR-0030.
+10. Реализовать ADR-0030, шаг 3: вид цели «автономный сервер» — `infobase.connection: ws=…`,
    секция `infobase.standalone`, провайдер `agent` через шлюз `ibsrv`, `ibcmd --pid` только
    для чтения после прогрева; при запуске `ibsrv` раннером — без extended-флага и с
    `--ssh-host-key`.
