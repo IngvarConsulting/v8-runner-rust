@@ -2,8 +2,8 @@
 id: CTR.WIRE.INFOBASE-RESTORE-DATA
 status: active
 governs: product
-version: 2
-decision: DEC.2026-09-14.A-PROVIDER-IS-NAMED-BY-WHO-EXECUTES
+version: 3
+decision: DEC.2026-09-14.PROVIDER-CHOSEN-PER-OPERATION
 artifact: docs/schemas/command-data/infobase-restore.schema.json
 producer: src/domain/infobase_export.rs
 consumers: [cli, unica]
@@ -27,10 +27,10 @@ scope: [wire, cli]
   "subject": {
     "kind": "infobase"
   },
-  "selection": {
-    "provider": null,
-    "reason": "provider selection was not attempted because the request is invalid",
-    "candidates": []
+  "provider": {
+    "selected": null,
+    "origin": {"kind": "default"},
+    "skipped": []
   },
   "artifact_kind": "dt",
   "input": "build/main.dt",

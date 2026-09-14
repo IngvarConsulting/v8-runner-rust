@@ -159,7 +159,7 @@ fn write_config(
         )
     };
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\n  password: secret\ntests:\n  execution_timeout_seconds: {}\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  platform:\n    path: '{}'\n{}",
+        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\n  password: secret\ntests:\n  execution_timeout_seconds: {}\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  platform:\n    path: '{}'\n{}",
         work_path.display(),
         timeout_seconds,
         install_dir.display(),
@@ -331,7 +331,7 @@ fn setup_va_project_with_work_name(
         )
     };
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\n  password: secret\ntests:\n  execution_timeout_seconds: 5\n  va:\n    params_path: '{}'\n    profile: smoke\n    profiles:\n      smoke:\n        feature_path: '{}'\n        features_to_run:\n          - login\n        filter_tags:\n          - '@smoke'\n        ignore_tags:\n          - '@draft'\n        scenario_filter:\n          - Проверка логина\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  va:\n    epf_path: '{}'\n  platform:\n    path: '{}'\n{}",
+        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\n  password: secret\ntests:\n  execution_timeout_seconds: 5\n  va:\n    params_path: '{}'\n    profile: smoke\n    profiles:\n      smoke:\n        feature_path: '{}'\n        features_to_run:\n          - login\n        filter_tags:\n          - '@smoke'\n        ignore_tags:\n          - '@draft'\n        scenario_filter:\n          - Проверка логина\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  va:\n    epf_path: '{}'\n  platform:\n    path: '{}'\n{}",
         work_path.display(),
         va_params.display(),
         features_dir.display(),
@@ -1300,7 +1300,7 @@ fn test_module_edt_extension_build_uses_full_load_before_enterprise_launch() {
     write_edt_script(&edt_cli_path, &edt_calls);
 
     let config = format!(
-        "workPath: '{}'\nformat: EDT\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\ntests:\n  execution_timeout_seconds: 5\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: configuration\n  - name: client_mcp\n    type: EXTENSION\n    path: exts/client-mcp\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\ntests:\n  execution_timeout_seconds: 5\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: configuration\n  - name: client_mcp\n    type: EXTENSION\n    path: exts/client-mcp\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
         work_path.display(),
         install_dir.display(),
         edt_cli_path.display(),
@@ -1390,7 +1390,7 @@ fn repeated_test_skips_unchanged_source_backed_tool_extension_build() {
     write_edt_script(&edt_cli_path, &edt_calls);
 
     let config = format!(
-        "workPath: '{}'\nformat: EDT\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\ntests:\n  execution_timeout_seconds: 5\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: configuration\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: '{}'\n        format: EDT\n",
+        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\ntests:\n  execution_timeout_seconds: 5\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: configuration\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: '{}'\n        format: EDT\n",
         work_path.display(),
         install_dir.display(),
         edt_cli_path.display(),

@@ -330,14 +330,15 @@ struct MainConfigSchema {
     )]
     #[schemars(with = "SourceFormatSchema")]
     format: Option<SourceFormatSchema>,
-    /// Backend used for build/load operations.
+    /// Per-operation executor overrides. A missing key means the default chain from the
+    /// capability matrix; a present key means exactly that provider and no fallback.
     #[serde(
         default,
         deserialize_with = "deserialize_non_null_optional",
         skip_serializing_if = "Option::is_none"
     )]
-    #[schemars(with = "BuilderBackendSchema")]
-    builder: Option<BuilderBackendSchema>,
+    #[schemars(with = "ProvidersSchema")]
+    providers: Option<ProvidersSchema>,
     /// Target infobase connection, credentials, and optional DBMS settings.
     infobase: InfobaseSchema,
     /// Project source sets to build, test, dump, or materialize.
@@ -413,6 +414,14 @@ struct LocalOverlayConfigSchema {
     )]
     #[schemars(with = "PartialTestsSchema")]
     tests: Option<PartialTestsSchema>,
+    /// Machine-local executor overrides for an experiment or a workaround.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "ProvidersSchema")]
+    providers: Option<ProvidersSchema>,
     /// Machine-local MCP runtime overrides.
     #[serde(
         default,
@@ -430,11 +439,63 @@ enum SourceFormatSchema {
     Edt,
 }
 
+/// Executors the runner can dispatch to. Names say who does the work, not how it is started.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-enum BuilderBackendSchema {
+#[serde(rename_all = "kebab-case")]
+enum ProviderSchema {
     Designer,
+    Agent,
     Ibcmd,
+    IbcmdRs,
+    Webinst,
+}
+
+/// One optional override per operation that has a choice of executor.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(deny_unknown_fields)]
+struct ProvidersSchema {
+    /// Executor for `init`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    init: Option<ProviderSchema>,
+    /// Executor for `build`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    build: Option<ProviderSchema>,
+    /// Executor for `load`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    load: Option<ProviderSchema>,
+    /// Executor for `dump`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dump: Option<ProviderSchema>,
+    /// Executor for `extensions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    extensions: Option<ProviderSchema>,
+    /// Executor for `infobase configuration export`.
+    #[serde(
+        rename = "infobase.configuration.export",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    infobase_configuration_export: Option<ProviderSchema>,
+    /// Executor for `infobase dump`.
+    #[serde(
+        rename = "infobase.dump",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    infobase_dump: Option<ProviderSchema>,
+    /// Executor for `infobase restore`.
+    #[serde(
+        rename = "infobase.restore",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    infobase_restore: Option<ProviderSchema>,
+    /// Executor for `syntax`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    syntax: Option<ProviderSchema>,
+    /// Executor for `make`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    make: Option<ProviderSchema>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -1217,7 +1278,7 @@ mod tests {
         for overlay in [
             "source-set: []\n",
             "format: DESIGNER\n",
-            "builder: DESIGNER\n",
+            "",
             "unknown: value\n",
             "infobase:\n  name: unexpected\n",
             "tools:\n  client_mcp:\n    extension:\n      source:\n        extra: unexpected\n",
@@ -1603,11 +1664,11 @@ mod tests {
     }
 
     fn minimal_project_config_without_base_path() -> String {
-        "workPath: build\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=build/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n".to_owned()
+        "workPath: build\nformat: DESIGNER\ninfobase:\n  connection: 'File=build/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n".to_owned()
     }
 
     fn minimal_project_config_with_format_null() -> String {
-        "workPath: build\nformat: null\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=build/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n".to_owned()
+        "workPath: build\nformat: null\ninfobase:\n  connection: 'File=build/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n".to_owned()
     }
 
     fn assert_schema_valid(schema: &serde_json::Value, yaml: &str) {

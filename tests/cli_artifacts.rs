@@ -19,7 +19,7 @@ fn write_designer_script(path: &Path, fail: bool) {
 
 fn write_config(path: &Path, work_path: &Path, platform_path: &Path) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         platform_path.display(),
     );

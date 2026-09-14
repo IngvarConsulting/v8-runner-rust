@@ -76,8 +76,8 @@ where
 mod tests {
     use super::{dispatch_with_workspace_lock, map_failure_response};
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, SourceFormat, SourceSetConfig, SourceSetPurpose,
-        TestsConfig, ToolsConfig,
+        AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
+        ToolsConfig,
     };
     use crate::support::fs::acquire_advisory_lock;
     use crate::use_cases::context::CommandName;
@@ -94,7 +94,8 @@ mod tests {
             work_path: work_path.to_path_buf(),
             execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),

@@ -24,24 +24,19 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `bootstrap` | Работает без существующего конфига | Создаёт проект из существующей ИБ: config, local overlay, `.gitignore`, `src/configuration` |
 | `config init` | Работает без существующего конфига | Создаёт `v8project.yaml`, sibling `v8project.local.yaml`, `.gitignore` entry, autodetect-ит supported `source-set` и aggregate external roots |
 | `tools download <tool>` | CLI-only загрузка latest releases | Загружает выбранный YAxUnit, Vanessa Automation single или onec-client-mcp-devkit; обновляет local overlay для Vanessa/client MCP и при `yaxunit --sources` добавляет YAxUnit как `source-set` `tests` |
-| `init` | `format=DESIGNER` + `builder=DESIGNER` | Создаёт файловую ИБ через Designer; server connection остаётся manual prerequisite |
-| `init` | `format=DESIGNER` + `builder=IBCMD` | Выполняет `ensure` файловой или серверной ИБ через `ibcmd infobase create` |
-| `init` | `format=EDT` + `builder=DESIGNER|IBCMD` | Готовит ИБ по правилам builder и импортирует EDT workspace |
+| `init` | провайдер `designer` (умолчание) или `ibcmd` | Конфигуратор создаёт файловую ИБ, серверную оставляет ручной предпосылкой; `providers.init: ibcmd` создаёт файловую или серверную через `ibcmd infobase create` (серверной нужна `infobase.dbms`); при `format=EDT` дополнительно импортирует EDT workspace |
 | `extensions` | `format=DESIGNER` или `format=EDT` | Обновляет свойства extension `source-set` |
-| `build` | `format=DESIGNER` + `builder=DESIGNER|IBCMD` | Выполняет incremental/full загрузку в ИБ |
-| `build` | `format=EDT` + `builder=DESIGNER|IBCMD` | Экспортирует изменённые EDT `source-set`, затем грузит generated Designer output |
+| `build` | провайдер `designer` (умолчание) или `ibcmd`, любой `format` | Incremental/full загрузка в ИБ; при `format=EDT` сначала экспортирует изменённые EDT `source-set` |
 | `test` | Та же матрица, что и у `build` | По умолчанию запускает `build` |
 | `test --no-build` | Подготовленная file/server ИБ; source-set и build tooling не требуются | Запускает выбранный test engine без build |
-| `dump` | `format=DESIGNER` + `builder=DESIGNER` | Полная, инкрементальная или object-scoped partial выгрузка |
-| `dump` | `format=DESIGNER` + `builder=IBCMD` | Полная и инкрементальная выгрузка; `partial` деградирует в incremental с warning; standalone-server state изолирован в `workPath/ibcmd-data` |
-| `dump` | `format=EDT` + `builder=DESIGNER|IBCMD` | Reverse sync из ИБ через internal Designer snapshot и EDT import |
-| `infobase configuration export` | Designer и IBCMD | Выгружает working/database configuration в `.cf` или named extension в `.cfe`; `builder` задаёт preferred provider, runner выбирает готовый до spawn |
-| `infobase dump` | Designer | Выгружает полную ИБ в переносимый `.dt`; это не backup; IBCMD остаётся experimental до exclusive-access preflight |
-| `convert` | CLI-only repo-aware конвертация текущих `source-set` | Не использует `builder` и не требует ИБ |
-| `load` | `format=DESIGNER` + `builder=DESIGNER` | Загрузка `.cf` / `.cfe` артефактов в ИБ |
-| `make` / `artifacts` | `format=DESIGNER` + `builder=DESIGNER` | Экспорт `.cf` / `.cfe` и публикация `.epf` / `.erf` |
+| `dump` | провайдер `designer` (умолчание) или `ibcmd`, любой `format` | Полная, инкрементальная или object-scoped partial выгрузка; у `ibcmd` `partial` деградирует в incremental с warning; при `format=EDT` — reverse sync через internal Designer snapshot и EDT import |
+| `infobase configuration export` | цепочка `designer` → `ibcmd` | Выгружает working/database configuration в `.cf` или named extension в `.cfe`; раннер берёт первого готового до spawn, квитанция называет пропущенных |
+| `infobase dump` | провайдер `designer`; `ibcmd` только по `providers.infobase.dump` | Выгружает полную ИБ в переносимый `.dt`; это не backup; `ibcmd` остаётся experimental до exclusive-access preflight |
+| `convert` | CLI-only repo-aware конвертация текущих `source-set` | Строки в матрице провайдеров не имеет и не требует ИБ |
+| `load` | `format=DESIGNER`, провайдер только `designer` | Загрузка `.cf` / `.cfe` артефактов в ИБ |
+| `make` / `artifacts` | `format=DESIGNER`, провайдер только `designer` | Экспорт `.cf` / `.cfe` и публикация `.epf` / `.erf` |
 | `syntax` | `format=DESIGNER` или `format=EDT` | Designer checks для `DESIGNER`, EDT `validate` для `EDT` |
-| `infobase restore` | Не зависит от `format`; `builder` задаёт предпочтение | Загрузка полной ИБ из DT; обязателен `--create` или `--replace` |
+| `infobase restore` | провайдер `designer`; `ibcmd` только по `providers.infobase.restore` | Загрузка полной ИБ из DT; обязателен `--create` или `--replace` |
 | `launch` | Не зависит от `format` | Прямой запуск 1C utility по позиционному mode |
 | MCP | `stdio` и `streamable HTTP` | Публикует 8 инструментов, уже более узкая поверхность, чем CLI |
 
@@ -53,9 +48,9 @@ CLI help, доверяйте текущему коду и затем синхр�
 
 **Форм превью две, и это не недосмотр.** У `infobase`-экспорта и `restore` есть
 настоящий выбор провайдера, поэтому их превью отвечает экспортным конвертом
-(`mode=preview`, `plan.provider`, `selection.candidates`). У остальных выбора нет
-— провайдер задан `builder` или единственной утилитой, — и набор кандидатов с
-одним элементом был бы вымышленной развилкой. Их превью отвечает парой
+(`mode=preview`, `plan.provider`, квитанция `provider`). У остальных выбора в момент
+превью нет — исполнитель назначен матрицей или единственной утилитой, — и квитанция
+с одним кандидатом была бы вымышленной развилкой. Их превью отвечает парой
 **`provider_dispatched` + предмет глагола**:
 
 | Глагол | Что называет превью |
@@ -140,7 +135,7 @@ v8-runner --version
 ### `config init`
 
 ```bash
-v8-runner config init [--force] [--output <FILE>] [--connection <CONNECTION>] [--format <auto|designer|edt>] [--builder <DESIGNER|IBCMD>]
+v8-runner config init [--force] [--output <FILE>] [--connection <CONNECTION>] [--format <auto|designer|edt>]
 ```
 
 - Не требует существующего `v8project.yaml`.
@@ -151,7 +146,6 @@ v8-runner config init [--force] [--output <FILE>] [--connection <CONNECTION>] [-
 - Ищет supported `DESIGNER` / `EDT` `source-set` по marker files и их содержимому.
 - Для external roots создаёт aggregate `source-set` только при однородной классификации каталога.
 - Не пишет synthetic `CONFIGURATION`: отсутствие конфигурационного source-set это validation error.
-- Для `--builder IBCMD` найденные external roots считаются validation error.
 
 ### `bootstrap`
 
@@ -174,10 +168,10 @@ v8-runner init [--dry-run]
 ```
 
 - Всегда разделяет шаг подготовки ИБ и шаг EDT workspace.
-- Для file connection и `builder=DESIGNER` использует `1cv8 CREATEINFOBASE`.
-- Для `builder=IBCMD` использует `ibcmd infobase create`; server path добавляет
-  `--create-database`.
-- При `IBCMD` неудачное создание считается «база уже есть» только если сама база
+- Для file connection Конфигуратор (умолчание) использует `1cv8 CREATEINFOBASE`.
+- При `providers.init: ibcmd` использует `ibcmd infobase create`; server path добавляет
+  `--create-database` и требует `infobase.dbms`.
+- При `ibcmd` неудачное создание считается «база уже есть» только если сама база
   после этого читается: спрашивается `config generation-id`, и ноль она отвечает
   лишь когда база существует и эти учётные данные её читают. Формулировка отказа
   в решении не участвует (ADR-0029), поэтому отказ авторизации и незаписываемый
@@ -202,8 +196,8 @@ v8-runner tools download client-mcp [--sources] [--force]
   `v8project.yaml` `source-set` с именем `tests`; без `--sources` скачивает `.cfe` в
   `build/tools`.
 - `client-mcp --sources` распаковывает source subtree в
-  `build/tools/onec-client-mcp-devkit/exts/client-mcp`; без `--sources` требует
-  `builder=DESIGNER` и скачивает `.cfe` в `build/tools`.
+  `build/tools/onec-client-mcp-devkit/exts/client-mcp`; без `--sources` требует, чтобы
+  сборку исполнял Конфигуратор, и скачивает `.cfe` в `build/tools`.
 - `vanessa` всегда скачивает `build/tools/vanessa-automation-single.epf`.
 - `v8project.local.yaml` обновляется только для команд, которым нужны machine-local пути:
   `vanessa` заполняет `tools.va.epf_path`, `client-mcp` заполняет
@@ -239,8 +233,8 @@ v8-runner extensions activate --name <NAME> --active <yes|no> [--dry-run]
   расширений, **установленных в информационной базе**. Это разные вещи, и
   совпадение имён их не объединяет.
 - **Семейство IBCMD-only.** У Designer нет батч-ключа, который перечисляет
-  установленные расширения, поэтому `builder` здесь ничего не выбирает; при
-  отсутствии `ibcmd` операция отказывает, а не уходит на Designer.
+  установленные расширения, поэтому у `extensions` в матрице один исполнитель —
+  `ibcmd`; при его отсутствии операция отказывает, а не уходит на Designer.
 - `list` и `info` отдают по расширению: `name`, `version`, `active`, `purpose`,
   `safe_mode`, `security_profile_name`, `unsafe_action_protection`,
   `used_in_distributed_infobase`, `scope`, `hash_sum`. Пустое поле платформы —
@@ -328,19 +322,19 @@ v8-runner syntax edt [--project <PROJECT>...]
 
 `designer-config`:
 
-- Только `builder=DESIGNER`, `format=DESIGNER`.
+- Только Конфигуратор, `format=DESIGNER`.
 - Позволяет комбинировать config checks и client scopes.
 - Поддерживает `--extension <EXTENSION>` или `--all-extensions`.
 
 `designer-modules`:
 
-- Только `builder=DESIGNER`, `format=DESIGNER`.
+- Только Конфигуратор, `format=DESIGNER`.
 - Требует как минимум один mode flag.
 - Поддерживает `--extension <EXTENSION>` или `--all-extensions`.
 
 `edt`:
 
-- Только `builder=DESIGNER`, `format=EDT`.
+- Только `format=EDT`; исполнитель — EDT CLI, строки в матрице провайдеров нет.
 - Повторяемый `--project`.
 - Без `--project` использует дефолтный набор EDT-проектов из конфига.
 
@@ -358,11 +352,11 @@ v8-runner dump --mode <full|incremental|partial> [--source-set <NAME>] [--extens
   `data.selectors[*].requested`, а в списке Designer и как
   `data.selectors[*].normalized` используется нормализованный `TYPE.NAME`.
 - До запуска платформы CLI валидирует синтаксис селектора: непустые `TYPE` и `NAME`,
-  ровно один разделитель `:` или `.`, без управляющих символов. В `builder=DESIGNER`
-  существование metadata root type проверяет Designer; `builder=IBCMD` не использует object list,
+  ровно один разделитель `:` или `.`, без управляющих символов. У Конфигуратора
+  существование metadata root type проверяет сам Designer; `ibcmd` не использует object list,
   потому что деградирует в incremental.
-- `builder=DESIGNER` поддерживает true object-scoped partial.
-- `builder=IBCMD` не умеет object-scoped partial; запрос деградирует в incremental с warning.
+- Конфигуратор поддерживает true object-scoped partial.
+- `ibcmd` не умеет object-scoped partial; запрос деградирует в incremental с warning.
 - `format=EDT` использует internal Designer snapshot под `workPath/designer/<sourceSetName>`,
   затем импортирует его в EDT target и публикует результат атомарной заменой target каталога.
 
@@ -388,8 +382,10 @@ v8-runner infobase configuration export --state <working|database> --extension <
 
 - Сохраняет состояние конфигурации из ИБ, а не собирает пакет из project sources.
 - Без `--extension` экспортирует main configuration и требует `.cf`; с extension требует `.cfe`.
-- `builder` задаёт preferred provider, но runner выбирает первый `implemented + ready` candidate.
-- Fallback допустим только во время pure preflight; после первого spawn provider не переключается.
+- Умолчание — цепочка `designer` → `ibcmd`: runner берёт первого готового до spawn и кладёт
+  в квитанцию `provider`, кого пропустил и почему. `providers.infobase.configuration.export`
+  назначает одного исполнителя без отката.
+- Переключение допустимо только во время pure preflight; после первого spawn provider не меняется.
 - Публикация идёт через sibling staging и target-specific lock; `published=true` означает, что
   финальный файл уже заменён атомарно.
 - Target lock сериализует cooperating запуски runner. Параллельный внешний writer обязан
@@ -412,8 +408,8 @@ v8-runner infobase dump --output <FILE.dt> [--dry-run]
 ```
 
 - Сохраняет полную ИБ с данными в переносимый DT-файл. DT не является резервной копией.
-- В первом slice implemented provider — Designer. При `builder=IBCMD` runner пропускает
-  experimental IBCMD DT и выбирает готовый Designer.
+- Умолчание — Designer. `ibcmd` для DT остаётся experimental: в цепочку умолчаний не входит и
+  назначается только `providers.infobase.dump: ibcmd`.
 - Если implemented provider есть, но binary/version/connection не готовы, возвращается
   `environment_unavailable`; `capability_unavailable` означает отсутствие implemented adapter.
 - Для файловой ИБ readiness обоих process providers требует существующий файл
@@ -463,7 +459,7 @@ v8-runner load --path <FILE> [--mode <load|merge>] [--settings <FILE>] [--extens
 ```
 
 - Поддерживает `.cf` и `.cfe`.
-- Работает только для `format=DESIGNER` и `builder=DESIGNER`.
+- Работает только для `format=DESIGNER`; исполнитель — только Конфигуратор.
 - `.cfe` требует `--extension`.
 - `--mode merge` требует `--settings <FILE>`.
 - Состояние совместимости имеет три публичных значения: `supported` — вопрос задан
@@ -494,7 +490,7 @@ v8-runner artifacts --output <TARGET> [--source-set <NAME>] [--extension <NAME>]
 - `.cf` используется для основной конфигурации.
 - `.cfe` используется для extension export.
 - Каталог output используется для external `.epf` / `.erf` publication.
-- Требует `builder=DESIGNER`.
+- Исполнитель — только Конфигуратор.
 
 ## Прямой запуск и MCP
 
@@ -606,7 +602,7 @@ v8-runner mcp serve http
 ## Пока не поддерживается
 
 - Публикация CLI-only команд в MCP без отдельного ADR.
-- Object-scoped partial dump для `builder=IBCMD`.
-- `load` для `IBCMD`.
+- Object-scoped partial dump через `ibcmd`.
+- `load` через `ibcmd`.
 - Arbitrary path-based `convert source -> target` contract.
 - Отдельная пользовательская настройка EDT `working-directory`.

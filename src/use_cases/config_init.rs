@@ -22,7 +22,6 @@ pub struct ConfigInitRequest {
     pub force: bool,
     pub connection: Option<String>,
     pub format: ConfigFormatRequest,
-    pub builder: ConfigBuilderRequest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,12 +29,6 @@ pub enum ConfigFormatRequest {
     Auto,
     Designer,
     Edt,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConfigBuilderRequest {
-    Designer,
-    Ibcmd,
 }
 
 pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError> {
@@ -80,13 +73,12 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
     let project_source_sets = build_source_sets(&project_dir, &detected, format)?;
     let platform_version = detect_platform_version(&project_dir, format, &project_source_sets)?;
     let warnings = collect_discovery_warnings(&project_dir, format, &project_source_sets)?;
-    validate_discovered_source_sets(&project_dir, request.builder, &project_source_sets)?;
+    validate_discovered_source_sets(&project_dir, &project_source_sets)?;
     let source_sets =
         source_sets_relative_to_config_dir(&project_dir, output_dir, &project_source_sets);
     let yaml = render_config(
         request.connection.as_deref(),
         format,
-        request.builder,
         &source_sets,
         platform_version.as_deref(),
     );
@@ -109,7 +101,6 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
         local_path: local_path.display().to_string(),
         gitignore_path: gitignore_path.display().to_string(),
         format: format.as_yaml().to_owned(),
-        builder: request.builder.as_yaml().to_owned(),
         platform_version,
         source_sets,
         warnings,
@@ -302,15 +293,6 @@ impl ConfigFormatRequest {
             Self::Auto => "AUTO",
             Self::Designer => "DESIGNER",
             Self::Edt => "EDT",
-        }
-    }
-}
-
-impl ConfigBuilderRequest {
-    const fn as_yaml(self) -> &'static str {
-        match self {
-            Self::Designer => "DESIGNER",
-            Self::Ibcmd => "IBCMD",
         }
     }
 }
@@ -844,7 +826,6 @@ fn normalized_components(path: &Path) -> Vec<OsString> {
 fn render_config(
     connection: Option<&str>,
     format: ConfigFormatRequest,
-    builder: ConfigBuilderRequest,
     source_sets: &[ConfigInitSourceSet],
     platform_version: Option<&str>,
 ) -> String {
@@ -858,7 +839,6 @@ fn render_config(
     yaml.push_str("workPath: 'build'\n");
     yaml.push_str("execution_timeout: 300000\n");
     yaml.push_str(&format!("format: {}\n", format.as_yaml()));
-    yaml.push_str(&format!("builder: {}\n", builder.as_yaml()));
     yaml.push_str("infobase:\n");
     yaml.push_str(&format!("  connection: '{}'\n", escape_yaml(connection)));
     yaml.push_str("source-set:\n");
@@ -890,7 +870,6 @@ fn render_config(
 
 fn validate_discovered_source_sets(
     project_dir: &Path,
-    builder: ConfigBuilderRequest,
     source_sets: &[ConfigInitSourceSet],
 ) -> Result<(), AppError> {
     if source_sets.is_empty() {
@@ -905,18 +884,6 @@ fn validate_discovered_source_sets(
     {
         return Err(AppError::Validation(
             "autodiscovery did not find a CONFIGURATION source-set; add it manually".to_owned(),
-        ));
-    }
-    if matches!(builder, ConfigBuilderRequest::Ibcmd)
-        && source_sets.iter().any(|source_set| {
-            matches!(
-                source_set.source_type.as_str(),
-                "EXTERNAL_DATA_PROCESSORS" | "EXTERNAL_REPORTS"
-            )
-        })
-    {
-        return Err(AppError::Validation(
-            "autodiscovery found external source-sets, but builder IBCMD does not support them; rerun with --builder DESIGNER or edit config manually".to_owned(),
         ));
     }
     Ok(())
@@ -986,10 +953,7 @@ fn escape_yaml(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        discover_sources, execute, ConfigBuilderRequest, ConfigFormatRequest, ConfigInitRequest,
-        SourcePurpose,
-    };
+    use super::{discover_sources, execute, ConfigFormatRequest, ConfigInitRequest, SourcePurpose};
     use crate::config::loader::load_config;
     use std::path::Path;
     use std::process::Command;
@@ -1106,7 +1070,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Auto,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect("init config");
 
@@ -1145,7 +1108,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Designer,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect("init config");
 
@@ -1188,7 +1150,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Designer,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect_err("control characters are unsafe");
 
@@ -1209,7 +1170,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Designer,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect_err("should fail");
 
@@ -1228,7 +1188,6 @@ mod tests {
             force: true,
             connection: None,
             format: ConfigFormatRequest::Designer,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect_err("directory output path cannot be written as file");
 
@@ -1248,7 +1207,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Designer,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect("init config");
 
@@ -1297,7 +1255,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Designer,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect("init config");
 
@@ -1323,7 +1280,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Designer,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect("init config");
 
@@ -1347,7 +1303,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Designer,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect("init config");
 
@@ -1372,7 +1327,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Designer,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect("init config");
 
@@ -1400,7 +1354,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Designer,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect("init config");
 
@@ -1448,7 +1401,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Designer,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect("init config");
 
@@ -1489,7 +1441,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Auto,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect("init config");
 
@@ -1529,7 +1480,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Auto,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect("init config");
 
@@ -1572,7 +1522,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Designer,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect("init config");
 
@@ -1600,7 +1549,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Designer,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect("init config");
 
@@ -1645,7 +1593,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Auto,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect("init config");
 
@@ -1691,7 +1638,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Designer,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect_err("external-only autodetect must fail");
 
@@ -1731,7 +1677,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Edt,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect("init config");
 
@@ -1775,7 +1720,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Edt,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect("init config");
 
@@ -1809,35 +1753,12 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Edt,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect("init config");
 
         assert_eq!(result.source_sets.len(), 1);
         assert_eq!(result.source_sets[0].path, "workspace/cfg");
         assert_eq!(result.source_sets[0].source_type, "CONFIGURATION");
-    }
-
-    #[test]
-    fn ibcmd_builder_rejects_external_autodiscovery() {
-        let dir = tempdir().expect("tempdir");
-        write_file(&dir.path().join("Configuration.xml"), "<Configuration/>");
-        write_file(
-            &dir.path().join("tools").join("alpha.xml"),
-            "<ExternalReport><Properties><Name>Alpha</Name></Properties></ExternalReport>",
-        );
-
-        let error = execute(&ConfigInitRequest {
-            project_dir: dir.path().to_path_buf(),
-            output_path: "v8project.yaml".into(),
-            force: false,
-            connection: None,
-            format: ConfigFormatRequest::Designer,
-            builder: ConfigBuilderRequest::Ibcmd,
-        })
-        .expect_err("ibcmd + external must fail");
-
-        assert!(error.to_string().contains("builder IBCMD"));
     }
 
     #[test]
@@ -1861,7 +1782,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Auto,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect("init config");
 
@@ -1889,7 +1809,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Edt,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect("init config");
 
@@ -1929,7 +1848,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Designer,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect_err("malformed marker must fail");
 
@@ -1968,7 +1886,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Edt,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect("init config");
 
@@ -1992,7 +1909,6 @@ mod tests {
             force: false,
             connection: None,
             format: ConfigFormatRequest::Designer,
-            builder: ConfigBuilderRequest::Designer,
         })
         .expect("init config");
 

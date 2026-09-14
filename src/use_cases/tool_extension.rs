@@ -5,10 +5,10 @@ use std::time::{Duration, Instant};
 use crate::change_detection::analyzer::{self, AnalysisOutcome};
 use crate::change_detection::hash_storage::HashStorage;
 use crate::config::model::{
-    AppConfig, BuilderBackend, SourceFormat, ToolExtensionConfig, ToolExtensionInput,
-    ToolExtensionSourceConfig,
+    AppConfig, SourceFormat, ToolExtensionConfig, ToolExtensionInput, ToolExtensionSourceConfig,
 };
 use crate::domain::build::{BuildMode, BuildStep};
+use crate::domain::capability::{Operation, Provider};
 use crate::domain::source_set::SourceSetContext;
 use crate::platform::designer::DesignerDsl;
 use crate::platform::edt::EdtDsl;
@@ -269,8 +269,11 @@ fn prepare_designer_source_extension(
     source_path: &Path,
     utilities: &mut PlatformUtilities,
 ) -> Result<(), AppError> {
-    match config.builder {
-        BuilderBackend::Designer => {
+    match config.selected_provider(Operation::Build) {
+        other @ (Provider::Agent | Provider::IbcmdRs | Provider::Webinst) => Err(
+            crate::use_cases::unimplemented_provider(Operation::Build, other),
+        ),
+        Provider::Designer => {
             let binary = utilities
                 .locate(UtilityType::V8)
                 .map_err(AppError::from)?
@@ -316,7 +319,7 @@ fn prepare_designer_source_extension(
                 .map_err(AppError::from)?;
             ensure_tool_extension_success("update_db_cfg", extension, &update)
         }
-        BuilderBackend::Ibcmd => {
+        Provider::Ibcmd => {
             let binary = utilities
                 .locate(UtilityType::Ibcmd)
                 .map_err(AppError::from)?

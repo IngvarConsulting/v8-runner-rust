@@ -257,7 +257,7 @@ fn resolve_targets(
 mod tests {
     use super::{execute, map_extension_update_error, resolve_targets};
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, PlatformToolConfig, SourceFormat, SourceSetConfig,
+        AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
         SourceSetPurpose, TestsConfig, ToolsConfig,
     };
     use crate::platform::ibcmd::IbcmdError;
@@ -294,7 +294,8 @@ mod tests {
             work_path: work.to_path_buf(),
             execution_timeout: 300_000,
             format: SourceFormat::Edt,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![
                 SourceSetConfig {

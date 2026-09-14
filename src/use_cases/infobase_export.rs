@@ -3,14 +3,14 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::config::model::{AppConfig, BuilderBackend};
+use crate::config::model::AppConfig;
 use crate::domain::execution::{ExecutionError, ExecutionOutcome, ExecutionStatus, StepResult};
 use crate::domain::infobase_export::{
     ConfigurationState, ConfigurationSubject, ExportConfigurationPackageRequest,
     ExportConfigurationPackageResult, ExportInfobaseSnapshotRequest, ExportInfobaseSnapshotResult,
-    ExportPhase, ExportProvider, ExportProviderDecision, ExportTargetState, ProviderCandidate,
-    ProviderEvidence, ProviderImplementation, ProviderReadiness, RestoreInfobaseSnapshotRequest,
-    RestoreInfobaseSnapshotResult, RestoreTargetMode,
+    ExportPhase, ExportProvider, ExportTargetState, ProviderEvidence, ProviderImplementation,
+    ProviderReceipt, RestoreInfobaseSnapshotRequest, RestoreInfobaseSnapshotResult,
+    RestoreTargetMode,
 };
 use crate::platform::designer::DesignerDsl;
 use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
@@ -44,14 +44,14 @@ const SNAPSHOT_COMMAND: &str = "infobase.dump";
 
 #[derive(Debug, Clone)]
 pub struct PreparedExportProvider {
-    selection: ExportProviderDecision,
+    receipt: ProviderReceipt,
     provider: ExportProvider,
     executable: PathBuf,
 }
 
 impl PreparedExportProvider {
-    pub fn selection(&self) -> &ExportProviderDecision {
-        &self.selection
+    pub fn receipt(&self) -> &ProviderReceipt {
+        &self.receipt
     }
 }
 
@@ -63,7 +63,7 @@ pub fn execute_configuration_export(
     prepared: &PreparedExportProvider,
 ) -> UseCaseResult<ExportConfigurationPackageResult> {
     let mut result =
-        ExportConfigurationPackageResult::new(request.clone(), prepared.selection.clone());
+        ExportConfigurationPackageResult::new(request.clone(), Some(prepared.receipt.clone()));
     if let Err(error) = validate_configuration_request(request) {
         return Err(configuration_failure(
             context,
@@ -219,7 +219,8 @@ pub fn execute_infobase_snapshot(
     request: &ExportInfobaseSnapshotRequest,
     prepared: &PreparedExportProvider,
 ) -> UseCaseResult<ExportInfobaseSnapshotResult> {
-    let mut result = ExportInfobaseSnapshotResult::new(request.clone(), prepared.selection.clone());
+    let mut result =
+        ExportInfobaseSnapshotResult::new(request.clone(), Some(prepared.receipt.clone()));
     if let Err(error) = validate_snapshot_output(&request.output) {
         return Err(snapshot_failure(
             context,
@@ -417,11 +418,7 @@ pub fn prepare_infobase_restore(
     request: &RestoreInfobaseSnapshotRequest,
 ) -> Result<PreparedExportProvider, UseCaseFailure<RestoreInfobaseSnapshotResult>> {
     if let Err(error) = validate_restore_request(request) {
-        let decision = ExportProviderDecision::unavailable(
-            "provider selection was not attempted because the request is invalid",
-            Vec::new(),
-        );
-        let result = RestoreInfobaseSnapshotResult::new(request.clone(), decision);
+        let result = RestoreInfobaseSnapshotResult::new(request.clone(), None);
         return Err(restore_failure(
             context,
             error,
@@ -431,11 +428,7 @@ pub fn prepare_infobase_restore(
     }
 
     if let Err(error) = validate_restore_target(config, request.target_mode) {
-        let decision = ExportProviderDecision::unavailable(
-            "provider selection was not attempted because the target mode does not match the infobase",
-            Vec::new(),
-        );
-        let result = RestoreInfobaseSnapshotResult::new(request.clone(), decision);
+        let result = RestoreInfobaseSnapshotResult::new(request.clone(), None);
         return Err(restore_failure(
             context,
             error,
@@ -449,8 +442,8 @@ pub fn prepare_infobase_restore(
     };
     match select_provider(context, config, intent) {
         Ok(prepared) => Ok(prepared),
-        Err((error, decision)) => {
-            let result = RestoreInfobaseSnapshotResult::new(request.clone(), decision);
+        Err((error, receipt)) => {
+            let result = RestoreInfobaseSnapshotResult::new(request.clone(), Some(receipt));
             Err(restore_failure(
                 context,
                 error,
@@ -468,7 +461,7 @@ pub fn preview_infobase_restore(
     prepared: &PreparedExportProvider,
 ) -> UseCaseResult<RestoreInfobaseSnapshotResult> {
     let mut result =
-        RestoreInfobaseSnapshotResult::new(request.clone(), prepared.selection().clone());
+        RestoreInfobaseSnapshotResult::new(request.clone(), Some(prepared.receipt().clone()));
     result.mark_preview();
     Ok(result)
 }
@@ -485,7 +478,7 @@ pub fn execute_infobase_restore(
     prepared: &PreparedExportProvider,
 ) -> UseCaseResult<RestoreInfobaseSnapshotResult> {
     let mut result =
-        RestoreInfobaseSnapshotResult::new(request.clone(), prepared.selection.clone());
+        RestoreInfobaseSnapshotResult::new(request.clone(), Some(prepared.receipt.clone()));
     if let Err(error) = validate_restore_request(request) {
         return Err(restore_failure(
             context,
@@ -591,6 +584,13 @@ fn run_restore_provider(
     source_file: &Path,
 ) -> Result<PlatformCommandResult, AppError> {
     match provider {
+        // Исполнитель без адаптера: отказ, а не паника — строка матрицы опередила код.
+        other @ (ExportProvider::Agent | ExportProvider::IbcmdRs | ExportProvider::Webinst) => {
+            Err(crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::InfobaseRestore,
+                other,
+            ))
+        }
         ExportProvider::Designer => {
             let runner = crate::platform::process::ProcessExecutor;
             let log = provider_log_path(config, "infobase-restore")?;
@@ -688,11 +688,7 @@ pub fn prepare_configuration_export(
     request: &ExportConfigurationPackageRequest,
 ) -> Result<PreparedExportProvider, UseCaseFailure<ExportConfigurationPackageResult>> {
     if let Err(error) = validate_configuration_request(request) {
-        let decision = ExportProviderDecision::unavailable(
-            "provider selection was not attempted because the request is invalid",
-            Vec::new(),
-        );
-        let result = ExportConfigurationPackageResult::new(request.clone(), decision);
+        let result = ExportConfigurationPackageResult::new(request.clone(), None);
         return Err(configuration_failure(
             context,
             error,
@@ -703,8 +699,8 @@ pub fn prepare_configuration_export(
 
     match select_provider(context, config, ExportIntent::Configuration) {
         Ok(prepared) => Ok(prepared),
-        Err((error, decision)) => {
-            let result = ExportConfigurationPackageResult::new(request.clone(), decision);
+        Err((error, receipt)) => {
+            let result = ExportConfigurationPackageResult::new(request.clone(), Some(receipt));
             Err(configuration_failure(
                 context,
                 error,
@@ -721,11 +717,7 @@ pub fn prepare_infobase_snapshot(
     request: &ExportInfobaseSnapshotRequest,
 ) -> Result<PreparedExportProvider, UseCaseFailure<ExportInfobaseSnapshotResult>> {
     if let Err(error) = validate_snapshot_output(&request.output) {
-        let decision = ExportProviderDecision::unavailable(
-            "provider selection was not attempted because the request is invalid",
-            Vec::new(),
-        );
-        let result = ExportInfobaseSnapshotResult::new(request.clone(), decision);
+        let result = ExportInfobaseSnapshotResult::new(request.clone(), None);
         return Err(snapshot_failure(
             context,
             error,
@@ -736,8 +728,8 @@ pub fn prepare_infobase_snapshot(
 
     match select_provider(context, config, ExportIntent::Snapshot) {
         Ok(prepared) => Ok(prepared),
-        Err((error, decision)) => {
-            let result = ExportInfobaseSnapshotResult::new(request.clone(), decision);
+        Err((error, receipt)) => {
+            let result = ExportInfobaseSnapshotResult::new(request.clone(), Some(receipt));
             Err(snapshot_failure(
                 context,
                 error,
@@ -755,7 +747,7 @@ pub fn preview_configuration_export(
     prepared: &PreparedExportProvider,
 ) -> UseCaseResult<ExportConfigurationPackageResult> {
     let mut result =
-        ExportConfigurationPackageResult::new(request.clone(), prepared.selection().clone());
+        ExportConfigurationPackageResult::new(request.clone(), Some(prepared.receipt().clone()));
     result.mark_preview_failure();
     let output = resolve_output(config, &request.output).map_err(|error| {
         configuration_failure(context, error, result.clone(), ExportPhase::ResolveTarget)
@@ -772,7 +764,7 @@ pub fn preview_infobase_snapshot(
     prepared: &PreparedExportProvider,
 ) -> UseCaseResult<ExportInfobaseSnapshotResult> {
     let mut result =
-        ExportInfobaseSnapshotResult::new(request.clone(), prepared.selection().clone());
+        ExportInfobaseSnapshotResult::new(request.clone(), Some(prepared.receipt().clone()));
     result.mark_preview_failure();
     let output = resolve_output(config, &request.output).map_err(|error| {
         snapshot_failure(context, error, result.clone(), ExportPhase::ResolveTarget)
@@ -789,26 +781,38 @@ enum ExportIntent {
     SnapshotRestore { expects_absent_target: bool },
 }
 
+impl ExportIntent {
+    const fn operation(self) -> crate::domain::capability::Operation {
+        use crate::domain::capability::Operation;
+        match self {
+            Self::Configuration => Operation::ConfigurationExport,
+            Self::Snapshot => Operation::InfobaseDump,
+            Self::SnapshotRestore { .. } => Operation::InfobaseRestore,
+        }
+    }
+}
+
 fn select_provider(
     context: &ExecutionContext,
     config: &AppConfig,
     intent: ExportIntent,
-) -> Result<PreparedExportProvider, (AppError, ExportProviderDecision)> {
-    let providers = match config.builder {
-        BuilderBackend::Designer => [ExportProvider::Designer, ExportProvider::Ibcmd],
-        BuilderBackend::Ibcmd => [ExportProvider::Ibcmd, ExportProvider::Designer],
-    };
-    let mut utilities = PlatformUtilities::from_config(config);
-    let mut candidates = Vec::new();
-    let mut selected = None;
+) -> Result<PreparedExportProvider, (AppError, ProviderReceipt)> {
+    use crate::domain::capability::SkippedProvider;
 
-    for provider in providers {
+    // Кандидаты приходят из матрицы: переопределение — один исполнитель без отката,
+    // умолчание — цепочка, из которой берётся первый готовый.
+    let plan = config.provider_plan(intent.operation());
+    let mut utilities = PlatformUtilities::from_config(config);
+    let mut skipped: Vec<SkippedProvider> = Vec::new();
+    let mut has_implemented = false;
+
+    for provider in plan.candidates() {
         if let Some(interruption) = context.interruption() {
             let reason = format!(
                 "{} during provider selection",
                 interruption.message(context.command())
             );
-            let decision = ExportProviderDecision::unavailable(reason.clone(), candidates);
+            let receipt = plan.receipt_for_nobody(skipped);
             let error = match interruption {
                 crate::use_cases::context::ExecutionInterruption::Cancelled => {
                     AppError::Cancelled(reason)
@@ -817,74 +821,55 @@ fn select_provider(
                     AppError::TimedOut(reason)
                 }
             };
-            return Err((error, decision));
+            return Err((error, receipt));
         }
-        let (implementation, evidence, implementation_reason) = capability(intent, provider);
-        if selected.is_some() || implementation != ProviderImplementation::Implemented {
-            candidates.push(ProviderCandidate::new(
+        let (implementation, _evidence, implementation_reason) = capability(intent, provider);
+        // Экспериментальный адаптер доступен только переопределением: в цепочку умолчаний
+        // он не входит, а названный явно — пробуется, потому что за этим и назвали.
+        let named_explicitly = matches!(
+            plan,
+            crate::domain::capability::ProviderPlan::Override { .. }
+        );
+        if implementation == ProviderImplementation::Unsupported
+            || (implementation == ProviderImplementation::Experimental && !named_explicitly)
+        {
+            skipped.push(SkippedProvider {
                 provider,
-                implementation,
-                ProviderReadiness::NotChecked,
-                evidence,
-                implementation_reason,
-            ));
+                reason: implementation_reason.to_owned(),
+            });
             continue;
         }
+        has_implemented = true;
 
         let utility = provider_utility(provider);
         match readiness(config, &mut utilities, intent, provider, utility) {
             Ok(executable) => {
-                candidates.push(ProviderCandidate::new(
+                let receipt = plan.receipt_for(provider, skipped);
+                return Ok(PreparedExportProvider {
+                    receipt,
                     provider,
-                    implementation,
-                    ProviderReadiness::Ready,
-                    evidence,
-                    format!(
-                        "{}; '{}' resolved without starting a provider process",
-                        implementation_reason,
-                        executable.display()
-                    ),
-                ));
-                selected = Some((provider, executable));
+                    executable,
+                });
             }
-            Err(reason) => candidates.push(ProviderCandidate::new(
+            Err(reason) => skipped.push(SkippedProvider {
                 provider,
-                implementation,
-                ProviderReadiness::Unavailable,
-                evidence,
-                format!("{implementation_reason}; {reason}"),
-            )),
+                reason: format!("{implementation_reason}; {reason}"),
+            }),
         }
     }
 
-    if let Some((provider, executable)) = selected {
-        let reason = format!(
-            "selected {} before dispatch from the operation-specific candidate order",
-            provider.as_str()
-        );
-        let selection = ExportProviderDecision::selected(provider, reason, candidates);
-        return Ok(PreparedExportProvider {
-            selection,
-            provider,
-            executable,
-        });
-    }
-
-    let has_implemented = candidates
+    let reason = skipped
         .iter()
-        .any(|candidate| candidate.implementation == ProviderImplementation::Implemented);
-    let reason = candidates
-        .iter()
-        .map(|candidate| format!("{}: {}", candidate.provider.as_str(), candidate.reason))
+        .map(|entry| format!("{}: {}", entry.provider.as_str(), entry.reason))
         .collect::<Vec<_>>()
         .join("; ");
-    let decision = ExportProviderDecision::unavailable(reason.clone(), candidates);
+    let receipt = plan.receipt_for_nobody(skipped);
     let error = if has_implemented {
         AppError::EnvironmentUnavailable(reason)
     } else {
         AppError::CapabilityUnavailable(reason)
     };
-    Err((error, decision))
+    Err((error, receipt))
 }
 
 fn capability(
@@ -922,13 +907,21 @@ fn capability(
             ProviderEvidence::LiveVerified,
             "IBCMD DT restore runs but stays experimental until an exclusive-access preflight is implemented",
         ),
+        // Строка матрицы, опередившая код: исполнитель назван, адаптера у него нет.
+        (_, _) => (
+            ProviderImplementation::Experimental,
+            ProviderEvidence::Documented,
+            "no export adapter is implemented for this provider in this build of the runner",
+        ),
     }
 }
 
 fn provider_utility(provider: ExportProvider) -> UtilityType {
     match provider {
         ExportProvider::Designer => UtilityType::V8,
-        ExportProvider::Ibcmd => UtilityType::Ibcmd,
+        // Только эти два доходят до готовности: у остальных нет адаптера, и они
+        // отсеиваются выше как нереализованные.
+        _ => UtilityType::Ibcmd,
     }
 }
 
@@ -1365,6 +1358,13 @@ fn run_configuration_provider(
     };
     let runner = crate::platform::process::ProcessExecutor;
     let result = match provider {
+        // Исполнитель без адаптера: отказ, а не паника — строка матрицы опередила код.
+        other @ (ExportProvider::Agent | ExportProvider::IbcmdRs | ExportProvider::Webinst) => {
+            return Err(crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::ConfigurationExport,
+                other,
+            ));
+        }
         ExportProvider::Designer => {
             let log = provider_log_path(config, "configuration-export")?;
             let dsl = DesignerDsl::new(
@@ -1416,6 +1416,13 @@ fn run_snapshot_provider(
     staging_path: &Path,
 ) -> Result<PlatformCommandResult, AppError> {
     match provider {
+        // Исполнитель без адаптера: отказ, а не паника — строка матрицы опередила код.
+        other @ (ExportProvider::Agent | ExportProvider::IbcmdRs | ExportProvider::Webinst) => {
+            return Err(crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::InfobaseDump,
+                other,
+            ));
+        }
         ExportProvider::Designer => {
             let runner = crate::platform::process::ProcessExecutor;
             let log = provider_log_path(config, "infobase-dump")?;
@@ -1495,8 +1502,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, InfobaseConfig, McpConfig, SourceFormat,
-        TestsConfig, ToolsConfig,
+        AppConfig, BuildConfig, InfobaseConfig, McpConfig, SourceFormat, TestsConfig, ToolsConfig,
     };
     use crate::domain::execution::{ExecutionOutcome, ExecutionStatus};
     use crate::domain::infobase_export::{
@@ -1520,7 +1526,8 @@ mod tests {
             work_path: work.to_path_buf(),
             execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: InfobaseConfig::file("File=/tmp/ib"),
             source_sets: Vec::new(),
             build: BuildConfig::default(),

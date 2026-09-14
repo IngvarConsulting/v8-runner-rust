@@ -104,7 +104,7 @@ fn setup_extensions_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) 
     );
 
     let config = format!(
-        "workPath: '{}'\nformat: EDT\nbuilder: DESIGNER\ninfobase:\n  connection: 'File={}'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: configuration\n  - name: client_mcp\n    type: EXTENSION\n    path: exts/client-mcp\n  - name: tests\n    type: EXTENSION\n    path: tests\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File={}'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: configuration\n  - name: client_mcp\n    type: EXTENSION\n    path: exts/client-mcp\n  - name: tests\n    type: EXTENSION\n    path: tests\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         dir.path().join("ib").display(),
         ibcmd_path.display(),

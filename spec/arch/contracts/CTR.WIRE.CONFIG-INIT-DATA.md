@@ -2,8 +2,8 @@
 id: CTR.WIRE.CONFIG-INIT-DATA
 status: active
 governs: product
-version: 1
-decision: DEC.2026-09-14.EVERY-COMMAND-PINS-THE-FORM-OF-ITS-DATA
+version: 2
+decision: DEC.2026-09-14.BUILDER-KEY-IS-REMOVED
 artifact: docs/schemas/command-data/config-init.schema.json
 producer: src/domain/config_init.rs
 consumers: [cli]
@@ -29,7 +29,6 @@ scope: [wire, cli]
   "local_path": "v8project.local.yaml",
   "gitignore_path": ".gitignore",
   "format": "DESIGNER",
-  "builder": "DESIGNER",
   "platform_version": "8.3.27.2074",
   "source_sets": [
     {

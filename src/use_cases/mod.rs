@@ -60,3 +60,16 @@ pub mod transport;
 pub(crate) mod vanessa;
 /// Shared locking for commands that mutate the same workspace.
 pub mod workspace_lock;
+
+/// Отказ операции, которой назначен исполнитель, не умеющий её делать.
+///
+/// Валидация конфига такого не пропускает, поэтому сюда попадает только строка
+/// матрицы, опередившая код: типизированный отказ вместо паники.
+pub(crate) fn unimplemented_provider(
+    operation: crate::domain::capability::Operation,
+    provider: crate::domain::capability::Provider,
+) -> crate::support::error::AppError {
+    crate::support::error::AppError::CapabilityUnavailable(format!(
+        "provider '{provider}' is not implemented for {operation} in this build of the runner"
+    ))
+}

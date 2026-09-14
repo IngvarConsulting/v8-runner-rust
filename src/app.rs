@@ -18,7 +18,7 @@ use crate::config::loader::{
 use crate::output::presenter::Presenter;
 use crate::output::text::{TimelineItem, TimelineStatus};
 use crate::support::error::AppError;
-use crate::use_cases::config_init::{ConfigBuilderRequest, ConfigFormatRequest, ConfigInitRequest};
+use crate::use_cases::config_init::{ConfigFormatRequest, ConfigInitRequest};
 use crate::use_cases::context::CommandName;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
@@ -393,7 +393,6 @@ fn run_config_init(args: &ConfigInitArgs, presenter: &Presenter) -> i32 {
         force: args.force,
         connection: args.connection.clone(),
         format: map_config_format(&args.format),
-        builder: map_config_builder(&args.builder),
     };
 
     match crate::use_cases::config_init::execute(&request) {
@@ -431,7 +430,6 @@ fn render_config_init_text(
         format!("local path: {}", result.local_path),
         format!("gitignore: {}", result.gitignore_path),
         format!("format: {}", result.format),
-        format!("builder: {}", result.builder),
     ];
     if result.overwritten {
         details.push("overwritten: yes".to_owned());
@@ -515,13 +513,6 @@ fn map_config_format(value: &str) -> ConfigFormatRequest {
         "designer" | "DESIGNER" => ConfigFormatRequest::Designer,
         "edt" | "EDT" => ConfigFormatRequest::Edt,
         _ => ConfigFormatRequest::Auto,
-    }
-}
-
-fn map_config_builder(value: &str) -> ConfigBuilderRequest {
-    match value {
-        "ibcmd" | "IBCMD" => ConfigBuilderRequest::Ibcmd,
-        _ => ConfigBuilderRequest::Designer,
     }
 }
 

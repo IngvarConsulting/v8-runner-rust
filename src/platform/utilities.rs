@@ -91,8 +91,8 @@ impl PlatformUtilities {
 mod tests {
     use super::PlatformUtilities;
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, InfobaseConfig, McpConfig, PlatformToolConfig,
-        SourceFormat, TestsConfig, ToolsConfig,
+        AppConfig, BuildConfig, InfobaseConfig, McpConfig, PlatformToolConfig, SourceFormat,
+        TestsConfig, ToolsConfig,
     };
     use crate::platform::locator::{
         EdtVersion, Locator, LocatorError, PlatformVersion, PlatformVersionRequirement, UtilityType,
@@ -126,7 +126,8 @@ mod tests {
             work_path: PathBuf::from("/tmp/project/.work"),
             execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: InfobaseConfig::file("File=/tmp/ib"),
             source_sets: Vec::new(),
             build: BuildConfig::default(),
