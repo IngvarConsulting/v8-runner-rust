@@ -52,6 +52,7 @@ impl Provider {
         }
     }
 
+    #[allow(dead_code)]
     pub fn parse(value: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
