@@ -7,7 +7,14 @@
 window.RUNNER_DATA = (function () {
   var P = {
     designer: { key: 'designer', name: 'Designer', cls: 'batch', needs: 'designer' },
-    agent:    { key: 'agent',    name: 'agent',    cls: 'agent', needs: 'agent' },
+    // Агентскую точку входа для файловой и кластерной базы создаёт сам раннер: это
+    // процесс Конфигуратора, поднятый в агентском режиме, — значит на машине раннера
+    // нужна платформа. Подключиться к уже работающей точке входа можно только у
+    // автономного сервера: он держит свой SSH-шлюз независимо от раннера.
+    agent:    { key: 'agent',    name: 'agent',    cls: 'agent',
+                needs: function (ctx) {
+                  return ctx.tools.agent && (ctx.target === 'standalone' || ctx.tools.designer);
+                } },
     ibcmd:    { key: 'ibcmd',    name: 'ibcmd',    cls: 'ibcmd', needs: 'ibcmd' },
     rs:       { key: 'ibcmd-rs', name: 'ibcmd-rs', cls: 'rs',    needs: 'rs' },
     edt:      { key: 'edt-cli',  name: 'EDT CLI',  cls: 'neutral', needs: 'edt' },
@@ -28,15 +35,15 @@ window.RUNNER_DATA = (function () {
       { id: 'EXTERNAL',      label: 'внешние', hint: 'обработки и отчёты: в базу не грузятся, собираются в .epf и .erf' }
     ],
     target: [
-      { id: 'file',       label: 'файловая',  hint: 'File=…; раннер может создать её сам' },
-      { id: 'cluster',    label: 'кластер 1С', hint: 'Srvr=…;Ref=…; данные СУБД нужны, чтобы создать базу, а не чтобы работать с готовой' },
-      { id: 'standalone', label: 'автономный сервер', hint: 'ws=…; раннер работает через SSH-шлюз сервера' }
+      { id: 'file',       label: 'файловая',  hint: 'File=…; раннер может создать её сам. Агента для неё поднимает раннер — нужна платформа' },
+      { id: 'cluster',    label: 'кластер 1С', hint: 'Srvr=…;Ref=…; данные СУБД нужны, чтобы создать базу, а не чтобы работать с готовой. Агента для неё поднимает раннер — нужна платформа' },
+      { id: 'standalone', label: 'автономный сервер', hint: 'ws=…; сервер держит свой SSH-шлюз, платформа на машине раннера не нужна' }
     ],
     tools: [
       { id: 'designer', label: 'платформа 1С (1cv8, Конфигуратор)', short: 'платформа 1С', def: true },
       { id: 'ibcmd',    label: 'ibcmd', short: 'ibcmd', def: true },
       { id: 'edt',      label: 'EDT и 1cedtcli', short: 'EDT', def: false },
-      { id: 'agent',    label: 'агентский режим (SSH)', short: 'агент', def: true },
+      { id: 'agent',    label: 'агентский режим', short: 'агент', def: true },
       { id: 'rs',       label: 'ibcmd-rs', short: 'ibcmd-rs', def: false },
       { id: 'web',      label: 'веб-сервер Apache или IIS', short: 'веб-сервер', def: false }
     ]
@@ -70,8 +77,26 @@ window.RUNNER_DATA = (function () {
     if (ibcmdOk && ctx.tools.ibcmd) out.push(P.ibcmd);
     return out;
   }
+  // Инструмент провайдера бывает один (`needs: 'ibcmd'`), а бывает условием от цели:
+  // тогда `needs` — функция от контекста.
+  function ready(provider, ctx) {
+    return typeof provider.needs === 'function'
+      ? !!provider.needs(ctx)
+      : !!ctx.tools[provider.needs];
+  }
+
+  // Почему провайдер не готов. Отмеченный инструмент ещё не делает исполнителя
+  // доступным: агенту для файловой и кластерной базы нужна платформа, потому что
+  // поднимает его раннер.
+  function missingFor(provider, ctx) {
+    if (provider.key === 'agent' && ctx.tools.agent && ctx.target !== 'standalone' && !ctx.tools.designer) {
+      return 'agent (его поднимает раннер — нужна платформа)';
+    }
+    return provider.name;
+  }
+
   function firstReady(chain, ctx) {
-    for (var i = 0; i < chain.length; i++) { if (ctx.tools[chain[i].needs]) return chain[i]; }
+    for (var i = 0; i < chain.length; i++) { if (ready(chain[i], ctx)) return chain[i]; }
     return null;
   }
 
@@ -275,7 +300,7 @@ window.RUNNER_DATA = (function () {
       if (kind) { status = kind; why = blocked.why; fix = blocked.fix || ''; }
       else if (chain.length && !selected) {
         status = 'tool';
-        why = 'нет ни одного из: ' + chain.map(function (p) { return p.name; }).join(', ');
+        why = 'нет ни одного из: ' + chain.map(function (p) { return missingFor(p, ctx); }).join(', ');
         fix = '';
       }
 
