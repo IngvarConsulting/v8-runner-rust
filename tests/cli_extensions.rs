@@ -406,12 +406,12 @@ fn extensions_command_updates_all_extension_properties() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("│"));
-    assert!(stdout.contains("● client_mcp: disable_safety"));
+    assert!(stdout.contains("◌ client_mcp: disable_safety"));
     assert!(stdout.contains("updating extension properties"));
     assert!(stdout.contains("│   безопасный режим"));
-    assert!(stdout.contains("● tests: disable_safety"));
+    assert!(stdout.contains("◌ tests: disable_safety"));
     assert!(stdout.contains("● Extension properties updated successfully"));
-    assert_eq!(stdout.matches("● client_mcp: disable_safety").count(), 1);
+    assert_eq!(stdout.matches("◌ client_mcp: disable_safety").count(), 1);
     assert!(!stdout.contains("[Расширения]"));
 
     let calls = fs::read_to_string(calls_log).expect("calls");
@@ -458,7 +458,7 @@ fn extensions_command_streams_stage_before_pipeline_finishes() {
         &rx,
         Duration::from_secs(15),
         Duration::from_millis(50),
-        |line| line.contains("● client_mcp: disable_safety"),
+        |line| line.contains("◌ client_mcp: disable_safety"),
     );
 
     let still_running = child.try_wait().expect("try wait").is_none();

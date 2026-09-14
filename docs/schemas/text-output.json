@@ -1,0 +1,81 @@
+{
+  "_comment": "Порождается UPDATE_TEXT_OUTPUT_GRAMMAR=1 cargo test generated_text_output_grammar_is_current; руками не правится.",
+  "detail_kinds": [
+    {
+      "description": "ключ: значение",
+      "kind": "fact",
+      "pattern": "^[^\\s:]+: .*$"
+    },
+    {
+      "description": "свободная строка",
+      "kind": "free",
+      "pattern": "^.+$"
+    },
+    {
+      "description": "шаг со своим исходом",
+      "kind": "mark",
+      "pattern": "^[✓✗○→] .*$"
+    },
+    {
+      "description": "что легло на диск",
+      "kind": "artifact",
+      "pattern": "^\\[artifact\\] .*$"
+    },
+    {
+      "description": "пометка-улика",
+      "kind": "note",
+      "pattern": "^\\[[a-z][a-z0-9_-]*\\] .*$"
+    },
+    {
+      "description": "сделано не так, как просили",
+      "kind": "warning",
+      "pattern": "^\\[warning\\] .*$"
+    },
+    {
+      "description": "не сделано",
+      "kind": "error",
+      "pattern": "^\\[error(:[a-z0-9_]+)?\\] .*$"
+    }
+  ],
+  "line_kinds": {
+    "bare": {
+      "description": "Ответ без ленты. Так отвечает только `version`.",
+      "pattern": "^v8-runner \\S+$"
+    },
+    "detail": {
+      "description": "Подробность узла.",
+      "pattern": "^│   \\S.*$"
+    },
+    "error": {
+      "description": "Отказ в stderr — последнее слово команды.",
+      "pattern": "^ERROR: \\S.*$"
+    },
+    "node": {
+      "description": "Узел ленты: знак статуса и подпись. Знак читается без цвета.",
+      "pattern": "^[●▲✖◌○] \\S.*$"
+    },
+    "separator": {
+      "description": "Пустая связка между узлами.",
+      "pattern": "^│$"
+    }
+  },
+  "node_marks": {
+    "failed": "✖",
+    "running": "◌",
+    "skipped": "○",
+    "succeeded": "●",
+    "warned": "▲"
+  },
+  "streams": {
+    "stderr": [
+      "error"
+    ],
+    "stdout": [
+      "node",
+      "detail",
+      "separator",
+      "bare"
+    ]
+  },
+  "version": 1
+}

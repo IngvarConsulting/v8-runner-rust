@@ -1,0 +1,93 @@
+{
+  "$defs": {
+    "DumpMode": {
+      "enum": [
+        "FULL",
+        "INCREMENTAL",
+        "PARTIAL"
+      ],
+      "type": "string"
+    },
+    "DumpSelectorResult": {
+      "additionalProperties": false,
+      "properties": {
+        "normalized": {
+          "type": "string"
+        },
+        "requested": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "requested",
+        "normalized"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/dump.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "extension": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "message": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mode": {
+      "$ref": "#/$defs/DumpMode"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "platform_log_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "provider_dispatched": {
+      "description": "`false` when the run stopped at a preview instead of dispatching the platform.",
+      "type": "boolean"
+    },
+    "selectors": {
+      "items": {
+        "$ref": "#/$defs/DumpSelectorResult"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "source_set": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "target_path": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "ok",
+    "provider_dispatched",
+    "mode",
+    "target_path",
+    "duration_ms"
+  ],
+  "title": "DumpResult",
+  "type": "object"
+}

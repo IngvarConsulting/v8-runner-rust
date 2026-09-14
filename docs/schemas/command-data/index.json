@@ -1,0 +1,61 @@
+{
+  "_comment": "Порождается UPDATE_COMMAND_DATA_SCHEMAS=1 cargo test generated_command_data_schemas_are_current; руками не правится.",
+  "forms": {
+    "bootstrap": [
+      "bootstrap"
+    ],
+    "build": [
+      "build"
+    ],
+    "config init": [
+      "config-init"
+    ],
+    "convert": [
+      "convert"
+    ],
+    "dump": [
+      "dump"
+    ],
+    "extensions": [
+      "extensions",
+      "extensions-inventory"
+    ],
+    "infobase.configuration.export": [
+      "infobase-configuration-export"
+    ],
+    "infobase.dump": [
+      "infobase-dump"
+    ],
+    "infobase.restore": [
+      "infobase-restore"
+    ],
+    "init": [
+      "init"
+    ],
+    "launch": [
+      "launch"
+    ],
+    "load": [
+      "load"
+    ],
+    "make": [
+      "make"
+    ],
+    "syntax": [
+      "syntax"
+    ],
+    "test": [
+      "test"
+    ],
+    "tools download": [
+      "tools-download"
+    ],
+    "version": [
+      "version"
+    ]
+  },
+  "shared": [
+    "refusal",
+    "mcp-refusal"
+  ]
+}

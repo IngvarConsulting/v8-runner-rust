@@ -1,0 +1,241 @@
+{
+  "$defs": {
+    "EdtIssue": {
+      "properties": {
+        "check": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "column": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/IssueSeverity"
+        }
+      },
+      "required": [
+        "path",
+        "message",
+        "severity"
+      ],
+      "type": "object"
+    },
+    "Issue": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ModuleIssue",
+          "properties": {
+            "kind": {
+              "const": "module",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ObjectIssue",
+          "properties": {
+            "kind": {
+              "const": "object",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/EdtIssue",
+          "properties": {
+            "kind": {
+              "const": "edt",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "IssueSeverity": {
+      "enum": [
+        "ERROR",
+        "WARNING",
+        "INFO"
+      ],
+      "type": "string"
+    },
+    "ModuleIssue": {
+      "properties": {
+        "column": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/IssueSeverity"
+        }
+      },
+      "required": [
+        "path",
+        "message",
+        "severity"
+      ],
+      "type": "object"
+    },
+    "ObjectIssue": {
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "object": {
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/IssueSeverity"
+        }
+      },
+      "required": [
+        "object",
+        "message",
+        "severity"
+      ],
+      "type": "object"
+    },
+    "SyntaxCheckStatus": {
+      "enum": [
+        "clean",
+        "issues_found",
+        "tool_failed"
+      ],
+      "type": "string"
+    },
+    "SyntaxIssueSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "errors": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "info": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "warnings": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "errors",
+        "warnings",
+        "info"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/syntax.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "check_name": {
+      "type": "string"
+    },
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "exit_code": {
+      "format": "int32",
+      "type": "integer"
+    },
+    "issues": {
+      "items": {
+        "$ref": "#/$defs/Issue"
+      },
+      "type": "array"
+    },
+    "log_read_warning": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "platform_log_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {
+      "$ref": "#/$defs/SyntaxCheckStatus"
+    },
+    "stderr": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "summary": {
+      "$ref": "#/$defs/SyntaxIssueSummary"
+    }
+  },
+  "required": [
+    "status",
+    "exit_code",
+    "check_name",
+    "issues",
+    "summary",
+    "duration_ms"
+  ],
+  "title": "SyntaxCheckResult",
+  "type": "object"
+}

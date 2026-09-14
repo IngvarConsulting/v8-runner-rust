@@ -1,0 +1,84 @@
+{
+  "$defs": {
+    "InitStep": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/InitStepStatus"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "target",
+        "action",
+        "status",
+        "duration_ms"
+      ],
+      "type": "object"
+    },
+    "InitStepStatus": {
+      "oneOf": [
+        {
+          "enum": [
+            "ok",
+            "skipped",
+            "failed"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "planned",
+          "description": "The step was decided but not performed, because the run is a preview.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/init.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "provider_dispatched": {
+      "description": "`false` when the run stopped at a preview instead of dispatching the platform.\n\nAlways present, so an absent field never has to be read as \"nothing ran\".",
+      "type": "boolean"
+    },
+    "steps": {
+      "items": {
+        "$ref": "#/$defs/InitStep"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "ok",
+    "provider_dispatched",
+    "steps",
+    "duration_ms"
+  ],
+  "title": "InitResult",
+  "type": "object"
+}

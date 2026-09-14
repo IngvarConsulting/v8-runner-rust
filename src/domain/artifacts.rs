@@ -10,7 +10,7 @@ pub const CFE_RUNNER_ID: &str = "designer-cfe";
 pub const EPF_RUNNER_ID: &str = "designer-epf";
 pub const ERF_RUNNER_ID: &str = "designer-erf";
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactBuildMode {
     Unknown,
@@ -32,7 +32,7 @@ impl ArtifactBuildMode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ArtifactBuildMetadata {
     pub artifact_type: ArtifactBuildMode,
     pub output_path: PathBuf,
@@ -41,7 +41,7 @@ pub struct ArtifactBuildMetadata {
     pub published: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ArtifactsResult {
     /// `false` when the run stopped at a preview instead of dispatching the platform.
     pub provider_dispatched: bool,

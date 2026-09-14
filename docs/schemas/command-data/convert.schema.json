@@ -1,0 +1,93 @@
+{
+  "$defs": {
+    "ConvertDirection": {
+      "enum": [
+        "EDT_TO_DESIGNER",
+        "DESIGNER_TO_EDT"
+      ],
+      "type": "string"
+    },
+    "ConvertOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "source_path": {
+          "type": "string"
+        },
+        "source_set": {
+          "type": "string"
+        },
+        "target_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_set",
+        "source_path",
+        "target_path"
+      ],
+      "type": "object"
+    },
+    "ConvertScope": {
+      "enum": [
+        "ALL",
+        "SINGLE"
+      ],
+      "type": "string"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/convert.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "direction": {
+      "$ref": "#/$defs/ConvertDirection"
+    },
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "message": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "outputs": {
+      "items": {
+        "$ref": "#/$defs/ConvertOutput"
+      },
+      "type": "array"
+    },
+    "provider_dispatched": {
+      "description": "`false` when the run stopped at a preview instead of dispatching the EDT CLI.\n\nAlways present, so an absent field never has to be read as \"nothing ran\". In a\npreview `outputs` names what would be written; the flag is what separates planned\nfrom produced.",
+      "type": "boolean"
+    },
+    "scope": {
+      "$ref": "#/$defs/ConvertScope"
+    },
+    "source_set": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "workspace_path": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "ok",
+    "provider_dispatched",
+    "direction",
+    "scope",
+    "workspace_path",
+    "outputs",
+    "duration_ms"
+  ],
+  "title": "ConvertResult",
+  "type": "object"
+}

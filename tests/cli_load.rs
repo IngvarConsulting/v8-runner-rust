@@ -365,7 +365,7 @@ fn load_text_failure_surfaces_structured_error() {
     assert_eq!(output.status.code(), Some(2));
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("● Artifact load failed"));
+    assert!(stdout.contains("✖ Artifact load failed"));
     assert!(stdout.contains("[error:artifact_load_failed]"));
     assert!(stdout.contains("not supported"));
 }

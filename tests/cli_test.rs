@@ -666,8 +666,8 @@ fn test_text_output_splits_pipeline_into_timeline_stages() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(stdout.contains("● Tests completed successfully"));
-    assert!(stdout.contains("● test: build prerequisite"));
-    assert!(stdout.contains("● test: enterprise run"));
+    assert!(stdout.contains("◌ test: build prerequisite"));
+    assert!(stdout.contains("◌ test: enterprise run"));
     assert!(!stdout.contains("started_at: "));
     assert!(stdout.contains("│   target: all"));
     assert!(stdout.contains("│   summary: total=1, passed=1, failed=0, skipped=0, errors=0"));
@@ -738,7 +738,7 @@ fn test_command_streams_enterprise_stage_before_runner_finishes() {
         &rx,
         Duration::from_secs(5),
         Duration::from_millis(100),
-        |line| line.contains("● test: enterprise run"),
+        |line| line.contains("◌ test: enterprise run"),
     );
 
     let runner_started_before_release = wait_for_file(&runner_started, Duration::from_secs(5));
@@ -779,7 +779,7 @@ fn test_text_output_surfaces_failure_code_and_retained_artifacts() {
     assert_eq!(output.status.code(), Some(3));
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("● Tests failed"));
+    assert!(stdout.contains("✖ Tests failed"));
     assert!(stdout.contains("✗ enterprise run: runtime error: enterprise test run timed out"));
     assert!(stdout.contains("[warning] enterprise test run timed out"));
     assert!(stdout.contains("[artifact] run_dir -> "));
@@ -812,7 +812,7 @@ fn test_text_output_surfaces_success_log_findings_without_full_step_noise() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("● Tests completed with warnings"));
+    assert!(stdout.contains("▲ Tests completed with warnings"));
     assert!(stdout.contains("[error:test_report]"));
     assert!(!stdout.contains("prepare artifacts"));
 }

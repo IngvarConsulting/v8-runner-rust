@@ -1,5 +1,4 @@
 use serde::Serialize;
-use serde_json::json;
 
 use crate::command_envelope::{Envelope, EnvelopeError};
 use crate::output::presenter::Presenter;
@@ -27,11 +26,20 @@ pub fn print_command_use_case_error(
     print_command_error(presenter, command.as_str(), error, &error.to_string());
 }
 
-pub fn pre_dispatch_error_envelope(
-    command: &str,
-    error: &UseCaseError,
-) -> Envelope<serde_json::Value> {
-    failure_envelope(command, 0, json!({ "message": error.message() }), error)
+/// `data` отказа, случившегося до того, как команда начала работу.
+///
+/// Предмета у такого ответа нет — платформа не запускалась, план не строился, — поэтому
+/// форма несёт только текст отказа. Машинная часть причины живёт в `error` конверта.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct RefusalData {
+    pub message: String,
+}
+
+pub fn pre_dispatch_error_envelope(command: &str, error: &UseCaseError) -> Envelope<RefusalData> {
+    let data = RefusalData {
+        message: error.message().to_owned(),
+    };
+    failure_envelope(command, 0, data, error)
 }
 
 pub fn failure_envelope<T: Serialize>(

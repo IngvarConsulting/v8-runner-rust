@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -2126,7 +2125,9 @@ fn execute_launch(
                         None => presenter.print_envelope(&failure_envelope(
                             CommandName::Launch.as_str(),
                             started.elapsed().as_millis() as u64,
-                            json!({ "message": error.message() }),
+                            crate::cli::output::RefusalData {
+                                message: error.message().to_owned(),
+                            },
                             &error,
                         )),
                     }
@@ -2907,8 +2908,8 @@ fn is_reserved_raw_launch_key(raw: &str) -> bool {
         .any(|key| launch_key_alias_matches(raw, key))
 }
 
-#[derive(Debug, Serialize)]
-struct LoadJsonData<'a> {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct LoadJsonData<'a> {
     pub ok: bool,
     /// `false` when the run stopped at a preview instead of dispatching the platform.
     pub provider_dispatched: bool,
@@ -2999,8 +3000,8 @@ fn build_load_envelope(result: &LoadResult) -> Envelope<LoadJsonData<'_>> {
     }
 }
 
-#[derive(Debug, Serialize)]
-struct ArtifactsJsonData<'a> {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct ArtifactsJsonData<'a> {
     pub ok: bool,
     /// `false` when the run stopped at a preview instead of dispatching the platform.
     pub provider_dispatched: bool,
@@ -3461,7 +3462,15 @@ fn render_init_text(result: &InitResult, presenter: &Presenter) {
     let succeeded = result
         .steps
         .iter()
-        .all(|step| matches!(step.status, InitStepStatus::Ok | InitStepStatus::Skipped));
+        // Превью ничего не делает и потому ничего не проваливает: шаг со статусом
+        // `Planned` — это план, а не отказ. Раньше он приводил к подписи «Init failed»
+        // при `ok: true` и коде выхода 0, то есть текст говорил обратное всему остальному.
+        .all(|step| {
+            matches!(
+                step.status,
+                InitStepStatus::Ok | InitStepStatus::Skipped | InitStepStatus::Planned
+            )
+        });
     let mut timeline = vec![timeline_item_with_details(
         timeline_status(succeeded),
         "init:",
@@ -3663,6 +3672,11 @@ fn render_convert_scope(scope: ConvertScope, source_set: Option<&str>) -> String
 fn render_syntax_text(result: &SyntaxCheckResult, presenter: &Presenter) {
     let succeeded = matches!(result.status, SyntaxCheckStatus::Clean);
     let label = match result.status {
+        // Проверка прошла, но журнал прочитать не удалось: подпись обязана это
+        // сказать, иначе она расходится со знаком узла и с подробностью ниже.
+        SyntaxCheckStatus::Clean if result.log_read_warning.is_some() => {
+            format!("Syntax check {} completed with warnings", result.check_name)
+        }
         SyntaxCheckStatus::Clean => {
             format!("Syntax check {} completed successfully", result.check_name)
         }

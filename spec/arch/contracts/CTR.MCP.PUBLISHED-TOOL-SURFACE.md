@@ -30,3 +30,26 @@ scope: [mcp, wire]
 - `check_syntax_designer_modules`
 
 Состав меняется только вместе с версией этой формы.
+
+## Пример
+
+Фрагмент закреплённой поверхности — схема входа одного инструмента:
+
+```json
+{
+  "tools": {
+    "dump_config": {
+      "title": "McpDumpConfigRequest",
+      "type": "object",
+      "description": "MCP request for `dump_config`.",
+      "properties": {
+        "mode": {
+          "default": null,
+          "description": "Dump mode, for example FULL or INCREMENTAL.",
+          "type": ["string", "null"]
+        }
+      }
+    }
+  }
+}
+```

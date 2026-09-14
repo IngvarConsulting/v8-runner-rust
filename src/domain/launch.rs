@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// Structured result of a `launch` command.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LaunchResult {
     /// `true` when the process was spawned successfully.
     pub ok: bool,
@@ -34,7 +34,7 @@ pub struct LaunchResult {
 ///
 /// The plan names what the runner selected, because only the runner discovers a
 /// platform installation: a caller cannot compose these arguments itself.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LaunchPlan {
     /// Program the runner would have spawned.
     pub program: PathBuf,
@@ -43,7 +43,7 @@ pub struct LaunchPlan {
 }
 
 /// Observed outcome of an opt-in bounded external EPF client launch.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExternalEpfWaitResult {
     pub pid: u32,
     pub execute_path: String,
@@ -54,7 +54,7 @@ pub struct ExternalEpfWaitResult {
 }
 
 /// Canonical platform installation metadata exposed by `launch` JSON results.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PlatformResolution {
     /// Absolute canonical path to the selected executable.
     pub path: PathBuf,
@@ -67,7 +67,7 @@ pub struct PlatformResolution {
 }
 
 /// Typed discovery sources exposed by `launch` resolution metadata.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum PlatformResolutionSource {
     /// The configured utility or installation hint.
@@ -79,7 +79,7 @@ pub enum PlatformResolutionSource {
 }
 
 /// Result of probing a client-side MCP endpoint after launch.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpReadinessResult {
     /// `true` when initialize and tools/list succeeded and required tools were present.
     pub ok: bool,
@@ -94,7 +94,7 @@ pub struct McpReadinessResult {
 }
 
 /// Supported application launch modes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LaunchMode {
     Designer,

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::artifacts::ArtifactBuildMode;
 use crate::domain::execution::ExecutionOutcome;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LoadMode {
     Load,
@@ -13,7 +13,7 @@ pub enum LoadMode {
     Update,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LoadTargetKind {
     Unknown,
@@ -27,7 +27,7 @@ pub enum LoadTargetKind {
 /// of the answer the platform guarantees is whether the comparison ran: exit code zero, and
 /// exactly then a comparison report appears. Why it did not run is said in prose, and prose is
 /// not a contract — see ADR-0029 — so this enum has no variant for a reason.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CompatibilityState {
     /// The comparison ran, so both sides exist: a configuration is on support, an extension
@@ -45,7 +45,7 @@ pub enum CompatibilityState {
     NotProbed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct LoadExecutionMetadata {
     pub applied: bool,
     pub target_kind: LoadTargetKind,
@@ -53,7 +53,7 @@ pub struct LoadExecutionMetadata {
     pub update_db_cfg_ran: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LoadResult {
     /// `false` when the run stopped at a preview instead of dispatching the platform.
     pub provider_dispatched: bool,

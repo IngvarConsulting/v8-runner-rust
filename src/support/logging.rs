@@ -317,16 +317,13 @@ fn write_timeline_pipe(writer: &mut Writer<'_>) -> std::fmt::Result {
 }
 
 fn write_timeline_node(writer: &mut Writer<'_>, status: &str) -> std::fmt::Result {
+    // Знак берётся из общего словаря `output::text`: живой прогресс и итоговая лента
+    // говорят на одном языке, и статус виден без цвета.
+    let (glyph, color) = crate::output::text::progress_mark(status);
     if writer.has_ansi_escapes() {
-        let color = match status {
-            "failed" => "31",
-            "running" => "36",
-            "skipped" => "90",
-            _ => "32",
-        };
-        write!(writer, "\x1b[{color}m●\x1b[0m")
+        write!(writer, "\x1b[{color}m{glyph}\x1b[0m")
     } else {
-        write!(writer, "●")
+        write!(writer, "{glyph}")
     }
 }
 

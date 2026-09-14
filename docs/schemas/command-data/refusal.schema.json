@@ -1,0 +1,16 @@
+{
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/refusal.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`data` отказа, случившегося до того, как команда начала работу.\n\nПредмета у такого ответа нет — платформа не запускалась, план не строился, — поэтому\nформа несёт только текст отказа. Машинная часть причины живёт в `error` конверта.",
+  "properties": {
+    "message": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "message"
+  ],
+  "title": "RefusalData",
+  "type": "object"
+}

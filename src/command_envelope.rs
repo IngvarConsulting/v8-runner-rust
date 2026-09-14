@@ -72,7 +72,7 @@ impl<T: Serialize> Envelope<T> {
 }
 
 /// Shared JSON data projection for test command envelopes.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct TestEnvelopeData {
     pub ok: bool,
     pub target: TestTarget,

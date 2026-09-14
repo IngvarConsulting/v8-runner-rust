@@ -195,3 +195,162 @@ fn every_decision_names_evidence_that_resolves() {
         unresolved.join("\n")
     );
 }
+
+/// Раздел «Пример» у контракта — не проза, а проверяемый экземпляр формы.
+///
+/// Если артефакт контракта — схема, пример обязан её пройти; если артефакт не схема,
+/// а закреплённый документ, пример обязан быть его фрагментом. Иначе пример живёт своей
+/// жизнью и через два изменения формы врёт читателю ровно там, где тот ему верит.
+#[test]
+fn every_contract_shows_an_example_checked_against_its_form() {
+    let root = repo_root();
+    let contracts = root.join("spec/arch/contracts");
+    let mut wrong = Vec::new();
+
+    for entry in std::fs::read_dir(&contracts).expect("contracts directory is readable") {
+        let path = entry.expect("directory entry").path();
+        if path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("record is readable");
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_owned();
+
+        let Some(artifact) = text
+            .lines()
+            .find_map(|line| line.strip_prefix("artifact: "))
+            .map(|value| value.trim().to_owned())
+        else {
+            wrong.push(format!("{name}: no artifact prop"));
+            continue;
+        };
+        let Some((language, example)) = example_block(&text) else {
+            wrong.push(format!("{name}: no example block"));
+            continue;
+        };
+
+        let artifact_text = match std::fs::read_to_string(root.join(&artifact)) {
+            Ok(text) => text,
+            Err(error) => {
+                wrong.push(format!(
+                    "{name}: artifact {artifact} is unreadable: {error}"
+                ));
+                continue;
+            }
+        };
+        let artifact_value: serde_json::Value = match serde_json::from_str(&artifact_text) {
+            Ok(value) => value,
+            Err(error) => {
+                wrong.push(format!("{name}: artifact {artifact} is not json: {error}"));
+                continue;
+            }
+        };
+
+        if let Some(line_kinds) = artifact_value
+            .get("line_kinds")
+            .and_then(serde_json::Value::as_object)
+        {
+            // Артефакт-грамматика описывает не документ, а строки. Пример к нему —
+            // кусок настоящего вывода, и проверяется он построчно.
+            let patterns: Vec<regex::Regex> = line_kinds
+                .values()
+                .filter_map(|kind| kind.get("pattern").and_then(serde_json::Value::as_str))
+                .map(|pattern| regex::Regex::new(pattern).expect("kind pattern compiles"))
+                .collect();
+            for line in example.lines().filter(|line| !line.trim().is_empty()) {
+                if !patterns.iter().any(|pattern| pattern.is_match(line)) {
+                    wrong.push(format!(
+                        "{name}: example line matches no kind of {artifact}: {line:?}"
+                    ));
+                }
+            }
+        } else if artifact_value.get("$schema").is_some() {
+            let Some(parsed) = parse_example(&language, &example, &name, &mut wrong) else {
+                continue;
+            };
+            let validator = match jsonschema::validator_for(&artifact_value) {
+                Ok(validator) => validator,
+                Err(error) => {
+                    wrong.push(format!(
+                        "{name}: artifact {artifact} is not a schema: {error}"
+                    ));
+                    continue;
+                }
+            };
+            let errors: Vec<String> = validator
+                .iter_errors(&parsed)
+                .map(|error| format!("{} at {}", error, error.instance_path))
+                .collect();
+            if !errors.is_empty() {
+                wrong.push(format!(
+                    "{name}: example fails its own form {artifact}:\n{}",
+                    errors.join("\n")
+                ));
+            }
+        } else {
+            let Some(parsed) = parse_example(&language, &example, &name, &mut wrong) else {
+                continue;
+            };
+            if !contains(&artifact_value, &parsed) {
+                wrong.push(format!(
+                    "{name}: example is not a fragment of the pinned {artifact}"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "contract examples are prose, not pinned form:\n{}",
+        wrong.join("\n")
+    );
+}
+
+fn parse_example(
+    language: &str,
+    example: &str,
+    name: &str,
+    wrong: &mut Vec<String>,
+) -> Option<serde_json::Value> {
+    let parsed = match language {
+        "yaml" => serde_yaml::from_str::<serde_json::Value>(example).map_err(|e| e.to_string()),
+        _ => serde_json::from_str::<serde_json::Value>(example).map_err(|e| e.to_string()),
+    };
+    match parsed {
+        Ok(value) => Some(value),
+        Err(error) => {
+            wrong.push(format!("{name}: example is not valid {language}: {error}"));
+            None
+        }
+    }
+}
+
+/// Язык и тело первого блока кода в разделе «Пример».
+fn example_block(text: &str) -> Option<(String, String)> {
+    let heading = text.find("\n## Пример\n")? + "\n## Пример\n".len();
+    let rest = &text[heading..];
+    let open = rest.find("```")? + 3;
+    let after_open = &rest[open..];
+    let newline = after_open.find('\n')?;
+    let language = after_open[..newline].trim().to_owned();
+    let body = &after_open[newline + 1..];
+    let close = body.find("\n```")?;
+    Some((language, body[..close + 1].to_owned()))
+}
+
+/// Проверяет, что `fragment` целиком встречается в `whole`.
+///
+/// У объекта сверяются только названные фрагментом ключи, у всего остального —
+/// равенство. Так пример показывает одну запись закреплённого документа, не переписывая
+/// документ целиком.
+fn contains(whole: &serde_json::Value, fragment: &serde_json::Value) -> bool {
+    match (whole, fragment) {
+        (serde_json::Value::Object(whole), serde_json::Value::Object(fragment)) => fragment
+            .iter()
+            .all(|(key, value)| whole.get(key).is_some_and(|found| contains(found, value))),
+        _ => whole == fragment,
+    }
+}

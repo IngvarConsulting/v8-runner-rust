@@ -39,6 +39,27 @@ fn assert_envelope_business_failure(payload: &Value, command: &str) {
     assert!(payload["error"]["message"].is_string());
 }
 
+/// Отказ адаптера MCP печатает `data` закреплённой формы, а не произвольный объект.
+///
+/// Клиент разбирает его до того, как узнал об отказе, поэтому состав полей — такое же
+/// обещание, как и состав успешного ответа.
+fn assert_matches_the_mcp_refusal_form(data: &Value) {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("docs/schemas/command-data/mcp-refusal.schema.json");
+    let text = fs::read_to_string(&path).expect("refusal form artefact is present");
+    let schema: Value = serde_json::from_str(&text).expect("refusal form is valid json");
+    let validator = jsonschema::validator_for(&schema).expect("refusal form compiles");
+    let errors: Vec<String> = validator
+        .iter_errors(data)
+        .map(|error| format!("{} at {}", error, error.instance_path))
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "the refusal does not match the pinned form:\n{}",
+        errors.join("\n")
+    );
+}
+
 fn assert_launch_platform_resolution(data: &Value) {
     let binary = data["binary"].as_str().expect("launch binary");
     let resolution = &data["platform_resolution"];
@@ -969,6 +990,7 @@ async fn mcp_stdio_returns_structured_business_failure() {
     assert_eq!(payload["error"]["code"], "invalid_argument");
     assert_eq!(payload["data"]["field"], "module_name");
     assert_eq!(payload["data"]["tool"], "run_module_tests");
+    assert_matches_the_mcp_refusal_form(&payload["data"]);
 
     client.cancel().await.expect("cancel client");
 }

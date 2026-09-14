@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::domain::issue::Issue;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SyntaxCheckStatus {
     Clean,
@@ -11,14 +11,14 @@ pub enum SyntaxCheckStatus {
     ToolFailed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SyntaxIssueSummary {
     pub errors: usize,
     pub warnings: usize,
     pub info: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SyntaxCheckResult {
     pub status: SyntaxCheckStatus,
     pub exit_code: i32,

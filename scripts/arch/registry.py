@@ -66,6 +66,9 @@ SYMBOL_ANYWHERE = re.compile(r"\b(?:DEC\.\d{4}-\d{2}-\d{2}|INV|CTR)\.[A-Z0-9.-]+
 # A symbol becomes a filename, and Windows still refuses these as base names
 # whatever the extension follows. `CON` was the first contract prefix and made
 # the whole tree impossible to check out on Windows.
+EXAMPLE_HEADING = re.compile(r"^## Пример\s*$", re.M)
+FENCED_BLOCK = re.compile(r"^```[a-z]*\n(.*?)^```\s*$", re.M | re.S)
+
 DOS_DEVICE_NAMES = frozenset(
     ["CON", "PRN", "AUX", "NUL"]
     + [f"COM{digit}" for digit in range(10)]
@@ -134,6 +137,20 @@ def parse_front_matter(text: str) -> tuple[dict, str]:
         else:
             props[key] = raw
     return props, match.group(2)
+
+
+def example_block(body: str) -> str:
+    """Тело первого блока кода в разделе «Пример», или пустая строка.
+
+    Раздел обязателен у контракта: схема говорит, что допустимо, а пример —
+    что потребитель увидит на самом деле. Проверка `tests/arch_registry.rs`
+    прогоняет его через закреплённую форму, поэтому устареть молча он не может.
+    """
+    heading = EXAMPLE_HEADING.search(body)
+    if heading is None:
+        return ""
+    block = FENCED_BLOCK.search(body, heading.end())
+    return block.group(1) if block else ""
 
 
 def evidence_names(value: object) -> list[str]:
@@ -225,6 +242,10 @@ def validation_errors(found: list[Record]) -> list[str]:
             version = str(record.props.get("version", ""))
             if not version.isdecimal() or int(version) < 1:
                 errors.append(f"{record.relative}: version must be a positive integer")
+            if not example_block(record.body).strip():
+                errors.append(
+                    f"{record.relative}: no `## Пример` section with a fenced block"
+                )
         if record.kind == "decision":
             if "changes" in record.props:
                 changed_contracts = record.props.get("changes")

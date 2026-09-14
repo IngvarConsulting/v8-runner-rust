@@ -591,7 +591,7 @@ fn run_restore_provider(
     source_file: &Path,
 ) -> Result<PlatformCommandResult, AppError> {
     match provider {
-        ExportProvider::DesignerBatch => {
+        ExportProvider::Designer => {
             let runner = crate::platform::process::ProcessExecutor;
             let log = provider_log_path(config, "infobase-restore")?;
             DesignerDsl::new(
@@ -606,7 +606,7 @@ fn run_restore_provider(
             .restore_infobase(source_file)
             .map_err(AppError::from)
         }
-        ExportProvider::IbcmdProcess => Err(AppError::CapabilityUnavailable(
+        ExportProvider::Ibcmd => Err(AppError::CapabilityUnavailable(
             "IBCMD DT restore is experimental and cannot be dispatched".to_owned(),
         )),
     }
@@ -795,8 +795,8 @@ fn select_provider(
     intent: ExportIntent,
 ) -> Result<PreparedExportProvider, (AppError, ExportProviderDecision)> {
     let providers = match config.builder {
-        BuilderBackend::Designer => [ExportProvider::DesignerBatch, ExportProvider::IbcmdProcess],
-        BuilderBackend::Ibcmd => [ExportProvider::IbcmdProcess, ExportProvider::DesignerBatch],
+        BuilderBackend::Designer => [ExportProvider::Designer, ExportProvider::Ibcmd],
+        BuilderBackend::Ibcmd => [ExportProvider::Ibcmd, ExportProvider::Designer],
     };
     let mut utilities = PlatformUtilities::from_config(config);
     let mut candidates = Vec::new();
@@ -892,32 +892,32 @@ fn capability(
     provider: ExportProvider,
 ) -> (ProviderImplementation, ProviderEvidence, &'static str) {
     match (intent, provider) {
-        (ExportIntent::Configuration, ExportProvider::DesignerBatch) => (
+        (ExportIntent::Configuration, ExportProvider::Designer) => (
             ProviderImplementation::Implemented,
             ProviderEvidence::ArgvTested,
             "Designer CF/CFE adapter is implemented from the documented batch contract",
         ),
-        (ExportIntent::Configuration, ExportProvider::IbcmdProcess) => (
+        (ExportIntent::Configuration, ExportProvider::Ibcmd) => (
             ProviderImplementation::Implemented,
             ProviderEvidence::ArgvTested,
             "IBCMD CF/CFE adapter is implemented from the documented config-save contract",
         ),
-        (ExportIntent::Snapshot, ExportProvider::DesignerBatch) => (
+        (ExportIntent::Snapshot, ExportProvider::Designer) => (
             ProviderImplementation::Implemented,
             ProviderEvidence::ArgvTested,
             "Designer DT adapter is implemented from the documented batch contract",
         ),
-        (ExportIntent::Snapshot, ExportProvider::IbcmdProcess) => (
+        (ExportIntent::Snapshot, ExportProvider::Ibcmd) => (
             ProviderImplementation::Experimental,
             ProviderEvidence::Documented,
             "IBCMD DT export is disabled until an exclusive-access preflight is implemented",
         ),
-        (ExportIntent::SnapshotRestore { .. }, ExportProvider::DesignerBatch) => (
+        (ExportIntent::SnapshotRestore { .. }, ExportProvider::Designer) => (
             ProviderImplementation::Implemented,
             ProviderEvidence::LiveVerified,
             "Designer DT restore is implemented and was verified against a live 8.3.27 file infobase",
         ),
-        (ExportIntent::SnapshotRestore { .. }, ExportProvider::IbcmdProcess) => (
+        (ExportIntent::SnapshotRestore { .. }, ExportProvider::Ibcmd) => (
             ProviderImplementation::Experimental,
             ProviderEvidence::LiveVerified,
             "IBCMD DT restore runs but stays experimental until an exclusive-access preflight is implemented",
@@ -927,8 +927,8 @@ fn capability(
 
 fn provider_utility(provider: ExportProvider) -> UtilityType {
     match provider {
-        ExportProvider::DesignerBatch => UtilityType::V8,
-        ExportProvider::IbcmdProcess => UtilityType::Ibcmd,
+        ExportProvider::Designer => UtilityType::V8,
+        ExportProvider::Ibcmd => UtilityType::Ibcmd,
     }
 }
 
@@ -945,7 +945,7 @@ fn readiness(
         } => validate_restore_target_connection(config)?,
         _ => validate_file_infobase_readiness(config)?,
     }
-    if provider == ExportProvider::IbcmdProcess {
+    if provider == ExportProvider::Ibcmd {
         IbcmdConnection::from_infobase(&config.infobase)
             .map_err(|error| format!("connection is not ready for IBCMD: {error}"))?;
     }
@@ -1365,7 +1365,7 @@ fn run_configuration_provider(
     };
     let runner = crate::platform::process::ProcessExecutor;
     let result = match provider {
-        ExportProvider::DesignerBatch => {
+        ExportProvider::Designer => {
             let log = provider_log_path(config, "configuration-export")?;
             let dsl = DesignerDsl::new(
                 executable.to_path_buf(),
@@ -1382,7 +1382,7 @@ fn run_configuration_provider(
             }
             .map_err(AppError::from)?
         }
-        ExportProvider::IbcmdProcess => {
+        ExportProvider::Ibcmd => {
             let connection =
                 IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
             let data_path = config.work_path.join("ibcmd-data");
@@ -1416,7 +1416,7 @@ fn run_snapshot_provider(
     staging_path: &Path,
 ) -> Result<PlatformCommandResult, AppError> {
     match provider {
-        ExportProvider::DesignerBatch => {
+        ExportProvider::Designer => {
             let runner = crate::platform::process::ProcessExecutor;
             let log = provider_log_path(config, "infobase-dump")?;
             DesignerDsl::new(
@@ -1431,7 +1431,7 @@ fn run_snapshot_provider(
             .dump_infobase(staging_path)
             .map_err(AppError::from)
         }
-        ExportProvider::IbcmdProcess => Err(AppError::CapabilityUnavailable(
+        ExportProvider::Ibcmd => Err(AppError::CapabilityUnavailable(
             "IBCMD DT export is experimental and cannot be dispatched".to_owned(),
         )),
     }
@@ -1556,9 +1556,9 @@ mod tests {
         assert!(validate_snapshot_output(Path::new("dist/base.dt")).is_ok());
         assert!(validate_snapshot_output(Path::new("dist/base.backup")).is_err());
 
-        let (designer, _, _) = capability(ExportIntent::Snapshot, ExportProvider::DesignerBatch);
+        let (designer, _, _) = capability(ExportIntent::Snapshot, ExportProvider::Designer);
         assert_eq!(designer, ProviderImplementation::Implemented);
-        let (ibcmd, _, _) = capability(ExportIntent::Snapshot, ExportProvider::IbcmdProcess);
+        let (ibcmd, _, _) = capability(ExportIntent::Snapshot, ExportProvider::Ibcmd);
         assert_eq!(ibcmd, ProviderImplementation::Experimental);
     }
 

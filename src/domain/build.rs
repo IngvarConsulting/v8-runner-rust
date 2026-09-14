@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct BuildResult {
     pub ok: bool,
     /// `false` when the run stopped at a preview instead of dispatching the platform.
@@ -12,7 +12,7 @@ pub struct BuildResult {
     pub duration_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct BuildStep {
     pub source_set: String,
     pub mode: BuildMode,
@@ -21,7 +21,7 @@ pub struct BuildStep {
     pub duration_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BuildMode {
     EdtExport,

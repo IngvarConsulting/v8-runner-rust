@@ -37,6 +37,13 @@ impl Presenter {
         }
     }
 
+    /// Однострочный ответ без ленты — форма, объявленная для `version`.
+    pub fn print_bare(&self, line: &str) {
+        if !self.is_json() {
+            self.text.print_bare(line);
+        }
+    }
+
     pub fn print_timeline(&self, items: &[TimelineItem]) {
         if !self.is_json() {
             self.text.print_timeline(items);

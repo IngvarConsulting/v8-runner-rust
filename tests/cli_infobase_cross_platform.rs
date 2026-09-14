@@ -134,7 +134,7 @@ fn designer_configuration_and_dt_exports_publish_through_native_cli() {
             cfe.to_str().expect("cfe path"),
         ],
     );
-    assert_eq!(cfe_json["data"]["selection"]["provider"], "designer-batch");
+    assert_eq!(cfe_json["data"]["selection"]["provider"], "designer");
     assert_eq!(cfe_json["data"]["artifact_kind"], "cfe");
     assert_eq!(cfe_json["data"]["published"], true);
     assert_eq!(fs::read(&cfe).expect("published CFE"), b"payload");
@@ -148,7 +148,7 @@ fn designer_configuration_and_dt_exports_publish_through_native_cli() {
             dt.to_str().expect("dt path"),
         ],
     );
-    assert_eq!(dt_json["data"]["selection"]["provider"], "designer-batch");
+    assert_eq!(dt_json["data"]["selection"]["provider"], "designer");
     assert_eq!(dt_json["data"]["artifact_kind"], "dt");
     assert_eq!(dt_json["data"]["published"], true);
     assert_eq!(fs::read(&dt).expect("published DT"), b"payload");
@@ -179,7 +179,7 @@ fn infobase_dry_run_is_non_executing_on_the_host_platform() {
 
     assert_eq!(preview["data"]["mode"], "preview");
     assert_eq!(preview["data"]["provider_dispatched"], false);
-    assert_eq!(preview["data"]["selection"]["provider"], "designer-batch");
+    assert_eq!(preview["data"]["selection"]["provider"], "designer");
     assert!(!work.exists());
     assert!(!output.exists());
     assert!(!output.parent().expect("output parent").exists());

@@ -1,3 +1,5 @@
+use std::io::IsTerminal;
+
 use clap::Parser;
 use serde::Serialize;
 use tracing::{debug, error};
@@ -36,11 +38,7 @@ pub fn run() -> i32 {
         return run_mcp_command(&cli, args);
     }
 
-    let color_mode = if cli.no_color {
-        crate::output::presenter::ColorMode::Disabled
-    } else {
-        crate::output::presenter::ColorMode::Enabled
-    };
+    let color_mode = color_mode(cli.no_color);
     let presenter = Presenter::new(output_format.to_owned(), color_mode);
 
     if let Command::Config(args) = &cli.command {
@@ -122,14 +120,14 @@ pub fn run() -> i32 {
         crate::support::logging::init_action_logging_deferred(
             level,
             output_format,
-            !cli.no_color,
+            color_enabled(cli.no_color),
             &config.work_path,
         )
     } else {
         crate::support::logging::init_action_logging(
             level,
             output_format,
-            !cli.no_color,
+            color_enabled(cli.no_color),
             &config.work_path,
         )
     };
@@ -236,10 +234,10 @@ fn command_name(command: &Command) -> &'static str {
     }
 }
 
-#[derive(Debug, Serialize)]
-struct VersionInfo {
-    name: &'static str,
-    version: &'static str,
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct VersionInfo {
+    pub name: &'static str,
+    pub version: &'static str,
 }
 
 fn run_version_command(output_format: &str) -> i32 {
@@ -248,14 +246,14 @@ fn run_version_command(output_format: &str) -> i32 {
         version: env!("CARGO_PKG_VERSION"),
     };
 
-    if output_format == "json" {
-        let presenter = Presenter::new(
-            output_format.to_owned(),
-            crate::output::presenter::ColorMode::Disabled,
-        );
+    let presenter = Presenter::new(
+        output_format.to_owned(),
+        crate::output::presenter::ColorMode::Disabled,
+    );
+    if presenter.is_json() {
         presenter.print_envelope(&Envelope::ok(VERSION_COMMAND, 0, info));
     } else {
-        println!("{} {}", info.name, info.version);
+        presenter.print_bare(&format!("{} {}", info.name, info.version));
     }
 
     0
@@ -290,7 +288,7 @@ fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 
     if let Err(error) = crate::support::logging::init_action_logging(
         level,
         if presenter.is_json() { "json" } else { "text" },
-        !cli.no_color,
+        color_enabled(cli.no_color),
         &work_path,
     ) {
         let message = error.to_string();
@@ -341,7 +339,9 @@ fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 
                     presenter.print_envelope(&failure_envelope(
                         BOOTSTRAP_COMMAND,
                         0,
-                        serde_json::json!({ "message": error.message() }),
+                        crate::cli::output::RefusalData {
+                            message: error.message().to_owned(),
+                        },
                         &error,
                     ));
                 }
@@ -606,6 +606,31 @@ fn install_mcp_panic_hook() {
     std::panic::set_hook(Box::new(|panic_info| {
         eprintln!("{panic_info}");
     }));
+}
+
+/// Цвет — оформление, а не содержание, и включается он только там, где его увидят.
+///
+/// Перенаправленный вывод читает не терминал: escape-последовательности в файле журнала
+/// или в выводе CI мешают и человеку, и `grep`. Поэтому цвет выключает и флаг, и
+/// договорённость `NO_COLOR`, и сам факт, что на том конце не терминал.
+/// Цвет включается только там, где его увидят.
+///
+/// Порядок как у остальных инструментов: запрет сильнее разрешения, а разрешение
+/// сильнее догадки. `FORCE_COLOR` нужен тем, кто перенаправляет вывод в средство,
+/// которое ANSI отрисует, — в первую очередь CI.
+fn color_enabled(no_color_flag: bool) -> bool {
+    if no_color_flag || std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    std::env::var_os("FORCE_COLOR").is_some() || std::io::stdout().is_terminal()
+}
+
+fn color_mode(no_color_flag: bool) -> crate::output::presenter::ColorMode {
+    if color_enabled(no_color_flag) {
+        crate::output::presenter::ColorMode::Enabled
+    } else {
+        crate::output::presenter::ColorMode::Disabled
+    }
 }
 
 fn cli_output_format(json_message: bool) -> &'static str {

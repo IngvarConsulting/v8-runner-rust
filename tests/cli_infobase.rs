@@ -96,7 +96,7 @@ fn configuration_cf_dry_run_selects_provider_without_process_or_filesystem_mutat
     assert_eq!(envelope["command"], "infobase.configuration.export");
     assert_eq!(envelope["data"]["mode"], "preview");
     assert_eq!(envelope["data"]["provider_dispatched"], false);
-    assert_eq!(envelope["data"]["selection"]["provider"], "designer-batch");
+    assert_eq!(envelope["data"]["selection"]["provider"], "designer");
     assert_eq!(envelope["data"]["artifact_kind"], "cf");
     assert_eq!(envelope["data"]["published"], false);
     assert_eq!(envelope["data"]["target_state"], "unchanged");
@@ -108,7 +108,7 @@ fn configuration_cf_dry_run_selects_provider_without_process_or_filesystem_mutat
         envelope["data"]["plan"]["output"],
         expected_output.display().to_string()
     );
-    assert_eq!(envelope["data"]["plan"]["provider"], "designer-batch");
+    assert_eq!(envelope["data"]["plan"]["provider"], "designer");
     assert!(!calls.exists(), "preview must not start the platform");
     assert!(!work.exists(), "preview must not recreate workPath");
     assert!(!output.exists(), "preview must not create the output");
@@ -146,7 +146,7 @@ fn configuration_cfe_dry_run_preserves_extension_intent_without_dispatch() {
     assert_eq!(envelope["data"]["mode"], "preview");
     assert_eq!(envelope["data"]["subject"]["kind"], "extension");
     assert_eq!(envelope["data"]["subject"]["name"], "SalesAddon");
-    assert_eq!(envelope["data"]["selection"]["provider"], "ibcmd-process");
+    assert_eq!(envelope["data"]["selection"]["provider"], "ibcmd");
     assert_eq!(envelope["data"]["artifact_kind"], "cfe");
     assert_eq!(envelope["data"]["provider_dispatched"], false);
     assert!(!calls.exists());
@@ -187,7 +187,7 @@ fn dt_dry_run_reports_designer_fallback_without_dispatch() {
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
     assert_eq!(envelope["command"], "infobase.dump");
     assert_eq!(envelope["data"]["mode"], "preview");
-    assert_eq!(envelope["data"]["selection"]["provider"], "designer-batch");
+    assert_eq!(envelope["data"]["selection"]["provider"], "designer");
     assert_eq!(envelope["data"]["artifact_kind"], "dt");
     assert_eq!(envelope["data"]["provider_dispatched"], false);
     assert!(!calls.exists());
@@ -451,11 +451,11 @@ fn designer_exports_database_extension_to_cfe_with_typed_json() {
     assert_eq!(envelope["command"], "infobase.configuration.export");
     assert_eq!(envelope["data"]["state"], "database");
     assert_eq!(envelope["data"]["subject"]["kind"], "extension");
-    assert_eq!(envelope["data"]["selection"]["provider"], "designer-batch");
+    assert_eq!(envelope["data"]["selection"]["provider"], "designer");
     assert_eq!(envelope["data"]["artifact_kind"], "cfe");
     assert_eq!(envelope["data"]["published"], true);
     assert_eq!(envelope["data"]["target_state"], "created");
-    assert_eq!(envelope["data"]["selection"]["provider"], "designer-batch");
+    assert_eq!(envelope["data"]["selection"]["provider"], "designer");
     assert_eq!(
         envelope["data"]["selection"]["candidates"][0]["implementation"],
         "implemented"
@@ -613,7 +613,7 @@ fn restore_dry_run_plans_the_provider_without_dispatching_it() {
     assert_eq!(data["provider_dispatched"], false);
     assert_eq!(data["restored"], false);
     assert_eq!(data["target_state"], "unchanged");
-    assert_eq!(data["plan"]["provider"], "designer-batch");
+    assert_eq!(data["plan"]["provider"], "designer");
     assert_eq!(data["plan"]["target_mode"], "replace");
     assert_eq!(
         data["plan"]["input"].as_str().expect("planned input"),
@@ -767,7 +767,7 @@ fn restore_is_not_dispatched_when_ibcmd_is_the_only_environment() {
         .as_array()
         .expect("candidates");
     assert!(candidates.iter().any(|candidate| {
-        candidate["provider"] == "ibcmd-process" && candidate["implementation"] == "experimental"
+        candidate["provider"] == "ibcmd" && candidate["implementation"] == "experimental"
     }));
     assert!(
         !calls.exists(),
@@ -809,7 +809,7 @@ fn dt_uses_designer_when_ibcmd_is_preferred_but_not_implemented() {
     );
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
     assert_eq!(envelope["command"], "infobase.dump");
-    assert_eq!(envelope["data"]["selection"]["provider"], "designer-batch");
+    assert_eq!(envelope["data"]["selection"]["provider"], "designer");
     assert_eq!(envelope["data"]["published"], true);
     let argv = fs::read_to_string(calls).expect("calls");
     assert!(argv.contains("/DumpIB"));
@@ -852,10 +852,10 @@ fn missing_preferred_ibcmd_falls_back_to_ready_designer_before_dispatch() {
         String::from_utf8_lossy(&command.stderr)
     );
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
-    assert_eq!(envelope["data"]["selection"]["provider"], "designer-batch");
+    assert_eq!(envelope["data"]["selection"]["provider"], "designer");
     assert_eq!(
         envelope["data"]["selection"]["candidates"][0]["provider"],
-        "ibcmd-process"
+        "ibcmd"
     );
     assert_eq!(
         envelope["data"]["selection"]["candidates"][0]["readiness"],
@@ -901,10 +901,10 @@ fn missing_preferred_designer_falls_back_to_ready_ibcmd_before_dispatch() {
 
     assert!(command.status.success());
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
-    assert_eq!(envelope["data"]["selection"]["provider"], "ibcmd-process");
+    assert_eq!(envelope["data"]["selection"]["provider"], "ibcmd");
     assert_eq!(
         envelope["data"]["selection"]["candidates"][0]["provider"],
-        "designer-batch"
+        "designer"
     );
     assert_eq!(
         envelope["data"]["selection"]["candidates"][0]["readiness"],
@@ -1043,7 +1043,7 @@ fn incomplete_ibcmd_server_contract_does_not_block_ready_designer_alternate() {
         String::from_utf8_lossy(&command.stderr)
     );
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
-    assert_eq!(envelope["data"]["selection"]["provider"], "designer-batch");
+    assert_eq!(envelope["data"]["selection"]["provider"], "designer");
     assert_eq!(
         envelope["data"]["selection"]["candidates"][0]["readiness"],
         "unavailable"
@@ -1098,7 +1098,7 @@ fn complete_server_dbms_contract_is_dispatched_to_ibcmd() {
 
     assert!(command.status.success());
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
-    assert_eq!(envelope["data"]["selection"]["provider"], "ibcmd-process");
+    assert_eq!(envelope["data"]["selection"]["provider"], "ibcmd");
     let argv = fs::read_to_string(calls).expect("calls");
     assert!(argv.contains("--dbms PostgreSQL"));
     assert!(argv.contains("--database-server db.example.test"));
@@ -1134,7 +1134,7 @@ fn ibcmd_exports_working_configuration_without_designer_fallback() {
         String::from_utf8_lossy(&command.stderr)
     );
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
-    assert_eq!(envelope["data"]["selection"]["provider"], "ibcmd-process");
+    assert_eq!(envelope["data"]["selection"]["provider"], "ibcmd");
     assert_eq!(envelope["data"]["state"], "working");
     assert_eq!(envelope["data"]["published"], true);
     assert_eq!(fs::read(&output).expect("published cf"), b"payload");
@@ -1280,7 +1280,7 @@ fn ready_provider_reports_workspace_busy_without_dispatch() {
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
     assert_eq!(envelope["error"]["code"], "workspace_busy");
     assert_eq!(envelope["error"]["kind"], "workspace");
-    assert_eq!(envelope["data"]["selection"]["provider"], "designer-batch");
+    assert_eq!(envelope["data"]["selection"]["provider"], "designer");
     assert_eq!(envelope["data"]["target_state"], "unchanged");
     assert_eq!(envelope["data"]["execution"]["status"], "failed");
     assert_eq!(
@@ -1312,7 +1312,7 @@ fn text_output_uses_the_same_canonical_provider_name_as_json() {
     let stdout = String::from_utf8_lossy(&command.stdout);
     assert!(stdout.contains("command: infobase.dump"));
     assert!(stdout.contains("Infobase DT export"));
-    assert!(stdout.contains("provider: designer-batch"));
+    assert!(stdout.contains("provider: designer"));
     assert!(!stdout.contains("DesignerBatch"));
     assert!(stdout.contains("published: true"));
     assert!(stdout.contains("subject: infobase"));
@@ -1352,11 +1352,11 @@ fn text_output_explains_unavailable_preference_and_ready_alternate() {
 
     assert!(command.status.success());
     let stdout = String::from_utf8_lossy(&command.stdout);
-    assert!(stdout.contains("provider: designer-batch"));
+    assert!(stdout.contains("provider: designer"));
     assert!(stdout.contains("evidence: argv_tested"));
-    assert!(stdout.contains("candidate ibcmd-process:"));
+    assert!(stdout.contains("candidate ibcmd:"));
     assert!(stdout.contains("implementation=implemented, readiness=unavailable"));
-    assert!(stdout.contains("candidate designer-batch:"));
+    assert!(stdout.contains("candidate designer:"));
     assert!(stdout.contains("implementation=implemented, readiness=ready"));
 }
 
@@ -1392,7 +1392,7 @@ fn provider_failure_preserves_an_existing_target() {
 
     assert!(!command.status.success());
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
-    assert_eq!(envelope["data"]["selection"]["provider"], "designer-batch");
+    assert_eq!(envelope["data"]["selection"]["provider"], "designer");
     assert_eq!(envelope["data"]["published"], false);
     assert_eq!(envelope["data"]["target_state"], "unchanged");
     assert_eq!(envelope["data"]["execution"]["status"], "failed");
@@ -1462,7 +1462,7 @@ fn provider_failure_never_dispatches_a_ready_alternate_after_spawn() {
 
     assert!(!command.status.success());
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
-    assert_eq!(envelope["data"]["selection"]["provider"], "designer-batch");
+    assert_eq!(envelope["data"]["selection"]["provider"], "designer");
     assert_eq!(envelope["data"]["published"], false);
     assert_eq!(
         fs::read_to_string(calls).expect("single provider call"),

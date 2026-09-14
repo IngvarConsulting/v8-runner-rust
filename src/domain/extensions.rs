@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExtensionsResult {
     pub ok: bool,
     /// `false` when the run stopped at a preview instead of dispatching the platform.
@@ -9,7 +9,7 @@ pub struct ExtensionsResult {
     pub duration_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExtensionsStep {
     pub target: String,
     pub action: String,
@@ -23,7 +23,7 @@ pub struct ExtensionsStep {
 /// Field set mirrors `ibcmd config extension list` on 8.3.27 exactly. The name
 /// prefix is deliberately absent: the platform does not report it on read, it lives
 /// only in the extension's own `Configuration.xml`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct InstalledExtension {
     pub name: String,
     /// `None` when the platform reported the field empty.
@@ -41,7 +41,7 @@ pub struct InstalledExtension {
 }
 
 /// Result of reading the extension composition of an infobase.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExtensionInventoryResult {
     pub ok: bool,
     /// `false` when the run stopped at a preview instead of dispatching the platform.

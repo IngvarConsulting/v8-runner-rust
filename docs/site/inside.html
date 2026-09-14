@@ -44,7 +44,7 @@
 <thead><tr><th>Провайдер</th><th>Что это</th><th>Решение по</th></tr></thead>
 <tbody>
 <tr><td class="k"><span class="pill batch">Designer</span></td><td>процесс Конфигуратора на команду</td><td>коду выхода и появлению артефакта</td></tr>
-<tr><td class="k"><span class="pill agent">agent</span></td><td>агентский shell по SSH: Конфигуратор в режиме агента или шлюз ibsrv — набор команд одинаковый</td><td>JSON: <code>type</code> и закрытый <code>error-type</code></td></tr>
+<tr><td class="k"><span class="pill agent">agent</span></td><td>агентский shell по SSH: Конфигуратор в режиме агента или шлюз ibsrv — набор команд одинаковый. У файловой базы и кластера такой точки входа нет: Конфигуратор в агентском режиме поднимает сам раннер, поэтому платформа нужна на его машине</td><td>JSON: <code>type</code> и закрытый <code>error-type</code></td></tr>
 <tr><td class="k"><span class="pill ibcmd">ibcmd</span></td><td>утилита платформы; для автономного сервера — через <code>--pid</code></td><td>коду выхода и машинному выводу</td></tr>
 <tr><td class="k"><span class="pill rs">ibcmd-rs</span></td><td>конвертер XML ↔ CF без платформы</td><td>коду выхода</td></tr>
 <tr><td class="k"><span class="pill neutral">webinst</span></td><td>публикация базы на Apache или IIS</td><td>коду выхода и появлению публикации</td></tr>
@@ -91,6 +91,7 @@
 <thead><tr><th></th><th>managed</th><th>attached</th></tr></thead>
 <tbody>
 <tr><td class="k">кто поднял</td><td>раннер</td><td>вы</td></tr>
+<tr><td class="k">где бывает</td><td>любая цель</td><td>автономный сервер — всегда, он держит свой шлюз сам; файловая база и кластер — только если агент Конфигуратора подняли вы</td></tr>
 <tr><td class="k">признак в конфиге</td><td><code>launch</code> / <code>auto-start</code></td><td><code>gate</code> / <code>attach</code></td></tr>
 <tr><td class="k">флаги запуска</td><td>раннер плюс ваши</td><td>только ваши</td></tr>
 <tr><td class="k">если недоступен</td><td>ошибка запуска</td><td><code>endpoint_unreachable</code>, свой рядом не поднимает</td></tr>
