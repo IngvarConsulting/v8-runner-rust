@@ -232,20 +232,6 @@ fn every_contract_shows_an_example_checked_against_its_form() {
             continue;
         };
 
-        let parsed = match language.as_str() {
-            "yaml" => serde_yaml::from_str::<serde_json::Value>(&example)
-                .map_err(|error| error.to_string()),
-            _ => serde_json::from_str::<serde_json::Value>(&example)
-                .map_err(|error| error.to_string()),
-        };
-        let parsed = match parsed {
-            Ok(value) => value,
-            Err(error) => {
-                wrong.push(format!("{name}: example is not valid {language}: {error}"));
-                continue;
-            }
-        };
-
         let artifact_text = match std::fs::read_to_string(root.join(&artifact)) {
             Ok(text) => text,
             Err(error) => {
@@ -263,7 +249,28 @@ fn every_contract_shows_an_example_checked_against_its_form() {
             }
         };
 
-        if artifact_value.get("$schema").is_some() {
+        if let Some(line_kinds) = artifact_value
+            .get("line_kinds")
+            .and_then(serde_json::Value::as_object)
+        {
+            // Артефакт-грамматика описывает не документ, а строки. Пример к нему —
+            // кусок настоящего вывода, и проверяется он построчно.
+            let patterns: Vec<regex::Regex> = line_kinds
+                .values()
+                .filter_map(|kind| kind.get("pattern").and_then(serde_json::Value::as_str))
+                .map(|pattern| regex::Regex::new(pattern).expect("kind pattern compiles"))
+                .collect();
+            for line in example.lines().filter(|line| !line.trim().is_empty()) {
+                if !patterns.iter().any(|pattern| pattern.is_match(line)) {
+                    wrong.push(format!(
+                        "{name}: example line matches no kind of {artifact}: {line:?}"
+                    ));
+                }
+            }
+        } else if artifact_value.get("$schema").is_some() {
+            let Some(parsed) = parse_example(&language, &example, &name, &mut wrong) else {
+                continue;
+            };
             let validator = match jsonschema::validator_for(&artifact_value) {
                 Ok(validator) => validator,
                 Err(error) => {
@@ -283,10 +290,15 @@ fn every_contract_shows_an_example_checked_against_its_form() {
                     errors.join("\n")
                 ));
             }
-        } else if !contains(&artifact_value, &parsed) {
-            wrong.push(format!(
-                "{name}: example is not a fragment of the pinned {artifact}"
-            ));
+        } else {
+            let Some(parsed) = parse_example(&language, &example, &name, &mut wrong) else {
+                continue;
+            };
+            if !contains(&artifact_value, &parsed) {
+                wrong.push(format!(
+                    "{name}: example is not a fragment of the pinned {artifact}"
+                ));
+            }
         }
     }
 
@@ -295,6 +307,25 @@ fn every_contract_shows_an_example_checked_against_its_form() {
         "contract examples are prose, not pinned form:\n{}",
         wrong.join("\n")
     );
+}
+
+fn parse_example(
+    language: &str,
+    example: &str,
+    name: &str,
+    wrong: &mut Vec<String>,
+) -> Option<serde_json::Value> {
+    let parsed = match language {
+        "yaml" => serde_yaml::from_str::<serde_json::Value>(example).map_err(|e| e.to_string()),
+        _ => serde_json::from_str::<serde_json::Value>(example).map_err(|e| e.to_string()),
+    };
+    match parsed {
+        Ok(value) => Some(value),
+        Err(error) => {
+            wrong.push(format!("{name}: example is not valid {language}: {error}"));
+            None
+        }
+    }
 }
 
 /// Язык и тело первого блока кода в разделе «Пример».

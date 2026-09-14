@@ -127,7 +127,7 @@ fn artifacts_text_failure_surfaces_error_and_diagnostic_path() {
 
     assert!(!output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("● Artifacts export failed"));
+    assert!(stdout.contains("✖ Artifacts export failed"));
     assert!(stdout.contains("[error:designer_export_failed]"));
     assert!(stdout.contains("[diagnostic] platform log -> "));
 }

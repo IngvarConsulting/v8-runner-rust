@@ -183,7 +183,7 @@ fn syntax_text_success_warning_includes_diagnostic_path() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("● Syntax check designer-config completed successfully"));
+    assert!(stdout.contains("▲ Syntax check designer-config completed with warnings"));
     assert!(stdout.contains("[warning] log"));
     assert!(stdout.contains("[diagnostic] platform log -> "));
 }

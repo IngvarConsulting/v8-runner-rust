@@ -4,6 +4,7 @@
 
 | Символ | Вид | Статус | Проверяется | Суть | Файл |
 | --- | --- | --- | --- | --- | --- |
+| `CTR.CLI.TEXT-OUTPUT` | контракт · product | active | да | Текстовый вывод для человека | [contracts/CTR.CLI.TEXT-OUTPUT.md](contracts/CTR.CLI.TEXT-OUTPUT.md) |
 | `CTR.CONFIG.V8PROJECT-SCHEMA` | контракт · product | active | да | Опубликованные схемы конфигурации | [contracts/CTR.CONFIG.V8PROJECT-SCHEMA.md](contracts/CTR.CONFIG.V8PROJECT-SCHEMA.md) |
 | `CTR.MCP.PUBLISHED-TOOL-SURFACE` | контракт · product | active | да | Состав опубликованных инструментов MCP | [contracts/CTR.MCP.PUBLISHED-TOOL-SURFACE.md](contracts/CTR.MCP.PUBLISHED-TOOL-SURFACE.md) |
 | `CTR.WIRE.BOOTSTRAP-DATA` | контракт · product | active | да | `data` команды `bootstrap` | [contracts/CTR.WIRE.BOOTSTRAP-DATA.md](contracts/CTR.WIRE.BOOTSTRAP-DATA.md) |
@@ -94,6 +95,7 @@
 | `DEC.2026-09-14.SPEC-REGISTRY-RESET` | решение · process | active | да | Архитектура описывается атомарным реестром | [decisions/2026-09-14-spec-registry-reset.md](decisions/2026-09-14-spec-registry-reset.md) |
 | `DEC.2026-09-14.TARGET-HAS-TWO-ADDRESSES` | решение · product | planned | нет | У цели два адреса: административный и клиентский | [decisions/2026-09-14-target-has-two-addresses.md](decisions/2026-09-14-target-has-two-addresses.md) |
 | `DEC.2026-09-14.TARGET-KIND-IS-DECLARED-NOT-PARSED` | решение · product | planned | нет | Вид цели объявляется, а не выводится из строки подключения | [decisions/2026-09-14-target-kind-is-declared-not-parsed.md](decisions/2026-09-14-target-kind-is-declared-not-parsed.md) |
+| `DEC.2026-09-14.THE-HUMAN-SURFACE-IS-A-PINNED-SHAPE` | решение · product | active | да | Человеческая поверхность — тоже закреплённая форма | [decisions/2026-09-14-the-human-surface-is-a-pinned-shape.md](decisions/2026-09-14-the-human-surface-is-a-pinned-shape.md) |
 | `DEC.2026-09-14.THE-TARGET-MAY-LIVE-ON-ANOTHER-MACHINE` | решение · product | planned | нет | Файловая система цели раннеру не принадлежит | [decisions/2026-09-14-the-target-may-live-on-another-machine.md](decisions/2026-09-14-the-target-may-live-on-another-machine.md) |
 | `INV.CLI.CONCURRENT-PROCESSES-ARE-SERIALIZED` | инвариант · product | active | да | Два процесса на одном каталоге выстраиваются в очередь | [invariants/INV.CLI.CONCURRENT-PROCESSES-ARE-SERIALIZED.md](invariants/INV.CLI.CONCURRENT-PROCESSES-ARE-SERIALIZED.md) |
 | `INV.CLI.DIAGNOSTIC-PATH-IS-VISIBLE` | инвариант · product | active | да | Предупреждение называет путь к диагностике | [invariants/INV.CLI.DIAGNOSTIC-PATH-IS-VISIBLE.md](invariants/INV.CLI.DIAGNOSTIC-PATH-IS-VISIBLE.md) |
@@ -113,10 +115,12 @@
 | `INV.CLI.PREVIEW-TAKES-NO-LOCK` | инвариант · product | active | да | Превью не захватывает рабочий каталог и не ждёт его | [invariants/INV.CLI.PREVIEW-TAKES-NO-LOCK.md](invariants/INV.CLI.PREVIEW-TAKES-NO-LOCK.md) |
 | `INV.CLI.PROVIDER-IS-NOT-A-FLAG` | инвариант · product | planned | нет | Провайдера нельзя выбрать флагом или полем вызова | [invariants/INV.CLI.PROVIDER-IS-NOT-A-FLAG.md](invariants/INV.CLI.PROVIDER-IS-NOT-A-FLAG.md) |
 | `INV.CLI.PUBLISH-HAS-NO-PROVIDER-KEY` | инвариант · product | planned | нет | У публикации нет выбора исполнителя | [invariants/INV.CLI.PUBLISH-HAS-NO-PROVIDER-KEY.md](invariants/INV.CLI.PUBLISH-HAS-NO-PROVIDER-KEY.md) |
+| `INV.CLI.REDIRECTED-OUTPUT-CARRIES-NO-ESCAPES` | инвариант · product | active | да | Перенаправленный вывод не несёт escape-последовательностей | [invariants/INV.CLI.REDIRECTED-OUTPUT-CARRIES-NO-ESCAPES.md](invariants/INV.CLI.REDIRECTED-OUTPUT-CARRIES-NO-ESCAPES.md) |
 | `INV.CLI.RESTORE-MODE-IS-MANDATORY` | инвариант · product | active | да | Загрузка базы без режима цели отклоняется до выбора исполнителя | [invariants/INV.CLI.RESTORE-MODE-IS-MANDATORY.md](invariants/INV.CLI.RESTORE-MODE-IS-MANDATORY.md) |
 | `INV.CLI.RESTORE-TARGET-IS-OBSERVED-TWICE` | инвариант · product | active | да | Наличие цели проверяется до выбора исполнителя и повторно под блокировкой | [invariants/INV.CLI.RESTORE-TARGET-IS-OBSERVED-TWICE.md](invariants/INV.CLI.RESTORE-TARGET-IS-OBSERVED-TWICE.md) |
 | `INV.CLI.SECRETS-NEVER-REACH-THE-OUTPUT` | инвариант · product | active | да | Пароль не появляется в выводе | [invariants/INV.CLI.SECRETS-NEVER-REACH-THE-OUTPUT.md](invariants/INV.CLI.SECRETS-NEVER-REACH-THE-OUTPUT.md) |
 | `INV.CLI.SIDECAR-FAILURE-DOES-NOT-RELEASE-THE-LOCK` | инвариант · product | planned | нет | Ошибка записи метаданных не снимает блокировку | [invariants/INV.CLI.SIDECAR-FAILURE-DOES-NOT-RELEASE-THE-LOCK.md](invariants/INV.CLI.SIDECAR-FAILURE-DOES-NOT-RELEASE-THE-LOCK.md) |
+| `INV.CLI.STATUS-IS-READABLE-WITHOUT-COLOUR` | инвариант · product | active | да | Статус узла виден без цвета | [invariants/INV.CLI.STATUS-IS-READABLE-WITHOUT-COLOUR.md](invariants/INV.CLI.STATUS-IS-READABLE-WITHOUT-COLOUR.md) |
 | `INV.CONFIG.BASEPATH-IS-NOT-A-PUBLIC-KEY` | инвариант · product | active | да | Базовый путь проекта не задаётся ключом | [invariants/INV.CONFIG.BASEPATH-IS-NOT-A-PUBLIC-KEY.md](invariants/INV.CONFIG.BASEPATH-IS-NOT-A-PUBLIC-KEY.md) |
 | `INV.CONFIG.BUILDER-KEY-IS-REJECTED` | инвариант · product | planned | нет | Снятый ключ выбора исполнителя отклоняется | [invariants/INV.CONFIG.BUILDER-KEY-IS-REJECTED.md](invariants/INV.CONFIG.BUILDER-KEY-IS-REJECTED.md) |
 | `INV.CONFIG.CREDENTIALS-STAY-IN-THE-OVERLAY` | инвариант · product | active | да | Учётные данные попадают только в локальный слой | [invariants/INV.CONFIG.CREDENTIALS-STAY-IN-THE-OVERLAY.md](invariants/INV.CONFIG.CREDENTIALS-STAY-IN-THE-OVERLAY.md) |

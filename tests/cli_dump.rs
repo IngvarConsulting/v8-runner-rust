@@ -502,7 +502,7 @@ fn dump_text_success_is_compact_and_keeps_output_visible() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("● dump: full"));
+    assert!(stdout.contains("◌ dump: full"));
     assert!(!stdout.contains("started_at: "));
     assert!(stdout.contains("[ibcmd] exporting configuration files"));
     assert!(
@@ -604,7 +604,7 @@ fn dump_text_warning_shows_degraded_fallback_reason() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("● Dump completed with warnings"));
+    assert!(stdout.contains("▲ Dump completed with warnings"));
     assert!(stdout.contains("[warning] IBCMD does not support object-scoped partial dump"));
 }
 
@@ -707,7 +707,7 @@ fn dump_text_failure_shows_error_message() {
 
     assert!(!output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("● Dump failed"));
+    assert!(stdout.contains("✖ Dump failed"));
     assert!(stdout.contains("[error]"));
     assert!(stdout.contains("exit code 17"));
 }

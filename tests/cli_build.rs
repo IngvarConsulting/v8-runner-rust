@@ -536,7 +536,10 @@ fn build_text_stdout_includes_action_logs() {
 fn build_text_highlights_timeline_detail_prefixes() {
     let (_dir, config_path, _binary_path, _work_path) = setup_project();
 
+    // Вывод теста перенаправлен, а цвет включается только там, где его увидят.
+    // `FORCE_COLOR` — тот же способ, которым его включает CI.
     let output = v8_runner_command()
+        .env("FORCE_COLOR", "1")
         .args(["--config", &config_path.display().to_string(), "build"])
         .output()
         .expect("run designer build");
@@ -550,6 +553,7 @@ fn build_text_highlights_timeline_detail_prefixes() {
 
     let (_dir, config_path, _ibcmd_calls_log, _edt_calls_log) = setup_edt_ibcmd_project();
     let output = v8_runner_command()
+        .env("FORCE_COLOR", "1")
         .args(["--config", &config_path.display().to_string(), "build"])
         .output()
         .expect("run edt build");
@@ -783,7 +787,7 @@ fn build_text_groups_tool_extension_stages_under_single_build_node() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(stdout.matches("● tool:client_mcp:").count(), 1);
+    assert_eq!(stdout.matches("◌ tool:client_mcp:").count(), 1);
     assert!(stdout.contains("[EDT] Экспорт расширения client_mcp"));
     assert!(stdout.contains("[Конфигуратор] Загрузка расширения client_mcp"));
     assert!(stdout.contains("[Конфигуратор] Применение расширения client_mcp"));
@@ -887,10 +891,10 @@ fn build_ibcmd_full_rebuild_invokes_import_and_apply() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("● main:"));
+    assert!(stdout.contains("◌ main:"), "{stdout}");
     assert!(stdout.contains("[ibcmd] Загрузка в базу"));
     assert!(stdout.contains("[ibcmd] Применение изменений"));
-    assert_eq!(stdout.matches("● main").count(), 1);
+    assert_eq!(stdout.matches("◌ main").count(), 1);
     let calls = fs::read_to_string(calls_log).expect("calls");
     assert!(calls.contains("config import"));
     assert!(calls.contains("config apply"));
