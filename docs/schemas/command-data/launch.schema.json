@@ -1,0 +1,252 @@
+{
+  "$defs": {
+    "ExternalEpfWaitResult": {
+      "additionalProperties": false,
+      "description": "Observed outcome of an opt-in bounded external EPF client launch.",
+      "properties": {
+        "execute_path": {
+          "type": "string"
+        },
+        "exit_code": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "output_path": {
+          "type": "string"
+        },
+        "pid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stderr_path": {
+          "type": "string"
+        },
+        "timed_out": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "pid",
+        "execute_path",
+        "timed_out",
+        "output_path",
+        "stderr_path"
+      ],
+      "type": "object"
+    },
+    "LaunchMode": {
+      "description": "Supported application launch modes.",
+      "enum": [
+        "designer",
+        "thin",
+        "thick",
+        "ordinary",
+        "mcp"
+      ],
+      "type": "string"
+    },
+    "LaunchPlan": {
+      "additionalProperties": false,
+      "description": "Compact machine-facing plan produced by a non-executing launch preview.\n\nThe plan names what the runner selected, because only the runner discovers a\nplatform installation: a caller cannot compose these arguments itself.",
+      "properties": {
+        "args": {
+          "description": "Composed arguments with every credential value masked.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "program": {
+          "description": "Program the runner would have spawned.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "program",
+        "args"
+      ],
+      "type": "object"
+    },
+    "McpReadinessResult": {
+      "additionalProperties": false,
+      "description": "Result of probing a client-side MCP endpoint after launch.",
+      "properties": {
+        "message": {
+          "description": "Human-readable readiness summary.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "missing_tools": {
+          "description": "Required tool names that were not returned by `tools/list`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "ok": {
+          "description": "`true` when initialize and tools/list succeeded and required tools were present.",
+          "type": "boolean"
+        },
+        "tools": {
+          "description": "Tool names returned by `tools/list`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "url": {
+          "description": "Probed HTTP endpoint URL.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok",
+        "url",
+        "tools",
+        "missing_tools"
+      ],
+      "type": "object"
+    },
+    "PlatformResolution": {
+      "additionalProperties": false,
+      "description": "Canonical platform installation metadata exposed by `launch` JSON results.",
+      "properties": {
+        "installation_root": {
+          "description": "Absolute canonical root shared by platform utilities from this installation.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Absolute canonical path to the selected executable.",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/PlatformResolutionSource",
+          "description": "Discovery source used for the selected executable."
+        },
+        "version": {
+          "description": "Platform version inferred from the canonical installation path, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "source",
+        "installation_root"
+      ],
+      "type": "object"
+    },
+    "PlatformResolutionSource": {
+      "description": "Typed discovery sources exposed by `launch` resolution metadata.",
+      "oneOf": [
+        {
+          "const": "explicit",
+          "description": "The configured utility or installation hint.",
+          "type": "string"
+        },
+        {
+          "const": "default-root",
+          "description": "An operating-system-specific default installation root.",
+          "type": "string"
+        },
+        {
+          "const": "path",
+          "description": "A directory captured from `PATH` when the locator was created.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/launch.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Structured result of a `launch` command.",
+  "properties": {
+    "binary": {
+      "description": "Selected binary path used to spawn the process.",
+      "type": "string"
+    },
+    "external_epf_wait": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExternalEpfWaitResult"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Direct external EPF wait outcome when explicitly requested."
+    },
+    "mcp_readiness": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/McpReadinessResult"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Client-side MCP endpoint readiness details when readiness was requested."
+    },
+    "message": {
+      "description": "Human-readable launch summary.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mode": {
+      "$ref": "#/$defs/LaunchMode",
+      "description": "Requested launch mode."
+    },
+    "ok": {
+      "description": "`true` when the process was spawned successfully.",
+      "type": "boolean"
+    },
+    "pid": {
+      "description": "OS process identifier if the launcher exposed one.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "plan": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LaunchPlan"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Compact machine-facing plan produced by a non-executing preview."
+    },
+    "platform_resolution": {
+      "$ref": "#/$defs/PlatformResolution",
+      "description": "Canonical platform installation metadata for the selected binary."
+    },
+    "provider_dispatched": {
+      "description": "`false` when the run stopped at a preview instead of dispatching the client process.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "ok",
+    "mode",
+    "binary",
+    "platform_resolution",
+    "provider_dispatched"
+  ],
+  "title": "LaunchResult",
+  "type": "object"
+}

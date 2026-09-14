@@ -16,3 +16,16 @@ scope: [config, docs]
 Форма `v8project.yaml` и его локального слоя опубликована двумя JSON-схемами. Схемы порождаются из типизированной модели и обязаны совпадать с ней: расхождение
 валит проверку, а не обнаруживается в редакторе пользователя. Артефакт обновляется
 командой `UPDATE_CONFIG_SCHEMAS=1 cargo test generated_schema_artifacts_are_current`.
+
+## Пример
+
+```yaml
+workPath: build
+format: DESIGNER
+infobase:
+  connection: "File=build/ib"
+source-set:
+  - name: main
+    type: CONFIGURATION
+    path: src/cf
+```

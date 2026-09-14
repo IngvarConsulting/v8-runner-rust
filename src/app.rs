@@ -236,10 +236,10 @@ fn command_name(command: &Command) -> &'static str {
     }
 }
 
-#[derive(Debug, Serialize)]
-struct VersionInfo {
-    name: &'static str,
-    version: &'static str,
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct VersionInfo {
+    pub name: &'static str,
+    pub version: &'static str,
 }
 
 fn run_version_command(output_format: &str) -> i32 {
@@ -341,7 +341,9 @@ fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 
                     presenter.print_envelope(&failure_envelope(
                         BOOTSTRAP_COMMAND,
                         0,
-                        serde_json::json!({ "message": error.message() }),
+                        crate::cli::output::RefusalData {
+                            message: error.message().to_owned(),
+                        },
                         &error,
                     ));
                 }

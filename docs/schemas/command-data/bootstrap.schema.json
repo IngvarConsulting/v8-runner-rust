@@ -1,0 +1,57 @@
+{
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/bootstrap.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "dump_target_path": {
+      "type": "string"
+    },
+    "dumped": {
+      "type": "boolean"
+    },
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "gitignore_path": {
+      "type": "string"
+    },
+    "local_path": {
+      "type": "string"
+    },
+    "message": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "path": {
+      "type": "string"
+    },
+    "source_dir": {
+      "type": "string"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "ok",
+    "path",
+    "local_path",
+    "gitignore_path",
+    "source_dir",
+    "dump_target_path",
+    "dumped",
+    "duration_ms"
+  ],
+  "title": "BootstrapResult",
+  "type": "object"
+}

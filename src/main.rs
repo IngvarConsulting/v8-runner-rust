@@ -1,6 +1,7 @@
 mod app;
 mod change_detection;
 mod cli;
+mod command_data;
 mod command_envelope;
 mod config;
 mod domain;

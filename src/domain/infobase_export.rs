@@ -64,7 +64,7 @@ impl ExportPhase {
 }
 
 /// Configuration state persisted into a package.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigurationState {
     Working,
@@ -81,7 +81,7 @@ impl ConfigurationState {
 }
 
 /// Configuration whose state is persisted into a package.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConfigurationSubject {
     Main,
@@ -98,7 +98,7 @@ impl ConfigurationSubject {
 }
 
 /// Whether runner has an adapter for an exact export operation.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderImplementation {
     Implemented,
@@ -117,7 +117,7 @@ impl ProviderImplementation {
 }
 
 /// Current-environment readiness established without starting a provider process.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderReadiness {
     Ready,
@@ -136,7 +136,7 @@ impl ProviderReadiness {
 }
 
 /// Strongest evidence currently attached to an implementation row.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderEvidence {
     Documented,
@@ -155,7 +155,7 @@ impl ProviderEvidence {
 }
 
 /// Process provider selected for an information-base export.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExportProvider {
     DesignerBatch,
@@ -176,7 +176,7 @@ impl ExportProvider {
 /// This type is deliberately namespaced: [`crate::domain::artifact::ArtifactKind`]
 /// classifies retained execution artifacts and does not distinguish CF, CFE,
 /// and DT package formats.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InfobaseExportArtifactKind {
     Cf,
@@ -199,13 +199,13 @@ impl InfobaseExportArtifactKind {
 }
 
 /// Subject marker for a complete DT export.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InfobaseSnapshotSubject {
     Infobase,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ProviderCandidate {
     pub provider: ExportProvider,
     pub implementation: ProviderImplementation,
@@ -232,7 +232,7 @@ impl ProviderCandidate {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExportProviderDecision {
     provider: Option<ExportProvider>,
     reason: String,
@@ -279,7 +279,7 @@ impl ExportProviderDecision {
 }
 
 /// Observable state of the final output path after an export attempt.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExportTargetState {
     Unchanged,
@@ -290,7 +290,7 @@ pub enum ExportTargetState {
 }
 
 /// Whether the command only proves its execution plan or applies it.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InfobaseExportMode {
     Preview,
@@ -298,7 +298,7 @@ pub enum InfobaseExportMode {
 }
 
 /// Compact machine-facing plan produced by a non-executing preflight.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct InfobaseExportPlan {
     pub provider: ExportProvider,
     pub artifact_kind: InfobaseExportArtifactKind,
@@ -306,7 +306,7 @@ pub struct InfobaseExportPlan {
 }
 
 /// Request to persist a working or database configuration into CF/CFE.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExportConfigurationPackageRequest {
     pub state: ConfigurationState,
     pub subject: ConfigurationSubject,
@@ -314,7 +314,7 @@ pub struct ExportConfigurationPackageRequest {
 }
 
 /// Typed presentation data for a configuration package export.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExportConfigurationPackageResult {
     pub mode: InfobaseExportMode,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -383,13 +383,13 @@ impl ExportConfigurationPackageResult {
 }
 
 /// Request to persist the complete information base into a DT snapshot.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExportInfobaseSnapshotRequest {
     pub output: PathBuf,
 }
 
 /// Typed presentation data for an information-base snapshot export.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExportInfobaseSnapshotResult {
     pub mode: InfobaseExportMode,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -457,7 +457,7 @@ impl ExportInfobaseSnapshotResult {
 /// present one, and IBCMD overwrites a present one. The mode is therefore a
 /// runner-side gate, and a mode that does not match the observed target is a
 /// refusal rather than a silent fallback to the other case.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RestoreTargetMode {
     /// The target infobase must be absent; restoring creates it.
@@ -476,14 +476,14 @@ impl RestoreTargetMode {
 }
 
 /// Request to load a complete information base from a DT transfer file.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct RestoreInfobaseSnapshotRequest {
     pub input: PathBuf,
     pub target_mode: RestoreTargetMode,
 }
 
 /// Compact machine-facing plan produced by a non-executing restore preflight.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct InfobaseRestorePlan {
     pub provider: ExportProvider,
     pub artifact_kind: InfobaseExportArtifactKind,
@@ -492,7 +492,7 @@ pub struct InfobaseRestorePlan {
 }
 
 /// Typed presentation data for an information-base restore.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct RestoreInfobaseSnapshotResult {
     pub mode: InfobaseExportMode,
     #[serde(skip_serializing_if = "Option::is_none")]

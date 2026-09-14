@@ -1,0 +1,98 @@
+{
+  "$defs": {
+    "InstalledExtension": {
+      "additionalProperties": false,
+      "description": "One extension installed in the target infobase, as reported by the platform.\n\nField set mirrors `ibcmd config extension list` on 8.3.27 exactly. The name\nprefix is deliberately absent: the platform does not report it on read, it lives\nonly in the extension's own `Configuration.xml`.",
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "hash_sum": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "safe_mode": {
+          "type": "boolean"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "security_profile_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unsafe_action_protection": {
+          "type": "boolean"
+        },
+        "used_in_distributed_infobase": {
+          "type": "boolean"
+        },
+        "version": {
+          "description": "`None` when the platform reported the field empty.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "active",
+        "purpose",
+        "safe_mode",
+        "unsafe_action_protection",
+        "used_in_distributed_infobase",
+        "scope",
+        "hash_sum"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/extensions-inventory.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Result of reading the extension composition of an infobase.",
+  "properties": {
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "extensions": {
+      "description": "Extensions in the order the platform reported them.\n\nThat order is not the creation order and the platform does not document one,\nso callers must not rely on it.",
+      "items": {
+        "$ref": "#/$defs/InstalledExtension"
+      },
+      "type": "array"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "plan": {
+      "description": "What the apply would do, named without any secret from the connection string.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "provider_dispatched": {
+      "description": "`false` when the run stopped at a preview instead of dispatching the platform.\n\nReading the composition is an action, not a look: the platform starts, a session\nopens, the account authenticates and a journal trace is left. So the read has a\npreview too, and in it `extensions` is empty because nothing was asked.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "ok",
+    "provider_dispatched",
+    "extensions",
+    "duration_ms"
+  ],
+  "title": "ExtensionInventoryResult",
+  "type": "object"
+}

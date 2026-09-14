@@ -123,10 +123,8 @@ where
                     business_error.clone(),
                     adapter_error_envelope(
                         CommandName::Test,
-                        "run_module_tests",
-                        &message,
+                        McpRefusalData::new("run_module_tests", &message).with_field("module_name"),
                         business_error,
-                        json!({ "field": "module_name" }),
                     ),
                 ))
             })?;
@@ -182,10 +180,11 @@ where
                     business_error.clone(),
                     adapter_error_envelope(
                         CommandName::Dump,
-                        "dump_config",
-                        &data_message,
+                        McpRefusalData::new("dump_config", &data_message)
+                            .with_field("mode")
+                            .with_mode(mode)
+                            .with_errors(vec![message]),
                         business_error,
-                        json!({ "field": "mode", "mode": mode, "errors": [message] }),
                     ),
                 ))
             })?,
@@ -680,10 +679,8 @@ fn launch_adapter_business_error(
         business_error.clone(),
         adapter_error_envelope(
             CommandName::Launch,
-            "launch_app",
-            &message,
+            McpRefusalData::new("launch_app", &message).with_field(field),
             business_error,
-            json!({ "field": field }),
         ),
     ))
 }
@@ -699,10 +696,8 @@ fn test_adapter_business_error(
         business_error.clone(),
         adapter_error_envelope(
             CommandName::Test,
-            tool,
-            &message,
+            McpRefusalData::new(tool, &message).with_field(field),
             business_error,
-            json!({ "field": field }),
         ),
     ))
 }
@@ -799,27 +794,60 @@ fn fallback_error_envelope(
     mcp_value_envelope(Envelope::err(
         command.as_str(),
         0,
-        json!({
-            "message": error.message(),
-            "tool": tool,
-        }),
+        McpRefusalData::new(tool, error.message()),
     ))
+}
+
+/// `data` отказа адаптера MCP.
+///
+/// Отказ случается до сценария: вход клиента не разобран, команда не начиналась. Форма
+/// называет инструмент, по которому пришёл вызов, и — когда адаптер это знает — поле
+/// входа, из-за которого вызов отклонён.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct McpRefusalData {
+    pub message: String,
+    pub tool: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub errors: Option<Vec<String>>,
+}
+
+impl McpRefusalData {
+    fn new(tool: &str, message: &str) -> Self {
+        Self {
+            message: message.to_owned(),
+            tool: tool.to_owned(),
+            field: None,
+            mode: None,
+            errors: None,
+        }
+    }
+
+    fn with_field(mut self, field: &str) -> Self {
+        self.field = Some(field.to_owned());
+        self
+    }
+
+    fn with_mode(mut self, mode: String) -> Self {
+        self.mode = Some(mode);
+        self
+    }
+
+    fn with_errors(mut self, errors: Vec<String>) -> Self {
+        self.errors = Some(errors);
+        self
+    }
 }
 
 fn adapter_error_envelope(
     command: CommandName,
-    tool: &'static str,
-    message: &str,
+    data: McpRefusalData,
     business_error: McpBusinessError,
-    mut extra: Value,
 ) -> McpCommandEnvelope {
-    let mut data = json!({
-        "message": message,
-        "tool": tool,
-    });
-    if let (Some(data_object), Some(extra_object)) = (data.as_object_mut(), extra.as_object_mut()) {
-        data_object.extend(extra_object.clone());
-    }
+    let data = serde_json::to_value(data).expect("refusal data serializes");
     Envelope::err(command.as_str(), 0, data).with_error(envelope_error(&business_error))
 }
 
@@ -841,10 +869,8 @@ fn invalid_syntax_request(
         business_error.clone(),
         adapter_error_envelope(
             CommandName::Syntax,
-            tool,
-            &message,
+            McpRefusalData::new(tool, &message).with_errors(vec![message.clone()]),
             business_error,
-            json!({ "errors": [message] }),
         ),
     ))
 }

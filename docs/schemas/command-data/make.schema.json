@@ -1,0 +1,372 @@
+{
+  "$defs": {
+    "ArtifactBuildMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_type": {
+          "$ref": "#/$defs/ArtifactBuildMode"
+        },
+        "file_names": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "output_path": {
+          "type": "string"
+        },
+        "published": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "artifact_type",
+        "output_path",
+        "published"
+      ],
+      "type": "object"
+    },
+    "ArtifactBuildMode": {
+      "enum": [
+        "unknown",
+        "configuration_cf",
+        "extension_cfe",
+        "external_data_processor_epf",
+        "external_report_erf"
+      ],
+      "type": "string"
+    },
+    "ArtifactKind": {
+      "description": "Stable artifact classification for runner/package outputs.",
+      "oneOf": [
+        {
+          "enum": [
+            "run_directory",
+            "config",
+            "package",
+            "report",
+            "runner_log",
+            "platform_log",
+            "sentinel"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "other": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "other"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Reference to a single retained artifact.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ArtifactKind"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "path"
+      ],
+      "type": "object"
+    },
+    "ArtifactSet": {
+      "additionalProperties": false,
+      "description": "A retained artifact collection for a single execution.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ArtifactRef"
+          },
+          "type": "array"
+        },
+        "root_dir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ExecutionError": {
+      "additionalProperties": false,
+      "description": "Structured execution error that can point to related artifacts.",
+      "properties": {
+        "artifact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "code": {
+          "type": "string"
+        },
+        "details": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ExecutionInterruptionDetails": {
+      "additionalProperties": false,
+      "description": "Structured interruption metadata for actual or deferred command-boundary interruptions.",
+      "properties": {
+        "deferred": {
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/$defs/ExecutionInterruptionKind"
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "deferred"
+      ],
+      "type": "object"
+    },
+    "ExecutionInterruptionKind": {
+      "description": "Command-level interruption kind preserved in serialized execution results.",
+      "enum": [
+        "cancelled",
+        "timed_out"
+      ],
+      "type": "string"
+    },
+    "ExecutionMetrics": {
+      "additionalProperties": false,
+      "description": "Shared counters emitted by parsers and execution adapters.",
+      "properties": {
+        "errors": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "extra": {
+          "additionalProperties": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "object"
+        },
+        "failed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "passed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skipped": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total",
+        "passed",
+        "failed",
+        "skipped",
+        "errors"
+      ],
+      "type": "object"
+    },
+    "ExecutionOutcome": {
+      "additionalProperties": false,
+      "description": "Shared execution envelope for runner-like flows.",
+      "properties": {
+        "artifacts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactSet"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diagnostics": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/ExecutionError"
+          },
+          "type": "array"
+        },
+        "interruptions": {
+          "items": {
+            "$ref": "#/$defs/ExecutionInterruptionDetails"
+          },
+          "type": "array"
+        },
+        "metrics": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionMetrics"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactBuildMetadata"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/ExecutionStatus"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    "ExecutionStatus": {
+      "description": "Shared execution status used by runner and package-like flows.",
+      "enum": [
+        "succeeded",
+        "failed",
+        "cancelled",
+        "timed_out",
+        "invalid_output"
+      ],
+      "type": "string"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/make.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifacts": {
+      "$ref": "#/$defs/ArtifactSet"
+    },
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "execution": {
+      "$ref": "#/$defs/ExecutionOutcome"
+    },
+    "extension": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "message": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mode": {
+      "$ref": "#/$defs/ArtifactBuildMode"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "output_path": {
+      "type": "string"
+    },
+    "platform_log_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "provider_dispatched": {
+      "description": "`false` when the run stopped at a preview instead of dispatching the platform.",
+      "type": "boolean"
+    },
+    "source_set": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "ok",
+    "provider_dispatched",
+    "mode",
+    "output_path",
+    "duration_ms",
+    "execution"
+  ],
+  "title": "ArtifactsJsonData",
+  "type": "object"
+}

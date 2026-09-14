@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -2126,7 +2125,9 @@ fn execute_launch(
                         None => presenter.print_envelope(&failure_envelope(
                             CommandName::Launch.as_str(),
                             started.elapsed().as_millis() as u64,
-                            json!({ "message": error.message() }),
+                            crate::cli::output::RefusalData {
+                                message: error.message().to_owned(),
+                            },
                             &error,
                         )),
                     }
@@ -2907,8 +2908,8 @@ fn is_reserved_raw_launch_key(raw: &str) -> bool {
         .any(|key| launch_key_alias_matches(raw, key))
 }
 
-#[derive(Debug, Serialize)]
-struct LoadJsonData<'a> {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct LoadJsonData<'a> {
     pub ok: bool,
     /// `false` when the run stopped at a preview instead of dispatching the platform.
     pub provider_dispatched: bool,
@@ -2999,8 +3000,8 @@ fn build_load_envelope(result: &LoadResult) -> Envelope<LoadJsonData<'_>> {
     }
 }
 
-#[derive(Debug, Serialize)]
-struct ArtifactsJsonData<'a> {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct ArtifactsJsonData<'a> {
     pub ok: bool,
     /// `false` when the run stopped at a preview instead of dispatching the platform.
     pub provider_dispatched: bool,

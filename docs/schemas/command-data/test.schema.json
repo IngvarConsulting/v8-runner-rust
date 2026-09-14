@@ -1,0 +1,563 @@
+{
+  "$defs": {
+    "ArtifactKind": {
+      "description": "Stable artifact classification for runner/package outputs.",
+      "oneOf": [
+        {
+          "enum": [
+            "run_directory",
+            "config",
+            "package",
+            "report",
+            "runner_log",
+            "platform_log",
+            "sentinel"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "other": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "other"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Reference to a single retained artifact.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ArtifactKind"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "path"
+      ],
+      "type": "object"
+    },
+    "ArtifactSet": {
+      "additionalProperties": false,
+      "description": "A retained artifact collection for a single execution.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ArtifactRef"
+          },
+          "type": "array"
+        },
+        "root_dir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ExecutionError": {
+      "additionalProperties": false,
+      "description": "Structured execution error that can point to related artifacts.",
+      "properties": {
+        "artifact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "code": {
+          "type": "string"
+        },
+        "details": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ExecutionInterruptionDetails": {
+      "additionalProperties": false,
+      "description": "Structured interruption metadata for actual or deferred command-boundary interruptions.",
+      "properties": {
+        "deferred": {
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/$defs/ExecutionInterruptionKind"
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "deferred"
+      ],
+      "type": "object"
+    },
+    "ExecutionInterruptionKind": {
+      "description": "Command-level interruption kind preserved in serialized execution results.",
+      "enum": [
+        "cancelled",
+        "timed_out"
+      ],
+      "type": "string"
+    },
+    "ExecutionMetrics": {
+      "additionalProperties": false,
+      "description": "Shared counters emitted by parsers and execution adapters.",
+      "properties": {
+        "errors": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "extra": {
+          "additionalProperties": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "object"
+        },
+        "failed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "passed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skipped": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total",
+        "passed",
+        "failed",
+        "skipped",
+        "errors"
+      ],
+      "type": "object"
+    },
+    "ExecutionOutcome": {
+      "additionalProperties": false,
+      "description": "Shared execution envelope for runner-like flows.",
+      "properties": {
+        "artifacts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactSet"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diagnostics": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/ExecutionError"
+          },
+          "type": "array"
+        },
+        "interruptions": {
+          "items": {
+            "$ref": "#/$defs/ExecutionInterruptionDetails"
+          },
+          "type": "array"
+        },
+        "metrics": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionMetrics"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TestReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/ExecutionStatus"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    "ExecutionStatus": {
+      "description": "Shared execution status used by runner and package-like flows.",
+      "enum": [
+        "succeeded",
+        "failed",
+        "cancelled",
+        "timed_out",
+        "invalid_output"
+      ],
+      "type": "string"
+    },
+    "RetainedPaths": {
+      "additionalProperties": false,
+      "properties": {
+        "config_json": {
+          "type": "string"
+        },
+        "junit_xml": {
+          "type": "string"
+        },
+        "platform_log": {
+          "type": "string"
+        },
+        "run_dir": {
+          "type": "string"
+        },
+        "sentinel": {
+          "type": "string"
+        },
+        "yaxunit_log": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_dir",
+        "config_json",
+        "junit_xml",
+        "yaxunit_log",
+        "platform_log",
+        "sentinel"
+      ],
+      "type": "object"
+    },
+    "TestCase": {
+      "additionalProperties": false,
+      "properties": {
+        "class_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failure_message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "stack_trace": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/TestStatus"
+        }
+      },
+      "required": [
+        "name",
+        "status",
+        "duration_ms"
+      ],
+      "type": "object"
+    },
+    "TestErrorKind": {
+      "enum": [
+        "build_failed",
+        "infobase_unavailable",
+        "test_setup_failed",
+        "enterprise_spawn_failed",
+        "enterprise_startup_check_failed",
+        "enterprise_exited_early",
+        "enterprise_stdout_log_io",
+        "enterprise_stderr_log_io",
+        "enterprise_timed_out",
+        "enterprise_exited_non_zero",
+        "test_failures",
+        "junit_not_produced",
+        "junit_empty",
+        "junit_malformed"
+      ],
+      "type": "string"
+    },
+    "TestOutputMode": {
+      "enum": [
+        "compact",
+        "full"
+      ],
+      "type": "string"
+    },
+    "TestReport": {
+      "additionalProperties": false,
+      "properties": {
+        "extracted_errors": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "suites": {
+          "items": {
+            "$ref": "#/$defs/TestSuite"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "$ref": "#/$defs/TestSummary"
+        }
+      },
+      "required": [
+        "summary",
+        "suites",
+        "extracted_errors"
+      ],
+      "type": "object"
+    },
+    "TestStatus": {
+      "enum": [
+        "PASSED",
+        "FAILED",
+        "SKIPPED",
+        "ERROR"
+      ],
+      "type": "string"
+    },
+    "TestSuite": {
+      "additionalProperties": false,
+      "properties": {
+        "cases": {
+          "items": {
+            "$ref": "#/$defs/TestCase"
+          },
+          "type": "array"
+        },
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "cases",
+        "duration_ms"
+      ],
+      "type": "object"
+    },
+    "TestSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "errors": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "passed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skipped": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total",
+        "passed",
+        "failed",
+        "skipped",
+        "errors"
+      ],
+      "type": "object"
+    },
+    "TestTarget": {
+      "oneOf": [
+        {
+          "enum": [
+            "all"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "module": {
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "module"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/test.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Shared JSON data projection for test command envelopes.",
+  "properties": {
+    "diagnostics": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "error_kind": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TestErrorKind"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "execution": {
+      "$ref": "#/$defs/ExecutionOutcome"
+    },
+    "mode": {
+      "$ref": "#/$defs/TestOutputMode"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "report": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TestReport"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "retained_paths": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RetainedPaths"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "target": {
+      "$ref": "#/$defs/TestTarget"
+    }
+  },
+  "required": [
+    "ok",
+    "target",
+    "mode",
+    "diagnostics",
+    "execution"
+  ],
+  "title": "TestEnvelopeData",
+  "type": "object"
+}
