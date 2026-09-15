@@ -1,9 +1,9 @@
 ---
 id: INV.CLI.SIDECAR-FAILURE-DOES-NOT-RELEASE-THE-LOCK
-status: planned
+status: active
 governs: product
 decision: DEC.2026-04-20.THE-OS-LOCK-IS-THE-TRUTH-THE-SIDECAR-IS-DIAGNOSTICS
-check: null
+check: src/use_cases/workspace_lock.rs::an_unwritable_sidecar_does_not_release_the_lock
 scope: [cli]
 ---
 

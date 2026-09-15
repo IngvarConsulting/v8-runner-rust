@@ -54,17 +54,6 @@ This file tracks open implementation work only.
    для чтения после прогрева; при запуске `ibsrv` раннером — без extended-флага и с
    `--ssh-host-key`.
 
-11. Написать фальсификаторы для девяти правил, чьё поведение уже есть в коде, а теста нет:
-   `INV.CLI.NESTED-ORCHESTRATION-DOES-NOT-RELOCK`, `INV.CLI.SIDECAR-FAILURE-DOES-NOT-RELEASE-THE-LOCK`,
-   `INV.CLI.PREVIEW-RETURNS-AFTER-TOOL-LOOKUP`, `INV.CONFIG.UNSAFE-COMBINATIONS-ARE-REJECTED-BEFORE-DISPATCH`,
-   `INV.MCP.ADMISSION-IS-SHARED-BY-BOTH-TRANSPORTS`, `INV.USE-CASES.A-STALE-PROBE-LOG-IS-REMOVED-FIRST`,
-   `INV.USE-CASES.BLOCKS-EXCHANGE-TYPED-CONTEXT-ONLY`, `INV.USE-CASES.STAGING-SHARES-THE-PARENT-DIRECTORY`,
-   `INV.CLI.PREVIEW-LEAVES-A-LOG-ENTRY`. Остальные одиннадцать `planned` ждут не теста, а кода:
-   их решения сами `planned`. Список даёт `spec/arch/index.md` по колонке «проверяется».
-12. Починить пробел, найденный при написании тестов: `dump --dry-run` создаёт файл журнала
-   действий пустым, хотя превью обязано оставлять след вызова
-   (`INV.CLI.PREVIEW-LEAVES-A-LOG-ENTRY`). Сначала правка поведения, потом фальсификатор.
-
 13. Реализовать `DEC.2026-09-14.THE-TARGET-MAY-LIVE-ON-ANOTHER-MACHINE` вместе с агентским
    провайдером: локальность `workPath`, разрешение путей на стороне цели, объявленный канал
    обмена и отказ managed-режима при удалённой точке входа. Четыре правила ждут кода.

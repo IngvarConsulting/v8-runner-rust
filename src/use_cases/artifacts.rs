@@ -156,6 +156,10 @@ fn run_artifacts(
     };
 
     if args.dry_run {
+        crate::use_cases::progress::log_live_stage(
+            "make: preview",
+            "[Artifacts] preview only, nothing built or published",
+        );
         // The artifacts lock below is this command's first filesystem write, and Designer is
         // already located, so an absent platform refuses in the preview.
         let metadata = ArtifactBuildMetadata {
