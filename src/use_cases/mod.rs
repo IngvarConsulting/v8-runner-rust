@@ -23,6 +23,7 @@ pub mod convert_sources;
 /// Dump orchestration use case.
 pub mod dump_config;
 /// Shared extension identity helpers.
+pub(crate) mod extension_agent;
 pub mod extension_identity;
 pub mod extension_inventory;
 /// Shared discovery and preparation helpers for external artifacts.

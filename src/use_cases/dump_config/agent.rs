@@ -31,7 +31,13 @@ pub(super) fn run_dump_agent(
     let transcript = transcript_log(config, &format!("dump-{}", resolved.source_set_name))?;
 
     log_live_stage("dump: agent", "[агент] opening the Designer agent session");
-    let mut handle = connect(config, utilities, location, transcript.clone(), &wait)?;
+    let mut handle = connect(
+        config,
+        utilities,
+        location.map(|found| found.path.as_path()),
+        transcript.clone(),
+        &wait,
+    )?;
     let outcome = dump_through(context, config, resolved, mode, objects, &mut handle, &wait);
     handle.finish(&wait);
     let (reply_transcript, message, up_to_date) = outcome?;

@@ -1,12 +1,14 @@
 use std::time::Instant;
 
 use crate::config::model::{AppConfig, SourceSetPurpose};
+use crate::domain::capability::Provider;
 use crate::domain::extensions::{ExtensionsResult, ExtensionsStep};
 use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl, IbcmdError};
 use crate::platform::locator::UtilityType;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::extension_agent::ExtensionAgent;
 use crate::use_cases::extension_identity::platform_extension_name;
 use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
 use crate::use_cases::interruption;
@@ -64,20 +66,106 @@ pub fn execute(
         }
     };
     let receipt = selected.receipt;
-    let Some(location) = selected.location else {
-        return Err(UseCaseFailure::without_payload(
-            crate::use_cases::unimplemented_provider(
-                crate::domain::capability::Operation::Extensions,
-                selected.provider,
+    let mut setter = match (selected.provider, selected.location) {
+        (Provider::Agent, location) => {
+            match ExtensionAgent::open(context, config, location.map(|l| l.path).as_deref()) {
+                Ok(agent) => SafetySetter::Agent(agent),
+                Err(error) => return Err(UseCaseFailure::without_payload(error)),
+            }
+        }
+        (_, Some(location)) => SafetySetter::Ibcmd(
+            IbcmdDsl::new(
+                location.path,
+                connection,
+                utilities.runner_for(UtilityType::Ibcmd),
+            )
+            .with_execution_policy(
+                context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
             ),
-        ));
+        ),
+        (provider, None) => {
+            return Err(UseCaseFailure::without_payload(
+                crate::use_cases::unimplemented_provider(
+                    crate::domain::capability::Operation::Extensions,
+                    provider,
+                ),
+            ));
+        }
     };
-    let binary = location.path;
-    let dsl = IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
-        .with_execution_policy(
-            context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
-        );
 
+    let outcome = disable_safety_for(context, &mut setter, targets, started);
+    setter.close();
+    outcome.map(|steps| ExtensionsResult {
+        provider: Some(receipt),
+        provider_dispatched: true,
+        ok: true,
+        duration_ms: started.elapsed().as_millis() as u64,
+        steps,
+    })
+}
+
+/// Исполнитель одного и того же действия: `ibcmd` — процессом на цель, агент — одной
+/// сессией на команду.
+enum SafetySetter<'a> {
+    Ibcmd(IbcmdDsl<'a>),
+    Agent(ExtensionAgent),
+}
+
+impl SafetySetter<'_> {
+    /// Итог шага: удача с сообщением, отказ платформы с уликой или ошибка раннера.
+    fn disable(&mut self, target: &str) -> Result<String, StepFailure> {
+        match self {
+            Self::Ibcmd(dsl) => {
+                match dsl.infobase_extension_update_properties(target, false, false) {
+                    Ok(result) if result.process.exit_code == 0 => {
+                        let mut message =
+                            "безопасный режим и защита от опасных действий отключены".to_owned();
+                        if let Some(warning) = deferred_interruption_warning(&result) {
+                            message.push_str("; ");
+                            message.push_str(&warning);
+                        }
+                        Ok(message)
+                    }
+                    Ok(result) => Err(StepFailure::Platform(format_ibcmd_failure_details(
+                        "extension update",
+                        "extension",
+                        target,
+                        result.process.exit_code,
+                        &result.process.stdout,
+                        &result.process.stderr,
+                        None,
+                        None,
+                    ))),
+                    Err(error) => Err(StepFailure::Error(map_extension_update_error(
+                        target, error,
+                    ))),
+                }
+            }
+            Self::Agent(agent) => agent
+                .disable_safety(target)
+                .map(|()| "безопасный режим и защита от опасных действий отключены".to_owned())
+                .map_err(StepFailure::Error),
+        }
+    }
+
+    fn close(self) {
+        if let Self::Agent(agent) = self {
+            agent.close();
+        }
+    }
+}
+
+enum StepFailure {
+    Platform(String),
+    Error(AppError),
+}
+
+fn disable_safety_for(
+    context: &ExecutionContext,
+    setter: &mut SafetySetter<'_>,
+    targets: Vec<String>,
+    started: Instant,
+) -> Result<Vec<ExtensionsStep>, UseCaseFailure<ExtensionsResult>> {
     let mut steps = Vec::new();
     for target in targets {
         if let Some(interruption) = context.interruption() {
@@ -109,14 +197,8 @@ pub fn execute(
             "running",
             "updating extension properties",
         );
-        match dsl.infobase_extension_update_properties(&target, false, false) {
-            Ok(result) if result.process.exit_code == 0 => {
-                let mut message =
-                    "безопасный режим и защита от опасных действий отключены".to_owned();
-                if let Some(warning) = deferred_interruption_warning(&result) {
-                    message.push_str("; ");
-                    message.push_str(&warning);
-                }
+        match setter.disable(&target) {
+            Ok(message) => {
                 let step = ExtensionsStep {
                     target,
                     action: DISABLE_SAFETY_ACTION.to_owned(),
@@ -127,17 +209,7 @@ pub fn execute(
                 log_extension_step(&step);
                 steps.push(step);
             }
-            Ok(result) => {
-                let message = format_ibcmd_failure_details(
-                    "extension update",
-                    "extension",
-                    &target,
-                    result.process.exit_code,
-                    &result.process.stdout,
-                    &result.process.stderr,
-                    None,
-                    None,
-                );
+            Err(StepFailure::Platform(message)) => {
                 let step = ExtensionsStep {
                     target: target.clone(),
                     action: DISABLE_SAFETY_ACTION.to_owned(),
@@ -160,8 +232,7 @@ pub fn execute(
                     payload,
                 ));
             }
-            Err(error) => {
-                let app_error = map_extension_update_error(&target, error);
+            Err(StepFailure::Error(app_error)) => {
                 let message = app_error.to_string();
                 let step = ExtensionsStep {
                     target: target.clone(),
@@ -186,13 +257,7 @@ pub fn execute(
     }
 
     log_extensions_summary(true);
-    Ok(ExtensionsResult {
-        provider: Some(receipt),
-        provider_dispatched: true,
-        ok: true,
-        steps,
-        duration_ms: started.elapsed().as_millis() as u64,
-    })
+    Ok(steps)
 }
 
 fn log_extension_step(step: &ExtensionsStep) {

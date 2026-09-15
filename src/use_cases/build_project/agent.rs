@@ -59,7 +59,7 @@ impl AgentLoader {
             let handle = connect(
                 config,
                 &mut self.utilities,
-                self.location.as_ref(),
+                self.location.as_ref().map(|found| found.path.as_path()),
                 transcript,
                 &wait,
             )?;

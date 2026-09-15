@@ -450,6 +450,15 @@ pub fn copy_dir_recursively(source: &Path, destination: &Path) -> std::io::Resul
     Ok(())
 }
 
+/// Move a file: a rename when the filesystem allows it, a copy and removal otherwise.
+pub fn move_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    if std::fs::rename(source, destination).is_ok() {
+        return Ok(());
+    }
+    std::fs::copy(source, destination)?;
+    std::fs::remove_file(source)
+}
+
 /// Move a directory: a rename when the filesystem allows it, a copy and removal otherwise.
 pub fn move_dir(source: &Path, destination: &Path) -> std::io::Result<()> {
     if std::fs::rename(source, destination).is_ok() {

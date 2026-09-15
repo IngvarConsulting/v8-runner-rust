@@ -30,7 +30,30 @@ pub struct FakeAgent {
     pub designer_pid_file: PathBuf,
     /// Поколение конфигурации: растёт с каждой удачной загрузкой.
     pub generation: Arc<AtomicU64>,
+    /// Состав расширений базы: `properties get/set`, `create`, `delete`.
+    pub extensions: Arc<Mutex<Vec<FakeExtension>>>,
+    /// Что было собрано из каких xml: обратная выгрузка возвращает тот же описатель.
+    external_sources: Arc<Mutex<HashMap<PathBuf, String>>>,
     buffers: Arc<Mutex<HashMap<ChannelId, Vec<u8>>>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FakeExtension {
+    pub name: String,
+    pub active: bool,
+    pub safe_mode: bool,
+    pub unsafe_action_protection: bool,
+    pub purpose: String,
+}
+
+impl FakeExtension {
+    fn record(&self) -> String {
+        let hash = format!("{:x}", self.name.len());
+        format!(
+            "{{\"type\":\"extension-properties\",\"body\":{{\"name\":\"{}\",\"version\":\"\",\"active\":{},\"purpose\":\"{}\",\"safe-mode\":{},\"security-profile-name\":\"\",\"unsafe-action-protection\":{},\"used-in-distributed-infobase\":false,\"scope\":\"infobase\",\"hash-sum\":\"{hash}\"}}}}",
+            self.name, self.active, self.purpose, self.safe_mode, self.unsafe_action_protection
+        )
+    }
 }
 
 impl FakeAgent {
@@ -48,8 +71,57 @@ impl FakeAgent {
             base_dir_file,
             designer_pid_file,
             generation: Arc::new(AtomicU64::new(1)),
+            extensions: Arc::new(Mutex::new(vec![FakeExtension {
+                name: "Зонд".to_owned(),
+                active: true,
+                safe_mode: true,
+                unsafe_action_protection: true,
+                purpose: "customization".to_owned(),
+            }])),
+            external_sources: Arc::new(Mutex::new(HashMap::new())),
             buffers: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Файловый параметр агента: относительно каталога пользователя и — как у настоящего
+    /// агента — ни одной символической ссылки на пути («Файл не обнаружен»).
+    fn file_arg(&self, relative: &str) -> Result<PathBuf, String> {
+        let user_dir = self.user_dir();
+        let mut probe = user_dir.clone();
+        for component in Path::new(relative).components() {
+            probe.push(component);
+            if fs::symlink_metadata(&probe)
+                .map(|meta| meta.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                return Err(format!(
+                    "[{{\"type\":\"error\",\"error-type\":\"UnknownError\",\"message\":\"Файл не обнаружен '{}'\"}}]\n",
+                    probe.display()
+                ));
+            }
+        }
+        Ok(user_dir.join(relative))
+    }
+
+    fn extension_reply(&self, name: Option<&str>) -> String {
+        let extensions = self.extensions.lock().expect("extensions");
+        let records = extensions
+            .iter()
+            .filter(|extension| name.is_none_or(|name| extension.name == name))
+            .map(FakeExtension::record)
+            .collect::<Vec<_>>();
+        if name.is_some() && records.is_empty() {
+            return extension_not_found();
+        }
+        // Живой агент отвечает по-разному: на одно расширение — одним сообщением
+        // `extension-properties` без `success`, на все — списком в `body` у `success`.
+        if name.is_some() {
+            return format!("[{}]\n", records.join(","));
+        }
+        format!(
+            "[{{\"type\":\"success\",\"message\":\"\",\"body\":[{}]}}]\n",
+            records.join(",")
+        )
     }
 
     fn user_dir(&self) -> PathBuf {
@@ -78,15 +150,14 @@ impl FakeAgent {
     /// Ответ на одну команду и признак «сессия завершается».
     fn respond(&self, line: &str) -> (String, bool) {
         self.log(line);
+        let words = tokens(line);
         let option = |name: &str| -> Option<String> {
-            line.split_whitespace()
+            words
+                .iter()
                 .find_map(|word| word.strip_prefix(&format!("--{name}=")))
                 .map(str::to_owned)
         };
-        let has = |flag: &str| {
-            line.split_whitespace()
-                .any(|word| word == format!("--{flag}"))
-        };
+        let has = |flag: &str| words.iter().any(|word| word == &format!("--{flag}"));
         if line.starts_with("options set")
             || line == "common connect-ib"
             || line == "common disconnect-ib"
@@ -147,6 +218,165 @@ impl FakeAgent {
                 false,
             );
         }
+        if line.starts_with("config dump-cfg") {
+            let file = option("file").unwrap_or_default();
+            let target = match self.file_arg(&file) {
+                Ok(target) => target,
+                Err(reply) => return (reply, false),
+            };
+            if !target.parent().is_some_and(Path::is_dir) {
+                return (
+                    format!(
+                        "[{{\"type\":\"error\",\"error-type\":\"UnknownError\",\"message\":\"Файл не обнаружен '{}'\"}}]\n",
+                        target.display()
+                    ),
+                    false,
+                );
+            }
+            let body = match option("extension") {
+                Some(extension) => format!("CFE:{extension}"),
+                None => "CF:main".to_owned(),
+            };
+            fs::write(&target, body).expect("dump-cfg file");
+            return (
+                progress_then_success("Сохранение конфигурации в файл"),
+                false,
+            );
+        }
+        if line.starts_with("infobase-tools dump-ib") {
+            let file = option("file").unwrap_or_default();
+            let target = match self.file_arg(&file) {
+                Ok(target) => target,
+                Err(reply) => return (reply, false),
+            };
+            fs::write(&target, "DT").expect("dump-ib file");
+            return (progress_then_success("Выгрузка информационной базы"), false);
+        }
+        if line.starts_with("infobase-tools restore-ib") {
+            let file = option("file").unwrap_or_default();
+            let source = match self.file_arg(&file) {
+                Ok(source) => source,
+                Err(reply) => return (reply, false),
+            };
+            let Ok(payload) = fs::read_to_string(&source) else {
+                return (
+                    format!(
+                        "[{{\"type\":\"error\",\"error-type\":\"UnknownError\",\"message\":\"Файл не обнаружен '{}'\"}}]\n",
+                        source.display()
+                    ),
+                    false,
+                );
+            };
+            self.log(&format!("restored: {}", payload.trim()));
+            // После загрузки агент закрывает сеанс и рвёт SSH-соединение сам (4.7.7.6).
+            return (
+                "[{\"type\":\"log\",\"message\":\"Требуется повторное подключение к агенту\"}]\n[{\"type\":\"success\",\"message\":\"\",\"body\":[]}]\n".to_owned(),
+                true,
+            );
+        }
+        if line.starts_with("config load-external-data-processor-or-report-from-files") {
+            let xml = option("file").unwrap_or_default();
+            let out = option("ext-file").unwrap_or_default();
+            let (source, target) = match (self.file_arg(&xml), self.file_arg(&out)) {
+                (Ok(source), Ok(target)) => (source, target),
+                (Err(reply), _) | (_, Err(reply)) => return (reply, false),
+            };
+            let Ok(descriptor) = fs::read_to_string(&source) else {
+                return (
+                    "[{\"type\":\"error\",\"error-type\":\"ConfigFilesError\",\"message\":\"\"}]\n"
+                        .to_owned(),
+                    false,
+                );
+            };
+            fs::write(
+                &target,
+                format!("EPF:{}", source.file_name().unwrap().to_string_lossy()),
+            )
+            .expect("ext file");
+            self.external_sources
+                .lock()
+                .expect("external sources")
+                .insert(target, descriptor);
+            return (progress_then_success("Загрузка внешней обработки"), false);
+        }
+        if line.starts_with("config dump-external-data-processor-or-report-to-files") {
+            let ext = option("ext-file").unwrap_or_default();
+            let xml = option("file").unwrap_or_default();
+            let (binary, target) = match (self.file_arg(&ext), self.file_arg(&xml)) {
+                (Ok(binary), Ok(target)) => (binary, target),
+                (Err(reply), _) | (_, Err(reply)) => return (reply, false),
+            };
+            let Some(descriptor) = self
+                .external_sources
+                .lock()
+                .expect("external sources")
+                .get(&binary)
+                .cloned()
+            else {
+                return (
+                    "[{\"type\":\"error\",\"error-type\":\"ConfigFilesError\",\"message\":\"\"}]\n"
+                        .to_owned(),
+                    false,
+                );
+            };
+            fs::write(&target, descriptor).expect("descriptor xml");
+            return (progress_then_success("Выгрузка внешней обработки"), false);
+        }
+        if line.starts_with("config extensions properties get") {
+            if has("all-extensions") {
+                return (self.extension_reply(None), false);
+            }
+            return (self.extension_reply(option("extension").as_deref()), false);
+        }
+        if line.starts_with("config extensions properties set") {
+            let name = option("extension").unwrap_or_default();
+            let mut extensions = self.extensions.lock().expect("extensions");
+            let Some(extension) = extensions.iter_mut().find(|e| e.name == name) else {
+                return (extension_not_found(), false);
+            };
+            let flag = |value: Option<String>| value.map(|v| v == "yes");
+            if let Some(active) = flag(option("active")) {
+                extension.active = active;
+            }
+            if let Some(safe_mode) = flag(option("safe-mode")) {
+                extension.safe_mode = safe_mode;
+            }
+            if let Some(protection) = flag(option("unsafe-action-protection")) {
+                extension.unsafe_action_protection = protection;
+            }
+            return (success(), false);
+        }
+        if line.starts_with("config extensions create") {
+            // Как настоящий агент: синоним обязателен и только в форме NStr().
+            if !option("synonym").is_some_and(|synonym| synonym.contains("='")) {
+                return (
+                    "[{\"type\":\"error\",\"error-type\":\"CommandFormatError\",\"message\":\"Неверный формат команды:Ошибка разбора параметра: synonym\"}]\n".to_owned(),
+                    false,
+                );
+            }
+            let name = option("extension").unwrap_or_default();
+            self.extensions
+                .lock()
+                .expect("extensions")
+                .push(FakeExtension {
+                    name,
+                    active: true,
+                    safe_mode: true,
+                    unsafe_action_protection: true,
+                    purpose: option("purpose").unwrap_or_else(|| "customization".to_owned()),
+                });
+            return (success(), false);
+        }
+        if line.starts_with("config extensions delete") {
+            let name = option("extension").unwrap_or_default();
+            let mut extensions = self.extensions.lock().expect("extensions");
+            let before = extensions.len();
+            extensions.retain(|e| e.name != name);
+            if extensions.len() == before {
+                return (extension_not_found(), false);
+            }
+            return (success(), false);
+        }
         if line == "common shutdown" {
             if let Ok(pid) = fs::read_to_string(&self.designer_pid_file) {
                 let _ = std::process::Command::new("kill")
@@ -161,6 +391,32 @@ impl FakeAgent {
             false,
         )
     }
+}
+
+fn extension_not_found() -> String {
+    "[{\"type\":\"error\",\"error-type\":\"ExtensionNotFound\",\"message\":\"Операция не может быть выполнена, так как расширение конфигурации не найдено.\"}]\n".to_owned()
+}
+
+/// Слова команды с учётом двойных кавычек: `--synonym="ru='X'; en='X'"` — одно слово.
+fn tokens(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for ch in line.chars() {
+        match ch {
+            '"' => quoted = !quoted,
+            c if c.is_whitespace() && !quoted => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
 }
 
 fn success() -> String {

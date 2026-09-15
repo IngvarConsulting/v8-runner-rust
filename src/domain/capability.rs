@@ -236,25 +236,43 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
         experimental(Agent, LiveVerified),
     ];
     const DESIGNER_ONLY: &[Capability] = &[implemented(Designer, LiveVerified)];
-    const IBCMD_ONLY: &[Capability] = &[implemented(Ibcmd, LiveVerified)];
+    // `make`: у агента `dump-cfg` (cf/cfe прогнаны раннером на 8.3.27 15.09.2026) и
+    // загрузка внешних обработок из файлов (команда есть, живой прогон только двойником);
+    // `load`: у агента нет `compare-cfg`, проба совместимости невозможна, строки нет
+    // намеренно.
+    const MAKE: &[Capability] = &[
+        implemented(Designer, LiveVerified),
+        experimental(Agent, ArgvTested),
+    ];
+    // Агент: `config extensions …` — list/info/create/activate/delete и снятие защиты
+    // прогнаны раннером на 8.3.27 15.09.2026.
+    const EXTENSIONS: &[Capability] = &[
+        implemented(Ibcmd, LiveVerified),
+        experimental(Agent, LiveVerified),
+    ];
+    // Агент: `config dump-cfg` для рабочей конфигурации прогнан раннером 15.09.2026.
     const EXPORT: &[Capability] = &[
         implemented(Designer, ArgvTested),
         implemented(Ibcmd, ArgvTested),
+        experimental(Agent, LiveVerified),
     ];
+    // Агент: `infobase-tools dump-ib` и `restore-ib` (с обрывом сессии после загрузки)
+    // прогнаны раннером 15.09.2026.
     const SNAPSHOT: &[Capability] = &[
         implemented(Designer, ArgvTested),
         experimental(Ibcmd, Documented),
+        experimental(Agent, LiveVerified),
     ];
 
     match (operation, target) {
         (Operation::Init, TargetKind::File | TargetKind::Cluster) => DESIGNER_THEN_IBCMD,
         (Operation::Build, TargetKind::File | TargetKind::Cluster) => BUILD,
         (Operation::Dump, TargetKind::File | TargetKind::Cluster) => DUMP,
-        (
-            Operation::Load | Operation::Syntax | Operation::Make,
-            TargetKind::File | TargetKind::Cluster,
-        ) => DESIGNER_ONLY,
-        (Operation::Extensions, TargetKind::File | TargetKind::Cluster) => IBCMD_ONLY,
+        (Operation::Load | Operation::Syntax, TargetKind::File | TargetKind::Cluster) => {
+            DESIGNER_ONLY
+        }
+        (Operation::Make, TargetKind::File | TargetKind::Cluster) => MAKE,
+        (Operation::Extensions, TargetKind::File | TargetKind::Cluster) => EXTENSIONS,
         (Operation::ConfigurationExport, TargetKind::File | TargetKind::Cluster) => EXPORT,
         (
             Operation::InfobaseDump | Operation::InfobaseRestore,
