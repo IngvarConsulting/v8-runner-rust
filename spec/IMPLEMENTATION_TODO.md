@@ -39,6 +39,12 @@ This file tracks open implementation work only.
    сессией на время workspace lock (`DEC.2026-09-14.AGENT-SESSION-LIVES-WITH-THE-LOCK`),
    `generation-id` (#99), перевод строки `dump` из experimental после живого прогона через
    раннер, страж «агентский JSON — структурный вывод».
+8. Реализовать долгоживущего агента (`DEC.2026-09-15.A-KEPT-AGENT-LIVES-WITH-THE-WORKSPACE`):
+   `tools.designer_agent.lifetime: command | workspace`, удостоверение `<workPath>/agent/agent.json`,
+   проверка перед использованием (pid, личность, аутентификация), свободный порт на старте,
+   команды `agent start | stop | status`, остановка своего агента перед другим исполнителем и
+   при завершении MCP-сервера; фальсификаторы для трёх новых правил. Ожидаемая экономия — 6–9 с
+   на команду (замер УТ 15.09.2026).
 10. Реализовать цель «автономный сервер», шаг 3: вид цели «автономный сервер» — `infobase.connection: ws=…`,
    секция `infobase.standalone`, провайдер `agent` через шлюз `ibsrv`, `ibcmd --pid` только
    для чтения после прогрева; при запуске `ibsrv` раннером — без extended-флага и с
