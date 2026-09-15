@@ -25,9 +25,6 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
-    "builder": {
-      "type": "string"
-    },
     "duration_ms": {
       "format": "uint64",
       "minimum": 0,
@@ -76,7 +73,6 @@
     "local_path",
     "gitignore_path",
     "format",
-    "builder",
     "source_sets",
     "overwritten",
     "duration_ms"

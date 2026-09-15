@@ -1,8 +1,8 @@
 ---
 id: DEC.2026-09-14.PUBLICATION-IS-NEVER-A-DEFAULT-STEP
-status: planned
+status: active
 governs: product
-realized: null
+realized: tests/provider_matrix.rs::no_default_chain_names_the_publication_provider
 supersedes: []
 superseded-by: null
 establishes: []

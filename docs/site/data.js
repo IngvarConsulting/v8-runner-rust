@@ -50,7 +50,7 @@ window.RUNNER_DATA = (function () {
   };
 
   // Сценарии. Для каждого: applies(ctx) → null (применим) или причина;
-  // today(ctx) → {chain:[P…], config:[…], note} по текущему коду (ключ builder);
+  // today(ctx) → {chain:[P…], config:[…], note} по текущему коду (матрица провайдеров);
   // target(ctx) → то же по ADR-0030 (цепочка умолчаний и матрица).
   // Три разные причины, по которым сценарий сейчас не отработает. Их нельзя смешивать:
   // subject — предмет не тот (навсегда); tool — нет инструмента в окружении (поставьте — заработает);
@@ -71,7 +71,7 @@ window.RUNNER_DATA = (function () {
       : null;
   }
   function builderChoice(ctx, designerOk, ibcmdOk) {
-    // сегодня: builder задаёт провайдера на весь проект; показываем оба варианта, если оба возможны
+    // сегодня: цепочка умолчаний из матрицы; показываем оба варианта, если оба возможны
     var out = [];
     if (designerOk && ctx.tools.designer) out.push(P.designer);
     if (ibcmdOk && ctx.tools.ibcmd) out.push(P.ibcmd);
@@ -170,7 +170,7 @@ window.RUNNER_DATA = (function () {
       what: 'Грузит готовый .cf или .cfe в базу.',
       cmd: function (ctx) { return (ctx.type === 'EXTENSION' ? 'v8-runner load --path ext.cfe --extension ИмяРасширения' : 'v8-runner load --path main.cf'); },
       applies: function (ctx) { return notExternal(ctx, 'load') || noStandaloneToday(ctx); },
-      today: function (ctx) { return { chain: ctx.tools.designer ? [P.designer] : [], config: ['infobase.connection'], note: 'только builder=DESIGNER; состояния совместимости supported / absent / not_established / not_probed' }; },
+      today: function (ctx) { return { chain: ctx.tools.designer ? [P.designer] : [], config: ['infobase.connection'], note: 'только Конфигуратор; состояния совместимости supported / absent / not_established / not_probed' }; },
       target: function (ctx) {
         if (ctx.target === 'standalone') return { chain: [P.agent], config: ['infobase.standalone.*'], note: 'load-cfg по шлюзу' };
         return { chain: [P.agent, P.designer], config: ['infobase.connection'], note: '' };
@@ -183,7 +183,7 @@ window.RUNNER_DATA = (function () {
       applies: function (ctx) { return ctx.type !== 'EXTERNAL' ? noStandaloneToday(ctx) : null; },
       today: function (ctx) {
         if (ctx.type === 'EXTERNAL') return { chain: ctx.tools.designer ? [P.designer] : [], config: ['source-set[] с type EXTERNAL_*'], note: 'внешние собираются Конфигуратором из XML; базы не касается' };
-        return { chain: ctx.tools.designer ? [P.designer] : [], config: ['infobase.connection'], note: 'только builder=DESIGNER' };
+        return { chain: ctx.tools.designer ? [P.designer] : [], config: ['infobase.connection'], note: 'только Конфигуратор' };
       },
       target: function (ctx) {
         if (ctx.type === 'EXTERNAL') return { chain: [P.designer, P.rs], config: ['source-set[]'], note: 'ibcmd-rs собирает epf/erf без платформы — пока эксперимент, не умолчание' };
@@ -198,7 +198,7 @@ window.RUNNER_DATA = (function () {
       applies: function (ctx) { return notExternal(ctx, 'экспорт конфигурации') || noStandaloneToday(ctx); },
       today: function (ctx) {
         var chain = builderChoice(ctx, true, ctx.target === 'file' || ctx.target === 'cluster');
-        return { chain: chain, config: ['infobase.connection'].concat(ctx.target === 'cluster' ? ['infobase.dbms.* — для ibcmd'] : []), note: 'единственная команда, где раннер уже выбирает готового провайдера сам; builder — предпочтение' };
+        return { chain: chain, config: ['infobase.connection'].concat(ctx.target === 'cluster' ? ['infobase.dbms.* — для ibcmd'] : []), note: 'раннер берёт первого готового из цепочки; квитанция называет пропущенных' };
       },
       target: function (ctx) {
         if (ctx.target === 'standalone') return { chain: [P.agent, P.ibcmd], config: ['infobase.standalone.*'], note: 'dump-cfg по шлюзу; онлайн-экспорт ibcmd --pid сломан' };
@@ -237,13 +237,13 @@ window.RUNNER_DATA = (function () {
     },
     {
       id: 'publish', verb: 'publish', title: 'Опубликовать базу на веб-сервере',
-      cmd: function (ctx) { return 'v8-runner publish --web apache24 --wsdir demo --dir /var/www/demo'; },
+      cmd: function (ctx) { return 'v8-runner publish'; },
       what: 'Публикует базу на Apache или IIS, чтобы открыть её веб-клиентом.',
       applies: function (ctx) {
         if (ctx.target === 'standalone') return { kind: 'subject', why: 'автономный сервер отдаёт HTTP сам', fix: 'публикация не нужна' };
         return null;
       },
-      today: function (ctx) { return { chain: [], config: [], note: 'команды нет' }; },
+      today: function (ctx) { return this.target(ctx); },
       target: function (ctx) {
         return { chain: [P.webinst], config: ['infobase.connection', 'infobase.web.*'],
                  note: 'нужны права администратора; каталог публикации должен существовать' };
@@ -266,7 +266,7 @@ window.RUNNER_DATA = (function () {
         if (!ctx.tools.web) return { kind: 'tool', why: 'база не опубликована', fix: 'нужен веб-сервер и команда publish' };
         return null;
       },
-      today: function (ctx) { return { chain: [], config: [], note: 'команды нет' }; },
+      today: function (ctx) { return this.target(ctx); },
       target: function (ctx) {
         return { chain: [P.browser], config: ['infobase.web.url'],
                  note: ctx.target === 'standalone' ? 'адрес даёт сам автономный сервер' : 'адрес появляется после publish' };

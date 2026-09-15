@@ -45,12 +45,34 @@ pub fn execute(
     };
 
     let mut utilities = PlatformUtilities::from_config(config);
-    let binary = match utilities.locate(UtilityType::Ibcmd) {
-        Ok(location) => location.path,
-        Err(error) => {
-            return Err(UseCaseFailure::without_payload(AppError::from(error)));
+    let selected = match crate::use_cases::provider_selection::select(
+        config,
+        &mut utilities,
+        crate::domain::capability::Operation::Extensions,
+    ) {
+        Ok(selected) => selected,
+        Err((error, receipt)) => {
+            let mut result = ExtensionsResult {
+                provider: None,
+                ok: false,
+                provider_dispatched: false,
+                steps: Vec::new(),
+                duration_ms: started.elapsed().as_millis() as u64,
+            };
+            result.provider = Some(receipt);
+            return Err(UseCaseFailure::with_payload(error, result));
         }
     };
+    let receipt = selected.receipt;
+    let Some(location) = selected.location else {
+        return Err(UseCaseFailure::without_payload(
+            crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::Extensions,
+                selected.provider,
+            ),
+        ));
+    };
+    let binary = location.path;
     let dsl = IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
         .with_execution_policy(
             context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
@@ -65,6 +87,7 @@ pub fn execute(
                 "extension update",
             );
             let payload = ExtensionsResult {
+                provider: None,
                 provider_dispatched: true,
                 ok: false,
                 steps,
@@ -126,6 +149,7 @@ pub fn execute(
                 steps.push(step);
                 log_extensions_summary(false);
                 let payload = ExtensionsResult {
+                    provider: None,
                     provider_dispatched: true,
                     ok: false,
                     steps,
@@ -150,6 +174,7 @@ pub fn execute(
                 steps.push(step);
                 log_extensions_summary(false);
                 let payload = ExtensionsResult {
+                    provider: None,
                     provider_dispatched: true,
                     ok: false,
                     steps,
@@ -162,6 +187,7 @@ pub fn execute(
 
     log_extensions_summary(true);
     Ok(ExtensionsResult {
+        provider: Some(receipt),
         provider_dispatched: true,
         ok: true,
         steps,
@@ -257,7 +283,7 @@ fn resolve_targets(
 mod tests {
     use super::{execute, map_extension_update_error, resolve_targets};
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, PlatformToolConfig, SourceFormat, SourceSetConfig,
+        AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
         SourceSetPurpose, TestsConfig, ToolsConfig,
     };
     use crate::platform::ibcmd::IbcmdError;
@@ -294,7 +320,8 @@ mod tests {
             work_path: work.to_path_buf(),
             execution_timeout: 300_000,
             format: SourceFormat::Edt,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![
                 SourceSetConfig {

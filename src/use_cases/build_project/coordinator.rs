@@ -1,4 +1,5 @@
 use super::*;
+use crate::domain::capability::{Operation, Provider};
 
 pub(super) fn run_build_designer(
     context: &ExecutionContext,
@@ -20,6 +21,7 @@ pub(super) fn run_build_designer(
                 return Err(BuildExecutionFailure::with_payload(
                     error,
                     BuildResult {
+                        provider: None,
                         provider_dispatched: true,
                         ok: false,
                         steps: vec![],
@@ -214,6 +216,7 @@ pub(super) fn run_build_designer(
     }
 
     Ok(BuildResult {
+        provider: None,
         provider_dispatched: true,
         ok: true,
         steps,
@@ -241,6 +244,7 @@ pub(super) fn run_build_ibcmd(
                 return Err(BuildExecutionFailure::with_payload(
                     error,
                     BuildResult {
+                        provider: None,
                         provider_dispatched: true,
                         ok: false,
                         steps: vec![],
@@ -399,6 +403,7 @@ pub(super) fn run_build_ibcmd(
     }
 
     Ok(BuildResult {
+        provider: None,
         provider_dispatched: true,
         ok: true,
         steps,
@@ -410,6 +415,7 @@ pub(super) fn run_build_edt(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &BuildArgs,
+    provider: Provider,
 ) -> Result<BuildResult, BuildExecutionFailure> {
     debug!(
         full_rebuild = args.full_rebuild,
@@ -420,6 +426,7 @@ pub(super) fn run_build_edt(
         return Err(BuildExecutionFailure::with_payload(
             error,
             BuildResult {
+                provider: None,
                 provider_dispatched: true,
                 ok: false,
                 steps: vec![],
@@ -437,6 +444,7 @@ pub(super) fn run_build_edt(
                 return Err(BuildExecutionFailure::with_payload(
                     error,
                     BuildResult {
+                        provider: None,
                         provider_dispatched: true,
                         ok: false,
                         steps: vec![],
@@ -898,8 +906,11 @@ pub(super) fn run_build_edt(
                 commit,
             } => {
                 let load_started = Instant::now();
-                let load_result = match config.builder {
-                    BuilderBackend::Designer => {
+                let load_result = match provider {
+                    other @ (Provider::Agent | Provider::IbcmdRs | Provider::Webinst) => Err(
+                        crate::use_cases::unimplemented_provider(Operation::Build, other),
+                    ),
+                    Provider::Designer => {
                         let designer = match designer_binary.clone() {
                             Some(path) => path,
                             None => {
@@ -938,7 +949,7 @@ pub(super) fn run_build_edt(
                             &commit,
                         )
                     }
-                    BuilderBackend::Ibcmd => {
+                    Provider::Ibcmd => {
                         let ibcmd = match ibcmd_binary.clone() {
                             Some(path) => path,
                             None => {
@@ -1004,6 +1015,7 @@ pub(super) fn run_build_edt(
     }
 
     Ok(BuildResult {
+        provider: None,
         provider_dispatched: true,
         ok: true,
         steps,

@@ -8,6 +8,16 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use support::{temp_workspace, v8_runner_command, write_shell_script};
 
+/// Прежний глобальный `builder` в тестовых конфигах: `DESIGNER` — умолчания матрицы,
+/// `IBCMD` — `ibcmd` всюду, где у операции есть развилка.
+fn providers_yaml(builder: &str) -> &'static str {
+    if builder == "IBCMD" {
+        "providers:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\n"
+    } else {
+        ""
+    }
+}
+
 fn write_designer(path: &Path, calls: &Path) {
     write_shell_script(
         path,
@@ -52,9 +62,9 @@ fn write_config(path: &Path, base: &Path, work: &Path, builder: &str, platform: 
     fs::write(
         path,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\nbuilder: {}\ninfobase:\n  connection: 'File={}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
+            "workPath: '{}'\nformat: DESIGNER\n{}infobase:\n  connection: 'File={}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
             work.display(),
-            builder,
+            providers_yaml(builder),
             infobase.display(),
             platform.display(),
         ),
@@ -96,7 +106,7 @@ fn configuration_cf_dry_run_selects_provider_without_process_or_filesystem_mutat
     assert_eq!(envelope["command"], "infobase.configuration.export");
     assert_eq!(envelope["data"]["mode"], "preview");
     assert_eq!(envelope["data"]["provider_dispatched"], false);
-    assert_eq!(envelope["data"]["selection"]["provider"], "designer");
+    assert_eq!(envelope["data"]["provider"]["selected"], "designer");
     assert_eq!(envelope["data"]["artifact_kind"], "cf");
     assert_eq!(envelope["data"]["published"], false);
     assert_eq!(envelope["data"]["target_state"], "unchanged");
@@ -146,7 +156,7 @@ fn configuration_cfe_dry_run_preserves_extension_intent_without_dispatch() {
     assert_eq!(envelope["data"]["mode"], "preview");
     assert_eq!(envelope["data"]["subject"]["kind"], "extension");
     assert_eq!(envelope["data"]["subject"]["name"], "SalesAddon");
-    assert_eq!(envelope["data"]["selection"]["provider"], "ibcmd");
+    assert_eq!(envelope["data"]["provider"]["selected"], "ibcmd");
     assert_eq!(envelope["data"]["artifact_kind"], "cfe");
     assert_eq!(envelope["data"]["provider_dispatched"], false);
     assert!(!calls.exists());
@@ -187,7 +197,7 @@ fn dt_dry_run_reports_designer_fallback_without_dispatch() {
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
     assert_eq!(envelope["command"], "infobase.dump");
     assert_eq!(envelope["data"]["mode"], "preview");
-    assert_eq!(envelope["data"]["selection"]["provider"], "designer");
+    assert_eq!(envelope["data"]["provider"]["selected"], "designer");
     assert_eq!(envelope["data"]["artifact_kind"], "dt");
     assert_eq!(envelope["data"]["provider_dispatched"], false);
     assert!(!calls.exists());
@@ -295,11 +305,12 @@ fn missing_file_infobase_is_unavailable_before_designer_dispatch() {
     assert!(!command.status.success());
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
     assert_eq!(envelope["error"]["code"], "environment_unavailable");
+    assert_eq!(envelope["data"]["provider"]["selected"], Value::Null);
     assert_eq!(
-        envelope["data"]["selection"]["candidates"][0]["readiness"],
-        "unavailable"
+        envelope["data"]["provider"]["skipped"][0]["provider"],
+        "designer"
     );
-    assert!(envelope["data"]["selection"]["candidates"][0]["reason"]
+    assert!(envelope["data"]["provider"]["skipped"][0]["reason"]
         .as_str()
         .is_some_and(|reason| reason.contains("1Cv8.1CD")));
     assert!(!calls.exists());
@@ -339,7 +350,7 @@ fn malformed_server_connection_is_unavailable_before_provider_dispatch() {
     assert!(!command.status.success());
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
     assert_eq!(envelope["error"]["code"], "environment_unavailable");
-    assert!(envelope["data"]["selection"]["candidates"][0]["reason"]
+    assert!(envelope["data"]["provider"]["skipped"][0]["reason"]
         .as_str()
         .is_some_and(|reason| reason.contains("expected non-empty File=")));
     assert!(!calls.exists());
@@ -373,13 +384,8 @@ fn malformed_config_keeps_the_typed_infobase_failure_payload() {
     assert!(!command.status.success());
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
     assert_eq!(envelope["command"], "infobase.configuration.export");
-    assert_eq!(envelope["data"]["selection"]["provider"], Value::Null);
-    assert_eq!(
-        envelope["data"]["selection"]["candidates"]
-            .as_array()
-            .map(Vec::len),
-        Some(0)
-    );
+    // Выбор исполнителя не начинался: квитанции нет, а не «никто не подошёл».
+    assert!(envelope["data"]["provider"].is_null());
     assert_eq!(envelope["data"]["published"], false);
     assert_eq!(envelope["data"]["target_state"], "unchanged");
     assert_eq!(envelope["data"]["execution"]["status"], "failed");
@@ -451,18 +457,19 @@ fn designer_exports_database_extension_to_cfe_with_typed_json() {
     assert_eq!(envelope["command"], "infobase.configuration.export");
     assert_eq!(envelope["data"]["state"], "database");
     assert_eq!(envelope["data"]["subject"]["kind"], "extension");
-    assert_eq!(envelope["data"]["selection"]["provider"], "designer");
+    assert_eq!(envelope["data"]["provider"]["selected"], "designer");
     assert_eq!(envelope["data"]["artifact_kind"], "cfe");
     assert_eq!(envelope["data"]["published"], true);
     assert_eq!(envelope["data"]["target_state"], "created");
-    assert_eq!(envelope["data"]["selection"]["provider"], "designer");
+    assert_eq!(envelope["data"]["provider"]["origin"]["kind"], "default");
     assert_eq!(
-        envelope["data"]["selection"]["candidates"][0]["implementation"],
-        "implemented"
-    );
-    assert_eq!(
-        envelope["data"]["selection"]["candidates"][0]["readiness"],
-        "ready"
+        envelope["data"]["provider"]["skipped"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or(0),
+        0,
+        "{}",
+        envelope["data"]["provider"]
     );
     assert_eq!(envelope["data"]["execution"]["status"], "succeeded");
     assert_eq!(envelope["steps"].as_array().map(Vec::len), Some(2));
@@ -744,6 +751,9 @@ fn restore_rejects_a_non_dt_input_and_an_unreadable_one_before_dispatch() {
 }
 
 #[test]
+/// У `infobase restore` в цепочке умолчаний один Конфигуратор: `ibcmd` для DT
+/// экспериментален и назначается только явно. Без Конфигуратора восстанавливать некому.
+#[test]
 fn restore_is_not_dispatched_when_ibcmd_is_the_only_environment() {
     let (dir, config, _base, calls) = setup("IBCMD");
     let input = write_dt(&dir.path().join("transfer/base.dt"));
@@ -763,12 +773,13 @@ fn restore_is_not_dispatched_when_ibcmd_is_the_only_environment() {
 
     assert!(!command.status.success());
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
-    let candidates = envelope["data"]["selection"]["candidates"]
+    assert_eq!(envelope["error"]["code"], "environment_unavailable");
+    assert_eq!(envelope["data"]["provider"]["selected"], Value::Null);
+    let skipped = envelope["data"]["provider"]["skipped"]
         .as_array()
-        .expect("candidates");
-    assert!(candidates.iter().any(|candidate| {
-        candidate["provider"] == "ibcmd" && candidate["implementation"] == "experimental"
-    }));
+        .expect("skipped providers");
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(skipped[0]["provider"], "designer");
     assert!(
         !calls.exists(),
         "experimental IBCMD restore must not dispatch"
@@ -776,7 +787,7 @@ fn restore_is_not_dispatched_when_ibcmd_is_the_only_environment() {
 }
 
 #[test]
-fn dt_uses_designer_when_ibcmd_is_preferred_but_not_implemented() {
+fn dt_uses_designer_by_default_even_when_other_operations_name_ibcmd() {
     let dir = temp_workspace();
     let base = dir.path().join("project");
     let work = dir.path().join("work");
@@ -809,15 +820,17 @@ fn dt_uses_designer_when_ibcmd_is_preferred_but_not_implemented() {
     );
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
     assert_eq!(envelope["command"], "infobase.dump");
-    assert_eq!(envelope["data"]["selection"]["provider"], "designer");
+    assert_eq!(envelope["data"]["provider"]["selected"], "designer");
     assert_eq!(envelope["data"]["published"], true);
     let argv = fs::read_to_string(calls).expect("calls");
     assert!(argv.contains("/DumpIB"));
     assert!(!argv.contains("infobase dump"));
 }
 
+/// Переопределение строгое: названный исполнитель не готов — отказ с причиной, а не
+/// откат на умолчание. Иначе эксперимент, вернувшийся к умолчанию, ничего не измерил.
 #[test]
-fn missing_preferred_ibcmd_falls_back_to_ready_designer_before_dispatch() {
+fn an_override_does_not_fall_back_when_its_provider_is_missing() {
     let dir = temp_workspace();
     let base = dir.path().join("project");
     let work = dir.path().join("work");
@@ -846,32 +859,31 @@ fn missing_preferred_ibcmd_falls_back_to_ready_designer_before_dispatch() {
         .expect("run export");
 
     assert!(
-        command.status.success(),
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&command.stdout),
-        String::from_utf8_lossy(&command.stderr)
+        !command.status.success(),
+        "an override must not fall back: stdout={}",
+        String::from_utf8_lossy(&command.stdout)
     );
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
-    assert_eq!(envelope["data"]["selection"]["provider"], "designer");
+    assert_eq!(envelope["error"]["code"], "environment_unavailable");
+    assert_eq!(envelope["data"]["provider"]["selected"], Value::Null);
+    assert_eq!(envelope["data"]["provider"]["origin"]["kind"], "override");
     assert_eq!(
-        envelope["data"]["selection"]["candidates"][0]["provider"],
-        "ibcmd"
+        envelope["data"]["provider"]["origin"]["file"],
+        "v8project.yaml"
     );
-    assert_eq!(
-        envelope["data"]["selection"]["candidates"][0]["readiness"],
-        "unavailable"
+    let skipped = envelope["data"]["provider"]["skipped"]
+        .as_array()
+        .expect("skipped providers");
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(skipped[0]["provider"], "ibcmd");
+    assert!(
+        !calls.exists(),
+        "the ready Designer must not be tried behind an override"
     );
-    assert_eq!(
-        envelope["data"]["selection"]["candidates"][1]["readiness"],
-        "ready"
-    );
-    assert!(fs::read_to_string(calls)
-        .expect("calls")
-        .contains("/DumpCfg"));
 }
 
 #[test]
-fn missing_preferred_designer_falls_back_to_ready_ibcmd_before_dispatch() {
+fn a_default_chain_skips_the_missing_designer_and_selects_ibcmd() {
     let dir = temp_workspace();
     let base = dir.path().join("project");
     let work = dir.path().join("work");
@@ -901,19 +913,15 @@ fn missing_preferred_designer_falls_back_to_ready_ibcmd_before_dispatch() {
 
     assert!(command.status.success());
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
-    assert_eq!(envelope["data"]["selection"]["provider"], "ibcmd");
+    assert_eq!(envelope["data"]["provider"]["selected"], "ibcmd");
+    assert_eq!(envelope["data"]["provider"]["origin"]["kind"], "default");
     assert_eq!(
-        envelope["data"]["selection"]["candidates"][0]["provider"],
+        envelope["data"]["provider"]["skipped"][0]["provider"],
         "designer"
     );
-    assert_eq!(
-        envelope["data"]["selection"]["candidates"][0]["readiness"],
-        "unavailable"
-    );
-    assert_eq!(
-        envelope["data"]["selection"]["candidates"][1]["readiness"],
-        "ready"
-    );
+    assert!(envelope["data"]["provider"]["skipped"][0]["reason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("environment is not ready")));
     assert!(fs::read_to_string(calls)
         .expect("calls")
         .contains("config save"));
@@ -940,18 +948,13 @@ fn ibcmd_only_environment_cannot_dump_dt_until_capability_is_implemented() {
     assert!(!command.status.success());
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
     assert_eq!(envelope["error"]["code"], "environment_unavailable");
-    assert_eq!(
-        envelope["data"]["selection"]["candidates"][0]["implementation"],
-        "experimental"
-    );
-    assert_eq!(
-        envelope["data"]["selection"]["candidates"][0]["readiness"],
-        "not_checked"
-    );
-    assert_eq!(
-        envelope["data"]["selection"]["candidates"][1]["readiness"],
-        "unavailable"
-    );
+    // `ibcmd` для DT в цепочку умолчаний не входит вовсе: пропущен один Конфигуратор.
+    assert_eq!(envelope["data"]["provider"]["selected"], Value::Null);
+    let skipped = envelope["data"]["provider"]["skipped"]
+        .as_array()
+        .expect("skipped providers");
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(skipped[0]["provider"], "designer");
     assert!(!calls.exists());
     assert!(!output.exists());
 }
@@ -989,15 +992,17 @@ fn thin_client_alone_is_not_reported_as_designer_ready() {
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
     assert_eq!(envelope["error"]["code"], "environment_unavailable");
     assert_eq!(
-        envelope["data"]["selection"]["candidates"][0]["readiness"],
-        "unavailable"
+        envelope["data"]["provider"]["skipped"][0]["provider"],
+        "designer"
     );
     assert!(!calls.exists());
     assert!(!output.exists());
 }
 
+/// `infobase.dbms` нужна, чтобы создать серверную базу, а не чтобы с ней работать:
+/// экспорт на серверном подключении без неё идёт через Конфигуратор как ни в чём не бывало.
 #[test]
-fn incomplete_ibcmd_server_contract_does_not_block_ready_designer_alternate() {
+fn a_server_connection_without_dbms_still_exports_through_the_designer() {
     let dir = temp_workspace();
     let base = dir.path().join("project");
     let work = dir.path().join("work");
@@ -1012,7 +1017,7 @@ fn incomplete_ibcmd_server_contract_does_not_block_ready_designer_alternate() {
     fs::write(
         &config,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\nbuilder: IBCMD\ninfobase:\n  connection: 'Srvr=localhost;Ref=demo'\nsource-set: []\ntools:\n  platform:\n    path: '{}'\n",
+            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'Srvr=localhost;Ref=demo'\nsource-set: []\ntools:\n  platform:\n    path: '{}'\n",
             work.display(),
             platform.display(),
         ),
@@ -1043,15 +1048,8 @@ fn incomplete_ibcmd_server_contract_does_not_block_ready_designer_alternate() {
         String::from_utf8_lossy(&command.stderr)
     );
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
-    assert_eq!(envelope["data"]["selection"]["provider"], "designer");
-    assert_eq!(
-        envelope["data"]["selection"]["candidates"][0]["readiness"],
-        "unavailable"
-    );
-    assert_eq!(
-        envelope["data"]["selection"]["candidates"][1]["readiness"],
-        "ready"
-    );
+    assert_eq!(envelope["data"]["provider"]["selected"], "designer");
+    assert_eq!(envelope["data"]["provider"]["origin"]["kind"], "default");
     let argv = fs::read_to_string(calls).expect("calls");
     assert!(argv.contains("/DumpCfg"));
     assert!(!argv.contains("config save"));
@@ -1072,7 +1070,7 @@ fn complete_server_dbms_contract_is_dispatched_to_ibcmd() {
     fs::write(
         &config,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\nbuilder: IBCMD\ninfobase:\n  connection: 'Srvr=cluster;Ref=demo'\n  dbms:\n    kind: PostgreSQL\n    server: db.example.test\n    name: demo_data\nsource-set: []\ntools:\n  platform:\n    path: '{}'\n",
+            "workPath: '{}'\nformat: DESIGNER\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n  connection: 'Srvr=cluster;Ref=demo'\n  dbms:\n    kind: PostgreSQL\n    server: db.example.test\n    name: demo_data\nsource-set: []\ntools:\n  platform:\n    path: '{}'\n",
             work.display(),
             platform.display(),
         ),
@@ -1098,7 +1096,7 @@ fn complete_server_dbms_contract_is_dispatched_to_ibcmd() {
 
     assert!(command.status.success());
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
-    assert_eq!(envelope["data"]["selection"]["provider"], "ibcmd");
+    assert_eq!(envelope["data"]["provider"]["selected"], "ibcmd");
     let argv = fs::read_to_string(calls).expect("calls");
     assert!(argv.contains("--dbms PostgreSQL"));
     assert!(argv.contains("--database-server db.example.test"));
@@ -1134,7 +1132,7 @@ fn ibcmd_exports_working_configuration_without_designer_fallback() {
         String::from_utf8_lossy(&command.stderr)
     );
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
-    assert_eq!(envelope["data"]["selection"]["provider"], "ibcmd");
+    assert_eq!(envelope["data"]["provider"]["selected"], "ibcmd");
     assert_eq!(envelope["data"]["state"], "working");
     assert_eq!(envelope["data"]["published"], true);
     assert_eq!(fs::read(&output).expect("published cf"), b"payload");
@@ -1171,13 +1169,7 @@ fn invalid_suffix_is_rejected_before_workspace_lock_and_provider_dispatch() {
     assert_eq!(envelope["error"]["kind"], "validation");
     assert_eq!(envelope["error"]["code"], "invalid_argument");
     assert_eq!(envelope["data"]["subject"]["kind"], "main");
-    assert_eq!(envelope["data"]["selection"]["provider"], Value::Null);
-    assert_eq!(
-        envelope["data"]["selection"]["candidates"]
-            .as_array()
-            .map(Vec::len),
-        Some(0)
-    );
+    assert!(envelope["data"]["provider"].is_null());
     assert_eq!(envelope["data"]["target_state"], "unchanged");
     assert_eq!(envelope["data"]["execution"]["status"], "failed");
     assert_eq!(
@@ -1280,7 +1272,7 @@ fn ready_provider_reports_workspace_busy_without_dispatch() {
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
     assert_eq!(envelope["error"]["code"], "workspace_busy");
     assert_eq!(envelope["error"]["kind"], "workspace");
-    assert_eq!(envelope["data"]["selection"]["provider"], "designer");
+    assert_eq!(envelope["data"]["provider"]["selected"], "designer");
     assert_eq!(envelope["data"]["target_state"], "unchanged");
     assert_eq!(envelope["data"]["execution"]["status"], "failed");
     assert_eq!(
@@ -1316,14 +1308,13 @@ fn text_output_uses_the_same_canonical_provider_name_as_json() {
     assert!(!stdout.contains("DesignerBatch"));
     assert!(stdout.contains("published: true"));
     assert!(stdout.contains("subject: infobase"));
-    assert!(stdout.contains("implementation: implemented"));
-    assert!(stdout.contains("readiness: ready"));
+    assert!(stdout.contains("provider: designer (default)"));
     assert!(stdout.contains("artifact kind: dt"));
     assert!(stdout.contains("execution status: succeeded"));
 }
 
 #[test]
-fn text_output_explains_unavailable_preference_and_ready_alternate() {
+fn text_output_explains_the_skipped_default_and_the_selected_alternate() {
     let dir = temp_workspace();
     let base = dir.path().join("project");
     let work = dir.path().join("work");
@@ -1331,8 +1322,8 @@ fn text_output_explains_unavailable_preference_and_ready_alternate() {
     let platform = dir.path().join("platform");
     fs::create_dir_all(&platform).expect("platform");
     let calls = dir.path().join("calls.log");
-    write_designer(&platform.join("1cv8"), &calls);
-    write_config(&config, &base, &work, "IBCMD", &platform);
+    write_ibcmd(&platform.join("ibcmd"), &calls);
+    write_config(&config, &base, &work, "DESIGNER", &platform);
     let output = base.join("dist/main.cf");
 
     let command = v8_runner_command()
@@ -1350,14 +1341,14 @@ fn text_output_explains_unavailable_preference_and_ready_alternate() {
         .output()
         .expect("run text export");
 
-    assert!(command.status.success());
+    assert!(
+        command.status.success(),
+        "stdout={}",
+        String::from_utf8_lossy(&command.stdout)
+    );
     let stdout = String::from_utf8_lossy(&command.stdout);
-    assert!(stdout.contains("provider: designer"));
-    assert!(stdout.contains("evidence: argv_tested"));
-    assert!(stdout.contains("candidate ibcmd:"));
-    assert!(stdout.contains("implementation=implemented, readiness=unavailable"));
-    assert!(stdout.contains("candidate designer:"));
-    assert!(stdout.contains("implementation=implemented, readiness=ready"));
+    assert!(stdout.contains("provider: ibcmd (default)"), "{stdout}");
+    assert!(stdout.contains("[skipped:designer]"), "{stdout}");
 }
 
 #[test]
@@ -1392,7 +1383,7 @@ fn provider_failure_preserves_an_existing_target() {
 
     assert!(!command.status.success());
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
-    assert_eq!(envelope["data"]["selection"]["provider"], "designer");
+    assert_eq!(envelope["data"]["provider"]["selected"], "designer");
     assert_eq!(envelope["data"]["published"], false);
     assert_eq!(envelope["data"]["target_state"], "unchanged");
     assert_eq!(envelope["data"]["execution"]["status"], "failed");
@@ -1462,7 +1453,7 @@ fn provider_failure_never_dispatches_a_ready_alternate_after_spawn() {
 
     assert!(!command.status.success());
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
-    assert_eq!(envelope["data"]["selection"]["provider"], "designer");
+    assert_eq!(envelope["data"]["provider"]["selected"], "designer");
     assert_eq!(envelope["data"]["published"], false);
     assert_eq!(
         fs::read_to_string(calls).expect("single provider call"),
@@ -1626,7 +1617,7 @@ fn no_ready_provider_wins_over_workspace_contention_without_side_effects() {
     fs::write(
         &config,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\nbuilder: IBCMD\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set: []\ntools:\n  platform:\n    path: '{}'\n    strict: true\n    version: '8.3.27'\n",
+            "workPath: '{}'\nformat: DESIGNER\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set: []\ntools:\n  platform:\n    path: '{}'\n    strict: true\n    version: '8.3.27'\n",
             work.display(),
             platform.display()
         ),

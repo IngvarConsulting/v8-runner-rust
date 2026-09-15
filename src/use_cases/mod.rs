@@ -40,6 +40,8 @@ mod launch_keys;
 pub mod load_artifact;
 /// Text-mode live progress events shared by CLI-facing use cases.
 mod progress;
+pub mod provider_selection;
+pub mod publish_infobase;
 /// Transport-neutral request DTOs consumed by use cases.
 pub mod request;
 /// Transport-neutral use-case error and failure contracts.
@@ -60,3 +62,16 @@ pub mod transport;
 pub(crate) mod vanessa;
 /// Shared locking for commands that mutate the same workspace.
 pub mod workspace_lock;
+
+/// Отказ операции, которой назначен исполнитель, не умеющий её делать.
+///
+/// Валидация конфига такого не пропускает, поэтому сюда попадает только строка
+/// матрицы, опередившая код: типизированный отказ вместо паники.
+pub(crate) fn unimplemented_provider(
+    operation: crate::domain::capability::Operation,
+    provider: crate::domain::capability::Provider,
+) -> crate::support::error::AppError {
+    crate::support::error::AppError::CapabilityUnavailable(format!(
+        "provider '{provider}' is not implemented for {operation} in this build of the runner"
+    ))
+}

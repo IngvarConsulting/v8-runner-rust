@@ -35,6 +35,7 @@ rmcp = { version = "1.2.0", default-features = false, features = ["client", "mac
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+russh = { version = "0.63", default-features = false, features = ["ring"] }
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 unicode-casefold = "0.2"
@@ -51,6 +52,7 @@ predicates = "3"
 insta = "1"
 quote = "1"
 syn = { version = "2", features = ["full", "visit"] }
+rand = { version = "0.10", features = ["thread_rng"] }
 
 [profile.release]
 opt-level = "z"

@@ -343,7 +343,7 @@ fn write_config(
     platform_version: Option<&str>,
 ) {
     let mut config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         platform_path.display(),
     );
@@ -469,7 +469,7 @@ fn setup_mcp_va_project_with_options(
         )
     };
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\ntests:\n  va:\n    params_path: '{}'\n    profile: smoke\n    profiles:\n      smoke:\n        feature_path: '{}'\n        features_to_run:\n          - login\n        filter_tags:\n          - '@smoke'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  client_mcp:\n    port: 9874\n  va:\n    epf_path: '{}'\n  platform:\n    path: '{}'\n{}",
+        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\ntests:\n  va:\n    params_path: '{}'\n    profile: smoke\n    profiles:\n      smoke:\n        feature_path: '{}'\n        features_to_run:\n          - login\n        filter_tags:\n          - '@smoke'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  client_mcp:\n    port: 9874\n  va:\n    epf_path: '{}'\n  platform:\n    path: '{}'\n{}",
         work_path.display(),
         va_params.display(),
         features_dir.display(),
@@ -1788,4 +1788,73 @@ fn launch_non_mcp_rejects_mcp_options() {
     assert!(String::from_utf8_lossy(&output.stderr).contains(
         "--mcp-config, --mcp-port, --mode, --wait-ready, and MCP_SCENARIO are supported only for `launch mcp`"
     ));
+}
+
+/// `launch web` открывает объявленный адрес; без адреса — отказ, который называет,
+/// откуда адрес берётся. Раннер не выводит его из строки подключения.
+#[test]
+fn launch_web_without_a_declared_address_is_refused_with_the_reason() {
+    let (_dir, config_path, _install_dir, _work_path) = setup_project();
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "web",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!output.status.success());
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["error"]["kind"], "validation");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("infobase.web.url"), "{message}");
+    assert!(message.contains("publish"), "{message}");
+}
+
+/// Превью `launch web` называет открывалку системы и адрес, браузер не трогает.
+#[test]
+fn launch_web_dry_run_names_the_opener_and_the_address() {
+    let (dir, config_path, _install_dir, _work_path) = setup_project();
+    let yaml = fs::read_to_string(&config_path).expect("config");
+    let yaml = yaml.replace(
+        "infobase:\n  connection: 'File=/tmp/ib'\n",
+        "infobase:\n  connection: 'File=/tmp/ib'\n  web:\n    url: http://localhost/demo\n",
+    );
+    fs::write(&config_path, yaml).expect("config");
+    let _ = dir;
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "launch",
+            "web",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["data"]["mode"], "web");
+    assert_eq!(payload["data"]["url"], "http://localhost/demo");
+    assert_eq!(payload["data"]["provider_dispatched"], false);
+    assert!(payload["data"]["platform_resolution"].is_null());
+    let args = payload["data"]["plan"]["args"]
+        .as_array()
+        .expect("plan args");
+    assert_eq!(
+        args.last().and_then(Value::as_str),
+        Some("http://localhost/demo")
+    );
 }

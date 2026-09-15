@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crate::config::model::{AppConfig, BuilderBackend, SourceFormat, SourceSetConfig};
+use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig};
+use crate::domain::capability::{Operation, Provider};
 use crate::domain::issue::{EdtIssue, Issue, IssueSeverity, ObjectIssue};
 use crate::domain::syntax::{SyntaxCheckResult, SyntaxCheckStatus, SyntaxIssueSummary};
 use crate::parsers::designer_validation;
@@ -32,9 +33,9 @@ use crate::use_cases::source_inventory::SourceSetInventory;
 use tracing::debug;
 
 const SUPPORTED_DESIGNER_SYNTAX_ERROR: &str =
-    "syntax currently supports only builder=DESIGNER and format=DESIGNER";
+    "syntax currently supports only the Designer provider and format=DESIGNER";
 const SUPPORTED_EDT_SYNTAX_ERROR: &str =
-    "syntax edt currently supports only builder=DESIGNER and format=EDT";
+    "syntax edt currently supports only the Designer provider and format=EDT";
 static LOG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub fn execute(
@@ -162,25 +163,36 @@ fn run_syntax_with_context(
     debug!(path = %log_path.display(), "syntax platform log reserved");
 
     let mut utilities = PlatformUtilities::from_config(config);
-    let location = match utilities.locate(UtilityType::V8) {
-        Ok(location) => location,
-        Err(error) => {
+    let selected = match crate::use_cases::provider_selection::select(
+        config,
+        &mut utilities,
+        crate::domain::capability::Operation::Syntax,
+    ) {
+        Ok(selected) => selected,
+        Err((error, receipt)) => {
             let message = error.to_string();
-            let app_error = AppError::from(error);
-            return Err(SyntaxExecutionFailure::with_payload(
-                app_error,
-                failed_result(
-                    invocation.kind.check_name(),
-                    SyntaxCheckStatus::ToolFailed,
-                    -1,
-                    started,
-                    vec![],
-                    None,
-                    Some(message),
-                    Some(log_path),
-                ),
-            ));
+            let mut result = failed_result(
+                invocation.kind.check_name(),
+                SyntaxCheckStatus::ToolFailed,
+                -1,
+                started,
+                vec![],
+                None,
+                Some(message),
+                None,
+            );
+            result.provider = Some(receipt);
+            return Err(SyntaxExecutionFailure::with_payload(error, result));
         }
+    };
+    let receipt = selected.receipt;
+    let Some(location) = selected.location else {
+        return Err(SyntaxExecutionFailure::without_payload(
+            crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::Syntax,
+                selected.provider,
+            ),
+        ));
     };
 
     let runner = utilities.runner_for(UtilityType::V8);
@@ -208,23 +220,23 @@ fn run_syntax_with_context(
         Err(error) => {
             let app_error = AppError::from(error);
             let message = app_error.to_string();
-            return Err(SyntaxExecutionFailure::with_payload(
-                app_error,
-                failed_result(
-                    invocation.kind.check_name(),
-                    SyntaxCheckStatus::ToolFailed,
-                    -1,
-                    started,
-                    vec![],
-                    None,
-                    Some(message),
-                    Some(log_path),
-                ),
-            ));
+            let mut result = failed_result(
+                invocation.kind.check_name(),
+                SyntaxCheckStatus::ToolFailed,
+                -1,
+                started,
+                vec![],
+                None,
+                Some(message),
+                Some(log_path),
+            );
+            result.provider = Some(receipt);
+            return Err(SyntaxExecutionFailure::with_payload(app_error, result));
         }
     };
 
-    let result = build_result(invocation.kind.check_name(), platform_result, started);
+    let mut result = build_result(invocation.kind.check_name(), platform_result, started);
+    result.provider = Some(receipt);
     match result.status {
         SyntaxCheckStatus::Clean => Ok(result),
         SyntaxCheckStatus::IssuesFound | SyntaxCheckStatus::ToolFailed => {
@@ -394,7 +406,9 @@ impl HasClientScopes for DesignerModulesSyntaxArgs {
 }
 
 fn validate_designer_supported_matrix(config: &AppConfig) -> Option<AppError> {
-    if config.builder != BuilderBackend::Designer || config.format != SourceFormat::Designer {
+    if config.selected_provider(Operation::Syntax) != Provider::Designer
+        || config.format != SourceFormat::Designer
+    {
         Some(AppError::Validation(
             SUPPORTED_DESIGNER_SYNTAX_ERROR.to_owned(),
         ))
@@ -404,7 +418,9 @@ fn validate_designer_supported_matrix(config: &AppConfig) -> Option<AppError> {
 }
 
 fn validate_edt_supported_matrix(config: &AppConfig) -> Option<AppError> {
-    if config.builder != BuilderBackend::Designer || config.format != SourceFormat::Edt {
+    if config.selected_provider(Operation::Syntax) != Provider::Designer
+        || config.format != SourceFormat::Edt
+    {
         Some(AppError::Validation(SUPPORTED_EDT_SYNTAX_ERROR.to_owned()))
     } else {
         None
@@ -665,6 +681,7 @@ fn run_edt_syntax(
     let stderr = (!stderr_lines.is_empty()).then_some(stderr_lines.join("\n"));
     let log_read_warning = (!log_warnings.is_empty()).then_some(log_warnings.join("\n"));
     let result = SyntaxCheckResult {
+        provider: None,
         status,
         exit_code,
         check_name: "edt".to_owned(),
@@ -830,6 +847,7 @@ fn build_result(
     }
 
     SyntaxCheckResult {
+        provider: None,
         status,
         exit_code,
         check_name: check_name.to_owned(),
@@ -853,6 +871,7 @@ fn failed_result(
     platform_log_path: Option<PathBuf>,
 ) -> SyntaxCheckResult {
     SyntaxCheckResult {
+        provider: None,
         status,
         exit_code,
         check_name: check_name.to_owned(),
@@ -978,8 +997,8 @@ mod tests {
         run_syntax_with_context, status_from_exit_code,
     };
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, SourceFormat, SourceSetConfig, SourceSetPurpose,
-        TestsConfig, ToolsConfig,
+        AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
+        ToolsConfig,
     };
     use crate::domain::issue::{Issue, IssueSeverity};
     use crate::domain::syntax::SyntaxCheckStatus;
@@ -1186,7 +1205,8 @@ mod tests {
             work_path: work_path.to_path_buf(),
             execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
@@ -1215,7 +1235,8 @@ mod tests {
             work_path: work_path.to_path_buf(),
             execution_timeout: 300_000,
             format: SourceFormat::Edt,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![
                 SourceSetConfig {

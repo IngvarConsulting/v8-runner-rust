@@ -4,7 +4,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::config::model::{AppConfig, BuilderBackend, SourceFormat, SourceSetConfig};
+use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig};
+use crate::domain::capability::{Operation, Provider};
 use crate::domain::issue::{EdtIssue, Issue, IssueSeverity};
 use crate::domain::syntax::{SyntaxCheckResult, SyntaxCheckStatus, SyntaxIssueSummary};
 use crate::parsers::edt_validation;
@@ -17,7 +18,7 @@ use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 
 const SUPPORTED_EDT_SYNTAX_ERROR: &str =
-    "syntax edt currently supports only builder=DESIGNER and format=EDT";
+    "syntax edt currently supports only the Designer provider and format=EDT";
 static LOG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Executes MCP `check_syntax_edt` through the shared EDT session actor.
@@ -56,7 +57,9 @@ pub async fn execute(
         }
     };
 
-    if config.builder != BuilderBackend::Designer || config.format != SourceFormat::Edt {
+    if config.selected_provider(Operation::Syntax) != Provider::Designer
+        || config.format != SourceFormat::Edt
+    {
         let error = AppError::Validation(SUPPORTED_EDT_SYNTAX_ERROR.to_owned());
         return Ok(Err(SyntaxExecutionFailure::with_payload(
             error,
@@ -274,6 +277,7 @@ pub async fn execute(
     let stderr = (!stderr_lines.is_empty()).then_some(stderr_lines.join("\n"));
     let log_read_warning = (!log_warnings.is_empty()).then_some(log_warnings.join("\n"));
     let result = SyntaxCheckResult {
+        provider: None,
         status,
         exit_code,
         check_name: "edt".to_owned(),
@@ -394,6 +398,7 @@ fn failed_result(
     platform_log_path: Option<PathBuf>,
 ) -> SyntaxCheckResult {
     SyntaxCheckResult {
+        provider: None,
         status,
         exit_code,
         check_name: check_name.to_owned(),

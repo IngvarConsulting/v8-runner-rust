@@ -18,6 +18,7 @@ nuances вынесены в [DEEP_DIVE.md](DEEP_DIVE.md).
 - [`tools.platform`](#toolsplatform)
 - [`tools.enterprise`](#toolsenterprise)
 - [`tools.edt_cli`](#toolsedt_cli)
+- [`tools.designer_agent`](#toolsdesigner_agent)
 - [Неподдержанные ключи](#неподдержанные-ключи)
 
 ## Как получить стартовый конфиг
@@ -40,7 +41,6 @@ v8-runner config init
 - не перезаписывает существующий файл без `--force`;
 - не пишет synthetic `CONFIGURATION`: если конфигурационный `source-set` не найден,
   завершается validation error;
-- для `--builder IBCMD` отклоняет autodetected external roots как unsupported config combination.
 
 Автообнаружение опирается на содержимое marker files, а не на имена каталогов:
 
@@ -102,7 +102,7 @@ artifact без привязки к release tag.
 `v8project.yaml` использует не один стиль на весь документ. Это текущий loader contract, и docs
 ниже повторяют именно literal YAML keys.
 
-- top-level app keys: `workPath`, `execution_timeout`, `format`, `builder`, `infobase`,
+- top-level app keys: `workPath`, `execution_timeout`, `format`, `providers`, `infobase`,
   `source-set`, `build`, `tools`, `mcp`, `tests`;
 - `build` использует `partialLoadThreshold`;
 - `mcp.*` и `tests.*` используют `snake_case`;
@@ -112,6 +112,8 @@ artifact без привязки к release tag.
   - `auto-start`
   - `startup_timeout_ms`
   - `command_timeout_ms`
+- canonical key для агента Конфигуратора: `tools.designer_agent`; child keys —
+  `attach`, `base-dir`, `port`, `host-key` и `startup_timeout_ms`.
 
 Ниже фиксируются только поддержанные canonical keys.
 
@@ -121,7 +123,6 @@ artifact без привязки к release tag.
 workPath: build
 execution_timeout: 300000
 format: EDT
-builder: DESIGNER
 
 infobase:
   connection: "File=build/ib"
@@ -163,6 +164,9 @@ tools:
     auto-start: false
     startup_timeout_ms: 300000
     command_timeout_ms: 300000
+  designer_agent:
+    port: 1543               # управляемый агент; либо attach: host:port
+    startup_timeout_ms: 120000
 
 mcp:
   http:
@@ -225,8 +229,7 @@ Local overlay может задавать machine-local секции:
 Local overlay не может менять project identity:
 
 - `source-set`;
-- `format`;
-- `builder`.
+- `format`.
 
 Пример:
 
@@ -290,23 +293,41 @@ selection для infobase export не создаёт `workPath` и runtime-фа�
 - Значения: `DESIGNER`, `EDT`
 - По умолчанию: `DESIGNER`
 
-### `builder`
+### `providers`
 
-- Тип: enum
-- Значения: `DESIGNER`, `IBCMD`
-- По умолчанию: `DESIGNER`
+- Тип: объект `операция → исполнитель`
+- Обязателен: нет
 
-Ограничения:
+Исполнителя каждой операции раннер выбирает сам по матрице возможностей — паре
+«операция и вид информационной базы». Ключ нужен только для того, чтобы назначить
+исполнителя вручную: поставить эксперимент или обойти сломанное умолчание.
 
-- `builder=IBCMD` поддерживает `init`, `build`, source `dump` и `extensions`; для infobase
-  export значение `builder` задаёт preferred provider, после чего runner выбирает первый
-  `implemented + ready` candidate до spawn;
-- IBCMD DT остаётся experimental до реализации exclusive-access preflight, поэтому
-  `infobase dump` использует готовый Designer, если он доступен;
-- для server connection IBCMD-кандидат готов только при наличии `infobase.dbms.kind`,
-  `infobase.dbms.server`, `infobase.dbms.name`; в infobase export отсутствие этих полей не
-  блокирует готовый Designer alternate;
-- для file connection секция `infobase.dbms` запрещена.
+```yaml
+providers:
+  build: ibcmd
+  infobase.configuration.export: ibcmd
+```
+
+Правила:
+
+- значение — одно имя из закрытого набора `designer`, `agent`, `ibcmd`, `ibcmd-rs`,
+  `webinst`; назначенный исполнитель обязан реализовывать операцию на этой базе;
+- ключ принимается только для операции, у которой на этой базе есть выбор; для
+  операции с одним исполнителем это ошибка конфигурации, а не подтверждение очевидного;
+- переопределение строгое: если названный исполнитель не готов, команда отказывает с
+  причиной и на умолчание не откатывается;
+- допустимые ключи: `init`, `build`, `load`, `dump`, `extensions`,
+  `infobase.configuration.export`, `infobase.dump`, `infobase.restore`, `syntax`, `make`;
+- ключ разрешён и в `v8project.local.yaml` — для машинно-локального эксперимента; в
+  квитанции ответа видно, из какого файла он пришёл.
+
+Умолчания по операциям: `init`, `build`, `dump` — Конфигуратор, затем `ibcmd`;
+`infobase configuration export` — Конфигуратор, затем `ibcmd`; `infobase dump` и
+`infobase restore` — Конфигуратор (`ibcmd` для DT остаётся экспериментальным и
+назначается только явно); `load`, `syntax`, `make` — только Конфигуратор;
+`extensions` — только `ibcmd`.
+
+Ключ `builder` снят: конфиг с ним не проходит валидацию, а ошибка называет замену.
 
 ### `infobase`
 
@@ -329,12 +350,40 @@ selection для infobase export не создаёт `workPath` и runtime-фа�
 
 Credentials самой информационной базы.
 
+#### `infobase.web`
+
+- Тип: объект
+- Обязателен: нет
+
+У базы два адреса. По `infobase.connection` раннер её **администрирует**; по
+`infobase.web.url` её **открывают** клиентом или браузером. Строка `ws=…` в
+`infobase.connection` не принимается: она называет второй адрес, а не первый, и чем
+администрировать базу, из неё не следует.
+
+```yaml
+infobase:
+  connection: "Srvr=srv:1541;Ref=demo"
+  web:
+    server: apache24            # iis | apache2 | apache22 | apache24
+    wsdir: demo                 # виртуальный каталог
+    dir: /var/www/demo          # физический каталог, должен существовать
+    conf: /etc/httpd/httpd.conf # обязателен для apache2 и apache22
+    os-auth: false              # только для iis
+    url: http://localhost/demo  # адрес для launch web
+```
+
+`server`, `wsdir` и `dir` нужны команде `publish`; `url` — команде `launch web`. У
+файловой и кластерной базы адрес появляется после публикации, у автономного сервера
+известен сразу. Секция разрешена и в `v8project.local.yaml`.
+
 #### `infobase.dbms`
 
 - Тип: объект
 - Обязателен: нет
 
-Используется только для `builder=IBCMD` + server connection.
+Нужна там, где раннер идёт в СУБД напрямую: создать серверную информационную базу
+(`init` с `providers.init: ibcmd`). Для обычной работы с уже существующей серверной базой
+секция не требуется и валидацией не запрашивается.
 
 Поддержанные поля:
 
@@ -499,7 +548,8 @@ source-set build, а `launch mcp` и `launch mcp va` расширение не �
 с `--sources` он указывает `source.path` на
 `build/tools/onec-client-mcp-devkit/exts/client-mcp` и `source.format: EDT`, без
 `--sources` указывает `artifact.path` на скачанный `client_mcp.cfe`. Artifact-режим
-доступен только для `builder=DESIGNER`; для `builder=IBCMD` используйте `--sources`.
+доступен, только когда сборку исполняет Конфигуратор; при `providers.build: ibcmd`
+используйте `--sources`.
 
 ### `tools.va`
 
@@ -620,6 +670,65 @@ EDT-вызове.
 
 - Тип: integer
 - По умолчанию: `300000`
+
+## `tools.designer_agent`
+
+Точка входа агента Конфигуратора для провайдера `agent`. Режим объявлен ключами: без
+`attach` раннер поднимает агента сам (`managed`), с `attach` — подключается к агенту,
+поднятому без него (`attached`), не добавляет ему флагов, не перезапускает и не
+поднимает свой рядом. Ключи двух режимов не смешиваются: `attach` вместе с `port` или
+`host-key` — ошибка валидации, `base-dir` без `attach` — тоже.
+
+SSH-клиент встроен в раннер: внешний `ssh` не нужен ни на одной ОС. Сессия идёт без
+псевдотерминала; учётные данные — `infobase.user` и `infobase.password`, у базы без
+пользователей — пустая пара. Готовность агента доказывает успешная аутентификация, а не
+открытый порт. Ключ хоста агента не проверяется: у управляемого его создаёт платформа на
+этой же машине, у чужого — адрес назвал пользователь.
+
+Управляемый агент поднимается как `1cv8 DESIGNER <база> /AgentMode /AgentPort <port>
+/AgentListenAddress 127.0.0.1 /AgentSSHHostKeyAuto /AgentBaseDir <workPath>/agent/base`,
+поэтому для файловой и кластерной базы нужна локальная платформа; результат команд
+читается с диска из этого каталога. Журнал сессии — `workPath/logs/platform/<команда>-<набор>-agent.log`.
+
+Секция целиком допустима в `v8project.local.yaml`: адрес чужого агента — свойство
+машины.
+
+### `tools.designer_agent.attach`
+
+- Тип: строка `host:port`
+- Обязателен: нет
+
+Агент, поднятый вне раннера. Исключает `port` и `host-key`.
+
+### `tools.designer_agent.base-dir`
+
+- Тип: путь
+- Обязателен: только вместе с `attach` для операций, читающих результат с диска (`dump`)
+
+`AgentBaseDir` чужого агента: относительно его пользовательского каталога агент
+трактует пути команд.
+
+### `tools.designer_agent.port`
+
+- Тип: integer
+- По умолчанию: `1543`
+
+Порт управляемого агента.
+
+### `tools.designer_agent.host-key`
+
+- Тип: путь
+- Обязателен: нет
+
+Закрытый ключ хоста управляемого агента. Без него платформа берёт или создаёт свой
+(`/AgentSSHHostKeyAuto`).
+
+### `tools.designer_agent.startup_timeout_ms`
+
+- Тип: integer
+- По умолчанию: `120000`
+
+Сколько ждать, пока управляемый агент примет первую аутентифицированную сессию.
 
 ## Неподдержанные ключи
 

@@ -1,11 +1,12 @@
 ---
 id: DEC.2026-09-14.PROVIDER-CHOSEN-PER-OPERATION
-status: planned
+status: active
 governs: product
-realized: null
+realized: src/domain/capability.rs::an_experimental_provider_never_leads_a_default_chain
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [CTR.WIRE.INFOBASE-CONFIGURATION-EXPORT-DATA, CTR.WIRE.INFOBASE-DUMP-DATA, CTR.WIRE.INFOBASE-RESTORE-DATA]
+changes: [CTR.WIRE.INFOBASE-CONFIGURATION-EXPORT-DATA, CTR.WIRE.INFOBASE-DUMP-DATA, CTR.WIRE.INFOBASE-RESTORE-DATA]
 ---
 
 # Исполнителя выбирает пара «операция и цель»

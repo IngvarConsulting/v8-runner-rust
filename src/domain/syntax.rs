@@ -20,6 +20,10 @@ pub struct SyntaxIssueSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SyntaxCheckResult {
+    /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<crate::domain::capability::ProviderReceipt>,
+
     pub status: SyntaxCheckStatus,
     pub exit_code: i32,
     pub check_name: String,

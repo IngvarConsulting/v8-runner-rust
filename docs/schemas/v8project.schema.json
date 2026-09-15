@@ -12,13 +12,6 @@
       },
       "type": "object"
     },
-    "BuilderBackendSchema": {
-      "enum": [
-        "DESIGNER",
-        "IBCMD"
-      ],
-      "type": "string"
-    },
     "ClientMcpToolSchema": {
       "additionalProperties": false,
       "properties": {
@@ -52,6 +45,46 @@
             "integer",
             "null"
           ]
+        }
+      },
+      "type": "object"
+    },
+    "DesignerAgentSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "attach": {
+          "description": "`host:port` of a Designer agent started outside the runner (attached mode). Excludes `port` and `host-key`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base-dir": {
+          "description": "`AgentBaseDir` of the attached agent: where its commands read and write files. Needs `attach`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "host-key": {
+          "description": "Private host key file for the runner-launched agent. Absent: the platform generates one (`/AgentSSHHostKeyAuto`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "port": {
+          "description": "Port the runner-launched agent listens on (managed mode). Default 1543.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "startup_timeout_ms": {
+          "description": "Time limit for the runner-launched agent to accept the first authenticated session, in milliseconds.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
         }
       },
       "type": "object"
@@ -214,11 +247,75 @@
             "string",
             "null"
           ]
+        },
+        "web": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InfobaseWebSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Client address and web-server publication settings."
         }
       },
       "required": [
         "connection"
       ],
+      "type": "object"
+    },
+    "InfobaseWebSchema": {
+      "additionalProperties": false,
+      "description": "Publication and client-address settings for the target infobase.",
+      "properties": {
+        "conf": {
+          "description": "Web server configuration file (`webinst -confpath`); required for apache2 and apache22.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dir": {
+          "description": "Physical directory the publication is written to (`webinst -dir`); must exist.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "os-auth": {
+          "description": "Use OS authentication (`webinst -osauth`); IIS only.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "server": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WebServerKindSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Web server to publish on with `v8-runner publish`."
+        },
+        "url": {
+          "description": "Address a client or a browser opens the infobase at; `launch web` uses it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wsdir": {
+          "description": "Virtual directory name (`webinst -wsdir`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     },
     "McpExecutionSchema": {
@@ -304,6 +401,145 @@
             "string",
             "null"
           ]
+        }
+      },
+      "type": "object"
+    },
+    "ProviderSchema": {
+      "description": "Executors the runner can dispatch to. Names say who does the work, not how it is started.",
+      "enum": [
+        "designer",
+        "agent",
+        "ibcmd",
+        "ibcmd-rs",
+        "webinst"
+      ],
+      "type": "string"
+    },
+    "ProvidersSchema": {
+      "additionalProperties": false,
+      "description": "One optional override per operation that has a choice of executor.",
+      "properties": {
+        "build": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `build`."
+        },
+        "dump": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `dump`."
+        },
+        "extensions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `extensions`."
+        },
+        "infobase.configuration.export": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `infobase configuration export`."
+        },
+        "infobase.dump": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `infobase dump`."
+        },
+        "infobase.restore": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `infobase restore`."
+        },
+        "init": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `init`."
+        },
+        "load": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `load`."
+        },
+        "make": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `make`."
+        },
+        "publish": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `publish`. Accepted by the schema so validation can say the operation has no choice."
+        },
+        "syntax": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `syntax`."
         }
       },
       "type": "object"
@@ -489,6 +725,10 @@
           "$ref": "#/$defs/ClientMcpToolSchema",
           "description": "onec-client-mcp tool settings."
         },
+        "designer_agent": {
+          "$ref": "#/$defs/DesignerAgentSchema",
+          "description": "Designer agent endpoint: the agent the runner launches, or one to attach to."
+        },
         "edt_cli": {
           "$ref": "#/$defs/EdtCliSchema",
           "description": "EDT CLI discovery and execution settings."
@@ -597,6 +837,16 @@
       },
       "type": "object"
     },
+    "WebServerKindSchema": {
+      "description": "Web server a publication is written to.",
+      "enum": [
+        "iis",
+        "apache2",
+        "apache22",
+        "apache24"
+      ],
+      "type": "string"
+    },
     "YaxunitTestSchema": {
       "additionalProperties": false,
       "properties": {
@@ -616,10 +866,6 @@
       "$ref": "#/$defs/BuildSchema",
       "description": "Build pipeline settings."
     },
-    "builder": {
-      "$ref": "#/$defs/BuilderBackendSchema",
-      "description": "Backend used for build/load operations."
-    },
     "execution_timeout": {
       "description": "Global execution budget for public CLI and MCP commands in milliseconds.",
       "format": "uint64",
@@ -638,6 +884,10 @@
     "mcp": {
       "$ref": "#/$defs/McpSchema",
       "description": "MCP server transport and execution settings."
+    },
+    "providers": {
+      "$ref": "#/$defs/ProvidersSchema",
+      "description": "Per-operation executor overrides. A missing key means the default chain from the\ncapability matrix; a present key means exactly that provider and no fallback."
     },
     "source-set": {
       "default": [],

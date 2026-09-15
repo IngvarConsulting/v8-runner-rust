@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::config::model::{AppConfig, BuilderBackend, SourceFormat, SourceSetPurpose};
+use crate::config::model::{AppConfig, SourceFormat, SourceSetPurpose};
 use crate::domain::dump::{DumpMode, DumpResult, DumpSelectorResult};
 use crate::domain::partial_dump_selector::PartialDumpSelector;
 #[cfg(test)]
@@ -31,6 +31,7 @@ use crate::use_cases::request::{DumpModeRequest, DumpRequest as DumpArgs};
 use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
 use tracing::debug;
 
+mod agent;
 mod coordinator;
 mod helpers;
 
@@ -52,7 +53,8 @@ use crate::use_cases::source_inventory::SourceSetInventory;
 
 #[cfg(test)]
 const DUMP_COMMAND: &str = crate::use_cases::context::CommandName::Dump.as_str();
-const SUPPORTED_DUMP_ERROR: &str = "dump currently supports only builder=DESIGNER or IBCMD";
+const SUPPORTED_DUMP_ERROR: &str =
+    "dump currently supports only the Designer, ibcmd or agent provider";
 const PARTIAL_OBJECTS_REQUIRED_ERROR: &str = "partial dump requires at least one object";
 const NON_PARTIAL_OBJECTS_ERROR: &str = "dump objects are supported only for mode 'partial'";
 const ORPHAN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -965,7 +967,7 @@ mod tests {
         PARTIAL_OBJECT_BLANK_ERROR, PARTIAL_OBJECT_CONTROL_ERROR,
     };
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, PlatformToolConfig, SourceFormat, SourceSetConfig,
+        AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
         SourceSetPurpose, TestsConfig, ToolsConfig,
     };
     use crate::domain::dump::{DumpMode, DumpSelectorResult};
@@ -1245,26 +1247,25 @@ exit 0"#,
     }
 
     fn build_config(base_path: &Path, work_path: &Path, platform_path: &Path) -> AppConfig {
-        build_config_with_builder(
-            base_path,
-            work_path,
-            platform_path,
-            BuilderBackend::Designer,
-        )
+        build_config_with_builder(base_path, work_path, platform_path, Default::default())
     }
 
     fn build_config_with_builder(
         base_path: &Path,
         work_path: &Path,
         platform_path: &Path,
-        builder: BuilderBackend,
+        providers: std::collections::BTreeMap<
+            crate::domain::capability::Operation,
+            crate::domain::capability::Provider,
+        >,
     ) -> AppConfig {
         AppConfig {
             base_path: base_path.to_path_buf(),
             work_path: work_path.to_path_buf(),
             execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder,
+            providers,
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![
                 SourceSetConfig {
@@ -1297,9 +1298,12 @@ exit 0"#,
         work_path: &Path,
         platform_path: &Path,
         edt_path: &Path,
-        builder: BuilderBackend,
+        providers: std::collections::BTreeMap<
+            crate::domain::capability::Operation,
+            crate::domain::capability::Provider,
+        >,
     ) -> AppConfig {
-        let mut config = build_config_with_builder(base_path, work_path, platform_path, builder);
+        let mut config = build_config_with_builder(base_path, work_path, platform_path, providers);
         config.format = SourceFormat::Edt;
         config.tools.edt_cli.path = Some(edt_path.to_path_buf());
         config
@@ -1398,7 +1402,8 @@ exit 0"#,
         let dir = tempdir().expect("tempdir");
         let config = AppConfig {
             format: SourceFormat::Edt,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             ..build_config(dir.path(), dir.path(), dir.path())
         };
 
@@ -1410,8 +1415,12 @@ exit 0"#,
     #[test]
     fn ibcmd_dump_support_matrix_accepts_designer_format_with_ibcmd_builder() {
         let dir = tempdir().expect("tempdir");
-        let config =
-            build_config_with_builder(dir.path(), dir.path(), dir.path(), BuilderBackend::Ibcmd);
+        let config = build_config_with_builder(
+            dir.path(),
+            dir.path(),
+            dir.path(),
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
 
         let error = validate_supported_matrix(&config);
 
@@ -1967,7 +1976,7 @@ exit 0"#,
             dir.path(),
             &dir.path().join("work"),
             &script,
-            BuilderBackend::Ibcmd,
+            crate::domain::capability::ibcmd_for_every_choice(),
         );
 
         let failure = run_dump(
@@ -2145,7 +2154,12 @@ exit 0"#,
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
         write_ibcmd_dump_script(&script, &calls, None, 0);
-        let config = build_config_with_builder(&base, &work, &script, BuilderBackend::Ibcmd);
+        let config = build_config_with_builder(
+            &base,
+            &work,
+            &script,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
 
         let result = run_dump(
             &config,
@@ -2179,7 +2193,12 @@ exit 0"#,
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
         write_ibcmd_dump_script(&script, &calls, None, 0);
-        let config = build_config_with_builder(&base, &work, &script, BuilderBackend::Ibcmd);
+        let config = build_config_with_builder(
+            &base,
+            &work,
+            &script,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
 
         let result = run_dump(
             &config,
@@ -2222,7 +2241,12 @@ exit 0"#,
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
         write_ibcmd_dump_script(&script, &calls, None, 0);
-        let config = build_config_with_builder(&base, &work, &script, BuilderBackend::Ibcmd);
+        let config = build_config_with_builder(
+            &base,
+            &work,
+            &script,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
 
         let result = run_dump(
             &config,
@@ -2257,7 +2281,12 @@ exit 0"#,
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
         write_ibcmd_dump_script(&script, &calls, Some("--sync"), 0);
-        let config = build_config_with_builder(&base, &work, &script, BuilderBackend::Ibcmd);
+        let config = build_config_with_builder(
+            &base,
+            &work,
+            &script,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
 
         let failure = run_dump(
             &config,
@@ -2353,7 +2382,12 @@ exit 0"#,
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
         write_ibcmd_dump_script(&script, &calls, None, 0);
-        let config = build_config_with_builder(&base, &work, &script, BuilderBackend::Ibcmd);
+        let config = build_config_with_builder(
+            &base,
+            &work,
+            &script,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
         fs::write(base.join("main").join("old.txt"), "old").expect("old");
 
         let result = run_dump(
@@ -2384,7 +2418,12 @@ exit 0"#,
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
         write_ibcmd_dump_script(&script, &calls, None, 0);
-        let mut config = build_config_with_builder(&base, &work, &script, BuilderBackend::Ibcmd);
+        let mut config = build_config_with_builder(
+            &base,
+            &work,
+            &script,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
         config.infobase = crate::config::model::InfobaseConfig::server(
             "Srvr=cluster:1541;Ref=demo",
             crate::config::model::InfobaseDbmsConfig::new("PostgreSQL", "localhost", "demo")
@@ -2424,7 +2463,12 @@ exit 0"#,
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
         write_ibcmd_dump_script(&script, &calls, Some("--force"), 0);
-        let config = build_config_with_builder(&base, &work, &script, BuilderBackend::Ibcmd);
+        let config = build_config_with_builder(
+            &base,
+            &work,
+            &script,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
         fs::write(base.join("main").join("old.txt"), "keep me").expect("old");
 
         let failure = run_dump(
@@ -2455,7 +2499,12 @@ exit 0"#,
         let calls = dir.path().join("calls.log");
         create_source_tree(&base);
         write_ibcmd_dump_script(&script, &calls, None, 0);
-        let config = build_config_with_builder(&base, &work, &script, BuilderBackend::Ibcmd);
+        let config = build_config_with_builder(
+            &base,
+            &work,
+            &script,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
         fs::remove_dir_all(base.join("main")).expect("remove target");
 
         let result = run_dump(
@@ -2488,7 +2537,7 @@ exit 0"#,
         create_edt_source_tree(&base);
         write_designer_dump_script_for_edt(&designer, &designer_calls, None);
         write_edt_import_script(&edt, &edt_calls);
-        let config = build_edt_config(&base, &work, &designer, &edt, BuilderBackend::Designer);
+        let config = build_edt_config(&base, &work, &designer, &edt, Default::default());
         fs::write(base.join("main").join("stale.txt"), "stale").expect("stale");
 
         let result = run_dump(
@@ -2532,7 +2581,7 @@ exit 0"#,
         create_edt_source_tree(&base);
         write_designer_dump_script_for_edt(&designer, &designer_calls, None);
         write_edt_import_script(&edt, &edt_calls);
-        let config = build_edt_config(&base, &work, &designer, &edt, BuilderBackend::Designer);
+        let config = build_edt_config(&base, &work, &designer, &edt, Default::default());
         fs::create_dir_all(work.join("designer").join("main")).expect("empty designer snapshot");
         fs::write(
             work.join("designer").join("main").join("BrokenMirror.xml"),
@@ -2584,7 +2633,7 @@ exit 0"#,
         create_edt_source_tree(&base);
         write_designer_dump_script_for_edt(&designer, &designer_calls, None);
         write_edt_import_script(&edt, &edt_calls);
-        let config = build_edt_config(&base, &work, &designer, &edt, BuilderBackend::Designer);
+        let config = build_edt_config(&base, &work, &designer, &edt, Default::default());
 
         let result = run_dump(
             &config,
@@ -2627,7 +2676,7 @@ exit 0"#,
         create_edt_source_tree(&base);
         write_designer_dump_script_for_edt(&designer, &designer_calls, None);
         write_edt_import_script(&edt, &edt_calls);
-        let config = build_edt_config(&base, &work, &designer, &edt, BuilderBackend::Designer);
+        let config = build_edt_config(&base, &work, &designer, &edt, Default::default());
 
         let result = run_dump(
             &config,
@@ -2662,7 +2711,13 @@ exit 0"#,
         create_edt_source_tree(&base);
         write_ibcmd_dump_script_for_edt(&ibcmd, &ibcmd_calls, None);
         write_edt_import_script(&edt, &edt_calls);
-        let config = build_edt_config(&base, &work, &ibcmd, &edt, BuilderBackend::Ibcmd);
+        let config = build_edt_config(
+            &base,
+            &work,
+            &ibcmd,
+            &edt,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
 
         let result = run_dump(
             &config,
@@ -2699,7 +2754,7 @@ exit 0"#,
         let designer = dir.path().join("1cv8");
         let edt = dir.path().join("1cedtcli");
         create_edt_source_tree(&base);
-        let config = build_edt_config(&base, &work, &designer, &edt, BuilderBackend::Designer);
+        let config = build_edt_config(&base, &work, &designer, &edt, Default::default());
         let resolved = resolve_target(
             &config,
             &DumpArgs {
@@ -2741,7 +2796,7 @@ exit 0"#,
         let designer = dir.path().join("1cv8");
         let edt = dir.path().join("1cedtcli");
         create_edt_source_tree(&base);
-        let config = build_edt_config(&base, &work, &designer, &edt, BuilderBackend::Designer);
+        let config = build_edt_config(&base, &work, &designer, &edt, Default::default());
         let resolved = resolve_target(
             &config,
             &DumpArgs {
@@ -2785,7 +2840,13 @@ exit 0"#,
         let ibcmd = dir.path().join("ibcmd");
         let edt = dir.path().join("1cedtcli");
         create_edt_source_tree(&base);
-        let config = build_edt_config(&base, &work, &ibcmd, &edt, BuilderBackend::Ibcmd);
+        let config = build_edt_config(
+            &base,
+            &work,
+            &ibcmd,
+            &edt,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
         let resolved = resolve_target(
             &config,
             &DumpArgs {
@@ -2827,7 +2888,13 @@ exit 0"#,
         let ibcmd = dir.path().join("ibcmd");
         let edt = dir.path().join("1cedtcli");
         create_edt_source_tree(&base);
-        let config = build_edt_config(&base, &work, &ibcmd, &edt, BuilderBackend::Ibcmd);
+        let config = build_edt_config(
+            &base,
+            &work,
+            &ibcmd,
+            &edt,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
         let resolved = resolve_target(
             &config,
             &DumpArgs {
@@ -2874,7 +2941,7 @@ exit 0"#,
         let drift = dir.path().join("drift-target");
         create_edt_source_tree(&base);
         fs::create_dir_all(&drift).expect("drift target");
-        let config = build_edt_config(&base, &work, &designer, &edt, BuilderBackend::Designer);
+        let config = build_edt_config(&base, &work, &designer, &edt, Default::default());
         let resolved = resolve_target(
             &config,
             &DumpArgs {
@@ -3031,7 +3098,7 @@ exit 0"#,
         create_edt_source_tree(&base);
         fs::create_dir_all(&work).expect("work");
         fs::write(work.join("edt-workspace"), "not a directory").expect("workspace file");
-        let mut config = build_edt_config(&base, &work, &designer, &edt, BuilderBackend::Designer);
+        let mut config = build_edt_config(&base, &work, &designer, &edt, Default::default());
         config.tools.edt_cli.interactive_mode = true;
         let resolved = resolve_target(
             &config,
@@ -3089,7 +3156,7 @@ exit 0"#,
         create_edt_source_tree(&base);
         write_edt_import_script(&edt, &edt_calls);
         write_script(&designer, "exit 0");
-        let config = build_edt_config(&base, &work, &designer, &edt, BuilderBackend::Designer);
+        let config = build_edt_config(&base, &work, &designer, &edt, Default::default());
         fs::create_dir_all(work.join("designer").join("main")).expect("designer snapshot");
         fs::write(
             work.join("designer").join("main").join("Configuration.xml"),
@@ -3226,6 +3293,7 @@ exit 0"#,
     #[test]
     fn dump_result_json_contains_new_fields() {
         let result = crate::domain::dump::DumpResult {
+            provider: None,
             provider_dispatched: true,
             ok: true,
             source_set: Some("main".to_owned()),

@@ -1,8 +1,8 @@
 ---
 id: DEC.2026-09-14.PROVIDER-DEFAULTS-LIVE-IN-CODE
-status: planned
+status: active
 governs: product
-realized: null
+realized: tests/cli_infobase.rs::a_default_chain_skips_the_missing_designer_and_selects_ibcmd
 supersedes: []
 superseded-by: null
 establishes: []

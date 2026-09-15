@@ -75,8 +75,22 @@ pub enum Command {
     Syntax(SyntaxArgs),
     /// Launch 1C application
     Launch(LaunchArgs),
+    /// Publish the infobase on a web server with webinst, or delete the publication
+    Publish(PublishArgs),
     /// Serve Model Context Protocol transports
     Mcp(McpArgs),
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Command options")]
+pub struct PublishArgs {
+    /// Delete the publication named in infobase.web instead of creating it
+    #[arg(long)]
+    pub delete: bool,
+
+    /// Compose the webinst command and locate the platform without touching the web server
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
@@ -196,10 +210,6 @@ pub struct ConfigInitArgs {
     /// Source format to write
     #[arg(long, default_value = "auto", value_parser = ["auto", "designer", "edt"])]
     pub format: String,
-
-    /// Builder backend to write
-    #[arg(long, default_value = "DESIGNER", value_parser = ["DESIGNER", "IBCMD", "designer", "ibcmd"])]
-    pub builder: String,
 }
 
 #[derive(Args, Debug)]
@@ -602,8 +612,8 @@ pub enum SyntaxTarget {
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Command options")]
 pub struct LaunchArgs {
-    /// Launch mode
-    #[arg(value_name = "MODE", value_parser = ["designer", "thin", "thick", "ordinary", "mcp"])]
+    /// Launch mode; `web` opens infobase.web.url in the browser
+    #[arg(value_name = "MODE", value_parser = ["designer", "thin", "thick", "ordinary", "mcp", "web"])]
     pub target: String,
 
     /// Optional client-side MCP scenario to start with the MCP server

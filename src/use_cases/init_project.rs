@@ -5,9 +5,8 @@ use std::time::Instant;
 
 use tracing::debug;
 
-use crate::config::model::{
-    AppConfig, BuilderBackend, SourceFormat, SourceSetConfig, SourceSetPurpose,
-};
+use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose};
+use crate::domain::capability::{Operation, Provider};
 use crate::domain::init::{InitResult, InitStep, InitStepStatus};
 use crate::platform::designer::DesignerDsl;
 use crate::platform::edt::EdtDsl;
@@ -49,13 +48,23 @@ fn run_init(
 ) -> UseCaseResult<InitResult> {
     let started = Instant::now();
     let mut utilities = PlatformUtilities::from_config(config);
+    // Исполнитель нужен только шагу создания базы, и тот сам сообщает об отсутствии
+    // утилиты своим статусом: отказ выбора здесь не прерывает команду — у серверного
+    // подключения и у чисто EDT-проекта этот шаг может и не понадобиться. Квитанция
+    // при этом остаётся честной: никто не готов, пропущенные названы.
+    let (provider, receipt) =
+        match crate::use_cases::provider_selection::select(config, &mut utilities, Operation::Init)
+        {
+            Ok(selected) => (selected.provider, selected.receipt),
+            Err((_error, receipt)) => (config.selected_provider(Operation::Init), receipt),
+        };
     let mut steps = Vec::new();
     let mut first_error: Option<UseCaseError> = None;
 
     record_step(
         &mut steps,
         &mut first_error,
-        ensure_infobase(context, config, &mut utilities, dry_run),
+        ensure_infobase(context, config, &mut utilities, provider, dry_run),
     );
     record_step(
         &mut steps,
@@ -70,6 +79,7 @@ fn run_init(
         // ни база, ни рабочее пространство не тронуты.
         log_live_stage("init: preview", "[Init] preview only, nothing created");
     }
+    result.provider = Some(receipt);
 
     match first_error {
         Some(error) => Err(InitExecutionFailure::with_payload(error, result)),
@@ -79,6 +89,7 @@ fn run_init(
 
 fn init_result(started: Instant, steps: Vec<InitStep>, ok: bool) -> InitResult {
     InitResult {
+        provider: None,
         ok,
         provider_dispatched: true,
         steps,
@@ -201,27 +212,35 @@ fn ensure_infobase(
     context: &ExecutionContext,
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
+    provider: Provider,
     dry_run: bool,
 ) -> StepOutcome {
     let Some(infobase_dir) = config.v8_connection().file_path().map(PathBuf::from) else {
-        return match config.builder {
-            BuilderBackend::Designer => StepOutcome::skipped(
+        return match provider {
+            Provider::Ibcmd => {
+                ensure_server_infobase(context, config, utilities, provider, dry_run)
+            }
+            // Конфигуратор серверную базу не создаёт: шаг пропускается, как и раньше,
+            // а выбрать ibcmd можно ключом providers.init.
+            other => StepOutcome::skipped(
                 "infobase",
                 "create",
                 Instant::now(),
-                "server infobase connection detected; automatic creation is not supported for builder=DESIGNER",
+                format!(
+                    "server infobase connection detected; automatic creation is not supported by the {other} provider, set providers.init: ibcmd"
+                ),
             ),
-            BuilderBackend::Ibcmd => ensure_server_infobase(context, config, utilities, dry_run),
         };
     };
 
-    ensure_file_infobase(context, config, utilities, &infobase_dir, dry_run)
+    ensure_file_infobase(context, config, utilities, provider, &infobase_dir, dry_run)
 }
 
 fn ensure_file_infobase(
     context: &ExecutionContext,
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
+    provider: Provider,
     infobase_dir: &Path,
     dry_run: bool,
 ) -> StepOutcome {
@@ -240,7 +259,7 @@ fn ensure_file_infobase(
     if dry_run {
         // The platform is located here so an absent one refuses during the preview; the
         // parent directory below is the first thing this step would create.
-        return match locate_infobase_creator(config, utilities) {
+        return match locate_infobase_creator(provider, utilities) {
             Ok(binary) => StepOutcome::planned(
                 "infobase",
                 "create",
@@ -266,7 +285,7 @@ fn ensure_file_infobase(
     }
 
     log_live_stage("init: infobase create", "[Platform] creating infobase");
-    let command_result = match create_infobase(context, config, utilities) {
+    let command_result = match create_infobase(context, config, utilities, provider) {
         Ok(outcome) => outcome,
         Err(error) => return StepOutcome::failed("infobase", "create", started, error),
     };
@@ -330,6 +349,7 @@ fn ensure_server_infobase(
     context: &ExecutionContext,
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
+    provider: Provider,
     dry_run: bool,
 ) -> StepOutcome {
     let started = Instant::now();
@@ -337,7 +357,7 @@ fn ensure_server_infobase(
         // A server infobase cannot be observed without acting: `ibcmd infobase create`
         // is what distinguishes created from already-present. The preview therefore names
         // the target and the binary and stops short of that distinction.
-        return match locate_infobase_creator(config, utilities) {
+        return match locate_infobase_creator(provider, utilities) {
             Ok(binary) => StepOutcome::planned(
                 "infobase",
                 "create",
@@ -357,7 +377,7 @@ fn ensure_server_infobase(
         return outcome;
     }
     log_live_stage("init: infobase create", "[ibcmd] ensuring server infobase");
-    match create_infobase(context, config, utilities) {
+    match create_infobase(context, config, utilities, provider) {
         Ok(outcome) => match outcome.status {
             IbcmdInfobaseCreateStatus::Created => StepOutcome::ok(
                 "infobase",
@@ -649,12 +669,18 @@ fn create_infobase_via_ibcmd(
 /// Mirrors the `builder` dispatch of [`create_infobase`] so a preview refuses on the same
 /// missing platform the apply would.
 fn locate_infobase_creator(
-    config: &AppConfig,
+    provider: Provider,
     utilities: &mut PlatformUtilities,
 ) -> Result<PathBuf, AppError> {
-    let utility = match config.builder {
-        BuilderBackend::Designer => UtilityType::V8,
-        BuilderBackend::Ibcmd => UtilityType::Ibcmd,
+    let utility = match provider {
+        Provider::Designer => UtilityType::V8,
+        Provider::Ibcmd => UtilityType::Ibcmd,
+        other => {
+            return Err(crate::use_cases::unimplemented_provider(
+                Operation::Init,
+                other,
+            ))
+        }
     };
     utilities
         .locate(utility)
@@ -666,10 +692,15 @@ fn create_infobase(
     context: &ExecutionContext,
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
+    provider: Provider,
 ) -> Result<IbcmdInfobaseCreateOutcome, AppError> {
-    match config.builder {
-        BuilderBackend::Designer => create_infobase_via_designer(context, config, utilities),
-        BuilderBackend::Ibcmd => create_infobase_via_ibcmd(context, config, utilities),
+    match provider {
+        Provider::Designer => create_infobase_via_designer(context, config, utilities),
+        Provider::Ibcmd => create_infobase_via_ibcmd(context, config, utilities),
+        other => Err(crate::use_cases::unimplemented_provider(
+            Operation::Init,
+            other,
+        )),
     }
 }
 
@@ -855,9 +886,8 @@ mod tests {
         edt_workspace_marker_path, infobase_marker_path, ordered_source_sets, InitStepStatus,
     };
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, SourceFormat, SourceSetConfig, SourceSetPurpose,
-        TestsConfig, ToolExtensionConfig, ToolExtensionInput, ToolExtensionSourceConfig,
-        ToolsConfig,
+        AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
+        ToolExtensionConfig, ToolExtensionInput, ToolExtensionSourceConfig, ToolsConfig,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -870,7 +900,8 @@ mod tests {
             work_path: PathBuf::from("/tmp/work"),
             execution_timeout: 300_000,
             format: SourceFormat::Edt,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![
                 SourceSetConfig {
@@ -991,7 +1022,7 @@ mod tests {
         assert_eq!(
             result.steps[0].message.as_deref(),
             Some(
-                "server infobase connection detected; automatic creation is not supported for builder=DESIGNER"
+                "server infobase connection detected; automatic creation is not supported by the designer provider, set providers.init: ibcmd"
             )
         );
         assert_eq!(result.steps[1].target, "edt_workspace");

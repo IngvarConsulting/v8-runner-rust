@@ -1581,8 +1581,7 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::config::model::{
-        AppConfig, BuilderBackend, InfobaseConfig, McpConfig, SourceFormat, TestsConfig,
-        ToolsConfig,
+        AppConfig, InfobaseConfig, McpConfig, SourceFormat, TestsConfig, ToolsConfig,
     };
 
     use super::{convert_session_host_options, convert_workspace_path};
@@ -1593,7 +1592,8 @@ mod tests {
             work_path: PathBuf::from("/tmp/work"),
             execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![],
             build: Default::default(),

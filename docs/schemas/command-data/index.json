@@ -41,6 +41,9 @@
     "make": [
       "make"
     ],
+    "publish": [
+      "publish"
+    ],
     "syntax": [
       "syntax"
     ],

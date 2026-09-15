@@ -2,8 +2,8 @@
 id: CTR.CONFIG.V8PROJECT-SCHEMA
 status: active
 governs: product
-version: 1
-decision: DEC.2026-04-20.V8PROJECT-YAML-IS-THE-PROJECT-CONTRACT
+version: 3
+decision: DEC.2026-09-14.TARGET-HAS-TWO-ADDRESSES
 artifact: docs/schemas/v8project.schema.json
 producer: src/config/schema.rs
 consumers: [docs, cli]
@@ -22,6 +22,8 @@ scope: [config, docs]
 ```yaml
 workPath: build
 format: DESIGNER
+providers:
+  build: ibcmd
 infobase:
   connection: "File=build/ib"
 source-set:

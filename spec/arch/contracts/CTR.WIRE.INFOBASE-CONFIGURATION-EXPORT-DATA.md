@@ -2,8 +2,8 @@
 id: CTR.WIRE.INFOBASE-CONFIGURATION-EXPORT-DATA
 status: active
 governs: product
-version: 2
-decision: DEC.2026-09-14.A-PROVIDER-IS-NAMED-BY-WHO-EXECUTES
+version: 3
+decision: DEC.2026-09-14.PROVIDER-CHOSEN-PER-OPERATION
 artifact: docs/schemas/command-data/infobase-configuration-export.schema.json
 producer: src/domain/infobase_export.rs
 consumers: [cli, unica]
@@ -14,9 +14,10 @@ scope: [wire, cli]
 # `data` команды `infobase configuration export`
 
 Выгрузка пакета конфигурации из базы отчитывается не только результатом, но и выбором
-исполнителя: `selection` называет выбранного провайдера, причину выбора и каждого
-рассмотренного кандидата с его готовностью и уликой этой готовности. Без этого отказ
-«среда недоступна» неотличим от «провайдер не реализован», а чинить их надо по-разному.
+исполнителя: квитанция `provider` называет выбранного, откуда взялся выбор (умолчание
+матрицы или ключ `providers.*` с именем файла) и каждого пропущенного до него с причиной.
+`selected: null` — выбор состоялся и никто не подошёл; отсутствие квитанции — выбор не
+начинался, команда отказала раньше.
 
 `target_state` говорит о состоянии базы после операции: выгрузка не меняет базу, и форма
 это утверждает явно.
@@ -31,17 +32,12 @@ scope: [wire, cli]
   "subject": {
     "kind": "main"
   },
-  "selection": {
-    "provider": null,
-    "reason": "designer: file infobase is not ready: 'build/ib/1Cv8.1CD' is missing or is not a file",
-    "candidates": [
-      {
-        "provider": "designer",
-        "implementation": "implemented",
-        "readiness": "unavailable",
-        "evidence": "argv_tested",
-        "reason": "file infobase is not ready: 'build/ib/1Cv8.1CD' is missing or is not a file"
-      }
+  "provider": {
+    "selected": null,
+    "origin": {"kind": "default"},
+    "skipped": [
+      {"provider": "designer", "reason": "file infobase is not ready: 'build/ib/1Cv8.1CD' is missing or is not a file"},
+      {"provider": "ibcmd", "reason": "file infobase is not ready: 'build/ib/1Cv8.1CD' is missing or is not a file"}
     ]
   },
   "artifact_kind": "cf",
