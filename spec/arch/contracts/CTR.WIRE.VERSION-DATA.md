@@ -22,6 +22,6 @@ scope: [wire, cli]
 ```json
 {
   "name": "v8-runner",
-  "version": "0.9.0"
+  "version": "0.10.0"
 }
 ```
