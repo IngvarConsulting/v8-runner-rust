@@ -26,7 +26,7 @@ pub enum LoadTargetKind {
 /// The probe asks the platform to compare the target with its counterpart, and the only part
 /// of the answer the platform guarantees is whether the comparison ran: exit code zero, and
 /// exactly then a comparison report appears. Why it did not run is said in prose, and prose is
-/// not a contract — see ADR-0029 — so this enum has no variant for a reason.
+/// not a contract — see DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES — so this enum has no variant for a reason.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CompatibilityState {

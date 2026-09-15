@@ -1015,7 +1015,7 @@ mod tests {
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
 
-    /// ADR-0029 admits prose as a *label* on a finding, never as a verdict, and that admission
+    /// DEC.2026-09-12.A-LABEL-MAY-ONLY-MAKE-A-VERDICT-STRICTER admits prose as a *label* on a finding, never as a verdict, and that admission
     /// rests on three properties. Two of them are proven here; the third — that the verdict comes
     /// from the exit code — is `status_from_exit_code` having no other input.
     #[test]

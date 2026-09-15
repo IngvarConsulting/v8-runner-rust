@@ -1,13 +1,11 @@
 # Spec Guide
 
-`spec/` stores the active internal truth layer for planning, architecture rules, ADRs, and
+`spec/` stores the active internal truth layer for planning, architecture rules, decisions, and
 acceptance.
 
 ## Active Entry Points
 
 - `IMPLEMENTATION_TODO.md`: open implementation tasks only.
-- `ADR_DERIVED_BACKLOG.md`: open ADR-derived gaps that still need planning or execution.
-- `decisions/README.md`: accepted architecture decisions and their owning ADR files.
 - `arch/`: атомарный реестр решений, инвариантов и контрактов; читать с `arch/index.md`.
 - `archive/FATE.md`: судьба записей замороженного прежнего слоя.
 - `architecture/change-checklist.md`: required sync/checklist for contract and boundary changes.

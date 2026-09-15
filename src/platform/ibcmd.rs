@@ -249,7 +249,7 @@ impl<'a> IbcmdDsl<'a> {
     /// `ibcmd infobase create` answers 255 both when the infobase is already registered and
     /// when the path cannot be written (measured on 8.3.27.2074), so its exit code alone does
     /// not separate the benign case. The separation comes from a second structural question
-    /// rather than from the complaint's wording (ADR-0029): `config generation-id` answers
+    /// rather than from the complaint's wording (DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES): `config generation-id` answers
     /// zero only when the infobase exists **and** these credentials can read it — a missing
     /// infobase and a wrong user both answer 255. So a create that failed over an infobase we
     /// can still read is "already there", and anything else stays a failure, including the case
@@ -944,7 +944,7 @@ mod tests {
 
     /// Two tests used to stand here, proving that the phrase «уже существует» was benign in
     /// upper case and that «ошибка авторизации» next to it was not. Both read the platform's
-    /// wording, which ADR-0029 forbids, and the fact they protected is now asked of the
+    /// wording, which DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES forbids, and the fact they protected is now asked of the
     /// infobase instead.
     #[cfg(unix)]
     #[test]

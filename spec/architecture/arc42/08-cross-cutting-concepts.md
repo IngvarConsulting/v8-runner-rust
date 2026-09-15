@@ -10,7 +10,7 @@
 - Поддержанные `source-set[].type`: `CONFIGURATION`, `EXTENSION`, `EXTERNAL_DATA_PROCESSORS`, `EXTERNAL_REPORTS`.
 - `source-set.name` — stable identity для runtime state, generated directories, diagnostics и selection logic.
 - Для EDT/external source-set validation должна проверять layout, reserved names и пересечение пользовательских paths с generated work targets.
-- Поддержанный config contract описан в ADR-0017; legacy YAML keys не должны становиться публичным контрактом без отдельного решения.
+- Поддержанный config contract описан в `DEC.2026-04-20.V8PROJECT-YAML-IS-THE-PROJECT-CONTRACT`; legacy YAML keys не должны становиться публичным контрактом без отдельного решения.
 - `ExecutionContext` дополняет конфигурацию invocation-метаданными: команда, transport, correlation metadata и transport-specific flags.
 
 ### 8.2 Анализ изменений
@@ -21,7 +21,7 @@
 - При сбоях система предпочитает безопасную деградацию, а не тихую потерю данных.
 - Персистентное состояние хранится в отдельных `redb`-файлах на source-set, а не в едином глобальном индексе.
 - Для EDT исходный project context и generated Designer context анализируются отдельно; partial load decision принимается по Designer context.
-- Правила on-demand detection и partial load описаны в ADR-0012.
+- Правила on-demand detection и partial load описаны в `DEC.2026-04-20.CHANGES-ARE-DETECTED-ON-DEMAND` и `DEC.2026-04-20.DOUBT-TURNS-A-PARTIAL-LOAD-INTO-A-FULL-ONE`.
 
 ### 8.3 Обработка ошибок и результаты
 
@@ -30,7 +30,7 @@
 - Команды рассматриваются как pipeline из стандартных блоков: validation, resolve target, prepare workspace, platform command, parse output, publish, cleanup and diagnostics.
 - Pipeline composition находится в use case слое; adapters не собирают blocks, а только мапят request/response.
 - Blocks должны обмениваться typed context/input/output и оставлять step/outcome trail для skipped/degraded/failure behavior.
-- `ExecutionStatus::TimedOut` и `ExecutionStatus::Cancelled` допустимы только после terminal-state semantics из ADR-0014.
+- `ExecutionStatus::TimedOut` и `ExecutionStatus::Cancelled` допустимы только после terminal-state semantics из `DEC.2026-04-20.CANCELLATION-COUNTS-ONLY-AFTER-A-TERMINAL-STATE`.
 - Если cancellation/shutdown/timeout был requested внутри successful `CriticalNonAbortable` phase, итог остаётся `Succeeded`, а result содержит warning/diagnostic о deferred interruption.
 - Degraded success, например cleanup warning после успешного publish, не должен маскироваться как полностью чистый success.
 - CLI решает на адаптерной границе, печатать ли shared command envelope через `--json-message`, text rendering или top-level error.
@@ -38,7 +38,7 @@
 - CLI output использует единый high-signal contract для человека и AI-агента; `--json-message` выбирает structured output, а `--output` резервируется для user-facing output path flags.
 - MCP дополнительно разделяет `McpBusinessFailure<T>` и `McpInternalError`, чтобы агент видел предсказуемые business failures, но не получал как business-response ошибки неправильного transport/runtime usage.
 - Это разделение является ключевым architectural invariant: orchestration не должна знать про конкретный transport payload format.
-- Outcome/step contract описан в ADR-0016.
+- Outcome/step contract описан в `DEC.2026-04-21.A-COMMAND-IS-A-PIPELINE-OF-TYPED-BLOCKS` и `DEC.2026-04-21.EXECUTION-OUTCOME-IS-THE-CANONICAL-RESULT`.
 
 ### 8.4 Наблюдаемость
 
@@ -54,7 +54,7 @@
 - Staging/backup cleanup опирается на metadata sidecar: `tool`, `kind`, `run_id`, `target_path`, `target_identity`, `created_at`.
 - Orphan cleanup не должен удалять malformed, foreign или recent temp paths.
 - Incremental/partial dump остаются non-atomic update modes.
-- Правила staging/backup publication описаны в ADR-0015.
+- Правила staging/backup publication описаны в `DEC.2026-04-21.FULL-REPLACEMENT-PUBLISHES-THROUGH-STAGING`.
 
 ### 8.5 Параллелизм и таймауты
 
@@ -71,6 +71,6 @@
 - HTTP MCP-сессии ограничены по ёмкости и управляются через TTL.
 - Для интерактивного EDT-исполнения заданы отдельные ограничения на startup и command timeout.
 - Серверные отмены и shutdown строятся вокруг cooperative cancellation и bounded drain, а не вокруг мгновенного прерывания любой внешней работы.
-- Workspace lock contract описан в ADR-0011.
-- MCP admission/session capacity описаны в ADR-0013.
-- Общая timeout/cancellation policy описана в ADR-0014.
+- Workspace lock contract описан в `DEC.2026-04-20.A-COMMAND-OWNS-THE-WORKPATH-EXCLUSIVELY`.
+- MCP admission/session capacity описаны в `DEC.2026-04-20.MCP-LIMITS-EXECUTION-AND-SESSIONS-SEPARATELY`.
+- Общая timeout/cancellation policy описана в `DEC.2026-04-20.EVERY-COMMAND-HAS-A-DEADLINE`.
