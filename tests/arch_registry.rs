@@ -139,6 +139,61 @@ fn planned_rules_declare_a_missing_check() {
     );
 }
 
+/// Прежний слой заморожен в `spec/archive/`, и номер ADR больше ничего не адресует: у
+/// каждой записи ровно один владелец в реестре по таблице судьбы. Ссылка по номеру вне
+/// архива — это ссылка в никуда, и она не должна вернуться ни в код, ни в документы.
+#[test]
+fn old_adr_numbers_do_not_return_outside_the_archive() {
+    let root = repo_root();
+    let number = regex::Regex::new(r"ADR-\d{4}").expect("regex");
+    // Решение о переезде называет прежний слой по его же номерам — это его предмет.
+    let allowed = [
+        root.join("spec/archive"),
+        root.join("spec/arch/decisions/2026-09-14-spec-registry-reset.md"),
+    ];
+    let mut offenders = Vec::new();
+    let mut pending: Vec<PathBuf> = ["src", "tests", "docs", "spec", "scripts"]
+        .iter()
+        .map(|dir| root.join(dir))
+        .collect();
+    for entry in std::fs::read_dir(&root).expect("repo root is readable") {
+        let path = entry.expect("directory entry").path();
+        if path.extension().and_then(|value| value.to_str()) == Some("md") {
+            pending.push(path);
+        }
+    }
+    while let Some(path) = pending.pop() {
+        if allowed.iter().any(|prefix| path.starts_with(prefix)) {
+            continue;
+        }
+        if path.is_dir() {
+            for entry in std::fs::read_dir(&path).expect("directory is readable") {
+                pending.push(entry.expect("directory entry").path());
+            }
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for (index, line) in text.lines().enumerate() {
+            if let Some(found) = number.find(line) {
+                offenders.push(format!(
+                    "{}:{}: {}",
+                    path.strip_prefix(&root).unwrap_or(&path).display(),
+                    index + 1,
+                    found.as_str()
+                ));
+            }
+        }
+    }
+    offenders.sort();
+    assert!(
+        offenders.is_empty(),
+        "old ADR numbers address nothing; name the owner from spec/archive/FATE.md instead:\n{}",
+        offenders.join("\n")
+    );
+}
+
 #[test]
 fn every_rule_names_a_falsifier_that_exists() {
     let root = repo_root();

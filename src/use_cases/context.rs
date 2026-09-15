@@ -76,7 +76,7 @@ impl ExecutionInterruption {
     }
 }
 
-/// Command-level interruption safety contract from ADR-0014.
+/// Command-level interruption safety contract from DEC.2026-04-20.A-MUTATING-CRITICAL-PHASE-IS-NOT-HARD-KILLED.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterruptionSafetyClass {

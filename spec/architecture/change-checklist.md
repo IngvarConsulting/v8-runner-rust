@@ -5,7 +5,7 @@
 
 ## Изменение MCP public surface
 
-1. Подтвердить, что изменение разрешено текущим ADR; если нет, сначала добавить новый ADR или обновить `ADR-0005`.
+1. Подтвердить, что изменение разрешено действующим решением реестра `spec/arch`; если нет, сначала завести решение и поднять версию `CTR.MCP.PUBLISHED-TOOL-SURFACE`.
 2. Синхронизировать список tools и их публичную семантику минимум в:
    - `spec/arch/contracts/CTR.MCP.PUBLISHED-TOOL-SURFACE.md`
    - `spec/arch/README.md`
@@ -16,7 +16,7 @@
    - `src/mcp/request.rs`
    - `src/mcp/service.rs`
    - `src/command_envelope.rs`, если меняется machine-readable command payload
-3. Добавить или обновить tests для `list_tools`, request DTO, shared envelope payload и business/runtime failure mapping по `ADR-0009`.
+3. Добавить или обновить tests для `list_tools`, request DTO, shared envelope payload и business/runtime failure mapping по `DEC.2026-04-20.BUSINESS-FAILURES-ARE-NOT-TRANSPORT-FAULTS`.
 4. Явно проверить, что изменение не публикует CLI-only сценарий как MCP tool по умолчанию.
 
 ## Новая public CLI/MCP команда, работающая с `workPath`

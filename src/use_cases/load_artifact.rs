@@ -526,7 +526,7 @@ fn probe_compatibility(
     let Some(comparison_name) = resolved.comparison_name() else {
         // Nothing to ask with: the platform will not compare a configuration without the
         // vendor configuration's name. Saying "not asked" is the honest answer; guessing the
-        // support state from the refusal text is what ADR-0029 forbids.
+        // support state from the refusal text is what DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES forbids.
         return Ok(ProbeResult {
             state: CompatibilityState::NotProbed,
             dispatched: false,
@@ -670,7 +670,7 @@ fn probe_evidence(result: &PlatformCommandResult) -> Option<String> {
 
 /// The whole decision, enumerated: target kind, requested mode, and what was established.
 ///
-/// No default-permit arm (ADR-0023, point 6): a new target kind, mode or state cannot slip
+/// No default-permit arm (DEC.2026-09-02.LOAD-COMPATIBILITY-STATES-ARE-CLOSED-AND-FAIL-CLOSED): a new target kind, mode or state cannot slip
 /// through as "allowed" by falling into a wildcard. Nothing here reads a platform message —
 /// `evidence` only travels into the refusal text so a human can see what was not interpreted.
 fn validate_probe_mode_compatibility(
@@ -697,7 +697,7 @@ fn validate_probe_mode_compatibility(
             UNSUPPORTED_UPDATE_MODE_ERROR.to_owned(),
         )),
         // Asked and not proven permits no change, in either mode and for either target: the
-        // fail-closed rule carried from ADR-0023. An unreadable extension list or an
+        // fail-closed rule carried from DEC.2026-09-02.LOAD-COMPATIBILITY-STATES-ARE-CLOSED-AND-FAIL-CLOSED. An unreadable extension list or an
         // infobase that will not open stops a load too.
         (Configuration | Extension, Load | Merge, NotEstablished) => unproven(),
         // An extension the infobase does not list is a first installation; merging into
@@ -1138,7 +1138,7 @@ mod tests {
     #[test]
     fn a_probe_that_ran_is_the_only_proof_of_support() {
         // The whole classification, and the reason the four prose tests that used to stand
-        // here are gone (ADR-0029): exit zero means the comparison ran, and nothing else is
+        // here are gone (DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES): exit zero means the comparison ran, and nothing else is
         // guaranteed. The platform's sentence is carried as evidence, never read.
         let ran = PlatformCommandResult {
             process: ProcessResult {
@@ -1222,7 +1222,7 @@ mod tests {
             vendor_name: None,
         };
 
-        // Asked and not proven permits no change, in either mode (ADR-0029, point 5).
+        // Asked and not proven permits no change, in either mode (DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES).
         assert!(
             super::validate_probe_mode_compatibility(
                 &configuration,
@@ -1475,7 +1475,7 @@ mod tests {
 
     /// Four tests used to stand here, each proving that a particular mix of stdout, stderr and
     /// `/Out` lines kept the state `unknown` and blocked the load. They classified the
-    /// platform's prose, which ADR-0029 forbids, so the rule they protected is proven with a
+    /// platform's prose, which DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES forbids, so the rule they protected is proven with a
     /// structural input instead: the infobase cannot be asked at all, and nothing is applied.
     #[cfg(unix)]
     #[test]

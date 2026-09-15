@@ -626,7 +626,7 @@ fn init_ibcmd_server_provisions_infobase_without_precheck() {
 #[test]
 fn init_ibcmd_server_already_exists_is_non_fatal() {
     // The create fails and the infobase still answers a read, which is what makes it
-    // "already there" — the message it prints plays no part (ADR-0029).
+    // "already there" — the message it prints plays no part (DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES).
     let (_dir, config_path, _work_path, _calls_log) = setup_ibcmd_server_init_project(
         "if printf '%s' \"$*\" | grep -F -q -- 'generation-id'; then exit 0; fi\nprintf 'already exists\\n' >&2\nexit 17",
     );
