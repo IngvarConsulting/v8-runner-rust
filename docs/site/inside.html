@@ -74,6 +74,26 @@
   <li>Квитанция объясняет выбор: <code>selected</code>, <code>origin</code>, <code>skipped</code>.</li>
 </ol>
 
+<h2>Эксперименты: как включить и выключить</h2>
+<p>Часть строк матрицы помечена <strong>экспериментальными</strong>: исполнитель реализован и прогнан, но в цепочку умолчаний не входит — раннер сам его не выберет. Включается он только явно, на одну операцию, ключом <code>providers.&lt;операция&gt;</code>; выключается удалением ключа. Другого выключателя нет: ни флага CLI, ни переменной окружения, ни состояния на диске.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Режим (операция)</th><th>Экспериментальный исполнитель</th><th>Включить</th><th>Что даёт</th></tr></thead>
+<tbody>
+<tr><td class="k">build</td><td><span class="pill agent">agent</span></td><td><code>providers.build: agent</code></td><td>загрузка и <code>update-db-cfg</code> одной сессией, поколение записывается</td></tr>
+<tr><td class="k">dump</td><td><span class="pill agent">agent</span></td><td><code>providers.dump: agent</code></td><td>пропуск выгрузки по поколению; инкремент и частичная — на месте</td></tr>
+<tr><td class="k">make</td><td><span class="pill agent">agent</span></td><td><code>providers.make: agent</code></td><td>cf/cfe через <code>dump-cfg</code>, epf/erf через загрузку из файлов</td></tr>
+<tr><td class="k">extensions</td><td><span class="pill agent">agent</span></td><td><code>providers.extensions: agent</code></td><td>состав и свойства расширений группой <code>config extensions</code></td></tr>
+<tr><td class="k">infobase.configuration.export</td><td><span class="pill agent">agent</span></td><td><code>providers.infobase.configuration.export: agent</code></td><td>только рабочая конфигурация</td></tr>
+<tr><td class="k">infobase.dump</td><td><span class="pill ibcmd">ibcmd</span></td><td><code>providers.infobase.dump: ibcmd</code></td><td>до появления проверки монопольного доступа</td></tr>
+<tr><td class="k">infobase.restore</td><td><span class="pill ibcmd">ibcmd</span></td><td><code>providers.infobase.restore: ibcmd</code></td><td>то же</td></tr>
+</tbody></table></div>
+<p>Ключ пишется в <code>v8project.yaml</code> или в личный слой <code>v8project.local.yaml</code> — второй удобен, чтобы включить эксперимент у себя и не трогать общий конфиг:</p>
+<pre><code>providers:
+  build: agent
+  dump: agent</code></pre>
+<p>Проверить, что включилось, можно по квитанции в ответе любой команды: <code>provider.selected</code> называет исполнителя, <code>provider.origin.kind: override</code> — что его назначил ключ, а не умолчание. Валидация отвергает ключ там, где выбирать не из чего (у автономного сервера исполнитель один — <span class="pill agent">agent</span> через шлюз, ключ ему не нужен и не разрешён) и там, где названный исполнитель операцию не реализует; отказ называет, кто её реализует.</p>
+<p class="hint">Экспериментальный исполнитель не откатывается: если он не готов (нет платформы для управляемого агента, точка входа не отвечает), команда отказывает, а не берёт следующего по цепочке. Место <span class="pill agent">agent</span> в цепочке умолчаний решится вместе с долгоживущей сессией: пока старт агента на каждую команду съедает выигрыш.</p>
+
 <h2>Изменилась ли база</h2>
 <p>У раннера две независимые проверки. По файлам исходников он считает хеши и хранит их в <code>workPath</code> — это отвечает на вопрос «что изменилось у меня». У платформы он спрашивает <strong>идентификатор поколения</strong> конфигурации — это отвечает на вопрос «менялась ли база».</p>
 <div class="tablewrap"><table>
@@ -92,7 +112,7 @@
 <tbody>
 <tr><td class="k">кто поднял</td><td>раннер</td><td>вы</td></tr>
 <tr><td class="k">где бывает</td><td>любая цель</td><td>автономный сервер — всегда, он держит свой шлюз сам; файловая база и кластер — только если агент Конфигуратора подняли вы</td></tr>
-<tr><td class="k">признак в конфиге</td><td><code>launch</code> / <code>auto-start</code></td><td><code>gate</code> / <code>attach</code></td></tr>
+<tr><td class="k">признак в конфиге</td><td>ключей <code>tools.designer_agent.attach</code> нет — раннер поднимает сам</td><td><code>infobase.standalone.gate</code> / <code>tools.designer_agent.attach</code></td></tr>
 <tr><td class="k">флаги запуска</td><td>раннер плюс ваши</td><td>только ваши</td></tr>
 <tr><td class="k">если недоступен</td><td>ошибка запуска</td><td><code>endpoint_unreachable</code>, свой рядом не поднимает</td></tr>
 </tbody></table></div>

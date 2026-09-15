@@ -46,8 +46,8 @@ This file tracks open implementation work only.
    исполнитель `build|dump|make|extensions|infobase.configuration.export` (`dump-ib`
    через шлюз роняет `ibsrv` 8.3.27 — строк снимка нет); раннер сервер не запускает
    (`DEC.2026-09-14.ONLY-A-STANDALONE-SERVER-ANSWERS-WITHOUT-BEING-STARTED`); канал
-   `exchange: sftp` через тот же шлюз для сервера на другой машине. Открыто: частичная
-   загрузка по SFTP возит весь каталог набора, а не только изменённые файлы.
+   `exchange: sftp` через тот же шлюз для сервера на другой машине; частичная загрузка по
+   SFTP возит только корневые описатели, изменённые файлы и список (замер 16.09.2026).
 
 13. `DEC.2026-09-14.THE-TARGET-MAY-LIVE-ON-ANOTHER-MACHINE` реализовано на автономном
    сервере: `workPath` не лежит на стороне цели, пути команд шлюза относительны его

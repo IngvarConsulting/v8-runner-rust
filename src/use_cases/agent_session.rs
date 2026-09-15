@@ -449,6 +449,51 @@ pub(crate) fn stage_dir(
     }
 }
 
+/// Часть каталога раннера — на сторону точки входа: корневые описатели и названные
+/// файлы, каждый под своим относительным путём. По сети частичной загрузке хватает
+/// `Configuration.xml`, `ConfigDumpInfo.xml` и самих изменённых файлов (замер
+/// 16.09.2026 на агенте Конфигуратора 8.3.27); в каталог точки входа, видимый
+/// раннеру, каталог по-прежнему выставляется целиком ссылкой.
+pub(crate) fn stage_dir_partially(
+    handle: &mut AgentHandle,
+    exchange: &Exchange,
+    relative: &str,
+    local: &Path,
+    files: &[PathBuf],
+) -> Result<String, AppError> {
+    let Exchange::Sftp = exchange else {
+        return stage_dir(handle, exchange, relative, local);
+    };
+    let session = handle.session();
+    session.sftp_mkdir_all(relative).map_err(map_agent_error)?;
+    let mut selected: Vec<PathBuf> = ["Configuration.xml", "ConfigDumpInfo.xml"]
+        .iter()
+        .map(|name| local.join(name))
+        .filter(|path| path.is_file())
+        .collect();
+    selected.extend(files.iter().cloned());
+    for file in selected {
+        let inside = file.strip_prefix(local).map_err(|_| {
+            AppError::Runtime(format!(
+                "partial load file '{}' lies outside its source root '{}'",
+                file.display(),
+                local.display()
+            ))
+        })?;
+        let remote = format!(
+            "{relative}/{}",
+            inside.display().to_string().replace('\\', "/")
+        );
+        if let Some((parent, _)) = remote.rsplit_once('/') {
+            session.sftp_mkdir_all(parent).map_err(map_agent_error)?;
+        }
+        session
+            .sftp_put_file(&file, &remote)
+            .map_err(map_agent_error)?;
+    }
+    Ok(relative.to_owned())
+}
+
 /// То же, но всегда копией: для команд с файловыми параметрами, которые через ссылку
 /// точка входа не разрешает.
 pub(crate) fn stage_copy_dir(
