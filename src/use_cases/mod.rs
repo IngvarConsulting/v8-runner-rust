@@ -40,6 +40,7 @@ mod launch_keys;
 pub mod load_artifact;
 /// Text-mode live progress events shared by CLI-facing use cases.
 mod progress;
+pub mod publish_infobase;
 /// Transport-neutral request DTOs consumed by use cases.
 pub mod request;
 /// Transport-neutral use-case error and failure contracts.

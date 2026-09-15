@@ -1,11 +1,12 @@
 ---
 id: DEC.2026-09-14.TARGET-HAS-TWO-ADDRESSES
-status: planned
+status: active
 governs: product
-realized: null
+realized: tests/cli_launch.rs::launch_web_dry_run_names_the_opener_and_the_address
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [CTR.CONFIG.V8PROJECT-SCHEMA]
+changes: [CTR.CONFIG.V8PROJECT-SCHEMA]
 ---
 
 # У цели два адреса: административный и клиентский

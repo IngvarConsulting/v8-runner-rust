@@ -72,6 +72,7 @@ pub fn parse_launch_target(
             "thick" => Some(LaunchTargetRequest::thick_client()),
             "ordinary" => Some(LaunchTargetRequest::ordinary_application()),
             "mcp" => Some(LaunchTargetRequest::client_mcp()),
+            "web" => Some(LaunchTargetRequest::web()),
             _ => None,
         },
         LaunchModeAliases::Mcp => match normalized.as_str() {

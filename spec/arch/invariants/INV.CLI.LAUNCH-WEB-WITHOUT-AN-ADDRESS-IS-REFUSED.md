@@ -1,9 +1,9 @@
 ---
 id: INV.CLI.LAUNCH-WEB-WITHOUT-AN-ADDRESS-IS-REFUSED
-status: planned
+status: active
 governs: product
 decision: DEC.2026-09-14.LAUNCH-OPENS-THE-PUBLISHED-BASE
-check: null
+check: tests/cli_launch.rs::launch_web_without_a_declared_address_is_refused_with_the_reason
 scope: [cli]
 ---
 

@@ -604,11 +604,17 @@ pub enum ClientMcpMode {
 pub enum LaunchTargetRequest {
     Designer,
     Enterprise(EnterpriseLaunchTarget),
+    /// The published infobase in the browser at `infobase.web.url`.
+    Web,
 }
 
 impl LaunchTargetRequest {
     pub const fn designer() -> Self {
         Self::Designer
+    }
+
+    pub const fn web() -> Self {
+        Self::Web
     }
 
     pub const fn thin_client() -> Self {

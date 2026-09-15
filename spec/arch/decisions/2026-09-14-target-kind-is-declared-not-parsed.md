@@ -1,8 +1,8 @@
 ---
 id: DEC.2026-09-14.TARGET-KIND-IS-DECLARED-NOT-PARSED
-status: planned
+status: active
 governs: product
-realized: null
+realized: tests/cli_publish.rs::a_web_connection_string_is_refused_as_an_administrative_channel
 supersedes: []
 superseded-by: null
 establishes: [INV.CONFIG.TARGET-DECLARATIONS-ARE-EXCLUSIVE]

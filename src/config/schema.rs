@@ -496,6 +496,9 @@ struct ProvidersSchema {
     /// Executor for `make`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     make: Option<ProviderSchema>,
+    /// Executor for `publish`. Accepted by the schema so validation can say the operation has no choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    publish: Option<ProviderSchema>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -512,6 +515,43 @@ struct InfobaseSchema {
     /// Optional DBMS settings for server-based infobases.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dbms: Option<InfobaseDbmsSchema>,
+    /// Client address and web-server publication settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    web: Option<InfobaseWebSchema>,
+}
+
+/// Web server a publication is written to.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum WebServerKindSchema {
+    Iis,
+    Apache2,
+    Apache22,
+    Apache24,
+}
+
+/// Publication and client-address settings for the target infobase.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct InfobaseWebSchema {
+    /// Web server to publish on with `v8-runner publish`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    server: Option<WebServerKindSchema>,
+    /// Virtual directory name (`webinst -wsdir`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wsdir: Option<String>,
+    /// Physical directory the publication is written to (`webinst -dir`); must exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dir: Option<PathBuf>,
+    /// Web server configuration file (`webinst -confpath`); required for apache2 and apache22.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    conf: Option<PathBuf>,
+    /// Use OS authentication (`webinst -osauth`); IIS only.
+    #[serde(default, rename = "os-auth", skip_serializing_if = "Option::is_none")]
+    os_auth: Option<bool>,
+    /// Address a client or a browser opens the infobase at; `launch web` uses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -534,6 +574,9 @@ struct PartialInfobaseSchema {
     /// Optional local DBMS settings override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dbms: Option<PartialInfobaseDbmsSchema>,
+    /// Optional local publication and client-address override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    web: Option<InfobaseWebSchema>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]

@@ -95,10 +95,12 @@ pub enum Operation {
     Syntax,
     #[serde(rename = "make")]
     Make,
+    #[serde(rename = "publish")]
+    Publish,
 }
 
 impl Operation {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Init,
         Self::Build,
         Self::Load,
@@ -109,6 +111,7 @@ impl Operation {
         Self::InfobaseRestore,
         Self::Syntax,
         Self::Make,
+        Self::Publish,
     ];
 
     /// Ключ в `providers:` и имя в квитанции.
@@ -124,6 +127,7 @@ impl Operation {
             Self::InfobaseRestore => "infobase.restore",
             Self::Syntax => "syntax",
             Self::Make => "make",
+            Self::Publish => "publish",
         }
     }
 
@@ -208,7 +212,10 @@ const fn experimental(provider: Provider, evidence: Evidence) -> Capability {
 /// пробуются, если он не готов; экспериментальные назначаются только переопределением.
 pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capability] {
     use Evidence::{ArgvTested, Documented, LiveVerified};
-    use Provider::{Designer, Ibcmd};
+    use Provider::{Designer, Ibcmd, Webinst};
+
+    // Публикация на веб-сервере: у операции нет развилки, только `webinst`.
+    const WEBINST_ONLY: &[Capability] = &[implemented(Webinst, Documented)];
 
     const DESIGNER_THEN_IBCMD: &[Capability] = &[
         implemented(Designer, LiveVerified),
@@ -240,6 +247,7 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
             Operation::InfobaseDump | Operation::InfobaseRestore,
             TargetKind::File | TargetKind::Cluster,
         ) => SNAPSHOT,
+        (Operation::Publish, TargetKind::File | TargetKind::Cluster) => WEBINST_ONLY,
         // Автономный сервер как вид цели ещё не объявляется конфигом; строки для него
         // появятся вместе с секцией `infobase.standalone`.
         (_, TargetKind::Standalone) => &[],

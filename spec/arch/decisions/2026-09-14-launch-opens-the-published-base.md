@@ -1,11 +1,12 @@
 ---
 id: DEC.2026-09-14.LAUNCH-OPENS-THE-PUBLISHED-BASE
-status: planned
+status: active
 governs: product
-realized: null
+realized: tests/cli_launch.rs::launch_web_dry_run_names_the_opener_and_the_address
 supersedes: []
 superseded-by: null
-establishes: [INV.CLI.LAUNCH-WEB-WITHOUT-AN-ADDRESS-IS-REFUSED]
+establishes: [INV.CLI.LAUNCH-WEB-WITHOUT-AN-ADDRESS-IS-REFUSED, CTR.WIRE.LAUNCH-DATA]
+changes: [CTR.WIRE.LAUNCH-DATA]
 ---
 
 # `launch web` открывает опубликованную базу

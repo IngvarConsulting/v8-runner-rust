@@ -78,6 +78,69 @@ pub struct InfobaseConfig {
     /// Optional DBMS contract for server-based infobases.
     #[serde(default)]
     pub dbms: Option<InfobaseDbmsConfig>,
+
+    /// Client address and web-server publication settings.
+    ///
+    /// The runner administers the infobase through `connection`; a client or a browser
+    /// opens it through `web.url`. For a file or cluster infobase the address appears
+    /// after `publish`; a standalone server knows it up front.
+    #[serde(default)]
+    pub web: Option<InfobaseWebConfig>,
+}
+
+/// Web server a publication is written to.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WebServerKind {
+    Iis,
+    Apache2,
+    Apache22,
+    Apache24,
+}
+
+impl WebServerKind {
+    /// The `webinst` switch naming this server.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Iis => "iis",
+            Self::Apache2 => "apache2",
+            Self::Apache22 => "apache22",
+            Self::Apache24 => "apache24",
+        }
+    }
+
+    /// Apache 2.0 and 2.2 have no default configuration path `webinst` could guess.
+    pub const fn requires_conf(self) -> bool {
+        matches!(self, Self::Apache2 | Self::Apache22)
+    }
+}
+
+/// Publication and client-address settings for the target infobase.
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+pub struct InfobaseWebConfig {
+    /// Web server to publish on.
+    #[serde(default)]
+    pub server: Option<WebServerKind>,
+
+    /// Virtual directory name (`webinst -wsdir`).
+    #[serde(default)]
+    pub wsdir: Option<String>,
+
+    /// Physical directory the publication is written to (`webinst -dir`).
+    #[serde(default)]
+    pub dir: Option<PathBuf>,
+
+    /// Web server configuration file (`webinst -confpath`).
+    #[serde(default)]
+    pub conf: Option<PathBuf>,
+
+    /// Use OS authentication (`webinst -osauth`, IIS only).
+    #[serde(default, rename = "os-auth")]
+    pub os_auth: bool,
+
+    /// Address a client or a browser opens the infobase at.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 impl InfobaseConfig {
@@ -89,6 +152,7 @@ impl InfobaseConfig {
             user: None,
             password: None,
             dbms: None,
+            web: None,
         }
     }
 
@@ -107,6 +171,7 @@ impl InfobaseConfig {
             connection: connection.into(),
             user: None,
             password: None,
+            web: None,
             dbms: Some(dbms),
         }
     }

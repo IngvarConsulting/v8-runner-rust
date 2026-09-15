@@ -344,6 +344,32 @@ providers:
 
 Credentials самой информационной базы.
 
+#### `infobase.web`
+
+- Тип: объект
+- Обязателен: нет
+
+У базы два адреса. По `infobase.connection` раннер её **администрирует**; по
+`infobase.web.url` её **открывают** клиентом или браузером. Строка `ws=…` в
+`infobase.connection` не принимается: она называет второй адрес, а не первый, и чем
+администрировать базу, из неё не следует.
+
+```yaml
+infobase:
+  connection: "Srvr=srv:1541;Ref=demo"
+  web:
+    server: apache24            # iis | apache2 | apache22 | apache24
+    wsdir: demo                 # виртуальный каталог
+    dir: /var/www/demo          # физический каталог, должен существовать
+    conf: /etc/httpd/httpd.conf # обязателен для apache2 и apache22
+    os-auth: false              # только для iis
+    url: http://localhost/demo  # адрес для launch web
+```
+
+`server`, `wsdir` и `dir` нужны команде `publish`; `url` — команде `launch web`. У
+файловой и кластерной базы адрес появляется после публикации, у автономного сервера
+известен сразу. Секция разрешена и в `v8project.local.yaml`.
+
 #### `infobase.dbms`
 
 - Тип: объект

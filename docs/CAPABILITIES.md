@@ -37,7 +37,8 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `make` / `artifacts` | `format=DESIGNER`, провайдер только `designer` | Экспорт `.cf` / `.cfe` и публикация `.epf` / `.erf` |
 | `syntax` | `format=DESIGNER` или `format=EDT` | Designer checks для `DESIGNER`, EDT `validate` для `EDT` |
 | `infobase restore` | провайдер `designer`; `ibcmd` только по `providers.infobase.restore` | Загрузка полной ИБ из DT; обязателен `--create` или `--replace` |
-| `launch` | Не зависит от `format` | Прямой запуск 1C utility по позиционному mode |
+| `launch` | Не зависит от `format` | Прямой запуск 1C utility по позиционному mode; `launch web` открывает `infobase.web.url` в браузере |
+| `publish` | Файловая и кластерная база, провайдер только `webinst` | Публикует базу на веб-сервере из `infobase.web`; `--delete` снимает публикацию; `--dry-run` показывает команду `webinst` целиком |
 | MCP | `stdio` и `streamable HTTP` | Публикует 8 инструментов, уже более узкая поверхность, чем CLI |
 
 ## Превью у глаголов, работающих с платформой
@@ -492,12 +493,28 @@ v8-runner artifacts --output <TARGET> [--source-set <NAME>] [--extension <NAME>]
 - Каталог output используется для external `.epf` / `.erf` publication.
 - Исполнитель — только Конфигуратор.
 
+## `publish`
+
+```bash
+v8-runner publish [--delete] [--dry-run]
+```
+
+- Параметры берутся из `infobase.web`, а не из флагов: публикация воспроизводится из файла.
+- Составляет `webinst -publish|-delete -<server> -wsdir … -dir … [-connstr …] [-confpath …] [-osauth]`
+  по грамматике платформы; предусловия называются до запуска — существующий `dir`,
+  `conf` для apache2/apache22, `os-auth` только для iis.
+- Публикация замещает `default.vrd` целиком, поэтому у команды есть превью; удаление —
+  отдельный явный ключ `--delete`.
+- Не входит ни в одну цепочку умолчаний: `build`, `test` и остальные публикацию не делают.
+- Развилки нет: `providers.publish` отклоняется валидацией.
+
 ## Прямой запуск и MCP
 
 ### `launch`
 
 ```bash
 v8-runner launch <designer|thin|thick|ordinary> [--dry-run] [FLAGS]
+v8-runner launch web [--dry-run]
 v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--wait-ready] [FLAGS]
 ```
 

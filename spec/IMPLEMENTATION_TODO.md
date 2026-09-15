@@ -43,9 +43,6 @@ This file tracks open implementation work only.
    `tools.designer_agent` по образцу `tools.edt_cli`, SSH-клиент в процессе без pty, сессия
    на время workspace lock, типы ответа с закрытым `error-type`, страж признаёт агентский JSON
    структурным. Первыми через сессию идут `generation-id` (#99), `dump`, `build`.
-9. Реализовать решения о цели и публикации: `DEC.2026-09-14.TARGET-KIND-IS-DECLARED-NOT-PARSED`,
-   `TARGET-HAS-TWO-ADDRESSES`, `RUNNER-PUBLISHES-TO-A-WEB-SERVER`, `LAUNCH-OPENS-THE-PUBLISHED-BASE`,
-   `PUBLICATION-IS-NEVER-A-DEFAULT-STEP`. Идёт после шага 1 матрицы провайдеров.
 10. Реализовать цель «автономный сервер», шаг 3: вид цели «автономный сервер» — `infobase.connection: ws=…`,
    секция `infobase.standalone`, провайдер `agent` через шлюз `ibsrv`, `ibcmd --pid` только
    для чтения после прогрева; при запуске `ibsrv` раннером — без extended-флага и с
