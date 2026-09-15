@@ -101,28 +101,21 @@ fn run_build_branch(
     config: &AppConfig,
     args: &BuildArgs,
 ) -> UseCaseResult<BuildResult> {
+    // Сборка без изменений не запускает платформу, и раньше не требовала её: исполнитель
+    // ищется лениво, по первому набору, которому есть что грузить. Поэтому отказ выбора
+    // здесь не прерывает команду — он остаётся в квитанции, а нужна ли платформа,
+    // решают шаги.
     let mut utilities = PlatformUtilities::from_config(config);
-    let selected = match crate::use_cases::provider_selection::select(
+    let (provider, receipt) = match crate::use_cases::provider_selection::select(
         config,
         &mut utilities,
         Operation::Build,
     ) {
-        Ok(selected) => selected,
-        Err((error, receipt)) => {
-            return Err(BuildExecutionFailure::with_payload(
-                error,
-                BuildResult {
-                    provider: Some(receipt),
-                    provider_dispatched: false,
-                    ok: false,
-                    steps: vec![],
-                    duration_ms: 0,
-                },
-            ));
-        }
+        Ok(selected) => (selected.provider, selected.receipt),
+        Err((_error, receipt)) => (config.selected_provider(Operation::Build), receipt),
     };
-    let outcome = run_build_selected(context, config, args, selected.provider);
-    crate::use_cases::provider_selection::attach(outcome, &selected.receipt)
+    let outcome = run_build_selected(context, config, args, provider);
+    crate::use_cases::provider_selection::attach(outcome, &receipt)
 }
 
 fn run_build_selected(
