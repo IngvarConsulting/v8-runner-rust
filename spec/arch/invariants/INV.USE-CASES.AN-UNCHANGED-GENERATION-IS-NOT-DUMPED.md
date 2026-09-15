@@ -2,7 +2,7 @@
 id: INV.USE-CASES.AN-UNCHANGED-GENERATION-IS-NOT-DUMPED
 status: active
 governs: product
-decision: DEC.2026-09-15.THE-PLATFORM-IS-ASKED-WHETHER-THE-CONFIGURATION-CHANGED
+decision: DEC.2026-09-14.PLATFORM-ANSWERS-WHETHER-THE-BASE-CHANGED
 check: tests/cli_dump_agent.rs::an_unchanged_generation_is_not_dumped_twice
 scope: [use-cases, platform]
 ---

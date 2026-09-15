@@ -36,7 +36,7 @@ This file tracks open implementation work only.
 7. Реализовать агентский провайдер, шаг 2 (`DEC.2026-09-14.AGENT-*`). Сделано: `tools.designer_agent`
    (managed/attached), встроенный SSH-клиент (`russh`) без pty, типы ответа с закрытым `error-type`,
    `dump` и `build` через агента одной сессией на команду, учёт поколения конфигурации
-   (`DEC.2026-09-15.THE-PLATFORM-IS-ASKED-WHETHER-THE-CONFIGURATION-CHANGED`, #99). Строки
+   (`DEC.2026-09-14.PLATFORM-ANSWERS-WHETHER-THE-BASE-CHANGED`, #99). Строки
    `agent` в матрице экспериментальны: место в цепочке умолчаний назначает владелец;
    страж «агентский JSON — структурный вывод» не заведён.
 10. Реализовать цель «автономный сервер», шаг 3: вид цели «автономный сервер» — `infobase.connection: ws=…`,

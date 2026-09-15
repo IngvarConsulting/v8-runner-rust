@@ -3,7 +3,7 @@ id: CTR.WIRE.DUMP-DATA
 status: active
 governs: product
 version: 3
-decision: DEC.2026-09-15.THE-PLATFORM-IS-ASKED-WHETHER-THE-CONFIGURATION-CHANGED
+decision: DEC.2026-09-14.PLATFORM-ANSWERS-WHETHER-THE-BASE-CHANGED
 artifact: docs/schemas/command-data/dump.schema.json
 producer: src/domain/dump.rs
 consumers: [cli, mcp, unica]
