@@ -17,7 +17,7 @@ use crate::platform::agent::{
     self, AgentEndpoint, AgentError, AgentLaunch, AgentSession, AgentSessionRequest, ManagedAgent,
     WaitPolicy,
 };
-use crate::platform::locator::{UtilityLocation, UtilityType};
+use crate::platform::locator::UtilityType;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::support::fs::copy_dir_recursively;
@@ -83,11 +83,11 @@ pub(crate) fn transcript_log(config: &AppConfig, name: &str) -> Result<PathBuf, 
 }
 
 /// Открывает точку входа по конфигу: управляемую поднимает, к объявленной подключается.
-/// Локация из выбора исполнителя — `1cv8` у управляемого агента; у чужого её нет.
+/// `v8` — путь к `1cv8` из выбора исполнителя у управляемого агента; у чужого его нет.
 pub(crate) fn connect(
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
-    location: Option<&UtilityLocation>,
+    v8: Option<&Path>,
     transcript_log: PathBuf,
     wait: &WaitPolicy,
 ) -> Result<AgentHandle, AppError> {
@@ -115,14 +115,14 @@ pub(crate) fn connect(
             Ok(AgentHandle::Attached { session, base_dir })
         }
         DesignerAgentMode::Managed { port } => {
-            let v8 = location.ok_or_else(|| {
+            let v8 = v8.ok_or_else(|| {
                 AppError::EnvironmentUnavailable(
                     "the managed Designer agent needs the local platform; no 1cv8 was selected"
                         .to_owned(),
                 )
             })?;
             let launch = AgentLaunch {
-                v8: v8.path.clone(),
+                v8: v8.to_path_buf(),
                 infobase_args: connection.infobase_args(),
                 port,
                 host_key: agent.host_key.clone(),
@@ -240,6 +240,102 @@ fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
 #[cfg(windows)]
 fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::windows::fs::symlink_dir(target, link)
+}
+
+/// Кладёт чужой файл внутрь каталога пользователя агента под относительным именем:
+/// жёсткой ссылкой, если файловая система одна, иначе копией. Через символическую
+/// ссылку агент файлы не видит («Файл не обнаружен», замер 15.09.2026) — в отличие от
+/// каталогов.
+pub(crate) fn expose_file(
+    user_dir: &Path,
+    relative: &str,
+    target: &Path,
+) -> Result<String, AppError> {
+    let link = user_dir.join(relative);
+    if let Some(parent) = link.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to prepare the agent exchange dir '{}': {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    let _ = crate::support::fs::remove_path_if_exists(&link);
+    if std::fs::hard_link(target, &link).is_err() {
+        std::fs::copy(target, &link).map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to expose '{}' to the agent at '{}': {error}",
+                target.display(),
+                link.display()
+            ))
+        })?;
+    }
+    Ok(relative.to_owned())
+}
+
+/// Копия чужого каталога внутри каталога пользователя агента: для команд с файловыми
+/// параметрами, которые через ссылку не разрешаются.
+pub(crate) fn copy_dir_in(
+    user_dir: &Path,
+    relative: &str,
+    target: &Path,
+) -> Result<String, AppError> {
+    let copy = user_dir.join(relative);
+    let _ = crate::support::fs::remove_path_if_exists(&copy);
+    crate::support::fs::copy_dir_recursively(target, &copy).map_err(|error| {
+        AppError::Runtime(format!(
+            "failed to copy '{}' into the agent dir '{}': {error}",
+            target.display(),
+            copy.display()
+        ))
+    })?;
+    Ok(relative.to_owned())
+}
+
+/// Каталог для файлов, которые агент должен *написать*: настоящий подкаталог
+/// каталога пользователя — через символическую ссылку агент файлы не пишет.
+pub(crate) fn output_dir(user_dir: &Path, relative: &str) -> Result<PathBuf, AppError> {
+    let dir = user_dir.join(relative);
+    std::fs::create_dir_all(&dir).map_err(|error| {
+        AppError::Runtime(format!(
+            "failed to prepare the agent output dir '{}': {error}",
+            dir.display()
+        ))
+    })?;
+    Ok(dir)
+}
+
+/// Одна команда с проверкой итога; журнал ответа возвращается как улика.
+pub(crate) fn run_command(
+    handle: &mut AgentHandle,
+    command: &str,
+    wait: &WaitPolicy,
+) -> Result<agent::AgentReply, AppError> {
+    let reply = handle
+        .session()
+        .run(command, wait)
+        .map_err(map_agent_error)?;
+    reply.outcome().map_err(map_agent_error)?;
+    Ok(reply)
+}
+
+/// Ответ агента в форме результата платформы: код 0, журнал сообщений — как stdout,
+/// путь журнала сессии — как платформенный журнал.
+pub(crate) fn platform_result(
+    transcript: String,
+    log: PathBuf,
+) -> crate::platform::result::PlatformCommandResult {
+    crate::platform::result::PlatformCommandResult {
+        process: crate::platform::process::ProcessResult {
+            exit_code: 0,
+            stdout: transcript,
+            stderr: String::new(),
+            interruption: None,
+        },
+        platform_log_path: Some(log),
+        platform_log: None,
+        platform_log_read_error: None,
+    }
 }
 
 /// Снимает выставленный каталог: ссылку — как ссылку, копию — целиком.

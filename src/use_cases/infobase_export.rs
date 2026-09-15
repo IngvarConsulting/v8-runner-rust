@@ -1,4 +1,6 @@
 use std::io::ErrorKind;
+mod agent;
+
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -46,7 +48,8 @@ const SNAPSHOT_COMMAND: &str = "infobase.dump";
 pub struct PreparedExportProvider {
     receipt: ProviderReceipt,
     provider: ExportProvider,
-    executable: PathBuf,
+    /// `None` у исполнителя без утилиты на этой машине — чужого агента.
+    executable: Option<PathBuf>,
 }
 
 impl PreparedExportProvider {
@@ -103,7 +106,7 @@ pub fn execute_configuration_export(
         context,
         config,
         provider,
-        &prepared.executable,
+        prepared.executable.as_deref(),
         request.state,
         &request.subject,
         publication.staging_path(),
@@ -260,7 +263,7 @@ pub fn execute_infobase_snapshot(
         context,
         config,
         provider,
-        &prepared.executable,
+        prepared.executable.as_deref(),
         publication.staging_path(),
     ) {
         Ok(platform_result) => platform_result,
@@ -512,7 +515,7 @@ pub fn execute_infobase_restore(
         context,
         config,
         prepared.provider,
-        &prepared.executable,
+        prepared.executable.as_deref(),
         &request.input,
     ) {
         Ok(platform_result) => platform_result,
@@ -580,18 +583,20 @@ fn run_restore_provider(
     context: &ExecutionContext,
     config: &AppConfig,
     provider: ExportProvider,
-    executable: &Path,
+    executable: Option<&Path>,
     source_file: &Path,
 ) -> Result<PlatformCommandResult, AppError> {
     match provider {
         // Исполнитель без адаптера: отказ, а не паника — строка матрицы опередила код.
-        other @ (ExportProvider::Agent | ExportProvider::IbcmdRs | ExportProvider::Webinst) => {
+        other @ (ExportProvider::IbcmdRs | ExportProvider::Webinst) => {
             Err(crate::use_cases::unimplemented_provider(
                 crate::domain::capability::Operation::InfobaseRestore,
                 other,
             ))
         }
+        ExportProvider::Agent => agent::restore_snapshot(context, config, executable, source_file),
         ExportProvider::Designer => {
+            let executable = executable_of(executable)?;
             let runner = crate::platform::process::ProcessExecutor;
             let log = provider_log_path(config, "infobase-restore")?;
             DesignerDsl::new(
@@ -841,7 +846,7 @@ fn select_provider(
         }
         has_implemented = true;
 
-        let utility = provider_utility(provider);
+        let utility = provider_utility(config, provider);
         match readiness(config, &mut utilities, intent, provider, utility) {
             Ok(executable) => {
                 let receipt = plan.receipt_for(provider, skipped);
@@ -907,6 +912,21 @@ fn capability(
             ProviderEvidence::LiveVerified,
             "IBCMD DT restore runs but stays experimental until an exclusive-access preflight is implemented",
         ),
+        (ExportIntent::Configuration, ExportProvider::Agent) => (
+            ProviderImplementation::Experimental,
+            ProviderEvidence::ArgvTested,
+            "agent CF/CFE export runs `config dump-cfg` in the agent session; named by providers.* only",
+        ),
+        (ExportIntent::Snapshot, ExportProvider::Agent) => (
+            ProviderImplementation::Experimental,
+            ProviderEvidence::Documented,
+            "agent DT export runs `infobase-tools dump-ib`; named by providers.* only",
+        ),
+        (ExportIntent::SnapshotRestore { .. }, ExportProvider::Agent) => (
+            ProviderImplementation::Experimental,
+            ProviderEvidence::Documented,
+            "agent DT restore runs `infobase-tools restore-ib`; the agent drops the session afterwards",
+        ),
         // Строка матрицы, опередившая код: исполнитель назван, адаптера у него нет.
         (_, _) => (
             ProviderImplementation::Experimental,
@@ -916,12 +936,18 @@ fn capability(
     }
 }
 
-fn provider_utility(provider: ExportProvider) -> UtilityType {
+/// Утилита исполнителя; `None` — исполнителю на этой машине утилита не нужна.
+fn provider_utility(config: &AppConfig, provider: ExportProvider) -> Option<UtilityType> {
     match provider {
-        ExportProvider::Designer => UtilityType::V8,
-        // Только эти два доходят до готовности: у остальных нет адаптера, и они
-        // отсеиваются выше как нереализованные.
-        _ => UtilityType::Ibcmd,
+        ExportProvider::Designer => Some(UtilityType::V8),
+        // Управляемому агенту нужна платформа, чужому — ничего.
+        ExportProvider::Agent => match config.tools.designer_agent.mode() {
+            Ok(crate::config::model::DesignerAgentMode::Attached { .. }) => None,
+            _ => Some(UtilityType::V8),
+        },
+        // Только Designer, Agent и ibcmd доходят до готовности: у остальных нет адаптера,
+        // и они отсеиваются выше как нереализованные.
+        _ => Some(UtilityType::Ibcmd),
     }
 }
 
@@ -930,8 +956,8 @@ fn readiness(
     utilities: &mut PlatformUtilities,
     intent: ExportIntent,
     provider: ExportProvider,
-    utility: UtilityType,
-) -> Result<PathBuf, String> {
+    utility: Option<UtilityType>,
+) -> Result<Option<PathBuf>, String> {
     match intent {
         ExportIntent::SnapshotRestore {
             expects_absent_target: true,
@@ -942,10 +968,13 @@ fn readiness(
         IbcmdConnection::from_infobase(&config.infobase)
             .map_err(|error| format!("connection is not ready for IBCMD: {error}"))?;
     }
-    utilities
-        .locate(utility)
-        .map(|location| location.path)
-        .map_err(|error| format!("environment is not ready: {error}"))
+    match utility {
+        Some(utility) => utilities
+            .locate(utility)
+            .map(|location| Some(location.path))
+            .map_err(|error| format!("environment is not ready: {error}")),
+        None => Ok(None),
+    }
 }
 
 fn validate_file_infobase_readiness(config: &AppConfig) -> Result<(), String> {
@@ -1347,7 +1376,7 @@ fn run_configuration_provider(
     context: &ExecutionContext,
     config: &AppConfig,
     provider: ExportProvider,
-    executable: &Path,
+    executable: Option<&Path>,
     state: ConfigurationState,
     subject: &ConfigurationSubject,
     staging_path: &Path,
@@ -1359,13 +1388,24 @@ fn run_configuration_provider(
     let runner = crate::platform::process::ProcessExecutor;
     let result = match provider {
         // Исполнитель без адаптера: отказ, а не паника — строка матрицы опередила код.
-        other @ (ExportProvider::Agent | ExportProvider::IbcmdRs | ExportProvider::Webinst) => {
+        other @ (ExportProvider::IbcmdRs | ExportProvider::Webinst) => {
             return Err(crate::use_cases::unimplemented_provider(
                 crate::domain::capability::Operation::ConfigurationExport,
                 other,
             ));
         }
+        ExportProvider::Agent => {
+            return agent::export_configuration(
+                context,
+                config,
+                executable,
+                state,
+                extension,
+                staging_path,
+            );
+        }
         ExportProvider::Designer => {
+            let executable = executable_of(executable)?;
             let log = provider_log_path(config, "configuration-export")?;
             let dsl = DesignerDsl::new(
                 executable.to_path_buf(),
@@ -1383,6 +1423,7 @@ fn run_configuration_provider(
             .map_err(AppError::from)?
         }
         ExportProvider::Ibcmd => {
+            let executable = executable_of(executable)?;
             let connection =
                 IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
             let data_path = config.work_path.join("ibcmd-data");
@@ -1412,18 +1453,20 @@ fn run_snapshot_provider(
     context: &ExecutionContext,
     config: &AppConfig,
     provider: ExportProvider,
-    executable: &Path,
+    executable: Option<&Path>,
     staging_path: &Path,
 ) -> Result<PlatformCommandResult, AppError> {
     match provider {
         // Исполнитель без адаптера: отказ, а не паника — строка матрицы опередила код.
-        other @ (ExportProvider::Agent | ExportProvider::IbcmdRs | ExportProvider::Webinst) => {
+        other @ (ExportProvider::IbcmdRs | ExportProvider::Webinst) => {
             return Err(crate::use_cases::unimplemented_provider(
                 crate::domain::capability::Operation::InfobaseDump,
                 other,
             ));
         }
+        ExportProvider::Agent => agent::export_snapshot(context, config, executable, staging_path),
         ExportProvider::Designer => {
+            let executable = executable_of(executable)?;
             let runner = crate::platform::process::ProcessExecutor;
             let log = provider_log_path(config, "infobase-dump")?;
             DesignerDsl::new(
@@ -1442,6 +1485,13 @@ fn run_snapshot_provider(
             "IBCMD DT export is experimental and cannot be dispatched".to_owned(),
         )),
     }
+}
+
+/// Утилита, без которой пакетному исполнителю не работать; её отсутствие после
+/// выбора — ошибка раннера, а не среды.
+fn executable_of(executable: Option<&Path>) -> Result<&Path, AppError> {
+    executable
+        .ok_or_else(|| AppError::Runtime("executor was selected without its utility".to_owned()))
 }
 
 fn provider_log_path(config: &AppConfig, stem: &str) -> Result<PathBuf, AppError> {

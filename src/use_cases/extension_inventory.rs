@@ -4,9 +4,11 @@
 //! platform rather than by `builder`: Designer has no batch key that reports installed
 //! extensions, so every operation here is IBCMD-only and says so when IBCMD is absent.
 
+use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::config::model::AppConfig;
+use crate::domain::capability::Provider;
 use crate::domain::extensions::{
     ExtensionInventoryResult, ExtensionsResult, ExtensionsStep, InstalledExtension,
 };
@@ -17,6 +19,7 @@ use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::extension_agent::ExtensionAgent;
 use crate::use_cases::request::{ExtensionInventoryRequest, ExtensionInventoryScope};
 use crate::use_cases::result::{UseCaseError, UseCaseFailure, UseCaseResult};
 use tracing::debug;
@@ -51,15 +54,8 @@ pub fn execute(
     )
     .map_err(|(error, _receipt)| UseCaseFailure::without_payload(error))?;
     let receipt = selected.receipt;
-    let Some(location) = selected.location else {
-        return Err(UseCaseFailure::without_payload(
-            crate::use_cases::unimplemented_provider(
-                crate::domain::capability::Operation::Extensions,
-                selected.provider,
-            ),
-        ));
-    };
-    let binary = location.path;
+    let executor = Executor::of(selected.provider, selected.location)
+        .map_err(UseCaseFailure::without_payload)?;
     if request.dry_run {
         // Reading the composition starts the platform, authenticates and leaves a journal
         // trace, so the read is previewed like any change: the target and the account are
@@ -75,27 +71,43 @@ pub fn execute(
                     ExtensionInventoryScope::Named { name } => format!("extension '{name}'"),
                 },
                 connection.describe_target(),
-                binary.display()
+                executor.label()
             )),
             extensions: Vec::new(),
             duration_ms: started.elapsed().as_millis() as u64,
         });
     }
 
-    let dsl = IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
-        .with_execution_policy(
-            context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-        );
+    let extensions = match executor {
+        Executor::Agent(v8) => {
+            let mut agent = ExtensionAgent::open(context, config, v8.as_deref())
+                .map_err(UseCaseFailure::without_payload)?;
+            let inventory = agent.inventory(match &request.scope {
+                ExtensionInventoryScope::All => None,
+                ExtensionInventoryScope::Named { name } => Some(name.as_str()),
+            });
+            agent.close();
+            let extensions = inventory.map_err(UseCaseFailure::without_payload)?;
+            ensure_requested_record(&extensions, request)
+                .map_err(UseCaseFailure::without_payload)?;
+            extensions
+        }
+        Executor::Ibcmd(binary) => {
+            let dsl = IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
+                .with_execution_policy(
+                    context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+                );
 
-    let platform_result = match &request.scope {
-        ExtensionInventoryScope::All => dsl.infobase_extension_list(),
-        ExtensionInventoryScope::Named { name } => dsl.infobase_extension_info(name),
-    }
-    .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+            let platform_result = match &request.scope {
+                ExtensionInventoryScope::All => dsl.infobase_extension_list(),
+                ExtensionInventoryScope::Named { name } => dsl.infobase_extension_info(name),
+            }
+            .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
 
-    validate_success(&platform_result).map_err(UseCaseFailure::without_payload)?;
-    let extensions =
-        read_inventory(&platform_result, request).map_err(UseCaseFailure::without_payload)?;
+            validate_success(&platform_result).map_err(UseCaseFailure::without_payload)?;
+            read_inventory(&platform_result, request).map_err(UseCaseFailure::without_payload)?
+        }
+    };
 
     Ok(ExtensionInventoryResult {
         provider: Some(receipt),
@@ -150,6 +162,14 @@ fn read_inventory(
             "cannot read the platform extension inventory: {error}"
         ))
     })?;
+    ensure_requested_record(&extensions, request)?;
+    Ok(extensions)
+}
+
+fn ensure_requested_record(
+    extensions: &[InstalledExtension],
+    request: &ExtensionInventoryRequest,
+) -> Result<(), AppError> {
     if let ExtensionInventoryScope::Named { name } = &request.scope {
         if !extensions
             .iter()
@@ -160,7 +180,37 @@ fn read_inventory(
             )));
         }
     }
-    Ok(extensions)
+    Ok(())
+}
+
+/// Кто выполняет: `ibcmd` — утилитой, агент — сессией (утилита нужна только
+/// управляемому агенту, чтобы его запустить).
+enum Executor {
+    Ibcmd(PathBuf),
+    Agent(Option<PathBuf>),
+}
+
+impl Executor {
+    fn of(
+        provider: Provider,
+        location: Option<crate::platform::locator::UtilityLocation>,
+    ) -> Result<Self, AppError> {
+        match (provider, location) {
+            (Provider::Agent, location) => Ok(Self::Agent(location.map(|l| l.path))),
+            (_, Some(location)) => Ok(Self::Ibcmd(location.path)),
+            (provider, None) => Err(crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::Extensions,
+                provider,
+            )),
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Self::Ibcmd(binary) => binary.display().to_string(),
+            Self::Agent(_) => "the designer agent".to_owned(),
+        }
+    }
 }
 
 /// Change to the extension composition of the infobase.
@@ -226,15 +276,8 @@ pub fn change(
     )
     .map_err(|(error, _receipt)| UseCaseFailure::without_payload(error))?;
     let receipt = selected.receipt;
-    let Some(location) = selected.location else {
-        return Err(UseCaseFailure::without_payload(
-            crate::use_cases::unimplemented_provider(
-                crate::domain::capability::Operation::Extensions,
-                selected.provider,
-            ),
-        ));
-    };
-    let binary = location.path;
+    let executor = Executor::of(selected.provider, selected.location)
+        .map_err(UseCaseFailure::without_payload)?;
     if dry_run {
         return Ok(ExtensionsResult {
             provider: Some(receipt),
@@ -249,7 +292,7 @@ pub fn change(
                     request.action(),
                     request.target(),
                     connection.describe_target(),
-                    binary.display()
+                    executor.label()
                 )),
                 duration_ms: 0,
             }],
@@ -257,31 +300,55 @@ pub fn change(
         });
     }
 
-    let dsl = IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
-        .with_execution_policy(
-            context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
-        );
-
-    let platform_result = match request {
-        ExtensionChangeRequest::Create {
-            name,
-            name_prefix,
-            synonym,
-            purpose,
-        } => {
-            dsl.infobase_extension_create(name, name_prefix, synonym.as_deref(), purpose.as_deref())
+    let outcome = match executor {
+        Executor::Agent(v8) => {
+            ExtensionAgent::open(context, config, v8.as_deref()).and_then(|mut agent| {
+                let outcome = match request {
+                    ExtensionChangeRequest::Create {
+                        name,
+                        name_prefix,
+                        synonym,
+                        purpose,
+                    } => agent.create(name, name_prefix, synonym.as_deref(), purpose.as_deref()),
+                    ExtensionChangeRequest::Delete { name } => agent.delete(name),
+                    ExtensionChangeRequest::SetActive { name, active } => {
+                        agent.set_active(name, *active)
+                    }
+                };
+                agent.close();
+                outcome
+            })
         }
-        ExtensionChangeRequest::Delete { name } => dsl.infobase_extension_delete(name),
-        ExtensionChangeRequest::SetActive { name, active } => {
-            dsl.infobase_extension_set_active(name, *active)
+        Executor::Ibcmd(binary) => {
+            let dsl = IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
+                .with_execution_policy(
+                    context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
+                );
+            let platform_result = match request {
+                ExtensionChangeRequest::Create {
+                    name,
+                    name_prefix,
+                    synonym,
+                    purpose,
+                } => dsl.infobase_extension_create(
+                    name,
+                    name_prefix,
+                    synonym.as_deref(),
+                    purpose.as_deref(),
+                ),
+                ExtensionChangeRequest::Delete { name } => dsl.infobase_extension_delete(name),
+                ExtensionChangeRequest::SetActive { name, active } => {
+                    dsl.infobase_extension_set_active(name, *active)
+                }
+            };
+            platform_result
+                .map_err(AppError::from)
+                .and_then(|result| validate_success(&result))
         }
     };
 
     let step_duration = started.elapsed().as_millis() as u64;
-    match platform_result
-        .map_err(AppError::from)
-        .and_then(|result| validate_success(&result))
-    {
+    match outcome {
         Ok(()) => Ok(ExtensionsResult {
             provider: Some(receipt.clone()),
             ok: true,

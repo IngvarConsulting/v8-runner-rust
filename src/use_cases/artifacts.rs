@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+mod agent;
 use tracing::debug;
 
 use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose};
@@ -172,14 +174,21 @@ fn run_artifacts_selected(
     utilities: PlatformUtilities,
     selected: crate::use_cases::provider_selection::SelectedProvider,
 ) -> UseCaseResult<ArtifactsResult> {
-    let Some(location) = selected.location else {
+    // Только агентский исполнитель может обходиться без утилиты: к чужому агенту
+    // подключаются по сети. Любому другому без утилиты делать нечего.
+    let executable = selected.location.map(|location| location.path);
+    if executable.is_none() && selected.provider != Provider::Agent {
         return Err(UseCaseFailure::without_payload(
             crate::use_cases::unimplemented_provider(
                 crate::domain::capability::Operation::Make,
                 selected.provider,
             ),
         ));
-    };
+    }
+    let executor_label = executable
+        .as_deref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "the designer agent".to_owned());
 
     if args.dry_run {
         crate::use_cases::progress::log_live_stage(
@@ -211,7 +220,7 @@ fn run_artifacts_selected(
                     "would build {:?} into '{}' via {}; nothing published",
                     resolved.mode,
                     resolved.output_path.display(),
-                    location.path.display()
+                    executor_label
                 )]),
         });
     }
@@ -252,13 +261,24 @@ fn run_artifacts_selected(
         ));
     }
 
-    let execution_result = run_designer_export(
-        context,
-        config,
-        &resolved,
-        location.path.as_path(),
-        utilities.runner_for(UtilityType::V8),
-    );
+    let execution_result = match (selected.provider, executable.as_deref()) {
+        (Provider::Agent, v8) => agent::run_agent_export(context, config, &resolved, v8),
+        (_, Some(binary)) => run_designer_export(
+            context,
+            config,
+            &resolved,
+            binary,
+            utilities.runner_for(UtilityType::V8),
+        ),
+        (provider, None) => Err((
+            crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::Make,
+                provider,
+            ),
+            ArtifactSet::default(),
+            None,
+        )),
+    };
     drop(lock_guard);
 
     match execution_result {
@@ -543,7 +563,7 @@ fn run_external_designer_export(
         resolved.mode,
     )
     .map_err(|error| (error, ArtifactSet::default(), None))?;
-    let descriptors = external_descriptors(context, config, resolved, runner, binary)
+    let descriptors = external_descriptors(context, config, resolved)
         .map_err(|error| (error, ArtifactSet::default(), None))?;
     let mut artifacts = ArtifactSet::default();
     let mut last_result = PlatformCommandResult {
@@ -856,7 +876,11 @@ fn resolve_target(
 }
 
 fn validate_supported_matrix(config: &AppConfig, args: &ArtifactsRequest) -> Option<AppError> {
-    if config.selected_provider(Operation::Make) != Provider::Designer {
+    // Агент — тот же профиль Конфигуратора (те же виды артефактов), только через shell.
+    if !matches!(
+        config.selected_provider(Operation::Make),
+        Provider::Designer | Provider::Agent
+    ) {
         return Some(AppError::Validation(SUPPORTED_ARTIFACTS_ERROR.to_owned()));
     }
     if args.execution.profile.backend_hint.as_deref() != Some("designer") {
@@ -1141,8 +1165,6 @@ fn external_descriptors(
     context: &ExecutionContext,
     config: &AppConfig,
     resolved: &ResolvedArtifactsTarget,
-    _runner: &dyn ProcessRunner,
-    _binary: &Path,
 ) -> Result<Vec<ExternalArtifactDescriptor>, AppError> {
     let source_set = config
         .source_sets

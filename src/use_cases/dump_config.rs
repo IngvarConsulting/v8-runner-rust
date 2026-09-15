@@ -749,48 +749,47 @@ pub(crate) fn run_external_dump_designer(
             result.platform_log_path.clone(),
         ));
     }
+    verify_external_dump_descriptor(root_xml_path, expected_kind, expected_logical_name)
+        .map_err(|error| (error, result.platform_log_path.clone()))?;
+    Ok((result, root_xml_path.to_path_buf()))
+}
+
+/// Выгруженный обратно описатель должен быть того вида и с тем именем, что собирали:
+/// иначе платформа собрала не то, что просили, и файл нельзя публиковать.
+pub(crate) fn verify_external_dump_descriptor(
+    root_xml_path: &Path,
+    expected_kind: ExternalArtifactKind,
+    expected_logical_name: &str,
+) -> Result<(), AppError> {
     let contents = match std::fs::read_to_string(root_xml_path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err((
-                AppError::Validation(format!(
-                    "external dump '{}' did not produce descriptor xml",
-                    root_xml_path.display()
-                )),
-                result.platform_log_path.clone(),
-            ));
+            return Err(AppError::Validation(format!(
+                "external dump '{}' did not produce descriptor xml",
+                root_xml_path.display()
+            )));
         }
         Err(error) => {
-            return Err((
-                AppError::Runtime(format!(
-                    "failed to read external dump root xml '{}': {error}",
-                    root_xml_path.display()
-                )),
-                result.platform_log_path.clone(),
-            ));
+            return Err(AppError::Runtime(format!(
+                "failed to read external dump root xml '{}': {error}",
+                root_xml_path.display()
+            )));
         }
     };
-    let parsed = parse_external_dump_descriptor(&contents, root_xml_path)
-        .map_err(|error| (error, result.platform_log_path.clone()))?;
+    let parsed = parse_external_dump_descriptor(&contents, root_xml_path)?;
     if parsed.purpose.external_root_tag() != Some(expected_kind.root_tag()) {
-        return Err((
-            AppError::Validation(format!(
-                "external dump '{}' has unexpected root element",
-                root_xml_path.display()
-            )),
-            result.platform_log_path.clone(),
-        ));
+        return Err(AppError::Validation(format!(
+            "external dump '{}' has unexpected root element",
+            root_xml_path.display()
+        )));
     }
     if parsed.logical_name != expected_logical_name {
-        return Err((
-            AppError::Validation(format!(
-                "external dump '{}' has unexpected logical name",
-                root_xml_path.display()
-            )),
-            result.platform_log_path.clone(),
-        ));
+        return Err(AppError::Validation(format!(
+            "external dump '{}' has unexpected logical name",
+            root_xml_path.display()
+        )));
     }
-    Ok((result, root_xml_path.to_path_buf()))
+    Ok(())
 }
 
 fn parse_external_dump_descriptor(

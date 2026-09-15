@@ -35,10 +35,12 @@ This file tracks open implementation work only.
 
 7. Реализовать агентский провайдер, шаг 2 (`DEC.2026-09-14.AGENT-*`). Сделано: `tools.designer_agent`
    (managed/attached), встроенный SSH-клиент (`russh`) без pty, типы ответа с закрытым `error-type`,
-   `dump` и `build` через агента одной сессией на команду, учёт поколения конфигурации
-   (`DEC.2026-09-14.PLATFORM-ANSWERS-WHETHER-THE-BASE-CHANGED`, #99). Строки
-   `agent` в матрице экспериментальны: место в цепочке умолчаний назначает владелец;
-   страж «агентский JSON — структурный вывод» не заведён.
+   `dump`, `build`, `make`, `infobase configuration export|dump|restore` и `extensions`
+   через агента одной сессией на команду, учёт поколения конфигурации
+   (`DEC.2026-09-14.PLATFORM-ANSWERS-WHETHER-THE-BASE-CHANGED`, #99); `load` через
+   агента не предусмотрен (нет `compare-cfg`). Строки `agent` в матрице
+   экспериментальны: место в цепочке умолчаний назначает владелец; страж
+   «агентский JSON — структурный вывод» не заведён; долгоживущая сессия — #125.
 10. Реализовать цель «автономный сервер», шаг 3: вид цели «автономный сервер» — `infobase.connection: ws=…`,
    секция `infobase.standalone`, провайдер `agent` через шлюз `ibsrv`, `ibcmd --pid` только
    для чтения после прогрева; при запуске `ibsrv` раннером — без extended-флага и с

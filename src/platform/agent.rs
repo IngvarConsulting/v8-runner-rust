@@ -40,7 +40,9 @@ const RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 const WAIT_SLICE: Duration = Duration::from_millis(200);
 
-/// Тип сообщения агента по документации (Приложение 4, 4.7.8).
+/// Тип сообщения агента по документации (Приложение 4, 4.7.8) плюс
+/// `extension-properties`, которым 8.3.27 отвечает на `extensions properties get
+/// --extension=` (живой ответ 15.09.2026; в документации его нет).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentMessageType {
@@ -53,6 +55,7 @@ pub enum AgentMessageType {
     LoadingIssue,
     Progress,
     ExtensionInfo,
+    ExtensionProperties,
 }
 
 /// Закрытое множество `error-type`; всё вне его сохраняется дословно, а не теряется.
@@ -141,6 +144,8 @@ pub struct AgentReply {
 
 impl AgentMessage {
     /// Сообщение, которым команда заканчивается; прогресс и журнал — промежуточные.
+    /// `extension-properties` — тоже итог: на `properties get --extension=` агент
+    /// отвечает только им, без `success` (живой ответ 15.09.2026).
     pub fn is_terminal(&self) -> bool {
         matches!(
             self.kind,
@@ -148,6 +153,7 @@ impl AgentMessage {
                 | AgentMessageType::Error
                 | AgentMessageType::Canceled
                 | AgentMessageType::Question
+                | AgentMessageType::ExtensionProperties
         )
     }
 }
@@ -162,7 +168,14 @@ impl AgentReply {
             .rev()
             .find(|message| message.is_terminal());
         match terminal {
-            Some(message) if message.kind == AgentMessageType::Success => Ok(message.body.as_ref()),
+            Some(message)
+                if matches!(
+                    message.kind,
+                    AgentMessageType::Success | AgentMessageType::ExtensionProperties
+                ) =>
+            {
+                Ok(message.body.as_ref())
+            }
             Some(message) if message.kind == AgentMessageType::Error => Err(AgentError::Command {
                 error_type: message
                     .error_type
@@ -850,6 +863,25 @@ mod tests {
             }
             other => panic!("unexpected outcome: {other:?}"),
         }
+    }
+
+    /// На одно расширение агент отвечает записью без `success`: она и есть итог.
+    #[test]
+    fn an_extension_properties_message_alone_ends_the_reply() {
+        let reply = AgentReply {
+            messages: serde_json::from_str(
+                r#"[{"type":"extension-properties","body":{"name":"Зонд"}}]"#,
+            )
+            .expect("messages"),
+        };
+        assert!(reply.messages[0].is_terminal());
+        assert_eq!(
+            reply
+                .outcome()
+                .expect("outcome")
+                .and_then(|body| body.get("name")),
+            Some(&serde_json::Value::String("Зонд".to_owned()))
+        );
     }
 
     #[test]
