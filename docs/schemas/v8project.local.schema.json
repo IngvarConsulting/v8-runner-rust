@@ -1,5 +1,52 @@
 {
   "$defs": {
+    "DesignerAgentSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "attach": {
+          "description": "`host:port` of a Designer agent started outside the runner (attached mode). Excludes `port` and `host-key`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base-dir": {
+          "description": "`AgentBaseDir` of the attached agent: where its commands read and write files. Needs `attach`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "host-key": {
+          "description": "Private host key file for the runner-launched agent. Absent: the platform generates one (`/AgentSSHHostKeyAuto`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "port": {
+          "description": "Port the runner-launched agent listens on (managed mode). Default 1543.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "ssh": {
+          "description": "Path to the system `ssh` client. Absent: `ssh` from PATH.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startup_timeout_ms": {
+          "description": "Time limit for the runner-launched agent to accept the first authenticated session, in milliseconds.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "EdtCliSchema": {
       "additionalProperties": false,
       "properties": {
@@ -445,6 +492,10 @@
         "client_mcp": {
           "$ref": "#/$defs/PartialClientMcpToolSchema",
           "description": "Machine-local onec-client-mcp tool settings."
+        },
+        "designer_agent": {
+          "$ref": "#/$defs/DesignerAgentSchema",
+          "description": "Designer agent endpoint: the agent the runner launches, or one to attach to."
         },
         "edt_cli": {
           "$ref": "#/$defs/EdtCliSchema",

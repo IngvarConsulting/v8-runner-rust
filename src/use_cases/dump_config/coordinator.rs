@@ -326,6 +326,20 @@ fn run_dump_selected(
                 objects,
             )
         }
+        (SourceFormat::Designer, DumpMode::Partial, Provider::Agent, None, _) => {
+            Err(AppError::Runtime(
+                "partial dump objects were not validated before execution".to_owned(),
+            ))
+        }
+        (SourceFormat::Designer, _, Provider::Agent, objects, _) => super::agent::run_dump_agent(
+            context,
+            config,
+            &resolved,
+            &mode,
+            objects,
+            location.path.as_path(),
+            &mut utilities,
+        ),
         (SourceFormat::Edt, DumpMode::Incremental, Provider::Designer, _, Some(edt_binary)) => {
             run_incremental_dump_edt_designer(
                 context,

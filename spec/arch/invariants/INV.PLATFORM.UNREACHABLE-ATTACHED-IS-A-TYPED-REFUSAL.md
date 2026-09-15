@@ -1,9 +1,9 @@
 ---
 id: INV.PLATFORM.UNREACHABLE-ATTACHED-IS-A-TYPED-REFUSAL
-status: planned
+status: active
 governs: product
 decision: DEC.2026-09-14.AGENT-ENDPOINT-IS-MANAGED-OR-ATTACHED
-check: null
+check: tests/cli_dump_agent.rs::an_unreachable_attached_agent_is_refused_and_no_process_is_launched_instead
 scope: [platform]
 ---
 

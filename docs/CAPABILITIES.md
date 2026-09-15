@@ -29,7 +29,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `build` | провайдер `designer` (умолчание) или `ibcmd`, любой `format` | Incremental/full загрузка в ИБ; при `format=EDT` сначала экспортирует изменённые EDT `source-set` |
 | `test` | Та же матрица, что и у `build` | По умолчанию запускает `build` |
 | `test --no-build` | Подготовленная file/server ИБ; source-set и build tooling не требуются | Запускает выбранный test engine без build |
-| `dump` | провайдер `designer` (умолчание) или `ibcmd`, любой `format` | Полная, инкрементальная или object-scoped partial выгрузка; у `ibcmd` `partial` деградирует в incremental с warning; при `format=EDT` — reverse sync через internal Designer snapshot и EDT import |
+| `dump` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.dump: agent` при `format=DESIGNER` | Полная, инкрементальная или object-scoped partial выгрузка; у `ibcmd` `partial` деградирует в incremental с warning; у `agent` `incremental` деградирует в full с warning, результат публикуется через staging из `AgentBaseDir`; при `format=EDT` — reverse sync через internal Designer snapshot и EDT import |
 | `infobase configuration export` | цепочка `designer` → `ibcmd` | Выгружает working/database configuration в `.cf` или named extension в `.cfe`; раннер берёт первого готового до spawn, квитанция называет пропущенных |
 | `infobase dump` | провайдер `designer`; `ibcmd` только по `providers.infobase.dump` | Выгружает полную ИБ в переносимый `.dt`; это не backup; `ibcmd` остаётся experimental до exclusive-access preflight |
 | `convert` | CLI-only repo-aware конвертация текущих `source-set` | Строки в матрице провайдеров не имеет и не требует ИБ |

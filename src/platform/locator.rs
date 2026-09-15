@@ -19,6 +19,8 @@ pub enum UtilityType {
     EdtCli,
     /// `webinst`
     Webinst,
+    /// System `ssh` client that drives a Designer agent.
+    Ssh,
 }
 
 impl UtilityType {
@@ -30,12 +32,13 @@ impl UtilityType {
             Self::Ibcmd => executable_name_for("ibcmd"),
             Self::EdtCli => executable_name_for("1cedtcli"),
             Self::Webinst => executable_name_for("webinst"),
+            Self::Ssh => executable_name_for("ssh"),
         }
     }
 
     /// Returns `true` for regular 1C platform binaries.
     pub fn is_platform(self) -> bool {
-        !matches!(self, Self::EdtCli)
+        !matches!(self, Self::EdtCli | Self::Ssh)
     }
 }
 
@@ -210,6 +213,8 @@ pub struct LocatorOptions {
     pub edt_hint: Option<PathBuf>,
     /// Optional EDT discovery version.
     pub edt_version: Option<EdtVersion>,
+    /// Configured `ssh` client; absent means `PATH`.
+    pub ssh_hint: Option<PathBuf>,
 }
 
 /// Typed origin of a resolved executable.
@@ -310,6 +315,7 @@ pub struct Locator {
     platform_policy: PlatformResolutionPolicy,
     edt_hint: Option<PathBuf>,
     edt_version: Option<EdtVersion>,
+    ssh_hint: Option<PathBuf>,
     cache: HashMap<(UtilityType, Option<String>), UtilityLocation>,
     platform_roots: Vec<PathBuf>,
     edt_roots: Vec<PathBuf>,
@@ -326,6 +332,7 @@ impl Locator {
             platform_policy: options.platform_policy,
             edt_hint: options.edt_hint,
             edt_version: options.edt_version,
+            ssh_hint: options.ssh_hint,
             cache: HashMap::new(),
             platform_roots: default_platform_roots(),
             edt_roots: default_edt_roots(),
@@ -345,7 +352,9 @@ impl Locator {
             self.cache.remove(&cache_key);
         }
 
-        let selected = if utility.is_platform() {
+        let selected = if utility == UtilityType::Ssh {
+            self.locate_ssh()?
+        } else if utility.is_platform() {
             self.locate_platform(utility)?
         } else {
             self.locate_edt(utility)?
@@ -413,6 +422,11 @@ impl Locator {
                 PlatformResolutionPolicy::Lenient | PlatformResolutionPolicy::Strict,
                 Some(_) | None,
             ) => select_edt_candidate(vec![candidate], utility, None),
+            (
+                UtilityType::Ssh,
+                PlatformResolutionPolicy::Lenient | PlatformResolutionPolicy::Strict,
+                Some(_) | None,
+            ) => first_valid_candidate(utility, vec![candidate]),
         }?;
 
         (current == *cached).then_some(current)
@@ -456,6 +470,7 @@ impl Locator {
             platform_policy,
             edt_hint,
             edt_version,
+            ssh_hint: None,
             cache: HashMap::new(),
             platform_roots,
             edt_roots,
@@ -591,6 +606,21 @@ impl Locator {
             root: location.installation_root.clone(),
             source: location.source,
         });
+    }
+
+    /// The `ssh` client has no version and no installation root worth a boundary: a
+    /// configured path is the only candidate, otherwise the first one on `PATH` wins.
+    fn locate_ssh(&self) -> Result<UtilityLocation, LocatorError> {
+        let utility = UtilityType::Ssh;
+        let candidates = match self.ssh_hint.as_ref() {
+            Some(hint) => vec![candidate_from_path(
+                hint.clone(),
+                utility,
+                ResolutionSource::Explicit,
+            )],
+            None => path_candidates(utility, &self.path_roots),
+        };
+        first_valid_candidate(utility, candidates).ok_or(LocatorError::NotFound(utility))
     }
 
     fn locate_edt(&self, utility: UtilityType) -> Result<UtilityLocation, LocatorError> {
@@ -936,6 +966,22 @@ fn choose_candidate(
         })
 }
 
+fn first_valid_candidate(
+    utility: UtilityType,
+    candidates: Vec<Candidate>,
+) -> Option<UtilityLocation> {
+    canonical_candidates(utility, candidates, None)
+        .into_iter()
+        .next()
+        .map(|chosen| UtilityLocation {
+            utility,
+            path: chosen.path,
+            version: chosen.version,
+            source: chosen.source,
+            installation_root: chosen.installation_root,
+        })
+}
+
 fn select_edt_candidate(
     candidates: Vec<Candidate>,
     utility: UtilityType,
@@ -1112,6 +1158,7 @@ fn infer_version(utility: UtilityType, path: &Path) -> Option<UtilityVersion> {
         UtilityType::EdtCli => version_text
             .and_then(EdtVersion::parse_lenient)
             .map(UtilityVersion::Edt),
+        UtilityType::Ssh => None,
     }
 }
 

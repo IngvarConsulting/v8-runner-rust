@@ -18,6 +18,7 @@ nuances вынесены в [DEEP_DIVE.md](DEEP_DIVE.md).
 - [`tools.platform`](#toolsplatform)
 - [`tools.enterprise`](#toolsenterprise)
 - [`tools.edt_cli`](#toolsedt_cli)
+- [`tools.designer_agent`](#toolsdesigner_agent)
 - [Неподдержанные ключи](#неподдержанные-ключи)
 
 ## Как получить стартовый конфиг
@@ -111,6 +112,8 @@ artifact без привязки к release tag.
   - `auto-start`
   - `startup_timeout_ms`
   - `command_timeout_ms`
+- canonical key для агента Конфигуратора: `tools.designer_agent`; child keys —
+  `attach`, `base-dir`, `port`, `host-key`, `ssh` и `startup_timeout_ms`.
 
 Ниже фиксируются только поддержанные canonical keys.
 
@@ -161,6 +164,9 @@ tools:
     auto-start: false
     startup_timeout_ms: 300000
     command_timeout_ms: 300000
+  designer_agent:
+    port: 1543               # управляемый агент; либо attach: host:port
+    startup_timeout_ms: 120000
 
 mcp:
   http:
@@ -664,6 +670,71 @@ EDT-вызове.
 
 - Тип: integer
 - По умолчанию: `300000`
+
+## `tools.designer_agent`
+
+Точка входа агента Конфигуратора для провайдера `agent`. Режим объявлен ключами: без
+`attach` раннер поднимает агента сам (`managed`), с `attach` — подключается к агенту,
+поднятому без него (`attached`), не добавляет ему флагов, не перезапускает и не
+поднимает свой рядом. Ключи двух режимов не смешиваются: `attach` вместе с `port` или
+`host-key` — ошибка валидации, `base-dir` без `attach` — тоже.
+
+Сессия идёт через системный `ssh` без псевдотерминала; учётные данные — `infobase.user`
+и `infobase.password`, у базы без пользователей — пустая пара. Готовность агента
+доказывает успешная аутентификация, а не открытый порт.
+
+Управляемый агент поднимается как `1cv8 DESIGNER <база> /AgentMode /AgentPort <port>
+/AgentListenAddress 127.0.0.1 /AgentSSHHostKeyAuto /AgentBaseDir <workPath>/agent/base`,
+поэтому для файловой и кластерной базы нужна локальная платформа; результат команд
+читается с диска из этого каталога. Журнал сессии — `workPath/logs/platform/<команда>-<набор>-agent.log`.
+
+Секция целиком допустима в `v8project.local.yaml`: адрес чужого агента и путь к `ssh` —
+свойства машины.
+
+### `tools.designer_agent.attach`
+
+- Тип: строка `host:port`
+- Обязателен: нет
+
+Агент, поднятый вне раннера. Исключает `port` и `host-key`.
+
+### `tools.designer_agent.base-dir`
+
+- Тип: путь
+- Обязателен: только вместе с `attach` для операций, читающих результат с диска (`dump`)
+
+`AgentBaseDir` чужого агента: относительно его пользовательского каталога агент
+трактует пути команд.
+
+### `tools.designer_agent.port`
+
+- Тип: integer
+- По умолчанию: `1543`
+
+Порт управляемого агента.
+
+### `tools.designer_agent.host-key`
+
+- Тип: путь
+- Обязателен: нет
+
+Закрытый ключ хоста управляемого агента. Без него платформа берёт или создаёт свой
+(`/AgentSSHHostKeyAuto`).
+
+### `tools.designer_agent.ssh`
+
+- Тип: путь
+- Обязателен: нет
+
+Системный клиент `ssh`. Без ключа — первый `ssh` из `PATH`. Нужен OpenSSH 8.4+ с
+`SSH_ASKPASS_REQUIRE`.
+
+### `tools.designer_agent.startup_timeout_ms`
+
+- Тип: integer
+- По умолчанию: `120000`
+
+Сколько ждать, пока управляемый агент примет первую аутентифицированную сессию.
 
 ## Неподдержанные ключи
 

@@ -1,9 +1,9 @@
 ---
 id: INV.PLATFORM.AGENT-READINESS-IS-AUTHENTICATION
-status: planned
+status: active
 governs: product
-decision: DEC.2026-09-14.AGENT-SPEAKS-JSON-WITHOUT-A-PTY
-check: null
+decision: DEC.2026-09-15.AGENT-IS-DRIVEN-BY-THE-SYSTEM-SSH-CLIENT
+check: tests/cli_dump_agent.rs::a_rejected_password_is_an_environment_refusal_even_though_the_port_answers
 scope: [platform]
 ---
 

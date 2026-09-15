@@ -228,6 +228,20 @@ fn add_numeric_runtime_bounds(schema: &mut Value) {
         Some(1),
         None,
     );
+    set_numeric_bounds(
+        schema,
+        &["DesignerAgentSchema"],
+        "startup_timeout_ms",
+        Some(1),
+        None,
+    );
+    set_numeric_bounds(
+        schema,
+        &["DesignerAgentSchema"],
+        "port",
+        Some(1),
+        Some(65_535),
+    );
     for def in ["ClientMcpToolSchema", "PartialClientMcpToolSchema"] {
         set_numeric_bounds(schema, &[def], "port", Some(1), None);
         set_numeric_bounds(
@@ -663,6 +677,15 @@ struct ToolsSchema {
     )]
     #[schemars(with = "EdtCliSchema")]
     edt_cli: Option<EdtCliSchema>,
+    /// Designer agent endpoint: the agent the runner launches, or one to attach to.
+    #[serde(
+        rename = "designer_agent",
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "DesignerAgentSchema")]
+    designer_agent: Option<DesignerAgentSchema>,
     /// onec-client-mcp tool settings.
     #[serde(
         default,
@@ -709,6 +732,15 @@ struct PartialToolsSchema {
     )]
     #[schemars(with = "EdtCliSchema")]
     edt_cli: Option<EdtCliSchema>,
+    /// Designer agent endpoint: the agent the runner launches, or one to attach to.
+    #[serde(
+        rename = "designer_agent",
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "DesignerAgentSchema")]
+    designer_agent: Option<DesignerAgentSchema>,
     /// Machine-local onec-client-mcp tool settings.
     #[serde(
         default,
@@ -797,6 +829,40 @@ struct EdtCliSchema {
     )]
     #[schemars(with = "u64")]
     command_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct DesignerAgentSchema {
+    /// `host:port` of a Designer agent started outside the runner (attached mode). Excludes `port` and `host-key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attach: Option<String>,
+    /// `AgentBaseDir` of the attached agent: where its commands read and write files. Needs `attach`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    base_dir: Option<PathBuf>,
+    /// Port the runner-launched agent listens on (managed mode). Default 1543.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "u16")]
+    port: Option<u16>,
+    /// Private host key file for the runner-launched agent. Absent: the platform generates one (`/AgentSSHHostKeyAuto`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host_key: Option<PathBuf>,
+    /// Path to the system `ssh` client. Absent: `ssh` from PATH.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ssh: Option<PathBuf>,
+    /// Time limit for the runner-launched agent to accept the first authenticated session, in milliseconds.
+    #[serde(
+        rename = "startup_timeout_ms",
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "u64")]
+    startup_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]

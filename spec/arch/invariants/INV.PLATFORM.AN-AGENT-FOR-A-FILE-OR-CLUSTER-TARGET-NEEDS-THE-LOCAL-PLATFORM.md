@@ -1,9 +1,9 @@
 ---
 id: INV.PLATFORM.AN-AGENT-FOR-A-FILE-OR-CLUSTER-TARGET-NEEDS-THE-LOCAL-PLATFORM
-status: planned
+status: active
 governs: product
 decision: DEC.2026-09-14.ONLY-A-STANDALONE-SERVER-ANSWERS-WITHOUT-BEING-STARTED
-check: null
+check: tests/cli_dump_agent.rs::a_managed_agent_without_the_local_platform_is_refused_before_ssh_is_started
 scope: [platform, config]
 ---
 

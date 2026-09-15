@@ -116,6 +116,22 @@ pub enum ConfigValidationError {
         implemented: String,
     },
 
+    #[error(
+        "tools.designer_agent.attach names an agent started outside the runner; launch keys {keys} do not apply to it — drop either attach or the launch keys"
+    )]
+    DesignerAgentAttachConflictsWithLaunchKeys { keys: String },
+
+    #[error("tools.designer_agent.attach: {0}")]
+    DesignerAgentAttachInvalid(String),
+
+    #[error(
+        "tools.designer_agent.{keys} describe an agent started outside the runner and need attach next to them; the managed agent works under workPath"
+    )]
+    DesignerAgentAttachedKeysWithoutAttach { keys: String },
+
+    #[error("tools.designer_agent.startup_timeout_ms must be greater than 0")]
+    InvalidDesignerAgentStartupTimeoutMs,
+
     #[error("format EDT requires at least one source-set with a valid EDT project path")]
     EdtNoProjects,
 
@@ -237,6 +253,7 @@ pub fn validate(config: &AppConfig) -> Result<(), ConfigValidationError> {
     validate_mcp_config(config)?;
     validate_client_mcp_tool_extension(config)?;
     validate_edt_cli_config(config)?;
+    validate_designer_agent_config(config)?;
     Ok(())
 }
 
@@ -975,6 +992,38 @@ fn validate_edt_cli_config(config: &AppConfig) -> Result<(), ConfigValidationErr
     }
 
     Ok(())
+}
+
+/// Режим агента объявлен ключами, и ключи двух режимов не смешиваются: к чужому
+/// процессу раннер не добавляет флагов запуска, значит и в конфиге им рядом не место.
+fn validate_designer_agent_config(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    let agent = &config.tools.designer_agent;
+    if agent.startup_timeout_ms == 0 {
+        return Err(ConfigValidationError::InvalidDesignerAgentStartupTimeoutMs);
+    }
+    if agent.attach.is_some() {
+        let keys = agent.managed_keys_present();
+        if !keys.is_empty() {
+            return Err(
+                ConfigValidationError::DesignerAgentAttachConflictsWithLaunchKeys {
+                    keys: keys.join(", "),
+                },
+            );
+        }
+    } else {
+        let keys = agent.attached_keys_present();
+        if !keys.is_empty() {
+            return Err(
+                ConfigValidationError::DesignerAgentAttachedKeysWithoutAttach {
+                    keys: keys.join(", "),
+                },
+            );
+        }
+    }
+    agent
+        .mode()
+        .map(|_| ())
+        .map_err(ConfigValidationError::DesignerAgentAttachInvalid)
 }
 
 fn validate_client_mcp_tool_extension(config: &AppConfig) -> Result<(), ConfigValidationError> {

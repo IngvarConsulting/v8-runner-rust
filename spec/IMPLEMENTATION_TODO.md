@@ -33,10 +33,13 @@ This file tracks open implementation work only.
    `ExportProvider` и `ExportTargetState`. Переименование не меняет провод (значения на нём
    уже нейтральны), но затрагивает много файлов, поэтому идёт отдельной задачей.
 
-7. Реализовать агентский провайдер, шаг 2 (`DEC.2026-09-14.AGENT-*`): провайдер `agent` для файловой и кластерной базы —
-   `tools.designer_agent` по образцу `tools.edt_cli`, SSH-клиент в процессе без pty, сессия
-   на время workspace lock, типы ответа с закрытым `error-type`, страж признаёт агентский JSON
-   структурным. Первыми через сессию идут `generation-id` (#99), `dump`, `build`.
+7. Реализовать агентский провайдер, шаг 2 (`DEC.2026-09-14.AGENT-*`,
+   `DEC.2026-09-15.AGENT-IS-DRIVEN-BY-THE-SYSTEM-SSH-CLIENT`). Сделано: `tools.designer_agent`
+   (managed/attached), сессия через системный `ssh` без pty, типы ответа с закрытым `error-type`,
+   `dump` через агента (экспериментально, по ключу). Осталось: `build` через агента одной
+   сессией на время workspace lock (`DEC.2026-09-14.AGENT-SESSION-LIVES-WITH-THE-LOCK`),
+   `generation-id` (#99), перевод строки `dump` из experimental после живого прогона через
+   раннер, страж «агентский JSON — структурный вывод».
 10. Реализовать цель «автономный сервер», шаг 3: вид цели «автономный сервер» — `infobase.connection: ws=…`,
    секция `infobase.standalone`, провайдер `agent` через шлюз `ibsrv`, `ibcmd --pid` только
    для чтения после прогрева; при запуске `ibsrv` раннером — без extended-флага и с

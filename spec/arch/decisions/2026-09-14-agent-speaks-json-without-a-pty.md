@@ -1,10 +1,10 @@
 ---
 id: DEC.2026-09-14.AGENT-SPEAKS-JSON-WITHOUT-A-PTY
-status: planned
+status: superseded
 governs: product
 realized: null
 supersedes: []
-superseded-by: null
+superseded-by: DEC.2026-09-15.AGENT-IS-DRIVEN-BY-THE-SYSTEM-SSH-CLIENT
 establishes: [INV.PLATFORM.AGENT-READINESS-IS-AUTHENTICATION, INV.PLATFORM.AGENT-SESSION-OPENS-IN-JSON-MODE]
 ---
 
