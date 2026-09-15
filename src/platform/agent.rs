@@ -24,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::platform::process::{ManagedSpawnMode, ProcessRequest, ProcessRunner};
+use crate::platform::sftp::{self, SftpClient, SftpError};
 
 /// Первая команда любой сессии: без неё ответы — проза с приглашением.
 pub const JSON_MODE_COMMAND: &str = "options set --show-prompt=no --output-format=json";
@@ -281,6 +282,11 @@ pub enum AgentError {
         source: std::io::Error,
     },
 
+    /// Обмен файлами по SFTP той же точки входа не удался: путь на её стороне и
+    /// её ответ дословно.
+    #[error("sftp exchange with the agent failed at '{path}': {detail}")]
+    Exchange { path: String, detail: String },
+
     #[error("managed agent could not be launched: {0}")]
     Launch(#[source] crate::platform::process::ProcessError),
 
@@ -355,6 +361,8 @@ pub struct AgentSession {
     runtime: tokio::runtime::Runtime,
     connection: client::Handle<ClientEvents>,
     channel: russh::Channel<client::Msg>,
+    /// Подсистема SFTP той же точки входа, открывается при первой надобности.
+    sftp: Option<SftpClient<russh::ChannelStream<client::Msg>>>,
     pending: Vec<u8>,
     stderr: Vec<u8>,
     endpoint: AgentEndpoint,
@@ -451,6 +459,7 @@ impl AgentSession {
             runtime,
             connection,
             channel,
+            sftp: None,
             pending: Vec::new(),
             stderr: Vec::new(),
             endpoint,
@@ -491,6 +500,275 @@ impl AgentSession {
         self.disconnect();
     }
 
+    /// SFTP той же точки входа: второй канал того же соединения (агент допускает один
+    /// shell и несколько SFTP-клиентов). Пути — относительно корня, который точка входа
+    /// отдаёт как каталог пользователя (замер 15.09.2026 на шлюзе `ibsrv`).
+    fn sftp(&mut self) -> Result<(), AgentError> {
+        if self.sftp.is_none() {
+            let connection = &self.connection;
+            let client = self
+                .runtime
+                .block_on(async {
+                    let channel = connection
+                        .channel_open_session()
+                        .await
+                        .map_err(|error| SftpError::Io(error.to_string()))?;
+                    channel
+                        .request_subsystem(true, "sftp")
+                        .await
+                        .map_err(|error| SftpError::Io(error.to_string()))?;
+                    SftpClient::init(channel.into_stream()).await
+                })
+                .map_err(|error| AgentError::Exchange {
+                    path: "/".to_owned(),
+                    detail: format!("cannot open the sftp subsystem: {error}"),
+                })?;
+            self.sftp = Some(client);
+        }
+        Ok(())
+    }
+
+    /// Одна операция SFTP. Обрыв канала подсистемы — повод открыть её заново и
+    /// повторить операцию один раз; отказ самой точки входа возвращается как есть.
+    fn sftp_call<T>(
+        &mut self,
+        path: &str,
+        call: impl Fn(
+            &mut SftpClient<russh::ChannelStream<client::Msg>>,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, SftpError>> + '_>>,
+    ) -> Result<T, AgentError> {
+        let mut reopened = false;
+        loop {
+            self.sftp()?;
+            let runtime = &self.runtime;
+            let client = self.sftp.as_mut().expect("sftp is open");
+            match runtime.block_on(call(client)) {
+                Ok(value) => return Ok(value),
+                Err(error) if error.is_channel_loss() && !reopened => {
+                    debug!(%error, "sftp channel is gone; reopening the subsystem");
+                    self.drop_sftp();
+                    reopened = true;
+                }
+                Err(error) => {
+                    return Err(AgentError::Exchange {
+                        path: path.to_owned(),
+                        detail: error.to_string(),
+                    })
+                }
+            }
+        }
+    }
+
+    /// Поток канала отпускается только внутри контекста runtime: его освобождение
+    /// обращается к реактору tokio, и вне контекста это паника, а не ошибка.
+    fn drop_sftp(&mut self) {
+        let _entered = self.runtime.enter();
+        self.sftp = None;
+    }
+
+    /// Путь на стороне точки входа — всегда от корня SFTP: относительные пути шлюз
+    /// `ibsrv` 8.3.27 не разрешает («No such file or directory» на `mkdir dump`),
+    /// а корень он отдаёт как каталог пользователя (замер 15.09.2026).
+    fn sftp_path(remote: &str) -> String {
+        format!("/{}", remote.trim_start_matches('/'))
+    }
+
+    /// Каталог на стороне точки входа, со всеми родителями. Существование не
+    /// спрашивается: на отсутствующий путь шлюз `ibsrv` 8.3.27 отвечает общим
+    /// `Failure`, а не `NoSuchFile`, так что «есть ли» по коду не узнать; создание
+    /// существующего каталога — не ошибка.
+    pub fn sftp_mkdir_all(&mut self, remote: &str) -> Result<(), AgentError> {
+        let mut prefix = String::new();
+        for segment in remote.split('/').filter(|segment| !segment.is_empty()) {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(segment);
+            let path = Self::sftp_path(&prefix);
+            let created = self.sftp_call(&prefix, move |client| {
+                let path = path.clone();
+                Box::pin(async move { client.mkdir(&path).await })
+            });
+            if let Err(error) = created {
+                debug!(%error, "sftp mkdir refused; assuming the dir exists");
+            }
+        }
+        Ok(())
+    }
+
+    /// Файл целиком на сторону точки входа.
+    ///
+    /// Флаги открытия — по убыванию строгости: создать и обрезать, создать, только
+    /// записать. Точка входа вправе принимать не все сочетания (шлюз `ibsrv` 8.3.27
+    /// на запись не отвечает ни одним — замер 15.09.2026), и отказ на последнем
+    /// сочетании — отказ канала с кодом точки входа, а не догадка о его причине.
+    pub fn sftp_write(&mut self, remote: &str, data: &[u8]) -> Result<(), AgentError> {
+        let attempts = [
+            sftp::OPEN_WRITE | sftp::OPEN_CREATE | sftp::OPEN_TRUNCATE,
+            sftp::OPEN_WRITE | sftp::OPEN_CREATE,
+            sftp::OPEN_WRITE,
+        ];
+        let mut last = None;
+        for flags in attempts {
+            let data = data.to_vec();
+            let path = Self::sftp_path(remote);
+            let written = self.sftp_call(remote, move |client| {
+                let (path, data) = (path.clone(), data.clone());
+                Box::pin(async move { client.write_file(&path, flags, &data).await })
+            });
+            match written {
+                Ok(()) => return Ok(()),
+                Err(error) => last = Some(error),
+            }
+        }
+        Err(last.expect("at least one attempt"))
+    }
+
+    /// Файл целиком со стороны точки входа.
+    pub fn sftp_read(&mut self, remote: &str) -> Result<Vec<u8>, AgentError> {
+        let path = Self::sftp_path(remote);
+        self.sftp_call(remote, move |client| {
+            let path = path.clone();
+            Box::pin(async move { client.read_file(&path).await })
+        })
+    }
+
+    /// Локальный файл — на сторону точки входа.
+    pub fn sftp_put_file(&mut self, local: &Path, remote: &str) -> Result<(), AgentError> {
+        let data = std::fs::read(local).map_err(|error| AgentError::Exchange {
+            path: remote.to_owned(),
+            detail: format!("cannot read '{}': {error}", local.display()),
+        })?;
+        self.sftp_write(remote, &data)
+    }
+
+    /// Файл со стороны точки входа — в локальный путь (родители создаются).
+    pub fn sftp_get_file(&mut self, remote: &str, local: &Path) -> Result<(), AgentError> {
+        let data = self.sftp_read(remote)?;
+        if let Some(parent) = local.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| AgentError::Exchange {
+                path: remote.to_owned(),
+                detail: format!("cannot create '{}': {error}", parent.display()),
+            })?;
+        }
+        std::fs::write(local, data).map_err(|error| AgentError::Exchange {
+            path: remote.to_owned(),
+            detail: format!("cannot write '{}': {error}", local.display()),
+        })
+    }
+
+    /// Локальный каталог целиком — на сторону точки входа (символические ссылки
+    /// разыменовываются).
+    pub fn sftp_put_dir(&mut self, local: &Path, remote: &str) -> Result<(), AgentError> {
+        self.sftp_mkdir_all(remote)?;
+        let entries = std::fs::read_dir(local).map_err(|error| AgentError::Exchange {
+            path: remote.to_owned(),
+            detail: format!("cannot list '{}': {error}", local.display()),
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| AgentError::Exchange {
+                path: remote.to_owned(),
+                detail: format!("cannot list '{}': {error}", local.display()),
+            })?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let child_remote = format!("{remote}/{name}");
+            let child_local = entry.path();
+            if child_local.is_dir() {
+                self.sftp_put_dir(&child_local, &child_remote)?;
+            } else {
+                self.sftp_put_file(&child_local, &child_remote)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Каталог со стороны точки входа — поверх локального (существующие файлы
+    /// перезаписываются, лишние не трогаются).
+    pub fn sftp_get_dir(&mut self, remote: &str, local: &Path) -> Result<(), AgentError> {
+        std::fs::create_dir_all(local).map_err(|error| AgentError::Exchange {
+            path: remote.to_owned(),
+            detail: format!("cannot create '{}': {error}", local.display()),
+        })?;
+        for (name, is_dir) in self.sftp_list(remote)? {
+            let child_remote = format!("{remote}/{name}");
+            let child_local = local.join(&name);
+            if is_dir {
+                self.sftp_get_dir(&child_remote, &child_local)?;
+            } else {
+                self.sftp_get_file(&child_remote, &child_local)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Имена и вид записей каталога на стороне точки входа.
+    fn sftp_list(&mut self, remote: &str) -> Result<Vec<(String, bool)>, AgentError> {
+        let path = Self::sftp_path(remote);
+        let entries = self.sftp_call(remote, move |client| {
+            let path = path.clone();
+            Box::pin(async move { client.list_dir(&path).await })
+        })?;
+        Ok(entries
+            .into_iter()
+            .map(|entry| (entry.name, entry.is_dir))
+            .collect())
+    }
+
+    /// Убирает путь на стороне точки входа целиком; отсутствующий — не ошибка.
+    /// Вид пути не спрашивается (см. `sftp_mkdir_all`): каталог узнаётся по тому, что
+    /// его удалось перечислить, остальное убирается как файл.
+    pub fn sftp_remove_all(&mut self, remote: &str) -> Result<(), AgentError> {
+        let path = Self::sftp_path(remote);
+        match self.sftp_list(remote) {
+            Ok(entries) => {
+                for (name, _) in entries {
+                    self.sftp_remove_all(&format!("{remote}/{name}"))?;
+                }
+                let removed = self.sftp_call(remote, move |client| {
+                    let path = path.clone();
+                    Box::pin(async move { client.rmdir(&path).await })
+                });
+                if let Err(error) = removed {
+                    debug!(%error, "sftp rmdir refused");
+                }
+                Ok(())
+            }
+            Err(_) => {
+                let removed = self.sftp_call(remote, move |client| {
+                    let path = path.clone();
+                    Box::pin(async move { client.remove(&path).await })
+                });
+                if let Err(error) = removed {
+                    debug!(%error, "sftp rm refused; assuming the path is absent");
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Убирает опустевшие родительские каталоги пути, не доходя до корня.
+    pub fn sftp_remove_empty_parents(&mut self, remote: &str) {
+        let mut path = remote.to_owned();
+        while let Some((parent, _)) = path.rsplit_once('/') {
+            let parent = parent.to_owned();
+            if parent.is_empty() {
+                break;
+            }
+            let remote_parent = Self::sftp_path(&parent);
+            let removed = self
+                .sftp_call(&parent, move |client| {
+                    let remote_parent = remote_parent.clone();
+                    Box::pin(async move { client.rmdir(&remote_parent).await })
+                })
+                .is_ok();
+            if !removed {
+                break;
+            }
+            path = parent;
+        }
+    }
+
     /// Просит агента завершиться и закрывает сессию; возвращает ответ, если он был.
     pub fn shutdown(mut self, policy: &WaitPolicy) -> Option<AgentReply> {
         // Ответ на shutdown может и не прийти — сессию закрывает сам агент; ждать его
@@ -510,6 +788,7 @@ impl AgentSession {
     }
 
     fn disconnect(&mut self) {
+        self.drop_sftp();
         if self.ended {
             return;
         }
@@ -868,6 +1147,62 @@ mod tests {
             }
             other => panic!("unexpected outcome: {other:?}"),
         }
+    }
+
+    /// Живой зонд SFTP шлюза: `V8_GATE_PROBE=host:port V8_GATE_USER=u V8_GATE_PASSWORD=p
+    /// cargo test -- --ignored gate_sftp_probe --nocapture`.
+    #[test]
+    #[ignore]
+    fn gate_sftp_probe() {
+        let Ok(endpoint) = std::env::var("V8_GATE_PROBE") else {
+            return;
+        };
+        let (host, port) = endpoint.rsplit_once(':').expect("host:port");
+        let request = AgentSessionRequest {
+            endpoint: AgentEndpoint {
+                host: host.to_owned(),
+                port: port.parse().expect("port"),
+            },
+            user: std::env::var("V8_GATE_USER").unwrap_or_default(),
+            password: std::env::var("V8_GATE_PASSWORD").unwrap_or_default(),
+            transcript_log: None,
+        };
+        let wait = WaitPolicy {
+            timeout: Some(Duration::from_secs(60)),
+            cancellation: CancellationToken::new(),
+        };
+        let mut session = AgentSession::open(&request, &wait).expect("open");
+        eprintln!(
+            "connect-ib: {:?}",
+            session
+                .run("common connect-ib", &wait)
+                .map(|r| r.messages.len())
+        );
+        let before = std::env::var("V8_GATE_PROBE_MODE").as_deref() != Ok("after");
+        if before {
+            eprintln!("mkdir: {:?}", session.sftp_mkdir_all("probe/x"));
+            eprintln!("list before command: {:?}", session.sftp_list("probe"));
+        }
+        eprintln!(
+            "dump-cfg: {:?}",
+            session
+                .run("config dump-cfg --file=probe/x/a.cf", &wait)
+                .map(|r| r.messages.len())
+        );
+        eprintln!("list after command: {:?}", session.sftp_list("probe/x"));
+        eprintln!(
+            "read after command: {:?}",
+            session.sftp_read("probe/x/a.cf").map(|b| b.len())
+        );
+        session.drop_sftp();
+        eprintln!("list after reopen: {:?}", session.sftp_list("probe/x"));
+        eprintln!(
+            "read after reopen: {:?}",
+            session.sftp_read("probe/x/a.cf").map(|b| b.len())
+        );
+        eprintln!("remove: {:?}", session.sftp_remove_all("probe"));
+        let _ = session.run("common disconnect-ib", &wait);
+        session.close();
     }
 
     /// Шлюз автономного сервера внутри ответа на `update-db-cfg` шлёт уведомление

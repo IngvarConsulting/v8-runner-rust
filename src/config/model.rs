@@ -103,19 +103,28 @@ pub struct StandaloneConfig {
     /// `host:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`, port 1543 by default).
     pub gate: String,
 
-    /// How files travel between the runner and the gate user's directory.
+    /// How files travel between the runner and the gate user's directory: `sftp` through
+    /// the gate itself, or `{ dir: … }` — that directory as the runner sees it.
     #[serde(default)]
     pub exchange: Option<StandaloneExchangeConfig>,
 }
 
 /// The declared file channel to a standalone server.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "kebab-case")]
-pub struct StandaloneExchangeConfig {
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum StandaloneExchangeConfig {
+    /// A named channel: `sftp` — the SFTP subsystem of the gate's SSH connection.
+    Named(StandaloneExchangeChannel),
     /// The gate user's directory (`<users-data>/<user>` of `ibsrv`) as the runner sees it:
     /// the server's own path on the same machine or a mount of it.
-    #[serde(default)]
-    pub dir: Option<PathBuf>,
+    Dir { dir: PathBuf },
+}
+
+/// Named exchange channels.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StandaloneExchangeChannel {
+    Sftp,
 }
 
 impl StandaloneConfig {
@@ -124,11 +133,22 @@ impl StandaloneConfig {
         parse_host_port(&self.gate)
     }
 
-    /// The declared directory channel, if any.
+    /// The declared directory channel, if that is the channel.
     pub fn exchange_dir(&self) -> Option<&Path> {
-        self.exchange
-            .as_ref()
-            .and_then(|exchange| exchange.dir.as_deref())
+        match self.exchange.as_ref() {
+            Some(StandaloneExchangeConfig::Dir { dir }) => Some(dir.as_path()),
+            _ => None,
+        }
+    }
+
+    /// Files travel through the gate's SFTP subsystem.
+    pub fn exchange_is_sftp(&self) -> bool {
+        matches!(
+            self.exchange,
+            Some(StandaloneExchangeConfig::Named(
+                StandaloneExchangeChannel::Sftp
+            ))
+        )
     }
 }
 

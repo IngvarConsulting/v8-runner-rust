@@ -31,12 +31,22 @@ pub(crate) enum AgentHandle {
         session: AgentSession,
         base_dir: PathBuf,
     },
-    /// SSH-шлюз автономного сервера: тот же shell, файлы — в каталоге пользователя
-    /// шлюза, который конфиг назвал как канал обмена.
+    /// SSH-шлюз автономного сервера: тот же shell, файлы — объявленным каналом
+    /// обмена (каталог пользователя шлюза или SFTP того же соединения).
     Gate {
         session: AgentSession,
-        user_dir: PathBuf,
+        exchange: Exchange,
     },
+}
+
+/// Канал обмена файлами с точкой входа. Пути команд всегда относительны каталога
+/// пользователя точки входа; канал решает, как файлы туда попадают и как
+/// возвращаются: `Dir` — тот каталог, видимый раннеру (ссылки, копии, переносы),
+/// `Sftp` — подсистема SFTP того же SSH-соединения (передача по сети).
+#[derive(Debug, Clone)]
+pub(crate) enum Exchange {
+    Dir(PathBuf),
+    Sftp,
 }
 
 impl AgentHandle {
@@ -47,16 +57,18 @@ impl AgentHandle {
         }
     }
 
-    /// Каталог пользователя агента: относительно него агент трактует пути команд.
-    /// У агента Конфигуратора он выводится из карты `AgentBaseDir`, у шлюза
-    /// автономного сервера объявлен конфигом как канал обмена.
-    pub(crate) fn user_dir(&self, config: &AppConfig) -> Result<PathBuf, AppError> {
+    /// Канал обмена с точкой входа. У агента Конфигуратора это его каталог
+    /// пользователя из карты `AgentBaseDir`, у шлюза автономного сервера — то, что
+    /// объявил конфиг.
+    pub(crate) fn exchange(&self, config: &AppConfig) -> Result<Exchange, AppError> {
         let base_dir = match self {
             Self::Managed(agent) => agent.base_dir(),
             Self::Attached { base_dir, .. } => base_dir,
-            Self::Gate { user_dir, .. } => return Ok(user_dir.clone()),
+            Self::Gate { exchange, .. } => return Ok(exchange.clone()),
         };
-        agent::user_dir(base_dir, &agent_user(config)).map_err(map_agent_error)
+        agent::user_dir(base_dir, &agent_user(config))
+            .map(Exchange::Dir)
+            .map_err(map_agent_error)
     }
 
     /// Управляемый агент гасится, чужой — только отпускается: соединение с базой
@@ -138,11 +150,20 @@ pub(crate) fn connect(
     // идут объявленным каналом — каталогом пользователя шлюза.
     if let Some(standalone) = config.infobase.standalone.as_ref() {
         let (host, port) = standalone.gate_endpoint().map_err(AppError::Validation)?;
-        let user_dir = standalone.exchange_dir().ok_or_else(|| {
-            AppError::CapabilityUnavailable(
-                "files travel to a standalone server only through a declared channel; set infobase.standalone.exchange.dir".to_owned(),
+        let exchange = if standalone.exchange_is_sftp() {
+            Exchange::Sftp
+        } else {
+            Exchange::Dir(
+                standalone
+                    .exchange_dir()
+                    .ok_or_else(|| {
+                        AppError::CapabilityUnavailable(
+                            "files travel to a standalone server only through a declared channel; set infobase.standalone.exchange".to_owned(),
+                        )
+                    })?
+                    .to_path_buf(),
             )
-        })?;
+        };
         let request = AgentSessionRequest {
             endpoint: AgentEndpoint { host, port },
             user,
@@ -150,10 +171,7 @@ pub(crate) fn connect(
             transcript_log: Some(transcript_log),
         };
         let session = open_gate_session(&request, wait)?;
-        return Ok(AgentHandle::Gate {
-            session,
-            user_dir: user_dir.to_path_buf(),
-        });
+        return Ok(AgentHandle::Gate { session, exchange });
     }
 
     let mode = agent.mode().map_err(AppError::Validation)?;
@@ -220,7 +238,8 @@ pub(crate) fn map_agent_error(error: AgentError) -> AppError {
         | AgentError::InvalidReply { .. }
         | AgentError::SessionClosed { .. }
         | AgentError::Transport { .. }
-        | AgentError::UserDirUnknown { .. } => AppError::Platform(error.to_string()),
+        | AgentError::UserDirUnknown { .. }
+        | AgentError::Exchange { .. } => AppError::Platform(error.to_string()),
         AgentError::Workspace { .. } => AppError::Runtime(error.to_string()),
         AgentError::Unreachable { .. }
         | AgentError::Handshake { .. }
@@ -409,6 +428,252 @@ pub(crate) fn tidy_run_path(user_dir: &Path, relative: &str) {
             break;
         }
         parent = dir.parent();
+    }
+}
+
+/// Каталог раннера — на сторону точки входа под относительным именем: в её каталог
+/// ссылкой (копией, где ссылки нет), по SFTP — передачей.
+pub(crate) fn stage_dir(
+    handle: &mut AgentHandle,
+    exchange: &Exchange,
+    relative: &str,
+    local: &Path,
+) -> Result<String, AppError> {
+    match exchange {
+        Exchange::Dir(user_dir) => expose_dir(user_dir, relative, local),
+        Exchange::Sftp => handle
+            .session()
+            .sftp_put_dir(local, relative)
+            .map(|()| relative.to_owned())
+            .map_err(map_agent_error),
+    }
+}
+
+/// То же, но всегда копией: для команд с файловыми параметрами, которые через ссылку
+/// точка входа не разрешает.
+pub(crate) fn stage_copy_dir(
+    handle: &mut AgentHandle,
+    exchange: &Exchange,
+    relative: &str,
+    local: &Path,
+) -> Result<String, AppError> {
+    match exchange {
+        Exchange::Dir(user_dir) => copy_dir_in(user_dir, relative, local),
+        Exchange::Sftp => stage_dir(handle, exchange, relative, local),
+    }
+}
+
+/// Файл раннера — на сторону точки входа под относительным именем.
+pub(crate) fn stage_file(
+    handle: &mut AgentHandle,
+    exchange: &Exchange,
+    relative: &str,
+    local: &Path,
+) -> Result<String, AppError> {
+    match exchange {
+        Exchange::Dir(user_dir) => expose_file(user_dir, relative, local),
+        Exchange::Sftp => {
+            let session = handle.session();
+            if let Some((parent, _)) = relative.rsplit_once('/') {
+                session.sftp_mkdir_all(parent).map_err(map_agent_error)?;
+            }
+            session
+                .sftp_put_file(local, relative)
+                .map(|()| relative.to_owned())
+                .map_err(map_agent_error)
+        }
+    }
+}
+
+/// Текст — на сторону точки входа под относительным именем (списки объектов и путей).
+pub(crate) fn write_text(
+    handle: &mut AgentHandle,
+    exchange: &Exchange,
+    relative: &str,
+    text: &str,
+) -> Result<(), AppError> {
+    write_bytes(handle, exchange, relative, text.as_bytes())
+}
+
+/// Байты — на сторону точки входа под относительным именем.
+pub(crate) fn write_bytes(
+    handle: &mut AgentHandle,
+    exchange: &Exchange,
+    relative: &str,
+    bytes: &[u8],
+) -> Result<(), AppError> {
+    match exchange {
+        Exchange::Dir(user_dir) => {
+            let path = user_dir.join(relative);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    AppError::Runtime(format!(
+                        "failed to prepare the agent exchange dir '{}': {error}",
+                        parent.display()
+                    ))
+                })?;
+            }
+            std::fs::write(&path, bytes).map_err(|error| {
+                AppError::Runtime(format!(
+                    "failed to write '{}' for the agent: {error}",
+                    path.display()
+                ))
+            })
+        }
+        Exchange::Sftp => {
+            let session = handle.session();
+            if let Some((parent, _)) = relative.rsplit_once('/') {
+                session.sftp_mkdir_all(parent).map_err(map_agent_error)?;
+            }
+            session.sftp_write(relative, bytes).map_err(map_agent_error)
+        }
+    }
+}
+
+/// Каталог на стороне точки входа, в который она будет писать.
+pub(crate) fn make_output_dir(
+    handle: &mut AgentHandle,
+    exchange: &Exchange,
+    relative: &str,
+) -> Result<(), AppError> {
+    match exchange {
+        Exchange::Dir(user_dir) => output_dir(user_dir, relative).map(|_| ()),
+        Exchange::Sftp => handle
+            .session()
+            .sftp_mkdir_all(relative)
+            .map_err(map_agent_error),
+    }
+}
+
+/// Каталог, который точка входа написала, — в локальный путь (родители создаются);
+/// на стороне точки входа его больше нет.
+pub(crate) fn collect_dir(
+    handle: &mut AgentHandle,
+    exchange: &Exchange,
+    relative: &str,
+    destination: &Path,
+) -> Result<(), AppError> {
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            AppError::Runtime(format!("failed to prepare '{}': {error}", parent.display()))
+        })?;
+    }
+    match exchange {
+        Exchange::Dir(user_dir) => {
+            let produced = user_dir.join(relative);
+            if !produced.is_dir() {
+                return Err(AppError::Platform(format!(
+                    "agent reported success but wrote nothing into '{}'",
+                    produced.display()
+                )));
+            }
+            let _ = crate::support::fs::remove_path_if_exists(destination);
+            crate::support::fs::move_dir(&produced, destination).map_err(|error| {
+                AppError::Runtime(format!(
+                    "failed to collect the agent's dir '{}': {error}",
+                    produced.display()
+                ))
+            })
+        }
+        Exchange::Sftp => {
+            let session = handle.session();
+            let _ = crate::support::fs::remove_path_if_exists(destination);
+            session
+                .sftp_get_dir(relative, destination)
+                .map_err(|error| {
+                    AppError::Platform(format!(
+                        "agent reported success but its dir '{relative}' could not be collected: {error}"
+                    ))
+                })?;
+            session.sftp_remove_all(relative).map_err(map_agent_error)
+        }
+    }
+}
+
+/// Каталог, который точка входа написала, — поверх существующего локального
+/// (файлы перезаписываются, лишние остаются); на стороне точки входа его больше нет.
+pub(crate) fn collect_into_dir(
+    handle: &mut AgentHandle,
+    exchange: &Exchange,
+    relative: &str,
+    existing: &Path,
+) -> Result<(), AppError> {
+    match exchange {
+        Exchange::Dir(user_dir) => {
+            let produced = user_dir.join(relative);
+            copy_dir_recursively(&produced, existing).map_err(|error| {
+                AppError::Runtime(format!(
+                    "failed to collect the agent's dir '{}': {error}",
+                    produced.display()
+                ))
+            })?;
+            tidy_run_path(user_dir, relative);
+            Ok(())
+        }
+        Exchange::Sftp => {
+            let session = handle.session();
+            session
+                .sftp_get_dir(relative, existing)
+                .map_err(map_agent_error)?;
+            session.sftp_remove_all(relative).map_err(map_agent_error)
+        }
+    }
+}
+
+/// Файл, который точка входа написала, — в локальный путь; на её стороне его больше нет.
+pub(crate) fn collect_file(
+    handle: &mut AgentHandle,
+    exchange: &Exchange,
+    relative: &str,
+    destination: &Path,
+) -> Result<(), AppError> {
+    match exchange {
+        Exchange::Dir(user_dir) => {
+            let produced = user_dir.join(relative);
+            if !produced.is_file() {
+                return Err(AppError::Platform(format!(
+                    "agent reported success but wrote no file at '{}'",
+                    produced.display()
+                )));
+            }
+            crate::support::fs::move_file(&produced, destination).map_err(|error| {
+                AppError::Runtime(format!(
+                    "failed to collect the agent's file '{}': {error}",
+                    produced.display()
+                ))
+            })
+        }
+        Exchange::Sftp => {
+            let session = handle.session();
+            session
+                .sftp_get_file(relative, destination)
+                .map_err(|error| {
+                    AppError::Platform(format!(
+                        "agent reported success but its file '{relative}' could not be collected: {error}"
+                    ))
+                })?;
+            session.sftp_remove_all(relative).map_err(map_agent_error)
+        }
+    }
+}
+
+/// Убирает выставленный каталог со стороны точки входа (ссылку — как ссылку).
+pub(crate) fn unstage(handle: &mut AgentHandle, exchange: &Exchange, relative: &str) {
+    match exchange {
+        Exchange::Dir(user_dir) => withdraw_dir(user_dir, relative),
+        Exchange::Sftp => tidy(handle, exchange, relative),
+    }
+}
+
+/// Убирает след прогона со стороны точки входа: путь и опустевшие родители.
+pub(crate) fn tidy(handle: &mut AgentHandle, exchange: &Exchange, relative: &str) {
+    match exchange {
+        Exchange::Dir(user_dir) => tidy_run_path(user_dir, relative),
+        Exchange::Sftp => {
+            let session = handle.session();
+            let _ = session.sftp_remove_all(relative);
+            session.sftp_remove_empty_parents(relative);
+        }
     }
 }
 
