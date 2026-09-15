@@ -201,6 +201,10 @@ fn run_load_selected(
     };
 
     if args.dry_run {
+        crate::use_cases::progress::log_live_stage(
+            "load: preview",
+            "[Load] preview only, nothing probed or applied",
+        );
         // The next step is the compatibility probe, and the probe is a Designer run against
         // the infobase. A preview must not dispatch it, so the compatibility state stays
         // `not_probed` — a named case, not a guess — and nothing is reported as applied.

@@ -1,9 +1,9 @@
 ---
 id: INV.CLI.PREVIEW-LEAVES-A-LOG-ENTRY
-status: planned
+status: active
 governs: product
 decision: DEC.2026-09-11.PREVIEW-STOPS-BEFORE-THE-PROVIDER-IS-DISPATCHED
-check: null
+check: tests/contract_previews.rs::every_preview_leaves_a_line_in_the_action_log
 scope: [cli]
 ---
 
@@ -12,6 +12,6 @@ scope: [cli]
 Строка о вызове появляется в журнале и для превью: оно не прячется, хотя предмет не
 меняет.
 
-Замер 14.09.2026: правило сейчас не держится. У `dump --dry-run` файл журнала
-действий создаётся пустым, поэтому тест написан не был — сначала нужна правка
-поведения, потом фальсификатор.
+Замер 14.09.2026 нашёл, что `dump --dry-run` оставлял журнал пустым; фальсификатор,
+написанный 15.09, нашёл то же у `init`, `load` и `make`. Все четыре превью теперь пишут
+свою строку, и проверка держит шесть команд.

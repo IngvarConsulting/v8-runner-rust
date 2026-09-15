@@ -179,3 +179,68 @@ fn change_checklist_covers_mcp_workspace_lock_and_config_contract() {
         );
     }
 }
+
+/// Вложенные шаги не берут блокировку повторно: замок рабочего каталога живёт на
+/// границе адаптера, а сценарии зовут друг друга через входы без замка. Второй захват
+/// изнутри дал бы «занято» самому себе.
+#[test]
+fn nested_orchestration_never_acquires_the_workspace_lock_inside_use_cases() {
+    let root = repo_path("src/use_cases");
+    for file in collect_rust_files(&root) {
+        // `workspace_lock.rs` реализует замок, `transport.rs` — граница адаптера, где он
+        // берётся один раз за команду. Всё остальное в слое сценариев работает под ним.
+        if matches!(
+            file.file_name().and_then(|name| name.to_str()),
+            Some("workspace_lock.rs") | Some("transport.rs")
+        ) {
+            continue;
+        }
+        let production = production_tokens(&file);
+        assert!(
+            !production.contains("acquire_workspace_lock("),
+            "{} takes the workspace lock inside a use case; nested steps run under the caller's lock",
+            file.display()
+        );
+    }
+
+    // `test` строит перед прогоном тем же сценарием сборки, не выходя на границу адаптера.
+    let run_tests = read("src/use_cases/run_tests/coordinator.rs");
+    assert!(
+        run_tests.contains("build_project::execute("),
+        "run_tests must reuse the build use case directly, under the lock already held by the caller"
+    );
+}
+
+/// Лимит одновременных вызовов общий для обоих транспортов: семафор допуска создаётся
+/// в одном месте, и оба конструктора — stdio и http — приходят к нему одной дорогой.
+/// Второй `Semaphore::new` означал бы второй лимит, о котором конфиг не знает.
+#[test]
+fn mcp_admission_is_built_once_and_shared_by_both_transports() {
+    let source = read("src/mcp/server.rs");
+    let production = production_tokens(repo_path("src/mcp/server.rs").as_path());
+    assert_eq!(
+        production.matches("Semaphore::new(").count(),
+        1,
+        "admission must be built in exactly one place"
+    );
+
+    for constructor in ["fn stdio(", "fn http("] {
+        let start = source
+            .find(constructor)
+            .unwrap_or_else(|| panic!("{constructor} constructor is missing"));
+        let body = &source[start..];
+        let end = body[constructor.len()..]
+            .find("\n    pub fn ")
+            .map(|offset| offset + constructor.len())
+            .unwrap_or(body.len());
+        let window = &body[..end];
+        assert!(
+            window.contains("with_port(") || window.contains("Self::new("),
+            "{constructor} must build the server through the shared constructor"
+        );
+        assert!(
+            !window.contains("Semaphore::new("),
+            "{constructor} builds its own admission limit"
+        );
+    }
+}

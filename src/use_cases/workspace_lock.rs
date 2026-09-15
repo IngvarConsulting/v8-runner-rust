@@ -292,6 +292,29 @@ mod tests {
         assert!(!stale_temp.exists());
     }
 
+    /// Замок — файл ОС; sidecar — диагностика. Невозможность записать sidecar не
+    /// отменяет владение каталогом: второй запуск всё равно получает «занято».
+    #[test]
+    fn an_unwritable_sidecar_does_not_release_the_lock() {
+        let work = tempdir().expect("work");
+        let config = sample_config(work.path());
+        let canonical =
+            crate::support::path::nearest_existing_canonical_path(work.path()).expect("canonical");
+        // Каталог на месте sidecar: переименовать поверх него файл нельзя.
+        std::fs::create_dir_all(super::workspace_lock_sidecar_path(&canonical)).expect("blocker");
+
+        let guard = acquire_workspace_lock(&config, "build")
+            .expect("the OS lock is taken even when the sidecar cannot be written");
+        let busy = acquire_workspace_lock(&config, "dump").expect_err("second owner is refused");
+        assert!(
+            matches!(busy, crate::support::error::AppError::WorkspaceBusy(_)),
+            "{busy}"
+        );
+        drop(guard);
+
+        acquire_workspace_lock(&config, "dump").expect("released after the first owner is gone");
+    }
+
     #[test]
     fn drop_removes_sidecar_file() {
         let dir = tempdir().expect("tempdir");

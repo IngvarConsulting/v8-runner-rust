@@ -164,7 +164,12 @@ fn run_dump_selected(
 
     if args.dry_run {
         // Both utilities are located above, so a missing platform refuses in the preview; the
-        // dump lock below is this command's first filesystem write.
+        // dump lock below is this command's first filesystem write. The preview still leaves
+        // its line in the action log: it hides nothing, even though it changes nothing.
+        crate::use_cases::progress::log_live_stage(
+            "dump: preview",
+            "[Dump] preview only, nothing written",
+        );
         let mut preview = empty_result(
             mode.clone(),
             started,

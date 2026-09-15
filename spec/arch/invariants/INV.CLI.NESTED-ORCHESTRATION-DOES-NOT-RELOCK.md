@@ -1,9 +1,9 @@
 ---
 id: INV.CLI.NESTED-ORCHESTRATION-DOES-NOT-RELOCK
-status: planned
+status: active
 governs: product
 decision: DEC.2026-04-20.A-COMMAND-OWNS-THE-WORKPATH-EXCLUSIVELY
-check: null
+check: tests/architecture_guardrails.rs::nested_orchestration_never_acquires_the_workspace_lock_inside_use_cases
 scope: [cli, use-cases]
 ---
 

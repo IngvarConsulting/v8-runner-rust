@@ -1,9 +1,9 @@
 ---
 id: INV.CONFIG.UNSAFE-COMBINATIONS-ARE-REJECTED-BEFORE-DISPATCH
-status: planned
+status: active
 governs: product
 decision: DEC.2026-04-20.V8PROJECT-YAML-IS-THE-PROJECT-CONTRACT
-check: null
+check: tests/contract_config_boundary.rs::an_unsupported_combination_is_refused_before_any_utility_runs
 scope: [config]
 ---
 

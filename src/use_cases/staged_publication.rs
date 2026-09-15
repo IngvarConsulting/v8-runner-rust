@@ -427,6 +427,22 @@ mod tests {
         assert!(!stage_metadata.exists());
     }
 
+    /// Промежуточный результат лежит в одном каталоге с целью: публикация — это
+    /// переименование, а не копирование через границу файловой системы.
+    #[test]
+    fn a_staging_path_shares_the_parent_directory_of_its_target() {
+        let dir = tempdir().expect("tempdir");
+        let target_dir = dir.path().join("nested").join("target");
+        let publication =
+            StagedPublication::prepare_dir(&target_dir, "identity", ".stage").expect("prepare");
+        assert_eq!(publication.staging_path().parent(), target_dir.parent());
+
+        let target_file = dir.path().join("nested").join("main.cf");
+        let publication = StagedPublication::prepare_file(&target_file, "identity", ".stage", "cf")
+            .expect("prepare");
+        assert_eq!(publication.staging_path().parent(), target_file.parent());
+    }
+
     #[test]
     fn prepare_file_writes_metadata_without_materializing_stage_file() {
         let dir = tempdir().expect("tempdir");
