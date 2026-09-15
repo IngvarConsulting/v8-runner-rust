@@ -361,9 +361,12 @@ impl AgentSession {
 
         let (connection, channel) =
             runtime.block_on(async {
+                // Без keepalive: агент однопоточен и, занятый долгой командой, не отвечает
+                // на глобальные запросы — три неотвеченных keepalive рвали сессию на 46-й
+                // секунде выгрузки УТ (замер 15.09.2026). Зависание ловит срок команды.
                 let config = Arc::new(client::Config {
                     inactivity_timeout: None,
-                    keepalive_interval: Some(Duration::from_secs(15)),
+                    keepalive_interval: None,
                     ..client::Config::default()
                 });
                 let mut connection = client::connect(
