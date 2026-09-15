@@ -5,7 +5,7 @@ governs: product
 realized: src/output/text.rs::generated_text_output_grammar_is_current
 supersedes: []
 superseded-by: null
-establishes: [CTR.CLI.TEXT-OUTPUT, INV.CLI.STATUS-IS-READABLE-WITHOUT-COLOUR, INV.CLI.REDIRECTED-OUTPUT-CARRIES-NO-ESCAPES]
+establishes: [CTR.CLI.TEXT-OUTPUT, INV.CLI.A-NODE-CAPTION-AGREES-WITH-ITS-SIGN, INV.CLI.STATUS-IS-READABLE-WITHOUT-COLOUR, INV.CLI.REDIRECTED-OUTPUT-CARRIES-NO-ESCAPES]
 ---
 
 # Человеческая поверхность — тоже закреплённая форма

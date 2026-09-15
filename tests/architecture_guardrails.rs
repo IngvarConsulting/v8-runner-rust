@@ -244,3 +244,23 @@ fn mcp_admission_is_built_once_and_shared_by_both_transports() {
         );
     }
 }
+
+/// Слово исхода в подписи узла пишет presenter, а не рендерер.
+///
+/// Пока его писал каждый рендерер сам, подпись расходилась со знаком: `syntax` называл
+/// проверку успешной, имея предупреждение среди подробностей, `test` обещал
+/// предупреждения, не имея их. Оба расхождения нашли тесты, а не правило. Теперь слово
+/// и знак берутся из одного значения (`NodeMark`), и рендереру незачем их произносить.
+#[test]
+fn a_renderer_never_spells_the_outcome_word_itself() {
+    const OUTCOME_WORDS: &[&str] = &["completed successfully", "completed with warnings"];
+    let renderers = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/cli/execute.rs");
+    let text = fs::read_to_string(&renderers).expect("renderers are readable");
+    for word in OUTCOME_WORDS {
+        assert!(
+            !text.contains(word),
+            "{}: the outcome word `{word}` belongs to the presenter; name the subject and let it pick the word and the sign together",
+            renderers.display()
+        );
+    }
+}
