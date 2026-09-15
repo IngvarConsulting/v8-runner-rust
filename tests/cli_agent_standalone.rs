@@ -27,10 +27,30 @@ const GATE_USER: &str = "agent";
 
 fn write_config(harness: &Harness, infobase: &str, extra: &str) {
     let root = harness.dir.path();
+    // Платформы на машине раннера нет вовсе: пустой каталог в `tools.platform.path`
+    // закрывает и системный поиск `1cv8`, чтобы установленная платформа не скрыла
+    // лишнюю зависимость.
+    let no_platform = root.join("no-platform");
+    fs::create_dir_all(&no_platform).expect("empty platform dir");
+    let tools = if extra.contains("tools:") {
+        extra.replacen(
+            "tools:\n",
+            &format!(
+                "tools:\n  platform:\n    path: {}\n    strict: true\n",
+                no_platform.display()
+            ),
+            1,
+        )
+    } else {
+        format!(
+            "{extra}tools:\n  platform:\n    path: {}\n    strict: true\n",
+            no_platform.display()
+        )
+    };
     fs::write(
         &harness.config_path,
         format!(
-            "workPath: {work}\nformat: DESIGNER\ninfobase:\n{infobase}source-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\n  - name: Зонд\n    type: EXTENSION\n    path: project/ext\n{extra}",
+            "workPath: {work}\nformat: DESIGNER\ninfobase:\n{infobase}source-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\n  - name: Зонд\n    type: EXTENSION\n    path: project/ext\n{tools}",
             work = root.join("work").display(),
         ),
     )

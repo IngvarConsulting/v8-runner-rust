@@ -30,10 +30,13 @@ impl AgentLoader {
     pub(super) fn new(config: &AppConfig) -> Self {
         Self {
             utilities: PlatformUtilities::from_config(config),
-            managed: !matches!(
-                config.tools.designer_agent.mode(),
-                Ok(crate::config::model::DesignerAgentMode::Attached { .. })
-            ),
+            // Платформа нужна только управляемому агенту; чужой агент и шлюз
+            // автономного сервера поднимает не раннер.
+            managed: config.infobase.standalone.is_none()
+                && !matches!(
+                    config.tools.designer_agent.mode(),
+                    Ok(crate::config::model::DesignerAgentMode::Attached { .. })
+                ),
             location: None,
             handle: None,
             wait: None,
