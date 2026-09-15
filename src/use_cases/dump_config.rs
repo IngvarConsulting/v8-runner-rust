@@ -31,6 +31,7 @@ use crate::use_cases::request::{DumpModeRequest, DumpRequest as DumpArgs};
 use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
 use tracing::debug;
 
+mod agent;
 mod coordinator;
 mod helpers;
 
@@ -52,7 +53,8 @@ use crate::use_cases::source_inventory::SourceSetInventory;
 
 #[cfg(test)]
 const DUMP_COMMAND: &str = crate::use_cases::context::CommandName::Dump.as_str();
-const SUPPORTED_DUMP_ERROR: &str = "dump currently supports only the Designer or ibcmd provider";
+const SUPPORTED_DUMP_ERROR: &str =
+    "dump currently supports only the Designer, ibcmd or agent provider";
 const PARTIAL_OBJECTS_REQUIRED_ERROR: &str = "partial dump requires at least one object";
 const NON_PARTIAL_OBJECTS_ERROR: &str = "dump objects are supported only for mode 'partial'";
 const ORPHAN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -3291,6 +3293,7 @@ exit 0"#,
     #[test]
     fn dump_result_json_contains_new_fields() {
         let result = crate::domain::dump::DumpResult {
+            provider: None,
             provider_dispatched: true,
             ok: true,
             source_set: Some("main".to_owned()),

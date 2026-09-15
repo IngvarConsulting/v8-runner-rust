@@ -55,6 +55,10 @@ pub struct LoadExecutionMetadata {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LoadResult {
+    /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<crate::domain::capability::ProviderReceipt>,
+
     /// `false` when the run stopped at a preview instead of dispatching the platform.
     pub provider_dispatched: bool,
     pub mode: LoadMode,
@@ -76,6 +80,7 @@ mod tests {
     #[test]
     fn load_result_serializes_canonical_execution_without_legacy_fields() {
         let result = LoadResult {
+            provider: None,
             provider_dispatched: true,
             mode: LoadMode::Load,
             artifact_path: PathBuf::from("/tmp/main.cf"),

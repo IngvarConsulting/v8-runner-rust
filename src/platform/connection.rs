@@ -43,6 +43,12 @@ impl V8Connection {
         args
     }
 
+    /// Only the infobase address, without credentials: for launch modes where `/N` and
+    /// `/P` are ignored and the password must not reach the command line.
+    pub fn infobase_args(&self) -> Vec<String> {
+        self.connection_args.clone()
+    }
+
     /// Return the file-based infobase path when connection string contains `File=...`.
     pub fn file_path(&self) -> Option<&str> {
         if self.raw.starts_with('/') || self.raw.starts_with('-') {

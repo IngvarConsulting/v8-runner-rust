@@ -82,44 +82,62 @@ pub(super) fn run_dump_with_context(
     };
 
     let mut utilities = PlatformUtilities::from_config(config);
-    let provider = config.selected_provider(Operation::Dump);
-    let utility = match provider {
-        Provider::Designer => UtilityType::V8,
-        Provider::Ibcmd => UtilityType::Ibcmd,
-        other => {
-            return Err(DumpExecutionFailure::with_payload(
-                crate::use_cases::unimplemented_provider(Operation::Dump, other),
-                empty_result(
+    let selected =
+        match crate::use_cases::provider_selection::select(config, &mut utilities, Operation::Dump)
+        {
+            Ok(selected) => selected,
+            Err((error, receipt)) => {
+                let message = error.to_string();
+                let mut result = empty_result(
                     mode,
                     started,
                     args.source_set.clone(),
                     args.extension.clone(),
                     selectors.clone(),
                     None,
-                    None,
-                ),
-            ));
-        }
-    };
-    let location = match utilities.locate(utility) {
-        Ok(location) => location,
-        Err(error) => {
-            let message = error.to_string();
-            let app_error = AppError::from(error);
-            return Err(DumpExecutionFailure::with_payload(
-                app_error,
-                empty_result(
-                    mode,
-                    started,
-                    Some(resolved.source_set_name.clone()),
-                    resolved.extension.clone(),
-                    selectors.clone(),
-                    Some(resolved.target_path.clone()),
                     Some(message),
-                ),
-            ));
-        }
-    };
+                );
+                result.provider = Some(receipt);
+                return Err(DumpExecutionFailure::with_payload(error, result));
+            }
+        };
+    let receipt = selected.receipt.clone();
+    let outcome = run_dump_selected(
+        context,
+        config,
+        args,
+        mode,
+        started,
+        selectors,
+        partial_objects,
+        resolved,
+        utilities,
+        selected,
+    );
+    crate::use_cases::provider_selection::attach(outcome, &receipt)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_dump_selected(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &DumpArgs,
+    mode: DumpMode,
+    started: Instant,
+    selectors: Option<Vec<DumpSelectorResult>>,
+    partial_objects: Option<Vec<PartialDumpSelector>>,
+    resolved: ResolvedDumpTarget,
+    mut utilities: PlatformUtilities,
+    selected: crate::use_cases::provider_selection::SelectedProvider,
+) -> Result<DumpResult, DumpExecutionFailure> {
+    let provider = selected.provider;
+    let location = selected.location;
+    // Исполнителю без утилиты (чужой агент) путь не нужен; остальным его даёт выбор,
+    // и пустой путь ниже недостижим — арка-страж перед матчем отказывает раньше.
+    let binary = location
+        .as_ref()
+        .map(|found| found.path.clone())
+        .unwrap_or_default();
     let edt_binary = if config.format == SourceFormat::Edt {
         Some(match utilities.locate(UtilityType::EdtCli) {
             Ok(location) => location.path,
@@ -158,7 +176,10 @@ pub(super) fn run_dump_with_context(
                 "would dump {:?} into '{}' via {}; nothing written",
                 mode.clone(),
                 resolved.target_path.display(),
-                location.path.display()
+                match location.as_ref() {
+                    Some(found) => found.path.display().to_string(),
+                    None => "the attached Designer agent".to_owned(),
+                }
             )),
         );
         preview.ok = true;
@@ -260,12 +281,15 @@ pub(super) fn run_dump_with_context(
     let partial_objects = partial_objects.as_deref();
     let edt_binary = edt_binary.as_deref();
     let result = match (config.format, &mode, provider, partial_objects, edt_binary) {
+        (_, _, other, _, _) if location.is_none() && other != Provider::Agent => Err(
+            crate::use_cases::unimplemented_provider(Operation::Dump, other),
+        ),
         (SourceFormat::Designer, DumpMode::Incremental, Provider::Designer, _, _) => {
             run_incremental_dump_designer(
                 context,
                 config,
                 &resolved,
-                location.path.as_path(),
+                binary.as_path(),
                 utilities.runner_for(UtilityType::V8),
             )
         }
@@ -274,7 +298,7 @@ pub(super) fn run_dump_with_context(
                 context,
                 config,
                 &resolved,
-                location.path.as_path(),
+                binary.as_path(),
                 utilities.runner_for(UtilityType::Ibcmd),
             )
         }
@@ -283,7 +307,7 @@ pub(super) fn run_dump_with_context(
                 context,
                 config,
                 &resolved,
-                location.path.as_path(),
+                binary.as_path(),
                 utilities.runner_for(UtilityType::V8),
             )
         }
@@ -291,7 +315,7 @@ pub(super) fn run_dump_with_context(
             context,
             config,
             &resolved,
-            location.path.as_path(),
+            binary.as_path(),
             utilities.runner_for(UtilityType::Ibcmd),
         ),
         (SourceFormat::Designer, DumpMode::Partial, Provider::Designer, Some(objects), _) => {
@@ -299,7 +323,7 @@ pub(super) fn run_dump_with_context(
                 context,
                 config,
                 &resolved,
-                location.path.as_path(),
+                binary.as_path(),
                 utilities.runner_for(UtilityType::V8),
                 objects,
             )
@@ -309,17 +333,31 @@ pub(super) fn run_dump_with_context(
                 context,
                 config,
                 &resolved,
-                location.path.as_path(),
+                binary.as_path(),
                 utilities.runner_for(UtilityType::Ibcmd),
                 objects,
             )
         }
+        (SourceFormat::Designer, DumpMode::Partial, Provider::Agent, None, _) => {
+            Err(AppError::Runtime(
+                "partial dump objects were not validated before execution".to_owned(),
+            ))
+        }
+        (SourceFormat::Designer, _, Provider::Agent, objects, _) => super::agent::run_dump_agent(
+            context,
+            config,
+            &resolved,
+            &mode,
+            objects,
+            location.as_ref(),
+            &mut utilities,
+        ),
         (SourceFormat::Edt, DumpMode::Incremental, Provider::Designer, _, Some(edt_binary)) => {
             run_incremental_dump_edt_designer(
                 context,
                 config,
                 &resolved,
-                location.path.as_path(),
+                binary.as_path(),
                 edt_binary,
                 utilities.runner_for(UtilityType::V8),
                 utilities.runner_for(UtilityType::EdtCli),
@@ -330,7 +368,7 @@ pub(super) fn run_dump_with_context(
                 context,
                 config,
                 &resolved,
-                location.path.as_path(),
+                binary.as_path(),
                 edt_binary,
                 utilities.runner_for(UtilityType::Ibcmd),
                 utilities.runner_for(UtilityType::EdtCli),
@@ -341,7 +379,7 @@ pub(super) fn run_dump_with_context(
                 context,
                 config,
                 &resolved,
-                location.path.as_path(),
+                binary.as_path(),
                 edt_binary,
                 utilities.runner_for(UtilityType::V8),
                 utilities.runner_for(UtilityType::EdtCli),
@@ -352,7 +390,7 @@ pub(super) fn run_dump_with_context(
                 context,
                 config,
                 &resolved,
-                location.path.as_path(),
+                binary.as_path(),
                 edt_binary,
                 utilities.runner_for(UtilityType::Ibcmd),
                 utilities.runner_for(UtilityType::EdtCli),
@@ -368,7 +406,7 @@ pub(super) fn run_dump_with_context(
             context,
             config,
             &resolved,
-            location.path.as_path(),
+            binary.as_path(),
             edt_binary,
             utilities.runner_for(UtilityType::V8),
             utilities.runner_for(UtilityType::EdtCli),
@@ -384,7 +422,7 @@ pub(super) fn run_dump_with_context(
             context,
             config,
             &resolved,
-            location.path.as_path(),
+            binary.as_path(),
             edt_binary,
             utilities.runner_for(UtilityType::Ibcmd),
             utilities.runner_for(UtilityType::EdtCli),
@@ -407,6 +445,7 @@ pub(super) fn run_dump_with_context(
 
     match result {
         Ok((platform_result, cleanup_message)) => Ok(DumpResult {
+            provider: None,
             provider_dispatched: true,
             ok: true,
             source_set: Some(resolved.source_set_name),
@@ -423,6 +462,7 @@ pub(super) fn run_dump_with_context(
             Err(DumpExecutionFailure::with_payload(
                 error,
                 DumpResult {
+                    provider: None,
                     provider_dispatched: true,
                     ok: false,
                     source_set: Some(resolved.source_set_name),

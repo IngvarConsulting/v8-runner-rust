@@ -78,6 +78,69 @@ pub struct InfobaseConfig {
     /// Optional DBMS contract for server-based infobases.
     #[serde(default)]
     pub dbms: Option<InfobaseDbmsConfig>,
+
+    /// Client address and web-server publication settings.
+    ///
+    /// The runner administers the infobase through `connection`; a client or a browser
+    /// opens it through `web.url`. For a file or cluster infobase the address appears
+    /// after `publish`; a standalone server knows it up front.
+    #[serde(default)]
+    pub web: Option<InfobaseWebConfig>,
+}
+
+/// Web server a publication is written to.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WebServerKind {
+    Iis,
+    Apache2,
+    Apache22,
+    Apache24,
+}
+
+impl WebServerKind {
+    /// The `webinst` switch naming this server.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Iis => "iis",
+            Self::Apache2 => "apache2",
+            Self::Apache22 => "apache22",
+            Self::Apache24 => "apache24",
+        }
+    }
+
+    /// Apache 2.0 and 2.2 have no default configuration path `webinst` could guess.
+    pub const fn requires_conf(self) -> bool {
+        matches!(self, Self::Apache2 | Self::Apache22)
+    }
+}
+
+/// Publication and client-address settings for the target infobase.
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+pub struct InfobaseWebConfig {
+    /// Web server to publish on.
+    #[serde(default)]
+    pub server: Option<WebServerKind>,
+
+    /// Virtual directory name (`webinst -wsdir`).
+    #[serde(default)]
+    pub wsdir: Option<String>,
+
+    /// Physical directory the publication is written to (`webinst -dir`).
+    #[serde(default)]
+    pub dir: Option<PathBuf>,
+
+    /// Web server configuration file (`webinst -confpath`).
+    #[serde(default)]
+    pub conf: Option<PathBuf>,
+
+    /// Use OS authentication (`webinst -osauth`, IIS only).
+    #[serde(default, rename = "os-auth")]
+    pub os_auth: bool,
+
+    /// Address a client or a browser opens the infobase at.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 impl InfobaseConfig {
@@ -89,6 +152,7 @@ impl InfobaseConfig {
             user: None,
             password: None,
             dbms: None,
+            web: None,
         }
     }
 
@@ -107,6 +171,7 @@ impl InfobaseConfig {
             connection: connection.into(),
             user: None,
             password: None,
+            web: None,
             dbms: Some(dbms),
         }
     }
@@ -301,6 +366,10 @@ pub struct ToolsConfig {
 
     #[serde(rename = "edt_cli", default)]
     pub edt_cli: EdtCliConfig,
+
+    /// Designer agent endpoint: launched by the runner or attached to.
+    #[serde(rename = "designer_agent", default)]
+    pub designer_agent: DesignerAgentConfig,
 
     #[serde(default)]
     pub client_mcp: ClientMcpToolConfig,
@@ -663,6 +732,113 @@ impl Default for EdtCliConfig {
             command_timeout_ms: default_edt_cli_command_timeout_ms(),
         }
     }
+}
+
+/// Where the Designer agent lives and how the runner reaches it.
+///
+/// Two modes, told apart by the keys present: `attach` names an agent somebody else
+/// started, everything else describes the agent the runner launches itself. The two
+/// sets of keys do not mix; the loader refuses a config that names both.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct DesignerAgentConfig {
+    /// `host:port` of an agent started outside the runner. Attached mode.
+    pub attach: Option<String>,
+
+    /// `AgentBaseDir` of the attached agent, where its commands read and write files.
+    /// Attached mode only; the managed agent always works under `workPath`.
+    pub base_dir: Option<PathBuf>,
+
+    /// Port the managed agent listens on. Managed mode; default `1543`.
+    pub port: Option<u16>,
+
+    /// Private host key for the managed agent. Absent: `/AgentSSHHostKeyAuto`.
+    pub host_key: Option<PathBuf>,
+
+    /// Time limit for the managed agent to accept the first authenticated session.
+    #[serde(
+        default = "default_designer_agent_startup_timeout_ms",
+        rename = "startup_timeout_ms"
+    )]
+    pub startup_timeout_ms: u64,
+}
+
+impl Default for DesignerAgentConfig {
+    fn default() -> Self {
+        Self {
+            attach: None,
+            base_dir: None,
+            port: None,
+            host_key: None,
+            startup_timeout_ms: default_designer_agent_startup_timeout_ms(),
+        }
+    }
+}
+
+/// Default SSH port of a Designer agent.
+pub const DEFAULT_DESIGNER_AGENT_PORT: u16 = 1543;
+
+/// The mode the keys of `tools.designer_agent` describe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DesignerAgentMode {
+    /// The runner launches `1cv8 DESIGNER … /AgentMode` and owns its lifetime.
+    Managed { port: u16 },
+    /// The runner connects to an agent it did not start and never restarts it.
+    Attached { host: String, port: u16 },
+}
+
+impl DesignerAgentConfig {
+    /// Keys that only make sense for a managed agent.
+    pub fn managed_keys_present(&self) -> Vec<&'static str> {
+        let mut keys = Vec::new();
+        if self.port.is_some() {
+            keys.push("port");
+        }
+        if self.host_key.is_some() {
+            keys.push("host-key");
+        }
+        keys
+    }
+
+    /// Keys that only make sense for an attached agent.
+    pub fn attached_keys_present(&self) -> Vec<&'static str> {
+        let mut keys = Vec::new();
+        if self.base_dir.is_some() {
+            keys.push("base-dir");
+        }
+        keys
+    }
+
+    /// Mode derived from the keys; `attach` that does not parse is reported as such.
+    pub fn mode(&self) -> Result<DesignerAgentMode, String> {
+        match self.attach.as_deref() {
+            None => Ok(DesignerAgentMode::Managed {
+                port: self.port.unwrap_or(DEFAULT_DESIGNER_AGENT_PORT),
+            }),
+            Some(attach) => {
+                let (host, port) = attach
+                    .rsplit_once(':')
+                    .ok_or_else(|| format!("'{attach}' is not host:port"))?;
+                let port = port
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|port| *port != 0)
+                    .ok_or_else(|| format!("'{attach}' has no valid port"))?;
+                let host = host.trim();
+                if host.is_empty() {
+                    return Err(format!("'{attach}' has no host"));
+                }
+                Ok(DesignerAgentMode::Attached {
+                    host: host.to_owned(),
+                    port,
+                })
+            }
+        }
+    }
+}
+
+const fn default_designer_agent_startup_timeout_ms() -> u64 {
+    120_000
 }
 
 fn default_mcp_http_bind_address() -> String {

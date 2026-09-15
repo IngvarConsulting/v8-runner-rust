@@ -29,7 +29,7 @@ use super::ResolvedDumpTarget;
 pub(super) fn validate_supported_matrix(config: &AppConfig) -> Option<AppError> {
     if matches!(
         config.selected_provider(Operation::Dump),
-        Provider::Designer | Provider::Ibcmd
+        Provider::Designer | Provider::Ibcmd | Provider::Agent
     ) {
         None
     } else {
@@ -379,6 +379,7 @@ pub(super) fn empty_result(
     message: Option<String>,
 ) -> DumpResult {
     DumpResult {
+        provider: None,
         provider_dispatched: true,
         ok: false,
         source_set,

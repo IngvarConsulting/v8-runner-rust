@@ -2,8 +2,8 @@
 id: CTR.CONFIG.V8PROJECT-SCHEMA
 status: active
 governs: product
-version: 2
-decision: DEC.2026-09-14.BUILDER-KEY-IS-REMOVED
+version: 3
+decision: DEC.2026-09-14.TARGET-HAS-TWO-ADDRESSES
 artifact: docs/schemas/v8project.schema.json
 producer: src/config/schema.rs
 consumers: [docs, cli]

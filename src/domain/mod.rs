@@ -30,6 +30,8 @@ pub mod launch;
 pub mod load;
 /// Canonical selectors for partial dumps.
 pub mod partial_dump_selector;
+/// Web publication domain models.
+pub mod publish;
 /// Shared runner models.
 pub mod runner;
 /// Source set domain models.

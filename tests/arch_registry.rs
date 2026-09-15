@@ -227,19 +227,29 @@ fn every_decision_names_evidence_that_resolves() {
         if value == "null" {
             continue;
         }
-        let (file, name) = match value.split_once("::") {
-            Some((file, name)) => (file, Some(name)),
-            None => (value, None),
-        };
-        let evidence = root.join(file);
-        if !evidence.is_file() {
-            unresolved.push(format!("{}: missing evidence {file}", path.display()));
-            continue;
-        }
-        if let Some(name) = name {
-            let body = std::fs::read_to_string(&evidence).expect("evidence is readable");
-            if !body.contains(&format!("fn {name}(")) {
-                unresolved.push(format!("{}: {file} has no test {name}", path.display()));
+        // Решение может держаться несколькими свидетельствами: список в квадратных
+        // скобках, как и у `check` правил.
+        let entries = value
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty());
+        for entry in entries {
+            let (file, name) = match entry.split_once("::") {
+                Some((file, name)) => (file, Some(name)),
+                None => (entry, None),
+            };
+            let evidence = root.join(file);
+            if !evidence.is_file() {
+                unresolved.push(format!("{}: missing evidence {file}", path.display()));
+                continue;
+            }
+            if let Some(name) = name {
+                let body = std::fs::read_to_string(&evidence).expect("evidence is readable");
+                if !body.contains(&format!("fn {name}(")) {
+                    unresolved.push(format!("{}: {file} has no test {name}", path.display()));
+                }
             }
         }
     }

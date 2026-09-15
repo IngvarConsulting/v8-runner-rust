@@ -91,7 +91,7 @@ fn run_load(
     let started = Instant::now();
     // One owner of the truth about the run: flipped where a platform process is actually
     // started, and carried into every payload instead of a constant `true`.
-    let mut dispatched = false;
+    let dispatched = false;
     let request_snapshot = request_snapshot_for_failure_payload(args);
 
     if let Some(error) = validate_supported_matrix(config) {
@@ -152,23 +152,52 @@ fn run_load(
     }
 
     let mut utilities = PlatformUtilities::from_config(config);
-    let location = match utilities.locate(UtilityType::V8) {
-        Ok(location) => location,
-        Err(error) => {
+    let selected = match crate::use_cases::provider_selection::select(
+        config,
+        &mut utilities,
+        crate::domain::capability::Operation::Load,
+    ) {
+        Ok(selected) => selected,
+        Err((error, receipt)) => {
             let message = error.to_string();
-            return Err(LoadExecutionFailure::with_payload(
-                AppError::from(error),
-                empty_result_from_resolved(
-                    dispatched,
-                    &resolved,
-                    CompatibilityState::NotProbed,
-                    started,
-                    Some(message),
-                    None,
-                    false,
-                ),
-            ));
+            let mut result = empty_result_from_resolved(
+                dispatched,
+                &resolved,
+                CompatibilityState::NotProbed,
+                started,
+                Some(message),
+                None,
+                false,
+            );
+            result.provider = Some(receipt);
+            return Err(LoadExecutionFailure::with_payload(error, result));
         }
+    };
+    let receipt = selected.receipt.clone();
+    let outcome = run_load_selected(
+        context, config, args, started, dispatched, resolved, utilities, selected,
+    );
+    crate::use_cases::provider_selection::attach(outcome, &receipt)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_load_selected(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &LoadRequest,
+    started: Instant,
+    mut dispatched: bool,
+    resolved: ResolvedLoadRequest,
+    mut utilities: PlatformUtilities,
+    selected: crate::use_cases::provider_selection::SelectedProvider,
+) -> UseCaseResult<LoadResult> {
+    let Some(location) = selected.location else {
+        return Err(UseCaseFailure::without_payload(
+            crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::Load,
+                selected.provider,
+            ),
+        ));
     };
 
     if args.dry_run {
@@ -188,6 +217,7 @@ fn run_load(
                 location.path.display()
             )]);
         return Ok(LoadResult {
+            provider: None,
             provider_dispatched: false,
             mode: resolved.mode,
             artifact_path: resolved.artifact_path,
@@ -470,6 +500,7 @@ fn run_load(
         execution = execution.with_interruptions(deferred_interruptions);
     }
     Ok(LoadResult {
+        provider: None,
         provider_dispatched: true,
         mode: resolved.mode,
         artifact_path: resolved.artifact_path,
@@ -971,6 +1002,7 @@ fn interrupted_result_from_resolved(
     platform_log_path: Option<PathBuf>,
 ) -> LoadResult {
     LoadResult {
+        provider: None,
         provider_dispatched: true,
         mode: resolved.mode,
         artifact_path: resolved.artifact_path.clone(),
@@ -1045,6 +1077,7 @@ fn empty_result(
         .clone()
         .unwrap_or_else(|| "artifact load failed".to_owned());
     LoadResult {
+        provider: None,
         provider_dispatched,
         mode,
         artifact_path,

@@ -435,6 +435,30 @@ pub fn read_temp_dir_metadata(dir: &Path) -> std::io::Result<TempDirMetadata> {
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
+/// Copy a directory tree into `destination`, creating it; existing files are overwritten.
+pub fn copy_dir_recursively(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let target = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursively(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Move a directory: a rename when the filesystem allows it, a copy and removal otherwise.
+pub fn move_dir(source: &Path, destination: &Path) -> std::io::Result<()> {
+    if std::fs::rename(source, destination).is_ok() {
+        return Ok(());
+    }
+    copy_dir_recursively(source, destination)?;
+    std::fs::remove_dir_all(source)
+}
+
 pub fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {
     if !path.exists() {
         return Ok(());

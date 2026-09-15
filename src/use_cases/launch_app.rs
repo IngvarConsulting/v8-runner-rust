@@ -39,7 +39,11 @@ pub fn execute(
         target = ?args.target,
         "executing launch use case"
     );
+    if args.target == LaunchTargetRequest::Web {
+        return execute_web(context, config, args);
+    }
     let (mode, utility, client_mode) = match args.target {
+        LaunchTargetRequest::Web => unreachable!("web launches are handled above"),
         LaunchTargetRequest::Designer => (
             LaunchMode::Designer,
             UtilityType::V8,
@@ -99,7 +103,7 @@ pub fn execute(
     let location = utilities
         .locate(utility)
         .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
-    let platform_resolution = platform_resolution(&location);
+    let platform_resolution = Some(platform_resolution(&location));
     let process_request = ProcessRequest {
         program: location.path.clone(),
         args: build_launch_args(
@@ -133,6 +137,7 @@ pub fn execute(
             pid: None,
             binary: location.path.clone(),
             platform_resolution,
+            url: None,
             provider_dispatched: false,
             plan: Some(LaunchPlan {
                 program: process_request.program.clone(),
@@ -176,6 +181,7 @@ pub fn execute(
             pid: Some(pid),
             binary: location.path,
             platform_resolution,
+            url: None,
             provider_dispatched: true,
             plan: None,
             message: Some(message.clone()),
@@ -210,6 +216,7 @@ pub fn execute(
             pid: Some(pid),
             binary: binary.clone(),
             platform_resolution: platform_resolution.clone(),
+            url: None,
             provider_dispatched: true,
             plan: None,
             message: Some(launch_message(config, args, &binary, pid)),
@@ -260,6 +267,7 @@ pub fn execute(
         pid: Some(spawned.pid),
         binary: spawned.binary.clone(),
         platform_resolution,
+        url: None,
         provider_dispatched: true,
         plan: None,
         message: Some(launch_message(config, args, &spawned.binary, spawned.pid)),
@@ -463,7 +471,88 @@ fn mode_label(target: LaunchTargetRequest) -> &'static str {
         LaunchTargetRequest::Enterprise(EnterpriseLaunchTarget::ClientMcp { .. }) => {
             "клиентский MCP-сервер"
         }
+        LaunchTargetRequest::Web => "веб-клиент",
     }
+}
+
+/// `launch web`: открыть объявленный клиентский адрес в браузере.
+///
+/// Без `infobase.web.url` — типизированный отказ: адрес появляется после публикации
+/// или задаётся вручную, выводить его раннер не берётся. Доступность адреса не
+/// проверяется: раннер не пингует публикацию и не чинит её.
+fn execute_web(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &LaunchArgs,
+) -> UseCaseResult<LaunchResult> {
+    let url = config
+        .infobase
+        .web
+        .as_ref()
+        .and_then(|web| web.url.as_deref())
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .ok_or_else(|| {
+            UseCaseFailure::without_payload(AppError::Validation(
+                "infobase.web.url is not declared: the client address appears after `publish` on a web server or is set by hand in infobase.web.url"
+                    .to_owned(),
+            ))
+        })?;
+    if args.client_mcp.is_some() || args.launch.external_epf_wait.is_some() {
+        return Err(UseCaseFailure::without_payload(AppError::Validation(
+            "launch web opens a browser and takes no client launch options".to_owned(),
+        )));
+    }
+    if let Some(interruption) = context.interruption() {
+        return Err(UseCaseFailure::without_payload(AppError::Runtime(format!(
+            "{} for command '{}'",
+            interruption_message(interruption),
+            context.command().as_str()
+        ))));
+    }
+
+    let (program, leading) = crate::platform::browser::opener();
+    let mut plan_args = leading.clone();
+    plan_args.push(url.to_owned());
+    if args.dry_run {
+        log_live_stage(
+            "launch: preview",
+            "[Launch] preview only, browser not opened",
+        );
+        return Ok(LaunchResult {
+            ok: true,
+            mode: LaunchMode::Web,
+            pid: None,
+            binary: program.clone(),
+            platform_resolution: None,
+            url: Some(url.to_owned()),
+            provider_dispatched: false,
+            plan: Some(LaunchPlan {
+                program,
+                args: plan_args,
+            }),
+            message: Some(format!("Previewed веб-клиент at {url}; browser not opened")),
+            mcp_readiness: None,
+            external_epf_wait: None,
+        });
+    }
+
+    log_live_stage("launch: web", "[Launch] opening the published infobase");
+    let pid = crate::platform::browser::open_url(&program, &leading, url)
+        .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+    Ok(LaunchResult {
+        ok: true,
+        mode: LaunchMode::Web,
+        pid: Some(pid),
+        binary: program,
+        platform_resolution: None,
+        url: Some(url.to_owned()),
+        provider_dispatched: true,
+        plan: None,
+        message: Some(format!("Opened веб-клиент at {url} (pid {pid})")),
+        mcp_readiness: None,
+        external_epf_wait: None,
+    })
 }
 
 fn client_mcp_launch_shape(mode: ClientMcpMode) -> (LaunchMode, UtilityType, LaunchClientMode) {

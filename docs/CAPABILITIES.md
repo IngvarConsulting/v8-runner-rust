@@ -29,7 +29,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `build` | провайдер `designer` (умолчание) или `ibcmd`, любой `format` | Incremental/full загрузка в ИБ; при `format=EDT` сначала экспортирует изменённые EDT `source-set` |
 | `test` | Та же матрица, что и у `build` | По умолчанию запускает `build` |
 | `test --no-build` | Подготовленная file/server ИБ; source-set и build tooling не требуются | Запускает выбранный test engine без build |
-| `dump` | провайдер `designer` (умолчание) или `ibcmd`, любой `format` | Полная, инкрементальная или object-scoped partial выгрузка; у `ibcmd` `partial` деградирует в incremental с warning; при `format=EDT` — reverse sync через internal Designer snapshot и EDT import |
+| `dump` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.dump: agent` при `format=DESIGNER` | Полная, инкрементальная или object-scoped partial выгрузка; у `ibcmd` `partial` деградирует в incremental с warning; у `agent` `incremental` деградирует в full с warning, результат публикуется через staging из `AgentBaseDir`; при `format=EDT` — reverse sync через internal Designer snapshot и EDT import |
 | `infobase configuration export` | цепочка `designer` → `ibcmd` | Выгружает working/database configuration в `.cf` или named extension в `.cfe`; раннер берёт первого готового до spawn, квитанция называет пропущенных |
 | `infobase dump` | провайдер `designer`; `ibcmd` только по `providers.infobase.dump` | Выгружает полную ИБ в переносимый `.dt`; это не backup; `ibcmd` остаётся experimental до exclusive-access preflight |
 | `convert` | CLI-only repo-aware конвертация текущих `source-set` | Строки в матрице провайдеров не имеет и не требует ИБ |
@@ -37,7 +37,8 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `make` / `artifacts` | `format=DESIGNER`, провайдер только `designer` | Экспорт `.cf` / `.cfe` и публикация `.epf` / `.erf` |
 | `syntax` | `format=DESIGNER` или `format=EDT` | Designer checks для `DESIGNER`, EDT `validate` для `EDT` |
 | `infobase restore` | провайдер `designer`; `ibcmd` только по `providers.infobase.restore` | Загрузка полной ИБ из DT; обязателен `--create` или `--replace` |
-| `launch` | Не зависит от `format` | Прямой запуск 1C utility по позиционному mode |
+| `launch` | Не зависит от `format` | Прямой запуск 1C utility по позиционному mode; `launch web` открывает `infobase.web.url` в браузере |
+| `publish` | Файловая и кластерная база, провайдер только `webinst` | Публикует базу на веб-сервере из `infobase.web`; `--delete` снимает публикацию; `--dry-run` показывает команду `webinst` целиком |
 | MCP | `stdio` и `streamable HTTP` | Публикует 8 инструментов, уже более узкая поверхность, чем CLI |
 
 ## Превью у глаголов, работающих с платформой
@@ -46,11 +47,15 @@ CLI help, доверяйте текущему коду и затем синхр�
 `infobase dump`, `infobase restore`, `launch`, `convert`, `init`, `build`,
 `load`, `dump` и `artifacts`.
 
-**Форм превью две, и это не недосмотр.** У `infobase`-экспорта и `restore` есть
-настоящий выбор провайдера, поэтому их превью отвечает экспортным конвертом
-(`mode=preview`, `plan.provider`, квитанция `provider`). У остальных выбора в момент
-превью нет — исполнитель назначен матрицей или единственной утилитой, — и квитанция
-с одним кандидатом была бы вымышленной развилкой. Их превью отвечает парой
+**Квитанция об исполнителе одна у всех.** Каждая операция, у которой есть строка в
+матрице провайдеров, кладёт в ответ `provider`: `selected` — кто выбран, `origin` —
+умолчание матрицы или ключ `providers.*` с именем файла, `skipped[]` — кого пропустили
+и почему. Раннер берёт первого готового из цепочки умолчаний; переопределение не
+откатывается: `selected: null` и список пропущенных с причиной.
+
+**Форм превью две, и это не недосмотр.** У `infobase`-экспорта и `restore` превью
+отвечает экспортным конвертом (`mode=preview`, `plan.provider`); у остальных превью
+отвечает парой `provider_dispatched` + предмет глагола. Их превью отвечает парой
 **`provider_dispatched` + предмет глагола**:
 
 | Глагол | Что называет превью |
@@ -492,12 +497,28 @@ v8-runner artifacts --output <TARGET> [--source-set <NAME>] [--extension <NAME>]
 - Каталог output используется для external `.epf` / `.erf` publication.
 - Исполнитель — только Конфигуратор.
 
+## `publish`
+
+```bash
+v8-runner publish [--delete] [--dry-run]
+```
+
+- Параметры берутся из `infobase.web`, а не из флагов: публикация воспроизводится из файла.
+- Составляет `webinst -publish|-delete -<server> -wsdir … -dir … [-connstr …] [-confpath …] [-osauth]`
+  по грамматике платформы; предусловия называются до запуска — существующий `dir`,
+  `conf` для apache2/apache22, `os-auth` только для iis.
+- Публикация замещает `default.vrd` целиком, поэтому у команды есть превью; удаление —
+  отдельный явный ключ `--delete`.
+- Не входит ни в одну цепочку умолчаний: `build`, `test` и остальные публикацию не делают.
+- Развилки нет: `providers.publish` отклоняется валидацией.
+
 ## Прямой запуск и MCP
 
 ### `launch`
 
 ```bash
 v8-runner launch <designer|thin|thick|ordinary> [--dry-run] [FLAGS]
+v8-runner launch web [--dry-run]
 v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--wait-ready] [FLAGS]
 ```
 

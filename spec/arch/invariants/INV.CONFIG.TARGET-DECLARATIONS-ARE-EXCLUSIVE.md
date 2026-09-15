@@ -1,9 +1,9 @@
 ---
 id: INV.CONFIG.TARGET-DECLARATIONS-ARE-EXCLUSIVE
-status: planned
+status: active
 governs: product
 decision: DEC.2026-09-14.TARGET-KIND-IS-DECLARED-NOT-PARSED
-check: null
+check: tests/cli_publish.rs::a_web_connection_string_is_refused_as_an_administrative_channel
 scope: [config]
 ---
 

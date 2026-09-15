@@ -101,14 +101,38 @@ fn run_build_branch(
     config: &AppConfig,
     args: &BuildArgs,
 ) -> UseCaseResult<BuildResult> {
+    // Сборка без изменений не запускает платформу, и раньше не требовала её: исполнитель
+    // ищется лениво, по первому набору, которому есть что грузить. Поэтому отказ выбора
+    // здесь не прерывает команду — он остаётся в квитанции, а нужна ли платформа,
+    // решают шаги.
+    let mut utilities = PlatformUtilities::from_config(config);
+    let (provider, receipt) = match crate::use_cases::provider_selection::select(
+        config,
+        &mut utilities,
+        Operation::Build,
+    ) {
+        Ok(selected) => (selected.provider, selected.receipt),
+        Err((_error, receipt)) => (config.selected_provider(Operation::Build), receipt),
+    };
+    let outcome = run_build_selected(context, config, args, provider);
+    crate::use_cases::provider_selection::attach(outcome, &receipt)
+}
+
+fn run_build_selected(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &BuildArgs,
+    provider: Provider,
+) -> UseCaseResult<BuildResult> {
     if config.format == SourceFormat::Edt {
-        return run_build_edt(context, config, args);
+        return run_build_edt(context, config, args, provider);
     }
 
     if let Some(error) = validate_designer_supported_matrix(config) {
         return Err(BuildExecutionFailure::with_payload(
             error,
             BuildResult {
+                provider: None,
                 provider_dispatched: true,
                 ok: false,
                 steps: vec![],
@@ -117,12 +141,13 @@ fn run_build_branch(
         ));
     }
 
-    match config.selected_provider(Operation::Build) {
+    match provider {
         Provider::Designer => run_build_designer(context, config, args),
         Provider::Ibcmd => run_build_ibcmd(context, config, args),
         other => Err(BuildExecutionFailure::with_payload(
             crate::use_cases::unimplemented_provider(Operation::Build, other),
             BuildResult {
+                provider: None,
                 provider_dispatched: false,
                 ok: false,
                 steps: vec![],
@@ -186,9 +211,10 @@ fn run_build_edt(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &BuildArgs,
+    provider: Provider,
 ) -> Result<BuildResult, BuildExecutionFailure> {
     let started = Instant::now();
-    let mut result = coordinator::run_build_edt(context, config, args)?;
+    let mut result = coordinator::run_build_edt(context, config, args, provider)?;
     append_client_mcp_extension_step(context, config, args, started, &mut result)?;
     Ok(result)
 }
@@ -3112,6 +3138,7 @@ mod tests {
     #[test]
     fn build_result_stays_json_serializable() {
         let result = crate::domain::build::BuildResult {
+            provider: None,
             provider_dispatched: true,
             ok: true,
             steps: vec![

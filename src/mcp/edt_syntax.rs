@@ -277,6 +277,7 @@ pub async fn execute(
     let stderr = (!stderr_lines.is_empty()).then_some(stderr_lines.join("\n"));
     let log_read_warning = (!log_warnings.is_empty()).then_some(log_warnings.join("\n"));
     let result = SyntaxCheckResult {
+        provider: None,
         status,
         exit_code,
         check_name: "edt".to_owned(),
@@ -397,6 +398,7 @@ fn failed_result(
     platform_log_path: Option<PathBuf>,
 ) -> SyntaxCheckResult {
     SyntaxCheckResult {
+        provider: None,
         status,
         exit_code,
         check_name: check_name.to_owned(),
