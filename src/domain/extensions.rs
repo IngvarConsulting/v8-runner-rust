@@ -44,6 +44,20 @@ pub struct InstalledExtension {
     pub hash_sum: String,
 }
 
+/// What the read was asked for, named as data.
+///
+/// A change preview names its `target` and `action` as fields; the read names its
+/// subject the same way, so a caller pairs the answer with its request without
+/// parsing the wording of `plan`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum RequestedInventory {
+    /// Every extension installed in the infobase.
+    All,
+    /// One extension by its platform name.
+    Named { name: String },
+}
+
 /// Result of reading the extension composition of an infobase.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExtensionInventoryResult {
@@ -58,6 +72,8 @@ pub struct ExtensionInventoryResult {
     /// opens, the account authenticates and a journal trace is left. So the read has a
     /// preview too, and in it `extensions` is empty because nothing was asked.
     pub provider_dispatched: bool,
+    /// The subject of the read, present in the preview and in the answer alike.
+    pub requested: RequestedInventory,
     /// What the apply would do, named without any secret from the connection string.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,

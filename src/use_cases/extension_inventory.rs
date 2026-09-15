@@ -11,6 +11,7 @@ use crate::config::model::AppConfig;
 use crate::domain::capability::Provider;
 use crate::domain::extensions::{
     ExtensionInventoryResult, ExtensionsResult, ExtensionsStep, InstalledExtension,
+    RequestedInventory,
 };
 use crate::platform::extension_inventory::parse_extension_inventory;
 use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
@@ -63,6 +64,7 @@ pub fn execute(
             provider: Some(receipt),
             ok: true,
             provider_dispatched: false,
+            requested: requested(&request.scope),
             plan: Some(format!(
                 "would read {} of {} via {}",
                 match &request.scope {
@@ -117,10 +119,18 @@ pub fn execute(
         provider: Some(receipt),
         ok: true,
         provider_dispatched: true,
+        requested: requested(&request.scope),
         plan: None,
         extensions,
         duration_ms: started.elapsed().as_millis() as u64,
     })
+}
+
+fn requested(scope: &ExtensionInventoryScope) -> RequestedInventory {
+    match scope {
+        ExtensionInventoryScope::All => RequestedInventory::All,
+        ExtensionInventoryScope::Named { name } => RequestedInventory::Named { name: name.clone() },
+    }
 }
 
 fn validate_success(result: &PlatformCommandResult) -> Result<(), AppError> {
