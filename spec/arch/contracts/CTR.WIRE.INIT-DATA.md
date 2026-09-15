@@ -2,8 +2,8 @@
 id: CTR.WIRE.INIT-DATA
 status: active
 governs: product
-version: 1
-decision: DEC.2026-09-14.EVERY-COMMAND-PINS-THE-FORM-OF-ITS-DATA
+version: 2
+decision: DEC.2026-09-14.RECEIPT-EXPLAINS-PROVIDER-CHOICE
 artifact: docs/schemas/command-data/init.schema.json
 producer: src/domain/init.rs
 consumers: [cli, unica]
@@ -24,6 +24,7 @@ scope: [wire, cli]
 
 ```json
 {
+  "provider": {"selected": "designer", "origin": {"kind": "default"}},
   "ok": true,
   "provider_dispatched": false,
   "duration_ms": 0,

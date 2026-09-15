@@ -44,15 +44,20 @@ pub fn execute(
     let connection = IbcmdConnection::from_infobase(&config.infobase)
         .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
     let mut utilities = PlatformUtilities::from_config(config);
-    let binary = utilities
-        .locate(UtilityType::Ibcmd)
-        .map(|location| location.path)
-        .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+    let selected = crate::use_cases::provider_selection::select(
+        config,
+        &mut utilities,
+        crate::domain::capability::Operation::Extensions,
+    )
+    .map_err(|(error, _receipt)| UseCaseFailure::without_payload(error))?;
+    let receipt = selected.receipt;
+    let binary = selected.location.path;
     if request.dry_run {
         // Reading the composition starts the platform, authenticates and leaves a journal
         // trace, so the read is previewed like any change: the target and the account are
         // named, and nothing is asked of the platform yet.
         return Ok(ExtensionInventoryResult {
+            provider: Some(receipt),
             ok: true,
             provider_dispatched: false,
             plan: Some(format!(
@@ -85,6 +90,7 @@ pub fn execute(
         read_inventory(&platform_result, request).map_err(UseCaseFailure::without_payload)?;
 
     Ok(ExtensionInventoryResult {
+        provider: Some(receipt),
         ok: true,
         provider_dispatched: true,
         plan: None,
@@ -205,12 +211,17 @@ pub fn change(
     let connection = IbcmdConnection::from_infobase(&config.infobase)
         .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
     let mut utilities = PlatformUtilities::from_config(config);
-    let binary = utilities
-        .locate(UtilityType::Ibcmd)
-        .map(|location| location.path)
-        .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+    let selected = crate::use_cases::provider_selection::select(
+        config,
+        &mut utilities,
+        crate::domain::capability::Operation::Extensions,
+    )
+    .map_err(|(error, _receipt)| UseCaseFailure::without_payload(error))?;
+    let receipt = selected.receipt;
+    let binary = selected.location.path;
     if dry_run {
         return Ok(ExtensionsResult {
+            provider: Some(receipt),
             ok: true,
             provider_dispatched: false,
             steps: vec![ExtensionsStep {
@@ -256,6 +267,7 @@ pub fn change(
         .and_then(|result| validate_success(&result))
     {
         Ok(()) => Ok(ExtensionsResult {
+            provider: Some(receipt.clone()),
             ok: true,
             provider_dispatched: true,
             steps: vec![ExtensionsStep {
@@ -269,6 +281,7 @@ pub fn change(
         }),
         Err(error) => {
             let payload = ExtensionsResult {
+                provider: Some(receipt.clone()),
                 ok: false,
                 provider_dispatched: true,
                 steps: vec![ExtensionsStep {

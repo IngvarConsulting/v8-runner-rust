@@ -1189,6 +1189,7 @@ mod tests {
     #[test]
     fn build_project_maps_success_request_and_response() {
         let port = StubPort::with_build_result(Ok(BuildResult {
+            provider: None,
             provider_dispatched: true,
             ok: true,
             steps: vec![BuildStep {
@@ -1231,6 +1232,7 @@ mod tests {
         let port = StubPort::with_build_result(Err(UseCaseFailure::with_payload(
             UseCaseError::new(UseCaseErrorKind::Runtime, "builder failed"),
             BuildResult {
+                provider: None,
                 provider_dispatched: true,
                 ok: false,
                 steps: vec![BuildStep {
@@ -1519,6 +1521,7 @@ mod tests {
     #[test]
     fn dump_config_maps_success_and_incremental_default_mode() {
         let port = StubPort::with_dump_result(Ok(DumpResult {
+            provider: None,
             provider_dispatched: true,
             ok: true,
             source_set: Some("main".to_owned()),
@@ -1561,6 +1564,7 @@ mod tests {
             StubPort::with_dump_result(Err(UseCaseFailure::with_payload(
                 UseCaseError::new(UseCaseErrorKind::Runtime, "dump failed"),
                 DumpResult {
+                    provider: None,
                     provider_dispatched: true,
                     ok: false,
                     source_set: Some("main".to_owned()),
@@ -1639,6 +1643,7 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_dump_result(Ok(DumpResult {
+                provider: None,
                 provider_dispatched: true,
                 ok: true,
                 source_set: None,
@@ -1688,6 +1693,7 @@ mod tests {
     #[test]
     fn dump_config_partial_success_preserves_partial_mode_and_warning_message() {
         let port = StubPort::with_dump_result(Ok(DumpResult {
+            provider: None,
             provider_dispatched: true,
             ok: true,
             source_set: Some("main".to_owned()),
@@ -1738,6 +1744,7 @@ mod tests {
                     "IBCMD does not support object-scoped partial dump; export failed",
                 ),
                 DumpResult {
+                    provider: None,
                     provider_dispatched: true,
                     ok: false,
                     source_set: Some("main".to_owned()),
@@ -2540,6 +2547,7 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_build_result(Ok(BuildResult {
+                provider: None,
                 provider_dispatched: true,
                 ok: true,
                 steps: vec![],
@@ -2569,6 +2577,7 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_build_result(Ok(BuildResult {
+                provider: None,
                 provider_dispatched: true,
                 ok: true,
                 steps: vec![],
@@ -2705,6 +2714,7 @@ mod tests {
 
     fn sample_syntax_result(status: SyntaxCheckStatus) -> SyntaxCheckResult {
         SyntaxCheckResult {
+            provider: None,
             status,
             exit_code: if matches!(status, SyntaxCheckStatus::Clean) {
                 0

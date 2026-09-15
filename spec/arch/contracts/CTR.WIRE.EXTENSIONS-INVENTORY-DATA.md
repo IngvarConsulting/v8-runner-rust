@@ -2,8 +2,8 @@
 id: CTR.WIRE.EXTENSIONS-INVENTORY-DATA
 status: active
 governs: product
-version: 1
-decision: DEC.2026-09-14.EVERY-COMMAND-PINS-THE-FORM-OF-ITS-DATA
+version: 2
+decision: DEC.2026-09-14.RECEIPT-EXPLAINS-PROVIDER-CHOICE
 artifact: docs/schemas/command-data/extensions-inventory.schema.json
 producer: src/domain/extensions.rs
 consumers: [cli, unica]
@@ -25,6 +25,7 @@ scope: [wire, cli]
 
 ```json
 {
+  "provider": {"selected": "ibcmd", "origin": {"kind": "default"}},
   "ok": true,
   "provider_dispatched": false,
   "plan": "would read every installed extension of file infobase 'build/ib' with no configured infobase user via /opt/1cv8/bin/ibcmd",

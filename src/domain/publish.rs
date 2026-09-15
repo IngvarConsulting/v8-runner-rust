@@ -30,6 +30,10 @@ pub struct PublishPlan {
 /// Результат `publish` и `publish --delete`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct PublishResult {
+    /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<crate::domain::capability::ProviderReceipt>,
+
     pub ok: bool,
     /// `false` when the run stopped at a preview instead of dispatching `webinst`.
     pub provider_dispatched: bool,

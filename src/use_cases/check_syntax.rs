@@ -163,26 +163,30 @@ fn run_syntax_with_context(
     debug!(path = %log_path.display(), "syntax platform log reserved");
 
     let mut utilities = PlatformUtilities::from_config(config);
-    let location = match utilities.locate(UtilityType::V8) {
-        Ok(location) => location,
-        Err(error) => {
+    let selected = match crate::use_cases::provider_selection::select(
+        config,
+        &mut utilities,
+        crate::domain::capability::Operation::Syntax,
+    ) {
+        Ok(selected) => selected,
+        Err((error, receipt)) => {
             let message = error.to_string();
-            let app_error = AppError::from(error);
-            return Err(SyntaxExecutionFailure::with_payload(
-                app_error,
-                failed_result(
-                    invocation.kind.check_name(),
-                    SyntaxCheckStatus::ToolFailed,
-                    -1,
-                    started,
-                    vec![],
-                    None,
-                    Some(message),
-                    Some(log_path),
-                ),
-            ));
+            let mut result = failed_result(
+                invocation.kind.check_name(),
+                SyntaxCheckStatus::ToolFailed,
+                -1,
+                started,
+                vec![],
+                None,
+                Some(message),
+                None,
+            );
+            result.provider = Some(receipt);
+            return Err(SyntaxExecutionFailure::with_payload(error, result));
         }
     };
+    let receipt = selected.receipt;
+    let location = selected.location;
 
     let runner = utilities.runner_for(UtilityType::V8);
     let dsl = DesignerDsl::new(
@@ -209,23 +213,23 @@ fn run_syntax_with_context(
         Err(error) => {
             let app_error = AppError::from(error);
             let message = app_error.to_string();
-            return Err(SyntaxExecutionFailure::with_payload(
-                app_error,
-                failed_result(
-                    invocation.kind.check_name(),
-                    SyntaxCheckStatus::ToolFailed,
-                    -1,
-                    started,
-                    vec![],
-                    None,
-                    Some(message),
-                    Some(log_path),
-                ),
-            ));
+            let mut result = failed_result(
+                invocation.kind.check_name(),
+                SyntaxCheckStatus::ToolFailed,
+                -1,
+                started,
+                vec![],
+                None,
+                Some(message),
+                Some(log_path),
+            );
+            result.provider = Some(receipt);
+            return Err(SyntaxExecutionFailure::with_payload(app_error, result));
         }
     };
 
-    let result = build_result(invocation.kind.check_name(), platform_result, started);
+    let mut result = build_result(invocation.kind.check_name(), platform_result, started);
+    result.provider = Some(receipt);
     match result.status {
         SyntaxCheckStatus::Clean => Ok(result),
         SyntaxCheckStatus::IssuesFound | SyntaxCheckStatus::ToolFailed => {
@@ -670,6 +674,7 @@ fn run_edt_syntax(
     let stderr = (!stderr_lines.is_empty()).then_some(stderr_lines.join("\n"));
     let log_read_warning = (!log_warnings.is_empty()).then_some(log_warnings.join("\n"));
     let result = SyntaxCheckResult {
+        provider: None,
         status,
         exit_code,
         check_name: "edt".to_owned(),
@@ -835,6 +840,7 @@ fn build_result(
     }
 
     SyntaxCheckResult {
+        provider: None,
         status,
         exit_code,
         check_name: check_name.to_owned(),
@@ -858,6 +864,7 @@ fn failed_result(
     platform_log_path: Option<PathBuf>,
 ) -> SyntaxCheckResult {
     SyntaxCheckResult {
+        provider: None,
         status,
         exit_code,
         check_name: check_name.to_owned(),

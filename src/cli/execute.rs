@@ -313,6 +313,7 @@ fn render_publish_text(
             .as_deref()
             .map(|path| format!("[diagnostic] platform log -> {}", path.display())),
     );
+    details.extend(provider_receipt_details(result.provider.as_ref()));
     single_timeline(presenter, timeline_status(succeeded), label, details);
 }
 
@@ -707,6 +708,8 @@ fn render_extension_inventory_text(
             )
         })
         .collect::<Vec<_>>();
+    let mut details = details;
+    details.extend(provider_receipt_details(result.provider.as_ref()));
     presenter.print_timeline(&[TimelineItem::new(
         TimelineStatus::Succeeded,
         "Infobase extensions",
@@ -749,6 +752,8 @@ fn render_extensions_text(
     } else {
         "Infobase extension change preview"
     };
+    let mut details = details;
+    details.extend(provider_receipt_details(result.provider.as_ref()));
     presenter.print_timeline(&[TimelineItem::new(status, label).with_detail(details.join("\n"))]);
 }
 
@@ -1967,6 +1972,30 @@ fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Present
     presenter.print_timeline(&[TimelineItem::new(status, label).with_detail(details.join("\n"))]);
 }
 
+/// Строки квитанции о выборе исполнителя — одни и те же у всех команд.
+fn provider_receipt_details(
+    receipt: Option<&crate::domain::capability::ProviderReceipt>,
+) -> Vec<String> {
+    let Some(receipt) = receipt else {
+        return Vec::new();
+    };
+    let mut details = vec![match receipt.selected {
+        Some(selected) => format!(
+            "provider: {selected} ({})",
+            provider_origin_label(&receipt.origin)
+        ),
+        None => "provider: none is ready".to_owned(),
+    }];
+    for skipped in &receipt.skipped {
+        details.push(format!(
+            "[skipped:{}] {}",
+            skipped.provider.as_str(),
+            skipped.reason
+        ));
+    }
+    details
+}
+
 fn provider_origin_label(origin: &crate::domain::capability::ProviderOrigin) -> String {
     match origin {
         crate::domain::capability::ProviderOrigin::Default => "default".to_owned(),
@@ -2994,6 +3023,10 @@ fn is_reserved_raw_launch_key(raw: &str) -> bool {
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(crate) struct LoadJsonData<'a> {
+    /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<crate::domain::capability::ProviderReceipt>,
+
     pub ok: bool,
     /// `false` when the run stopped at a preview instead of dispatching the platform.
     pub provider_dispatched: bool,
@@ -3016,6 +3049,7 @@ impl<'a> LoadJsonData<'a> {
     fn from_result(result: &'a LoadResult) -> Self {
         let metadata = load_metadata(result);
         Self {
+            provider: result.provider.clone(),
             ok: result.execution.is_ok(),
             provider_dispatched: result.provider_dispatched,
             mode: result.mode,
@@ -3086,6 +3120,10 @@ fn build_load_envelope(result: &LoadResult) -> Envelope<LoadJsonData<'_>> {
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(crate) struct ArtifactsJsonData<'a> {
+    /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<crate::domain::capability::ProviderReceipt>,
+
     pub ok: bool,
     /// `false` when the run stopped at a preview instead of dispatching the platform.
     pub provider_dispatched: bool,
@@ -3108,6 +3146,7 @@ pub(crate) struct ArtifactsJsonData<'a> {
 impl<'a> ArtifactsJsonData<'a> {
     fn from_result(result: &'a ArtifactsResult) -> Self {
         Self {
+            provider: result.provider.clone(),
             ok: result.execution.is_ok(),
             provider_dispatched: result.provider_dispatched,
             mode: result.mode,
@@ -3183,6 +3222,12 @@ fn render_build_text(result: &BuildResult, presenter: &Presenter, succeeded: boo
         TimelineItem::new(TimelineStatus::Succeeded, "Build completed: no changes")
     } else {
         TimelineItem::new(TimelineStatus::Succeeded, "Build completed successfully")
+    };
+    let receipt = provider_receipt_details(result.provider.as_ref());
+    let summary = if receipt.is_empty() {
+        summary
+    } else {
+        summary.with_detail(receipt.join("\n"))
     };
     presenter.print_timeline(&[summary]);
 }
@@ -3524,6 +3569,7 @@ fn render_load_text(result: &LoadResult, presenter: &Presenter, succeeded: bool)
                 .map(|path| format!("[diagnostic] platform log -> {}", path.display())),
         );
     }
+    details.extend(provider_receipt_details(result.provider.as_ref()));
     single_timeline(presenter, timeline_status(succeeded), label, details);
 }
 
@@ -3560,11 +3606,15 @@ fn render_init_text(result: &InitResult, presenter: &Presenter) {
         "init:",
         details,
     )];
-    timeline.push(if succeeded {
-        TimelineItem::new(TimelineStatus::Succeeded, "Init completed successfully")
-    } else {
-        TimelineItem::new(TimelineStatus::Failed, "Init failed")
-    });
+    timeline.push(timeline_item_with_details(
+        timeline_status(succeeded),
+        if succeeded {
+            "Init completed successfully"
+        } else {
+            "Init failed"
+        },
+        provider_receipt_details(result.provider.as_ref()),
+    ));
     presenter.print_timeline(&timeline);
 }
 
@@ -3618,6 +3668,7 @@ fn render_dump_text(result: &DumpResult, presenter: &Presenter, succeeded: bool)
                 .map(|path| format!("[diagnostic] platform log -> {}", path.display())),
         );
     }
+    details.extend(provider_receipt_details(result.provider.as_ref()));
     single_timeline(presenter, timeline_status(succeeded), label, details);
 }
 
@@ -3735,6 +3786,7 @@ fn render_artifacts_text(result: &ArtifactsResult, presenter: &Presenter, succee
             details.push(render_artifact_ref("diagnostic", artifact));
         }
     }
+    details.extend(provider_receipt_details(result.provider.as_ref()));
     single_timeline(presenter, timeline_status(succeeded), label, details);
 }
 
@@ -3813,6 +3865,7 @@ fn render_syntax_text(result: &SyntaxCheckResult, presenter: &Presenter) {
         );
     }
 
+    details.extend(provider_receipt_details(result.provider.as_ref()));
     single_timeline(presenter, timeline_status(succeeded), label, details);
 }
 
@@ -4866,6 +4919,7 @@ mod tests {
     #[test]
     fn load_json_message_preserves_success_text_and_all_diagnostics() {
         let result = LoadResult {
+            provider: None,
             provider_dispatched: true,
             mode: LoadMode::Load,
             artifact_path: PathBuf::from("main.cf"),

@@ -379,6 +379,7 @@ pub(super) fn empty_result(
     message: Option<String>,
 ) -> DumpResult {
     DumpResult {
+        provider: None,
         provider_dispatched: true,
         ok: false,
         source_set,

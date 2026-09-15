@@ -82,44 +82,56 @@ pub(super) fn run_dump_with_context(
     };
 
     let mut utilities = PlatformUtilities::from_config(config);
-    let provider = config.selected_provider(Operation::Dump);
-    let utility = match provider {
-        Provider::Designer => UtilityType::V8,
-        Provider::Ibcmd => UtilityType::Ibcmd,
-        other => {
-            return Err(DumpExecutionFailure::with_payload(
-                crate::use_cases::unimplemented_provider(Operation::Dump, other),
-                empty_result(
+    let selected =
+        match crate::use_cases::provider_selection::select(config, &mut utilities, Operation::Dump)
+        {
+            Ok(selected) => selected,
+            Err((error, receipt)) => {
+                let message = error.to_string();
+                let mut result = empty_result(
                     mode,
                     started,
                     args.source_set.clone(),
                     args.extension.clone(),
                     selectors.clone(),
                     None,
-                    None,
-                ),
-            ));
-        }
-    };
-    let location = match utilities.locate(utility) {
-        Ok(location) => location,
-        Err(error) => {
-            let message = error.to_string();
-            let app_error = AppError::from(error);
-            return Err(DumpExecutionFailure::with_payload(
-                app_error,
-                empty_result(
-                    mode,
-                    started,
-                    Some(resolved.source_set_name.clone()),
-                    resolved.extension.clone(),
-                    selectors.clone(),
-                    Some(resolved.target_path.clone()),
                     Some(message),
-                ),
-            ));
-        }
-    };
+                );
+                result.provider = Some(receipt);
+                return Err(DumpExecutionFailure::with_payload(error, result));
+            }
+        };
+    let receipt = selected.receipt.clone();
+    let outcome = run_dump_selected(
+        context,
+        config,
+        args,
+        mode,
+        started,
+        selectors,
+        partial_objects,
+        resolved,
+        utilities,
+        selected,
+    );
+    crate::use_cases::provider_selection::attach(outcome, &receipt)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_dump_selected(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &DumpArgs,
+    mode: DumpMode,
+    started: Instant,
+    selectors: Option<Vec<DumpSelectorResult>>,
+    partial_objects: Option<Vec<PartialDumpSelector>>,
+    resolved: ResolvedDumpTarget,
+    mut utilities: PlatformUtilities,
+    selected: crate::use_cases::provider_selection::SelectedProvider,
+) -> Result<DumpResult, DumpExecutionFailure> {
+    let provider = selected.provider;
+    let location = selected.location;
     let edt_binary = if config.format == SourceFormat::Edt {
         Some(match utilities.locate(UtilityType::EdtCli) {
             Ok(location) => location.path,
@@ -407,6 +419,7 @@ pub(super) fn run_dump_with_context(
 
     match result {
         Ok((platform_result, cleanup_message)) => Ok(DumpResult {
+            provider: None,
             provider_dispatched: true,
             ok: true,
             source_set: Some(resolved.source_set_name),
@@ -423,6 +436,7 @@ pub(super) fn run_dump_with_context(
             Err(DumpExecutionFailure::with_payload(
                 error,
                 DumpResult {
+                    provider: None,
                     provider_dispatched: true,
                     ok: false,
                     source_set: Some(resolved.source_set_name),
