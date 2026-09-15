@@ -45,7 +45,8 @@
         "thin",
         "thick",
         "ordinary",
-        "mcp"
+        "mcp",
+        "web"
       ],
       "type": "string"
     },
@@ -171,7 +172,7 @@
   "description": "Structured result of a `launch` command.",
   "properties": {
     "binary": {
-      "description": "Selected binary path used to spawn the process.",
+      "description": "Selected binary path used to spawn the process; for `web` — the system URL opener.",
       "type": "string"
     },
     "external_epf_wait": {
@@ -232,19 +233,32 @@
       "description": "Compact machine-facing plan produced by a non-executing preview."
     },
     "platform_resolution": {
-      "$ref": "#/$defs/PlatformResolution",
-      "description": "Canonical platform installation metadata for the selected binary."
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PlatformResolution"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Canonical platform installation metadata for the selected binary. Absent for\n`web`: a browser is not a platform utility."
     },
     "provider_dispatched": {
       "description": "`false` when the run stopped at a preview instead of dispatching the client process.",
       "type": "boolean"
+    },
+    "url": {
+      "description": "Address opened by `launch web`.",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [
     "ok",
     "mode",
     "binary",
-    "platform_resolution",
     "provider_dispatched"
   ],
   "title": "LaunchResult",

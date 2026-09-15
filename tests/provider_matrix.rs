@@ -173,3 +173,25 @@ fn a_provider_override_is_a_scalar_for_an_operation_with_a_choice() {
     let (code, payload) = run(&config_path, &["build", "--dry-run"]);
     assert_eq!(code, 0, "a valid override is accepted: {payload}");
 }
+
+/// Публикация не входит ни в одну цепочку умолчаний: она меняет веб-сервер вне
+/// рабочего каталога и делается только отдельной командой.
+#[test]
+fn no_default_chain_names_the_publication_provider() {
+    let dir = temp_workspace();
+    let config_path = write_project(dir.path(), "");
+    for command in [
+        vec!["build", "--dry-run"],
+        vec!["init", "--dry-run"],
+        vec!["dump", "--mode", "full", "--dry-run"],
+    ] {
+        let (code, payload) = run(&config_path, &command);
+        assert_eq!(code, 0, "{payload}");
+        let text = payload.to_string();
+        assert!(
+            !text.contains("webinst") && !text.contains("publish"),
+            "`{}` mentions publication: {text}",
+            command.join(" ")
+        );
+    }
+}

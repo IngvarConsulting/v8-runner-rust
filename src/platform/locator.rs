@@ -17,6 +17,8 @@ pub enum UtilityType {
     Ibcmd,
     /// `1cedtcli`
     EdtCli,
+    /// `webinst`
+    Webinst,
 }
 
 impl UtilityType {
@@ -27,6 +29,7 @@ impl UtilityType {
             Self::V8C => executable_name_for("1cv8c"),
             Self::Ibcmd => executable_name_for("ibcmd"),
             Self::EdtCli => executable_name_for("1cedtcli"),
+            Self::Webinst => executable_name_for("webinst"),
         }
     }
 
@@ -373,7 +376,7 @@ impl Locator {
         };
         let current = match (utility, self.platform_policy, self.pinned_platform.as_ref()) {
             (
-                UtilityType::V8 | UtilityType::V8C | UtilityType::Ibcmd,
+                UtilityType::V8 | UtilityType::V8C | UtilityType::Ibcmd | UtilityType::Webinst,
                 PlatformResolutionPolicy::Strict,
                 Some(pinned),
             ) => select_pinned_candidate(
@@ -383,7 +386,7 @@ impl Locator {
                 &pinned.root,
             ),
             (
-                UtilityType::V8 | UtilityType::V8C | UtilityType::Ibcmd,
+                UtilityType::V8 | UtilityType::V8C | UtilityType::Ibcmd | UtilityType::Webinst,
                 PlatformResolutionPolicy::Strict,
                 None,
             ) => {
@@ -396,7 +399,7 @@ impl Locator {
                 )
             }
             (
-                UtilityType::V8 | UtilityType::V8C | UtilityType::Ibcmd,
+                UtilityType::V8 | UtilityType::V8C | UtilityType::Ibcmd | UtilityType::Webinst,
                 PlatformResolutionPolicy::Lenient,
                 Some(_) | None,
             ) => select_candidate(
@@ -1101,9 +1104,11 @@ fn infer_version(utility: UtilityType, path: &Path) -> Option<UtilityVersion> {
     let installation_root = installation_root_for_executable(path);
     let version_text = installation_root.file_name().and_then(|name| name.to_str());
     match utility {
-        UtilityType::V8 | UtilityType::V8C | UtilityType::Ibcmd => version_text
-            .and_then(PlatformVersion::parse_strict)
-            .map(UtilityVersion::Platform),
+        UtilityType::V8 | UtilityType::V8C | UtilityType::Ibcmd | UtilityType::Webinst => {
+            version_text
+                .and_then(PlatformVersion::parse_strict)
+                .map(UtilityVersion::Platform)
+        }
         UtilityType::EdtCli => version_text
             .and_then(EdtVersion::parse_lenient)
             .map(UtilityVersion::Edt),
@@ -1138,6 +1143,7 @@ fn executable_name_for(base: &'static str) -> &'static str {
             "1cv8c" => "1cv8c.exe",
             "ibcmd" => "ibcmd.exe",
             "1cedtcli" => "1cedtcli.exe",
+            "webinst" => "webinst.exe",
             _ => base,
         }
     }

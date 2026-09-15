@@ -1,11 +1,11 @@
 ---
 id: DEC.2026-09-14.RUNNER-PUBLISHES-TO-A-WEB-SERVER
-status: planned
+status: active
 governs: product
-realized: null
+realized: tests/cli_publish.rs::publish_composes_webinst_from_the_declared_web_section
 supersedes: []
 superseded-by: null
-establishes: [INV.CLI.PUBLISH-HAS-NO-PROVIDER-KEY]
+establishes: [INV.CLI.PUBLISH-HAS-NO-PROVIDER-KEY, CTR.WIRE.PUBLISH-DATA]
 ---
 
 # Публикацию на веб-сервере делает раннер

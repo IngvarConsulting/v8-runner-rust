@@ -190,8 +190,130 @@ pub fn execute_command(
             clean_before_execution,
             cancellation,
         ),
+        Command::Publish(args) => execute_publish(
+            config,
+            args,
+            presenter,
+            clean_before_execution,
+            cancellation,
+        ),
         Command::Mcp(_) => unreachable!("mcp commands are handled outside cli::execute"),
     }
+}
+
+fn execute_publish(
+    config: &AppConfig,
+    args: &crate::cli::args::PublishArgs,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    use crate::domain::publish::PublishAction;
+    use crate::use_cases::publish_infobase::{self, PublishRequest};
+
+    let request = PublishRequest {
+        action: if args.delete {
+            PublishAction::Delete
+        } else {
+            PublishAction::Publish
+        },
+        dry_run: args.dry_run,
+    };
+    let context = ExecutionContext::cli(CommandName::Publish)
+        .with_deadline(Some(Instant::now() + config.execution_timeout_duration()))
+        .with_cancellation(cancellation);
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        CommandName::Publish,
+        clean_before_execution,
+        args.dry_run,
+        || match publish_infobase::execute(&context, config, &request) {
+            Ok(result) => {
+                if presenter.is_json() {
+                    presenter.print_envelope(&Envelope::ok(
+                        CommandName::Publish.as_str(),
+                        result.duration_ms,
+                        result,
+                    ));
+                } else {
+                    render_publish_text(&result, presenter, true);
+                }
+                Ok(())
+            }
+            Err(failure) => {
+                let error = failure.error;
+                if presenter.is_json() {
+                    match failure.payload {
+                        Some(result) => presenter.print_envelope(&failure_envelope(
+                            CommandName::Publish.as_str(),
+                            result.duration_ms,
+                            result,
+                            &error,
+                        )),
+                        None => presenter.print_envelope(&pre_dispatch_error_envelope(
+                            CommandName::Publish.as_str(),
+                            &error,
+                        )),
+                    }
+                } else {
+                    if let Some(result) = failure.payload.as_ref() {
+                        render_publish_text(result, presenter, false);
+                    }
+                    presenter.print_error(&error.to_string());
+                }
+                Err(error)
+            }
+        },
+    )
+}
+
+fn render_publish_text(
+    result: &crate::domain::publish::PublishResult,
+    presenter: &Presenter,
+    succeeded: bool,
+) {
+    let verb = match result.action {
+        crate::domain::publish::PublishAction::Publish => "Publication",
+        crate::domain::publish::PublishAction::Delete => "Publication removal",
+    };
+    let label = if !succeeded {
+        format!("{verb} failed")
+    } else if result.provider_dispatched {
+        format!("{verb} completed successfully")
+    } else {
+        format!("{verb} planned")
+    };
+    let mut details = vec![
+        format!("server: {}", result.server),
+        format!("wsdir: {}", result.wsdir),
+        format!("dir: {}", result.dir.display()),
+    ];
+    if let Some(url) = result.url.as_deref() {
+        details.push(format!("url: {url}"));
+    }
+    if !result.provider_dispatched {
+        details.push("provider dispatched: false".to_owned());
+    }
+    if let Some(plan) = &result.plan {
+        details.push(format!("planned program: {}", plan.program.display()));
+        details.push(format!("planned args: {}", plan.args.join(" ")));
+    }
+    append_if_present(
+        &mut details,
+        result
+            .message
+            .as_deref()
+            .map(|message| bracketed_detail(if succeeded { "status" } else { "error" }, message)),
+    );
+    append_if_present(
+        &mut details,
+        result
+            .platform_log_path
+            .as_deref()
+            .map(|path| format!("[diagnostic] platform log -> {}", path.display())),
+    );
+    single_timeline(presenter, timeline_status(succeeded), label, details);
 }
 
 /// Returns the canonical command identifier for a parsed CLI command.
@@ -225,6 +347,7 @@ pub fn command_name(command: &Command) -> CommandName {
         Command::Artifacts(_) => CommandName::Artifacts,
         Command::Syntax(_) => CommandName::Syntax,
         Command::Launch(_) => CommandName::Launch,
+        Command::Publish(_) => CommandName::Publish,
         Command::Mcp(_) => unreachable!("mcp commands do not map to CLI command names"),
     }
 }
@@ -3720,6 +3843,9 @@ fn render_launch_text_with_status(
         format!("mode: {}", render_launch_mode(&result.mode)),
         format!("binary: {}", result.binary.display()),
     ];
+    if let Some(url) = result.url.as_deref() {
+        details.push(format!("url: {url}"));
+    }
     append_if_present(
         &mut details,
         result
@@ -3763,6 +3889,7 @@ fn render_launch_mode(mode: &LaunchMode) -> &'static str {
         LaunchMode::Thick => "толстый клиент",
         LaunchMode::Ordinary => "обычное приложение",
         LaunchMode::Mcp => "клиентский MCP-сервер",
+        LaunchMode::Web => "веб-клиент",
     }
 }
 

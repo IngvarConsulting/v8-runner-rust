@@ -237,13 +237,13 @@ window.RUNNER_DATA = (function () {
     },
     {
       id: 'publish', verb: 'publish', title: 'Опубликовать базу на веб-сервере',
-      cmd: function (ctx) { return 'v8-runner publish --web apache24 --wsdir demo --dir /var/www/demo'; },
+      cmd: function (ctx) { return 'v8-runner publish'; },
       what: 'Публикует базу на Apache или IIS, чтобы открыть её веб-клиентом.',
       applies: function (ctx) {
         if (ctx.target === 'standalone') return { kind: 'subject', why: 'автономный сервер отдаёт HTTP сам', fix: 'публикация не нужна' };
         return null;
       },
-      today: function (ctx) { return { chain: [], config: [], note: 'команды нет' }; },
+      today: function (ctx) { return this.target(ctx); },
       target: function (ctx) {
         return { chain: [P.webinst], config: ['infobase.connection', 'infobase.web.*'],
                  note: 'нужны права администратора; каталог публикации должен существовать' };
@@ -266,7 +266,7 @@ window.RUNNER_DATA = (function () {
         if (!ctx.tools.web) return { kind: 'tool', why: 'база не опубликована', fix: 'нужен веб-сервер и команда publish' };
         return null;
       },
-      today: function (ctx) { return { chain: [], config: [], note: 'команды нет' }; },
+      today: function (ctx) { return this.target(ctx); },
       target: function (ctx) {
         return { chain: [P.browser], config: ['infobase.web.url'],
                  note: ctx.target === 'standalone' ? 'адрес даёт сам автономный сервер' : 'адрес появляется после publish' };

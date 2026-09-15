@@ -11,10 +11,15 @@ pub struct LaunchResult {
     pub mode: LaunchMode,
     /// OS process identifier if the launcher exposed one.
     pub pid: Option<u32>,
-    /// Selected binary path used to spawn the process.
+    /// Selected binary path used to spawn the process; for `web` — the system URL opener.
     pub binary: PathBuf,
-    /// Canonical platform installation metadata for the selected binary.
-    pub platform_resolution: PlatformResolution,
+    /// Canonical platform installation metadata for the selected binary. Absent for
+    /// `web`: a browser is not a platform utility.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform_resolution: Option<PlatformResolution>,
+    /// Address opened by `launch web`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     /// `false` when the run stopped at a preview instead of dispatching the client process.
     pub provider_dispatched: bool,
     /// Compact machine-facing plan produced by a non-executing preview.
@@ -102,4 +107,5 @@ pub enum LaunchMode {
     Thick,
     Ordinary,
     Mcp,
+    Web,
 }

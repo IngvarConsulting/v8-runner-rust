@@ -1,0 +1,105 @@
+{
+  "$defs": {
+    "PublishAction": {
+      "description": "Что просили у `webinst`.",
+      "enum": [
+        "publish",
+        "delete"
+      ],
+      "type": "string"
+    },
+    "PublishPlan": {
+      "additionalProperties": false,
+      "description": "Команда, которую раннер составил для `webinst`.",
+      "properties": {
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "program": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "program",
+        "args"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/publish.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Результат `publish` и `publish --delete`.",
+  "properties": {
+    "action": {
+      "$ref": "#/$defs/PublishAction"
+    },
+    "dir": {
+      "description": "Physical directory the publication is written to.",
+      "type": "string"
+    },
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "message": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "plan": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PublishPlan"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "platform_log_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "provider_dispatched": {
+      "description": "`false` when the run stopped at a preview instead of dispatching `webinst`.",
+      "type": "boolean"
+    },
+    "server": {
+      "description": "Web server named in `infobase.web.server`.",
+      "type": "string"
+    },
+    "url": {
+      "description": "Address the published infobase opens at, when `infobase.web.url` is declared.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "wsdir": {
+      "description": "Virtual directory of the publication.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "ok",
+    "provider_dispatched",
+    "action",
+    "server",
+    "wsdir",
+    "dir",
+    "duration_ms"
+  ],
+  "title": "PublishResult",
+  "type": "object"
+}

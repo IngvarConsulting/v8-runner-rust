@@ -77,6 +77,23 @@ pub enum ConfigValidationError {
     DbmsNotAllowedForFileConnection,
 
     #[error(
+        "infobase.connection 'ws=…' is a web-client address, not an administrative channel: put it into infobase.web.url and declare the target with File=… or Srvr=…;Ref=…"
+    )]
+    WebConnectionIsNotAnAdministrativeChannel,
+
+    #[error("infobase.web.{field} is required to publish on {server}")]
+    WebPublicationFieldMissing {
+        field: &'static str,
+        server: &'static str,
+    },
+
+    #[error("infobase.web.os-auth is supported only for iis, not for {server}")]
+    WebOsAuthRequiresIis { server: &'static str },
+
+    #[error("infobase.web.dir does not exist or is not a directory: {0}")]
+    WebPublicationDirMissing(String),
+
+    #[error(
         "top-level key 'builder' is not supported: the executor is chosen per operation; name one with providers.<operation> (for example providers.build: ibcmd) or remove the key to use the defaults"
     )]
     BuilderKeyRemoved,
@@ -212,6 +229,7 @@ pub fn validate(config: &AppConfig) -> Result<(), ConfigValidationError> {
     validate_providers(config)?;
     validate_source_sets(config)?;
     validate_connection_contract(config)?;
+    validate_web_publication(config)?;
     validate_platform_version(config)?;
     validate_build_config(config)?;
     validate_execution_timeout(config)?;
@@ -630,6 +648,17 @@ fn validate_connection_contract(config: &AppConfig) -> Result<(), ConfigValidati
     if config.infobase.connection.trim().is_empty() {
         return Err(ConfigValidationError::EmptyConnection);
     }
+    // Вид цели объявляется, а не угадывается: за `ws=` может стоять файловая база,
+    // кластер или автономный сервер, и чем базу администрировать, из адреса не следует.
+    if config
+        .infobase
+        .connection
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("ws=")
+    {
+        return Err(ConfigValidationError::WebConnectionIsNotAnAdministrativeChannel);
+    }
 
     let is_file_connection = config.v8_connection().file_path().is_some();
     if is_file_connection {
@@ -678,6 +707,53 @@ fn is_reserved_workdir_name(name: &str) -> bool {
         normalized.as_str(),
         "hash-storages" | "logs" | "temp" | "edt-workspace" | "designer"
     )
+}
+
+/// Предусловия `webinst` называются до запуска: у Apache 2.0 и 2.2 нет пути к конфигу
+/// по умолчанию, `-osauth` знает только IIS, а каталог публикации утилита не создаёт.
+fn validate_web_publication(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    let Some(web) = config.infobase.web.as_ref() else {
+        return Ok(());
+    };
+    let Some(server) = web.server else {
+        return Ok(());
+    };
+    let server_name = server.as_str();
+    if web
+        .wsdir
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Err(ConfigValidationError::WebPublicationFieldMissing {
+            field: "wsdir",
+            server: server_name,
+        });
+    }
+    let Some(dir) = web.dir.as_ref() else {
+        return Err(ConfigValidationError::WebPublicationFieldMissing {
+            field: "dir",
+            server: server_name,
+        });
+    };
+    if !dir.is_dir() {
+        return Err(ConfigValidationError::WebPublicationDirMissing(
+            dir.display().to_string(),
+        ));
+    }
+    if server.requires_conf() && web.conf.is_none() {
+        return Err(ConfigValidationError::WebPublicationFieldMissing {
+            field: "conf",
+            server: server_name,
+        });
+    }
+    if web.os_auth && server != crate::config::model::WebServerKind::Iis {
+        return Err(ConfigValidationError::WebOsAuthRequiresIis {
+            server: server_name,
+        });
+    }
+    Ok(())
 }
 
 /// Переопределение провайдера принимается только там, где есть развилка, и только
@@ -2234,6 +2310,7 @@ mod tests {
                 user: None,
                 password: None,
                 dbms: None,
+                web: None,
             },
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),

@@ -264,6 +264,14 @@ fn normalize_config_paths(config: &mut AppConfig, config_dir: &Path) {
     if let Some(path) = config.tools.va.epf_path.as_mut() {
         *path = normalize_optional_path(path, config_dir);
     }
+    if let Some(web) = config.infobase.web.as_mut() {
+        if let Some(path) = web.dir.as_mut() {
+            *path = normalize_optional_path(path, config_dir);
+        }
+        if let Some(path) = web.conf.as_mut() {
+            *path = normalize_optional_path(path, config_dir);
+        }
+    }
     if let Some(path) = config.tools.platform.path.as_mut() {
         *path = normalize_optional_path(path, config_dir);
     }

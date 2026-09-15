@@ -1,9 +1,9 @@
 ---
 id: INV.CLI.PUBLISH-HAS-NO-PROVIDER-KEY
-status: planned
+status: active
 governs: product
 decision: DEC.2026-09-14.RUNNER-PUBLISHES-TO-A-WEB-SERVER
-check: null
+check: tests/cli_publish.rs::publish_rejects_a_provider_override_because_there_is_no_choice
 scope: [config]
 ---
 

@@ -2,8 +2,8 @@
 id: CTR.WIRE.LAUNCH-DATA
 status: active
 governs: product
-version: 1
-decision: DEC.2026-09-14.EVERY-COMMAND-PINS-THE-FORM-OF-ITS-DATA
+version: 2
+decision: DEC.2026-09-14.LAUNCH-OPENS-THE-PUBLISHED-BASE
 artifact: docs/schemas/command-data/launch.schema.json
 producer: src/domain/launch.rs
 consumers: [cli, mcp, unica]

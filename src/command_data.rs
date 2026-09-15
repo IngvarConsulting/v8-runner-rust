@@ -89,6 +89,7 @@ command_data_forms! {
     "make", "make" => crate::cli::execute::ArtifactsJsonData<'static>;
     "syntax", "syntax" => crate::domain::syntax::SyntaxCheckResult;
     "launch", "launch" => crate::domain::launch::LaunchResult;
+    "publish", "publish" => crate::domain::publish::PublishResult;
     "*", "refusal" => crate::cli::output::RefusalData;
     "*", "mcp-refusal" => crate::mcp::service::McpRefusalData;
 }

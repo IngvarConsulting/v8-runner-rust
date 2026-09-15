@@ -167,7 +167,8 @@ pub fn run() -> i32 {
         | Command::Convert(_)
         | Command::Artifacts(_)
         | Command::Syntax(_)
-        | Command::Launch(_) => execute::execute_command(
+        | Command::Launch(_)
+        | Command::Publish(_) => execute::execute_command(
             &config,
             &cli.command,
             Some(primary_config_path),

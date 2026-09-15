@@ -22,6 +22,7 @@ pub enum CommandName {
     Artifacts,
     Syntax,
     Launch,
+    Publish,
 }
 
 impl CommandName {
@@ -43,6 +44,7 @@ impl CommandName {
             Self::Artifacts => "make",
             Self::Syntax => "syntax",
             Self::Launch => "launch",
+            Self::Publish => "publish",
         }
     }
 }
