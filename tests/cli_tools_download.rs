@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use support::command_data::assert_data_matches_a_declared_form;
 use support::{temp_workspace, v8_runner_command};
 
 const SLEEPING_RESPONSE_DELAY: Duration = Duration::from_secs(5);
@@ -588,6 +589,44 @@ fn tools_download_follows_latest_release_and_asset_redirects() {
     let local = fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("local");
     assert!(local.contains("artifact:"));
     assert!(local.contains("client_mcp.cfe"));
+}
+
+/// Живая сверка формы `tools download`: загрузка идёт с поддельного сервера в этом же
+/// процессе, поэтому сеть для неё не нужна.
+#[test]
+fn tools_download_answers_in_the_form_declared_for_it() {
+    let dir = temp_workspace();
+    let config_path = write_minimal_config(dir.path());
+    let server_root = dir.path().join("server");
+    let (_server, port) = FixtureServer::start(&server_root);
+    write_http_fixture(&server_root, port);
+
+    let output = v8_runner_command()
+        .env(
+            "V8TR_GITHUB_API_BASE_URL",
+            format!("http://127.0.0.1:{port}"),
+        )
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "tools",
+            "download",
+            "client-mcp",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json envelope");
+    assert_eq!(payload["command"], "tools download", "{payload}");
+    assert_data_matches_a_declared_form(&payload, "`tools download client-mcp`");
 }
 
 #[test]

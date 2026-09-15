@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod command_data;
+
 use std::fs;
 use std::future::Future;
 #[cfg(unix)]
@@ -168,5 +170,7 @@ pub async fn wait_for_line_count(path: &Path, expected: usize) {
     );
 }
 
-#[cfg(unix)]
+/// Двойник агента и шлюза: обычный сервер на `russh`, поэтому кросс-платформенный.
+/// Поддельный процесс платформы внутри него помечен `cfg(unix)` поимённо — он нужен
+/// только управляемому режиму.
 pub mod fake_agent;

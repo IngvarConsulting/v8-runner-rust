@@ -5,6 +5,7 @@ mod support;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
+use support::command_data::assert_data_matches_a_declared_form;
 use support::{temp_workspace, v8_runner_command, write_shell_script as write_script};
 
 const LOCAL_CONFIG_SCHEMA_MODEL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.local.schema.json";
@@ -162,6 +163,9 @@ fn bootstrap_json_success_keeps_credentials_in_local_overlay_only() {
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], true);
     assert_eq!(payload["command"], "bootstrap");
+    // Настоящая база для живой сверки не нужна: харнесс подкладывает утилиты платформы,
+    // и команда доходит до собранного ответа.
+    assert_data_matches_a_declared_form(&payload, "`bootstrap`");
     assert!(!String::from_utf8_lossy(&output.stdout).contains("super-secret"));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("super-secret"));
 

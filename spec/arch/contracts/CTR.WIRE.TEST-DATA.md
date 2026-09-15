@@ -7,7 +7,7 @@ decision: DEC.2026-09-14.EVERY-COMMAND-PINS-THE-FORM-OF-ITS-DATA
 artifact: docs/schemas/command-data/test.schema.json
 producer: src/command_envelope.rs
 consumers: [cli, mcp, unica]
-check: [src/command_data.rs::generated_command_data_schemas_are_current]
+check: [src/command_data.rs::generated_command_data_schemas_are_current, tests/cli_test.rs::test_all_full_json_runs_build_first_and_returns_report]
 scope: [wire, cli, mcp]
 ---
 
