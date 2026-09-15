@@ -1,5 +1,3 @@
-#![cfg(unix)]
-
 mod support;
 
 use serde_json::Value;

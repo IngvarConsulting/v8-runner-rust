@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::future::Future;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -24,12 +25,17 @@ pub fn v8_runner_binary() -> PathBuf {
     assert_cmd::cargo::cargo_bin("v8-runner")
 }
 
+/// Поддельные утилиты платформы пишутся как shell-скрипты, поэтому живут только под
+/// unix; наборы тестов, которым поддельная утилита не нужна (двойник агента — обычный
+/// сервер на russh), идут и под Windows.
+#[cfg(unix)]
 pub fn make_executable(path: &Path) {
     let mut perms = fs::metadata(path).expect("metadata").permissions();
     perms.set_mode(0o755);
     fs::set_permissions(path, perms).expect("chmod");
 }
 
+#[cfg(unix)]
 pub fn write_shell_script(path: &Path, body: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("parent");
@@ -38,6 +44,7 @@ pub fn write_shell_script(path: &Path, body: &str) {
     make_executable(path);
 }
 
+#[cfg(unix)]
 pub fn write_shell_script_atomically(path: &Path, body: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("parent");
