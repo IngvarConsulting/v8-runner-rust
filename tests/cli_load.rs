@@ -80,7 +80,7 @@ fn write_config(
     format: &str,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: {}\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: {}\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         format,
         platform_path.display(),
@@ -401,7 +401,7 @@ fn load_rejects_edt_format_even_with_designer_builder() {
     assert!(payload["data"]["message"]
         .as_str()
         .expect("message")
-        .contains("builder=DESIGNER and format=DESIGNER"));
+        .contains("the Designer provider and format=DESIGNER"));
 }
 
 #[test]

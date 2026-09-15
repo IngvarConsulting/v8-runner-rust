@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crate::config::model::{AppConfig, BuilderBackend, SourceFormat, SourceSetConfig};
+use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig};
+use crate::domain::capability::{Operation, Provider};
 use crate::domain::issue::{EdtIssue, Issue, IssueSeverity, ObjectIssue};
 use crate::domain::syntax::{SyntaxCheckResult, SyntaxCheckStatus, SyntaxIssueSummary};
 use crate::parsers::designer_validation;
@@ -32,9 +33,9 @@ use crate::use_cases::source_inventory::SourceSetInventory;
 use tracing::debug;
 
 const SUPPORTED_DESIGNER_SYNTAX_ERROR: &str =
-    "syntax currently supports only builder=DESIGNER and format=DESIGNER";
+    "syntax currently supports only the Designer provider and format=DESIGNER";
 const SUPPORTED_EDT_SYNTAX_ERROR: &str =
-    "syntax edt currently supports only builder=DESIGNER and format=EDT";
+    "syntax edt currently supports only the Designer provider and format=EDT";
 static LOG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub fn execute(
@@ -394,7 +395,9 @@ impl HasClientScopes for DesignerModulesSyntaxArgs {
 }
 
 fn validate_designer_supported_matrix(config: &AppConfig) -> Option<AppError> {
-    if config.builder != BuilderBackend::Designer || config.format != SourceFormat::Designer {
+    if config.selected_provider(Operation::Syntax) != Provider::Designer
+        || config.format != SourceFormat::Designer
+    {
         Some(AppError::Validation(
             SUPPORTED_DESIGNER_SYNTAX_ERROR.to_owned(),
         ))
@@ -404,7 +407,9 @@ fn validate_designer_supported_matrix(config: &AppConfig) -> Option<AppError> {
 }
 
 fn validate_edt_supported_matrix(config: &AppConfig) -> Option<AppError> {
-    if config.builder != BuilderBackend::Designer || config.format != SourceFormat::Edt {
+    if config.selected_provider(Operation::Syntax) != Provider::Designer
+        || config.format != SourceFormat::Edt
+    {
         Some(AppError::Validation(SUPPORTED_EDT_SYNTAX_ERROR.to_owned()))
     } else {
         None
@@ -978,8 +983,8 @@ mod tests {
         run_syntax_with_context, status_from_exit_code,
     };
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, SourceFormat, SourceSetConfig, SourceSetPurpose,
-        TestsConfig, ToolsConfig,
+        AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
+        ToolsConfig,
     };
     use crate::domain::issue::{Issue, IssueSeverity};
     use crate::domain::syntax::SyntaxCheckStatus;
@@ -1186,7 +1191,8 @@ mod tests {
             work_path: work_path.to_path_buf(),
             execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
@@ -1215,7 +1221,8 @@ mod tests {
             work_path: work_path.to_path_buf(),
             execution_timeout: 300_000,
             format: SourceFormat::Edt,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![
                 SourceSetConfig {

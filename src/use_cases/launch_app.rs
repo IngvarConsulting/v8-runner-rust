@@ -528,8 +528,8 @@ fn build_client_mcp_payload(
 mod tests {
     use super::{execute, platform_resolution};
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, EnterpriseToolConfig, PlatformToolConfig,
-        SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig, ToolExtensionArtifactConfig,
+        AppConfig, BuildConfig, EnterpriseToolConfig, PlatformToolConfig, SourceFormat,
+        SourceSetConfig, SourceSetPurpose, TestsConfig, ToolExtensionArtifactConfig,
         ToolExtensionConfig, ToolExtensionInput, ToolsConfig,
     };
     use crate::platform::locator::{ResolutionSource, UtilityLocation, UtilityType};
@@ -614,7 +614,8 @@ mod tests {
             work_path: work_path.to_path_buf(),
             execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),

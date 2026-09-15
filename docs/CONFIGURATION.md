@@ -40,7 +40,6 @@ v8-runner config init
 - не перезаписывает существующий файл без `--force`;
 - не пишет synthetic `CONFIGURATION`: если конфигурационный `source-set` не найден,
   завершается validation error;
-- для `--builder IBCMD` отклоняет autodetected external roots как unsupported config combination.
 
 Автообнаружение опирается на содержимое marker files, а не на имена каталогов:
 
@@ -102,7 +101,7 @@ artifact без привязки к release tag.
 `v8project.yaml` использует не один стиль на весь документ. Это текущий loader contract, и docs
 ниже повторяют именно literal YAML keys.
 
-- top-level app keys: `workPath`, `execution_timeout`, `format`, `builder`, `infobase`,
+- top-level app keys: `workPath`, `execution_timeout`, `format`, `providers`, `infobase`,
   `source-set`, `build`, `tools`, `mcp`, `tests`;
 - `build` использует `partialLoadThreshold`;
 - `mcp.*` и `tests.*` используют `snake_case`;
@@ -121,7 +120,6 @@ artifact без привязки к release tag.
 workPath: build
 execution_timeout: 300000
 format: EDT
-builder: DESIGNER
 
 infobase:
   connection: "File=build/ib"
@@ -225,8 +223,7 @@ Local overlay может задавать machine-local секции:
 Local overlay не может менять project identity:
 
 - `source-set`;
-- `format`;
-- `builder`.
+- `format`.
 
 Пример:
 
@@ -290,23 +287,41 @@ selection для infobase export не создаёт `workPath` и runtime-фа�
 - Значения: `DESIGNER`, `EDT`
 - По умолчанию: `DESIGNER`
 
-### `builder`
+### `providers`
 
-- Тип: enum
-- Значения: `DESIGNER`, `IBCMD`
-- По умолчанию: `DESIGNER`
+- Тип: объект `операция → исполнитель`
+- Обязателен: нет
 
-Ограничения:
+Исполнителя каждой операции раннер выбирает сам по матрице возможностей — паре
+«операция и вид информационной базы». Ключ нужен только для того, чтобы назначить
+исполнителя вручную: поставить эксперимент или обойти сломанное умолчание.
 
-- `builder=IBCMD` поддерживает `init`, `build`, source `dump` и `extensions`; для infobase
-  export значение `builder` задаёт preferred provider, после чего runner выбирает первый
-  `implemented + ready` candidate до spawn;
-- IBCMD DT остаётся experimental до реализации exclusive-access preflight, поэтому
-  `infobase dump` использует готовый Designer, если он доступен;
-- для server connection IBCMD-кандидат готов только при наличии `infobase.dbms.kind`,
-  `infobase.dbms.server`, `infobase.dbms.name`; в infobase export отсутствие этих полей не
-  блокирует готовый Designer alternate;
-- для file connection секция `infobase.dbms` запрещена.
+```yaml
+providers:
+  build: ibcmd
+  infobase.configuration.export: ibcmd
+```
+
+Правила:
+
+- значение — одно имя из закрытого набора `designer`, `agent`, `ibcmd`, `ibcmd-rs`,
+  `webinst`; назначенный исполнитель обязан реализовывать операцию на этой базе;
+- ключ принимается только для операции, у которой на этой базе есть выбор; для
+  операции с одним исполнителем это ошибка конфигурации, а не подтверждение очевидного;
+- переопределение строгое: если названный исполнитель не готов, команда отказывает с
+  причиной и на умолчание не откатывается;
+- допустимые ключи: `init`, `build`, `load`, `dump`, `extensions`,
+  `infobase.configuration.export`, `infobase.dump`, `infobase.restore`, `syntax`, `make`;
+- ключ разрешён и в `v8project.local.yaml` — для машинно-локального эксперимента; в
+  квитанции ответа видно, из какого файла он пришёл.
+
+Умолчания по операциям: `init`, `build`, `dump` — Конфигуратор, затем `ibcmd`;
+`infobase configuration export` — Конфигуратор, затем `ibcmd`; `infobase dump` и
+`infobase restore` — Конфигуратор (`ibcmd` для DT остаётся экспериментальным и
+назначается только явно); `load`, `syntax`, `make` — только Конфигуратор;
+`extensions` — только `ibcmd`.
+
+Ключ `builder` снят: конфиг с ним не проходит валидацию, а ошибка называет замену.
 
 ### `infobase`
 
@@ -334,7 +349,9 @@ Credentials самой информационной базы.
 - Тип: объект
 - Обязателен: нет
 
-Используется только для `builder=IBCMD` + server connection.
+Нужна там, где раннер идёт в СУБД напрямую: создать серверную информационную базу
+(`init` с `providers.init: ibcmd`). Для обычной работы с уже существующей серверной базой
+секция не требуется и валидацией не запрашивается.
 
 Поддержанные поля:
 
@@ -499,7 +516,8 @@ source-set build, а `launch mcp` и `launch mcp va` расширение не �
 с `--sources` он указывает `source.path` на
 `build/tools/onec-client-mcp-devkit/exts/client-mcp` и `source.format: EDT`, без
 `--sources` указывает `artifact.path` на скачанный `client_mcp.cfe`. Artifact-режим
-доступен только для `builder=DESIGNER`; для `builder=IBCMD` используйте `--sources`.
+доступен, только когда сборку исполняет Конфигуратор; при `providers.build: ibcmd`
+используйте `--sources`.
 
 ### `tools.va`
 

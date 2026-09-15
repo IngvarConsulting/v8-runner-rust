@@ -5,9 +5,8 @@ use std::time::Instant;
 
 use tracing::debug;
 
-use crate::config::model::{
-    AppConfig, BuilderBackend, SourceFormat, SourceSetConfig, SourceSetPurpose,
-};
+use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose};
+use crate::domain::capability::{Operation, Provider};
 use crate::domain::init::{InitResult, InitStep, InitStepStatus};
 use crate::platform::designer::DesignerDsl;
 use crate::platform::edt::EdtDsl;
@@ -199,14 +198,18 @@ fn ensure_infobase(
     dry_run: bool,
 ) -> StepOutcome {
     let Some(infobase_dir) = config.v8_connection().file_path().map(PathBuf::from) else {
-        return match config.builder {
-            BuilderBackend::Designer => StepOutcome::skipped(
+        return match config.selected_provider(Operation::Init) {
+            Provider::Ibcmd => ensure_server_infobase(context, config, utilities, dry_run),
+            // Конфигуратор серверную базу не создаёт: шаг пропускается, как и раньше,
+            // а выбрать ibcmd можно ключом providers.init.
+            other => StepOutcome::skipped(
                 "infobase",
                 "create",
                 Instant::now(),
-                "server infobase connection detected; automatic creation is not supported for builder=DESIGNER",
+                format!(
+                    "server infobase connection detected; automatic creation is not supported by the {other} provider, set providers.init: ibcmd"
+                ),
             ),
-            BuilderBackend::Ibcmd => ensure_server_infobase(context, config, utilities, dry_run),
         };
     };
 
@@ -647,9 +650,15 @@ fn locate_infobase_creator(
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
 ) -> Result<PathBuf, AppError> {
-    let utility = match config.builder {
-        BuilderBackend::Designer => UtilityType::V8,
-        BuilderBackend::Ibcmd => UtilityType::Ibcmd,
+    let utility = match config.selected_provider(Operation::Init) {
+        Provider::Designer => UtilityType::V8,
+        Provider::Ibcmd => UtilityType::Ibcmd,
+        other => {
+            return Err(crate::use_cases::unimplemented_provider(
+                Operation::Init,
+                other,
+            ))
+        }
     };
     utilities
         .locate(utility)
@@ -662,9 +671,13 @@ fn create_infobase(
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
 ) -> Result<IbcmdInfobaseCreateOutcome, AppError> {
-    match config.builder {
-        BuilderBackend::Designer => create_infobase_via_designer(context, config, utilities),
-        BuilderBackend::Ibcmd => create_infobase_via_ibcmd(context, config, utilities),
+    match config.selected_provider(Operation::Init) {
+        Provider::Designer => create_infobase_via_designer(context, config, utilities),
+        Provider::Ibcmd => create_infobase_via_ibcmd(context, config, utilities),
+        other => Err(crate::use_cases::unimplemented_provider(
+            Operation::Init,
+            other,
+        )),
     }
 }
 
@@ -850,9 +863,8 @@ mod tests {
         edt_workspace_marker_path, infobase_marker_path, ordered_source_sets, InitStepStatus,
     };
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, SourceFormat, SourceSetConfig, SourceSetPurpose,
-        TestsConfig, ToolExtensionConfig, ToolExtensionInput, ToolExtensionSourceConfig,
-        ToolsConfig,
+        AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
+        ToolExtensionConfig, ToolExtensionInput, ToolExtensionSourceConfig, ToolsConfig,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -865,7 +877,8 @@ mod tests {
             work_path: PathBuf::from("/tmp/work"),
             execution_timeout: 300_000,
             format: SourceFormat::Edt,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![
                 SourceSetConfig {
@@ -986,7 +999,7 @@ mod tests {
         assert_eq!(
             result.steps[0].message.as_deref(),
             Some(
-                "server infobase connection detected; automatic creation is not supported for builder=DESIGNER"
+                "server infobase connection detected; automatic creation is not supported by the designer provider, set providers.init: ibcmd"
             )
         );
         assert_eq!(result.steps[1].target, "edt_workspace");

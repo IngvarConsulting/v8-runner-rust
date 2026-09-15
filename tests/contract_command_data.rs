@@ -99,7 +99,7 @@ fn write_project(dir: &Path) -> PathBuf {
     fs::write(
         &config_path,
         format!(
-            "workPath: {}\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File={}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: {}\n",
+            "workPath: {}\nformat: DESIGNER\ninfobase:\n  connection: 'File={}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: {}\n",
             work_path.display(),
             dir.join("ib").display(),
             install_dir.display()

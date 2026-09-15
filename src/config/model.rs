@@ -6,6 +6,7 @@ use serde::de::Error as _;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::domain::capability::{self, Operation, Provider, ProviderPlan, TargetKind};
 use crate::domain::execution::ExecutionTimeouts;
 use crate::platform::connection::V8Connection;
 
@@ -26,9 +27,17 @@ pub struct AppConfig {
     #[serde(default = "default_format")]
     pub format: SourceFormat,
 
-    /// Builder backend: DESIGNER or IBCMD
-    #[serde(default = "default_builder")]
-    pub builder: BuilderBackend,
+    /// Per-operation provider overrides: `providers.<operation>: <provider>`.
+    ///
+    /// The only way to name an executor by hand. A missing key means the default chain
+    /// from the capability matrix; a present key means exactly that provider and no
+    /// fallback.
+    #[serde(default)]
+    pub providers: BTreeMap<Operation, Provider>,
+
+    /// Which file each override came from. Stamped by the loader, never read from YAML.
+    #[serde(skip)]
+    pub provider_origins: BTreeMap<Operation, String>,
 
     /// Infobase connection and credentials contract.
     pub infobase: InfobaseConfig,
@@ -162,6 +171,48 @@ impl AppConfig {
         conn
     }
 
+    /// Kind of the target infobase, as declared by the connection contract.
+    pub fn target_kind(&self) -> TargetKind {
+        if self.v8_connection().file_path().is_some() {
+            TargetKind::File
+        } else {
+            TargetKind::Cluster
+        }
+    }
+
+    /// Who is assigned to an operation on this target, before any readiness check.
+    ///
+    /// An override names one provider and never falls back; a default is the matrix
+    /// chain, from which the caller takes the first ready one.
+    pub fn provider_plan(&self, operation: Operation) -> ProviderPlan {
+        match self.providers.get(&operation) {
+            Some(provider) => ProviderPlan::Override {
+                provider: *provider,
+                file: self
+                    .provider_origins
+                    .get(&operation)
+                    .cloned()
+                    .unwrap_or_else(|| crate::config::loader::DEFAULT_CONFIG_FILE_NAME.to_owned()),
+            },
+            None => ProviderPlan::Default {
+                chain: capability::default_chain(operation, self.target_kind()),
+            },
+        }
+    }
+
+    /// The provider an operation dispatches to when it does not probe readiness itself.
+    ///
+    /// Validation guarantees the matrix has a row for every operation on file and cluster
+    /// targets, so an empty chain here is a programming error, not a user one.
+    pub fn selected_provider(&self, operation: Operation) -> Provider {
+        self.provider_plan(operation).first().unwrap_or_else(|| {
+            panic!(
+                "no provider row for {operation} on {}",
+                self.target_kind().as_str()
+            )
+        })
+    }
+
     /// Returns the global execution timeout as a duration.
     pub fn execution_timeout_duration(&self) -> Duration {
         Duration::from_millis(self.execution_timeout.max(1))
@@ -183,10 +234,6 @@ fn default_format() -> SourceFormat {
     SourceFormat::Designer
 }
 
-fn default_builder() -> BuilderBackend {
-    BuilderBackend::Designer
-}
-
 fn default_execution_timeout_ms() -> u64 {
     300_000
 }
@@ -196,13 +243,6 @@ fn default_execution_timeout_ms() -> u64 {
 pub enum SourceFormat {
     Designer,
     Edt,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum BuilderBackend {
-    Designer,
-    Ibcmd,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

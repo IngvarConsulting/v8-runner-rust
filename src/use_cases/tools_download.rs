@@ -9,7 +9,8 @@ use tracing::debug;
 use zip::ZipArchive;
 
 use crate::config::loader::LOCAL_CONFIG_FILE_NAME;
-use crate::config::model::{AppConfig, BuilderBackend};
+use crate::config::model::AppConfig;
+use crate::domain::capability::{Operation, Provider};
 use crate::domain::tools_download::{
     ToolDownloadDestination, ToolDownloadTarget, ToolExtensionInstallMode, ToolsDownloadResult,
 };
@@ -175,9 +176,11 @@ fn download_client_mcp(
     mode: ToolExtensionInstallMode,
     force: bool,
 ) -> Result<Vec<ToolDownloadDestination>, AppError> {
-    if mode == ToolExtensionInstallMode::Artifacts && config.builder != BuilderBackend::Designer {
+    if mode == ToolExtensionInstallMode::Artifacts
+        && config.selected_provider(Operation::Build) != Provider::Designer
+    {
         return Err(AppError::Validation(
-            "`tools download client-mcp` requires builder=DESIGNER because client_mcp.cfe is registered as a tool extension artifact; use `tools download client-mcp --sources` for builder=IBCMD"
+            "`tools download client-mcp` needs the Designer as the build provider because client_mcp.cfe is registered as a tool extension artifact; use `tools download client-mcp --sources` when providers.build names another executor"
                 .to_owned(),
         ));
     }

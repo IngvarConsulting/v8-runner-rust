@@ -1067,9 +1067,8 @@ mod tests {
         HttpSessionAdmission, McpTool, McpToolServer,
     };
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, McpConfig, McpExecutionConfig, McpHttpConfig,
-        PlatformToolConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
-        ToolsConfig,
+        AppConfig, BuildConfig, McpConfig, McpExecutionConfig, McpHttpConfig, PlatformToolConfig,
+        SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig, ToolsConfig,
     };
     use crate::mcp::context::McpCallContext;
     use crate::mcp::port::DefaultMcpUseCasePort;
@@ -1512,7 +1511,8 @@ mod tests {
             work_path: PathBuf::from("/tmp/work"),
             execution_timeout: edt_timeout_ms,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![SourceSetConfig {
                 name: String::from("main"),

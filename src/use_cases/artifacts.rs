@@ -2,14 +2,13 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tracing::debug;
 
-use crate::config::model::{
-    AppConfig, BuilderBackend, SourceFormat, SourceSetConfig, SourceSetPurpose,
-};
+use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose};
 use crate::domain::artifact::{
     ArtifactKind, ArtifactRef, ArtifactSet, ARTIFACT_ROLE_PACKAGE_FILE, ARTIFACT_ROLE_PLATFORM_LOG,
     ARTIFACT_ROLE_STAGE_FILE,
 };
 use crate::domain::artifacts::{ArtifactBuildMetadata, ArtifactBuildMode, ArtifactsResult};
+use crate::domain::capability::{Operation, Provider};
 use crate::domain::execution::{ExecutionError, ExecutionOutcome, ExecutionStatus};
 use crate::domain::runner::RunnerKind;
 use crate::platform::designer::DesignerDsl;
@@ -45,7 +44,7 @@ use super::staged_publication::{
 };
 
 const SUPPORTED_ARTIFACTS_ERROR: &str =
-    "artifacts currently supports only builder=DESIGNER with designer backend profile";
+    "artifacts currently supports only the Designer provider with the designer backend profile";
 const ARTIFACTS_BACKUP_PREFIX: &str = ".artifacts-backup";
 
 pub fn execute(
@@ -823,7 +822,7 @@ fn resolve_target(
 }
 
 fn validate_supported_matrix(config: &AppConfig, args: &ArtifactsRequest) -> Option<AppError> {
-    if config.builder != BuilderBackend::Designer {
+    if config.selected_provider(Operation::Make) != Provider::Designer {
         return Some(AppError::Validation(SUPPORTED_ARTIFACTS_ERROR.to_owned()));
     }
     if args.execution.profile.backend_hint.as_deref() != Some("designer") {
@@ -1164,7 +1163,7 @@ mod tests {
         run_artifacts, run_designer_export, validate_supported_matrix, ResolvedArtifactsTarget,
     };
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, PlatformToolConfig, SourceFormat, SourceSetConfig,
+        AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
         SourceSetPurpose, TestsConfig, ToolsConfig,
     };
     use crate::domain::artifact::{
@@ -1295,7 +1294,8 @@ mod tests {
             work_path: work.to_path_buf(),
             execution_timeout: 300_000,
             format,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![
                 SourceSetConfig {
@@ -1371,7 +1371,7 @@ mod tests {
 
         let error = validate_supported_matrix(&config, &request).expect("error");
 
-        assert!(error.to_string().contains("builder=DESIGNER"));
+        assert!(error.to_string().contains("the Designer provider"));
     }
 
     #[test]

@@ -519,7 +519,7 @@ mod tests {
         truncate_stack_trace, RunArtifacts,
     };
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, PlatformToolConfig, SourceFormat, SourceSetConfig,
+        AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
         SourceSetPurpose, TestsConfig, ToolsConfig, VanessaProfileConfig,
     };
     use crate::domain::execution::{ExecutionStatus, ExecutionTimeouts};
@@ -544,7 +544,8 @@ mod tests {
             work_path: work_path.to_path_buf(),
             execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),

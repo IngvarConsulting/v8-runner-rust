@@ -306,8 +306,8 @@ mod tests {
         source_set_external_kind, ExternalArtifactKind,
     };
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, SourceFormat, SourceSetConfig, SourceSetPurpose,
-        TestsConfig, ToolsConfig,
+        AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
+        ToolsConfig,
     };
     use crate::platform::edt::EdtDsl;
     use crate::platform::process::ProcessExecutor;
@@ -321,7 +321,8 @@ mod tests {
             work_path: work.to_path_buf(),
             execution_timeout: 300_000,
             format,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![
                 SourceSetConfig {

@@ -1,8 +1,8 @@
 ---
 id: DEC.2026-09-14.PROVIDER-OVERRIDE-IS-STRICT
-status: planned
+status: active
 governs: product
-realized: null
+realized: tests/cli_infobase.rs::an_override_does_not_fall_back_when_its_provider_is_missing
 supersedes: []
 superseded-by: null
 establishes: [INV.CONFIG.PROVIDERS-OVERRIDE-IS-A-SCALAR]

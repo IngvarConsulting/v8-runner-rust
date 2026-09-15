@@ -16,6 +16,16 @@ use support::{temp_workspace, v8_runner_command};
 
 const SLEEPING_RESPONSE_DELAY: Duration = Duration::from_secs(5);
 
+/// Прежний глобальный `builder` в тестовых конфигах: `DESIGNER` — умолчания матрицы,
+/// `IBCMD` — `ibcmd` всюду, где у операции есть развилка.
+fn providers_yaml(builder: &str) -> &'static str {
+    if builder == "IBCMD" {
+        "providers:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\n"
+    } else {
+        ""
+    }
+}
+
 fn write_minimal_config(root: &Path) -> PathBuf {
     write_minimal_config_with_builder(root, "DESIGNER")
 }
@@ -30,8 +40,9 @@ fn write_minimal_config_with_builder(root: &Path, builder: &str) -> PathBuf {
     fs::write(
         &config_path,
         format!(
-            "# yaml-language-server: $schema=./docs/schemas/v8project.schema.json\nworkPath: '{}'\nformat: DESIGNER\nbuilder: {builder}\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  edt_cli:\n    path: /tmp/edt\n",
+            "# yaml-language-server: $schema=./docs/schemas/v8project.schema.json\nworkPath: '{}'\nformat: DESIGNER\n{}infobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  edt_cli:\n    path: /tmp/edt\n",
             work_path.display(),
+            providers_yaml(builder),
         ),
     )
     .expect("config");
@@ -761,7 +772,7 @@ fn tools_download_artifacts_requires_designer_builder() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(combined.contains("requires builder=DESIGNER"));
+    assert!(combined.contains("needs the Designer as the build provider"));
 }
 
 #[test]

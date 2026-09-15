@@ -1,11 +1,12 @@
 ---
 id: DEC.2026-09-14.BUILDER-KEY-IS-REMOVED
-status: planned
+status: active
 governs: product
-realized: null
+realized: tests/provider_matrix.rs::a_config_with_the_builder_key_is_refused_with_the_replacement_named
 supersedes: []
 superseded-by: null
-establishes: [INV.CONFIG.BUILDER-KEY-IS-REJECTED]
+establishes: [INV.CONFIG.BUILDER-KEY-IS-REJECTED, CTR.CONFIG.V8PROJECT-SCHEMA, CTR.WIRE.CONFIG-INIT-DATA]
+changes: [CTR.CONFIG.V8PROJECT-SCHEMA, CTR.WIRE.CONFIG-INIT-DATA]
 ---
 
 # Ключ `builder` снимается

@@ -1,9 +1,9 @@
 ---
 id: INV.CONFIG.PROVIDERS-OVERRIDE-IS-A-SCALAR
-status: planned
+status: active
 governs: product
 decision: DEC.2026-09-14.PROVIDER-OVERRIDE-IS-STRICT
-check: null
+check: [tests/provider_matrix.rs::a_provider_override_is_a_scalar_for_an_operation_with_a_choice, src/config/validate.rs::provider_overrides_are_checked_against_the_matrix]
 scope: [config]
 ---
 

@@ -33,19 +33,16 @@ This file tracks open implementation work only.
    `ExportProvider` и `ExportTargetState`. Переименование не меняет провод (значения на нём
    уже нейтральны), но затрагивает много файлов, поэтому идёт отдельной задачей.
 
-6. Реализовать матрицу провайдеров, шаг 1 (`DEC.2026-09-14.PROVIDER-CHOSEN-PER-OPERATION` и соседние): матрица `domain/capability.rs` с цепочками умолчаний, ключ
-   `providers.<операция>` с тремя правилами валидации, единая квитанция о провайдере
-   (`selected`/`origin`/`skipped`) у всех операций включая экспортное семейство, снятие
-   `builder` (31 файл) и `init --builder`. Поведение на этом шаге не меняется: умолчания
-   повторяют сегодняшний выбор. Docs, схемы, `config init`, `bootstrap` — по чеклисту.
+6. Довести квитанцию о провайдере до всех операций (`DEC.2026-09-14.RECEIPT-EXPLAINS-PROVIDER-CHOICE`):
+   матрица, ключ `providers.<операция>`, три правила валидации и снятие `builder` сделаны;
+   квитанция `provider` (`selected`/`origin`/`skipped`) есть только у экспортного семейства,
+   где готовность пробуется по цепочке. `init`, `build`, `load`, `dump`, `extensions`,
+   `syntax`, `make` берут первого из плана без пробы и квитанции не печатают — им нужна
+   единая проверка готовности до запуска и поле `provider` в форме ответа (версия формы).
 7. Реализовать агентский провайдер, шаг 2 (`DEC.2026-09-14.AGENT-*`): провайдер `agent` для файловой и кластерной базы —
    `tools.designer_agent` по образцу `tools.edt_cli`, SSH-клиент в процессе без pty, сессия
    на время workspace lock, типы ответа с закрытым `error-type`, страж признаёт агентский JSON
    структурным. Первыми через сессию идут `generation-id` (#99), `dump`, `build`.
-8. Сверить требование полного `infobase.dbms` на серверном подключении с кодом: по
-   `DEC.2026-09-14.DBMS-SECTION-IS-DATABASE-ACCESS` секция нужна только там, где раннер идёт
-   в СУБД напрямую. Снять избыточное требование в `config::validate` и документации либо
-   назвать причину, по которой оно обосновано.
 9. Реализовать решения о цели и публикации: `DEC.2026-09-14.TARGET-KIND-IS-DECLARED-NOT-PARSED`,
    `TARGET-HAS-TWO-ADDRESSES`, `RUNNER-PUBLISHES-TO-A-WEB-SERVER`, `LAUNCH-OPENS-THE-PUBLISHED-BASE`,
    `PUBLICATION-IS-NEVER-A-DEFAULT-STEP`. Идёт после шага 1 матрицы провайдеров.

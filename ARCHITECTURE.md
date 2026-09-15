@@ -107,31 +107,47 @@ Important staging note:
 - `tools.edt_cli.auto_start=true` остаётся eager prewarm только для long-lived host process вроде MCP server; short-lived CLI commands всегда стартуют shared EDT lazy и держат session только в рамках current command lifetime.
 - `spec/archive/MCP_IMPLEMENTATION_PLAN_2026-03-21.md` remains the canonical staged MCP rollout history/reference for the closed Stage 1-5 MCP rollout; it is not the active backlog for follow-up EDT work.
 
-## Backend Dispatch
+## Provider Dispatch
 
-`build` and `dump` use cases dispatch by `builder`:
+Исполнителя выбирает пара «операция и вид информационной базы», а не ключ на весь
+проект. Матрица `(операция, цель) → цепочка исполнителей` живёт данными в
+`src/domain/capability.rs` и служит единственным источником для валидации конфига,
+выбора перед запуском и таблицы возможностей в `docs/CAPABILITIES.md`. Ключ
+`providers.<операция>` в `v8project.yaml` или `v8project.local.yaml` назначает
+исполнителя вручную и не откатывается на умолчание.
 
-- `builder=DESIGNER` uses the existing `DesignerDsl`.
-- `builder=IBCMD` uses `IbcmdDsl` with `config import/apply` for build and `config export` for dump; for EDT build the EDT export step still produces Designer-format files first, and for EDT dump the reverse path first updates an internal Designer snapshot before EDT import/publication.
-- Infobase CF/CFE and DT export exposes a CLI-only `--dry-run` at the existing use-case boundary:
-  request validation and provider selection are shared with apply, while preview returns before
-  action logging, workspace/target locks, staging, output creation, and provider dispatch.
-- `infobase restore` is the paired inverse of DT export and deliberately has no staging step:
-  the provider writes straight into the infobase, so the requested target mode (`--create` or
-  `--replace`) is checked against the observed target before provider selection and again under
-  the workspace lock, and a failed provider leaves `target_state=uncertain`.
-- Builder backends are expected to stay interchangeable for implemented builder scenarios. Functionality added for the Designer builder should also be available through the IBCMD builder, or the gap must be documented explicitly. Future Designer agent mode should be added behind the same use-case contract.
-- Server infobase support is a target contract for all tools; file-only behavior must be documented as a current gap rather than treated as the permanent architecture.
+- `designer` — `DesignerDsl`, пакетный процесс Конфигуратора на операцию.
+- `ibcmd` — `IbcmdDsl`: `config import/apply` для сборки и `config export` для выгрузки;
+  для EDT сборки шаг экспорта EDT по-прежнему сначала даёт файлы формата Конфигуратора,
+  а для EDT выгрузки обратный путь сначала обновляет внутренний снимок Конфигуратора.
+- Экспорт CF/CFE и DT перебирает цепочку умолчаний до первого готового исполнителя
+  и кладёт в ответ квитанцию `provider`: кто выбран, откуда взялся выбор и кого
+  пропустили с какой причиной. CLI-only `--dry-run` разделяет с apply валидацию
+  запроса и выбор исполнителя, а возвращается до журнала действий, замков, staging и
+  запуска процесса.
+- `infobase restore` — парная обратная операция к экспорту DT без staging: исполнитель
+  пишет прямо в базу, поэтому запрошенный режим цели (`--create` или `--replace`)
+  сверяется с наблюдаемой целью до выбора исполнителя и ещё раз под замком; упавший
+  исполнитель оставляет `target_state=uncertain`.
+- Исполнители одной строки матрицы взаимозаменяемы: возможность, добавленная
+  Конфигуратору, либо доступна и через `ibcmd`, либо пробел назван явно. Агентский
+  режим Конфигуратора встаёт за тот же контракт сценария.
+- Поддержка серверной базы — целевой контракт для всех инструментов; поведение только
+  для файловой базы документируется как текущий пробел, а не как норма архитектуры.
 
 Constraints to keep in mind:
 
-- Граница поддержки `IBCMD` как ограниченного backend формально закреплена в [решение 0001 в реестре](spec/arch/index.md).
-- Для реализованных builder-сценариев `IBCMD` уже поддерживает file и server infobase connections; server path требует полный `infobase.dbms` contract. Оставшиеся file-only или unsupported сценарии считаются явными gaps, а не нормой архитектуры.
-- `builder=DESIGNER` supports object-level partial dump via `/DumpConfigToFiles -partial -listFile`.
-- `builder=IBCMD` does not support object-scoped partial dump directly; `PARTIAL` degrades to
-  incremental export for the resolved target and returns a warning while preserving the requested
-  mode in the result payload.
-- `convert` is intentionally not a builder-dispatch scenario: it is a CLI-only repo-aware EDT-CLI conversion flow over configured `source-set` that stays independent from infobase/builder semantics; `--output` selects a target root only, not arbitrary source/target pairs.
+- Граница поддержки `ibcmd` как ограниченного исполнителя закреплена в
+  [реестре решений](spec/arch/index.md).
+- `infobase.dbms` нужна только там, где раннер идёт в СУБД сам: создать серверную базу
+  через `ibcmd`. Остальные сценарии на серверном подключении её не запрашивают.
+- `designer` поддерживает object-level partial dump через `/DumpConfigToFiles -partial -listFile`.
+- `ibcmd` не поддерживает object-scoped partial dump напрямую; `PARTIAL` деградирует в
+  incremental export для разрешённой цели и возвращает warning, сохраняя запрошенный
+  режим в результате.
+- `convert` строки в матрице не имеет: это CLI-only repo-aware конвертация через EDT CLI
+  над настроенными `source-set`, независимая от базы; `--output` выбирает только корень
+  цели, а не произвольные пары источник/цель.
 
 ## Dump And Artifact Publication
 

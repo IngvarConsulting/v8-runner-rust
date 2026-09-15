@@ -76,7 +76,7 @@ fn bootstrap_empty_dir_creates_config_and_dumps_main_configuration() {
     );
     let config = fs::read_to_string(project_dir.join("v8project.yaml")).expect("config");
     assert!(config.contains("format: DESIGNER"));
-    assert!(config.contains("builder: DESIGNER"));
+    assert!(!config.contains("builder:"));
     assert!(config.contains("connection: '/F \"/tmp/source ib\"'"));
     assert!(config.contains("path: 'src/configuration'"));
     assert!(config.contains("version: '8.3.27'"));
@@ -445,7 +445,7 @@ fn write_minimal_config(dir: &Path) -> PathBuf {
     fs::write(
         &config_path,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\n",
+            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\n",
             work_path.display()
         ),
     )
@@ -723,7 +723,7 @@ fn legacy_top_level_connection_is_rejected_in_json_mode() {
     fs::write(
         &config_path,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\nbuilder: DESIGNER\nconnection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\n",
+            "workPath: '{}'\nformat: DESIGNER\nconnection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\n",
             work_path.display()
         ),
     )
@@ -761,7 +761,7 @@ fn legacy_top_level_credentials_is_rejected_in_json_mode() {
     fs::write(
         &config_path,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\ncredentials:\n  user: Admin\n  password: secret\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\n",
+            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\ncredentials:\n  user: Admin\n  password: secret\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\n",
             work_path.display()
         ),
     )
@@ -799,7 +799,7 @@ fn top_level_execution_timeout_seconds_is_rejected_in_json_mode() {
     fs::write(
         &config_path,
         format!(
-            "workPath: '{}'\nexecution_timeout_seconds: 300\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\n",
+            "workPath: '{}'\nexecution_timeout_seconds: 300\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\n",
             work_path.display()
         ),
     )

@@ -7,8 +7,7 @@ workPath: build
 # Source format: DESIGNER or EDT
 format: DESIGNER
 
-# Builder backend: DESIGNER or IBCMD
-builder: DESIGNER
+# Executor overrides are optional: providers.<operation>: designer | ibcmd
 
 # 1C infobase connection string
 infobase:

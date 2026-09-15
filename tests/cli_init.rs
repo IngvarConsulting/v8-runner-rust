@@ -12,6 +12,16 @@ const V8_CONFIGURATION_NATURE: &str = "com._1c.g5.v8.dt.core.V8ConfigurationNatu
 const V8_EXTENSION_NATURE: &str = "com._1c.g5.v8.dt.core.V8ExtensionNature";
 const EDT_RUNTIME_VERSION: &str = "8.3.27";
 
+/// Прежний глобальный `builder` в тестовых конфигах: `DESIGNER` — умолчания матрицы,
+/// `IBCMD` — `ibcmd` всюду, где у операции есть развилка.
+fn providers_yaml(builder: &str) -> &'static str {
+    if builder == "IBCMD" {
+        "providers:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\n"
+    } else {
+        ""
+    }
+}
+
 fn write_native_edt_project(
     path: &Path,
     project_name: &str,
@@ -94,7 +104,7 @@ fn setup_designer_init_project_with_body(
     );
 
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File={}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File={}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         infobase_path.display(),
         v8_path.display(),
@@ -157,10 +167,10 @@ fn setup_edt_init_project(
     );
 
     let config = format!(
-        "workPath: '{}'\nformat: {}\nbuilder: {}\ninfobase:\n  connection: '{}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\n  - name: ext\n    type: EXTENSION\n    path: ext\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: {}\n{}infobase:\n  connection: '{}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\n  - name: ext\n    type: EXTENSION\n    path: ext\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
         work_path.display(),
         format,
-        builder,
+        providers_yaml(builder),
         resolved_connection,
         platform_path.display(),
         edt_path.display(),
@@ -199,7 +209,7 @@ fn setup_ibcmd_server_init_project(
     );
 
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nbuilder: IBCMD\ninfobase:\n  connection: 'Srvr=cluster:1541;Ref=demo'\n  user: Admin\n  password: secret\n  dbms:\n    kind: PostgreSQL\n    server: localhost\n    name: demo\n    user: postgres\n    password: pg-secret\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n  connection: 'Srvr=cluster:1541;Ref=demo'\n  user: Admin\n  password: secret\n  dbms:\n    kind: PostgreSQL\n    server: localhost\n    name: demo\n    user: postgres\n    password: pg-secret\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         ibcmd_path.display(),
     );

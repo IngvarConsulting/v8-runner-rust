@@ -34,8 +34,8 @@ use crate::domain::execution::{
 use crate::domain::infobase_export::{
     ConfigurationState, ConfigurationSubject, ExportConfigurationPackageRequest,
     ExportConfigurationPackageResult, ExportInfobaseSnapshotRequest, ExportInfobaseSnapshotResult,
-    ExportPhase, ExportProviderDecision, RestoreInfobaseSnapshotRequest,
-    RestoreInfobaseSnapshotResult, RestoreTargetMode,
+    ExportPhase, ProviderReceipt, RestoreInfobaseSnapshotRequest, RestoreInfobaseSnapshotResult,
+    RestoreTargetMode,
 };
 use crate::domain::init::{InitResult, InitStep, InitStepStatus};
 use crate::domain::issue::{Issue, IssueSeverity};
@@ -957,16 +957,17 @@ pub fn render_infobase_pre_dispatch_failure(
     args: &InfobaseArgs,
     presenter: &Presenter,
     error: UseCaseError,
-    selection_reason: &str,
+    _selection_reason: &str,
     phase: ExportPhase,
 ) -> UseCaseError {
-    let selection = ExportProviderDecision::unavailable(selection_reason, Vec::new());
+    // Выбор исполнителя не начинался: квитанции нет, причина — в ошибке конверта.
+    let selection: Option<ProviderReceipt> = None;
     match &args.command {
         InfobaseCommand::Configuration(configuration) => match &configuration.command {
             InfobaseConfigurationCommand::Export(args) => {
                 let request = map_infobase_configuration_export_request(args);
                 let mut result =
-                    configuration_pre_dispatch_failure(&request, selection, &error, phase);
+                    configuration_pre_dispatch_failure(&request, selection.clone(), &error, phase);
                 if args.dry_run {
                     result.mark_preview_failure();
                 }
@@ -982,7 +983,8 @@ pub fn render_infobase_pre_dispatch_failure(
             let request = ExportInfobaseSnapshotRequest {
                 output: PathBuf::from(&args.output),
             };
-            let mut result = snapshot_pre_dispatch_failure(&request, selection, &error, phase);
+            let mut result =
+                snapshot_pre_dispatch_failure(&request, selection.clone(), &error, phase);
             if args.dry_run {
                 result.mark_preview_failure();
             }
@@ -1367,7 +1369,7 @@ fn execute_infobase_restore(
         if let Err(error) = &outcome {
             let result = restore_pre_dispatch_failure(
                 &request,
-                prepared.selection().clone(),
+                Some(prepared.receipt().clone()),
                 error,
                 infobase_pre_dispatch_execution_phase(workspace_lock_acquired),
             );
@@ -1452,7 +1454,7 @@ fn execute_infobase_configuration_export(
         if let Err(error) = &outcome {
             let result = configuration_pre_dispatch_failure(
                 &request,
-                prepared.selection().clone(),
+                Some(prepared.receipt().clone()),
                 error,
                 infobase_pre_dispatch_execution_phase(workspace_lock_acquired),
             );
@@ -1535,7 +1537,7 @@ fn execute_infobase_dump(
         if let Err(error) = &outcome {
             let result = snapshot_pre_dispatch_failure(
                 &request,
-                prepared.selection().clone(),
+                Some(prepared.receipt().clone()),
                 error,
                 infobase_pre_dispatch_execution_phase(workspace_lock_acquired),
             );
@@ -1568,7 +1570,7 @@ fn annotate_pre_dispatch_failure(execution: &mut ExecutionOutcome<()>, error: &U
 
 fn configuration_pre_dispatch_failure(
     request: &ExportConfigurationPackageRequest,
-    selection: ExportProviderDecision,
+    selection: Option<ProviderReceipt>,
     error: &UseCaseError,
     phase: ExportPhase,
 ) -> ExportConfigurationPackageResult {
@@ -1583,7 +1585,7 @@ fn configuration_pre_dispatch_failure(
 
 fn snapshot_pre_dispatch_failure(
     request: &ExportInfobaseSnapshotRequest,
-    selection: ExportProviderDecision,
+    selection: Option<ProviderReceipt>,
     error: &UseCaseError,
     phase: ExportPhase,
 ) -> ExportInfobaseSnapshotResult {
@@ -1598,7 +1600,7 @@ fn snapshot_pre_dispatch_failure(
 
 fn restore_pre_dispatch_failure(
     request: &RestoreInfobaseSnapshotRequest,
-    selection: ExportProviderDecision,
+    selection: Option<ProviderReceipt>,
     error: &UseCaseError,
     phase: ExportPhase,
 ) -> RestoreInfobaseSnapshotResult {
@@ -1673,21 +1675,16 @@ struct InfobaseExportText<'a> {
     label: &'a str,
     state: Option<&'a str>,
     subject: String,
-    implementation: &'a str,
-    readiness: &'a str,
-    evidence: &'a str,
     artifact_kind: &'a str,
     execution_status: &'a str,
     /// Field name for `path`: an export names its output, a restore names its input.
     path_label: &'a str,
     path: &'a Path,
-    provider: Option<crate::domain::infobase_export::ExportProvider>,
-    provider_reason: &'a str,
+    provider: Option<&'a ProviderReceipt>,
     /// Field name for `applied`: an export publishes, a restore loads.
     applied_label: &'a str,
     applied: bool,
     target_state: &'a str,
-    candidates: &'a [crate::domain::infobase_export::ProviderCandidate],
     warnings: &'a [String],
     mode: crate::domain::infobase_export::InfobaseExportMode,
     provider_dispatched: Option<bool>,
@@ -1704,25 +1701,14 @@ fn render_configuration_export_text(
             label: "Configuration package export",
             state: Some(result.state.as_str()),
             subject: render_configuration_subject(&result.subject),
-            implementation: selected_candidate(&result.selection)
-                .map(|candidate| candidate.implementation.as_str())
-                .unwrap_or("none"),
-            readiness: selected_candidate(&result.selection)
-                .map(|candidate| candidate.readiness.as_str())
-                .unwrap_or("unavailable"),
-            evidence: selected_candidate(&result.selection)
-                .map(|candidate| candidate.evidence.as_str())
-                .unwrap_or("none"),
             artifact_kind: result.artifact_kind.as_str(),
             execution_status: execution_status_label(result.execution.status),
             path_label: "output",
             path: &result.output,
-            provider: result.selection.provider(),
-            provider_reason: result.selection.reason(),
+            provider: result.provider.as_ref(),
             applied_label: "published",
             applied: result.published,
             target_state: export_target_state_label(result.target_state),
-            candidates: result.selection.candidates(),
             warnings: &result.warnings,
             mode: result.mode,
             provider_dispatched: result.provider_dispatched,
@@ -1742,25 +1728,14 @@ fn render_snapshot_export_text(
             label: "Infobase DT export",
             state: None,
             subject: "infobase".to_owned(),
-            implementation: selected_candidate(&result.selection)
-                .map(|candidate| candidate.implementation.as_str())
-                .unwrap_or("none"),
-            readiness: selected_candidate(&result.selection)
-                .map(|candidate| candidate.readiness.as_str())
-                .unwrap_or("unavailable"),
-            evidence: selected_candidate(&result.selection)
-                .map(|candidate| candidate.evidence.as_str())
-                .unwrap_or("none"),
             artifact_kind: result.artifact_kind.as_str(),
             execution_status: execution_status_label(result.execution.status),
             path_label: "output",
             path: &result.output,
-            provider: result.selection.provider(),
-            provider_reason: result.selection.reason(),
+            provider: result.provider.as_ref(),
             applied_label: "published",
             applied: result.published,
             target_state: export_target_state_label(result.target_state),
-            candidates: result.selection.candidates(),
             warnings: &result.warnings,
             mode: result.mode,
             provider_dispatched: result.provider_dispatched,
@@ -1780,25 +1755,14 @@ fn render_restore_text(
             label: "Infobase DT restore",
             state: None,
             subject: format!("infobase:{}", result.target_mode.as_str()),
-            implementation: selected_candidate(&result.selection)
-                .map(|candidate| candidate.implementation.as_str())
-                .unwrap_or("none"),
-            readiness: selected_candidate(&result.selection)
-                .map(|candidate| candidate.readiness.as_str())
-                .unwrap_or("unavailable"),
-            evidence: selected_candidate(&result.selection)
-                .map(|candidate| candidate.evidence.as_str())
-                .unwrap_or("none"),
             artifact_kind: result.artifact_kind.as_str(),
             execution_status: execution_status_label(result.execution.status),
             path_label: "input",
             path: &result.input,
-            provider: result.selection.provider(),
-            provider_reason: result.selection.reason(),
+            provider: result.provider.as_ref(),
             applied_label: "restored",
             applied: result.restored,
             target_state: export_target_state_label(result.target_state),
-            candidates: result.selection.candidates(),
             warnings: &result.warnings,
             mode: result.mode,
             provider_dispatched: result.provider_dispatched,
@@ -1813,19 +1777,14 @@ fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Present
         label,
         state,
         subject,
-        implementation,
-        readiness,
-        evidence,
         artifact_kind,
         execution_status,
         path_label,
         path,
         provider,
-        provider_reason,
         applied_label,
         applied,
         target_state,
-        candidates,
         warnings,
         mode,
         provider_dispatched,
@@ -1838,9 +1797,16 @@ fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Present
     } else {
         TimelineStatus::Failed
     };
-    let provider = provider
-        .map(|value| value.as_str().to_owned())
-        .unwrap_or_else(|| "none".to_owned());
+    let provider_line = match provider {
+        Some(receipt) => match receipt.selected {
+            Some(selected) => format!(
+                "provider: {selected} ({})",
+                provider_origin_label(&receipt.origin)
+            ),
+            None => "provider: none is ready".to_owned(),
+        },
+        None => "provider: not selected".to_owned(),
+    };
     let mut details = vec![
         format!("command: {command}"),
         format!(
@@ -1851,12 +1817,8 @@ fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Present
             }
         ),
         format!("subject: {subject}"),
-        format!("implementation: {implementation}"),
-        format!("readiness: {readiness}"),
-        format!("evidence: {evidence}"),
         format!("artifact kind: {artifact_kind}"),
-        format!("provider: {provider}"),
-        format!("provider reason: {provider_reason}"),
+        provider_line,
         format!("execution status: {execution_status}"),
         format!("{applied_label}: {applied}"),
         format!("target state: {target_state}"),
@@ -1865,14 +1827,14 @@ fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Present
     if let Some(provider_dispatched) = provider_dispatched {
         details.insert(2, format!("provider dispatched: {provider_dispatched}"));
     }
-    for candidate in candidates {
+    for skipped in provider
+        .map(|receipt| receipt.skipped.as_slice())
+        .unwrap_or_default()
+    {
         details.push(format!(
-            "candidate {}: implementation={}, readiness={}, evidence={}; {}",
-            candidate.provider.as_str(),
-            candidate.implementation.as_str(),
-            candidate.readiness.as_str(),
-            candidate.evidence.as_str(),
-            candidate.reason
+            "[skipped:{}] {}",
+            skipped.provider.as_str(),
+            skipped.reason
         ));
     }
     if let Some(state) = state {
@@ -1882,14 +1844,13 @@ fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Present
     presenter.print_timeline(&[TimelineItem::new(status, label).with_detail(details.join("\n"))]);
 }
 
-fn selected_candidate(
-    selection: &crate::domain::infobase_export::ExportProviderDecision,
-) -> Option<&crate::domain::infobase_export::ProviderCandidate> {
-    let provider = selection.provider()?;
-    selection
-        .candidates()
-        .iter()
-        .find(|candidate| candidate.provider == provider)
+fn provider_origin_label(origin: &crate::domain::capability::ProviderOrigin) -> String {
+    match origin {
+        crate::domain::capability::ProviderOrigin::Default => "default".to_owned(),
+        crate::domain::capability::ProviderOrigin::Override { file } => {
+            format!("providers.* in {file}")
+        }
+    }
 }
 
 fn export_target_state_label(
@@ -3943,8 +3904,8 @@ mod tests {
     };
     use crate::cli::output::pre_dispatch_error_envelope;
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, SourceFormat, SourceSetConfig, SourceSetPurpose,
-        TestsConfig, ToolsConfig,
+        AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
+        ToolsConfig,
     };
     use crate::domain::artifacts::ArtifactBuildMode;
     use crate::domain::execution::{ExecutionOutcome, ExecutionStatus};
@@ -4486,7 +4447,8 @@ mod tests {
             work_path: work_path.to_path_buf(),
             execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![
                 SourceSetConfig {
