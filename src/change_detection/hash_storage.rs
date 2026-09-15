@@ -340,7 +340,7 @@ fn map_database_error(path: &Path, err: DatabaseError) -> StorageError {
         },
         // `InvalidData` is redb saying the file's contents are unusable, which is the same
         // fact as `Corrupted` above and is recoverable by rebuilding from disk. The kind says
-        // it; the message text must not be asked (ADR-0029).
+        // it; the message text must not be asked (DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES).
         DatabaseError::Storage(RedbStorageError::Io(e))
             if e.kind() == std::io::ErrorKind::InvalidData =>
         {

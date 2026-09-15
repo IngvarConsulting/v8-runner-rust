@@ -1091,7 +1091,7 @@ fn merge_optional_messages(left: Option<String>, right: Option<String>) -> Optio
 /// What the publish phase has to say, and whether an interruption was deferred through it.
 ///
 /// The flag used to be recovered by searching the message for the words "critical phase" — a
-/// verdict taken from prose the runner itself had formatted (ADR-0029). The phase knows the
+/// verdict taken from prose the runner itself had formatted (DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES). The phase knows the
 /// fact, so the fact travels.
 #[derive(Debug)]
 struct PublicationOutcome {
