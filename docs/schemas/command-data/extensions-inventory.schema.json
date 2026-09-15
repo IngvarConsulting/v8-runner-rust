@@ -150,6 +150,43 @@
       ],
       "type": "object"
     },
+    "RequestedInventory": {
+      "description": "What the read was asked for, named as data.\n\nA change preview names its `target` and `action` as fields; the read names its\nsubject the same way, so a caller pairs the answer with its request without\nparsing the wording of `plan`.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Every extension installed in the infobase.",
+          "properties": {
+            "kind": {
+              "const": "all",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "One extension by its platform name.",
+          "properties": {
+            "kind": {
+              "const": "named",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "SkippedProvider": {
       "additionalProperties": false,
       "description": "Исполнитель, пропущенный до выбранного, и почему.",
@@ -209,11 +246,16 @@
     "provider_dispatched": {
       "description": "`false` when the run stopped at a preview instead of dispatching the platform.\n\nReading the composition is an action, not a look: the platform starts, a session\nopens, the account authenticates and a journal trace is left. So the read has a\npreview too, and in it `extensions` is empty because nothing was asked.",
       "type": "boolean"
+    },
+    "requested": {
+      "$ref": "#/$defs/RequestedInventory",
+      "description": "The subject of the read, present in the preview and in the answer alike."
     }
   },
   "required": [
     "ok",
     "provider_dispatched",
+    "requested",
     "extensions",
     "duration_ms"
   ],

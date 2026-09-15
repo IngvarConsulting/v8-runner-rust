@@ -2,8 +2,8 @@
 id: CTR.WIRE.EXTENSIONS-INVENTORY-DATA
 status: active
 governs: product
-version: 2
-decision: DEC.2026-09-14.RECEIPT-EXPLAINS-PROVIDER-CHOICE
+version: 3
+decision: DEC.2026-09-15.INVENTORY-READ-NAMES-ITS-SUBJECT-AS-DATA
 artifact: docs/schemas/command-data/extensions-inventory.schema.json
 producer: src/domain/extensions.rs
 consumers: [cli, unica]
@@ -21,6 +21,10 @@ scope: [wire, cli]
 остаётся след. Поэтому у него тоже есть превью, и в нём `extensions` пуст: ничего не
 спрашивали.
 
+Предмет чтения назван полем `requested` — `{"kind": "all"}` или
+`{"kind": "named", "name": …}` — и в превью, и в ответе: вызывающий сверяет ответ со
+своим запросом по нему, а не по формулировке `plan`. `plan` остаётся для человека.
+
 ## Пример
 
 ```json
@@ -28,6 +32,7 @@ scope: [wire, cli]
   "provider": {"selected": "ibcmd", "origin": {"kind": "default"}},
   "ok": true,
   "provider_dispatched": false,
+  "requested": {"kind": "all"},
   "plan": "would read every installed extension of file infobase 'build/ib' with no configured infobase user via /opt/1cv8/bin/ibcmd",
   "extensions": [],
   "duration_ms": 0

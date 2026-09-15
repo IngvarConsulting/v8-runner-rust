@@ -167,6 +167,51 @@ fn extensions_read_is_previewed_because_it_starts_the_platform() {
         "{plan}"
     );
     assert!(plan.contains("file infobase"), "{plan}");
+    // The subject of the read is a field, not a phrase: a caller fences on it
+    // without parsing `plan`.
+    assert_eq!(data["requested"], serde_json::json!({"kind": "all"}));
+    assert!(!calls_log.exists(), "preview must not dispatch ibcmd");
+}
+
+/// `info --dry-run` names the requested extension structurally, the same way a
+/// change preview names its `target`: the wording of `plan` is for people.
+#[test]
+fn extensions_info_preview_names_the_requested_extension_as_data() {
+    let (_dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "extensions",
+            "info",
+            "--name",
+            "Проба",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("json envelope");
+    let data = &envelope["data"];
+    assert_eq!(data["provider_dispatched"], false);
+    assert_eq!(
+        data["requested"],
+        serde_json::json!({"kind": "named", "name": "Проба"})
+    );
+    assert!(data["extensions"]
+        .as_array()
+        .expect("extensions")
+        .is_empty());
+    assert!(data["plan"].as_str().expect("plan").contains("'Проба'"));
     assert!(!calls_log.exists(), "preview must not dispatch ibcmd");
 }
 
@@ -267,6 +312,11 @@ fn extensions_list_reports_the_installed_composition() {
         .as_array()
         .expect("extensions");
     assert_eq!(extensions.len(), 1);
+    // The answer says what was asked, so a caller can pair it with its request.
+    assert_eq!(
+        envelope["data"]["requested"],
+        serde_json::json!({"kind": "all"})
+    );
     assert_eq!(extensions[0]["name"], "Проба");
     assert_eq!(extensions[0]["purpose"], "add-on");
     assert_eq!(extensions[0]["active"], true);

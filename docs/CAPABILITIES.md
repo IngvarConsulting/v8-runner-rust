@@ -244,6 +244,10 @@ v8-runner extensions activate --name <NAME> --active <yes|no> [--dry-run]
   `safe_mode`, `security_profile_name`, `unsafe_action_protection`,
   `used_in_distributed_infobase`, `scope`, `hash_sum`. Пустое поле платформы —
   отсутствующее значение, а не пустая строка: в JSON его просто нет.
+- **Предмет чтения — поле.** И превью, и ответ несут `requested`:
+  `{"kind": "all"}` у `list`, `{"kind": "named", "name": …}` у `info`. Сверять
+  превью со своим запросом нужно по нему, а не по строке `plan`: она для
+  человека.
 - **Префикса имён на чтении нет.** Платформа не сообщает `name-prefix` ни в
   `list`, ни в `info`; он живёт только в `Configuration.xml` самого расширения,
   то есть достаётся выгрузкой.

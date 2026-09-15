@@ -676,11 +676,19 @@ fn render_extension_inventory_text(
     presenter: &Presenter,
 ) {
     if let Some(plan) = result.plan.as_deref() {
+        let requested = match &result.requested {
+            crate::domain::extensions::RequestedInventory::All => {
+                "requested: every installed extension".to_owned()
+            }
+            crate::domain::extensions::RequestedInventory::Named { name } => {
+                format!("requested: extension '{name}'")
+            }
+        };
         presenter.print_timeline(&[TimelineItem::new(
             TimelineStatus::Succeeded,
             "Infobase extensions preview",
         )
-        .with_detail(plan.to_owned())]);
+        .with_detail(format!("{requested}\n{plan}"))]);
         return;
     }
     if result.extensions.is_empty() {
