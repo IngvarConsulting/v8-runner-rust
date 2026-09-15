@@ -1,0 +1,12 @@
+---
+id: INV.PLATFORM.A-POOLED-AGENT-IS-KEYED-BY-THE-INFOBASE-IDENTITY
+status: planned
+governs: product
+decision: DEC.2026-09-15.AGENTS-LIVE-IN-ONE-DAEMONS-POOL-KEYED-BY-THE-INFOBASE
+check: null
+scope: [platform, use-cases]
+---
+
+# Запись пула ищется по личности базы, а не по рабочему пространству
+
+Ключ записи — нормализованная строка соединения, платформа и её версия. Две команды из разных `workPath` с одной базой получают одного и того же агента; команда с той же строкой соединения, но другой платформой — не получает: старая запись гасится и поднимается новая. Учётные данные в ключ не входят — они принадлежат сессии.
