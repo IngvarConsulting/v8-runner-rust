@@ -119,6 +119,7 @@ pub fn command_data_index() -> Value {
 
 fn generated_schema(schema: schemars::Schema, slug: &str) -> Value {
     let mut value = serde_json::to_value(schema).expect("schema json");
+    inline_tagged_variants(&mut value);
     close_every_object(&mut value);
     let object = value.as_object_mut().expect("root schema object");
     object.insert(
@@ -126,6 +127,156 @@ fn generated_schema(schema: schemars::Schema, slug: &str) -> Value {
         Value::String(format!("{REPOSITORY_RAW_SCHEMA_BASE}/{slug}.schema.json")),
     );
     value
+}
+
+/// Вставляет тело варианта размеченного перечисления в ветку, которая несёт его тег.
+///
+/// `schemars` раскладывает такое перечисление на ветку `oneOf` с тегом и `$ref` на
+/// определение варианта: тег лежит в ссылающемся объекте, тело — в `$defs`. Закрыть
+/// нельзя ни то, ни другое — каждый запретил бы поля соседа, и состав полей варианта
+/// оставался открытым. После вставки ветка описывает вариант целиком и закрывается
+/// обычным порядком; определения, на которые больше никто не ссылается, убираются.
+fn inline_tagged_variants(value: &mut Value) {
+    let definitions = value
+        .get("$defs")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if definitions.is_empty() {
+        return;
+    }
+    inline_into_branches(value, &definitions);
+    drop_unreferenced_definitions(value);
+}
+
+fn inline_into_branches(value: &mut Value, definitions: &serde_json::Map<String, Value>) {
+    match value {
+        Value::Object(object) => {
+            let target = object
+                .get("$ref")
+                .and_then(Value::as_str)
+                .filter(|_| object.contains_key("properties"))
+                .and_then(|reference| reference.strip_prefix("#/$defs/"))
+                .map(str::to_owned);
+            if let Some(name) = target {
+                if let Some(Value::Object(body)) = definitions.get(&name) {
+                    object.remove("$ref");
+                    merge_variant_body(object, body, &name);
+                }
+            }
+            for nested in object.values_mut() {
+                inline_into_branches(nested, definitions);
+            }
+        }
+        Value::Array(items) => {
+            for nested in items {
+                inline_into_branches(nested, definitions);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Поля и обязательность тела добавляются к тегу. Совпадение имени тега с полем тела —
+/// поломка формы, а не случай для тихого выбора победителя.
+fn merge_variant_body(
+    branch: &mut serde_json::Map<String, Value>,
+    body: &serde_json::Map<String, Value>,
+    name: &str,
+) {
+    if let Some(Value::Object(fields)) = body.get("properties") {
+        let own = branch
+            .entry("properties".to_owned())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        let own = own.as_object_mut().expect("properties is an object");
+        for (field, schema) in fields {
+            assert!(
+                !own.contains_key(field),
+                "variant `{name}` names `{field}` both as its tag and as its field"
+            );
+            own.insert(field.clone(), schema.clone());
+        }
+    }
+    if let Some(Value::Array(required)) = body.get("required") {
+        let own = branch
+            .entry("required".to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        let own = own.as_array_mut().expect("required is an array");
+        for field in required {
+            if !own.contains(field) {
+                own.push(field.clone());
+            }
+        }
+    }
+    for (keyword, schema) in body {
+        if keyword == "properties" || keyword == "required" {
+            continue;
+        }
+        branch
+            .entry(keyword.clone())
+            .or_insert_with(|| schema.clone());
+    }
+}
+
+/// Определения, на которые после вставки никто не ссылается, из формы убираются.
+///
+/// Живым считается то, на что ссылаются вне `$defs`, и всё, до чего можно дойти по
+/// ссылкам оттуда: пара определений, ссылающихся друг на друга, сама себя живой не
+/// делает. Поэтому обход — неподвижная точка, а не один проход.
+fn drop_unreferenced_definitions(value: &mut Value) {
+    let Some(definitions) = value.get("$defs").and_then(Value::as_object).cloned() else {
+        return;
+    };
+    let mut live = std::collections::BTreeSet::new();
+    let mut outside = value.clone();
+    if let Some(object) = outside.as_object_mut() {
+        object.remove("$defs");
+    }
+    collect_references(&outside, &mut live);
+    loop {
+        let mut grown = live.clone();
+        for name in &live {
+            if let Some(schema) = definitions.get(name) {
+                collect_references(schema, &mut grown);
+            }
+        }
+        if grown == live {
+            break;
+        }
+        live = grown;
+    }
+    if let Some(defs) = value.get_mut("$defs").and_then(Value::as_object_mut) {
+        defs.retain(|name, _| live.contains(name));
+        if defs.is_empty() {
+            value
+                .as_object_mut()
+                .expect("root schema object")
+                .remove("$defs");
+        }
+    }
+}
+
+fn collect_references(value: &Value, found: &mut std::collections::BTreeSet<String>) {
+    match value {
+        Value::Object(object) => {
+            if let Some(name) = object
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|reference| reference.strip_prefix("#/$defs/"))
+            {
+                found.insert(name.to_owned());
+            }
+            for nested in object.values() {
+                collect_references(nested, found);
+            }
+        }
+        Value::Array(items) => {
+            for nested in items {
+                collect_references(nested, found);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Закрывает список полей у каждого объекта формы.
@@ -253,6 +404,83 @@ mod tests {
             index,
             schema_json_pretty(&command_data_index()),
             "{COMMAND_DATA_INDEX_PATH} is stale; rerun UPDATE_COMMAND_DATA_SCHEMAS=1 cargo test generated_command_data_schemas_are_current"
+        );
+    }
+
+    /// Состав полей закрыт у каждого объекта каждой формы, включая варианты
+    /// размеченного перечисления: их тело вставляется в ветку с тегом, поэтому
+    /// закрывается обычным порядком. Без вставки такие объекты оставались открытыми,
+    /// и добавленное внутрь варианта поле проходило молча.
+    #[test]
+    fn every_object_of_every_form_closes_its_field_list() {
+        fn open_objects(value: &Value, path: &str, found: &mut Vec<String>) {
+            match value {
+                Value::Object(object) => {
+                    if object.contains_key("properties")
+                        && !object.contains_key("additionalProperties")
+                    {
+                        found.push(path.to_owned());
+                    }
+                    for (key, nested) in object {
+                        open_objects(nested, &format!("{path}/{key}"), found);
+                    }
+                }
+                Value::Array(items) => {
+                    for (index, nested) in items.iter().enumerate() {
+                        open_objects(nested, &format!("{path}[{index}]"), found);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for form in command_data_forms() {
+            let mut found = Vec::new();
+            open_objects(&form.schema, "", &mut found);
+            assert!(
+                found.is_empty(),
+                "form `{}` leaves objects open: {found:?}",
+                form.slug
+            );
+        }
+    }
+
+    /// Фальсификатор для предыдущего: поле, добавленное внутрь варианта, форму валит.
+    /// До вставки тела варианта в ветку такой документ проходил проверку.
+    #[test]
+    fn a_field_added_inside_a_variant_breaks_the_form() {
+        let form = command_data_forms()
+            .into_iter()
+            .find(|form| form.slug == "syntax")
+            .expect("syntax form");
+        let validator = jsonschema::validator_for(&form.schema).expect("form compiles");
+        let mut issue = serde_json::json!({
+            "kind": "module",
+            "path": "src/cf/CommonModules/Демо/Ext/Module.bsl",
+            "line": 42,
+            "column": 5,
+            "severity": "ERROR",
+            "message": "Переменная не определена"
+        });
+        let document = |issue: &Value| {
+            serde_json::json!({
+                "provider": {"selected": "designer", "origin": {"kind": "default"}},
+                "status": "issues_found",
+                "exit_code": 1,
+                "check_name": "designer-config",
+                "issues": [issue],
+                "summary": {"errors": 1, "warnings": 0, "info": 0},
+                "duration_ms": 321
+            })
+        };
+        assert!(
+            validator.is_valid(&document(&issue)),
+            "the declared shape of a variant is accepted"
+        );
+        issue["invented"] = Value::String("field".to_owned());
+        assert!(
+            !validator.is_valid(&document(&issue)),
+            "a field invented inside a variant must break the form"
         );
     }
 
