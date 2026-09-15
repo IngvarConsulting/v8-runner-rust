@@ -15,6 +15,7 @@ pub mod interactive;
 pub mod locator;
 pub mod process;
 pub mod result;
+pub mod sftp;
 pub mod utilities;
 /// `webinst` command composition.
 pub mod webinst;

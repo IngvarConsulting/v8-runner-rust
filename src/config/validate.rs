@@ -68,7 +68,7 @@ pub enum ConfigValidationError {
     StandaloneGateInvalid(String),
 
     #[error(
-        "files travel between the runner and a standalone server only through a declared channel: set infobase.standalone.exchange.dir to the gate user's directory (`<users-data>/<user>` of ibsrv) as the runner sees it"
+        "files travel between the runner and a standalone server only through a declared channel: set infobase.standalone.exchange to `sftp` (through the gate) or to `{{ dir: … }}` — the gate user's directory (`<users-data>/<user>` of ibsrv) as the runner sees it"
     )]
     StandaloneExchangeMissing,
 
@@ -732,14 +732,16 @@ fn validate_standalone_target(
     standalone
         .gate_endpoint()
         .map_err(ConfigValidationError::StandaloneGateInvalid)?;
-    let Some(dir) = standalone.exchange_dir() else {
+    if standalone.exchange.is_none() {
         return Err(ConfigValidationError::StandaloneExchangeMissing);
-    };
-    if paths_overlap(&config.work_path, dir) {
-        return Err(ConfigValidationError::WorkPathOverlapsTargetSideDir {
-            work_path: config.work_path.display().to_string(),
-            dir: dir.display().to_string(),
-        });
+    }
+    if let Some(dir) = standalone.exchange_dir() {
+        if paths_overlap(&config.work_path, dir) {
+            return Err(ConfigValidationError::WorkPathOverlapsTargetSideDir {
+                work_path: config.work_path.display().to_string(),
+                dir: dir.display().to_string(),
+            });
+        }
     }
     Ok(())
 }

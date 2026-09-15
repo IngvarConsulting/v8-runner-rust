@@ -14,10 +14,10 @@ use crate::platform::agent::WaitPolicy;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
-use crate::support::fs::{move_file, write_temp_dir_metadata, TempDirKind};
+use crate::support::fs::{write_temp_dir_metadata, TempDirKind};
 use crate::use_cases::agent_session::{
-    argument, connect, copy_dir_in, output_dir, platform_result, run_command, run_id,
-    tidy_run_path, transcript_log, wait_policy, AgentHandle,
+    argument, collect_file, connect, make_output_dir, platform_result, run_command, run_id,
+    stage_copy_dir, tidy, transcript_log, wait_policy, AgentHandle, Exchange,
 };
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::dump_config::verify_external_dump_descriptor;
@@ -95,9 +95,9 @@ pub(super) fn run_agent_export(
         config,
         v8,
         log.clone(),
-        |handle, wait, user_dir| {
+        |handle, wait, exchange| {
             let out = format!("make/{}", run_id());
-            output_dir(user_dir, &out)?;
+            make_output_dir(handle, exchange, &out)?;
             let relative = format!(
                 "{out}/{}.{}",
                 sanitize_file_stem(&resolved.source_set_name),
@@ -112,8 +112,8 @@ pub(super) fn run_agent_export(
             let staged = reply
                 .as_ref()
                 .ok()
-                .map(|_| take_produced(&user_dir.join(&relative), &staging_file));
-            tidy_run_path(user_dir, &out);
+                .map(|_| collect_file(handle, exchange, &relative, &staging_file));
+            tidy(handle, exchange, &out);
             let reply = reply?;
             staged.transpose()?;
             Ok(reply.transcript())
@@ -226,12 +226,12 @@ fn run_external_agent_export(
         staged.push((descriptor, publish_name, staging_file));
     }
 
-    let last_result = with_session(context, config, v8, log.clone(), |handle, wait, user_dir| {
+    let last_result = with_session(context, config, v8, log.clone(), |handle, wait, exchange| {
         let run = run_id();
         let base = format!("make/{run}");
-        output_dir(user_dir, &format!("{base}/out"))?;
-        let mut copied: Vec<(PathBuf, String)> = Vec::new();
         let outcome = (|| {
+            make_output_dir(handle, exchange, &format!("{base}/out"))?;
+            let mut copied: Vec<(PathBuf, String)> = Vec::new();
             for (descriptor, publish_name, staging_file) in &staged {
                 let source_link = match copied
                     .iter()
@@ -240,7 +240,7 @@ fn run_external_agent_export(
                     Some((_, link)) => link.clone(),
                     None => {
                         let link = format!("{base}/src-{}", copied.len());
-                        copy_dir_in(user_dir, &link, &descriptor.root_path)?;
+                        stage_copy_dir(handle, exchange, &link, &descriptor.root_path)?;
                         copied.push((descriptor.root_path.clone(), link.clone()));
                         link
                     }
@@ -279,7 +279,7 @@ fn run_external_agent_export(
                     "[агент] dumping external artifact descriptor",
                 );
                 let verify = format!("{base}/verify/{}.xml", descriptor.stable_id);
-                output_dir(user_dir, &format!("{base}/verify"))?;
+                make_output_dir(handle, exchange, &format!("{base}/verify"))?;
                 let reply = run_command(
                     handle,
                     &format!(
@@ -297,18 +297,16 @@ fn run_external_agent_export(
                     .join(format!("{}.xml", descriptor.logical_name));
                 if let Some(parent) = verify_target.parent() {
                     std::fs::create_dir_all(parent).map_err(|error| {
-                        AppError::Runtime(format!(
-                            "failed to create external dump dir: {error}"
-                        ))
+                        AppError::Runtime(format!("failed to create external dump dir: {error}"))
                     })?;
                 }
-                take_produced(&user_dir.join(&verify), &verify_target)?;
+                collect_file(handle, exchange, &verify, &verify_target)?;
                 verify_external_dump_descriptor(
                     &verify_target,
                     descriptor.artifact_type,
                     &descriptor.logical_name,
                 )?;
-                take_produced(&user_dir.join(&out), staging_file)?;
+                collect_file(handle, exchange, &out, staging_file)?;
                 if let Some(message) = reply
                     .messages
                     .iter()
@@ -320,7 +318,7 @@ fn run_external_agent_export(
             }
             Ok(String::new())
         })();
-        tidy_run_path(user_dir, &base);
+        tidy(handle, exchange, &base);
         outcome
     })
     .map_err(|error| (error, artifacts.clone(), Some(log.clone())))?;
@@ -372,35 +370,20 @@ fn run_external_agent_export(
     ))
 }
 
-fn take_produced(produced: &Path, destination: &Path) -> Result<(), AppError> {
-    if !produced.is_file() {
-        return Err(AppError::Platform(format!(
-            "agent reported success but wrote no file at '{}'",
-            produced.display()
-        )));
-    }
-    move_file(produced, destination).map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to stage the agent's file '{}': {error}",
-            produced.display()
-        ))
-    })
-}
-
 /// Одна сессия на операцию: открыть, выполнить, закрыть — и при отказе тоже.
 fn with_session(
     context: &ExecutionContext,
     config: &AppConfig,
     v8: Option<&Path>,
     log: PathBuf,
-    work: impl FnOnce(&mut AgentHandle, &WaitPolicy, &Path) -> Result<String, AppError>,
+    work: impl FnOnce(&mut AgentHandle, &WaitPolicy, &Exchange) -> Result<String, AppError>,
 ) -> Result<PlatformCommandResult, AppError> {
     let wait = wait_policy(context);
     let mut utilities = PlatformUtilities::from_config(config);
     let mut handle = connect(config, &mut utilities, v8, log.clone(), &wait)?;
     let outcome = handle
-        .user_dir(config)
-        .and_then(|user_dir| work(&mut handle, &wait, &user_dir));
+        .exchange(config)
+        .and_then(|exchange| work(&mut handle, &wait, &exchange));
     handle.finish(&wait);
     outcome.map(|transcript| platform_result(transcript, log))
 }

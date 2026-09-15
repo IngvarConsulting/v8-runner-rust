@@ -46,6 +46,7 @@ process-wrap = { version = "9.1.0", default-features = false, features = ["std",
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console"] }
 
 [dev-dependencies]
+russh-sftp = "3"
 assert_cmd = "2"
 jsonschema = "0.33"
 predicates = "3"

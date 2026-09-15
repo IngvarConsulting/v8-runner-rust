@@ -274,19 +274,34 @@
       },
       "type": "object"
     },
+    "InfobaseStandaloneExchangeChannelSchema": {
+      "description": "Named exchange channels.",
+      "enum": [
+        "sftp"
+      ],
+      "type": "string"
+    },
     "InfobaseStandaloneExchangeSchema": {
-      "additionalProperties": false,
-      "description": "The declared file channel to a standalone server.",
-      "properties": {
-        "dir": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/InfobaseStandaloneExchangeChannelSchema",
+          "description": "A named channel: `sftp` — the SFTP subsystem of the gate's SSH connection."
+        },
+        {
           "description": "The gate user's directory (`<users-data>/<user>` of `ibsrv`) as the runner sees it.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "properties": {
+            "dir": {
+              "description": "The gate user's directory as the runner sees it.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "dir"
+          ],
+          "type": "object"
         }
-      },
-      "type": "object"
+      ],
+      "description": "The declared file channel to a standalone server."
     },
     "InfobaseStandaloneSchema": {
       "additionalProperties": false,
@@ -301,7 +316,7 @@
               "type": "null"
             }
           ],
-          "description": "How files travel between the runner and the gate user's directory."
+          "description": "How files travel between the runner and the gate user's directory: `sftp` through\nthe gate, or `{ dir: … }` — that directory as the runner sees it."
         },
         "gate": {
           "description": "`host:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`, port 1543 by default).",

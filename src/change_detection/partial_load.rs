@@ -57,6 +57,11 @@ pub fn decide(changes: &[FileChange], source_root: &Path, threshold: usize) -> L
 /// `-listFile` parameter when running in agent mode. Path component separators
 /// remain native to the current operating system.
 pub fn write_list_file(paths: &[PathBuf], source_root: &Path, dest: &Path) -> std::io::Result<()> {
+    std::fs::write(dest, list_file_bytes(paths, source_root)?)
+}
+
+/// The same list as bytes, for callers that deliver it themselves (an agent's exchange).
+pub fn list_file_bytes(paths: &[PathBuf], source_root: &Path) -> std::io::Result<Vec<u8>> {
     let rel_paths = relative_paths(paths, source_root)?;
     let lines = rel_paths
         .iter()
@@ -66,7 +71,7 @@ pub fn write_list_file(paths: &[PathBuf], source_root: &Path, dest: &Path) -> st
     let mut payload = Vec::with_capacity(UTF8_BOM.len() + contents.len());
     payload.extend_from_slice(UTF8_BOM);
     payload.extend_from_slice(contents.as_bytes());
-    std::fs::write(dest, payload)
+    Ok(payload)
 }
 
 /// Convert safe absolute paths into relative paths under `source_root`.
