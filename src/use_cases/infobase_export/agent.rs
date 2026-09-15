@@ -14,7 +14,7 @@ use crate::support::error::AppError;
 use crate::support::fs::move_file;
 use crate::use_cases::agent_session::{
     argument, connect, expose_file, output_dir, platform_result, run_command, run_id,
-    transcript_log, wait_policy,
+    tidy_run_path, transcript_log, wait_policy,
 };
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::progress::log_live_stage;
@@ -61,7 +61,7 @@ pub(super) fn export_configuration(
                 .as_ref()
                 .ok()
                 .map(|_| take_produced(&user_dir.join(&relative), staging_path));
-            let _ = std::fs::remove_dir_all(user_dir.join(&out));
+            tidy_run_path(user_dir, &out);
             let reply = reply?;
             staged.transpose()?;
             Ok(reply.transcript())
@@ -98,7 +98,7 @@ pub(super) fn export_snapshot(
                 .as_ref()
                 .ok()
                 .map(|_| take_produced(&user_dir.join(&relative), staging_path));
-            let _ = std::fs::remove_dir_all(user_dir.join(&out));
+            tidy_run_path(user_dir, &out);
             let reply = reply?;
             staged.transpose()?;
             Ok(reply.transcript())
@@ -131,7 +131,7 @@ pub(super) fn restore_snapshot(
                 &format!("infobase-tools restore-ib --file={}", argument(&relative)),
                 wait,
             );
-            let _ = std::fs::remove_file(user_dir.join(&relative));
+            tidy_run_path(user_dir, &relative);
             Ok(outcome?.transcript())
         },
     )

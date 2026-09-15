@@ -56,7 +56,14 @@ fn run_init(
         match crate::use_cases::provider_selection::select(config, &mut utilities, Operation::Init)
         {
             Ok(selected) => (selected.provider, selected.receipt),
-            Err((_error, receipt)) => (config.selected_provider(Operation::Init), receipt),
+            // Без строки в матрице (автономный сервер) исполнителя нет вовсе; шаг
+            // создания базы назовёт это сам.
+            Err((_error, receipt)) => (
+                config
+                    .default_provider(Operation::Init)
+                    .unwrap_or(crate::domain::capability::Provider::Designer),
+                receipt,
+            ),
         };
     let mut steps = Vec::new();
     let mut first_error: Option<UseCaseError> = None;
@@ -215,6 +222,15 @@ fn ensure_infobase(
     provider: Provider,
     dry_run: bool,
 ) -> StepOutcome {
+    // Автономный сервер поднимает человек: раннер его не создаёт и не запускает.
+    if config.infobase.standalone.is_some() {
+        return StepOutcome::skipped(
+            "infobase",
+            "create",
+            Instant::now(),
+            "a standalone server is started by hand and is never created by the runner: infobase.standalone names an existing gate".to_owned(),
+        );
+    }
     let Some(infobase_dir) = config.v8_connection().file_path().map(PathBuf::from) else {
         return match provider {
             Provider::Ibcmd => {

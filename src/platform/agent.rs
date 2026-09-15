@@ -31,6 +31,8 @@ pub const JSON_MODE_COMMAND: &str = "options set --show-prompt=no --output-forma
 /// `DesignerNotConnectedToInfoBase` (замер 15.09.2026).
 pub const CONNECT_COMMAND: &str = "common connect-ib";
 /// Команда, которой управляемый агент завершает работу.
+/// Закрытие соединения с базой без завершения точки входа.
+pub const DISCONNECT_COMMAND: &str = "common disconnect-ib";
 pub const SHUTDOWN_COMMAND: &str = "common shutdown";
 /// Адрес, который слушает управляемый агент: он живёт на машине раннера.
 pub const MANAGED_LISTEN_ADDRESS: &str = "127.0.0.1";
@@ -40,9 +42,11 @@ const RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 const WAIT_SLICE: Duration = Duration::from_millis(200);
 
-/// Тип сообщения агента по документации (Приложение 4, 4.7.8) плюс
-/// `extension-properties`, которым 8.3.27 отвечает на `extensions properties get
-/// --extension=` (живой ответ 15.09.2026; в документации его нет).
+/// Тип сообщения агента по документации (Приложение 4, 4.7.8) плюс два, которых в ней
+/// нет (живые ответы 8.3.27 от 15.09.2026): `extension-properties` — ответ агента на
+/// `extensions properties get --extension=`, итоговый (после него `success` не
+/// приходит); `generation-id` — промежуточное уведомление шлюза автономного сервера
+/// внутри ответа на `update-db-cfg` (новый токен), итог команды приходит после него.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentMessageType {
@@ -56,6 +60,7 @@ pub enum AgentMessageType {
     Progress,
     ExtensionInfo,
     ExtensionProperties,
+    GenerationId,
 }
 
 /// Закрытое множество `error-type`; всё вне его сохраняется дословно, а не теряется.
@@ -863,6 +868,26 @@ mod tests {
             }
             other => panic!("unexpected outcome: {other:?}"),
         }
+    }
+
+    /// Шлюз автономного сервера внутри ответа на `update-db-cfg` шлёт уведомление
+    /// `generation-id`; оно не итог — итог команды приходит после него. Приняв его за
+    /// итог, читатель сдвинул бы все следующие ответы на одну команду (живой прогон
+    /// 15.09.2026).
+    #[test]
+    fn a_generation_id_notice_of_the_gate_does_not_end_the_reply() {
+        let notice: AgentMessage = serde_json::from_str(
+            r#"{"body":"9d8827bb07b15c4b84da5a76ddd83d4600000000","type":"generation-id"}"#,
+        )
+        .expect("message");
+        assert!(!notice.is_terminal());
+        let reply = AgentReply {
+            messages: serde_json::from_str(
+                r#"[{"message":"Принятие изменений...","type":"log"},{"body":"9d88","type":"generation-id"},{"message":"Обновление конфигурации базы данных успешно завершено","type":"log"},{"type":"success"}]"#,
+            )
+            .expect("messages"),
+        };
+        assert!(reply.outcome().is_ok());
     }
 
     /// На одно расширение агент отвечает записью без `success`: она и есть итог.

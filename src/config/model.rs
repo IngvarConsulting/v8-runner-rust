@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::de::Error as _;
@@ -66,7 +66,9 @@ pub struct AppConfig {
 /// Connection and credentials for the target infobase.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct InfobaseConfig {
-    /// Connection string to the infobase.
+    /// Connection string to the infobase: `File=…` or `Srvr=…;Ref=…`. Empty when the
+    /// target is a standalone server, which `standalone` declares instead.
+    #[serde(default)]
     pub connection: String,
 
     /// Optional infobase user name passed to platform utilities.
@@ -86,6 +88,65 @@ pub struct InfobaseConfig {
     /// after `publish`; a standalone server knows it up front.
     #[serde(default)]
     pub web: Option<InfobaseWebConfig>,
+
+    /// Standalone server (`ibsrv`) reached through its SSH gate. Its presence declares
+    /// the target kind; the runner never starts the server.
+    #[serde(default)]
+    pub standalone: Option<StandaloneConfig>,
+}
+
+/// A standalone server as the target: the runner attaches to its SSH gate and exchanges
+/// files through a declared channel, never through a path it assumes to be shared.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub struct StandaloneConfig {
+    /// `host:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`, port 1543 by default).
+    pub gate: String,
+
+    /// How files travel between the runner and the gate user's directory.
+    #[serde(default)]
+    pub exchange: Option<StandaloneExchangeConfig>,
+}
+
+/// The declared file channel to a standalone server.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct StandaloneExchangeConfig {
+    /// The gate user's directory (`<users-data>/<user>` of `ibsrv`) as the runner sees it:
+    /// the server's own path on the same machine or a mount of it.
+    #[serde(default)]
+    pub dir: Option<PathBuf>,
+}
+
+impl StandaloneConfig {
+    /// The gate as `(host, port)`.
+    pub fn gate_endpoint(&self) -> Result<(String, u16), String> {
+        parse_host_port(&self.gate)
+    }
+
+    /// The declared directory channel, if any.
+    pub fn exchange_dir(&self) -> Option<&Path> {
+        self.exchange
+            .as_ref()
+            .and_then(|exchange| exchange.dir.as_deref())
+    }
+}
+
+/// `host:port` with a non-zero port.
+pub fn parse_host_port(value: &str) -> Result<(String, u16), String> {
+    let (host, port) = value
+        .rsplit_once(':')
+        .ok_or_else(|| format!("'{value}' is not host:port"))?;
+    let port = port
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or_else(|| format!("'{value}' has no valid port"))?;
+    let host = host.trim();
+    if host.is_empty() {
+        return Err(format!("'{value}' has no host"));
+    }
+    Ok((host.to_owned(), port))
 }
 
 /// Web server a publication is written to.
@@ -153,6 +214,7 @@ impl InfobaseConfig {
             password: None,
             dbms: None,
             web: None,
+            standalone: None,
         }
     }
 
@@ -172,6 +234,7 @@ impl InfobaseConfig {
             user: None,
             password: None,
             web: None,
+            standalone: None,
             dbms: Some(dbms),
         }
     }
@@ -238,7 +301,9 @@ impl AppConfig {
 
     /// Kind of the target infobase, as declared by the connection contract.
     pub fn target_kind(&self) -> TargetKind {
-        if self.v8_connection().file_path().is_some() {
+        if self.infobase.standalone.is_some() {
+            TargetKind::Standalone
+        } else if self.v8_connection().file_path().is_some() {
             TargetKind::File
         } else {
             TargetKind::Cluster
@@ -265,10 +330,17 @@ impl AppConfig {
         }
     }
 
+    /// The provider an operation would dispatch to, or `None` where the target has no
+    /// executor for it at all (a standalone server has no `load`, `init`, `syntax`).
+    pub fn default_provider(&self, operation: Operation) -> Option<Provider> {
+        self.provider_plan(operation).first()
+    }
+
     /// The provider an operation dispatches to when it does not probe readiness itself.
     ///
     /// Validation guarantees the matrix has a row for every operation on file and cluster
-    /// targets, so an empty chain here is a programming error, not a user one.
+    /// targets, so an empty chain here is a programming error, not a user one. Where the
+    /// target may lack a row, ask `default_provider` instead.
     pub fn selected_provider(&self, operation: Operation) -> Provider {
         self.provider_plan(operation).first().unwrap_or_else(|| {
             panic!(
@@ -816,22 +888,8 @@ impl DesignerAgentConfig {
                 port: self.port.unwrap_or(DEFAULT_DESIGNER_AGENT_PORT),
             }),
             Some(attach) => {
-                let (host, port) = attach
-                    .rsplit_once(':')
-                    .ok_or_else(|| format!("'{attach}' is not host:port"))?;
-                let port = port
-                    .parse::<u16>()
-                    .ok()
-                    .filter(|port| *port != 0)
-                    .ok_or_else(|| format!("'{attach}' has no valid port"))?;
-                let host = host.trim();
-                if host.is_empty() {
-                    return Err(format!("'{attach}' has no host"));
-                }
-                Ok(DesignerAgentMode::Attached {
-                    host: host.to_owned(),
-                    port,
-                })
+                let (host, port) = parse_host_port(attach)?;
+                Ok(DesignerAgentMode::Attached { host, port })
             }
         }
     }

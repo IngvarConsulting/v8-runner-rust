@@ -5,6 +5,11 @@
 //! `{type: "extension-properties", body: {…}}`; `--extension=X` — сообщение
 //! `extension-properties` верхнего уровня с записью в `body`. Значения — JSON-логические;
 //! пустая строка в `version` и `security-profile-name` означает «не задано».
+//!
+//! Шлюз автономного сервера 8.3.27 отдаёт ту же запись, но с переставленными
+//! значениями `active` и `version` (`"active":"", "version":true` — живой ответ
+//! 15.09.2026). Перестановка узнаётся по типам значений, а не по тексту, и
+//! выправляется; запись, где ни один из двух ключей не логический, — отказ.
 
 use std::path::Path;
 
@@ -109,6 +114,26 @@ impl ExtensionAgent {
     }
 }
 
+/// Запись шлюза с переставленными `active`/`version`: логическое значение под
+/// `version` и строка под `active` меняются местами. Запись агента возвращается как есть.
+fn straighten_gate_record(record: &Value) -> Value {
+    let swapped = matches!(
+        (record.get("active"), record.get("version")),
+        (Some(Value::String(_)), Some(Value::Bool(_)))
+    );
+    if !swapped {
+        return record.clone();
+    }
+    let mut fixed = record.clone();
+    if let Some(object) = fixed.as_object_mut() {
+        let active = object.remove("version").unwrap_or(Value::Null);
+        let version = object.remove("active").unwrap_or(Value::Null);
+        object.insert("active".to_owned(), active);
+        object.insert("version".to_owned(), version);
+    }
+    fixed
+}
+
 /// Уже многоязычная строка (`ru='…'`) передаётся как есть, простая — заворачивается.
 fn nstr_synonym(value: &str) -> String {
     if value.contains("='") {
@@ -137,6 +162,7 @@ fn parse_properties(reply: &AgentReply) -> Result<Vec<InstalledExtension>, AppEr
         .iter()
         .map(|entry| {
             let record = entry.get("body").unwrap_or(entry);
+            let record = &straighten_gate_record(record);
             let text = |key: &str| -> Result<String, AppError> {
                 record
                     .get(key)
@@ -218,6 +244,19 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].version.as_deref(), Some("1.0"));
         assert!(!records[0].active);
+    }
+
+    /// Запись шлюза: `active` и `version` переставлены — узнаётся по типам и выправляется.
+    #[test]
+    fn a_gate_record_with_swapped_active_and_version_is_straightened() {
+        let records = parse_properties(&reply(
+            r#"[{"body":[{"body":{"active":"","hash-sum":"lp1b","name":"Зонд","purpose":"customization","safe-mode":false,"scope":"infobase","security-profile-name":"","unsafe-action-protection":false,"used-in-distributed-infobase":false,"version":true},"type":"extension-properties"}],"type":"success"}]"#,
+        ))
+        .expect("records");
+        assert_eq!(records.len(), 1);
+        assert!(records[0].active);
+        assert_eq!(records[0].version, None);
+        assert!(!records[0].safe_mode);
     }
 
     #[test]
