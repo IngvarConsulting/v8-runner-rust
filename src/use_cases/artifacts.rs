@@ -172,7 +172,14 @@ fn run_artifacts_selected(
     utilities: PlatformUtilities,
     selected: crate::use_cases::provider_selection::SelectedProvider,
 ) -> UseCaseResult<ArtifactsResult> {
-    let location = selected.location;
+    let Some(location) = selected.location else {
+        return Err(UseCaseFailure::without_payload(
+            crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::Make,
+                selected.provider,
+            ),
+        ));
+    };
 
     if args.dry_run {
         // The artifacts lock below is this command's first filesystem write, and Designer is

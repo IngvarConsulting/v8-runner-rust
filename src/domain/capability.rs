@@ -212,7 +212,7 @@ const fn experimental(provider: Provider, evidence: Evidence) -> Capability {
 /// пробуются, если он не готов; экспериментальные назначаются только переопределением.
 pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capability] {
     use Evidence::{ArgvTested, Documented, LiveVerified};
-    use Provider::{Designer, Ibcmd, Webinst};
+    use Provider::{Agent, Designer, Ibcmd, Webinst};
 
     // Публикация на веб-сервере: у операции нет развилки, только `webinst`.
     const WEBINST_ONLY: &[Capability] = &[implemented(Webinst, Documented)];
@@ -220,6 +220,14 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
     const DESIGNER_THEN_IBCMD: &[Capability] = &[
         implemented(Designer, LiveVerified),
         implemented(Ibcmd, ArgvTested),
+    ];
+    // Агент назначается только ключом `providers.dump: agent`, пока строка не
+    // подтверждена живым прогоном через сам раннер: команда агента замерена вручную
+    // 13.09.2026 (выгрузка побайтно равна `ibcmd`), путь раннера к ней — нет.
+    const DUMP: &[Capability] = &[
+        implemented(Designer, LiveVerified),
+        implemented(Ibcmd, ArgvTested),
+        experimental(Agent, ArgvTested),
     ];
     const DESIGNER_ONLY: &[Capability] = &[implemented(Designer, LiveVerified)];
     const IBCMD_ONLY: &[Capability] = &[implemented(Ibcmd, LiveVerified)];
@@ -233,10 +241,10 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
     ];
 
     match (operation, target) {
-        (
-            Operation::Init | Operation::Build | Operation::Dump,
-            TargetKind::File | TargetKind::Cluster,
-        ) => DESIGNER_THEN_IBCMD,
+        (Operation::Init | Operation::Build, TargetKind::File | TargetKind::Cluster) => {
+            DESIGNER_THEN_IBCMD
+        }
+        (Operation::Dump, TargetKind::File | TargetKind::Cluster) => DUMP,
         (
             Operation::Load | Operation::Syntax | Operation::Make,
             TargetKind::File | TargetKind::Cluster,

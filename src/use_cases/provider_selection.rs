@@ -8,27 +8,39 @@
 //! Экспортное семейство пробует готовность глубже (строка соединения, файл базы) и
 //! держит свой перебор, но квитанцию отдаёт ту же.
 
-use crate::config::model::AppConfig;
+use crate::config::model::{AppConfig, DesignerAgentMode};
 use crate::domain::capability::{Operation, Provider, ProviderReceipt, SkippedProvider};
 use crate::platform::locator::{UtilityLocation, UtilityType};
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 
 /// Исполнитель, выбранный для операции, вместе с найденной утилитой и квитанцией.
+///
+/// `location` пуста у исполнителя, которому утилита на этой машине не нужна: чужой
+/// агент уже поднят, к нему подключаются встроенным клиентом.
 #[derive(Debug, Clone)]
 pub struct SelectedProvider {
     pub provider: Provider,
-    pub location: UtilityLocation,
+    pub location: Option<UtilityLocation>,
     pub receipt: ProviderReceipt,
 }
 
-/// Утилита, которой исполнитель делает работу; `None` — адаптера в этой сборке нет.
-fn utility_of(provider: Provider) -> Option<UtilityType> {
+/// Утилиты, которыми исполнитель делает работу: `None` — адаптера в этой сборке
+/// нет, пустой список — исполнитель готов без утилит. Первая в списке становится
+/// `location` выбранного исполнителя.
+fn utilities_of(provider: Provider, config: &AppConfig) -> Option<Vec<UtilityType>> {
     match provider {
-        Provider::Designer => Some(UtilityType::V8),
-        Provider::Ibcmd => Some(UtilityType::Ibcmd),
-        Provider::Webinst => Some(UtilityType::Webinst),
-        Provider::Agent | Provider::IbcmdRs => None,
+        Provider::Designer => Some(vec![UtilityType::V8]),
+        Provider::Ibcmd => Some(vec![UtilityType::Ibcmd]),
+        Provider::Webinst => Some(vec![UtilityType::Webinst]),
+        // Точку входа агента для файловой и кластерной базы раннер поднимает сам —
+        // без платформы на этой машине агента нет. К чужой точке входа подключается
+        // встроенный SSH-клиент, утилиты для этого не нужны.
+        Provider::Agent => match config.tools.designer_agent.mode() {
+            Ok(DesignerAgentMode::Attached { .. }) => Some(Vec::new()),
+            Ok(DesignerAgentMode::Managed { .. }) | Err(_) => Some(vec![UtilityType::V8]),
+        },
+        Provider::IbcmdRs => None,
     }
 }
 
@@ -43,7 +55,7 @@ pub fn select(
     let mut had_an_adapter = false;
 
     for provider in plan.candidates() {
-        let Some(utility) = utility_of(provider) else {
+        let Some(needed) = utilities_of(provider, config) else {
             skipped.push(SkippedProvider {
                 provider,
                 reason: format!(
@@ -53,19 +65,27 @@ pub fn select(
             continue;
         };
         had_an_adapter = true;
-        match utilities.locate(utility) {
-            Ok(location) => {
+        let mut located = Vec::with_capacity(needed.len());
+        let mut not_ready = None;
+        for utility in needed {
+            match utilities.locate(utility) {
+                Ok(location) => located.push(location),
+                Err(error) => {
+                    not_ready = Some(format!("environment is not ready: {error}"));
+                    break;
+                }
+            }
+        }
+        match not_ready {
+            None => {
                 let receipt = plan.receipt_for(provider, skipped);
                 return Ok(SelectedProvider {
                     provider,
-                    location,
+                    location: located.into_iter().next(),
                     receipt,
                 });
             }
-            Err(error) => skipped.push(SkippedProvider {
-                provider,
-                reason: format!("environment is not ready: {error}"),
-            }),
+            Some(reason) => skipped.push(SkippedProvider { provider, reason }),
         }
     }
 

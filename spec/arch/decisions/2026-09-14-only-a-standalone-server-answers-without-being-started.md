@@ -1,8 +1,8 @@
 ---
 id: DEC.2026-09-14.ONLY-A-STANDALONE-SERVER-ANSWERS-WITHOUT-BEING-STARTED
-status: planned
+status: active
 governs: product
-realized: null
+realized: tests/cli_dump_agent.rs::a_managed_agent_without_the_local_platform_is_refused_before_any_connection
 supersedes: []
 superseded-by: null
 establishes: [INV.PLATFORM.AN-AGENT-FOR-A-FILE-OR-CLUSTER-TARGET-NEEDS-THE-LOCAL-PLATFORM]
