@@ -12,6 +12,7 @@ use crate::platform::agent::{
     AgentEndpoint, AgentError, AgentLaunch, AgentSession, AgentSessionRequest, ManagedAgent,
     WaitPolicy,
 };
+use crate::platform::locator::UtilityLocation;
 use crate::platform::process::ProcessResult;
 use crate::support::fs::{copy_dir_recursively, move_dir};
 use crate::support::temp::platform_logs_dir;
@@ -49,11 +50,11 @@ impl AgentHandle {
 }
 
 /// Открывает точку входа по конфигу: управляемую поднимает, к объявленной подключается.
-/// Локация из выбора исполнителя — `1cv8` у управляемого агента, `ssh` у чужого.
+/// Локация из выбора исполнителя — `1cv8` у управляемого агента; у чужого её нет.
 fn connect(
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
-    location: &Path,
+    location: Option<&UtilityLocation>,
     transcript_log: PathBuf,
     wait: &WaitPolicy,
 ) -> Result<AgentHandle, AppError> {
@@ -62,7 +63,6 @@ fn connect(
     let connection = config.v8_connection();
     let user = connection.user.clone().unwrap_or_default();
     let password = connection.password.clone().unwrap_or_default();
-    let askpass_dir = config.work_path.join("agent").join("ssh");
 
     match mode {
         DesignerAgentMode::Attached { host, port } => {
@@ -72,26 +72,24 @@ fn connect(
                 )
             })?;
             let request = AgentSessionRequest {
-                ssh: location.to_path_buf(),
                 endpoint: AgentEndpoint { host, port },
                 user,
                 password,
-                askpass_dir,
                 transcript_log: Some(transcript_log),
             };
-            // Чужая точка входа не поднимается заново: сначала структурная проба, что
-            // там кто-то слушает, и только потом сессия.
-            crate::platform::agent::probe_reachable(&request.endpoint, Duration::from_secs(5))
-                .map_err(map_agent_error)?;
+            // Чужая точка входа не поднимается заново: недоступная — типизированный отказ.
             let session = AgentSession::open(&request, wait).map_err(map_agent_error)?;
             Ok(AgentHandle::Attached { session, base_dir })
         }
         DesignerAgentMode::Managed { port } => {
-            let ssh = utilities
-                .locate(UtilityType::Ssh)
-                .map_err(|error| AppError::EnvironmentUnavailable(error.to_string()))?;
+            let v8 = location.ok_or_else(|| {
+                AppError::EnvironmentUnavailable(
+                    "the managed Designer agent needs the local platform; no 1cv8 was selected"
+                        .to_owned(),
+                )
+            })?;
             let launch = AgentLaunch {
-                v8: location.to_path_buf(),
+                v8: v8.path.clone(),
                 infobase_args: connection.infobase_args(),
                 port,
                 host_key: agent.host_key.clone(),
@@ -99,11 +97,9 @@ fn connect(
                 process_log: transcript_log.with_extension("process"),
             };
             let request = AgentSessionRequest {
-                ssh: ssh.path,
                 endpoint: launch.endpoint(),
                 user,
                 password,
-                askpass_dir,
                 transcript_log: Some(transcript_log),
             };
             let managed = ManagedAgent::launch(
@@ -129,11 +125,14 @@ fn map_agent_error(error: AgentError) -> AppError {
         | AgentError::Question { .. }
         | AgentError::NoTerminalMessage { .. }
         | AgentError::InvalidReply { .. }
-        | AgentError::UserDirUnknown { .. } => AppError::Platform(error.to_string()),
-        AgentError::Stdin(_) | AgentError::Workspace { .. } => AppError::Runtime(error.to_string()),
-        AgentError::SshSpawn { .. }
         | AgentError::SessionClosed { .. }
-        | AgentError::Unreachable { .. }
+        | AgentError::Transport { .. }
+        | AgentError::UserDirUnknown { .. } => AppError::Platform(error.to_string()),
+        AgentError::Workspace { .. } => AppError::Runtime(error.to_string()),
+        AgentError::Unreachable { .. }
+        | AgentError::Handshake { .. }
+        | AgentError::AuthenticationRejected { .. }
+        | AgentError::Channel { .. }
         | AgentError::Launch(_)
         | AgentError::StartupTimedOut { .. } => AppError::EnvironmentUnavailable(error.to_string()),
     }
@@ -156,7 +155,7 @@ pub(super) fn run_dump_agent(
     resolved: &ResolvedDumpTarget,
     mode: &DumpMode,
     objects: Option<&[PartialDumpSelector]>,
-    location: &Path,
+    location: Option<&UtilityLocation>,
     utilities: &mut PlatformUtilities,
 ) -> Result<(PlatformCommandResult, Option<String>), AppError> {
     let policy = context.process_policy(InterruptionSafetyClass::GracefulThenKill, None);

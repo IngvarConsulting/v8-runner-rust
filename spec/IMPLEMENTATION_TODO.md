@@ -33,9 +33,8 @@ This file tracks open implementation work only.
    `ExportProvider` и `ExportTargetState`. Переименование не меняет провод (значения на нём
    уже нейтральны), но затрагивает много файлов, поэтому идёт отдельной задачей.
 
-7. Реализовать агентский провайдер, шаг 2 (`DEC.2026-09-14.AGENT-*`,
-   `DEC.2026-09-15.AGENT-IS-DRIVEN-BY-THE-SYSTEM-SSH-CLIENT`). Сделано: `tools.designer_agent`
-   (managed/attached), сессия через системный `ssh` без pty, типы ответа с закрытым `error-type`,
+7. Реализовать агентский провайдер, шаг 2 (`DEC.2026-09-14.AGENT-*`). Сделано: `tools.designer_agent`
+   (managed/attached), встроенный SSH-клиент (`russh`) без pty, типы ответа с закрытым `error-type`,
    `dump` через агента (экспериментально, по ключу). Осталось: `build` через агента одной
    сессией на время workspace lock (`DEC.2026-09-14.AGENT-SESSION-LIVES-WITH-THE-LOCK`),
    `generation-id` (#99), перевод строки `dump` из experimental после живого прогона через

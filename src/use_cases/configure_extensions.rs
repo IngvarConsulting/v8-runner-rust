@@ -64,7 +64,15 @@ pub fn execute(
         }
     };
     let receipt = selected.receipt;
-    let binary = selected.location.path;
+    let Some(location) = selected.location else {
+        return Err(UseCaseFailure::without_payload(
+            crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::Extensions,
+                selected.provider,
+            ),
+        ));
+    };
+    let binary = location.path;
     let dsl = IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
         .with_execution_policy(
             context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),

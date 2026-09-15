@@ -67,7 +67,14 @@ pub fn execute(
         ));
     }
     let receipt = selected.receipt;
-    let location = selected.location;
+    let Some(location) = selected.location else {
+        return Err(UseCaseFailure::without_payload(
+            crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::Publish,
+                selected.provider,
+            ),
+        ));
+    };
 
     let args = webinst_args(
         request.action,

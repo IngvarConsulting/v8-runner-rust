@@ -2,7 +2,7 @@
 id: DEC.2026-09-14.AGENT-ENDPOINT-IS-MANAGED-OR-ATTACHED
 status: active
 governs: product
-realized: [tests/cli_dump_agent.rs::managed_agent_dumps_through_the_system_ssh_client_and_reads_the_result_from_disk, tests/cli_dump_agent.rs::an_unreachable_attached_agent_is_refused_and_no_process_is_launched_instead]
+realized: [tests/cli_dump_agent.rs::managed_agent_dumps_through_the_built_in_ssh_client_and_reads_the_result_from_disk, tests/cli_dump_agent.rs::an_unreachable_attached_agent_is_refused_and_no_process_is_launched_instead]
 supersedes: []
 superseded-by: null
 establishes: [INV.PLATFORM.LOCAL-AGENT-READS-RESULTS-FROM-DISK, INV.PLATFORM.READINESS-IS-PROBED-NOT-INFERRED, INV.PLATFORM.UNREACHABLE-ATTACHED-IS-A-TYPED-REFUSAL]

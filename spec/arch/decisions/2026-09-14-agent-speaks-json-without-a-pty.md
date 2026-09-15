@@ -1,10 +1,10 @@
 ---
 id: DEC.2026-09-14.AGENT-SPEAKS-JSON-WITHOUT-A-PTY
-status: superseded
+status: active
 governs: product
-realized: null
+realized: tests/cli_dump_agent.rs::managed_agent_dumps_through_the_built_in_ssh_client_and_reads_the_result_from_disk
 supersedes: []
-superseded-by: DEC.2026-09-15.AGENT-IS-DRIVEN-BY-THE-SYSTEM-SSH-CLIENT
+superseded-by: null
 establishes: [INV.PLATFORM.AGENT-READINESS-IS-AUTHENTICATION, INV.PLATFORM.AGENT-SESSION-OPENS-IN-JSON-MODE]
 ---
 

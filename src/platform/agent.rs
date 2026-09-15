@@ -1,23 +1,23 @@
-//! Агентский shell Конфигуратора через системный `ssh`.
+//! Агентский shell Конфигуратора по SSH из процесса раннера.
 //!
-//! Раннер не носит SSH-клиента в себе: сессию открывает `ssh -T` без псевдотерминала,
-//! пароль отдаёт через `SSH_ASKPASS` (форсированный `SSH_ASKPASS_REQUIRE=force`), а
-//! команды пишет по одной в открытый stdin. Первая команда переводит агент в JSON
-//! без приглашения; после неё каждый ответ — один JSON-массив, и границу ответа даёт
-//! сам разбор, а не поиск приглашения.
+//! SSH-клиент встроен (`russh`): сессия не зависит от внешнего `ssh`, его версии и
+//! способа передать пароль. Раннер открывает канал без псевдотерминала, первой
+//! командой переводит агент в JSON без приглашения и дальше пишет команды по одной;
+//! каждый ответ — один JSON-массив, и его границу даёт сам разбор.
 //!
 //! Решение по ответу принимается по `type` и закрытому множеству `error-type`;
-//! `message` переносится как улика.
+//! `message` переносится как улика. Отказы до первого ответа типизирует библиотека:
+//! соединение, рукопожатие, аутентификация и канал различимы без чтения прозы.
 
 use std::collections::VecDeque;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use russh::client;
+use russh::ChannelMsg;
 use serde::Deserialize;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -33,13 +33,9 @@ pub const SHUTDOWN_COMMAND: &str = "common shutdown";
 pub const MANAGED_LISTEN_ADDRESS: &str = "127.0.0.1";
 /// Файл карты пользовательских каталогов в `AgentBaseDir`.
 pub const BASE_DIR_MAP_FILE: &str = "agentbasedir.json";
-/// Имя переменной, из которой askpass-скрипт читает пароль: сам пароль в файл не
-/// попадает.
-const PASSWORD_ENV: &str = "V8_RUNNER_AGENT_PASSWORD";
-const READ_CHUNK: usize = 4096;
 const RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
-const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const WAIT_SLICE: Duration = Duration::from_millis(200);
 
 /// Тип сообщения агента по документации (Приложение 4, 4.7.8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -190,13 +186,6 @@ impl AgentReply {
 /// Отказы агентского пути. Каждый различим без чтения прозы.
 #[derive(Debug, Error)]
 pub enum AgentError {
-    #[error("ssh client could not be started ({ssh}): {source}")]
-    SshSpawn {
-        ssh: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-
     #[error("agent at {endpoint} is unreachable: {source}")]
     Unreachable {
         endpoint: String,
@@ -204,14 +193,32 @@ pub enum AgentError {
         source: std::io::Error,
     },
 
-    #[error(
-        "agent at {endpoint} accepted the connection, but the session ended before a reply (ssh exit {exit_code:?}); ssh said: {stderr}"
-    )]
-    SessionClosed {
+    #[error("SSH handshake with the agent at {endpoint} failed: {source}")]
+    Handshake {
         endpoint: String,
-        exit_code: Option<i32>,
-        stderr: String,
+        #[source]
+        source: russh::Error,
     },
+
+    #[error("agent at {endpoint} rejected the credentials of user '{user}'")]
+    AuthenticationRejected { endpoint: String, user: String },
+
+    #[error("agent at {endpoint} did not open a shell channel: {source}")]
+    Channel {
+        endpoint: String,
+        #[source]
+        source: russh::Error,
+    },
+
+    #[error("agent session at {endpoint} failed while sending a command: {source}")]
+    Transport {
+        endpoint: String,
+        #[source]
+        source: russh::Error,
+    },
+
+    #[error("agent session at {endpoint} ended before a reply; agent said: {stderr}")]
+    SessionClosed { endpoint: String, stderr: String },
 
     #[error("agent did not answer '{command}' within {timeout_ms} ms")]
     TimedOut { command: String, timeout_ms: u64 },
@@ -236,9 +243,6 @@ pub enum AgentError {
 
     #[error("agent asked a question the runner does not answer: {message}")]
     Question { message: String },
-
-    #[error("failed to write the agent session stdin: {0}")]
-    Stdin(#[source] std::io::Error),
 
     #[error("failed to prepare the agent workspace '{path}': {source}")]
     Workspace {
@@ -274,55 +278,14 @@ impl std::fmt::Display for AgentEndpoint {
     }
 }
 
-/// Как открыть сессию: клиент, точка входа, учётные данные и рабочий каталог для
-/// askpass-скрипта. Пустая пара — законные учётные данные базы без пользователей.
+/// Как открыть сессию: точка входа и учётные данные. Пустая пара — законные учётные
+/// данные базы без пользователей.
 #[derive(Debug, Clone)]
 pub struct AgentSessionRequest {
-    pub ssh: PathBuf,
     pub endpoint: AgentEndpoint,
     pub user: String,
     pub password: String,
-    pub askpass_dir: PathBuf,
     pub transcript_log: Option<PathBuf>,
-}
-
-/// Аргументы `ssh` для сессии агента. Хост-ключ агента не проверяется: он либо
-/// сгенерирован платформой на этой же машине, либо назван пользователем в `attach`.
-pub fn ssh_args(endpoint: &AgentEndpoint, user: &str) -> Vec<String> {
-    #[cfg(windows)]
-    let known_hosts = "UserKnownHostsFile=NUL";
-    #[cfg(not(windows))]
-    let known_hosts = "UserKnownHostsFile=/dev/null";
-    vec![
-        "-T".to_owned(),
-        "-o".to_owned(),
-        "StrictHostKeyChecking=no".to_owned(),
-        "-o".to_owned(),
-        known_hosts.to_owned(),
-        "-o".to_owned(),
-        "LogLevel=ERROR".to_owned(),
-        "-o".to_owned(),
-        "PreferredAuthentications=password,keyboard-interactive".to_owned(),
-        "-o".to_owned(),
-        "NumberOfPasswordPrompts=1".to_owned(),
-        "-p".to_owned(),
-        endpoint.port.to_string(),
-        "-l".to_owned(),
-        user.to_owned(),
-        endpoint.host.clone(),
-    ]
-}
-
-/// Открытая сессия: живой `ssh`, читатель ответов и журнал stderr.
-pub struct AgentSession {
-    child: Child,
-    stdin: Option<ChildStdin>,
-    stdout: Receiver<Vec<u8>>,
-    pending: Vec<u8>,
-    stderr: Arc<Mutex<Vec<u8>>>,
-    endpoint: AgentEndpoint,
-    transcript: Option<std::fs::File>,
-    ended: bool,
 }
 
 /// Ожидание ответа: срок и отмена, переданные с границы команды.
@@ -341,66 +304,102 @@ impl Default for WaitPolicy {
     }
 }
 
+/// Обработчик событий SSH-клиента. Ключ хоста принимается: у управляемого агента его
+/// создала платформа на этой же машине, у чужого — назвал пользователь в `attach`.
+struct ClientEvents;
+
+impl client::Handler for ClientEvents {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
+        debug!(key = ?server_public_key, "agent host key accepted");
+        Ok(true)
+    }
+}
+
+/// Открытая сессия: соединение, канал shell и накопленный, ещё не разобранный ответ.
+pub struct AgentSession {
+    runtime: tokio::runtime::Runtime,
+    connection: client::Handle<ClientEvents>,
+    channel: russh::Channel<client::Msg>,
+    pending: Vec<u8>,
+    stderr: Vec<u8>,
+    endpoint: AgentEndpoint,
+    transcript: Option<std::fs::File>,
+    ended: bool,
+}
+
 impl AgentSession {
     /// Открывает сессию и переводит её в машинный режим. Успех означает, что
     /// аутентификация прошла и агент ответил JSON, — этим и доказывается готовность.
     pub fn open(request: &AgentSessionRequest, policy: &WaitPolicy) -> Result<Self, AgentError> {
-        let askpass = write_askpass_script(&request.askpass_dir)?;
-        let mut command = Command::new(&request.ssh);
-        command
-            .args(ssh_args(&request.endpoint, &request.user))
-            .env("SSH_ASKPASS", &askpass)
-            .env("SSH_ASKPASS_REQUIRE", "force")
-            .env(PASSWORD_ENV, &request.password)
-            .env_remove("SSH_AUTH_SOCK")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        // `SSH_ASKPASS_REQUIRE=force` не смотрит на DISPLAY, но старые клиенты без
-        // переменной молча спрашивают у терминала — пусть DISPLAY будет непустым.
-        if std::env::var_os("DISPLAY").is_none() {
-            command.env("DISPLAY", "none:0");
-        }
-        debug!(endpoint = %request.endpoint, user = request.user.as_str(), "opening agent session");
-        let mut child = command.spawn().map_err(|source| AgentError::SshSpawn {
-            ssh: request.ssh.clone(),
-            source,
-        })?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|source| AgentError::Workspace {
+                path: PathBuf::from("<tokio runtime>"),
+                source,
+            })?;
+        let endpoint = request.endpoint.clone();
+        let named = endpoint.to_string();
+        debug!(endpoint = %named, user = request.user.as_str(), "opening agent session");
 
-        let stdin = child.stdin.take();
-        let stdout = child.stdout.take().expect("piped stdout");
-        let stderr_pipe = child.stderr.take().expect("piped stderr");
-        let (sender, receiver) = mpsc::channel::<Vec<u8>>();
-        thread::spawn(move || {
-            let mut stdout = stdout;
-            let mut chunk = [0u8; READ_CHUNK];
-            loop {
-                match stdout.read(&mut chunk) {
-                    Ok(0) | Err(_) => break,
-                    Ok(read) => {
-                        if sender.send(chunk[..read].to_vec()).is_err() {
-                            break;
-                        }
-                    }
+        let (connection, channel) =
+            runtime.block_on(async {
+                let config = Arc::new(client::Config {
+                    inactivity_timeout: None,
+                    keepalive_interval: Some(Duration::from_secs(15)),
+                    ..client::Config::default()
+                });
+                let mut connection = client::connect(
+                    config,
+                    (endpoint.host.as_str(), endpoint.port),
+                    ClientEvents,
+                )
+                .await
+                .map_err(|error| match error {
+                    russh::Error::IO(source) => AgentError::Unreachable {
+                        endpoint: named.clone(),
+                        source,
+                    },
+                    source => AgentError::Handshake {
+                        endpoint: named.clone(),
+                        source,
+                    },
+                })?;
+                let auth = connection
+                    .authenticate_password(request.user.clone(), request.password.clone())
+                    .await
+                    .map_err(|source| AgentError::Handshake {
+                        endpoint: named.clone(),
+                        source,
+                    })?;
+                if !auth.success() {
+                    return Err(AgentError::AuthenticationRejected {
+                        endpoint: named.clone(),
+                        user: request.user.clone(),
+                    });
                 }
-            }
-        });
-        let stderr = Arc::new(Mutex::new(Vec::new()));
-        let stderr_sink = Arc::clone(&stderr);
-        thread::spawn(move || {
-            let mut stderr_pipe = stderr_pipe;
-            let mut chunk = [0u8; READ_CHUNK];
-            loop {
-                match stderr_pipe.read(&mut chunk) {
-                    Ok(0) | Err(_) => break,
-                    Ok(read) => {
-                        if let Ok(mut sink) = stderr_sink.lock() {
-                            sink.extend_from_slice(&chunk[..read]);
-                        }
+                let channel = connection.channel_open_session().await.map_err(|source| {
+                    AgentError::Channel {
+                        endpoint: named.clone(),
+                        source,
                     }
-                }
-            }
-        });
+                })?;
+                // Без псевдотерминала: с ним агент рвёт сессию (замер 13.09.2026).
+                channel
+                    .request_shell(true)
+                    .await
+                    .map_err(|source| AgentError::Channel {
+                        endpoint: named.clone(),
+                        source,
+                    })?;
+                Ok((connection, channel))
+            })?;
+
         let transcript = match request.transcript_log.as_ref() {
             Some(path) => Some(
                 std::fs::OpenOptions::new()
@@ -416,12 +415,12 @@ impl AgentSession {
         };
 
         let mut session = Self {
-            child,
-            stdin,
-            stdout: receiver,
+            runtime,
+            connection,
+            channel,
             pending: Vec::new(),
-            stderr,
-            endpoint: request.endpoint.clone(),
+            stderr: Vec::new(),
+            endpoint,
             transcript,
             ended: false,
         };
@@ -446,9 +445,7 @@ impl AgentSession {
 
     /// Закрывает сессию, не трогая агента: у чужого процесса раннер не хозяин.
     pub fn close(mut self) {
-        self.stdin.take();
-        self.ended = true;
-        let _ = self.child.wait();
+        self.disconnect();
     }
 
     /// Просит агента завершиться и закрывает сессию; возвращает ответ, если он был.
@@ -464,32 +461,50 @@ impl AgentSession {
             cancellation: policy.cancellation.clone(),
         };
         let reply = self.run(SHUTDOWN_COMMAND, &capped).ok();
-        self.stdin.take();
-        self.ended = true;
-        let _ = self.child.wait();
+        self.disconnect();
         reply
     }
 
+    fn disconnect(&mut self) {
+        if self.ended {
+            return;
+        }
+        self.ended = true;
+        let channel = &self.channel;
+        let connection = &self.connection;
+        self.runtime.block_on(async {
+            let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                let _ = channel.eof().await;
+                let _ = channel.close().await;
+                let _ = connection
+                    .disconnect(russh::Disconnect::ByApplication, "", "")
+                    .await;
+            })
+            .await;
+        });
+    }
+
     fn send(&mut self, command: &str) -> Result<(), AgentError> {
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or_else(|| AgentError::SessionClosed {
+        if self.ended {
+            return Err(AgentError::SessionClosed {
                 endpoint: self.endpoint.to_string(),
-                exit_code: None,
-                stderr: "stdin is already closed".to_owned(),
-            })?;
+                stderr: self.stderr_text(),
+            });
+        }
         if let Some(log) = self.transcript.as_mut() {
             let _ = writeln!(log, "> {command}");
         }
-        stdin
-            .write_all(command.as_bytes())
-            .and_then(|_| stdin.write_all(b"\n"))
-            .and_then(|_| stdin.flush())
-            .map_err(AgentError::Stdin)
+        let payload = format!("{command}\n");
+        let channel = &self.channel;
+        self.runtime
+            .block_on(async { channel.data_bytes(payload.into_bytes()).await })
+            .map_err(|source| AgentError::Transport {
+                endpoint: self.endpoint.to_string(),
+                source,
+            })
     }
 
-    /// Читает поток до первого полного JSON-массива. Всё до открывающей скобки — не
+    /// Читает канал до первого полного JSON-массива. Всё до открывающей скобки — не
     /// ответ (баннер или приглашение до JSON-режима) и записывается только в журнал.
     fn read_reply(&mut self, command: &str, policy: &WaitPolicy) -> Result<Vec<u8>, AgentError> {
         let started = Instant::now();
@@ -502,7 +517,10 @@ impl AgentSession {
                 return Ok(reply);
             }
             if self.ended {
-                return Err(self.closed_error());
+                return Err(AgentError::SessionClosed {
+                    endpoint: self.endpoint.to_string(),
+                    stderr: self.stderr_text(),
+                });
             }
             if policy.cancellation.is_cancelled() {
                 return Err(AgentError::Cancelled {
@@ -518,16 +536,22 @@ impl AgentSession {
                             timeout_ms: timeout.as_millis() as u64,
                         });
                     }
-                    (timeout - elapsed).min(Duration::from_millis(200))
+                    (timeout - elapsed).min(WAIT_SLICE)
                 }
-                None => Duration::from_millis(200),
+                None => WAIT_SLICE,
             };
-            match self.stdout.recv_timeout(wait) {
-                Ok(chunk) => self.pending.extend_from_slice(&chunk),
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => {
-                    self.ended = true;
+            let channel = &mut self.channel;
+            let event = self
+                .runtime
+                .block_on(async { tokio::time::timeout(wait, channel.wait()).await });
+            match event {
+                Err(_elapsed) => {}
+                Ok(Some(ChannelMsg::Data { data })) => self.pending.extend_from_slice(&data),
+                Ok(Some(ChannelMsg::ExtendedData { data, .. })) => {
+                    self.stderr.extend_from_slice(&data)
                 }
+                Ok(Some(ChannelMsg::Eof | ChannelMsg::Close)) | Ok(None) => self.ended = true,
+                Ok(Some(_)) => {}
             }
         }
     }
@@ -559,93 +583,20 @@ impl AgentSession {
         }
     }
 
-    fn closed_error(&mut self) -> AgentError {
-        let exit_code = self.child.wait().ok().and_then(|status| status.code());
-        let stderr = self
-            .stderr
-            .lock()
-            .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned())
-            .unwrap_or_default();
-        AgentError::SessionClosed {
-            endpoint: self.endpoint.to_string(),
-            exit_code,
-            stderr,
-        }
+    fn stderr_text(&self) -> String {
+        String::from_utf8_lossy(&self.stderr).trim().to_owned()
     }
 }
 
 impl Drop for AgentSession {
     fn drop(&mut self) {
-        self.stdin.take();
-        if !self.ended {
-            let _ = self.child.kill();
-        }
-        let _ = self.child.wait();
+        self.disconnect();
     }
-}
-
-/// Точка входа принимает TCP-соединение. Это единственный структурный признак
-/// «там кто-то слушает»: ошибку соединения типизирует ОС, а `ssh` любую свою неудачу
-/// — от недоступного хоста до отвергнутого пароля — сообщает одним кодом 255 и
-/// прозой, на которую раннер решений не принимает.
-pub fn probe_reachable(endpoint: &AgentEndpoint, timeout: Duration) -> Result<(), AgentError> {
-    let address = format!("{endpoint}");
-    let resolved = std::net::ToSocketAddrs::to_socket_addrs(&address)
-        .and_then(|mut addresses| {
-            addresses.next().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::NotFound, "no address resolved")
-            })
-        })
-        .map_err(|source| AgentError::Unreachable {
-            endpoint: address.clone(),
-            source,
-        })?;
-    std::net::TcpStream::connect_timeout(&resolved, timeout)
-        .map(drop)
-        .map_err(|source| AgentError::Unreachable {
-            endpoint: address,
-            source,
-        })
 }
 
 fn head_of(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     text.chars().take(200).collect()
-}
-
-/// Пишет askpass-скрипт, который отдаёт пароль из окружения: файл с паролем на диске
-/// не появляется, а сам скрипт одинаков для любой сессии.
-fn write_askpass_script(dir: &Path) -> Result<PathBuf, AgentError> {
-    std::fs::create_dir_all(dir).map_err(|source| AgentError::Workspace {
-        path: dir.to_path_buf(),
-        source,
-    })?;
-    #[cfg(windows)]
-    let (name, body) = (
-        "askpass.cmd",
-        format!("@echo off\r\necho %{PASSWORD_ENV}%\r\n"),
-    );
-    #[cfg(not(windows))]
-    let (name, body) = (
-        "askpass.sh",
-        format!("#!/bin/sh\nprintf '%s\\n' \"${PASSWORD_ENV}\"\n"),
-    );
-    let path = dir.join(name);
-    std::fs::write(&path, body).map_err(|source| AgentError::Workspace {
-        path: path.clone(),
-        source,
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).map_err(
-            |source| AgentError::Workspace {
-                path: path.clone(),
-                source,
-            },
-        )?;
-    }
-    Ok(path)
 }
 
 /// Запуск Конфигуратора в агентском режиме. Из ключей базы берётся только адрес:
@@ -698,9 +649,9 @@ pub struct ManagedAgent {
 }
 
 impl ManagedAgent {
-    /// Поднимает процесс и ждёт, пока он примет аутентифицированную сессию. Отказ в
-    /// доступе останавливает ожидание сразу: повтор с теми же учётными данными не
-    /// поможет; «не дозвонились» — повод ждать дальше до срока.
+    /// Поднимает процесс и ждёт, пока он примет аутентифицированную сессию. Пока порт
+    /// не принимает соединений, агент ещё поднимается; любой другой отказ повтором
+    /// не лечится и останавливает ожидание сразу.
     pub fn launch(
         runner: &dyn ProcessRunner,
         launch: &AgentLaunch,
@@ -729,15 +680,16 @@ impl ManagedAgent {
             "designer agent launched"
         );
 
-        // Пока порт не принимает соединений, агент ещё поднимается; как только принял,
-        // сессия открывается один раз — отказ после этого повтором не лечится.
         let started = Instant::now();
-        let mut last;
-        loop {
-            match probe_reachable(&session.endpoint, PROBE_TIMEOUT) {
-                Ok(()) => break,
-                Err(error) => last = error.to_string(),
-            }
+        let opened = loop {
+            let last = match AgentSession::open(&session, policy) {
+                Ok(opened) => break opened,
+                Err(error @ AgentError::Unreachable { .. }) => error.to_string(),
+                Err(error) => {
+                    process.terminate();
+                    return Err(error);
+                }
+            };
             if policy.cancellation.is_cancelled() {
                 process.terminate();
                 return Err(AgentError::Cancelled {
@@ -752,13 +704,6 @@ impl ManagedAgent {
                 });
             }
             thread::sleep(RETRY_INTERVAL);
-        }
-        let opened = match AgentSession::open(&session, policy) {
-            Ok(opened) => opened,
-            Err(error) => {
-                process.terminate();
-                return Err(error);
-            }
         };
         Ok(Self {
             process: Some(process),
@@ -921,32 +866,21 @@ mod tests {
     }
 
     #[test]
-    fn ssh_args_request_no_pty_and_pass_an_empty_login_verbatim() {
-        let args = ssh_args(
-            &AgentEndpoint {
-                host: "127.0.0.1".to_owned(),
-                port: 2222,
-            },
-            "",
-        );
-        assert_eq!(args[0], "-T");
-        let login = args.iter().position(|arg| arg == "-l").expect("-l");
-        assert_eq!(args[login + 1], "");
-        assert_eq!(args[args.len() - 1], "127.0.0.1");
-    }
-
-    #[test]
-    fn reachability_is_decided_by_the_socket_not_by_ssh_prose() {
+    fn a_dead_endpoint_is_unreachable_not_a_handshake_failure() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
-        let endpoint = AgentEndpoint {
-            host: "127.0.0.1".to_owned(),
-            port,
-        };
-        assert!(probe_reachable(&endpoint, Duration::from_secs(1)).is_ok());
         drop(listener);
+        let request = AgentSessionRequest {
+            endpoint: AgentEndpoint {
+                host: "127.0.0.1".to_owned(),
+                port,
+            },
+            user: String::new(),
+            password: String::new(),
+            transcript_log: None,
+        };
         assert!(matches!(
-            probe_reachable(&endpoint, Duration::from_secs(1)),
+            AgentSession::open(&request, &WaitPolicy::default()),
             Err(AgentError::Unreachable { .. })
         ));
     }

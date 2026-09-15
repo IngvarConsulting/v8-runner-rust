@@ -53,7 +53,6 @@ impl PlatformUtilities {
                 },
                 edt_hint,
                 edt_version,
-                ssh_hint: config.tools.designer_agent.ssh.clone(),
             }),
             standard_runner: ProcessExecutor,
         }

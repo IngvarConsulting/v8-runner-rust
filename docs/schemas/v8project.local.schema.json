@@ -31,13 +31,6 @@
           "minimum": 1,
           "type": "integer"
         },
-        "ssh": {
-          "description": "Path to the system `ssh` client. Absent: `ssh` from PATH.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "startup_timeout_ms": {
           "description": "Time limit for the runner-launched agent to accept the first authenticated session, in milliseconds.",
           "format": "uint64",

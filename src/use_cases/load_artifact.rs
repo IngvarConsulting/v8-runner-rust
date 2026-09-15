@@ -191,7 +191,14 @@ fn run_load_selected(
     mut utilities: PlatformUtilities,
     selected: crate::use_cases::provider_selection::SelectedProvider,
 ) -> UseCaseResult<LoadResult> {
-    let location = selected.location;
+    let Some(location) = selected.location else {
+        return Err(UseCaseFailure::without_payload(
+            crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::Load,
+                selected.provider,
+            ),
+        ));
+    };
 
     if args.dry_run {
         // The next step is the compatibility probe, and the probe is a Designer run against

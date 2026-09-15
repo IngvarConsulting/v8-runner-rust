@@ -851,9 +851,6 @@ struct DesignerAgentSchema {
     /// Private host key file for the runner-launched agent. Absent: the platform generates one (`/AgentSSHHostKeyAuto`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     host_key: Option<PathBuf>,
-    /// Path to the system `ssh` client. Absent: `ssh` from PATH.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    ssh: Option<PathBuf>,
     /// Time limit for the runner-launched agent to accept the first authenticated session, in milliseconds.
     #[serde(
         rename = "startup_timeout_ms",

@@ -113,7 +113,7 @@ artifact без привязки к release tag.
   - `startup_timeout_ms`
   - `command_timeout_ms`
 - canonical key для агента Конфигуратора: `tools.designer_agent`; child keys —
-  `attach`, `base-dir`, `port`, `host-key`, `ssh` и `startup_timeout_ms`.
+  `attach`, `base-dir`, `port`, `host-key` и `startup_timeout_ms`.
 
 Ниже фиксируются только поддержанные canonical keys.
 
@@ -679,17 +679,19 @@ EDT-вызове.
 поднимает свой рядом. Ключи двух режимов не смешиваются: `attach` вместе с `port` или
 `host-key` — ошибка валидации, `base-dir` без `attach` — тоже.
 
-Сессия идёт через системный `ssh` без псевдотерминала; учётные данные — `infobase.user`
-и `infobase.password`, у базы без пользователей — пустая пара. Готовность агента
-доказывает успешная аутентификация, а не открытый порт.
+SSH-клиент встроен в раннер: внешний `ssh` не нужен ни на одной ОС. Сессия идёт без
+псевдотерминала; учётные данные — `infobase.user` и `infobase.password`, у базы без
+пользователей — пустая пара. Готовность агента доказывает успешная аутентификация, а не
+открытый порт. Ключ хоста агента не проверяется: у управляемого его создаёт платформа на
+этой же машине, у чужого — адрес назвал пользователь.
 
 Управляемый агент поднимается как `1cv8 DESIGNER <база> /AgentMode /AgentPort <port>
 /AgentListenAddress 127.0.0.1 /AgentSSHHostKeyAuto /AgentBaseDir <workPath>/agent/base`,
 поэтому для файловой и кластерной базы нужна локальная платформа; результат команд
 читается с диска из этого каталога. Журнал сессии — `workPath/logs/platform/<команда>-<набор>-agent.log`.
 
-Секция целиком допустима в `v8project.local.yaml`: адрес чужого агента и путь к `ssh` —
-свойства машины.
+Секция целиком допустима в `v8project.local.yaml`: адрес чужого агента — свойство
+машины.
 
 ### `tools.designer_agent.attach`
 
@@ -720,14 +722,6 @@ EDT-вызове.
 
 Закрытый ключ хоста управляемого агента. Без него платформа берёт или создаёт свой
 (`/AgentSSHHostKeyAuto`).
-
-### `tools.designer_agent.ssh`
-
-- Тип: путь
-- Обязателен: нет
-
-Системный клиент `ssh`. Без ключа — первый `ssh` из `PATH`. Нужен OpenSSH 8.4+ с
-`SSH_ASKPASS_REQUIRE`.
 
 ### `tools.designer_agent.startup_timeout_ms`
 

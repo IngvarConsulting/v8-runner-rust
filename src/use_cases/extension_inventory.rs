@@ -51,7 +51,15 @@ pub fn execute(
     )
     .map_err(|(error, _receipt)| UseCaseFailure::without_payload(error))?;
     let receipt = selected.receipt;
-    let binary = selected.location.path;
+    let Some(location) = selected.location else {
+        return Err(UseCaseFailure::without_payload(
+            crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::Extensions,
+                selected.provider,
+            ),
+        ));
+    };
+    let binary = location.path;
     if request.dry_run {
         // Reading the composition starts the platform, authenticates and leaves a journal
         // trace, so the read is previewed like any change: the target and the account are
@@ -218,7 +226,15 @@ pub fn change(
     )
     .map_err(|(error, _receipt)| UseCaseFailure::without_payload(error))?;
     let receipt = selected.receipt;
-    let binary = selected.location.path;
+    let Some(location) = selected.location else {
+        return Err(UseCaseFailure::without_payload(
+            crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::Extensions,
+                selected.provider,
+            ),
+        ));
+    };
+    let binary = location.path;
     if dry_run {
         return Ok(ExtensionsResult {
             provider: Some(receipt),

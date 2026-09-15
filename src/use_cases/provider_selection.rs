@@ -15,30 +15,32 @@ use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 
 /// Исполнитель, выбранный для операции, вместе с найденной утилитой и квитанцией.
+///
+/// `location` пуста у исполнителя, которому утилита на этой машине не нужна: чужой
+/// агент уже поднят, к нему подключаются встроенным клиентом.
 #[derive(Debug, Clone)]
 pub struct SelectedProvider {
     pub provider: Provider,
-    pub location: UtilityLocation,
+    pub location: Option<UtilityLocation>,
     pub receipt: ProviderReceipt,
 }
 
-/// Утилиты, которыми исполнитель делает работу; пустой список — адаптера в этой
-/// сборке нет. Первая в списке становится `location` выбранного исполнителя.
-fn utilities_of(provider: Provider, config: &AppConfig) -> Vec<UtilityType> {
+/// Утилиты, которыми исполнитель делает работу: `None` — адаптера в этой сборке
+/// нет, пустой список — исполнитель готов без утилит. Первая в списке становится
+/// `location` выбранного исполнителя.
+fn utilities_of(provider: Provider, config: &AppConfig) -> Option<Vec<UtilityType>> {
     match provider {
-        Provider::Designer => vec![UtilityType::V8],
-        Provider::Ibcmd => vec![UtilityType::Ibcmd],
-        Provider::Webinst => vec![UtilityType::Webinst],
+        Provider::Designer => Some(vec![UtilityType::V8]),
+        Provider::Ibcmd => Some(vec![UtilityType::Ibcmd]),
+        Provider::Webinst => Some(vec![UtilityType::Webinst]),
         // Точку входа агента для файловой и кластерной базы раннер поднимает сам —
-        // без платформы на этой машине агента нет. К чужой точке входа нужен только
-        // системный клиент `ssh`.
+        // без платформы на этой машине агента нет. К чужой точке входа подключается
+        // встроенный SSH-клиент, утилиты для этого не нужны.
         Provider::Agent => match config.tools.designer_agent.mode() {
-            Ok(DesignerAgentMode::Attached { .. }) => vec![UtilityType::Ssh],
-            Ok(DesignerAgentMode::Managed { .. }) | Err(_) => {
-                vec![UtilityType::V8, UtilityType::Ssh]
-            }
+            Ok(DesignerAgentMode::Attached { .. }) => Some(Vec::new()),
+            Ok(DesignerAgentMode::Managed { .. }) | Err(_) => Some(vec![UtilityType::V8]),
         },
-        Provider::IbcmdRs => Vec::new(),
+        Provider::IbcmdRs => None,
     }
 }
 
@@ -53,8 +55,7 @@ pub fn select(
     let mut had_an_adapter = false;
 
     for provider in plan.candidates() {
-        let needed = utilities_of(provider, config);
-        if needed.is_empty() {
+        let Some(needed) = utilities_of(provider, config) else {
             skipped.push(SkippedProvider {
                 provider,
                 reason: format!(
@@ -62,7 +63,7 @@ pub fn select(
                 ),
             });
             continue;
-        }
+        };
         had_an_adapter = true;
         let mut located = Vec::with_capacity(needed.len());
         let mut not_ready = None;
@@ -80,7 +81,7 @@ pub fn select(
                 let receipt = plan.receipt_for(provider, skipped);
                 return Ok(SelectedProvider {
                     provider,
-                    location: located.swap_remove(0),
+                    location: located.into_iter().next(),
                     receipt,
                 });
             }

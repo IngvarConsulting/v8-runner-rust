@@ -132,6 +132,12 @@ fn run_dump_selected(
 ) -> Result<DumpResult, DumpExecutionFailure> {
     let provider = selected.provider;
     let location = selected.location;
+    // Исполнителю без утилиты (чужой агент) путь не нужен; остальным его даёт выбор,
+    // и пустой путь ниже недостижим — арка-страж перед матчем отказывает раньше.
+    let binary = location
+        .as_ref()
+        .map(|found| found.path.clone())
+        .unwrap_or_default();
     let edt_binary = if config.format == SourceFormat::Edt {
         Some(match utilities.locate(UtilityType::EdtCli) {
             Ok(location) => location.path,
@@ -170,7 +176,10 @@ fn run_dump_selected(
                 "would dump {:?} into '{}' via {}; nothing written",
                 mode.clone(),
                 resolved.target_path.display(),
-                location.path.display()
+                match location.as_ref() {
+                    Some(found) => found.path.display().to_string(),
+                    None => "the attached Designer agent".to_owned(),
+                }
             )),
         );
         preview.ok = true;
@@ -272,12 +281,15 @@ fn run_dump_selected(
     let partial_objects = partial_objects.as_deref();
     let edt_binary = edt_binary.as_deref();
     let result = match (config.format, &mode, provider, partial_objects, edt_binary) {
+        (_, _, other, _, _) if location.is_none() && other != Provider::Agent => Err(
+            crate::use_cases::unimplemented_provider(Operation::Dump, other),
+        ),
         (SourceFormat::Designer, DumpMode::Incremental, Provider::Designer, _, _) => {
             run_incremental_dump_designer(
                 context,
                 config,
                 &resolved,
-                location.path.as_path(),
+                binary.as_path(),
                 utilities.runner_for(UtilityType::V8),
             )
         }
@@ -286,7 +298,7 @@ fn run_dump_selected(
                 context,
                 config,
                 &resolved,
-                location.path.as_path(),
+                binary.as_path(),
                 utilities.runner_for(UtilityType::Ibcmd),
             )
         }
@@ -295,7 +307,7 @@ fn run_dump_selected(
                 context,
                 config,
                 &resolved,
-                location.path.as_path(),
+                binary.as_path(),
                 utilities.runner_for(UtilityType::V8),
             )
         }
@@ -303,7 +315,7 @@ fn run_dump_selected(
             context,
             config,
             &resolved,
-            location.path.as_path(),
+            binary.as_path(),
             utilities.runner_for(UtilityType::Ibcmd),
         ),
         (SourceFormat::Designer, DumpMode::Partial, Provider::Designer, Some(objects), _) => {
@@ -311,7 +323,7 @@ fn run_dump_selected(
                 context,
                 config,
                 &resolved,
-                location.path.as_path(),
+                binary.as_path(),
                 utilities.runner_for(UtilityType::V8),
                 objects,
             )
@@ -321,7 +333,7 @@ fn run_dump_selected(
                 context,
                 config,
                 &resolved,
-                location.path.as_path(),
+                binary.as_path(),
                 utilities.runner_for(UtilityType::Ibcmd),
                 objects,
             )
@@ -337,7 +349,7 @@ fn run_dump_selected(
             &resolved,
             &mode,
             objects,
-            location.path.as_path(),
+            location.as_ref(),
             &mut utilities,
         ),
         (SourceFormat::Edt, DumpMode::Incremental, Provider::Designer, _, Some(edt_binary)) => {
@@ -345,7 +357,7 @@ fn run_dump_selected(
                 context,
                 config,
                 &resolved,
-                location.path.as_path(),
+                binary.as_path(),
                 edt_binary,
                 utilities.runner_for(UtilityType::V8),
                 utilities.runner_for(UtilityType::EdtCli),
@@ -356,7 +368,7 @@ fn run_dump_selected(
                 context,
                 config,
                 &resolved,
-                location.path.as_path(),
+                binary.as_path(),
                 edt_binary,
                 utilities.runner_for(UtilityType::Ibcmd),
                 utilities.runner_for(UtilityType::EdtCli),
@@ -367,7 +379,7 @@ fn run_dump_selected(
                 context,
                 config,
                 &resolved,
-                location.path.as_path(),
+                binary.as_path(),
                 edt_binary,
                 utilities.runner_for(UtilityType::V8),
                 utilities.runner_for(UtilityType::EdtCli),
@@ -378,7 +390,7 @@ fn run_dump_selected(
                 context,
                 config,
                 &resolved,
-                location.path.as_path(),
+                binary.as_path(),
                 edt_binary,
                 utilities.runner_for(UtilityType::Ibcmd),
                 utilities.runner_for(UtilityType::EdtCli),
@@ -394,7 +406,7 @@ fn run_dump_selected(
             context,
             config,
             &resolved,
-            location.path.as_path(),
+            binary.as_path(),
             edt_binary,
             utilities.runner_for(UtilityType::V8),
             utilities.runner_for(UtilityType::EdtCli),
@@ -410,7 +422,7 @@ fn run_dump_selected(
             context,
             config,
             &resolved,
-            location.path.as_path(),
+            binary.as_path(),
             edt_binary,
             utilities.runner_for(UtilityType::Ibcmd),
             utilities.runner_for(UtilityType::EdtCli),

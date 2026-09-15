@@ -186,7 +186,14 @@ fn run_syntax_with_context(
         }
     };
     let receipt = selected.receipt;
-    let location = selected.location;
+    let Some(location) = selected.location else {
+        return Err(SyntaxExecutionFailure::without_payload(
+            crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::Syntax,
+                selected.provider,
+            ),
+        ));
+    };
 
     let runner = utilities.runner_for(UtilityType::V8);
     let dsl = DesignerDsl::new(

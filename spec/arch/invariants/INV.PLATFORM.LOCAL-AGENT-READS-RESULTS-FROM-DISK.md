@@ -3,7 +3,7 @@ id: INV.PLATFORM.LOCAL-AGENT-READS-RESULTS-FROM-DISK
 status: active
 governs: product
 decision: DEC.2026-09-14.AGENT-ENDPOINT-IS-MANAGED-OR-ATTACHED
-check: tests/cli_dump_agent.rs::managed_agent_dumps_through_the_system_ssh_client_and_reads_the_result_from_disk
+check: tests/cli_dump_agent.rs::managed_agent_dumps_through_the_built_in_ssh_client_and_reads_the_result_from_disk
 scope: [platform]
 ---
 

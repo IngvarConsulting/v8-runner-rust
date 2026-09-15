@@ -755,9 +755,6 @@ pub struct DesignerAgentConfig {
     /// Private host key for the managed agent. Absent: `/AgentSSHHostKeyAuto`.
     pub host_key: Option<PathBuf>,
 
-    /// Path to the system `ssh` client. Absent: `ssh` from `PATH`.
-    pub ssh: Option<PathBuf>,
-
     /// Time limit for the managed agent to accept the first authenticated session.
     #[serde(
         default = "default_designer_agent_startup_timeout_ms",
@@ -773,7 +770,6 @@ impl Default for DesignerAgentConfig {
             base_dir: None,
             port: None,
             host_key: None,
-            ssh: None,
             startup_timeout_ms: default_designer_agent_startup_timeout_ms(),
         }
     }
