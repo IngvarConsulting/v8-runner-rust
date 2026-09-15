@@ -67,6 +67,19 @@ fn standalone_infobase(harness: &Harness) -> String {
 }
 
 fn harness() -> Harness {
+    harness_with_channel(Channel::Dir)
+}
+
+/// Канал обмена двойника: каталог пользователя шлюза на машине раннера или SFTP.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Channel {
+    Dir,
+    Sftp,
+    /// SFTP только на чтение — как у живого шлюза `ibsrv` 8.3.27.
+    SftpReadOnly,
+}
+
+fn harness_with_channel(channel: Channel) -> Harness {
     let dir = temp_workspace();
     let root = dir.path().to_path_buf();
     let project = root.join("project");
@@ -95,11 +108,9 @@ fn harness() -> Harness {
     let user_dir = root.join("server").join("users-data").join(GATE_USER);
     fs::create_dir_all(&user_dir).expect("gate user dir");
     let commands_log = root.join("gate-commands.log");
-    let port = start_fake_agent(FakeAgent::gate(
-        commands_log.clone(),
-        GATE_USER,
-        user_dir.clone(),
-    ));
+    let mut gate = FakeAgent::gate(commands_log.clone(), GATE_USER, user_dir.clone());
+    gate.sftp_read_only = channel == Channel::SftpReadOnly;
+    let port = start_fake_agent(gate);
     let harness = Harness {
         config_path: root.join("v8project.yaml"),
         commands_log,
@@ -107,9 +118,161 @@ fn harness() -> Harness {
         port,
         dir,
     };
-    let infobase = standalone_infobase(&harness);
+    let infobase = match channel {
+        Channel::Dir => standalone_infobase(&harness),
+        Channel::Sftp | Channel::SftpReadOnly => sftp_infobase(&harness),
+    };
     write_config(&harness, &infobase, "");
     harness
+}
+
+fn sftp_infobase(harness: &Harness) -> String {
+    format!(
+        "  user: {GATE_USER}\n  password: '{password}'\n  standalone:\n    gate: 127.0.0.1:{port}\n    exchange: sftp\n",
+        password = AGENT_PASSWORD,
+        port = harness.port,
+    )
+}
+
+fn sftp_lines(harness: &Harness) -> Vec<String> {
+    commands(harness)
+        .into_iter()
+        .filter(|line| line.starts_with("sftp "))
+        .collect()
+}
+
+/// По SFTP выгрузка приходит к раннеру через шлюз: результат опубликован локально, на
+/// стороне сервера следа нет, а каталог пользователя шлюза раннер напрямую не трогал.
+#[test]
+fn a_full_dump_travels_through_sftp() {
+    let harness = harness_with_channel(Channel::Sftp);
+    let target = harness.dir.path().join("project").join("configuration");
+
+    let (code, payload) = run(&harness, &["dump", "--mode", "full"]);
+
+    assert_eq!(code, 0, "{payload}\n{:?}", commands(&harness));
+    assert_eq!(
+        fs::read_to_string(target.join("Configuration.xml")).expect("published dump"),
+        "<Configuration/>\n"
+    );
+    let sftp = sftp_lines(&harness);
+    assert!(
+        sftp.iter().any(|line| line.starts_with("sftp mkdir dump/")),
+        "{sftp:?}"
+    );
+    assert!(
+        sftp.iter().any(|line| line.starts_with("sftp read dump/") && line.ends_with("/Configuration.xml")),
+        "{sftp:?}"
+    );
+    assert!(
+        sftp.iter().any(|line| line.starts_with("sftp rmdir dump/")),
+        "remote run dir is removed: {sftp:?}"
+    );
+    assert!(
+        fs::read_dir(&harness.user_dir)
+            .map(|entries| entries.count() == 0)
+            .unwrap_or(true),
+        "nothing is left on the server side"
+    );
+}
+
+/// Сборка по SFTP: исходники уходят на сторону сервера через шлюз, список частичной
+/// загрузки — тоже; после команды на сервере пусто.
+#[test]
+fn a_build_travels_through_sftp() {
+    let harness = harness_with_channel(Channel::Sftp);
+
+    let (code, payload) = run(&harness, &["build"]);
+
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(payload["data"]["steps"][0]["mode"], "full", "{payload}");
+    let sftp = sftp_lines(&harness);
+    assert!(
+        sftp.iter()
+            .any(|line| line.starts_with("sftp write build/")
+                && line.ends_with("/Configuration.xml")),
+        "{sftp:?}"
+    );
+    assert!(
+        commands(&harness)
+            .iter()
+            .any(|line| line.starts_with("config load-config-from-files --dir=build/")),
+        "{:?}",
+        commands(&harness)
+    );
+    assert!(
+        fs::read_dir(&harness.user_dir)
+            .map(|entries| entries.count() == 0)
+            .unwrap_or(true),
+        "nothing is left on the server side"
+    );
+}
+
+/// Инкрементальная выгрузка по SFTP не возит цель целиком: на сервер уходит только
+/// опись выгрузки, обратно приходят изменённые файлы поверх локальной цели.
+#[test]
+fn an_incremental_dump_through_sftp_sends_only_the_dump_info() {
+    let harness = harness_with_channel(Channel::Sftp);
+    let target = harness.dir.path().join("project").join("configuration");
+    fs::write(target.join("ConfigDumpInfo.xml"), "<ConfigDumpInfo/>").expect("dump info");
+    fs::write(target.join("Untouched.xml"), "<Keep/>").expect("untouched");
+
+    let (code, payload) = run(&harness, &["dump", "--mode", "incremental"]);
+
+    assert_eq!(code, 0, "{payload}");
+    let sftp = sftp_lines(&harness);
+    let writes: Vec<&String> = sftp
+        .iter()
+        .filter(|line| line.starts_with("sftp write "))
+        .collect();
+    assert_eq!(writes.len(), 1, "{sftp:?}");
+    assert!(writes[0].ends_with("/ConfigDumpInfo.xml"), "{sftp:?}");
+    assert!(
+        commands(&harness).iter().any(|line| line
+            .starts_with("config dump-config-to-files --dir=target/")
+            && line.ends_with("--update")),
+        "{:?}",
+        commands(&harness)
+    );
+    assert!(
+        target.join("updated.txt").is_file(),
+        "changed files merged into the target"
+    );
+    assert!(
+        target.join("Untouched.xml").is_file(),
+        "files the server did not touch stay"
+    );
+}
+
+/// Шлюз, чей SFTP не принимает запись (живой `ibsrv` 8.3.27): выгрузка и `make`
+/// работают — они только забирают файлы; сборка отказывает типизированно, назвав
+/// канал, а не падает где-то посередине.
+#[test]
+fn a_read_only_sftp_gate_serves_downloads_and_refuses_uploads() {
+    let harness = harness_with_channel(Channel::SftpReadOnly);
+    let output = harness.dir.path().join("dist").join("release.cf");
+
+    let (code, payload) = run(
+        &harness,
+        &["artifacts", "--output", &output.display().to_string()],
+    );
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(fs::read_to_string(&output).expect("package"), "CF:main");
+
+    let (code, payload) = run(&harness, &["build"]);
+    assert_ne!(code, 0, "{payload}");
+    assert_eq!(payload["error"]["kind"], "platform", "{payload}");
+    assert!(
+        error_message(&payload).contains("sftp exchange"),
+        "{payload}"
+    );
+    assert!(
+        !commands(&harness)
+            .iter()
+            .any(|line| line.starts_with("config load-config-from-files")),
+        "nothing is loaded when the sources could not be delivered: {:?}",
+        commands(&harness)
+    );
 }
 
 fn run(harness: &Harness, arguments: &[&str]) -> (i32, Value) {
@@ -264,7 +427,7 @@ fn a_standalone_server_without_a_declared_channel_is_refused_before_any_session(
     assert_ne!(code, 0, "{payload}");
     assert_eq!(payload["error"]["kind"], "validation", "{payload}");
     assert!(
-        error_message(&payload).contains("infobase.standalone.exchange.dir"),
+        error_message(&payload).contains("infobase.standalone.exchange"),
         "{payload}"
     );
     assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));

@@ -15,6 +15,9 @@ use std::time::Duration;
 
 use russh::server::{self, Auth, Msg, Server as _, Session};
 use russh::{Channel, ChannelId};
+use russh_sftp::protocol::{
+    Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
+};
 
 pub const AGENT_PASSWORD: &str = "agentpass";
 
@@ -33,6 +36,13 @@ pub struct FakeAgent {
     /// Двойник шлюза автономного сервера: каталог пользователя задан прямо (у шлюза
     /// нет карты `agentbasedir.json`), логин — имя пользователя базы.
     pub gate: Option<(String, PathBuf)>,
+    /// SFTP только на чтение — как у живого шлюза `ibsrv` 8.3.27 (замер 15.09.2026:
+    /// mkdir/rmdir/get работают, open на запись — Failure).
+    pub sftp_read_only: bool,
+    /// Каналы соединения: подсистема SFTP забирает свой канал в поток.
+    channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
+    /// Каналы, отданные SFTP: их байты — не команды shell.
+    sftp_channels: Arc<Mutex<Vec<ChannelId>>>,
     /// Состав расширений базы: `properties get/set`, `create`, `delete`.
     pub extensions: Arc<Mutex<Vec<FakeExtension>>>,
     /// Что было собрано из каких xml: обратная выгрузка возвращает тот же описатель.
@@ -83,6 +93,9 @@ impl FakeAgent {
             base_dir_file,
             designer_pid_file,
             gate: None,
+            sftp_read_only: false,
+            channels: Arc::new(Mutex::new(HashMap::new())),
+            sftp_channels: Arc::new(Mutex::new(Vec::new())),
             generation: Arc::new(AtomicU64::new(1)),
             extensions: Arc::new(Mutex::new(vec![FakeExtension {
                 name: "Зонд".to_owned(),
@@ -522,7 +535,46 @@ impl server::Handler for FakeAgent {
             .lock()
             .expect("buffers")
             .insert(channel.id(), Vec::new());
+        self.channels
+            .lock()
+            .expect("channels")
+            .insert(channel.id(), channel);
         reply.accept().await;
+        Ok(())
+    }
+
+    /// Подсистема SFTP того же соединения: файлы — в каталоге пользователя двойника,
+    /// как у настоящей точки входа.
+    async fn subsystem_request(
+        &mut self,
+        channel_id: ChannelId,
+        name: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        if name != "sftp" {
+            session.channel_failure(channel_id)?;
+            return Ok(());
+        }
+        let channel = self.channels.lock().expect("channels").remove(&channel_id);
+        let Some(channel) = channel else {
+            session.channel_failure(channel_id)?;
+            return Ok(());
+        };
+        session.channel_success(channel_id)?;
+        self.sftp_channels
+            .lock()
+            .expect("sftp channels")
+            .push(channel_id);
+        let handler = FakeSftp {
+            root: self.user_dir(),
+            read_only: self.sftp_read_only,
+            commands_log: self.commands_log.clone(),
+            handles: HashMap::new(),
+            next_handle: 0,
+        };
+        tokio::spawn(async move {
+            russh_sftp::server::run(channel.into_stream(), handler).await;
+        });
         Ok(())
     }
 
@@ -548,6 +600,14 @@ impl server::Handler for FakeAgent {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        if self
+            .sftp_channels
+            .lock()
+            .expect("sftp channels")
+            .contains(&channel)
+        {
+            return Ok(());
+        }
         let lines = {
             let mut buffers = self.buffers.lock().expect("buffers");
             let buffer = buffers.entry(channel).or_default();
@@ -568,6 +628,266 @@ impl server::Handler for FakeAgent {
             }
         }
         Ok(())
+    }
+}
+
+/// SFTP-сервер двойника над каталогом пользователя. Пути клиента относительны корня;
+/// журнал команд получает строки `sftp <op> <path>` — так тест видит, что и куда
+/// переносилось.
+struct FakeSftp {
+    root: PathBuf,
+    read_only: bool,
+    commands_log: PathBuf,
+    handles: HashMap<String, FakeSftpHandle>,
+    next_handle: u64,
+}
+
+enum FakeSftpHandle {
+    File(std::fs::File),
+    Dir {
+        entries: Vec<(String, FileAttributes)>,
+        sent: bool,
+    },
+}
+
+impl FakeSftp {
+    fn resolve(&self, path: &str) -> PathBuf {
+        let trimmed = path.trim_start_matches('/');
+        if trimmed.is_empty() || trimmed == "." {
+            self.root.clone()
+        } else {
+            self.root.join(trimmed)
+        }
+    }
+
+    fn log(&self, op: &str, path: &str) {
+        if let Ok(mut log) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.commands_log)
+        {
+            use std::io::Write;
+            let _ = writeln!(log, "sftp {op} {}", path.trim_start_matches('/'));
+        }
+    }
+
+    fn new_handle(&mut self, handle: FakeSftpHandle) -> String {
+        self.next_handle += 1;
+        let id = format!("h{}", self.next_handle);
+        self.handles.insert(id.clone(), handle);
+        id
+    }
+
+    fn ok(id: u32) -> Status {
+        Status {
+            id,
+            status_code: StatusCode::Ok,
+            error_message: "Ok".to_owned(),
+            language_tag: "en-US".to_owned(),
+        }
+    }
+}
+
+impl russh_sftp::server::Handler for FakeSftp {
+    type Error = StatusCode;
+
+    fn unimplemented(&self) -> Self::Error {
+        StatusCode::OpUnsupported
+    }
+
+    async fn init(
+        &mut self,
+        _version: u32,
+        _extensions: HashMap<String, String>,
+    ) -> Result<Version, Self::Error> {
+        Ok(Version::new())
+    }
+
+    async fn open(
+        &mut self,
+        id: u32,
+        filename: String,
+        pflags: OpenFlags,
+        _attrs: FileAttributes,
+    ) -> Result<Handle, Self::Error> {
+        let path = self.resolve(&filename);
+        let writing = pflags.contains(OpenFlags::WRITE) || pflags.contains(OpenFlags::CREATE);
+        if writing {
+            if self.read_only {
+                self.log("open-refused", &filename);
+                return Err(StatusCode::Failure);
+            }
+            self.log("write", &filename);
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .create(pflags.contains(OpenFlags::CREATE))
+                .truncate(pflags.contains(OpenFlags::TRUNCATE))
+                .open(&path)
+                .map_err(|_| StatusCode::Failure)?;
+            let handle = self.new_handle(FakeSftpHandle::File(file));
+            return Ok(Handle { id, handle });
+        }
+        self.log("read", &filename);
+        let file = fs::File::open(&path).map_err(|_| StatusCode::NoSuchFile)?;
+        let handle = self.new_handle(FakeSftpHandle::File(file));
+        Ok(Handle { id, handle })
+    }
+
+    async fn close(&mut self, id: u32, handle: String) -> Result<Status, Self::Error> {
+        self.handles.remove(&handle);
+        Ok(Self::ok(id))
+    }
+
+    async fn read(
+        &mut self,
+        id: u32,
+        handle: String,
+        offset: u64,
+        len: u32,
+    ) -> Result<Data, Self::Error> {
+        use std::io::{Read, Seek, SeekFrom};
+        let Some(FakeSftpHandle::File(file)) = self.handles.get_mut(&handle) else {
+            return Err(StatusCode::Failure);
+        };
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|_| StatusCode::Failure)?;
+        let mut data = vec![0; len as usize];
+        let read = file.read(&mut data).map_err(|_| StatusCode::Failure)?;
+        if read == 0 {
+            return Err(StatusCode::Eof);
+        }
+        data.truncate(read);
+        Ok(Data { id, data })
+    }
+
+    async fn write(
+        &mut self,
+        id: u32,
+        handle: String,
+        offset: u64,
+        data: Vec<u8>,
+    ) -> Result<Status, Self::Error> {
+        use std::io::{Seek, SeekFrom, Write};
+        let Some(FakeSftpHandle::File(file)) = self.handles.get_mut(&handle) else {
+            return Err(StatusCode::Failure);
+        };
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|_| StatusCode::Failure)?;
+        file.write_all(&data).map_err(|_| StatusCode::Failure)?;
+        Ok(Self::ok(id))
+    }
+
+    async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+        let metadata =
+            fs::symlink_metadata(self.resolve(&path)).map_err(|_| StatusCode::NoSuchFile)?;
+        Ok(Attrs {
+            id,
+            attrs: FileAttributes::from(&metadata),
+        })
+    }
+
+    async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+        let metadata = fs::metadata(self.resolve(&path)).map_err(|_| StatusCode::NoSuchFile)?;
+        Ok(Attrs {
+            id,
+            attrs: FileAttributes::from(&metadata),
+        })
+    }
+
+    async fn fstat(&mut self, id: u32, handle: String) -> Result<Attrs, Self::Error> {
+        let Some(FakeSftpHandle::File(file)) = self.handles.get(&handle) else {
+            return Err(StatusCode::Failure);
+        };
+        let metadata = file.metadata().map_err(|_| StatusCode::Failure)?;
+        Ok(Attrs {
+            id,
+            attrs: FileAttributes::from(&metadata),
+        })
+    }
+
+    async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
+        let dir = self.resolve(&path);
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(&dir).map_err(|_| StatusCode::NoSuchFile)? {
+            let entry = entry.map_err(|_| StatusCode::Failure)?;
+            let metadata = entry.metadata().map_err(|_| StatusCode::Failure)?;
+            entries.push((
+                entry.file_name().to_string_lossy().into_owned(),
+                FileAttributes::from(&metadata),
+            ));
+        }
+        let handle = self.new_handle(FakeSftpHandle::Dir {
+            entries,
+            sent: false,
+        });
+        Ok(Handle { id, handle })
+    }
+
+    async fn readdir(&mut self, id: u32, handle: String) -> Result<Name, Self::Error> {
+        let Some(FakeSftpHandle::Dir { entries, sent }) = self.handles.get_mut(&handle) else {
+            return Err(StatusCode::Failure);
+        };
+        if *sent {
+            return Err(StatusCode::Eof);
+        }
+        *sent = true;
+        Ok(Name {
+            id,
+            files: entries
+                .iter()
+                .map(|(name, attrs)| File::new(name.clone(), attrs.clone()))
+                .collect(),
+        })
+    }
+
+    async fn remove(&mut self, id: u32, filename: String) -> Result<Status, Self::Error> {
+        self.log("remove", &filename);
+        fs::remove_file(self.resolve(&filename)).map_err(|_| StatusCode::NoSuchFile)?;
+        Ok(Self::ok(id))
+    }
+
+    async fn mkdir(
+        &mut self,
+        id: u32,
+        path: String,
+        _attrs: FileAttributes,
+    ) -> Result<Status, Self::Error> {
+        self.log("mkdir", &path);
+        fs::create_dir(self.resolve(&path)).map_err(|_| StatusCode::Failure)?;
+        Ok(Self::ok(id))
+    }
+
+    async fn rmdir(&mut self, id: u32, path: String) -> Result<Status, Self::Error> {
+        self.log("rmdir", &path);
+        fs::remove_dir(self.resolve(&path)).map_err(|_| StatusCode::Failure)?;
+        Ok(Self::ok(id))
+    }
+
+    async fn realpath(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
+        let trimmed = path.trim_start_matches('/').trim_end_matches('/');
+        let canonical = if trimmed.is_empty() || trimmed == "." {
+            "/".to_owned()
+        } else {
+            format!("/{trimmed}")
+        };
+        Ok(Name {
+            id,
+            files: vec![File::dummy(canonical)],
+        })
+    }
+
+    async fn rename(
+        &mut self,
+        id: u32,
+        oldpath: String,
+        newpath: String,
+    ) -> Result<Status, Self::Error> {
+        if self.read_only {
+            return Err(StatusCode::Failure);
+        }
+        fs::rename(self.resolve(&oldpath), self.resolve(&newpath))
+            .map_err(|_| StatusCode::Failure)?;
+        Ok(Self::ok(id))
     }
 }
 

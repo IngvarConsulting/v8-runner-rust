@@ -2,7 +2,8 @@
 //!
 //! Файлы агент пишет только в настоящий подкаталог своего каталога пользователя —
 //! через символическую ссылку он их не видит (замер 15.09.2026), поэтому результат
-//! сначала появляется там и лишь потом переносится в стадию публикации семейства.
+//! сначала появляется там и лишь потом забирается каналом обмена в стадию
+//! публикации семейства.
 
 use std::path::Path;
 
@@ -11,10 +12,9 @@ use crate::domain::infobase_export::ConfigurationState;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
-use crate::support::fs::move_file;
 use crate::use_cases::agent_session::{
-    argument, connect, expose_file, output_dir, platform_result, run_command, run_id,
-    tidy_run_path, transcript_log, wait_policy,
+    argument, collect_file, connect, make_output_dir, platform_result, run_command, run_id,
+    stage_file, tidy, tidy_run_path, transcript_log, wait_policy, AgentHandle, Exchange,
 };
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::progress::log_live_stage;
@@ -44,9 +44,9 @@ pub(super) fn export_configuration(
         config,
         v8,
         "infobase-export",
-        |handle, wait, user_dir| {
+        |handle, wait, exchange| {
             let out = format!("export/{}", run_id());
-            output_dir(user_dir, &out)?;
+            make_output_dir(handle, exchange, &out)?;
             let relative = format!("{out}/{name}");
             command.push_str(&format!(" --file={}", argument(&relative)));
             if let Some(extension) = extension {
@@ -60,8 +60,8 @@ pub(super) fn export_configuration(
             let staged = reply
                 .as_ref()
                 .ok()
-                .map(|_| take_produced(&user_dir.join(&relative), staging_path));
-            tidy_run_path(user_dir, &out);
+                .map(|_| collect_file(handle, exchange, &relative, staging_path));
+            tidy(handle, exchange, &out);
             let reply = reply?;
             staged.transpose()?;
             Ok(reply.transcript())
@@ -81,9 +81,9 @@ pub(super) fn export_snapshot(
         config,
         v8,
         "infobase-dump",
-        |handle, wait, user_dir| {
+        |handle, wait, exchange| {
             let out = format!("export/{}", run_id());
-            output_dir(user_dir, &out)?;
+            make_output_dir(handle, exchange, &out)?;
             let relative = format!("{out}/infobase.dt");
             log_live_stage(
                 "infobase dump: agent",
@@ -97,8 +97,8 @@ pub(super) fn export_snapshot(
             let staged = reply
                 .as_ref()
                 .ok()
-                .map(|_| take_produced(&user_dir.join(&relative), staging_path));
-            tidy_run_path(user_dir, &out);
+                .map(|_| collect_file(handle, exchange, &relative, staging_path));
+            tidy(handle, exchange, &out);
             let reply = reply?;
             staged.transpose()?;
             Ok(reply.transcript())
@@ -119,9 +119,9 @@ pub(super) fn restore_snapshot(
         config,
         v8,
         "infobase-restore",
-        |handle, wait, user_dir| {
+        |handle, wait, exchange| {
             let relative = format!("restore/{}.dt", run_id());
-            expose_file(user_dir, &relative, source_file)?;
+            stage_file(handle, exchange, &relative, source_file)?;
             log_live_stage(
                 "infobase restore: agent",
                 "[агент] restoring infobase snapshot",
@@ -131,25 +131,14 @@ pub(super) fn restore_snapshot(
                 &format!("infobase-tools restore-ib --file={}", argument(&relative)),
                 wait,
             );
-            tidy_run_path(user_dir, &relative);
+            // После загрузки сессии уже нет: убрать копию DT по SFTP не выйдет, а из
+            // каталога — можно.
+            if let Exchange::Dir(user_dir) = exchange {
+                tidy_run_path(user_dir, &relative);
+            }
             Ok(outcome?.transcript())
         },
     )
-}
-
-fn take_produced(produced: &Path, staging_path: &Path) -> Result<(), AppError> {
-    if !produced.is_file() {
-        return Err(AppError::Platform(format!(
-            "agent reported success but wrote no file at '{}'",
-            produced.display()
-        )));
-    }
-    move_file(produced, staging_path).map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to stage the agent's file '{}': {error}",
-            produced.display()
-        ))
-    })
 }
 
 /// Одна сессия на операцию: открыть, выполнить, закрыть — и при отказе тоже.
@@ -159,9 +148,9 @@ fn with_session(
     v8: Option<&Path>,
     log_name: &str,
     work: impl FnOnce(
-        &mut crate::use_cases::agent_session::AgentHandle,
+        &mut AgentHandle,
         &crate::platform::agent::WaitPolicy,
-        &Path,
+        &Exchange,
     ) -> Result<String, AppError>,
 ) -> Result<PlatformCommandResult, AppError> {
     let wait = wait_policy(context);
@@ -169,8 +158,8 @@ fn with_session(
     let mut utilities = PlatformUtilities::from_config(config);
     let mut handle = connect(config, &mut utilities, v8, log.clone(), &wait)?;
     let outcome = handle
-        .user_dir(config)
-        .and_then(|user_dir| work(&mut handle, &wait, &user_dir));
+        .exchange(config)
+        .and_then(|exchange| work(&mut handle, &wait, &exchange));
     handle.finish(&wait);
     outcome.map(|transcript| platform_result(transcript, log))
 }

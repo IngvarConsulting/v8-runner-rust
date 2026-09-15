@@ -545,18 +545,30 @@ struct InfobaseSchema {
 struct InfobaseStandaloneSchema {
     /// `host:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`, port 1543 by default).
     gate: String,
-    /// How files travel between the runner and the gate user's directory.
+    /// How files travel between the runner and the gate user's directory: `sftp` through
+    /// the gate, or `{ dir: … }` — that directory as the runner sees it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     exchange: Option<InfobaseStandaloneExchangeSchema>,
 }
 
 /// The declared file channel to a standalone server.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields, rename_all = "kebab-case")]
-struct InfobaseStandaloneExchangeSchema {
+#[serde(untagged)]
+enum InfobaseStandaloneExchangeSchema {
+    /// A named channel: `sftp` — the SFTP subsystem of the gate's SSH connection.
+    Named(InfobaseStandaloneExchangeChannelSchema),
     /// The gate user's directory (`<users-data>/<user>` of `ibsrv`) as the runner sees it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    dir: Option<PathBuf>,
+    Dir {
+        /// The gate user's directory as the runner sees it.
+        dir: PathBuf,
+    },
+}
+
+/// Named exchange channels.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum InfobaseStandaloneExchangeChannelSchema {
+    Sftp,
 }
 
 /// Web server a publication is written to.

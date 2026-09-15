@@ -13,8 +13,9 @@ use crate::platform::locator::UtilityLocation;
 use crate::platform::process::ProcessResult;
 use crate::support::fs::move_dir;
 use crate::use_cases::agent_session::{
-    argument, connect, expose_dir, generation_id, map_agent_error, run_id, tidy_run_path,
-    transcript_log, wait_policy, withdraw_dir, AgentHandle, GenerationLedger,
+    argument, collect_dir, collect_into_dir, connect, expose_dir, generation_id, make_output_dir,
+    map_agent_error, run_id, stage_file, tidy, transcript_log, wait_policy, withdraw_dir,
+    write_text, AgentHandle, Exchange, GenerationLedger,
 };
 
 /// Выгрузка одного режима через одну сессию.
@@ -68,7 +69,7 @@ fn dump_through(
     handle: &mut AgentHandle,
     wait: &WaitPolicy,
 ) -> Result<(String, Option<String>, bool), AppError> {
-    let user_dir = handle.user_dir(config)?;
+    let exchange = handle.exchange(config)?;
     let extension = resolved.extension.as_deref();
     let ledger = GenerationLedger::new(config);
 
@@ -99,6 +100,7 @@ fn dump_through(
     let (transcript, cleanup) = match mode {
         DumpMode::Full => {
             let out_relative = format!("dump/{run}");
+            make_output_dir(handle, &exchange, &out_relative)?;
             let command = with_extension(
                 format!(
                     "config dump-config-to-files --dir={}",
@@ -107,38 +109,81 @@ fn dump_through(
                 extension,
             );
             log_live_stage(stage, "[агент] exporting configuration files");
-            let transcript = run_command(handle, &command, wait)?;
-            let produced = user_dir.join(&out_relative);
-            if !produced.is_dir() {
-                return Err(AppError::Platform(format!(
-                    "agent reported success but wrote nothing into '{}'",
-                    produced.display()
-                )));
-            }
+            let transcript = run_command(handle, &command, wait);
+            // Результат забирается к раннеру под workPath и уже оттуда публикуется
+            // ступенчато; на стороне точки входа следа не остаётся.
+            let produced = config.work_path.join("agent").join("exchange").join(&run);
+            let collected = transcript
+                .as_ref()
+                .ok()
+                .map(|_| collect_dir(handle, &exchange, &out_relative, &produced));
+            tidy(handle, &exchange, &out_relative);
+            let transcript = transcript?;
+            collected.transpose()?;
             let cleanup = publish_full(context, resolved, &produced);
-            tidy_run_path(&user_dir, &out_relative);
+            let _ = std::fs::remove_dir(produced.parent().unwrap_or(&produced));
             (transcript, cleanup?)
         }
         DumpMode::Incremental => {
             ensure_dir(&resolved.platform_target_path).map_err(|error| {
                 AppError::Runtime(format!("failed to create target dir: {error}"))
             })?;
-            let target = expose_dir(
-                &user_dir,
-                &format!("target/{run}"),
-                &resolved.platform_target_path,
-            )?;
-            let command = with_extension(
-                format!(
-                    "config dump-config-to-files --dir={} --update",
-                    argument(&target)
-                ),
-                extension,
-            );
-            log_live_stage(stage, "[агент] exporting configuration files");
-            let outcome = run_command(handle, &command, wait);
-            withdraw_dir(&user_dir, &target);
-            (outcome?, None)
+            let target_relative = format!("target/{run}");
+            match &exchange {
+                // Каталог точки входа виден раннеру: цель выставляется ссылкой и
+                // обновляется на месте, как у пакетного Конфигуратора.
+                Exchange::Dir(user_dir) => {
+                    let target =
+                        expose_dir(user_dir, &target_relative, &resolved.platform_target_path)?;
+                    let command = with_extension(
+                        format!(
+                            "config dump-config-to-files --dir={} --update",
+                            argument(&target)
+                        ),
+                        extension,
+                    );
+                    log_live_stage(stage, "[агент] exporting configuration files");
+                    let outcome = run_command(handle, &command, wait);
+                    withdraw_dir(user_dir, &target);
+                    (outcome?, None)
+                }
+                // По сети цель целиком не возится: точке входа хватает описи выгрузки
+                // (`ConfigDumpInfo.xml`), чтобы выгрузить только изменённое; обратно
+                // приходят изменённые файлы и новая опись, поверх локальной цели.
+                Exchange::Sftp => {
+                    make_output_dir(handle, &exchange, &target_relative)?;
+                    let dump_info = resolved.platform_target_path.join("ConfigDumpInfo.xml");
+                    if dump_info.is_file() {
+                        stage_file(
+                            handle,
+                            &exchange,
+                            &format!("{target_relative}/ConfigDumpInfo.xml"),
+                            &dump_info,
+                        )?;
+                    }
+                    let command = with_extension(
+                        format!(
+                            "config dump-config-to-files --dir={} --update",
+                            argument(&target_relative)
+                        ),
+                        extension,
+                    );
+                    log_live_stage(stage, "[агент] exporting changed configuration files");
+                    let outcome = run_command(handle, &command, wait);
+                    let collected = outcome.as_ref().ok().map(|_| {
+                        collect_into_dir(
+                            handle,
+                            &exchange,
+                            &target_relative,
+                            &resolved.platform_target_path,
+                        )
+                    });
+                    tidy(handle, &exchange, &target_relative);
+                    let transcript = outcome?;
+                    collected.transpose()?;
+                    (transcript, None)
+                }
+            }
         }
         DumpMode::Partial => {
             let objects = objects.ok_or_else(|| {
@@ -150,37 +195,54 @@ fn dump_through(
                 AppError::Runtime(format!("failed to create target dir: {error}"))
             })?;
             let list_relative = format!("dump-lists/{run}.txt");
-            let list_path = user_dir.join(&list_relative);
-            ensure_dir(list_path.parent().unwrap_or(&user_dir)).map_err(|error| {
-                AppError::Runtime(format!("failed to create agent list dir: {error}"))
-            })?;
-            std::fs::write(
-                &list_path,
-                objects
-                    .iter()
-                    .map(|object| format!("{}\n", object.normalized()))
-                    .collect::<String>(),
-            )
-            .map_err(|error| {
-                AppError::Runtime(format!("failed to write partial dump list: {error}"))
-            })?;
-            let target = expose_dir(
-                &user_dir,
-                &format!("target/{run}"),
-                &resolved.platform_target_path,
-            )?;
-            let command = with_extension(
-                format!(
-                    "config dump-config-to-files --dir={} --list-file={}",
-                    argument(&target),
-                    argument(&list_relative)
-                ),
-                extension,
-            );
-            log_live_stage(stage, "[агент] exporting selected configuration objects");
-            let outcome = run_command(handle, &command, wait);
-            withdraw_dir(&user_dir, &target);
-            let _ = std::fs::remove_file(&list_path);
+            let list = objects
+                .iter()
+                .map(|object| format!("{}\n", object.normalized()))
+                .collect::<String>();
+            write_text(handle, &exchange, &list_relative, &list)?;
+            let target_relative = format!("target/{run}");
+            let outcome = match &exchange {
+                Exchange::Dir(user_dir) => {
+                    let target =
+                        expose_dir(user_dir, &target_relative, &resolved.platform_target_path)?;
+                    let command = with_extension(
+                        format!(
+                            "config dump-config-to-files --dir={} --list-file={}",
+                            argument(&target),
+                            argument(&list_relative)
+                        ),
+                        extension,
+                    );
+                    log_live_stage(stage, "[агент] exporting selected configuration objects");
+                    let outcome = run_command(handle, &command, wait);
+                    withdraw_dir(user_dir, &target);
+                    outcome
+                }
+                Exchange::Sftp => {
+                    make_output_dir(handle, &exchange, &target_relative)?;
+                    let command = with_extension(
+                        format!(
+                            "config dump-config-to-files --dir={} --list-file={}",
+                            argument(&target_relative),
+                            argument(&list_relative)
+                        ),
+                        extension,
+                    );
+                    log_live_stage(stage, "[агент] exporting selected configuration objects");
+                    let outcome = run_command(handle, &command, wait);
+                    let collected = outcome.as_ref().ok().map(|_| {
+                        collect_into_dir(
+                            handle,
+                            &exchange,
+                            &target_relative,
+                            &resolved.platform_target_path,
+                        )
+                    });
+                    tidy(handle, &exchange, &target_relative);
+                    collected.transpose().and(outcome)
+                }
+            };
+            tidy(handle, &exchange, &list_relative);
             (outcome?, None)
         }
     };

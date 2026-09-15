@@ -12,8 +12,8 @@ use super::*;
 use crate::platform::agent::WaitPolicy;
 use crate::platform::locator::UtilityLocation;
 use crate::use_cases::agent_session::{
-    argument, connect, expose_dir, generation_id, map_agent_error, run_id, tidy_run_path,
-    transcript_log, wait_policy, withdraw_dir, AgentHandle, GenerationLedger,
+    argument, connect, generation_id, map_agent_error, run_id, stage_dir, tidy, transcript_log,
+    unstage, wait_policy, write_bytes, AgentHandle, Exchange, GenerationLedger,
 };
 
 pub(super) struct AgentLoader {
@@ -100,26 +100,31 @@ impl SourceSetLoader for AgentLoader {
         }
         let run = self.run.clone();
         let (handle, wait) = self.handle(context, config)?;
-        let user_dir = handle.user_dir(config)?;
-        let exposed = expose_dir(
-            &user_dir,
-            &format!("build/{run}/{step_index:02}-{}", source_set.name),
-            source_context.path(),
-        )?;
+        let exchange = handle.exchange(config)?;
+        let relative = format!("build/{run}/{step_index:02}-{}", source_set.name);
+        // Недоставленные исходники (канал отверг запись) не оставляют на стороне точки
+        // входа и половины каталога.
+        let exposed = match stage_dir(handle, &exchange, &relative, source_context.path()) {
+            Ok(exposed) => exposed,
+            Err(error) => {
+                unstage(handle, &exchange, &relative);
+                return Err(error);
+            }
+        };
         let extension = extension_name(source_set);
 
         let outcome = load_and_update(
             context,
             handle,
             &wait,
-            &user_dir,
+            &exchange,
             &exposed,
             source_set,
             source_context,
             extension,
             partial_paths,
         );
-        withdraw_dir(&user_dir, &exposed);
+        unstage(handle, &exchange, &exposed);
         outcome?;
 
         commit_step_state(source_set, source_context, &config.work_path, commit)?;
@@ -148,7 +153,7 @@ fn load_and_update(
     context: &ExecutionContext,
     handle: &mut AgentHandle,
     wait: &WaitPolicy,
-    user_dir: &Path,
+    exchange: &Exchange,
     exposed: &str,
     source_set: &SourceSetConfig,
     source_context: &SourceSetContext,
@@ -164,10 +169,11 @@ fn load_and_update(
         // лежит в каталоге пользователя агента; пути в нём — относительно каталога
         // загрузки.
         let list_relative = format!("{exposed}.list.txt");
-        let list_path = user_dir.join(&list_relative);
-        partial_load::write_list_file(paths, source_context.path(), &list_path).map_err(
-            |error| AppError::Runtime(format!("failed to write partial load list: {error}")),
-        )?;
+        let list =
+            partial_load::list_file_bytes(paths, source_context.path()).map_err(|error| {
+                AppError::Runtime(format!("failed to write partial load list: {error}"))
+            })?;
+        write_bytes(handle, exchange, &list_relative, &list)?;
         load.push_str(&format!(
             " --partial --list-file={}",
             argument(&list_relative)
@@ -193,7 +199,7 @@ fn load_and_update(
     }
     let loaded = run_command(handle, &load, wait);
     if partial_paths.is_some() {
-        tidy_run_path(user_dir, &format!("{exposed}.list.txt"));
+        tidy(handle, exchange, &format!("{exposed}.list.txt"));
     }
     loaded?;
 

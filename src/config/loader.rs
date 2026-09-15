@@ -264,12 +264,11 @@ fn normalize_config_paths(config: &mut AppConfig, config_dir: &Path) {
     if let Some(path) = config.tools.va.epf_path.as_mut() {
         *path = normalize_optional_path(path, config_dir);
     }
-    if let Some(dir) = config
+    if let Some(crate::config::model::StandaloneExchangeConfig::Dir { dir }) = config
         .infobase
         .standalone
         .as_mut()
         .and_then(|standalone| standalone.exchange.as_mut())
-        .and_then(|exchange| exchange.dir.as_mut())
     {
         *dir = normalize_optional_path(dir, config_dir);
     }
