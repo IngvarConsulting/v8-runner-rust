@@ -1,3 +1,5 @@
+/// Agent entry point shared by the scenarios that talk to the Designer agent.
+pub(crate) mod agent_session;
 /// Artifact export orchestration use case.
 pub mod artifacts;
 /// Bootstrap project from an existing infobase.

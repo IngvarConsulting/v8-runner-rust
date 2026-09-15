@@ -381,6 +381,7 @@ pub(super) fn empty_result(
     DumpResult {
         provider: None,
         provider_dispatched: true,
+        up_to_date: false,
         ok: false,
         source_set,
         extension,

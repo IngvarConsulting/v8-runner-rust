@@ -203,6 +203,11 @@
     },
     "target_path": {
       "type": "string"
+    },
+    "up_to_date": {
+      "default": false,
+      "description": "`true` when the platform reported the configuration generation unchanged since the\nlast recorded build or dump and nothing was dumped.",
+      "type": "boolean"
     }
   },
   "required": [

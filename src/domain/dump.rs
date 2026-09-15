@@ -10,6 +10,10 @@ pub struct DumpResult {
     pub ok: bool,
     /// `false` when the run stopped at a preview instead of dispatching the platform.
     pub provider_dispatched: bool,
+    /// `true` when the platform reported the configuration generation unchanged since the
+    /// last recorded build or dump and nothing was dumped.
+    #[serde(default)]
+    pub up_to_date: bool,
     pub source_set: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extension: Option<String>,

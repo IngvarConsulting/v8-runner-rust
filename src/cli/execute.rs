@@ -3492,10 +3492,11 @@ fn test_has_actionable_success_signal(result: &TestRunResult) -> bool {
 }
 
 fn dump_has_warning(result: &DumpResult) -> bool {
-    result
-        .message
-        .as_deref()
-        .is_some_and(|message| message != "dump completed successfully")
+    !result.up_to_date
+        && result
+            .message
+            .as_deref()
+            .is_some_and(|message| message != "dump completed successfully")
 }
 
 fn execution_has_warning(
@@ -3638,6 +3639,8 @@ fn render_dump_text(result: &DumpResult, presenter: &Presenter, succeeded: bool)
     let warning = succeeded && dump_has_warning(result);
     let label = if !succeeded {
         "Dump failed"
+    } else if result.up_to_date {
+        "Dump skipped: configuration unchanged"
     } else if warning {
         "Dump completed with warnings"
     } else {
@@ -3650,6 +3653,15 @@ fn render_dump_text(result: &DumpResult, presenter: &Presenter, succeeded: bool)
     ];
     if let Some(extension) = result.extension.as_deref() {
         details.push(format!("extension: {extension}"));
+    }
+    if succeeded && result.up_to_date {
+        append_if_present(
+            &mut details,
+            result
+                .message
+                .as_deref()
+                .map(|message| bracketed_detail("note", message)),
+        );
     }
     if !succeeded || warning {
         let prefix = if succeeded { "warning" } else { "error" };

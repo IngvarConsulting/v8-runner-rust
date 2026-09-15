@@ -1,11 +1,12 @@
 ---
 id: DEC.2026-09-14.PLATFORM-ANSWERS-WHETHER-THE-BASE-CHANGED
-status: planned
+status: active
 governs: product
-realized: null
+realized: tests/cli_dump_agent.rs::an_unchanged_generation_is_not_dumped_twice
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [INV.USE-CASES.AN-UNCHANGED-GENERATION-IS-NOT-DUMPED, CTR.WIRE.DUMP-DATA]
+changes: [CTR.WIRE.DUMP-DATA]
 ---
 
 # Менялась ли база, спрашиваем у платформы
