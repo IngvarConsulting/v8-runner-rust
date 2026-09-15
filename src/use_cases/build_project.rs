@@ -6,8 +6,9 @@ use std::time::Instant;
 
 use crate::change_detection::analyzer::{self, AnalysisOutcome};
 use crate::change_detection::partial_load;
-use crate::config::model::{AppConfig, BuilderBackend, SourceFormat, SourceSetConfig};
+use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig};
 use crate::domain::build::{BuildMode, BuildResult};
+use crate::domain::capability::{Operation, Provider};
 use crate::domain::source_set::SourceSetContext;
 use crate::platform::edt::EdtDsl;
 use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
@@ -46,9 +47,9 @@ use self::helpers::{
 #[cfg(test)]
 const BUILD_COMMAND: &str = crate::use_cases::context::CommandName::Build.as_str();
 const SUPPORTED_DESIGNER_BUILD_ERROR: &str =
-    "build currently supports only builder=DESIGNER or IBCMD with format=DESIGNER";
+    "build currently supports only the Designer or ibcmd provider with format=DESIGNER";
 const SUPPORTED_EDT_BUILD_ERROR: &str =
-    "build with format=EDT currently supports only builder=DESIGNER or IBCMD";
+    "build with format=EDT currently supports only the Designer or ibcmd provider";
 
 pub fn execute(
     context: &ExecutionContext,
@@ -116,9 +117,18 @@ fn run_build_branch(
         ));
     }
 
-    match config.builder {
-        BuilderBackend::Designer => run_build_designer(context, config, args),
-        BuilderBackend::Ibcmd => run_build_ibcmd(context, config, args),
+    match config.selected_provider(Operation::Build) {
+        Provider::Designer => run_build_designer(context, config, args),
+        Provider::Ibcmd => run_build_ibcmd(context, config, args),
+        other => Err(BuildExecutionFailure::with_payload(
+            crate::use_cases::unimplemented_provider(Operation::Build, other),
+            BuildResult {
+                provider_dispatched: false,
+                ok: false,
+                steps: vec![],
+                duration_ms: 0,
+            },
+        )),
     }
 }
 
@@ -147,8 +157,8 @@ fn run_build_ibcmd(
 fn validate_designer_supported_matrix(config: &AppConfig) -> Option<AppError> {
     if config.format == SourceFormat::Designer
         && matches!(
-            config.builder,
-            BuilderBackend::Designer | BuilderBackend::Ibcmd
+            config.selected_provider(Operation::Build),
+            Provider::Designer | Provider::Ibcmd
         )
     {
         None
@@ -162,8 +172,8 @@ fn validate_designer_supported_matrix(config: &AppConfig) -> Option<AppError> {
 fn validate_edt_supported_matrix(config: &AppConfig) -> Option<AppError> {
     if config.format == SourceFormat::Edt
         && matches!(
-            config.builder,
-            BuilderBackend::Designer | BuilderBackend::Ibcmd
+            config.selected_provider(Operation::Build),
+            Provider::Designer | Provider::Ibcmd
         )
     {
         None
@@ -726,7 +736,7 @@ mod tests {
     use crate::change_detection::hash_storage::{HashStorage, FILES_MTIME};
     use crate::change_detection::source_sets::SourceSetsService;
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, PlatformToolConfig, SourceFormat, SourceSetConfig,
+        AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
         SourceSetPurpose, TestsConfig, ToolExtensionArtifactConfig, ToolExtensionConfig,
         ToolExtensionInput, ToolExtensionSourceConfig, ToolsConfig,
     };
@@ -912,14 +922,18 @@ mod tests {
         platform_path: &Path,
         threshold: usize,
         format: SourceFormat,
-        builder: BuilderBackend,
+        providers: std::collections::BTreeMap<
+            crate::domain::capability::Operation,
+            crate::domain::capability::Provider,
+        >,
     ) -> AppConfig {
         AppConfig {
             base_path: base_path.to_path_buf(),
             work_path: work_path.to_path_buf(),
             execution_timeout: 300_000,
             format,
-            builder,
+            providers,
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![
                 SourceSetConfig {
@@ -960,7 +974,8 @@ mod tests {
             work_path: work_path.to_path_buf(),
             execution_timeout: 300_000,
             format: SourceFormat::Edt,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![
                 SourceSetConfig {
@@ -1023,7 +1038,7 @@ mod tests {
             &platform,
             20,
             SourceFormat::Designer,
-            BuilderBackend::Designer,
+            Default::default(),
         );
         let cancellation = CancellationToken::new();
         cancellation.cancel();
@@ -1081,7 +1096,7 @@ mod tests {
             &ibcmd,
             20,
             SourceFormat::Designer,
-            BuilderBackend::Ibcmd,
+            crate::domain::capability::ibcmd_for_every_choice(),
         );
         let cancellation = CancellationToken::new();
         let delayed_cancel = cancellation.clone();
@@ -1390,7 +1405,7 @@ mod tests {
             &script,
             20,
             SourceFormat::Designer,
-            BuilderBackend::Ibcmd,
+            crate::domain::capability::ibcmd_for_every_choice(),
         );
         let result = run_build(&config, &build_args(true)).expect("build");
 
@@ -1418,7 +1433,7 @@ mod tests {
             &dir.path().join("platform"),
             20,
             SourceFormat::Designer,
-            BuilderBackend::Designer,
+            Default::default(),
         );
         config.source_sets = vec![SourceSetConfig {
             name: "main".to_owned(),
@@ -1893,7 +1908,7 @@ mod tests {
             &script,
             20,
             SourceFormat::Designer,
-            BuilderBackend::Ibcmd,
+            crate::domain::capability::ibcmd_for_every_choice(),
         );
         config.infobase = crate::config::model::InfobaseConfig::server(
             "Srvr=cluster:1541;Ref=demo",
@@ -1931,7 +1946,7 @@ mod tests {
             &script,
             20,
             SourceFormat::Designer,
-            BuilderBackend::Ibcmd,
+            crate::domain::capability::ibcmd_for_every_choice(),
         );
         prime_snapshots(&config);
         let generation_before = storage_generation(&config, "main");
@@ -2032,7 +2047,7 @@ mod tests {
         write_ibcmd_script(&ibcmd_script, &ibcmd_calls, None);
         write_edt_script(&edt_script, &edt_calls, None);
         let mut config = build_edt_config(&base, &work, &ibcmd_script, &edt_script);
-        config.builder = BuilderBackend::Ibcmd;
+        config.providers = crate::domain::capability::ibcmd_for_every_choice();
         prime_edt_snapshots(&config);
 
         fs::write(
@@ -2257,7 +2272,7 @@ mod tests {
         write_edt_script(&edt_script, &edt_calls, None);
 
         let mut config = build_edt_config(&base, &work, &ibcmd_script, &edt_script);
-        config.builder = BuilderBackend::Ibcmd;
+        config.providers = crate::domain::capability::ibcmd_for_every_choice();
         config.source_sets = vec![SourceSetConfig {
             name: "client_mcp".to_owned(),
             purpose: SourceSetPurpose::Extension,
@@ -2611,7 +2626,7 @@ mod tests {
             &script,
             20,
             SourceFormat::Designer,
-            BuilderBackend::Designer,
+            Default::default(),
         );
         prime_snapshots(&config);
 
@@ -2642,7 +2657,7 @@ mod tests {
             &script,
             20,
             SourceFormat::Designer,
-            BuilderBackend::Designer,
+            Default::default(),
         );
         prime_snapshots(&config);
 
@@ -2685,7 +2700,7 @@ mod tests {
             &script,
             20,
             SourceFormat::Designer,
-            BuilderBackend::Designer,
+            Default::default(),
         );
         prime_snapshots(&config);
 
@@ -2738,7 +2753,7 @@ mod tests {
             &script,
             20,
             SourceFormat::Designer,
-            BuilderBackend::Designer,
+            Default::default(),
         );
         prime_snapshots(&config);
 
@@ -2810,7 +2825,7 @@ mod tests {
             &script,
             20,
             SourceFormat::Designer,
-            BuilderBackend::Designer,
+            Default::default(),
         );
         prime_snapshots(&config);
 
@@ -2846,7 +2861,7 @@ mod tests {
             &script,
             20,
             SourceFormat::Designer,
-            BuilderBackend::Designer,
+            Default::default(),
         );
         prime_snapshots(&config);
 
@@ -2899,7 +2914,7 @@ mod tests {
             &script,
             20,
             SourceFormat::Designer,
-            BuilderBackend::Designer,
+            Default::default(),
         );
         config.tools.client_mcp.extension = Some(ToolExtensionConfig {
             name: "client_mcp".to_owned(),
@@ -2951,7 +2966,7 @@ mod tests {
             &script,
             20,
             SourceFormat::Designer,
-            BuilderBackend::Designer,
+            Default::default(),
         );
 
         let failure = run_build(
@@ -2985,7 +3000,7 @@ mod tests {
             &script,
             20,
             SourceFormat::Designer,
-            BuilderBackend::Designer,
+            Default::default(),
         );
         prime_snapshots(&config);
 
@@ -3022,7 +3037,7 @@ mod tests {
             &script,
             20,
             SourceFormat::Designer,
-            BuilderBackend::Designer,
+            Default::default(),
         );
         prime_snapshots(&config);
 
@@ -3059,7 +3074,7 @@ mod tests {
             &script,
             20,
             SourceFormat::Designer,
-            BuilderBackend::Designer,
+            Default::default(),
         );
         prime_snapshots(&config);
 

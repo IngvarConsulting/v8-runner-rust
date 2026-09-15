@@ -426,6 +426,134 @@
       },
       "type": "object"
     },
+    "ProviderSchema": {
+      "description": "Executors the runner can dispatch to. Names say who does the work, not how it is started.",
+      "enum": [
+        "designer",
+        "agent",
+        "ibcmd",
+        "ibcmd-rs",
+        "webinst"
+      ],
+      "type": "string"
+    },
+    "ProvidersSchema": {
+      "additionalProperties": false,
+      "description": "One optional override per operation that has a choice of executor.",
+      "properties": {
+        "build": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `build`."
+        },
+        "dump": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `dump`."
+        },
+        "extensions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `extensions`."
+        },
+        "infobase.configuration.export": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `infobase configuration export`."
+        },
+        "infobase.dump": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `infobase dump`."
+        },
+        "infobase.restore": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `infobase restore`."
+        },
+        "init": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `init`."
+        },
+        "load": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `load`."
+        },
+        "make": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `make`."
+        },
+        "syntax": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `syntax`."
+        }
+      },
+      "type": "object"
+    },
     "SourceFormatSchema": {
       "enum": [
         "DESIGNER",
@@ -578,6 +706,10 @@
     "mcp": {
       "$ref": "#/$defs/McpSchema",
       "description": "Machine-local MCP runtime overrides."
+    },
+    "providers": {
+      "$ref": "#/$defs/ProvidersSchema",
+      "description": "Machine-local executor overrides for an experiment or a workaround."
     },
     "tests": {
       "$ref": "#/$defs/TestsSchema",

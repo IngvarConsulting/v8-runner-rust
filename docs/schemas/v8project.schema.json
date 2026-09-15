@@ -12,13 +12,6 @@
       },
       "type": "object"
     },
-    "BuilderBackendSchema": {
-      "enum": [
-        "DESIGNER",
-        "IBCMD"
-      ],
-      "type": "string"
-    },
     "ClientMcpToolSchema": {
       "additionalProperties": false,
       "properties": {
@@ -304,6 +297,134 @@
             "string",
             "null"
           ]
+        }
+      },
+      "type": "object"
+    },
+    "ProviderSchema": {
+      "description": "Executors the runner can dispatch to. Names say who does the work, not how it is started.",
+      "enum": [
+        "designer",
+        "agent",
+        "ibcmd",
+        "ibcmd-rs",
+        "webinst"
+      ],
+      "type": "string"
+    },
+    "ProvidersSchema": {
+      "additionalProperties": false,
+      "description": "One optional override per operation that has a choice of executor.",
+      "properties": {
+        "build": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `build`."
+        },
+        "dump": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `dump`."
+        },
+        "extensions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `extensions`."
+        },
+        "infobase.configuration.export": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `infobase configuration export`."
+        },
+        "infobase.dump": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `infobase dump`."
+        },
+        "infobase.restore": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `infobase restore`."
+        },
+        "init": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `init`."
+        },
+        "load": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `load`."
+        },
+        "make": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `make`."
+        },
+        "syntax": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `syntax`."
         }
       },
       "type": "object"
@@ -616,10 +737,6 @@
       "$ref": "#/$defs/BuildSchema",
       "description": "Build pipeline settings."
     },
-    "builder": {
-      "$ref": "#/$defs/BuilderBackendSchema",
-      "description": "Backend used for build/load operations."
-    },
     "execution_timeout": {
       "description": "Global execution budget for public CLI and MCP commands in milliseconds.",
       "format": "uint64",
@@ -638,6 +755,10 @@
     "mcp": {
       "$ref": "#/$defs/McpSchema",
       "description": "MCP server transport and execution settings."
+    },
+    "providers": {
+      "$ref": "#/$defs/ProvidersSchema",
+      "description": "Per-operation executor overrides. A missing key means the default chain from the\ncapability matrix; a present key means exactly that provider and no fallback."
     },
     "source-set": {
       "default": [],

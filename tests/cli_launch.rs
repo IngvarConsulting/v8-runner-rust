@@ -343,7 +343,7 @@ fn write_config(
     platform_version: Option<&str>,
 ) {
     let mut config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         platform_path.display(),
     );
@@ -469,7 +469,7 @@ fn setup_mcp_va_project_with_options(
         )
     };
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\ntests:\n  va:\n    params_path: '{}'\n    profile: smoke\n    profiles:\n      smoke:\n        feature_path: '{}'\n        features_to_run:\n          - login\n        filter_tags:\n          - '@smoke'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  client_mcp:\n    port: 9874\n  va:\n    epf_path: '{}'\n  platform:\n    path: '{}'\n{}",
+        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\ntests:\n  va:\n    params_path: '{}'\n    profile: smoke\n    profiles:\n      smoke:\n        feature_path: '{}'\n        features_to_run:\n          - login\n        filter_tags:\n          - '@smoke'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  client_mcp:\n    port: 9874\n  va:\n    epf_path: '{}'\n  platform:\n    path: '{}'\n{}",
         work_path.display(),
         va_params.display(),
         features_dir.display(),

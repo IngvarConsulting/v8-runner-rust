@@ -196,10 +196,6 @@ pub struct ConfigInitArgs {
     /// Source format to write
     #[arg(long, default_value = "auto", value_parser = ["auto", "designer", "edt"])]
     pub format: String,
-
-    /// Builder backend to write
-    #[arg(long, default_value = "DESIGNER", value_parser = ["DESIGNER", "IBCMD", "designer", "ibcmd"])]
-    pub builder: String,
 }
 
 #[derive(Args, Debug)]

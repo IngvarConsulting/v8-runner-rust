@@ -3,9 +3,10 @@ use std::time::Instant;
 
 use tracing::debug;
 
-use crate::config::model::{AppConfig, BuilderBackend, SourceFormat};
+use crate::config::model::{AppConfig, SourceFormat};
 use crate::domain::artifact::{ArtifactKind, ArtifactRef, ArtifactSet, ARTIFACT_ROLE_PLATFORM_LOG};
 use crate::domain::artifacts::ArtifactBuildMode;
+use crate::domain::capability::{Operation, Provider};
 use crate::domain::execution::{ExecutionError, ExecutionOutcome, ExecutionStatus};
 use crate::domain::load::{
     CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
@@ -31,7 +32,7 @@ use crate::use_cases::request::LoadRequest;
 use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
 
 const SUPPORTED_LOAD_ERROR: &str =
-    "load currently supports only builder=DESIGNER and format=DESIGNER";
+    "load currently supports only the Designer provider and format=DESIGNER";
 const UNSUPPORTED_EXTERNAL_ARTIFACTS_ERROR: &str =
     "load currently supports only .cf and .cfe artifacts";
 const UNSUPPORTED_UPDATE_MODE_ERROR: &str =
@@ -737,7 +738,9 @@ fn validate_probe_mode_compatibility(
 }
 
 fn validate_supported_matrix(config: &AppConfig) -> Option<AppError> {
-    if config.builder == BuilderBackend::Designer && config.format == SourceFormat::Designer {
+    if config.selected_provider(Operation::Load) == Provider::Designer
+        && config.format == SourceFormat::Designer
+    {
         None
     } else {
         Some(AppError::Validation(SUPPORTED_LOAD_ERROR.to_owned()))
@@ -1084,8 +1087,7 @@ fn with_platform_log_artifact(
 mod tests {
     use super::{execute, resolve_request, ResolvedLoadRequest};
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, PlatformToolConfig, SourceFormat, TestsConfig,
-        ToolsConfig,
+        AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, TestsConfig, ToolsConfig,
     };
     use crate::domain::artifacts::ArtifactBuildMode;
     use crate::domain::execution::ExecutionStatus;
@@ -1367,7 +1369,8 @@ mod tests {
             work_path: root.join("work"),
             execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![],
             build: BuildConfig::default(),
@@ -1642,7 +1645,13 @@ mod tests {
         let root = dir.path();
         fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
         let mut config = sample_config(root, &root.join("1cv8"));
-        config.builder = BuilderBackend::Ibcmd;
+        // Валидация конфига такого ключа не пропустит: у `load` один исполнитель. Здесь
+        // проверяется вторая линия — сценарий отказывает сам, если матрицу обошли.
+        config.providers = [(
+            crate::domain::capability::Operation::Load,
+            crate::domain::capability::Provider::Ibcmd,
+        )]
+        .into();
 
         let request = LoadRequest {
             vendor_name: None,
@@ -1665,7 +1674,7 @@ mod tests {
             LoadTargetKind::Extension
         );
         assert_eq!(payload.extension.as_deref(), Some("ExistingExt"));
-        assert!(load_message(&payload).contains("builder=DESIGNER and format=DESIGNER"));
+        assert!(load_message(&payload).contains("the Designer provider and format=DESIGNER"));
     }
 
     #[cfg(unix)]

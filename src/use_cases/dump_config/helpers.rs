@@ -4,7 +4,8 @@ use std::time::Instant;
 
 use tempfile::NamedTempFile;
 
-use crate::config::model::{AppConfig, BuilderBackend, SourceSetPurpose};
+use crate::config::model::{AppConfig, SourceSetPurpose};
+use crate::domain::capability::{Operation, Provider};
 use crate::domain::dump::{DumpMode, DumpResult, DumpSelectorResult};
 use crate::domain::partial_dump_selector::PartialDumpSelector;
 use crate::platform::designer::DesignerDsl;
@@ -27,8 +28,8 @@ use super::ResolvedDumpTarget;
 
 pub(super) fn validate_supported_matrix(config: &AppConfig) -> Option<AppError> {
     if matches!(
-        config.builder,
-        BuilderBackend::Designer | BuilderBackend::Ibcmd
+        config.selected_provider(Operation::Dump),
+        Provider::Designer | Provider::Ibcmd
     ) {
         None
     } else {

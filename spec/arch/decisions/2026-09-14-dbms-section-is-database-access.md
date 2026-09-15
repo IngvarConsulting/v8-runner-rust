@@ -1,8 +1,8 @@
 ---
 id: DEC.2026-09-14.DBMS-SECTION-IS-DATABASE-ACCESS
-status: planned
+status: active
 governs: product
-realized: null
+realized: tests/cli_infobase.rs::a_server_connection_without_dbms_still_exports_through_the_designer
 supersedes: []
 superseded-by: null
 establishes: []

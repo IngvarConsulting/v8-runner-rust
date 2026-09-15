@@ -262,43 +262,6 @@
       ],
       "type": "string"
     },
-    "ExportProvider": {
-      "description": "Process provider selected for an information-base export.",
-      "enum": [
-        "designer",
-        "ibcmd"
-      ],
-      "type": "string"
-    },
-    "ExportProviderDecision": {
-      "additionalProperties": false,
-      "properties": {
-        "candidates": {
-          "items": {
-            "$ref": "#/$defs/ProviderCandidate"
-          },
-          "type": "array"
-        },
-        "provider": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ExportProvider"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "reason": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "reason",
-        "candidates"
-      ],
-      "type": "object"
-    },
     "ExportTargetState": {
       "description": "Observable state of the final output path after an export attempt.",
       "enum": [
@@ -338,7 +301,7 @@
           "type": "string"
         },
         "provider": {
-          "$ref": "#/$defs/ExportProvider"
+          "$ref": "#/$defs/Provider"
         },
         "target_mode": {
           "$ref": "#/$defs/RestoreTargetMode"
@@ -370,60 +333,101 @@
         }
       ]
     },
-    "ProviderCandidate": {
-      "additionalProperties": false,
-      "properties": {
-        "evidence": {
-          "$ref": "#/$defs/ProviderEvidence"
-        },
-        "implementation": {
-          "$ref": "#/$defs/ProviderImplementation"
-        },
-        "provider": {
-          "$ref": "#/$defs/ExportProvider"
-        },
-        "readiness": {
-          "$ref": "#/$defs/ProviderReadiness"
-        },
-        "reason": {
+    "Provider": {
+      "description": "Исполнитель. Имя называет того, кто делает работу, а не способ его запуска.",
+      "oneOf": [
+        {
+          "const": "designer",
+          "description": "Конфигуратор пакетным процессом на операцию.",
           "type": "string"
+        },
+        {
+          "const": "agent",
+          "description": "Агентский shell: Конфигуратор в агентском режиме или шлюз автономного сервера.",
+          "type": "string"
+        },
+        {
+          "const": "ibcmd",
+          "description": "Утилита `ibcmd`.",
+          "type": "string"
+        },
+        {
+          "const": "ibcmd-rs",
+          "description": "Конвертер XML ↔ CF без платформы.",
+          "type": "string"
+        },
+        {
+          "const": "webinst",
+          "description": "Публикация базы на веб-сервере.",
+          "type": "string"
+        }
+      ]
+    },
+    "ProviderOrigin": {
+      "description": "Откуда взялся выбранный исполнитель.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Первый готовый из цепочки умолчаний.",
+          "properties": {
+            "kind": {
+              "const": "default",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Назначен ключом `providers.<операция>` в названном файле.",
+          "properties": {
+            "file": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "override",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "file"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ProviderReceipt": {
+      "additionalProperties": false,
+      "description": "Квитанция о выборе исполнителя — одна форма у всех операций.\n\nОбъясняет принятое решение и не предлагает другого: неиспользованные альтернативы\nне перечисляются, потому что выбор вызывающему не принадлежит. `selected: null`\nзначит, что выбор состоялся и никто не подошёл: каждый пропущенный назван с причиной.",
+      "properties": {
+        "origin": {
+          "$ref": "#/$defs/ProviderOrigin"
+        },
+        "selected": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provider"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "skipped": {
+          "items": {
+            "$ref": "#/$defs/SkippedProvider"
+          },
+          "type": "array"
         }
       },
       "required": [
-        "provider",
-        "implementation",
-        "readiness",
-        "evidence",
-        "reason"
+        "origin"
       ],
       "type": "object"
-    },
-    "ProviderEvidence": {
-      "description": "Strongest evidence currently attached to an implementation row.",
-      "enum": [
-        "documented",
-        "argv_tested",
-        "live_verified"
-      ],
-      "type": "string"
-    },
-    "ProviderImplementation": {
-      "description": "Whether runner has an adapter for an exact export operation.",
-      "enum": [
-        "implemented",
-        "experimental",
-        "unsupported"
-      ],
-      "type": "string"
-    },
-    "ProviderReadiness": {
-      "description": "Current-environment readiness established without starting a provider process.",
-      "enum": [
-        "ready",
-        "unavailable",
-        "not_checked"
-      ],
-      "type": "string"
     },
     "RestoreTargetMode": {
       "description": "Which irreversible change to the target infobase the caller permits.\n\nNeither provider asks: Designer creates an absent infobase and overwrites a\npresent one, and IBCMD overwrites a present one. The mode is therefore a\nrunner-side gate, and a mode that does not match the observed target is a\nrefusal rather than a silent fallback to the other case.",
@@ -439,6 +443,23 @@
           "type": "string"
         }
       ]
+    },
+    "SkippedProvider": {
+      "additionalProperties": false,
+      "description": "Исполнитель, пропущенный до выбранного, и почему.",
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/Provider"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "reason"
+      ],
+      "type": "object"
     }
   },
   "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/infobase-restore.schema.json",
@@ -468,6 +489,17 @@
         }
       ]
     },
+    "provider": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProviderReceipt"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Квитанция о выборе исполнителя; `None`, пока выбор не начинался."
+    },
     "provider_dispatched": {
       "type": [
         "boolean",
@@ -477,9 +509,6 @@
     "restored": {
       "description": "`true` only after the provider reported a completed load.",
       "type": "boolean"
-    },
-    "selection": {
-      "$ref": "#/$defs/ExportProviderDecision"
     },
     "subject": {
       "$ref": "#/$defs/InfobaseSnapshotSubject"
@@ -494,7 +523,6 @@
   "required": [
     "mode",
     "subject",
-    "selection",
     "artifact_kind",
     "input",
     "target_mode",

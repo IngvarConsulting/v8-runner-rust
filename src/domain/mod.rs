@@ -6,6 +6,8 @@ pub mod artifacts;
 pub mod bootstrap;
 /// Build domain models.
 pub mod build;
+/// Capability matrix: who executes which operation on which target.
+pub mod capability;
 /// Config bootstrap domain models.
 pub mod config_init;
 /// Source-format conversion domain models.

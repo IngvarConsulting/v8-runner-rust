@@ -269,7 +269,7 @@ fn write_config(
     platform_version: Option<&str>,
 ) {
     let mut config = format!(
-        "workPath: '{}'\nformat: {format}\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n",
+        "workPath: '{}'\nformat: {format}\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n",
         work_path.display(),
     );
     for source_set in source_sets {

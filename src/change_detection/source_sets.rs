@@ -94,8 +94,8 @@ fn absolutize_path(path: &Path) -> PathBuf {
 mod tests {
     use super::SourceSetsService;
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, SourceFormat, SourceSetConfig, SourceSetPurpose,
-        TestsConfig, ToolsConfig,
+        AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
+        ToolsConfig,
     };
     use std::path::Path;
 
@@ -106,7 +106,8 @@ mod tests {
             work_path: std::path::PathBuf::from("target/tmp-work"),
             execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
@@ -134,7 +135,8 @@ mod tests {
             work_path: std::path::PathBuf::from("target/tmp-work"),
             execution_timeout: 300_000,
             format: SourceFormat::Edt,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),

@@ -3,7 +3,6 @@
 
 workPath: /abs/path/to/repo/target/manual-tests/live-cli-fixture/work
 format: DESIGNER
-builder: DESIGNER
 infobase:
   connection: "File=/abs/path/to/dedicated/file-infobase"
 

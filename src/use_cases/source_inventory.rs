@@ -121,8 +121,8 @@ fn index_contexts(contexts: &[SourceSetContext]) -> HashMap<String, SourceSetCon
 mod tests {
     use super::SourceSetInventory;
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, InfobaseConfig, SourceFormat, SourceSetConfig,
-        SourceSetPurpose, TestsConfig, ToolsConfig,
+        AppConfig, BuildConfig, InfobaseConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
+        TestsConfig, ToolsConfig,
     };
 
     fn config(format: SourceFormat) -> AppConfig {
@@ -134,7 +134,8 @@ mod tests {
             work_path: root.join("work"),
             execution_timeout: 300_000,
             format,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: InfobaseConfig::file("File=/tmp/ib"),
             source_sets: vec![
                 SourceSetConfig {

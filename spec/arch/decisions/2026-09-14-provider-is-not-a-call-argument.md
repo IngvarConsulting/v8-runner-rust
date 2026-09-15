@@ -1,8 +1,8 @@
 ---
 id: DEC.2026-09-14.PROVIDER-IS-NOT-A-CALL-ARGUMENT
-status: planned
+status: active
 governs: product
-realized: null
+realized: tests/provider_matrix.rs::no_command_accepts_a_provider_flag
 supersedes: []
 superseded-by: null
 establishes: [INV.CLI.PROVIDER-IS-NOT-A-FLAG]

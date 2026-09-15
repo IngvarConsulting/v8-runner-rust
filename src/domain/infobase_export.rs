@@ -116,25 +116,6 @@ impl ProviderImplementation {
     }
 }
 
-/// Current-environment readiness established without starting a provider process.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderReadiness {
-    Ready,
-    Unavailable,
-    NotChecked,
-}
-
-impl ProviderReadiness {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Ready => "ready",
-            Self::Unavailable => "unavailable",
-            Self::NotChecked => "not_checked",
-        }
-    }
-}
-
 /// Strongest evidence currently attached to an implementation row.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -154,22 +135,9 @@ impl ProviderEvidence {
     }
 }
 
-/// Process provider selected for an information-base export.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-#[serde(rename_all = "kebab-case")]
-pub enum ExportProvider {
-    Designer,
-    Ibcmd,
-}
-
-impl ExportProvider {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Designer => "designer",
-            Self::Ibcmd => "ibcmd",
-        }
-    }
-}
+/// Исполнитель экспорта — тот же закрытый набор, что у всех операций.
+pub use crate::domain::capability::Provider as ExportProvider;
+pub use crate::domain::capability::ProviderReceipt;
 
 /// Closed file format vocabulary for information-base exports.
 ///
@@ -203,79 +171,6 @@ impl InfobaseExportArtifactKind {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InfobaseSnapshotSubject {
     Infobase,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-pub struct ProviderCandidate {
-    pub provider: ExportProvider,
-    pub implementation: ProviderImplementation,
-    pub readiness: ProviderReadiness,
-    pub evidence: ProviderEvidence,
-    pub reason: String,
-}
-
-impl ProviderCandidate {
-    pub fn new(
-        provider: ExportProvider,
-        implementation: ProviderImplementation,
-        readiness: ProviderReadiness,
-        evidence: ProviderEvidence,
-        reason: impl Into<String>,
-    ) -> Self {
-        Self {
-            provider,
-            implementation,
-            readiness,
-            evidence,
-            reason: reason.into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-pub struct ExportProviderDecision {
-    provider: Option<ExportProvider>,
-    reason: String,
-    candidates: Vec<ProviderCandidate>,
-}
-
-impl ExportProviderDecision {
-    pub fn selected(
-        provider: ExportProvider,
-        reason: impl Into<String>,
-        candidates: Vec<ProviderCandidate>,
-    ) -> Self {
-        debug_assert!(candidates.iter().any(|candidate| {
-            candidate.provider == provider
-                && candidate.implementation == ProviderImplementation::Implemented
-                && candidate.readiness == ProviderReadiness::Ready
-        }));
-        Self {
-            provider: Some(provider),
-            reason: reason.into(),
-            candidates,
-        }
-    }
-
-    pub fn unavailable(reason: impl Into<String>, candidates: Vec<ProviderCandidate>) -> Self {
-        Self {
-            provider: None,
-            reason: reason.into(),
-            candidates,
-        }
-    }
-
-    pub const fn provider(&self) -> Option<ExportProvider> {
-        self.provider
-    }
-
-    pub fn reason(&self) -> &str {
-        &self.reason
-    }
-
-    pub fn candidates(&self) -> &[ProviderCandidate] {
-        &self.candidates
-    }
 }
 
 /// Observable state of the final output path after an export attempt.
@@ -321,7 +216,9 @@ pub struct ExportConfigurationPackageResult {
     pub provider_dispatched: Option<bool>,
     pub state: ConfigurationState,
     pub subject: ConfigurationSubject,
-    pub selection: ExportProviderDecision,
+    /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderReceipt>,
     pub artifact_kind: InfobaseExportArtifactKind,
     pub output: PathBuf,
     pub published: bool,
@@ -338,7 +235,7 @@ pub struct ExportConfigurationPackageResult {
 impl ExportConfigurationPackageResult {
     pub fn new(
         request: ExportConfigurationPackageRequest,
-        selection: ExportProviderDecision,
+        provider: Option<ProviderReceipt>,
     ) -> Self {
         let artifact_kind = request.subject.artifact_kind();
         Self {
@@ -346,7 +243,7 @@ impl ExportConfigurationPackageResult {
             provider_dispatched: None,
             state: request.state,
             subject: request.subject,
-            selection,
+            provider,
             artifact_kind,
             output: request.output,
             published: false,
@@ -366,8 +263,9 @@ impl ExportConfigurationPackageResult {
         self.mode = InfobaseExportMode::Preview;
         self.provider_dispatched = Some(false);
         self.plan = self
-            .selection
-            .provider()
+            .provider
+            .as_ref()
+            .and_then(|receipt| receipt.selected)
             .map(|provider| InfobaseExportPlan {
                 provider,
                 artifact_kind: self.artifact_kind,
@@ -395,7 +293,9 @@ pub struct ExportInfobaseSnapshotResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_dispatched: Option<bool>,
     pub subject: InfobaseSnapshotSubject,
-    pub selection: ExportProviderDecision,
+    /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderReceipt>,
     pub artifact_kind: InfobaseExportArtifactKind,
     pub output: PathBuf,
     pub published: bool,
@@ -410,12 +310,12 @@ pub struct ExportInfobaseSnapshotResult {
 }
 
 impl ExportInfobaseSnapshotResult {
-    pub fn new(request: ExportInfobaseSnapshotRequest, selection: ExportProviderDecision) -> Self {
+    pub fn new(request: ExportInfobaseSnapshotRequest, provider: Option<ProviderReceipt>) -> Self {
         Self {
             mode: InfobaseExportMode::Apply,
             provider_dispatched: None,
             subject: InfobaseSnapshotSubject::Infobase,
-            selection,
+            provider,
             artifact_kind: InfobaseExportArtifactKind::Dt,
             output: request.output,
             published: false,
@@ -435,8 +335,9 @@ impl ExportInfobaseSnapshotResult {
         self.mode = InfobaseExportMode::Preview;
         self.provider_dispatched = Some(false);
         self.plan = self
-            .selection
-            .provider()
+            .provider
+            .as_ref()
+            .and_then(|receipt| receipt.selected)
             .map(|provider| InfobaseExportPlan {
                 provider,
                 artifact_kind: self.artifact_kind,
@@ -498,7 +399,9 @@ pub struct RestoreInfobaseSnapshotResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_dispatched: Option<bool>,
     pub subject: InfobaseSnapshotSubject,
-    pub selection: ExportProviderDecision,
+    /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderReceipt>,
     pub artifact_kind: InfobaseExportArtifactKind,
     pub input: PathBuf,
     pub target_mode: RestoreTargetMode,
@@ -515,12 +418,12 @@ pub struct RestoreInfobaseSnapshotResult {
 }
 
 impl RestoreInfobaseSnapshotResult {
-    pub fn new(request: RestoreInfobaseSnapshotRequest, selection: ExportProviderDecision) -> Self {
+    pub fn new(request: RestoreInfobaseSnapshotRequest, provider: Option<ProviderReceipt>) -> Self {
         Self {
             mode: InfobaseExportMode::Apply,
             provider_dispatched: None,
             subject: InfobaseSnapshotSubject::Infobase,
-            selection,
+            provider,
             artifact_kind: InfobaseExportArtifactKind::Dt,
             input: request.input,
             target_mode: request.target_mode,
@@ -541,8 +444,9 @@ impl RestoreInfobaseSnapshotResult {
         self.mode = InfobaseExportMode::Preview;
         self.provider_dispatched = Some(false);
         self.plan = self
-            .selection
-            .provider()
+            .provider
+            .as_ref()
+            .and_then(|receipt| receipt.selected)
             .map(|provider| InfobaseRestorePlan {
                 provider,
                 artifact_kind: self.artifact_kind,
@@ -567,20 +471,16 @@ mod tests {
     use super::{
         ConfigurationState, ConfigurationSubject, ExportConfigurationPackageRequest,
         ExportConfigurationPackageResult, ExportInfobaseSnapshotRequest,
-        ExportInfobaseSnapshotResult, ExportPhase, ExportProvider, ExportProviderDecision,
-        ExportTargetState, InfobaseExportArtifactKind, ProviderCandidate, ProviderEvidence,
-        ProviderImplementation, ProviderReadiness,
+        ExportInfobaseSnapshotResult, ExportPhase, ExportProvider, ExportTargetState,
+        InfobaseExportArtifactKind, ProviderImplementation, ProviderReceipt,
     };
     use crate::domain::execution::ExecutionStepKind;
 
-    fn ready(provider: ExportProvider) -> ProviderCandidate {
-        ProviderCandidate::new(
+    fn chosen(provider: ExportProvider) -> Option<ProviderReceipt> {
+        Some(ProviderReceipt::new(
             provider,
-            ProviderImplementation::Implemented,
-            ProviderReadiness::Ready,
-            ProviderEvidence::ArgvTested,
-            "adapter and utility are ready",
-        )
+            crate::domain::capability::ProviderOrigin::Default,
+        ))
     }
 
     #[test]
@@ -652,13 +552,7 @@ mod tests {
             subject: ConfigurationSubject::Main,
             output: PathBuf::from("/tmp/main.cf"),
         };
-        let selection = ExportProviderDecision::selected(
-            ExportProvider::Ibcmd,
-            "selected ready provider",
-            vec![ready(ExportProvider::Ibcmd)],
-        );
-
-        let result = ExportConfigurationPackageResult::new(request, selection);
+        let result = ExportConfigurationPackageResult::new(request, chosen(ExportProvider::Ibcmd));
 
         assert_eq!(result.artifact_kind, InfobaseExportArtifactKind::Cf);
         assert!(!result.published);
@@ -669,17 +563,7 @@ mod tests {
                 "mode": "apply",
                 "state": "working",
                 "subject": {"kind": "main"},
-                "selection": {
-                    "provider": "ibcmd",
-                    "reason": "selected ready provider",
-                    "candidates": [{
-                        "provider": "ibcmd",
-                        "implementation": "implemented",
-                        "readiness": "ready",
-                        "evidence": "argv_tested",
-                        "reason": "adapter and utility are ready"
-                    }]
-                },
+                "provider": {"selected": "ibcmd", "origin": {"kind": "default"}},
                 "artifact_kind": "cf",
                 "output": "/tmp/main.cf",
                 "published": false,
@@ -690,46 +574,12 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_provider_decision_keeps_candidate_diagnostics() {
-        let decision = ExportProviderDecision::unavailable(
-            "no implemented provider is ready for DT export",
-            vec![ProviderCandidate::new(
-                ExportProvider::Ibcmd,
-                ProviderImplementation::Experimental,
-                ProviderReadiness::NotChecked,
-                ProviderEvidence::Documented,
-                "exclusive access is not implemented",
-            )],
-        );
-
-        assert_eq!(decision.provider(), None);
-        assert_eq!(
-            serde_json::to_value(&decision).expect("unsupported decision json"),
-            json!({
-                "provider": null,
-                "reason": "no implemented provider is ready for DT export",
-                "candidates": [{
-                    "provider": "ibcmd",
-                    "implementation": "experimental",
-                    "readiness": "not_checked",
-                    "evidence": "documented",
-                    "reason": "exclusive access is not implemented"
-                }]
-            })
-        );
-    }
-
-    #[test]
     fn snapshot_result_is_always_a_dt_and_preserves_typed_presentation_fields() {
         let request = ExportInfobaseSnapshotRequest {
             output: PathBuf::from("/tmp/base.dt"),
         };
-        let selection = ExportProviderDecision::selected(
-            ExportProvider::Designer,
-            "selected ready provider",
-            vec![ready(ExportProvider::Designer)],
-        );
-        let mut result = ExportInfobaseSnapshotResult::new(request, selection);
+        let mut result =
+            ExportInfobaseSnapshotResult::new(request, chosen(ExportProvider::Designer));
         result.published = true;
         result.target_state = ExportTargetState::Created;
         result.mark_succeeded();
@@ -741,17 +591,7 @@ mod tests {
             json!({
                 "mode": "apply",
                 "subject": {"kind": "infobase"},
-                "selection": {
-                    "provider": "designer",
-                    "reason": "selected ready provider",
-                    "candidates": [{
-                        "provider": "designer",
-                        "implementation": "implemented",
-                        "readiness": "ready",
-                        "evidence": "argv_tested",
-                        "reason": "adapter and utility are ready"
-                    }]
-                },
+                "provider": {"selected": "designer", "origin": {"kind": "default"}},
                 "artifact_kind": "dt",
                 "output": "/tmp/base.dt",
                 "published": true,
