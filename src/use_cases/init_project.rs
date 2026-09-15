@@ -48,21 +48,16 @@ fn run_init(
 ) -> UseCaseResult<InitResult> {
     let started = Instant::now();
     let mut utilities = PlatformUtilities::from_config(config);
-    let selected =
+    // Исполнитель нужен только шагу создания базы, и тот сам сообщает об отсутствии
+    // утилиты своим статусом: отказ выбора здесь не прерывает команду — у серверного
+    // подключения и у чисто EDT-проекта этот шаг может и не понадобиться. Квитанция
+    // при этом остаётся честной: никто не готов, пропущенные названы.
+    let (provider, receipt) =
         match crate::use_cases::provider_selection::select(config, &mut utilities, Operation::Init)
         {
-            Ok(selected) => selected,
-            Err((error, receipt)) => {
-                let mut result = init_result(started, Vec::new(), false);
-                result.provider_dispatched = false;
-                result.provider = Some(receipt);
-                return Err(InitExecutionFailure::with_payload(
-                    UseCaseError::from(error),
-                    result,
-                ));
-            }
+            Ok(selected) => (selected.provider, selected.receipt),
+            Err((_error, receipt)) => (config.selected_provider(Operation::Init), receipt),
         };
-    let provider = selected.provider;
     let mut steps = Vec::new();
     let mut first_error: Option<UseCaseError> = None;
 
@@ -79,7 +74,7 @@ fn run_init(
 
     let mut result = init_result(started, steps, first_error.is_none());
     result.provider_dispatched = !dry_run;
-    result.provider = Some(selected.receipt);
+    result.provider = Some(receipt);
 
     match first_error {
         Some(error) => Err(InitExecutionFailure::with_payload(error, result)),

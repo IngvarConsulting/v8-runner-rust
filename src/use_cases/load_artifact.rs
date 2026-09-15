@@ -91,7 +91,7 @@ fn run_load(
     let started = Instant::now();
     // One owner of the truth about the run: flipped where a platform process is actually
     // started, and carried into every payload instead of a constant `true`.
-    let mut dispatched = false;
+    let dispatched = false;
     let request_snapshot = request_snapshot_for_failure_payload(args);
 
     if let Some(error) = validate_supported_matrix(config) {

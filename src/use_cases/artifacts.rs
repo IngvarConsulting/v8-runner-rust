@@ -169,7 +169,7 @@ fn run_artifacts_selected(
     args: &ArtifactsRequest,
     started: Instant,
     resolved: ResolvedArtifactsTarget,
-    mut utilities: PlatformUtilities,
+    utilities: PlatformUtilities,
     selected: crate::use_cases::provider_selection::SelectedProvider,
 ) -> UseCaseResult<ArtifactsResult> {
     let location = selected.location;
