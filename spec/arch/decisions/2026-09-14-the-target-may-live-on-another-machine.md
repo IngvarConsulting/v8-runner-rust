@@ -1,8 +1,8 @@
 ---
 id: DEC.2026-09-14.THE-TARGET-MAY-LIVE-ON-ANOTHER-MACHINE
-status: planned
+status: active
 governs: product
-realized: null
+realized: tests/cli_agent_standalone.rs::gate_commands_carry_target_side_relative_paths
 supersedes: []
 superseded-by: null
 establishes: [INV.CONFIG.WORKPATH-IS-ALWAYS-LOCAL, INV.PLATFORM.MANAGED-MODE-REQUIRES-A-LOCAL-ENDPOINT, INV.PLATFORM.REMOTE-FILES-TRAVEL-BY-A-DECLARED-CHANNEL, INV.PLATFORM.TARGET-SIDE-PATHS-RESOLVE-ON-THE-TARGET]

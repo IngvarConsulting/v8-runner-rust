@@ -42,6 +42,15 @@ pub fn execute(
     if args.target == LaunchTargetRequest::Web {
         return execute_web(context, config, args);
     }
+    // Автономный сервер не открывается клиентом по строке подключения — у него её нет;
+    // его адрес — `infobase.web.url`, и это `launch web`.
+    if config.target_kind() == crate::domain::capability::TargetKind::Standalone {
+        return Err(UseCaseFailure::without_payload(
+            AppError::CapabilityUnavailable(
+                "a standalone server is opened by its web address: use `launch web` with infobase.web.url; a client is not launched against the gate".to_owned(),
+            ),
+        ));
+    }
     let (mode, utility, client_mode) = match args.target {
         LaunchTargetRequest::Web => unreachable!("web launches are handled above"),
         LaunchTargetRequest::Designer => (

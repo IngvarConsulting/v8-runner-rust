@@ -533,6 +533,11 @@ pub(super) fn run_tests(
 }
 
 fn validate_prepared_infobase(config: &AppConfig) -> Result<(), AppError> {
+    if config.target_kind() == crate::domain::capability::TargetKind::Standalone {
+        return Err(AppError::CapabilityUnavailable(
+            "tests start an enterprise client by the connection string; a standalone server has none — run tests against a File= or Srvr= target".to_owned(),
+        ));
+    }
     let connection = config.v8_connection();
     let Some(file_path) = connection.file_path() else {
         return Ok(());

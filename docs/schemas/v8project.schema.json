@@ -220,7 +220,8 @@
       "additionalProperties": false,
       "properties": {
         "connection": {
-          "description": "1C infobase connection string without embedded user or password.",
+          "default": "",
+          "description": "1C infobase connection string without embedded user or password; empty for a\nstandalone server, which `standalone` declares.",
           "type": "string"
         },
         "dbms": {
@@ -241,6 +242,17 @@
             "null"
           ]
         },
+        "standalone": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InfobaseStandaloneSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Standalone server reached through its SSH gate; declares the target kind."
+        },
         "user": {
           "description": "Optional infobase user name passed to platform utilities.",
           "type": [
@@ -260,8 +272,44 @@
           "description": "Client address and web-server publication settings."
         }
       },
+      "type": "object"
+    },
+    "InfobaseStandaloneExchangeSchema": {
+      "additionalProperties": false,
+      "description": "The declared file channel to a standalone server.",
+      "properties": {
+        "dir": {
+          "description": "The gate user's directory (`<users-data>/<user>` of `ibsrv`) as the runner sees it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "InfobaseStandaloneSchema": {
+      "additionalProperties": false,
+      "description": "A standalone server (`ibsrv`) as the target.",
+      "properties": {
+        "exchange": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InfobaseStandaloneExchangeSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How files travel between the runner and the gate user's directory."
+        },
+        "gate": {
+          "description": "`host:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`, port 1543 by default).",
+          "type": "string"
+        }
+      },
       "required": [
-        "connection"
+        "gate"
       ],
       "type": "object"
     },

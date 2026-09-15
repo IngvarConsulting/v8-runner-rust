@@ -1,9 +1,9 @@
 ---
 id: INV.PLATFORM.REMOTE-FILES-TRAVEL-BY-A-DECLARED-CHANNEL
-status: planned
+status: active
 governs: product
 decision: DEC.2026-09-14.THE-TARGET-MAY-LIVE-ON-ANOTHER-MACHINE
-check: null
+check: tests/cli_agent_standalone.rs::a_standalone_server_without_a_declared_channel_is_refused_before_any_session
 scope: [platform]
 ---
 

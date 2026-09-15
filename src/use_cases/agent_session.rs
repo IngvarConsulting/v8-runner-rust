@@ -31,33 +31,71 @@ pub(crate) enum AgentHandle {
         session: AgentSession,
         base_dir: PathBuf,
     },
+    /// SSH-шлюз автономного сервера: тот же shell, файлы — в каталоге пользователя
+    /// шлюза, который конфиг назвал как канал обмена.
+    Gate {
+        session: AgentSession,
+        user_dir: PathBuf,
+    },
 }
 
 impl AgentHandle {
     pub(crate) fn session(&mut self) -> &mut AgentSession {
         match self {
             Self::Managed(agent) => agent.session(),
-            Self::Attached { session, .. } => session,
-        }
-    }
-
-    pub(crate) fn base_dir(&self) -> &Path {
-        match self {
-            Self::Managed(agent) => agent.base_dir(),
-            Self::Attached { base_dir, .. } => base_dir,
+            Self::Attached { session, .. } | Self::Gate { session, .. } => session,
         }
     }
 
     /// Каталог пользователя агента: относительно него агент трактует пути команд.
+    /// У агента Конфигуратора он выводится из карты `AgentBaseDir`, у шлюза
+    /// автономного сервера объявлен конфигом как канал обмена.
     pub(crate) fn user_dir(&self, config: &AppConfig) -> Result<PathBuf, AppError> {
-        agent::user_dir(self.base_dir(), &agent_user(config)).map_err(map_agent_error)
+        let base_dir = match self {
+            Self::Managed(agent) => agent.base_dir(),
+            Self::Attached { base_dir, .. } => base_dir,
+            Self::Gate { user_dir, .. } => return Ok(user_dir.clone()),
+        };
+        agent::user_dir(base_dir, &agent_user(config)).map_err(map_agent_error)
     }
 
-    /// Управляемый агент гасится, чужой — только отпускается.
+    /// Управляемый агент гасится, чужой — только отпускается: соединение с базой
+    /// закрывается явно, иначе точка входа держит блокировку Конфигуратора и после
+    /// разрыва SSH (шлюз `ibsrv` 8.3.27 держал её до перезапуска сервера — замер
+    /// 15.09.2026). Ответ не важен: после `restore-ib` сессии уже нет.
     pub(crate) fn finish(self, wait: &WaitPolicy) {
         match self {
             Self::Managed(agent) => agent.shutdown(wait),
-            Self::Attached { session, .. } => session.close(),
+            Self::Attached { mut session, .. } | Self::Gate { mut session, .. } => {
+                let _ = session.run(agent::DISCONNECT_COMMAND, wait);
+                session.close();
+            }
+        }
+    }
+}
+
+/// После `update-db-cfg` автономный сервер 8.3.27 уходит в «refreshing» на 15–20 с и
+/// всё это время отвергает SSH-логин (живой прогон 15.09.2026); в этом окне отказ
+/// аутентификации — не неверный пароль, а занятой сервер. Поэтому к шлюзу стучатся
+/// повторно в ограниченном окне; неверный пароль виден по тому, что окно истекло.
+const GATE_REFRESH_WINDOW: Duration = Duration::from_secs(30);
+
+fn open_gate_session(
+    request: &AgentSessionRequest,
+    wait: &WaitPolicy,
+) -> Result<AgentSession, AppError> {
+    let started = std::time::Instant::now();
+    loop {
+        match AgentSession::open(request, wait) {
+            Ok(session) => return Ok(session),
+            Err(
+                error
+                @ (AgentError::AuthenticationRejected { .. } | AgentError::Unreachable { .. }),
+            ) if started.elapsed() < GATE_REFRESH_WINDOW && !wait.cancellation.is_cancelled() => {
+                tracing::debug!(%error, "gate is not accepting sessions yet; waiting");
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            Err(error) => return Err(map_agent_error(error)),
         }
     }
 }
@@ -92,11 +130,33 @@ pub(crate) fn connect(
     wait: &WaitPolicy,
 ) -> Result<AgentHandle, AppError> {
     let agent = &config.tools.designer_agent;
-    let mode = agent.mode().map_err(AppError::Validation)?;
     let connection = config.v8_connection();
     let user = connection.user.clone().unwrap_or_default();
     let password = connection.password.clone().unwrap_or_default();
 
+    // Автономный сервер держит свой шлюз сам: раннер только подключается, и файлы
+    // идут объявленным каналом — каталогом пользователя шлюза.
+    if let Some(standalone) = config.infobase.standalone.as_ref() {
+        let (host, port) = standalone.gate_endpoint().map_err(AppError::Validation)?;
+        let user_dir = standalone.exchange_dir().ok_or_else(|| {
+            AppError::CapabilityUnavailable(
+                "files travel to a standalone server only through a declared channel; set infobase.standalone.exchange.dir".to_owned(),
+            )
+        })?;
+        let request = AgentSessionRequest {
+            endpoint: AgentEndpoint { host, port },
+            user,
+            password,
+            transcript_log: Some(transcript_log),
+        };
+        let session = open_gate_session(&request, wait)?;
+        return Ok(AgentHandle::Gate {
+            session,
+            user_dir: user_dir.to_path_buf(),
+        });
+    }
+
+    let mode = agent.mode().map_err(AppError::Validation)?;
     match mode {
         DesignerAgentMode::Attached { host, port } => {
             let base_dir = agent.base_dir.clone().ok_or_else(|| {
@@ -338,6 +398,20 @@ pub(crate) fn platform_result(
     }
 }
 
+/// Убирает след прогона из каталога пользователя: сам путь и опустевшие родители до
+/// каталога пользователя. В каталоге чужой точки входа раннер следов не оставляет.
+pub(crate) fn tidy_run_path(user_dir: &Path, relative: &str) {
+    let path = user_dir.join(relative);
+    let _ = crate::support::fs::remove_path_if_exists(&path);
+    let mut parent = path.parent();
+    while let Some(dir) = parent.filter(|dir| *dir != user_dir && dir.starts_with(user_dir)) {
+        if std::fs::remove_dir(dir).is_err() {
+            break;
+        }
+        parent = dir.parent();
+    }
+}
+
 /// Снимает выставленный каталог: ссылку — как ссылку, копию — целиком.
 pub(crate) fn withdraw_dir(user_dir: &Path, relative: &str) {
     let link = user_dir.join(relative);
@@ -350,6 +424,7 @@ pub(crate) fn withdraw_dir(user_dir: &Path, relative: &str) {
         }
         _ => {}
     }
+    tidy_run_path(user_dir, relative);
 }
 
 /// Токен поколения конфигурации у агента: `config generation-id [--extension=<имя>]`.

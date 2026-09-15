@@ -44,8 +44,7 @@ pub fn execute(
             )));
         }
     }
-    let connection = IbcmdConnection::from_infobase(&config.infobase)
-        .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+    let connection = ibcmd_connection(config).map_err(UseCaseFailure::without_payload)?;
     let mut utilities = PlatformUtilities::from_config(config);
     let selected = crate::use_cases::provider_selection::select(
         config,
@@ -70,7 +69,7 @@ pub fn execute(
                     ExtensionInventoryScope::All => "every installed extension".to_owned(),
                     ExtensionInventoryScope::Named { name } => format!("extension '{name}'"),
                 },
-                connection.describe_target(),
+                target_label(config, connection.as_ref()),
                 executor.label()
             )),
             extensions: Vec::new(),
@@ -93,6 +92,11 @@ pub fn execute(
             extensions
         }
         Executor::Ibcmd(binary) => {
+            let connection = connection.ok_or_else(|| {
+                UseCaseFailure::without_payload(AppError::Runtime(
+                    "ibcmd was selected for a target without a connection string".to_owned(),
+                ))
+            })?;
             let dsl = IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
                 .with_execution_policy(
                     context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
@@ -183,6 +187,26 @@ fn ensure_requested_record(
     Ok(())
 }
 
+/// Подключение `ibcmd` строится только там, где есть строка подключения: у автономного
+/// сервера её нет, туда ходит шлюз.
+fn ibcmd_connection(config: &AppConfig) -> Result<Option<IbcmdConnection>, AppError> {
+    if config.infobase.standalone.is_some() {
+        return Ok(None);
+    }
+    IbcmdConnection::from_infobase(&config.infobase)
+        .map(Some)
+        .map_err(AppError::from)
+}
+
+/// Цель для превью без секретов: подключение `ibcmd` или шлюз автономного сервера.
+fn target_label(config: &AppConfig, connection: Option<&IbcmdConnection>) -> String {
+    match (connection, config.infobase.standalone.as_ref()) {
+        (Some(connection), _) => connection.describe_target(),
+        (None, Some(standalone)) => format!("standalone server at {}", standalone.gate),
+        (None, None) => "the infobase".to_owned(),
+    }
+}
+
 /// Кто выполняет: `ibcmd` — утилитой, агент — сессией (утилита нужна только
 /// управляемому агенту, чтобы его запустить).
 enum Executor {
@@ -266,8 +290,7 @@ pub fn change(
         "executing extension composition change"
     );
     let started = Instant::now();
-    let connection = IbcmdConnection::from_infobase(&config.infobase)
-        .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+    let connection = ibcmd_connection(config).map_err(UseCaseFailure::without_payload)?;
     let mut utilities = PlatformUtilities::from_config(config);
     let selected = crate::use_cases::provider_selection::select(
         config,
@@ -291,7 +314,7 @@ pub fn change(
                     "would {} '{}' in {} via {}",
                     request.action(),
                     request.target(),
-                    connection.describe_target(),
+                    target_label(config, connection.as_ref()),
                     executor.label()
                 )),
                 duration_ms: 0,
@@ -320,6 +343,11 @@ pub fn change(
             })
         }
         Executor::Ibcmd(binary) => {
+            let connection = connection.ok_or_else(|| {
+                UseCaseFailure::without_payload(AppError::Runtime(
+                    "ibcmd was selected for a target without a connection string".to_owned(),
+                ))
+            })?;
             let dsl = IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
                 .with_execution_policy(
                     context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),

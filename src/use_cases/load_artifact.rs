@@ -773,7 +773,7 @@ fn validate_probe_mode_compatibility(
 }
 
 fn validate_supported_matrix(config: &AppConfig) -> Option<AppError> {
-    if config.selected_provider(Operation::Load) == Provider::Designer
+    if config.default_provider(Operation::Load) == Some(Provider::Designer)
         && config.format == SourceFormat::Designer
     {
         None

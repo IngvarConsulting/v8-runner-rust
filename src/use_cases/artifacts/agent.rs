@@ -17,7 +17,7 @@ use crate::support::error::AppError;
 use crate::support::fs::{move_file, write_temp_dir_metadata, TempDirKind};
 use crate::use_cases::agent_session::{
     argument, connect, copy_dir_in, output_dir, platform_result, run_command, run_id,
-    transcript_log, wait_policy, AgentHandle,
+    tidy_run_path, transcript_log, wait_policy, AgentHandle,
 };
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::dump_config::verify_external_dump_descriptor;
@@ -113,7 +113,7 @@ pub(super) fn run_agent_export(
                 .as_ref()
                 .ok()
                 .map(|_| take_produced(&user_dir.join(&relative), &staging_file));
-            let _ = std::fs::remove_dir_all(user_dir.join(&out));
+            tidy_run_path(user_dir, &out);
             let reply = reply?;
             staged.transpose()?;
             Ok(reply.transcript())
@@ -320,7 +320,7 @@ fn run_external_agent_export(
             }
             Ok(String::new())
         })();
-        let _ = std::fs::remove_dir_all(user_dir.join(&base));
+        tidy_run_path(user_dir, &base);
         outcome
     })
     .map_err(|error| (error, artifacts.clone(), Some(log.clone())))?;

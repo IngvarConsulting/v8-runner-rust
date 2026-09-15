@@ -13,8 +13,8 @@ use crate::platform::locator::UtilityLocation;
 use crate::platform::process::ProcessResult;
 use crate::support::fs::move_dir;
 use crate::use_cases::agent_session::{
-    argument, connect, expose_dir, generation_id, map_agent_error, run_id, transcript_log,
-    wait_policy, withdraw_dir, AgentHandle, GenerationLedger,
+    argument, connect, expose_dir, generation_id, map_agent_error, run_id, tidy_run_path,
+    transcript_log, wait_policy, withdraw_dir, AgentHandle, GenerationLedger,
 };
 
 /// Выгрузка одного режима через одну сессию.
@@ -115,8 +115,9 @@ fn dump_through(
                     produced.display()
                 )));
             }
-            let cleanup = publish_full(context, resolved, &produced)?;
-            (transcript, cleanup)
+            let cleanup = publish_full(context, resolved, &produced);
+            tidy_run_path(&user_dir, &out_relative);
+            (transcript, cleanup?)
         }
         DumpMode::Incremental => {
             ensure_dir(&resolved.platform_target_path).map_err(|error| {

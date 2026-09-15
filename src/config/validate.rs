@@ -56,6 +56,32 @@ pub enum ConfigValidationError {
     #[error("infobase.connection is empty")]
     EmptyConnection,
 
+    #[error(
+        "the target is declared once: infobase.standalone names a standalone server, so infobase.connection must be empty"
+    )]
+    TargetDeclaredTwice,
+
+    #[error("infobase.dbms is not allowed for a standalone server: the server opens its database itself")]
+    DbmsNotAllowedForStandalone,
+
+    #[error("infobase.standalone.gate: {0}")]
+    StandaloneGateInvalid(String),
+
+    #[error(
+        "files travel between the runner and a standalone server only through a declared channel: set infobase.standalone.exchange.dir to the gate user's directory (`<users-data>/<user>` of ibsrv) as the runner sees it"
+    )]
+    StandaloneExchangeMissing,
+
+    #[error(
+        "workPath stays on the runner's side: '{work_path}' overlaps the target-side directory infobase.standalone.exchange.dir '{dir}'"
+    )]
+    WorkPathOverlapsTargetSideDir { work_path: String, dir: String },
+
+    #[error(
+        "tools.designer_agent.{keys} do not apply to a standalone server: it is reached through infobase.standalone.gate and is never started by the runner"
+    )]
+    DesignerAgentDoesNotApplyToStandalone { keys: String },
+
     #[error("legacy top-level key 'connection' is not supported; use infobase.connection")]
     LegacyTopLevelConnection,
 
@@ -662,6 +688,9 @@ fn validate_source_set_name(name: &str) -> Result<(), ConfigValidationError> {
 }
 
 fn validate_connection_contract(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    if let Some(standalone) = config.infobase.standalone.as_ref() {
+        return validate_standalone_target(config, standalone);
+    }
     if config.infobase.connection.trim().is_empty() {
         return Err(ConfigValidationError::EmptyConnection);
     }
@@ -685,6 +714,33 @@ fn validate_connection_contract(config: &AppConfig) -> Result<(), ConfigValidati
         return Ok(());
     }
 
+    Ok(())
+}
+
+/// Автономный сервер: цель объявлена один раз, шлюз назван, канал обмена объявлен, и
+/// рабочий каталог раннера не лежит на стороне цели.
+fn validate_standalone_target(
+    config: &AppConfig,
+    standalone: &crate::config::model::StandaloneConfig,
+) -> Result<(), ConfigValidationError> {
+    if !config.infobase.connection.trim().is_empty() {
+        return Err(ConfigValidationError::TargetDeclaredTwice);
+    }
+    if config.infobase.dbms.is_some() {
+        return Err(ConfigValidationError::DbmsNotAllowedForStandalone);
+    }
+    standalone
+        .gate_endpoint()
+        .map_err(ConfigValidationError::StandaloneGateInvalid)?;
+    let Some(dir) = standalone.exchange_dir() else {
+        return Err(ConfigValidationError::StandaloneExchangeMissing);
+    };
+    if paths_overlap(&config.work_path, dir) {
+        return Err(ConfigValidationError::WorkPathOverlapsTargetSideDir {
+            work_path: config.work_path.display().to_string(),
+            dir: dir.display().to_string(),
+        });
+    }
     Ok(())
 }
 
@@ -998,6 +1054,21 @@ fn validate_edt_cli_config(config: &AppConfig) -> Result<(), ConfigValidationErr
 /// процессу раннер не добавляет флагов запуска, значит и в конфиге им рядом не место.
 fn validate_designer_agent_config(config: &AppConfig) -> Result<(), ConfigValidationError> {
     let agent = &config.tools.designer_agent;
+    if config.infobase.standalone.is_some() {
+        let mut keys = Vec::new();
+        if agent.attach.is_some() {
+            keys.push("attach");
+        }
+        keys.extend(agent.attached_keys_present());
+        keys.extend(agent.managed_keys_present());
+        if !keys.is_empty() {
+            return Err(
+                ConfigValidationError::DesignerAgentDoesNotApplyToStandalone {
+                    keys: keys.join(", "),
+                },
+            );
+        }
+    }
     if agent.startup_timeout_ms == 0 {
         return Err(ConfigValidationError::InvalidDesignerAgentStartupTimeoutMs);
     }
@@ -2360,6 +2431,7 @@ mod tests {
                 password: None,
                 dbms: None,
                 web: None,
+                standalone: None,
             },
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),

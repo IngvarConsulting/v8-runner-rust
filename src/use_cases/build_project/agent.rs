@@ -12,8 +12,8 @@ use super::*;
 use crate::platform::agent::WaitPolicy;
 use crate::platform::locator::UtilityLocation;
 use crate::use_cases::agent_session::{
-    argument, connect, expose_dir, generation_id, map_agent_error, run_id, transcript_log,
-    wait_policy, withdraw_dir, AgentHandle, GenerationLedger,
+    argument, connect, expose_dir, generation_id, map_agent_error, run_id, tidy_run_path,
+    transcript_log, wait_policy, withdraw_dir, AgentHandle, GenerationLedger,
 };
 
 pub(super) struct AgentLoader {
@@ -188,7 +188,11 @@ fn load_and_update(
     if let Some(extension) = extension {
         load.push_str(&format!(" --extension={}", argument(extension)));
     }
-    run_command(handle, &load, wait)?;
+    let loaded = run_command(handle, &load, wait);
+    if partial_paths.is_some() {
+        tidy_run_path(user_dir, &format!("{exposed}.list.txt"));
+    }
+    loaded?;
 
     if let Some(error) = interruption_before_safe_point(
         context,

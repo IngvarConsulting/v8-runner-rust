@@ -518,7 +518,9 @@ struct ProvidersSchema {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct InfobaseSchema {
-    /// 1C infobase connection string without embedded user or password.
+    /// 1C infobase connection string without embedded user or password; empty for a
+    /// standalone server, which `standalone` declares.
+    #[serde(default)]
     connection: String,
     /// Optional infobase user name passed to platform utilities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -532,6 +534,29 @@ struct InfobaseSchema {
     /// Client address and web-server publication settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     web: Option<InfobaseWebSchema>,
+    /// Standalone server reached through its SSH gate; declares the target kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    standalone: Option<InfobaseStandaloneSchema>,
+}
+
+/// A standalone server (`ibsrv`) as the target.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct InfobaseStandaloneSchema {
+    /// `host:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`, port 1543 by default).
+    gate: String,
+    /// How files travel between the runner and the gate user's directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    exchange: Option<InfobaseStandaloneExchangeSchema>,
+}
+
+/// The declared file channel to a standalone server.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct InfobaseStandaloneExchangeSchema {
+    /// The gate user's directory (`<users-data>/<user>` of `ibsrv`) as the runner sees it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dir: Option<PathBuf>,
 }
 
 /// Web server a publication is written to.
