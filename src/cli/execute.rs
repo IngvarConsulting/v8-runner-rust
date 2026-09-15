@@ -277,13 +277,9 @@ fn render_publish_text(
         crate::domain::publish::PublishAction::Publish => "Publication",
         crate::domain::publish::PublishAction::Delete => "Publication removal",
     };
-    let label = if !succeeded {
-        format!("{verb} failed")
-    } else if result.provider_dispatched {
-        format!("{verb} completed successfully")
-    } else {
-        format!("{verb} planned")
-    };
+    // «Запланировано» — не стандартный исход, у него своя подпись.
+    let planned_label =
+        (succeeded && !result.provider_dispatched).then(|| format!("{verb} planned"));
     let mut details = vec![
         format!("server: {}", result.server),
         format!("wsdir: {}", result.wsdir),
@@ -314,7 +310,10 @@ fn render_publish_text(
             .map(|path| format!("[diagnostic] platform log -> {}", path.display())),
     );
     details.extend(provider_receipt_details(result.provider.as_ref()));
-    single_timeline(presenter, timeline_status(succeeded), label, details);
+    match planned_label {
+        Some(label) => single_timeline(presenter, timeline_status(succeeded), label, details),
+        None => single_timeline_outcome(presenter, timeline_status(succeeded), verb, details),
+    }
 }
 
 /// Returns the canonical command identifier for a parsed CLI command.
@@ -2258,7 +2257,7 @@ fn execute_launch(
                             result,
                             presenter,
                             TimelineStatus::Failed,
-                            "Launch failed",
+                            "Launch",
                         );
                     }
                     presenter.print_error(&error.to_string());
@@ -3220,16 +3219,16 @@ fn test_report(result: &TestRunResult) -> Option<&TestReport> {
 }
 
 fn render_build_text(result: &BuildResult, presenter: &Presenter, succeeded: bool) {
-    let summary = if !succeeded {
-        TimelineItem::new(TimelineStatus::Failed, "Build failed")
-    } else if result
-        .steps
-        .iter()
-        .all(|step| matches!(step.mode, BuildMode::Skipped) && step.ok)
+    // «Без изменений» — не стандартный исход, у него своя подпись.
+    let summary = if succeeded
+        && result
+            .steps
+            .iter()
+            .all(|step| matches!(step.mode, BuildMode::Skipped) && step.ok)
     {
         TimelineItem::new(TimelineStatus::Succeeded, "Build completed: no changes")
     } else {
-        TimelineItem::new(TimelineStatus::Succeeded, "Build completed successfully")
+        TimelineItem::outcome(timeline_status(succeeded), "Build")
     };
     let receipt = provider_receipt_details(result.provider.as_ref());
     let summary = if receipt.is_empty() {
@@ -3299,6 +3298,19 @@ fn bracketed_detail(kind: &str, message: impl AsRef<str>) -> String {
     format!("[{kind}] {}", message.as_ref())
 }
 
+fn timeline_outcome_with_details(
+    status: TimelineStatus,
+    subject: impl Into<String>,
+    details: Vec<String>,
+) -> TimelineItem {
+    let item = TimelineItem::outcome(status, subject);
+    if details.is_empty() {
+        item
+    } else {
+        item.with_detail(details.join("\n"))
+    }
+}
+
 fn single_timeline(
     presenter: &Presenter,
     status: TimelineStatus,
@@ -3306,6 +3318,23 @@ fn single_timeline(
     details: Vec<String>,
 ) {
     presenter.print_timeline(&[timeline_item_with_details(status, label, details)]);
+}
+
+/// Узел со стандартным исходом: рендерер называет предмет, слово выбирает presenter
+/// тем же правилом, что и знак.
+fn single_timeline_outcome(
+    presenter: &Presenter,
+    status: TimelineStatus,
+    subject: impl Into<String>,
+    details: Vec<String>,
+) {
+    let item = TimelineItem::outcome(status, subject);
+    let item = if details.is_empty() {
+        item
+    } else {
+        item.with_detail(details.join("\n"))
+    };
+    presenter.print_timeline(&[item]);
 }
 
 fn append_if_present(details: &mut Vec<String>, line: Option<String>) {
@@ -3504,7 +3533,7 @@ fn dump_has_warning(result: &DumpResult) -> bool {
         && result
             .message
             .as_deref()
-            .is_some_and(|message| message != "dump completed successfully")
+            .is_some_and(|message| message != crate::domain::dump::DUMP_SUCCESS_MESSAGE)
 }
 
 fn execution_has_warning(
@@ -3542,18 +3571,12 @@ fn render_load_text(result: &LoadResult, presenter: &Presenter, succeeded: bool)
         ),
         crate::domain::load::LoadTargetKind::Unknown => "unknown".to_owned(),
     };
-    let warning = succeeded
-        && execution_has_warning(
+    // Рендерер решает, какие подробности показать; слово исхода выбирает presenter.
+    let show_signals = !succeeded
+        || execution_has_warning(
             &result.execution.diagnostics,
             &result.execution.interruptions,
         );
-    let label = if !succeeded {
-        "Artifact load failed"
-    } else if warning {
-        "Artifact load completed with warnings"
-    } else {
-        "Artifact load completed successfully"
-    };
     let mut details = vec![
         format!("target: {target}"),
         format!(
@@ -3562,7 +3585,7 @@ fn render_load_text(result: &LoadResult, presenter: &Presenter, succeeded: bool)
         ),
         format!("artifact: {}", result.artifact_path.display()),
     ];
-    if !succeeded || warning {
+    if show_signals {
         let prefix = if succeeded { "warning" } else { "error" };
         append_if_present(
             &mut details,
@@ -3579,7 +3602,12 @@ fn render_load_text(result: &LoadResult, presenter: &Presenter, succeeded: bool)
         );
     }
     details.extend(provider_receipt_details(result.provider.as_ref()));
-    single_timeline(presenter, timeline_status(succeeded), label, details);
+    single_timeline_outcome(
+        presenter,
+        timeline_status(succeeded),
+        "Artifact load",
+        details,
+    );
 }
 
 fn render_init_text(result: &InitResult, presenter: &Presenter) {
@@ -3615,13 +3643,9 @@ fn render_init_text(result: &InitResult, presenter: &Presenter) {
         "init:",
         details,
     )];
-    timeline.push(timeline_item_with_details(
+    timeline.push(timeline_outcome_with_details(
         timeline_status(succeeded),
-        if succeeded {
-            "Init completed successfully"
-        } else {
-            "Init failed"
-        },
+        "Init",
         provider_receipt_details(result.provider.as_ref()),
     ));
     presenter.print_timeline(&timeline);
@@ -3644,16 +3668,9 @@ fn render_dump_text(result: &DumpResult, presenter: &Presenter, succeeded: bool)
         DumpMode::Partial => "partial",
     };
     let source_set = result.source_set.as_deref().unwrap_or("<unresolved>");
-    let warning = succeeded && dump_has_warning(result);
-    let label = if !succeeded {
-        "Dump failed"
-    } else if result.up_to_date {
-        "Dump skipped: configuration unchanged"
-    } else if warning {
-        "Dump completed with warnings"
-    } else {
-        "Dump completed successfully"
-    };
+    let show_signals = !succeeded || dump_has_warning(result);
+    let skipped_label =
+        (succeeded && result.up_to_date).then_some("Dump skipped: configuration unchanged");
     let mut details = vec![
         format!("source-set: {source_set}"),
         format!("mode: {mode}"),
@@ -3671,7 +3688,7 @@ fn render_dump_text(result: &DumpResult, presenter: &Presenter, succeeded: bool)
                 .map(|message| bracketed_detail("note", message)),
         );
     }
-    if !succeeded || warning {
+    if show_signals {
         let prefix = if succeeded { "warning" } else { "error" };
         append_if_present(
             &mut details,
@@ -3689,19 +3706,15 @@ fn render_dump_text(result: &DumpResult, presenter: &Presenter, succeeded: bool)
         );
     }
     details.extend(provider_receipt_details(result.provider.as_ref()));
-    single_timeline(presenter, timeline_status(succeeded), label, details);
+    // «Пропущено» — не стандартный исход, у него своя подпись; в остальных случаях
+    // слово выбирает presenter.
+    match skipped_label {
+        Some(label) => single_timeline(presenter, timeline_status(succeeded), label, details),
+        None => single_timeline_outcome(presenter, timeline_status(succeeded), "Dump", details),
+    }
 }
 
 fn render_convert_text(result: &ConvertResult, presenter: &Presenter, succeeded: bool) {
-    let label = if succeeded {
-        if result.message.is_some() {
-            "Convert completed with warnings"
-        } else {
-            "Convert completed successfully"
-        }
-    } else {
-        "Convert failed"
-    };
     let mut details = vec![
         format!("direction: {}", render_convert_direction(result.direction)),
         format!(
@@ -3728,25 +3741,19 @@ fn render_convert_text(result: &ConvertResult, presenter: &Presenter, succeeded:
                 .map(|message| bracketed_detail(prefix, message)),
         );
     }
-    single_timeline(presenter, timeline_status(succeeded), label, details);
+    single_timeline_outcome(presenter, timeline_status(succeeded), "Convert", details);
 }
 
 fn render_artifacts_text(result: &ArtifactsResult, presenter: &Presenter, succeeded: bool) {
     let source_set = result.source_set.as_deref().unwrap_or("<unresolved>");
     let message = execution_message(&result.execution);
-    let warning = succeeded
-        && (message.is_some()
-            || execution_has_warning(
-                &result.execution.diagnostics,
-                &result.execution.interruptions,
-            ));
-    let label = if !succeeded {
-        "Artifacts export failed"
-    } else if warning {
-        "Artifacts export completed with warnings"
-    } else {
-        "Artifacts export completed successfully"
-    };
+    // Рендерер решает, какие подробности показать; слово исхода выбирает presenter.
+    let show_signals = !succeeded
+        || message.is_some()
+        || execution_has_warning(
+            &result.execution.diagnostics,
+            &result.execution.interruptions,
+        );
     let mut details = vec![
         format!("source-set: {source_set}"),
         format!("mode: {}", render_artifact_mode(result.mode)),
@@ -3780,7 +3787,7 @@ fn render_artifacts_text(result: &ArtifactsResult, presenter: &Presenter, succee
             details.push(render_artifact_ref("artifact", artifact));
         }
     }
-    if !succeeded || warning {
+    if show_signals {
         let prefix = if succeeded { "warning" } else { "error" };
         append_if_present(
             &mut details,
@@ -3807,7 +3814,12 @@ fn render_artifacts_text(result: &ArtifactsResult, presenter: &Presenter, succee
         }
     }
     details.extend(provider_receipt_details(result.provider.as_ref()));
-    single_timeline(presenter, timeline_status(succeeded), label, details);
+    single_timeline_outcome(
+        presenter,
+        timeline_status(succeeded),
+        "Artifacts export",
+        details,
+    );
 }
 
 fn render_convert_direction(direction: ConvertDirection) -> &'static str {
@@ -3827,20 +3839,12 @@ fn render_convert_scope(scope: ConvertScope, source_set: Option<&str>) -> String
 
 fn render_syntax_text(result: &SyntaxCheckResult, presenter: &Presenter) {
     let succeeded = matches!(result.status, SyntaxCheckStatus::Clean);
-    let label = match result.status {
-        // Проверка прошла, но журнал прочитать не удалось: подпись обязана это
-        // сказать, иначе она расходится со знаком узла и с подробностью ниже.
-        SyntaxCheckStatus::Clean if result.log_read_warning.is_some() => {
-            format!("Syntax check {} completed with warnings", result.check_name)
-        }
-        SyntaxCheckStatus::Clean => {
-            format!("Syntax check {} completed successfully", result.check_name)
-        }
-        SyntaxCheckStatus::IssuesFound => {
-            format!("Syntax check {} found issues", result.check_name)
-        }
-        SyntaxCheckStatus::ToolFailed => format!("Syntax check {} failed", result.check_name),
-    };
+    // «Найдены замечания» — не стандартный исход, у него своя подпись. У остальных
+    // слово выбирает presenter: непрочитанный журнал лежит среди подробностей
+    // предупреждением, и подпись следует за знаком сама.
+    let subject = format!("Syntax check {}", result.check_name);
+    let issues_label = matches!(result.status, SyntaxCheckStatus::IssuesFound)
+        .then(|| format!("{subject} found issues"));
     let mut details = vec![format!(
         "status: {} (exit {}, errors {}, warnings {}, info {}, duration {} ms)",
         render_syntax_status(result.status),
@@ -3886,7 +3890,10 @@ fn render_syntax_text(result: &SyntaxCheckResult, presenter: &Presenter) {
     }
 
     details.extend(provider_receipt_details(result.provider.as_ref()));
-    single_timeline(presenter, timeline_status(succeeded), label, details);
+    match issues_label {
+        Some(label) => single_timeline(presenter, timeline_status(succeeded), label, details),
+        None => single_timeline_outcome(presenter, timeline_status(succeeded), subject, details),
+    }
 }
 
 fn render_syntax_status(status: SyntaxCheckStatus) -> &'static str {
@@ -3898,19 +3905,19 @@ fn render_syntax_status(status: SyntaxCheckStatus) -> &'static str {
 }
 
 fn render_launch_text(result: &LaunchResult, presenter: &Presenter) {
-    let label = if result.provider_dispatched {
-        "Launch completed successfully"
+    let subject = if result.provider_dispatched {
+        "Launch"
     } else {
-        "Launch preview completed successfully"
+        "Launch preview"
     };
-    render_launch_text_with_status(result, presenter, TimelineStatus::Succeeded, label);
+    render_launch_text_with_status(result, presenter, TimelineStatus::Succeeded, subject);
 }
 
 fn render_launch_text_with_status(
     result: &LaunchResult,
     presenter: &Presenter,
     status: TimelineStatus,
-    label: &'static str,
+    subject: &'static str,
 ) {
     let mut details = vec![
         format!("mode: {}", render_launch_mode(&result.mode)),
@@ -3952,7 +3959,7 @@ fn render_launch_text_with_status(
             ));
         }
     }
-    single_timeline(presenter, status, label, details);
+    single_timeline_outcome(presenter, status, subject, details);
 }
 
 fn render_launch_mode(mode: &LaunchMode) -> &'static str {
@@ -3969,23 +3976,15 @@ fn render_launch_mode(mode: &LaunchMode) -> &'static str {
 fn render_test_text(result: &TestRunResult, presenter: &Presenter) {
     let diagnostics = visible_test_diagnostics(result);
     let succeeded = result.execution.is_ok();
-    let has_warning = succeeded
-        && (!result.warnings.is_empty()
-            || test_has_actionable_success_signal(result)
-            || !result.execution.interruptions.is_empty()
-            || result
-                .steps
-                .iter()
-                .any(|step| !matches!(step.status, ExecutionStepStatus::Succeeded)));
-    let label = if succeeded {
-        if has_warning {
-            "Tests completed with warnings"
-        } else {
-            "Tests completed successfully"
-        }
-    } else {
-        "Tests failed"
-    };
+    // Рендерер решает, показывать ли сигналы шагов; слово исхода выбирает presenter.
+    let show_signals = !succeeded
+        || !result.warnings.is_empty()
+        || test_has_actionable_success_signal(result)
+        || !result.execution.interruptions.is_empty()
+        || result
+            .steps
+            .iter()
+            .any(|step| !matches!(step.status, ExecutionStepStatus::Succeeded));
     let mut details = vec![format!("target: {}", render_test_target(&result.target))];
     if let Some(report) = test_report(result) {
         details.push(format!(
@@ -3998,7 +3997,7 @@ fn render_test_text(result: &TestRunResult, presenter: &Presenter) {
         ));
     }
 
-    if !succeeded || has_warning {
+    if show_signals {
         append_step_signals(&mut details, &result.steps);
         append_report_failures(&mut details, result);
         append_error_details(&mut details, &result.execution.errors);
@@ -4010,7 +4009,7 @@ fn render_test_text(result: &TestRunResult, presenter: &Presenter) {
         append_retained_test_artifacts(&mut details, result);
     }
 
-    single_timeline(presenter, timeline_status(succeeded), label, details);
+    single_timeline_outcome(presenter, timeline_status(succeeded), "Tests", details);
 }
 
 fn render_test_target(target: &TestTarget) -> String {

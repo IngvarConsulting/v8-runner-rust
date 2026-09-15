@@ -437,6 +437,9 @@ impl FakeAgent {
             return (success(), false);
         }
         if line == "common shutdown" {
+            // Поддельный процесс платформы бывает только под unix; шлюз и чужой агент
+            // своего процесса не имеют, гасить нечего.
+            #[cfg(unix)]
             if let Ok(pid) = fs::read_to_string(&self.designer_pid_file) {
                 let _ = std::process::Command::new("kill")
                     .arg(pid.trim())
@@ -930,6 +933,7 @@ pub fn start_fake_agent(agent: FakeAgent) -> u16 {
 
 /// Поддельный `1cv8` в агентском режиме: записывает ключи, создаёт раскладку
 /// `AgentBaseDir` как платформа и живёт до сигнала.
+#[cfg(unix)]
 pub fn write_fake_designer(path: &Path, args_log: &Path, pid_file: &Path, base_dir_file: &Path) {
     let body = format!(
         r#"printf '%s\n' "$*" >> "{args_log}"
@@ -957,6 +961,7 @@ pub fn read_or_empty(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_default()
 }
 
+#[cfg(unix)]
 pub fn process_is_alive(pid: u32) -> bool {
     std::process::Command::new("kill")
         .args(["-0", &pid.to_string()])

@@ -12,8 +12,9 @@ use super::*;
 use crate::platform::agent::WaitPolicy;
 use crate::platform::locator::UtilityLocation;
 use crate::use_cases::agent_session::{
-    argument, connect, generation_id, map_agent_error, run_id, stage_dir, tidy, transcript_log,
-    unstage, wait_policy, write_bytes, AgentHandle, Exchange, GenerationLedger,
+    argument, connect, generation_id, map_agent_error, run_id, stage_dir, stage_dir_partially,
+    tidy, transcript_log, unstage, wait_policy, write_bytes, AgentHandle, Exchange,
+    GenerationLedger,
 };
 
 pub(super) struct AgentLoader {
@@ -104,7 +105,13 @@ impl SourceSetLoader for AgentLoader {
         let relative = format!("build/{run}/{step_index:02}-{}", source_set.name);
         // Недоставленные исходники (канал отверг запись) не оставляют на стороне точки
         // входа и половины каталога.
-        let exposed = match stage_dir(handle, &exchange, &relative, source_context.path()) {
+        let staged = match partial_paths {
+            Some(paths) => {
+                stage_dir_partially(handle, &exchange, &relative, source_context.path(), paths)
+            }
+            None => stage_dir(handle, &exchange, &relative, source_context.path()),
+        };
+        let exposed = match staged {
             Ok(exposed) => exposed,
             Err(error) => {
                 unstage(handle, &exchange, &relative);

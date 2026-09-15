@@ -4,7 +4,11 @@
 //!
 //! Двойник шлюза — тот же `support::fake_agent` с фиксированным каталогом пользователя
 //! и именованным логином, как у настоящего `ibsrv` (замер 15.09.2026).
-#![cfg(unix)]
+//!
+//! Набор идёт и под Windows: поддельная утилита платформы здесь не нужна — раннер к
+//! шлюзу подключается, ничего не запуская, а двойник шлюза это обычный сервер на
+//! `russh`. Под Windows набор заодно проверяет то, чего не видно под unix: пути на
+//! стороне цели собираются через `/`, хотя локальные приходят с `\\`.
 
 mod support;
 
@@ -206,6 +210,47 @@ fn a_build_travels_through_sftp() {
             .unwrap_or(true),
         "nothing is left on the server side"
     );
+}
+
+/// Частичная сборка по SFTP не возит набор целиком: на сервер уходят корневые описатели,
+/// изменённые файлы и список — и ничего больше.
+#[test]
+fn a_partial_build_through_sftp_ships_only_the_changed_files() {
+    let harness = harness_with_channel(Channel::Sftp);
+    let (code, payload) = run(&harness, &["build"]);
+    assert_eq!(code, 0, "{payload}");
+    let seen_before = commands(&harness).len();
+    fs::write(
+        harness
+            .dir
+            .path()
+            .join("project/configuration/Catalogs/Items.xml"),
+        "<Catalog changed='1'/>",
+    )
+    .expect("change");
+
+    let (code, payload) = run(&harness, &["build"]);
+
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(
+        payload["data"]["steps"][0]["mode"]["partial"]["file_count"], 1,
+        "{payload}"
+    );
+    let writes: Vec<String> = commands(&harness)
+        .into_iter()
+        .skip(seen_before)
+        .filter(|line| line.starts_with("sftp write "))
+        .map(|line| line.rsplit('/').next().unwrap_or_default().to_owned())
+        .collect();
+    let mut expected = vec![
+        "Configuration.xml".to_owned(),
+        "Items.xml".to_owned(),
+        "00-main.list.txt".to_owned(),
+    ];
+    let mut actual = writes.clone();
+    actual.sort();
+    expected.sort();
+    assert_eq!(actual, expected, "{writes:?}");
 }
 
 /// Инкрементальная выгрузка по SFTP не возит цель целиком: на сервер уходит только

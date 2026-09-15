@@ -7,7 +7,7 @@ decision: DEC.2026-09-14.EVERY-COMMAND-PINS-THE-FORM-OF-ITS-DATA
 artifact: docs/schemas/command-data/tools-download.schema.json
 producer: src/domain/tools_download.rs
 consumers: [cli]
-check: [src/command_data.rs::generated_command_data_schemas_are_current]
+check: [src/command_data.rs::generated_command_data_schemas_are_current, tests/cli_tools_download.rs::tools_download_answers_in_the_form_declared_for_it]
 scope: [wire, cli]
 ---
 

@@ -239,13 +239,12 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
     // Шлюз прогнан раннером на живом `ibsrv` 8.3.27 15.09.2026: build (полная и частичная
     // загрузка), dump (полная и пропуск по поколению), make cf, export cf, extensions.
     const GATE_ONLY: &[Capability] = &[implemented(Agent, LiveVerified)];
-    // `make`: у агента `dump-cfg` (cf/cfe прогнаны раннером на 8.3.27 15.09.2026) и
-    // загрузка внешних обработок из файлов (команда есть, живой прогон только двойником);
-    // `load`: у агента нет `compare-cfg`, проба совместимости невозможна, строки нет
-    // намеренно.
+    // `make`: у агента `dump-cfg` (cf/cfe) и сборка внешней обработки из файлов с
+    // обратной выгрузкой — прогнаны раннером на 8.3.27 15–16.09.2026; `load`: у агента
+    // нет `compare-cfg`, проба совместимости невозможна, строки нет намеренно.
     const MAKE: &[Capability] = &[
         implemented(Designer, LiveVerified),
-        experimental(Agent, ArgvTested),
+        experimental(Agent, LiveVerified),
     ];
     // Агент: `config extensions …` — list/info/create/activate/delete и снятие защиты
     // прогнаны раннером на 8.3.27 15.09.2026.

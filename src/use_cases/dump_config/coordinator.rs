@@ -469,7 +469,8 @@ fn run_dump_selected(
             target_path: resolved.target_path,
             platform_log_path: platform_result.platform_log_path,
             duration_ms: started.elapsed().as_millis() as u64,
-            message: cleanup_message.or_else(|| Some("dump completed successfully".to_owned())),
+            message: cleanup_message
+                .or_else(|| Some(crate::domain::dump::DUMP_SUCCESS_MESSAGE.to_owned())),
         }),
         Err(error) => {
             let message = error.to_string();

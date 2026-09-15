@@ -70,6 +70,16 @@ impl NodeMark {
         }
     }
 
+    /// Слово исхода для подписи узла. Знак и слово берутся из одного значения, поэтому
+    /// разойтись не могут.
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Succeeded => "completed successfully",
+            Self::Warned => "completed with warnings",
+            Self::Failed => "failed",
+        }
+    }
+
     const fn color(self) -> &'static str {
         match self {
             Self::Succeeded => "32",
@@ -184,15 +194,38 @@ pub fn text_output_grammar() -> Value {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimelineItem {
     pub status: TimelineStatus,
-    pub label: String,
+    pub label: TimelineLabel,
     pub detail: Option<String>,
+}
+
+/// Подпись узла: либо названа целиком, либо собирается из предмета.
+///
+/// Во втором случае слово исхода выбирает presenter — тем же правилом, каким выбирает
+/// знак. Пока слово собирал рендерер, оно расходилось со знаком: у `syntax` подпись
+/// называла проверку успешной, имея предупреждение среди подробностей, у `test` —
+/// обещала предупреждения, не имея их. Оба случая находились тестами, а не правилом.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimelineLabel {
+    /// Готовая подпись: у узла нет стандартного исхода («Dump skipped: …», «config:»).
+    Fixed(String),
+    /// Предмет узла: слово исхода подставит presenter.
+    Subject(String),
 }
 
 impl TimelineItem {
     pub fn new(status: TimelineStatus, label: impl Into<String>) -> Self {
         Self {
             status,
-            label: label.into(),
+            label: TimelineLabel::Fixed(label.into()),
+            detail: None,
+        }
+    }
+
+    /// Узел со стандартным исходом: рендерер называет предмет, слово выбирает presenter.
+    pub fn outcome(status: TimelineStatus, subject: impl Into<String>) -> Self {
+        Self {
+            status,
+            label: TimelineLabel::Subject(subject.into()),
             detail: None,
         }
     }
@@ -221,7 +254,11 @@ impl TextPresenter {
             let last = index + 1 == items.len();
             let details = ordered_details(item);
             let mark = node_mark(item.status, &details);
-            println!("{} {}", self.timeline_node(mark), item.label);
+            let label = match &item.label {
+                TimelineLabel::Fixed(label) => label.clone(),
+                TimelineLabel::Subject(subject) => format!("{subject} {}", mark.word()),
+            };
+            println!("{} {}", self.timeline_node(mark), label);
 
             let prefix = self.timeline_pipe();
             for line in &details {
@@ -446,5 +483,34 @@ mod tests {
         let presenter = TextPresenter { no_color: true };
 
         assert_eq!(presenter.timeline_detail("✓ completed"), "✓ completed");
+    }
+
+    /// Подпись узла и его знак берутся из одного значения: предупреждение среди
+    /// подробностей меняет и слово, и знак. Фальсификатор правила — тот же узел без
+    /// предупреждения обязан называться успешным.
+    #[test]
+    fn the_word_of_an_outcome_follows_the_sign() {
+        let clean = super::TimelineItem::outcome(super::TimelineStatus::Succeeded, "Dump")
+            .with_detail("mode: full");
+        let warned = super::TimelineItem::outcome(super::TimelineStatus::Succeeded, "Dump")
+            .with_detail("[warning] slow");
+        let failed = super::TimelineItem::outcome(super::TimelineStatus::Failed, "Dump")
+            .with_detail("[error] no");
+
+        let word = |item: &super::TimelineItem| {
+            let details = super::ordered_details(item);
+            super::node_mark(item.status, &details).word().to_owned()
+        };
+        let mark = |item: &super::TimelineItem| {
+            let details = super::ordered_details(item);
+            super::node_mark(item.status, &details).glyph()
+        };
+
+        assert_eq!(word(&clean), "completed successfully");
+        assert_eq!(mark(&clean), super::MARK_SUCCEEDED);
+        assert_eq!(word(&warned), "completed with warnings");
+        assert_eq!(mark(&warned), super::MARK_WARNED);
+        assert_eq!(word(&failed), "failed");
+        assert_eq!(mark(&failed), super::MARK_FAILED);
     }
 }

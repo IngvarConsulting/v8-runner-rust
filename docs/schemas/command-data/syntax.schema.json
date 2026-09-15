@@ -1,84 +1,117 @@
 {
   "$defs": {
-    "EdtIssue": {
-      "properties": {
-        "check": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "column": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "line": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "message": {
-          "type": "string"
-        },
-        "path": {
-          "type": "string"
-        },
-        "severity": {
-          "$ref": "#/$defs/IssueSeverity"
-        }
-      },
-      "required": [
-        "path",
-        "message",
-        "severity"
-      ],
-      "type": "object"
-    },
     "Issue": {
       "oneOf": [
         {
-          "$ref": "#/$defs/ModuleIssue",
+          "additionalProperties": false,
           "properties": {
+            "column": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "kind": {
               "const": "module",
               "type": "string"
+            },
+            "line": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "message": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/$defs/IssueSeverity"
             }
           },
           "required": [
-            "kind"
+            "kind",
+            "path",
+            "message",
+            "severity"
           ],
           "type": "object"
         },
         {
-          "$ref": "#/$defs/ObjectIssue",
+          "additionalProperties": false,
           "properties": {
             "kind": {
               "const": "object",
               "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "object": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/$defs/IssueSeverity"
             }
           },
           "required": [
-            "kind"
+            "kind",
+            "object",
+            "message",
+            "severity"
           ],
           "type": "object"
         },
         {
-          "$ref": "#/$defs/EdtIssue",
+          "additionalProperties": false,
           "properties": {
+            "check": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "column": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "kind": {
               "const": "edt",
               "type": "string"
+            },
+            "line": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "message": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/$defs/IssueSeverity"
             }
           },
           "required": [
-            "kind"
+            "kind",
+            "path",
+            "message",
+            "severity"
           ],
           "type": "object"
         }
@@ -91,60 +124,6 @@
         "INFO"
       ],
       "type": "string"
-    },
-    "ModuleIssue": {
-      "properties": {
-        "column": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "line": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "message": {
-          "type": "string"
-        },
-        "path": {
-          "type": "string"
-        },
-        "severity": {
-          "$ref": "#/$defs/IssueSeverity"
-        }
-      },
-      "required": [
-        "path",
-        "message",
-        "severity"
-      ],
-      "type": "object"
-    },
-    "ObjectIssue": {
-      "properties": {
-        "message": {
-          "type": "string"
-        },
-        "object": {
-          "type": "string"
-        },
-        "severity": {
-          "$ref": "#/$defs/IssueSeverity"
-        }
-      },
-      "required": [
-        "object",
-        "message",
-        "severity"
-      ],
-      "type": "object"
     },
     "Provider": {
       "description": "Исполнитель. Имя называет того, кто делает работу, а не способ его запуска.",

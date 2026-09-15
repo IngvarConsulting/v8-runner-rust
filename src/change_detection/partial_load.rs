@@ -283,7 +283,7 @@ mod tests {
         let file = nested.join("ObjectModule.bsl");
         std::fs::write(&file, "module").expect("write");
 
-        let rels = relative_paths(&[file.clone()], root).expect("relative paths");
+        let rels = relative_paths(std::slice::from_ref(&file), root).expect("relative paths");
 
         assert_eq!(rels, vec![PathBuf::from("Catalogs.Items/ObjectModule.bsl")]);
     }

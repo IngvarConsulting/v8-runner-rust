@@ -7,7 +7,7 @@ decision: DEC.2026-09-14.EVERY-COMMAND-PINS-THE-FORM-OF-ITS-DATA
 artifact: docs/schemas/command-data/bootstrap.schema.json
 producer: src/domain/bootstrap.rs
 consumers: [cli]
-check: [src/command_data.rs::generated_command_data_schemas_are_current]
+check: [src/command_data.rs::generated_command_data_schemas_are_current, tests/cli_bootstrap.rs::bootstrap_json_success_keeps_credentials_in_local_overlay_only]
 scope: [wire, cli]
 ---
 

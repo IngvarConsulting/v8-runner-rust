@@ -1,6 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Сообщение удачной выгрузки, которой нечего сообщить.
+///
+/// Его же рендерер отличает от настоящего предупреждения, поэтому фраза живёт одним
+/// значением: разъехавшись, они сделали бы безоблачную выгрузку предупреждением.
+pub const DUMP_SUCCESS_MESSAGE: &str = "dump completed successfully";
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DumpResult {
     /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
