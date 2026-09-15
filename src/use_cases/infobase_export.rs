@@ -807,6 +807,16 @@ fn select_provider(
     // Кандидаты приходят из матрицы: переопределение — один исполнитель без отката,
     // умолчание — цепочка, из которой берётся первый готовый.
     let plan = config.provider_plan(intent.operation());
+    if plan.candidates().is_empty() {
+        return Err((
+            AppError::CapabilityUnavailable(format!(
+                "no executor implements {} on a {} target",
+                intent.operation(),
+                config.target_kind().as_str()
+            )),
+            plan.receipt_for_nobody(Vec::new()),
+        ));
+    }
     let mut utilities = PlatformUtilities::from_config(config);
     let mut skipped: Vec<SkippedProvider> = Vec::new();
     let mut has_implemented = false;
@@ -835,8 +845,13 @@ fn select_provider(
             plan,
             crate::domain::capability::ProviderPlan::Override { .. }
         );
+        // У автономного сервера шлюз — единственный исполнитель: он не эксперимент, а
+        // строка матрицы (`GATE_ONLY`), и в цепочку входит сам.
+        let gate_only = provider == ExportProvider::Agent && config.infobase.standalone.is_some();
         if implementation == ProviderImplementation::Unsupported
-            || (implementation == ProviderImplementation::Experimental && !named_explicitly)
+            || (implementation == ProviderImplementation::Experimental
+                && !named_explicitly
+                && !gate_only)
         {
             skipped.push(SkippedProvider {
                 provider,
@@ -940,7 +955,8 @@ fn capability(
 fn provider_utility(config: &AppConfig, provider: ExportProvider) -> Option<UtilityType> {
     match provider {
         ExportProvider::Designer => Some(UtilityType::V8),
-        // Управляемому агенту нужна платформа, чужому — ничего.
+        // Управляемому агенту нужна платформа, чужому и шлюзу автономного сервера — ничего.
+        ExportProvider::Agent if config.infobase.standalone.is_some() => None,
         ExportProvider::Agent => match config.tools.designer_agent.mode() {
             Ok(crate::config::model::DesignerAgentMode::Attached { .. }) => None,
             _ => Some(UtilityType::V8),
@@ -958,11 +974,27 @@ fn readiness(
     provider: ExportProvider,
     utility: Option<UtilityType>,
 ) -> Result<Option<PathBuf>, String> {
-    match intent {
-        ExportIntent::SnapshotRestore {
-            expects_absent_target: true,
-        } => validate_restore_target_connection(config)?,
-        _ => validate_file_infobase_readiness(config)?,
+    // Автономный сервер обслуживает существующую базу: файловых проверок нет, а
+    // `--create` ему не адресовать.
+    if config.infobase.standalone.is_some() {
+        if matches!(
+            intent,
+            ExportIntent::SnapshotRestore {
+                expects_absent_target: true
+            }
+        ) {
+            return Err(
+                "a standalone server serves an existing infobase: restore it with --replace, not --create"
+                    .to_owned(),
+            );
+        }
+    } else {
+        match intent {
+            ExportIntent::SnapshotRestore {
+                expects_absent_target: true,
+            } => validate_restore_target_connection(config)?,
+            _ => validate_file_infobase_readiness(config)?,
+        }
     }
     if provider == ExportProvider::Ibcmd {
         IbcmdConnection::from_infobase(&config.infobase)

@@ -57,7 +57,7 @@ pub async fn execute(
         }
     };
 
-    if config.selected_provider(Operation::Syntax) != Provider::Designer
+    if config.default_provider(Operation::Syntax) != Some(Provider::Designer)
         || config.format != SourceFormat::Edt
     {
         let error = AppError::Validation(SUPPORTED_EDT_SYNTAX_ERROR.to_owned());

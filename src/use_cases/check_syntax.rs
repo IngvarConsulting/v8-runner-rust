@@ -406,7 +406,7 @@ impl HasClientScopes for DesignerModulesSyntaxArgs {
 }
 
 fn validate_designer_supported_matrix(config: &AppConfig) -> Option<AppError> {
-    if config.selected_provider(Operation::Syntax) != Provider::Designer
+    if config.default_provider(Operation::Syntax) != Some(Provider::Designer)
         || config.format != SourceFormat::Designer
     {
         Some(AppError::Validation(
@@ -418,7 +418,7 @@ fn validate_designer_supported_matrix(config: &AppConfig) -> Option<AppError> {
 }
 
 fn validate_edt_supported_matrix(config: &AppConfig) -> Option<AppError> {
-    if config.selected_provider(Operation::Syntax) != Provider::Designer
+    if config.default_provider(Operation::Syntax) != Some(Provider::Designer)
         || config.format != SourceFormat::Edt
     {
         Some(AppError::Validation(SUPPORTED_EDT_SYNTAX_ERROR.to_owned()))

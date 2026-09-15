@@ -37,6 +37,8 @@ fn utilities_of(provider: Provider, config: &AppConfig) -> Option<Vec<UtilityTyp
         // без платформы на этой машине агента нет. К чужой точке входа подключается
         // встроенный SSH-клиент, утилиты для этого не нужны.
         Provider::Agent => match config.tools.designer_agent.mode() {
+            // Шлюз автономного сервера держит сам сервер: утилиты раннеру не нужны.
+            _ if config.infobase.standalone.is_some() => Some(Vec::new()),
             Ok(DesignerAgentMode::Attached { .. }) => Some(Vec::new()),
             Ok(DesignerAgentMode::Managed { .. }) | Err(_) => Some(vec![UtilityType::V8]),
         },
@@ -51,6 +53,16 @@ pub fn select(
     operation: Operation,
 ) -> Result<SelectedProvider, (AppError, ProviderReceipt)> {
     let plan = config.provider_plan(operation);
+    if plan.candidates().is_empty() {
+        let target = config.target_kind();
+        return Err((
+            AppError::CapabilityUnavailable(format!(
+                "no executor implements {operation} on a {} target",
+                target.as_str()
+            )),
+            plan.receipt_for_nobody(Vec::new()),
+        ));
+    }
     let mut skipped: Vec<SkippedProvider> = Vec::new();
     let mut had_an_adapter = false;
 

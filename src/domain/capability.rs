@@ -236,6 +236,9 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
         experimental(Agent, LiveVerified),
     ];
     const DESIGNER_ONLY: &[Capability] = &[implemented(Designer, LiveVerified)];
+    // Шлюз прогнан раннером на живом `ibsrv` 8.3.27 15.09.2026: build (полная и частичная
+    // загрузка), dump (полная и пропуск по поколению), make cf, export cf, extensions.
+    const GATE_ONLY: &[Capability] = &[implemented(Agent, LiveVerified)];
     // `make`: у агента `dump-cfg` (cf/cfe прогнаны раннером на 8.3.27 15.09.2026) и
     // загрузка внешних обработок из файлов (команда есть, живой прогон только двойником);
     // `load`: у агента нет `compare-cfg`, проба совместимости невозможна, строки нет
@@ -279,8 +282,21 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
             TargetKind::File | TargetKind::Cluster,
         ) => SNAPSHOT,
         (Operation::Publish, TargetKind::File | TargetKind::Cluster) => WEBINST_ONLY,
-        // Автономный сервер как вид цели ещё не объявляется конфигом; строки для него
-        // появятся вместе с секцией `infobase.standalone`.
+        // Автономный сервер: единственная точка входа — его SSH-шлюз, тот же агентский
+        // shell (`DEC.2026-09-14.ONLY-A-STANDALONE-SERVER-ANSWERS-WITHOUT-BEING-STARTED`).
+        // Раннер к нему подключается, ничего не запуская, поэтому `init`, `publish`,
+        // `load` (нет `compare-cfg`) и `syntax` строк не имеют. `infobase dump|restore`
+        // строк не имеют намеренно: `infobase-tools dump-ib` через шлюз роняет `ibsrv`
+        // 8.3.27 (SIGSEGV, живой прогон 15.09.2026), а `restore-ib` завершает сеанс
+        // сервера по документации — снимок автономного сервера снимают его средствами.
+        (
+            Operation::Build
+            | Operation::Dump
+            | Operation::Make
+            | Operation::Extensions
+            | Operation::ConfigurationExport,
+            TargetKind::Standalone,
+        ) => GATE_ONLY,
         (_, TargetKind::Standalone) => &[],
     }
 }

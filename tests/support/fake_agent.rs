@@ -30,6 +30,9 @@ pub struct FakeAgent {
     pub designer_pid_file: PathBuf,
     /// Поколение конфигурации: растёт с каждой удачной загрузкой.
     pub generation: Arc<AtomicU64>,
+    /// Двойник шлюза автономного сервера: каталог пользователя задан прямо (у шлюза
+    /// нет карты `agentbasedir.json`), логин — имя пользователя базы.
+    pub gate: Option<(String, PathBuf)>,
     /// Состав расширений базы: `properties get/set`, `create`, `delete`.
     pub extensions: Arc<Mutex<Vec<FakeExtension>>>,
     /// Что было собрано из каких xml: обратная выгрузка возвращает тот же описатель.
@@ -47,6 +50,15 @@ pub struct FakeExtension {
 }
 
 impl FakeExtension {
+    /// Запись шлюза автономного сервера 8.3.27: `active` и `version` переставлены
+    /// (живой ответ 15.09.2026).
+    fn gate_record(&self) -> String {
+        format!(
+            "{{\"body\":{{\"active\":\"\",\"hash-sum\":\"{:x}\",\"name\":\"{}\",\"purpose\":\"{}\",\"safe-mode\":{},\"scope\":\"infobase\",\"security-profile-name\":\"\",\"unsafe-action-protection\":{},\"used-in-distributed-infobase\":false,\"version\":{}}},\"type\":\"extension-properties\"}}",
+            self.name.len(), self.name, self.purpose, self.safe_mode, self.unsafe_action_protection, self.active
+        )
+    }
+
     fn record(&self) -> String {
         let hash = format!("{:x}", self.name.len());
         format!(
@@ -70,6 +82,7 @@ impl FakeAgent {
             base_dir,
             base_dir_file,
             designer_pid_file,
+            gate: None,
             generation: Arc::new(AtomicU64::new(1)),
             extensions: Arc::new(Mutex::new(vec![FakeExtension {
                 name: "Зонд".to_owned(),
@@ -108,7 +121,13 @@ impl FakeAgent {
         let records = extensions
             .iter()
             .filter(|extension| name.is_none_or(|name| extension.name == name))
-            .map(FakeExtension::record)
+            .map(|extension| {
+                if self.gate.is_some() {
+                    extension.gate_record()
+                } else {
+                    extension.record()
+                }
+            })
             .collect::<Vec<_>>();
         if name.is_some() && records.is_empty() {
             return extension_not_found();
@@ -124,7 +143,23 @@ impl FakeAgent {
         )
     }
 
+    /// Шлюз автономного сервера: сессии от `user` с паролем, файлы — в `user_dir`.
+    pub fn gate(commands_log: PathBuf, user: &str, user_dir: PathBuf) -> Self {
+        let mut agent = Self::new(
+            true,
+            commands_log,
+            None,
+            PathBuf::from("/nonexistent/base-dir-file"),
+            PathBuf::from("/nonexistent/designer.pid"),
+        );
+        agent.gate = Some((user.to_owned(), user_dir));
+        agent
+    }
+
     fn user_dir(&self) -> PathBuf {
+        if let Some((_, user_dir)) = self.gate.as_ref() {
+            return user_dir.clone();
+        }
         let base = match self.base_dir.as_ref() {
             Some(base) => base.clone(),
             None => PathBuf::from(fs::read_to_string(&self.base_dir_file).unwrap_or_default()),
@@ -213,6 +248,17 @@ impl FakeAgent {
             return (progress_then_success("Загрузка конфигурации"), false);
         }
         if line.starts_with("config update-db-cfg") {
+            // Шлюз автономного сервера вставляет в ответ уведомление `generation-id`
+            // с новым токеном до итога команды (живой прогон 15.09.2026).
+            if self.gate.is_some() {
+                return (
+                    format!(
+                        "[{{\"type\":\"log\",\"message\":\"Принятие изменений...\"}}]\n[{{\"body\":\"{}\",\"type\":\"generation-id\"}}]\n[{{\"type\":\"log\",\"message\":\"Обновление конфигурации базы данных успешно завершено\"}}]\n[{{\"type\":\"success\"}}]\n",
+                        self.token()
+                    ),
+                    false,
+                );
+            }
             return (
                 "[{\"type\":\"log\",\"message\":\"Обработка структуры базы данных...\"}]\n[{\"type\":\"log\",\"message\":\"Принятие изменений...\"}]\n[{\"type\":\"success\",\"message\":\"\"}]\n".to_owned(),
                 false,
@@ -443,6 +489,14 @@ impl server::Handler for FakeAgent {
         // Настоящий агент слушает порт только после старта процесса; двойник слушает
         // заранее, поэтому сессию он принимает лишь после того, как поддельный `1cv8`
         // записал свою раскладку.
+        if let Some((expected_user, _)) = self.gate.as_ref() {
+            // Шлюз с пользователями базы: только пользователь ИБ и его пароль.
+            return Ok(if user == expected_user && password == AGENT_PASSWORD {
+                Auth::Accept
+            } else {
+                Auth::reject()
+            });
+        }
         if self.base_dir.is_none() {
             let started = std::time::Instant::now();
             while !self.base_dir_file.exists() && started.elapsed() < Duration::from_secs(20) {

@@ -39,10 +39,16 @@ pub fn execute(
         }
     };
 
-    let connection = match IbcmdConnection::from_infobase(&config.infobase) {
-        Ok(connection) => connection,
-        Err(error) => {
-            return Err(UseCaseFailure::without_payload(AppError::from(error)));
+    // Подключение `ibcmd` строится только для него: у автономного сервера строки
+    // подключения нет, туда ходит шлюз.
+    let connection = if config.infobase.standalone.is_some() {
+        None
+    } else {
+        match IbcmdConnection::from_infobase(&config.infobase) {
+            Ok(connection) => Some(connection),
+            Err(error) => {
+                return Err(UseCaseFailure::without_payload(AppError::from(error)));
+            }
         }
     };
 
@@ -76,7 +82,15 @@ pub fn execute(
         (_, Some(location)) => SafetySetter::Ibcmd(
             IbcmdDsl::new(
                 location.path,
-                connection,
+                match connection {
+                    Some(connection) => connection,
+                    None => {
+                        return Err(UseCaseFailure::without_payload(AppError::Runtime(
+                            "ibcmd was selected for a target without a connection string"
+                                .to_owned(),
+                        )))
+                    }
+                },
                 utilities.runner_for(UtilityType::Ibcmd),
             )
             .with_execution_policy(
