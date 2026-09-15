@@ -1,11 +1,12 @@
 ---
 id: DEC.2026-09-14.RECEIPT-EXPLAINS-PROVIDER-CHOICE
-status: planned
+status: active
 governs: product
-realized: null
+realized: tests/contract_receipt.rs::every_operation_with_an_executor_answers_with_a_receipt
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [CTR.WIRE.INIT-DATA, CTR.WIRE.BUILD-DATA, CTR.WIRE.DUMP-DATA, CTR.WIRE.LOAD-DATA, CTR.WIRE.EXTENSIONS-DATA, CTR.WIRE.EXTENSIONS-INVENTORY-DATA, CTR.WIRE.SYNTAX-DATA, CTR.WIRE.MAKE-DATA, CTR.WIRE.PUBLISH-DATA]
+changes: [CTR.WIRE.INIT-DATA, CTR.WIRE.BUILD-DATA, CTR.WIRE.DUMP-DATA, CTR.WIRE.LOAD-DATA, CTR.WIRE.EXTENSIONS-DATA, CTR.WIRE.EXTENSIONS-INVENTORY-DATA, CTR.WIRE.SYNTAX-DATA, CTR.WIRE.MAKE-DATA, CTR.WIRE.PUBLISH-DATA]
 ---
 
 # Квитанция объясняет выбор провайдера, а не предлагает его

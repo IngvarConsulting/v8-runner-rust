@@ -3291,6 +3291,7 @@ exit 0"#,
     #[test]
     fn dump_result_json_contains_new_fields() {
         let result = crate::domain::dump::DumpResult {
+            provider: None,
             provider_dispatched: true,
             ok: true,
             source_set: Some("main".to_owned()),

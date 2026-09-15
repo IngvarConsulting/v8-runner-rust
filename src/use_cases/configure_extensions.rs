@@ -45,12 +45,26 @@ pub fn execute(
     };
 
     let mut utilities = PlatformUtilities::from_config(config);
-    let binary = match utilities.locate(UtilityType::Ibcmd) {
-        Ok(location) => location.path,
-        Err(error) => {
-            return Err(UseCaseFailure::without_payload(AppError::from(error)));
+    let selected = match crate::use_cases::provider_selection::select(
+        config,
+        &mut utilities,
+        crate::domain::capability::Operation::Extensions,
+    ) {
+        Ok(selected) => selected,
+        Err((error, receipt)) => {
+            let mut result = ExtensionsResult {
+                provider: None,
+                ok: false,
+                provider_dispatched: false,
+                steps: Vec::new(),
+                duration_ms: started.elapsed().as_millis() as u64,
+            };
+            result.provider = Some(receipt);
+            return Err(UseCaseFailure::with_payload(error, result));
         }
     };
+    let receipt = selected.receipt;
+    let binary = selected.location.path;
     let dsl = IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
         .with_execution_policy(
             context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
@@ -65,6 +79,7 @@ pub fn execute(
                 "extension update",
             );
             let payload = ExtensionsResult {
+                provider: None,
                 provider_dispatched: true,
                 ok: false,
                 steps,
@@ -126,6 +141,7 @@ pub fn execute(
                 steps.push(step);
                 log_extensions_summary(false);
                 let payload = ExtensionsResult {
+                    provider: None,
                     provider_dispatched: true,
                     ok: false,
                     steps,
@@ -150,6 +166,7 @@ pub fn execute(
                 steps.push(step);
                 log_extensions_summary(false);
                 let payload = ExtensionsResult {
+                    provider: None,
                     provider_dispatched: true,
                     ok: false,
                     steps,
@@ -162,6 +179,7 @@ pub fn execute(
 
     log_extensions_summary(true);
     Ok(ExtensionsResult {
+        provider: Some(receipt),
         provider_dispatched: true,
         ok: true,
         steps,

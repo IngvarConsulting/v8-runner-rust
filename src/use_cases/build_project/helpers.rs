@@ -598,6 +598,7 @@ pub(super) fn fail_with_remaining_steps(
     }
 
     BuildResult {
+        provider: None,
         provider_dispatched: true,
         ok: false,
         steps: completed_steps,

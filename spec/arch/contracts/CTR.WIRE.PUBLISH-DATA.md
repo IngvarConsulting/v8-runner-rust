@@ -2,8 +2,8 @@
 id: CTR.WIRE.PUBLISH-DATA
 status: active
 governs: product
-version: 1
-decision: DEC.2026-09-14.RUNNER-PUBLISHES-TO-A-WEB-SERVER
+version: 2
+decision: DEC.2026-09-14.RECEIPT-EXPLAINS-PROVIDER-CHOICE
 artifact: docs/schemas/command-data/publish.schema.json
 producer: src/domain/publish.rs
 consumers: [cli, unica]
@@ -23,6 +23,7 @@ scope: [wire, cli]
 
 ```json
 {
+  "provider": {"selected": "webinst", "origin": {"kind": "default"}},
   "ok": true,
   "provider_dispatched": false,
   "action": "publish",

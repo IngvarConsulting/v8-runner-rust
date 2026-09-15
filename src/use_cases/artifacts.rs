@@ -136,23 +136,43 @@ fn run_artifacts(
     }
 
     let mut utilities = PlatformUtilities::from_config(config);
-    let location = match utilities.locate(UtilityType::V8) {
-        Ok(location) => location,
-        Err(error) => {
+    let selected = match crate::use_cases::provider_selection::select(
+        config,
+        &mut utilities,
+        crate::domain::capability::Operation::Make,
+    ) {
+        Ok(selected) => selected,
+        Err((error, receipt)) => {
             let message = error.to_string();
-            return Err(ArtifactsExecutionFailure::with_payload(
-                AppError::from(error),
-                empty_result(
-                    resolved.mode,
-                    started,
-                    Some(resolved.source_set_name.clone()),
-                    resolved.extension.clone(),
-                    resolved.output_path.clone(),
-                    Some(message),
-                ),
-            ));
+            let mut result = empty_result(
+                resolved.mode,
+                started,
+                Some(resolved.source_set_name.clone()),
+                resolved.extension.clone(),
+                resolved.output_path.clone(),
+                Some(message),
+            );
+            result.provider = Some(receipt);
+            return Err(ArtifactsExecutionFailure::with_payload(error, result));
         }
     };
+    let receipt = selected.receipt.clone();
+    let outcome = run_artifacts_selected(
+        context, config, args, started, resolved, utilities, selected,
+    );
+    crate::use_cases::provider_selection::attach(outcome, &receipt)
+}
+
+fn run_artifacts_selected(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &ArtifactsRequest,
+    started: Instant,
+    resolved: ResolvedArtifactsTarget,
+    mut utilities: PlatformUtilities,
+    selected: crate::use_cases::provider_selection::SelectedProvider,
+) -> UseCaseResult<ArtifactsResult> {
+    let location = selected.location;
 
     if args.dry_run {
         // The artifacts lock below is this command's first filesystem write, and Designer is
@@ -168,6 +188,7 @@ fn run_artifacts(
             published: false,
         };
         return Ok(ArtifactsResult {
+            provider: None,
             provider_dispatched: false,
             mode: resolved.mode,
             source_set: Some(resolved.source_set_name.clone()),
@@ -263,6 +284,7 @@ fn run_artifacts(
                     )]);
             }
             Ok(ArtifactsResult {
+                provider: None,
                 provider_dispatched: true,
                 mode: resolved.mode,
                 source_set: Some(resolved.source_set_name),
@@ -317,6 +339,7 @@ fn run_artifacts(
                 }]);
             }
             let payload = ArtifactsResult {
+                provider: None,
                 provider_dispatched: true,
                 mode: resolved.mode,
                 source_set: Some(resolved.source_set_name),
@@ -1035,6 +1058,7 @@ fn empty_result(
             .with_errors(vec![ExecutionError::new("artifacts_failed", message)]);
     }
     ArtifactsResult {
+        provider: None,
         provider_dispatched: true,
         mode,
         source_set,

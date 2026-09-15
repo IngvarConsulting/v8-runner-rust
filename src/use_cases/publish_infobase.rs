@@ -57,17 +57,17 @@ pub fn execute(
     let wsdir = web.wsdir.clone().unwrap_or_default();
     let dir = web.dir.clone().unwrap_or_default();
 
-    let provider = config.selected_provider(Operation::Publish);
-    if provider != Provider::Webinst {
+    let mut utilities = PlatformUtilities::from_config(config);
+    let selected =
+        crate::use_cases::provider_selection::select(config, &mut utilities, Operation::Publish)
+            .map_err(|(error, _receipt)| UseCaseFailure::without_payload(error))?;
+    if selected.provider != Provider::Webinst {
         return Err(UseCaseFailure::without_payload(
-            crate::use_cases::unimplemented_provider(Operation::Publish, provider),
+            crate::use_cases::unimplemented_provider(Operation::Publish, selected.provider),
         ));
     }
-
-    let mut utilities = PlatformUtilities::from_config(config);
-    let location = utilities
-        .locate(UtilityType::Webinst)
-        .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+    let receipt = selected.receipt;
+    let location = selected.location;
 
     let args = webinst_args(
         request.action,
@@ -78,6 +78,7 @@ pub fn execute(
         &config.infobase.connection,
     );
     let result = |provider_dispatched: bool, plan: Option<PublishPlan>| PublishResult {
+        provider: Some(receipt.clone()),
         ok: true,
         provider_dispatched,
         action: request.action,
