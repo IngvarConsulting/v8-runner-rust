@@ -3295,6 +3295,7 @@ exit 0"#,
         let result = crate::domain::dump::DumpResult {
             provider: None,
             provider_dispatched: true,
+            up_to_date: false,
             ok: true,
             source_set: Some("main".to_owned()),
             extension: Some("ext".to_owned()),

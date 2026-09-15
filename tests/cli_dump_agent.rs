@@ -1,219 +1,25 @@
 //! Выгрузка через агентский shell Конфигуратора встроенным SSH-клиентом.
 //!
-//! Харнесс держит двойника агента прямо в процессе теста: SSH-сервер на `russh` с
-//! настоящим рукопожатием и аутентификацией по паролю, который отвечает как агент
-//! Конфигуратора — JSON-массивами на каждую команду и файлами в каталог пользователя
-//! на `dump-config-to-files`. Поддельный `1cv8` записывает ключи запуска, создаёт
-//! раскладку `AgentBaseDir` как платформа и живёт до сигнала; порт для него слушает
-//! двойник. Так фальсифицируется ровно то, что обещают правила: первая команда,
-//! готовность по аутентификации, локальная платформа для управляемого агента, чтение
-//! результата с диска, типизированный отказ у недоступной чужой точки входа.
+//! Двойник агента — настоящий SSH-сервер в процессе теста (`support::fake_agent`),
+//! поддельный `1cv8` записывает ключи запуска и раскладку `AgentBaseDir`. Так
+//! фальсифицируется ровно то, что обещают правила: первая команда, готовность по
+//! аутентификации, локальная платформа для управляемого агента, чтение результата с
+//! диска, типизированный отказ у недоступной чужой точки входа, а также учёт
+//! поколения: неизменившаяся конфигурация не выгружается.
 #![cfg(unix)]
 
 mod support;
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use russh::server::{self, Auth, Msg, Server as _, Session};
-use russh::{Channel, ChannelId};
 use serde_json::Value;
-use support::{temp_workspace, v8_runner_command, wait_until, write_shell_script};
-
-const AGENT_PASSWORD: &str = "agentpass";
-
-/// Двойник агента: один экземпляр на соединение, общее состояние — через `Arc`.
-#[derive(Clone)]
-struct FakeAgent {
-    accept_password: bool,
-    commands_log: PathBuf,
-    /// Каталог `AgentBaseDir`: у чужого агента известен заранее, у управляемого его
-    /// сообщает поддельный `1cv8` через файл.
-    base_dir: Option<PathBuf>,
-    base_dir_file: PathBuf,
-    designer_pid_file: PathBuf,
-    buffers: Arc<Mutex<HashMap<ChannelId, Vec<u8>>>>,
-}
-
-impl FakeAgent {
-    fn user_dir(&self) -> PathBuf {
-        let base = match self.base_dir.as_ref() {
-            Some(base) => base.clone(),
-            None => PathBuf::from(fs::read_to_string(&self.base_dir_file).unwrap_or_default()),
-        };
-        base.join("0")
-    }
-
-    /// Ответ на одну команду и признак «сессия завершается».
-    fn respond(&self, line: &str) -> (String, bool) {
-        if let Ok(mut log) = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.commands_log)
-        {
-            use std::io::Write;
-            let _ = writeln!(log, "{line}");
-        }
-        if line.starts_with("options set") {
-            return (
-                "[\n{\n\"type\": \"success\",\n\"message\": \"\"\n}\n]\n".to_owned(),
-                false,
-            );
-        }
-        if line.starts_with("config dump-config-to-files") {
-            let dir = line
-                .split_whitespace()
-                .find_map(|word| word.strip_prefix("--dir="))
-                .unwrap_or_default();
-            let target = self.user_dir().join(dir);
-            fs::create_dir_all(&target).expect("agent output dir");
-            fs::write(target.join("Configuration.xml"), "<Configuration/>\n").expect("dump file");
-            return (
-                r#"[{"type":"log","message":"Выгрузка конфигурации"},{"type":"progress","message":"100"},{"type":"success","message":""}]"#.to_owned() + "\n",
-                false,
-            );
-        }
-        if line == "common shutdown" {
-            if let Ok(pid) = fs::read_to_string(&self.designer_pid_file) {
-                let _ = std::process::Command::new("kill")
-                    .arg(pid.trim())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-            }
-            return (
-                r#"[{"type":"success","message":""}]"#.to_owned() + "\n",
-                true,
-            );
-        }
-        (
-            r#"[{"type":"error","error-type":"CommandFormatError","message":"Неизвестная команда"}]"#.to_owned() + "\n",
-            false,
-        )
-    }
-}
-
-impl server::Server for FakeAgent {
-    type Handler = Self;
-    fn new_client(&mut self, _: Option<std::net::SocketAddr>) -> Self {
-        self.clone()
-    }
-}
-
-impl server::Handler for FakeAgent {
-    type Error = russh::Error;
-
-    async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
-        // Настоящий агент слушает порт только после старта процесса; двойник слушает
-        // заранее, поэтому сессию он принимает лишь после того, как поддельный `1cv8`
-        // записал свою раскладку.
-        if self.base_dir.is_none() {
-            let started = std::time::Instant::now();
-            while !self.base_dir_file.exists() && started.elapsed() < Duration::from_secs(20) {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        }
-        // Правило агента: база без пользователей принимает пустой логин и пустую или
-        // настроенную пару; любое другое имя отвергается.
-        if self.accept_password && user.is_empty() && password == AGENT_PASSWORD {
-            Ok(Auth::Accept)
-        } else {
-            Ok(Auth::reject())
-        }
-    }
-
-    async fn channel_open_session(
-        &mut self,
-        channel: Channel<Msg>,
-        reply: server::ChannelOpenHandle,
-        _session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        self.buffers
-            .lock()
-            .expect("buffers")
-            .insert(channel.id(), Vec::new());
-        reply.accept().await;
-        Ok(())
-    }
-
-    async fn shell_request(
-        &mut self,
-        channel: ChannelId,
-        session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        session.channel_success(channel)?;
-        // Приглашение до JSON-режима: раннер обязан его пропустить, а не разбирать.
-        session.data(channel, "designer> ".as_bytes().to_vec())?;
-        Ok(())
-    }
-
-    async fn data(
-        &mut self,
-        channel: ChannelId,
-        data: &[u8],
-        session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        let lines = {
-            let mut buffers = self.buffers.lock().expect("buffers");
-            let buffer = buffers.entry(channel).or_default();
-            buffer.extend_from_slice(data);
-            let mut lines = Vec::new();
-            while let Some(end) = buffer.iter().position(|byte| *byte == b'\n') {
-                let line = buffer.drain(..=end).collect::<Vec<_>>();
-                lines.push(String::from_utf8_lossy(&line).trim_end().to_owned());
-            }
-            lines
-        };
-        for line in lines {
-            let (reply, closing) = self.respond(&line);
-            session.data(channel, reply.into_bytes())?;
-            if closing {
-                session.eof(channel)?;
-                session.close(channel)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Поднимает двойника на свободном порту в отдельном потоке; живёт до конца теста.
-fn start_fake_agent(agent: FakeAgent) -> u16 {
-    let (port_tx, port_rx) = std::sync::mpsc::channel::<u16>();
-    std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("fake agent runtime");
-        runtime.block_on(async move {
-            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-                .await
-                .expect("bind fake agent");
-            port_tx
-                .send(listener.local_addr().expect("addr").port())
-                .expect("port");
-            let seed: [u8; 32] = rand::random();
-            let key = russh::keys::PrivateKey::new(
-                russh::keys::ssh_key::private::KeypairData::Ed25519(
-                    russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&seed),
-                ),
-                "fake-agent",
-            )
-            .expect("host key");
-            let config = Arc::new(server::Config {
-                auth_rejection_time: Duration::from_millis(50),
-                auth_rejection_time_initial: Some(Duration::ZERO),
-                inactivity_timeout: Some(Duration::from_secs(120)),
-                keys: vec![key],
-                ..server::Config::default()
-            });
-            let mut agent = agent;
-            let _ = agent.run_on_socket(config, &listener).await;
-        });
-    });
-    port_rx.recv().expect("fake agent port")
-}
+use support::fake_agent::{
+    process_is_alive, read_or_empty, start_fake_agent, write_fake_designer, FakeAgent,
+    AGENT_PASSWORD,
+};
+use support::{temp_workspace, v8_runner_command, wait_until};
 
 struct Harness {
     dir: tempfile::TempDir,
@@ -226,32 +32,8 @@ struct Harness {
     port: u16,
 }
 
-fn write_fake_designer(harness: &Harness, path: &Path) {
-    let body = format!(
-        r#"printf '%s\n' "$*" >> "{args_log}"
-printf '%s\n' "$$" > "{pid_file}"
-base=""
-prev=""
-for arg in "$@"; do
-  if [ "$prev" = "/AgentBaseDir" ]; then base="$arg"; fi
-  prev="$arg"
-done
-if [ -z "$base" ]; then exit 3; fi
-mkdir -p "$base/0"
-printf '{{"usersInfo":[{{"name":"","dir":"0"}}]}}' > "$base/agentbasedir.json"
-printf '%s' "$base" > "{base_dir_file}"
-trap 'exit 0' TERM INT
-while :; do sleep 1; done"#,
-        args_log = harness.designer_args_log.display(),
-        pid_file = harness.designer_pid_file.display(),
-        base_dir_file = harness.base_dir_file.display(),
-    );
-    write_shell_script(path, &body);
-}
-
 /// Проект с версионной раскладкой платформы: строгий поиск не уходит за её пределы.
-/// `agent` — двойник, который поднимается на порту управляемого агента; `None` —
-/// на порту никто не слушает.
+/// `agent` — принимает ли двойник пароль; `None` — на порту никто не слушает.
 fn harness(with_designer: bool, agent: Option<bool>, attach: bool) -> Harness {
     let dir = temp_workspace();
     let root = dir.path().to_path_buf();
@@ -267,6 +49,7 @@ fn harness(with_designer: bool, agent: Option<bool>, attach: bool) -> Harness {
     let commands_log = root.join("agent-commands.log");
     let base_dir_file = root.join("base-dir.txt");
     let designer_pid_file = root.join("designer.pid");
+    let designer_args_log = root.join("designer-args.log");
     // Чужой агент уже имеет свою раскладку: карту и каталог пользователя создал не раннер.
     let attached_base = attach.then(|| {
         let base = root.join("attached-base");
@@ -279,28 +62,22 @@ fn harness(with_designer: bool, agent: Option<bool>, attach: bool) -> Harness {
         base
     });
     let port = match agent {
-        Some(accept_password) => start_fake_agent(FakeAgent {
+        Some(accept_password) => start_fake_agent(FakeAgent::new(
             accept_password,
-            commands_log: commands_log.clone(),
-            base_dir: attached_base.clone(),
-            base_dir_file: base_dir_file.clone(),
-            designer_pid_file: designer_pid_file.clone(),
-            buffers: Arc::new(Mutex::new(HashMap::new())),
-        }),
+            commands_log.clone(),
+            attached_base.clone(),
+            base_dir_file.clone(),
+            designer_pid_file.clone(),
+        )),
         None => support::free_tcp_port(),
     };
-    let harness = Harness {
-        config_path: root.join("v8project.yaml"),
-        commands_log,
-        designer_args_log: root.join("designer-args.log"),
-        designer_pid_file,
-        base_dir_file,
-        target,
-        dir,
-        port,
-    };
     if with_designer {
-        write_fake_designer(&harness, &bin.join("1cv8"));
+        write_fake_designer(
+            &bin.join("1cv8"),
+            &designer_args_log,
+            &designer_pid_file,
+            &base_dir_file,
+        );
     }
     let agent_yaml = if let Some(base) = attached_base.as_ref() {
         format!(
@@ -310,8 +87,9 @@ fn harness(with_designer: bool, agent: Option<bool>, attach: bool) -> Harness {
     } else {
         format!("    port: {port}\n")
     };
+    let config_path = root.join("v8project.yaml");
     fs::write(
-        &harness.config_path,
+        &config_path,
         format!(
             "workPath: {work}\nformat: DESIGNER\nproviders:\n  dump: agent\ninfobase:\n  connection: 'File={ib}'\n  password: '{password}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: {platform}\n    strict: true\n    version: '8.3.27'\n  designer_agent:\n{agent_yaml}",
             work = work_path.display(),
@@ -321,7 +99,16 @@ fn harness(with_designer: bool, agent: Option<bool>, attach: bool) -> Harness {
         ),
     )
     .expect("write config");
-    harness
+    Harness {
+        config_path,
+        commands_log,
+        designer_args_log,
+        designer_pid_file,
+        base_dir_file,
+        target,
+        dir,
+        port,
+    }
 }
 
 fn run_dump(harness: &Harness, extra: &[&str]) -> (i32, Value) {
@@ -345,16 +132,11 @@ fn run_dump(harness: &Harness, extra: &[&str]) -> (i32, Value) {
     (output.status.code().unwrap_or(-1), payload)
 }
 
-fn read_or_empty(path: &Path) -> String {
-    fs::read_to_string(path).unwrap_or_default()
-}
-
-fn process_is_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+fn commands(harness: &Harness) -> Vec<String> {
+    read_or_empty(&harness.commands_log)
+        .lines()
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Управляемый агент: раннер поднимает Конфигуратор своими ключами, ведёт сессию
@@ -405,27 +187,45 @@ fn managed_agent_dumps_through_the_built_in_ssh_client_and_reads_the_result_from
         "the managed agent must live under workPath: {base_dir}"
     );
 
-    // Порядок команд: JSON-режим первым, выгрузка, завершение агента.
-    let commands = read_or_empty(&harness.commands_log);
-    let lines: Vec<&str> = commands.lines().collect();
+    // Порядок команд: JSON-режим, подключение к базе, поколение, выгрузка, завершение.
+    let lines = commands(&harness);
     assert_eq!(
-        lines.first().copied(),
+        lines.first().map(String::as_str),
         Some("options set --show-prompt=no --output-format=json"),
-        "{commands}"
+        "{lines:?}"
+    );
+    assert_eq!(
+        lines.get(1).map(String::as_str),
+        Some("common connect-ib"),
+        "{lines:?}"
+    );
+    assert_eq!(
+        lines.get(2).map(String::as_str),
+        Some("config generation-id"),
+        "{lines:?}"
     );
     assert!(
         lines
-            .get(1)
+            .get(3)
             .is_some_and(|line| line.starts_with("config dump-config-to-files --dir=dump/")),
-        "{commands}"
+        "{lines:?}"
     );
-    assert_eq!(lines.last().copied(), Some("common shutdown"), "{commands}");
+    assert_eq!(
+        lines.last().map(String::as_str),
+        Some("common shutdown"),
+        "{lines:?}"
+    );
 
-    // Журнал сессии лежит рядом с журналами платформы.
+    // Журнал сессии лежит рядом с журналами платформы; поколение записано.
     assert!(harness
         .dir
         .path()
         .join("work/logs/platform/dump-main-agent.log")
+        .is_file());
+    assert!(harness
+        .dir
+        .path()
+        .join("work/agent/generation/main.json")
         .is_file());
 
     // Поднятый процесс не переживает команду.
@@ -441,21 +241,72 @@ fn managed_agent_dumps_through_the_built_in_ssh_client_and_reads_the_result_from
     );
 }
 
-/// Инкрементальный режим у агента — полная выгрузка с предупреждением в ответе.
+/// Инкрементальная выгрузка обновляет цель на месте через ссылку в каталоге агента.
 #[test]
-fn incremental_mode_through_the_agent_degrades_to_full_and_says_so() {
+fn incremental_mode_updates_the_target_in_place_through_a_link() {
     let harness = harness(true, Some(true), false);
 
     let (code, payload) = run_dump(&harness, &["--mode", "incremental"]);
 
     assert_eq!(code, 0, "{payload}");
+    assert!(harness.target.join("Configuration.xml").is_file());
+    assert!(
+        harness.target.join("updated.txt").is_file(),
+        "the agent must have been asked to update the target itself"
+    );
+    assert!(
+        harness.target.join("old.txt").is_file(),
+        "an incremental dump merges into the target, it does not replace it"
+    );
+    let lines = commands(&harness);
+    assert!(
+        lines.iter().any(
+            |line| line.starts_with("config dump-config-to-files --dir=target/")
+                && line.ends_with("--update")
+        ),
+        "{lines:?}"
+    );
+    let user_dir = PathBuf::from(read_or_empty(&harness.base_dir_file)).join("0");
+    assert!(
+        !user_dir.join("target").exists()
+            || fs::read_dir(user_dir.join("target"))
+                .map(|entries| entries.count() == 0)
+                .unwrap_or(true),
+        "the link is withdrawn after the command"
+    );
+}
+
+/// Поколение конфигурации, не изменившееся с последней выгрузки, не выгружается снова.
+#[test]
+fn an_unchanged_generation_is_not_dumped_twice() {
+    let harness = harness(true, Some(true), false);
+
+    let (first, payload) = run_dump(&harness, &["--mode", "full"]);
+    assert_eq!(first, 0, "{payload}");
+    let dumps_after_first = commands(&harness)
+        .iter()
+        .filter(|line| line.starts_with("config dump-config-to-files"))
+        .count();
+    assert_eq!(dumps_after_first, 1);
+
+    let (second, payload) = run_dump(&harness, &["--mode", "full"]);
+
+    assert_eq!(second, 0, "{payload}");
+    assert_eq!(payload["data"]["up_to_date"], true, "{payload}");
     assert!(
         payload["data"]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("ran a full export")),
+            .is_some_and(|message| message.contains("nothing to dump")),
         "{payload}"
     );
-    assert!(harness.target.join("Configuration.xml").is_file());
+    let dumps_after_second = commands(&harness)
+        .iter()
+        .filter(|line| line.starts_with("config dump-config-to-files"))
+        .count();
+    assert_eq!(
+        dumps_after_second, 1,
+        "the second command must ask for the generation and stop there"
+    );
 }
 
 /// Чужой агент: раннер ничего не поднимает, подключается по `attach`, читает результат
@@ -479,14 +330,15 @@ fn an_attached_agent_is_used_without_launching_or_stopping_anything() {
         !harness.designer_args_log.exists(),
         "an attached agent is never launched by the runner"
     );
-    let commands = read_or_empty(&harness.commands_log);
-    assert!(
-        commands.starts_with("options set --show-prompt=no --output-format=json"),
-        "{commands}"
+    let lines = commands(&harness);
+    assert_eq!(
+        lines.first().map(String::as_str),
+        Some("options set --show-prompt=no --output-format=json"),
+        "{lines:?}"
     );
     assert!(
-        !commands.contains("common shutdown"),
-        "the runner must not stop an agent it did not start: {commands}"
+        !lines.iter().any(|line| line == "common shutdown"),
+        "the runner must not stop an agent it did not start: {lines:?}"
     );
 }
 

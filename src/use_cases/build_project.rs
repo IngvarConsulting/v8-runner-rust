@@ -33,6 +33,7 @@ use crate::use_cases::tool_extension;
 use tempfile::NamedTempFile;
 use tracing::debug;
 
+mod agent;
 mod coordinator;
 mod helpers;
 
@@ -47,7 +48,7 @@ use self::helpers::{
 #[cfg(test)]
 const BUILD_COMMAND: &str = crate::use_cases::context::CommandName::Build.as_str();
 const SUPPORTED_DESIGNER_BUILD_ERROR: &str =
-    "build currently supports only the Designer or ibcmd provider with format=DESIGNER";
+    "build currently supports only the Designer, ibcmd or agent provider with format=DESIGNER";
 const SUPPORTED_EDT_BUILD_ERROR: &str =
     "build with format=EDT currently supports only the Designer or ibcmd provider";
 
@@ -144,6 +145,7 @@ fn run_build_selected(
     match provider {
         Provider::Designer => run_build_designer(context, config, args),
         Provider::Ibcmd => run_build_ibcmd(context, config, args),
+        Provider::Agent => run_build_agent(context, config, args),
         other => Err(BuildExecutionFailure::with_payload(
             crate::use_cases::unimplemented_provider(Operation::Build, other),
             BuildResult {
@@ -179,11 +181,22 @@ fn run_build_ibcmd(
     Ok(result)
 }
 
+fn run_build_agent(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &BuildArgs,
+) -> Result<BuildResult, BuildExecutionFailure> {
+    let started = Instant::now();
+    let mut result = coordinator::run_build_agent(context, config, args)?;
+    append_client_mcp_extension_step(context, config, args, started, &mut result)?;
+    Ok(result)
+}
+
 fn validate_designer_supported_matrix(config: &AppConfig) -> Option<AppError> {
     if config.format == SourceFormat::Designer
         && matches!(
             config.selected_provider(Operation::Build),
-            Provider::Designer | Provider::Ibcmd
+            Provider::Designer | Provider::Ibcmd | Provider::Agent
         )
     {
         None

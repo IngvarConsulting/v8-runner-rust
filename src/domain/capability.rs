@@ -221,13 +221,19 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
         implemented(Designer, LiveVerified),
         implemented(Ibcmd, ArgvTested),
     ];
-    // Агент назначается только ключом `providers.dump: agent`, пока строка не
-    // подтверждена живым прогоном через сам раннер: команда агента замерена вручную
-    // 13.09.2026 (выгрузка побайтно равна `ibcmd`), путь раннера к ней — нет.
+    // Агент назначается только ключом `providers.<op>: agent`: его место в цепочке
+    // умолчаний назначает владелец. Путь раннера через агента прогнан вживую
+    // 15.09.2026 на 8.3.27.2074: полная и частичная загрузка с `update-db-cfg` в одной
+    // сессии, полная выгрузка через staging, короткое замыкание по поколению.
     const DUMP: &[Capability] = &[
         implemented(Designer, LiveVerified),
         implemented(Ibcmd, ArgvTested),
-        experimental(Agent, ArgvTested),
+        experimental(Agent, LiveVerified),
+    ];
+    const BUILD: &[Capability] = &[
+        implemented(Designer, LiveVerified),
+        implemented(Ibcmd, ArgvTested),
+        experimental(Agent, LiveVerified),
     ];
     const DESIGNER_ONLY: &[Capability] = &[implemented(Designer, LiveVerified)];
     const IBCMD_ONLY: &[Capability] = &[implemented(Ibcmd, LiveVerified)];
@@ -241,9 +247,8 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
     ];
 
     match (operation, target) {
-        (Operation::Init | Operation::Build, TargetKind::File | TargetKind::Cluster) => {
-            DESIGNER_THEN_IBCMD
-        }
+        (Operation::Init, TargetKind::File | TargetKind::Cluster) => DESIGNER_THEN_IBCMD,
+        (Operation::Build, TargetKind::File | TargetKind::Cluster) => BUILD,
         (Operation::Dump, TargetKind::File | TargetKind::Cluster) => DUMP,
         (
             Operation::Load | Operation::Syntax | Operation::Make,

@@ -1523,6 +1523,7 @@ mod tests {
         let port = StubPort::with_dump_result(Ok(DumpResult {
             provider: None,
             provider_dispatched: true,
+            up_to_date: false,
             ok: true,
             source_set: Some("main".to_owned()),
             extension: None,
@@ -1566,6 +1567,7 @@ mod tests {
                 DumpResult {
                     provider: None,
                     provider_dispatched: true,
+                    up_to_date: false,
                     ok: false,
                     source_set: Some("main".to_owned()),
                     extension: None,
@@ -1645,6 +1647,7 @@ mod tests {
             StubPort::with_dump_result(Ok(DumpResult {
                 provider: None,
                 provider_dispatched: true,
+                up_to_date: false,
                 ok: true,
                 source_set: None,
                 extension: None,
@@ -1695,6 +1698,7 @@ mod tests {
         let port = StubPort::with_dump_result(Ok(DumpResult {
             provider: None,
             provider_dispatched: true,
+            up_to_date: false,
             ok: true,
             source_set: Some("main".to_owned()),
             extension: None,
@@ -1746,6 +1750,7 @@ mod tests {
                 DumpResult {
                     provider: None,
                     provider_dispatched: true,
+                    up_to_date: false,
                     ok: false,
                     source_set: Some("main".to_owned()),
                     extension: None,

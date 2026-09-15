@@ -27,6 +27,9 @@ use crate::platform::process::{ManagedSpawnMode, ProcessRequest, ProcessRunner};
 
 /// Первая команда любой сессии: без неё ответы — проза с приглашением.
 pub const JSON_MODE_COMMAND: &str = "options set --show-prompt=no --output-format=json";
+/// Вторая команда сессии: без подключения к базе любая команда `config` отвечает
+/// `DesignerNotConnectedToInfoBase` (замер 15.09.2026).
+pub const CONNECT_COMMAND: &str = "common connect-ib";
 /// Команда, которой управляемый агент завершает работу.
 pub const SHUTDOWN_COMMAND: &str = "common shutdown";
 /// Адрес, который слушает управляемый агент: он живёт на машине раннера.
@@ -136,19 +139,28 @@ pub struct AgentReply {
     pub messages: Vec<AgentMessage>,
 }
 
+impl AgentMessage {
+    /// Сообщение, которым команда заканчивается; прогресс и журнал — промежуточные.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.kind,
+            AgentMessageType::Success
+                | AgentMessageType::Error
+                | AgentMessageType::Canceled
+                | AgentMessageType::Question
+        )
+    }
+}
+
 impl AgentReply {
     /// Итог команды: успех с телом или типизированный отказ. Прогресс и журнал итогом
     /// не являются; вопрос агента — отказ, раннер на вопросы не отвечает.
     pub fn outcome(&self) -> Result<Option<&serde_json::Value>, AgentError> {
-        let terminal = self.messages.iter().rev().find(|message| {
-            matches!(
-                message.kind,
-                AgentMessageType::Success
-                    | AgentMessageType::Error
-                    | AgentMessageType::Canceled
-                    | AgentMessageType::Question
-            )
-        });
+        let terminal = self
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.is_terminal());
         match terminal {
             Some(message) if message.kind == AgentMessageType::Success => Ok(message.body.as_ref()),
             Some(message) if message.kind == AgentMessageType::Error => Err(AgentError::Command {
@@ -424,20 +436,30 @@ impl AgentSession {
             transcript,
             ended: false,
         };
-        let reply = session.run(JSON_MODE_COMMAND, policy)?;
-        reply.outcome()?;
+        session.run(JSON_MODE_COMMAND, policy)?.outcome()?;
+        session.run(CONNECT_COMMAND, policy)?.outcome()?;
         Ok(session)
     }
 
-    /// Одна команда — один ответ-массив.
+    /// Одна команда — последовательность JSON-массивов до первого с итоговым
+    /// сообщением: долгие команды шлют прогресс и журнал отдельными массивами
+    /// (замер 15.09.2026: `load-config-from-files` — `progress`, `progress`, …, `success`).
     pub fn run(&mut self, command: &str, policy: &WaitPolicy) -> Result<AgentReply, AgentError> {
         self.send(command)?;
-        let raw = self.read_reply(command, policy)?;
-        let messages: Vec<AgentMessage> =
-            serde_json::from_slice(&raw).map_err(|error| AgentError::InvalidReply {
-                detail: error.to_string(),
-                head: head_of(&raw),
-            })?;
+        let mut messages = Vec::new();
+        loop {
+            let raw = self.read_reply(command, policy)?;
+            let batch: Vec<AgentMessage> =
+                serde_json::from_slice(&raw).map_err(|error| AgentError::InvalidReply {
+                    detail: error.to_string(),
+                    head: head_of(&raw),
+                })?;
+            let done = batch.iter().any(AgentMessage::is_terminal);
+            messages.extend(batch);
+            if done {
+                break;
+            }
+        }
         let reply = AgentReply { messages };
         debug!(command, messages = reply.messages.len(), "agent replied");
         Ok(reply)
@@ -460,6 +482,7 @@ impl AgentSession {
             ),
             cancellation: policy.cancellation.clone(),
         };
+        // Агент может закрыть соединение, не ответив: EOF здесь — не отказ.
         let reply = self.run(SHUTDOWN_COMMAND, &capped).ok();
         self.disconnect();
         reply

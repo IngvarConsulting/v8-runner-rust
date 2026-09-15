@@ -1,8 +1,8 @@
 ---
 id: DEC.2026-09-14.AGENT-SESSION-LIVES-WITH-THE-LOCK
-status: planned
+status: active
 governs: product
-realized: null
+realized: tests/cli_build_agent.rs::a_managed_build_loads_and_updates_in_one_session_and_records_the_generation
 supersedes: []
 superseded-by: null
 establishes: []

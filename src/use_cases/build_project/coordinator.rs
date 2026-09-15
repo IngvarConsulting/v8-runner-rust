@@ -1,10 +1,106 @@
 use super::*;
 use crate::domain::capability::{Operation, Provider};
 
+/// Кто грузит набор исходников в базу: пакетный Конфигуратор или его агент.
+///
+/// Утилита ищется до превью (превью отказывает без платформы), а процесс или сессия
+/// поднимаются только перед первой настоящей загрузкой: сборка без изменений
+/// платформу не запускает.
+pub(super) trait SourceSetLoader {
+    fn locate(&mut self) -> Result<(), AppError>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn load(
+        &mut self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        source_set: &SourceSetConfig,
+        source_context: &SourceSetContext,
+        step_index: usize,
+        partial_paths: Option<&[PathBuf]>,
+        commit: &StepCommit,
+    ) -> Result<Vec<String>, AppError>;
+
+    /// Вызывается после последнего набора, и при отказе тоже.
+    fn finish(&mut self) {}
+}
+
+/// Пакетный Конфигуратор: процесс на каждую команду, утилита — `1cv8`.
+pub(super) struct DesignerLoader {
+    utilities: PlatformUtilities,
+    binary: Option<PathBuf>,
+}
+
+impl DesignerLoader {
+    pub(super) fn new(config: &AppConfig) -> Self {
+        Self {
+            utilities: PlatformUtilities::from_config(config),
+            binary: None,
+        }
+    }
+}
+
+impl SourceSetLoader for DesignerLoader {
+    fn locate(&mut self) -> Result<(), AppError> {
+        if self.binary.is_none() {
+            let location = self.utilities.locate(UtilityType::V8)?;
+            self.binary = Some(location.path);
+        }
+        Ok(())
+    }
+
+    fn load(
+        &mut self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        source_set: &SourceSetConfig,
+        source_context: &SourceSetContext,
+        step_index: usize,
+        partial_paths: Option<&[PathBuf]>,
+        commit: &StepCommit,
+    ) -> Result<Vec<String>, AppError> {
+        let binary = self.binary.clone().ok_or_else(|| {
+            AppError::Runtime("Designer was not located before the load".to_owned())
+        })?;
+        execute_source_set_step(
+            context,
+            config,
+            &binary,
+            self.utilities.runner_for(UtilityType::V8),
+            source_set,
+            source_context,
+            source_context,
+            step_index,
+            partial_paths,
+            commit,
+        )
+    }
+}
+
 pub(super) fn run_build_designer(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &BuildArgs,
+) -> Result<BuildResult, BuildExecutionFailure> {
+    run_build_with(context, config, args, &mut DesignerLoader::new(config))
+}
+
+pub(super) fn run_build_agent(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &BuildArgs,
+) -> Result<BuildResult, BuildExecutionFailure> {
+    let mut loader = super::agent::AgentLoader::new(config);
+    let outcome = run_build_with(context, config, args, &mut loader);
+    loader.finish();
+    outcome
+}
+
+fn run_build_with(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &BuildArgs,
+    loader: &mut dyn SourceSetLoader,
 ) -> Result<BuildResult, BuildExecutionFailure> {
     debug!(
         full_rebuild = args.full_rebuild,
@@ -42,8 +138,6 @@ pub(super) fn run_build_designer(
         ))
     };
 
-    let mut utilities = PlatformUtilities::from_config(config);
-    let mut designer_binary: Option<PathBuf> = None;
     let mut steps = Vec::new();
 
     for (index, source_set) in ordered_source_sets.iter().enumerate() {
@@ -139,31 +233,18 @@ pub(super) fn run_build_designer(
                     message = message.as_str(),
                     "executing build step"
                 );
-                let binary = match designer_binary.clone() {
-                    Some(path) => path,
-                    None => {
-                        let location = match utilities.locate(UtilityType::V8) {
-                            Ok(location) => location,
-                            Err(error) => {
-                                let result = fail_from_source_set_index(
-                                    started,
-                                    steps,
-                                    &ordered_source_sets,
-                                    index,
-                                    source_set,
-                                    mode.clone(),
-                                    error.to_string(),
-                                );
-                                return Err(BuildExecutionFailure::with_payload(
-                                    AppError::from(error),
-                                    result,
-                                ));
-                            }
-                        };
-                        designer_binary = Some(location.path.clone());
-                        location.path
-                    }
-                };
+                if let Err(error) = loader.locate() {
+                    let result = fail_from_source_set_index(
+                        started,
+                        steps,
+                        &ordered_source_sets,
+                        index,
+                        source_set,
+                        mode.clone(),
+                        error.to_string(),
+                    );
+                    return Err(BuildExecutionFailure::with_payload(error, result));
+                }
 
                 if args.dry_run {
                     push_build_step(
@@ -178,13 +259,10 @@ pub(super) fn run_build_designer(
                 }
 
                 let step_started = Instant::now();
-                match execute_source_set_step(
+                match loader.load(
                     context,
                     config,
-                    &binary,
-                    utilities.runner_for(UtilityType::V8),
                     source_set,
-                    &source_context,
                     &source_context,
                     index,
                     partial_paths.as_deref(),

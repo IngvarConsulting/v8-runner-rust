@@ -160,3 +160,6 @@ pub async fn wait_for_line_count(path: &Path, expected: usize) {
         path.display()
     );
 }
+
+#[cfg(unix)]
+pub mod fake_agent;
