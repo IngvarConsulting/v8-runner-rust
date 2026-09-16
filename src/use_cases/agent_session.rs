@@ -8,7 +8,7 @@
 //! или выгрузки и сравниваемый перед следующей выгрузкой.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -112,12 +112,17 @@ fn open_gate_session(
     }
 }
 
-/// Срок и отмена сессии — с границы команды.
+/// Срок, отмена и класс безопасности сессии — с границы команды.
+///
+/// Класс здесь не теряется: агентский транспорт обязан различать команду, которую можно
+/// бросить на полпути, и ту, что меняет базу. Класс по умолчанию — для команд без
+/// побочного эффекта; меняющие команды называют свой класс сами, через `run_critical`.
 pub(crate) fn wait_policy(context: &ExecutionContext) -> WaitPolicy {
     let policy = context.process_policy(InterruptionSafetyClass::GracefulThenKill, None);
     WaitPolicy {
-        timeout: policy.timeout,
+        deadline: policy.timeout.map(|timeout| Instant::now() + timeout),
         cancellation: policy.cancellation.clone(),
+        safety: policy.safety,
     }
 }
 

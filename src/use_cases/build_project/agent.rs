@@ -22,8 +22,9 @@ pub(super) struct AgentLoader {
     /// Управляемому агенту нужна платформа на этой машине; чужому — ничего.
     managed: bool,
     location: Option<UtilityLocation>,
-    handle: Option<AgentHandle>,
-    wait: Option<WaitPolicy>,
+    /// Сессия и её политика ожидания живут вместе: политика несёт абсолютный срок
+    /// команды, и сессия без неё означала бы ожидание без срока.
+    session: Option<(AgentHandle, WaitPolicy)>,
     run: String,
 }
 
@@ -39,8 +40,7 @@ impl AgentLoader {
                     Ok(crate::config::model::DesignerAgentMode::Attached { .. })
                 ),
             location: None,
-            handle: None,
-            wait: None,
+            session: None,
             run: run_id(),
         }
     }
@@ -51,7 +51,7 @@ impl AgentLoader {
         context: &ExecutionContext,
         config: &AppConfig,
     ) -> Result<(&mut AgentHandle, WaitPolicy), AppError> {
-        if self.handle.is_none() {
+        if self.session.is_none() {
             let wait = wait_policy(context);
             let transcript = transcript_log(config, "build")?;
             log_timeline_stage(
@@ -67,11 +67,13 @@ impl AgentLoader {
                 transcript,
                 &wait,
             )?;
-            self.wait = Some(wait);
-            self.handle = Some(handle);
+            self.session = Some((handle, wait));
         }
-        let wait = handle_wait(&self.wait);
-        Ok((self.handle.as_mut().expect("handle was just opened"), wait))
+        let (handle, wait) = self
+            .session
+            .as_mut()
+            .expect("agent session was just opened");
+        Ok((handle, wait.clone()))
     }
 }
 
@@ -144,15 +146,10 @@ impl SourceSetLoader for AgentLoader {
     }
 
     fn finish(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            let wait = handle_wait(&self.wait);
+        if let Some((handle, wait)) = self.session.take() {
             handle.finish(&wait);
         }
     }
-}
-
-fn handle_wait(wait: &Option<WaitPolicy>) -> WaitPolicy {
-    wait.clone().unwrap_or_default()
 }
 
 #[allow(clippy::too_many_arguments)]

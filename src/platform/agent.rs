@@ -16,6 +16,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::platform::process::ProcessInterruptionSafety;
+
 use russh::client;
 use russh::ChannelMsg;
 use serde::Deserialize;
@@ -324,18 +326,26 @@ pub struct AgentSessionRequest {
     pub transcript_log: Option<PathBuf>,
 }
 
-/// Ожидание ответа: срок и отмена, переданные с границы команды.
+/// Ожидание ответа: срок, отмена и класс безопасности, переданные с границы команды.
+///
+/// Срок — абсолютный, а не длительность: одна команда агента читает канал столько раз,
+/// сколько батчей пришлёт агент (`progress`, `progress`, …, `success`), и длительность,
+/// отсчитываемая заново на каждом чтении, ограничивала бы батч, а не команду. Тот же
+/// абсолютный срок переживает и несколько команд одной сессии, поэтому вложенная работа
+/// получает остаток бюджета, а не свежую его копию.
 #[derive(Debug, Clone)]
 pub struct WaitPolicy {
-    pub timeout: Option<Duration>,
+    pub deadline: Option<Instant>,
     pub cancellation: CancellationToken,
+    pub safety: ProcessInterruptionSafety,
 }
 
 impl Default for WaitPolicy {
     fn default() -> Self {
         Self {
-            timeout: None,
+            deadline: None,
             cancellation: CancellationToken::new(),
+            safety: ProcessInterruptionSafety::Interruptible,
         }
     }
 }
@@ -773,13 +783,15 @@ impl AgentSession {
     pub fn shutdown(mut self, policy: &WaitPolicy) -> Option<AgentReply> {
         // Ответ на shutdown может и не прийти — сессию закрывает сам агент; ждать его
         // дольше короткого срока незачем, даже если бюджет команды не ограничен.
+        let grace = Instant::now() + SHUTDOWN_GRACE;
         let capped = WaitPolicy {
-            timeout: Some(
+            deadline: Some(
                 policy
-                    .timeout
-                    .map_or(SHUTDOWN_GRACE, |timeout| timeout.min(SHUTDOWN_GRACE)),
+                    .deadline
+                    .map_or(grace, |deadline| deadline.min(grace)),
             ),
             cancellation: policy.cancellation.clone(),
+            safety: ProcessInterruptionSafety::Interruptible,
         };
         // Агент может закрыть соединение, не ответив: EOF здесь — не отказ.
         let reply = self.run(SHUTDOWN_COMMAND, &capped).ok();
@@ -850,16 +862,16 @@ impl AgentSession {
                     command: command.to_owned(),
                 });
             }
-            let wait = match policy.timeout {
-                Some(timeout) => {
-                    let elapsed = started.elapsed();
-                    if elapsed >= timeout {
+            let wait = match policy.deadline {
+                Some(deadline) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
                         return Err(AgentError::TimedOut {
                             command: command.to_owned(),
-                            timeout_ms: timeout.as_millis() as u64,
+                            timeout_ms: started.elapsed().as_millis() as u64,
                         });
                     }
-                    (timeout - elapsed).min(WAIT_SLICE)
+                    remaining.min(WAIT_SLICE)
                 }
                 None => WAIT_SLICE,
             };
@@ -1168,8 +1180,9 @@ mod tests {
             transcript_log: None,
         };
         let wait = WaitPolicy {
-            timeout: Some(Duration::from_secs(60)),
+            deadline: Some(Instant::now() + Duration::from_secs(60)),
             cancellation: CancellationToken::new(),
+            safety: ProcessInterruptionSafety::Interruptible,
         };
         let mut session = AgentSession::open(&request, &wait).expect("open");
         eprintln!(
