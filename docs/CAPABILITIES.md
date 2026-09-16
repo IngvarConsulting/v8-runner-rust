@@ -53,7 +53,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 и `infobase configuration export` на файловой базе и кластере, а также `ibcmd` у
 `infobase dump` и `infobase restore`; у автономного сервера `agent` — единственный
 исполнитель, ключ ему не нужен и не разрешён. Подробнее — раздел «Эксперименты» на
-[сайте](https://ingvarconsulting.github.io/v8-runner-rust/inside.html).
+[сайте](https://ingvarconsulting.github.io/v8-runner-rust/architecture.html).
 
 ## Превью у глаголов, работающих с платформой
 
