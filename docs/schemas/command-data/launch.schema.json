@@ -72,6 +72,21 @@
       ],
       "type": "object"
     },
+    "LaunchVia": {
+      "description": "Which of the target's two addresses opens the base.\n\nA target has an administrative address and a client one, and a client can be opened by\neither. The target kind sets the default; `--via` overrides it.",
+      "oneOf": [
+        {
+          "const": "connection",
+          "description": "The administrative address — `infobase.connection`.",
+          "type": "string"
+        },
+        {
+          "const": "web",
+          "description": "The client address — `infobase.web.url`, as a ws connection.",
+          "type": "string"
+        }
+      ]
+    },
     "McpReadinessResult": {
       "additionalProperties": false,
       "description": "Result of probing a client-side MCP endpoint after launch.",
@@ -248,17 +263,22 @@
       "type": "boolean"
     },
     "url": {
-      "description": "Address opened by `launch web`.",
+      "description": "Client address opened by `launch web` or by a thin client going through the web.\nAny userinfo password in it is masked.",
       "type": [
         "string",
         "null"
       ]
+    },
+    "via": {
+      "$ref": "#/$defs/LaunchVia",
+      "description": "Which address the base was opened by. Present for every mode, not only for the\nones that have a choice: no caller has to read an absent field as \"by connection\"."
     }
   },
   "required": [
     "ok",
     "mode",
     "binary",
+    "via",
     "provider_dispatched"
   ],
   "title": "LaunchResult",
