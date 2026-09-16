@@ -135,7 +135,7 @@ impl SourceSetLoader for AgentLoader {
             partial_paths,
         );
         unstage(handle, &exchange, &exposed);
-        outcome?;
+        let warnings = outcome?;
 
         commit_step_state(source_set, source_context, &config.work_path, commit)?;
 
@@ -143,7 +143,7 @@ impl SourceSetLoader for AgentLoader {
         // и не станет выгружать то, что не менялось.
         let token = generation_id(handle.session(), extension, &wait)?;
         GenerationLedger::new(config).record(&source_set.name, &token, "build")?;
-        Ok(Vec::new())
+        Ok(warnings)
     }
 
     fn finish(&mut self) {

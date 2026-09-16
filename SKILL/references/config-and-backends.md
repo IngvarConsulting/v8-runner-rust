@@ -26,13 +26,17 @@ settings before CLI overrides.
 There is no global backend switch. The executor is chosen per operation from a capability
 matrix, and `providers.<operation>` names one explicitly.
 
-- Valid keys: `init`, `build`, `load`, `dump`, `extensions`, `infobase.configuration.export`,
-  `infobase.dump`, `infobase.restore`, `syntax`, `make`.
+- Executors are `designer`, `ibcmd`, and `agent`.
+- The key is accepted only where the matrix gives this target more than one executor. On a file
+  or cluster infobase that means `init`, `build`, `dump`, `extensions`,
+  `infobase.configuration.export`, `infobase.dump`, `infobase.restore`, and `make`. Naming an
+  executor for a single-executor operation is a config error, so `providers.load` and
+  `providers.syntax` are refused — both are Designer-only.
 - Defaults: `init`, `build`, `dump`, `infobase.configuration.export` try Designer then `ibcmd`;
   `infobase.dump` and `infobase.restore` use Designer (experimental IBCMD DT only when named);
-  `load`, `syntax`, `make` are Designer-only; `extensions` is `ibcmd`-only.
-- The key is accepted only for an operation that has a real choice on this target; naming an
-  executor for a single-executor operation is a config error.
+  `load` and `syntax` are Designer-only; `extensions` defaults to `ibcmd`. `agent` is
+  experimental for most rows and is reached only by naming it — except on a standalone server,
+  where its SSH gate is the only executor there is.
 - An override is strict: if the named executor is not ready the command refuses with a reason
   and never falls back to the default chain.
 - The key is allowed in `v8project.local.yaml` too; the response receipt names the file it came from.

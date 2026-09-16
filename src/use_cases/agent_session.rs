@@ -10,6 +10,10 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::platform::process::{
+    ProcessInterruption, ProcessInterruptionAction, ProcessInterruptionReason,
+};
+
 use serde::{Deserialize, Serialize};
 
 use crate::config::model::{AppConfig, DesignerAgentMode};
@@ -413,13 +417,19 @@ pub(crate) fn run_command(
 pub(crate) fn platform_result(
     transcript: String,
     log: PathBuf,
+    interruption: Option<ProcessInterruptionReason>,
 ) -> crate::platform::result::PlatformCommandResult {
     crate::platform::result::PlatformCommandResult {
         process: crate::platform::process::ProcessResult {
             exit_code: 0,
             stdout: transcript,
             stderr: String::new(),
-            interruption: None,
+            // Отложенное прерывание едет тем же полем, что и у процессов платформы,
+            // поэтому о нём рассказывают уже существующие помощники, а не второй путь.
+            interruption: interruption.map(|reason| ProcessInterruption {
+                reason,
+                action: ProcessInterruptionAction::Deferred,
+            }),
         },
         platform_log_path: Some(log),
         platform_log: None,
@@ -866,5 +876,39 @@ mod tests {
         assert_eq!(record.token, "abc");
         assert_eq!(record.after, "build");
         assert!(ledger.read("ext").is_none());
+    }
+
+    /// Отложенное прерывание едет тем же полем, что и у процессов платформы: иначе о нём
+    /// рассказывал бы второй путь, а существующие помощники (`deferred_process_*`) для
+    /// агентских результатов не срабатывали бы никогда.
+    #[test]
+    fn an_agent_result_reports_a_deferred_interruption_like_any_platform_result() {
+        let quiet = platform_result("ok".to_owned(), PathBuf::from("/tmp/agent.log"), None);
+        assert!(quiet.process.interruption.is_none());
+        assert!(
+            crate::use_cases::interruption::deferred_process_interruption_warning("build", &quiet)
+                .is_none()
+        );
+
+        let latched = platform_result(
+            "ok".to_owned(),
+            PathBuf::from("/tmp/agent.log"),
+            Some(ProcessInterruptionReason::Cancelled),
+        );
+
+        let interruption = latched
+            .process
+            .interruption
+            .expect("a latched interruption must reach the platform result");
+        assert_eq!(interruption.reason, ProcessInterruptionReason::Cancelled);
+        assert_eq!(interruption.action, ProcessInterruptionAction::Deferred);
+
+        let warning = crate::use_cases::interruption::deferred_process_interruption_warning(
+            "update_db_cfg",
+            &latched,
+        )
+        .expect("the existing reporter must fire for an agent result");
+        assert!(warning.contains("update_db_cfg"), "{warning}");
+        assert!(warning.contains("critical phase"), "{warning}");
     }
 }

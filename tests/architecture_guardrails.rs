@@ -318,7 +318,9 @@ fn the_shipped_skill_never_names_the_removed_builder_key() {
                 stack.push(entry_path);
                 continue;
             }
-            if entry_path.extension().is_none_or(|ext| ext != "md") {
+            // Расширение не фильтруется: ключ может вернуться и в yaml рядом с навыком,
+            // а «то же самое под другим именем» — это ровно то, что ловит эта проверка.
+            if entry_path.extension().is_none() {
                 continue;
             }
             let text = fs::read_to_string(&entry_path).expect("read SKILL file");

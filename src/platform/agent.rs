@@ -358,6 +358,9 @@ impl WaitPolicy {
         let grace = Instant::now() + SHUTDOWN_GRACE;
         Self {
             deadline: Some(self.deadline.map_or(grace, |deadline| deadline.min(grace))),
+            // Очистка не наследует критический класс: иначе она перестала бы слушать
+            // собственный срок и завершение могло бы не закончиться никогда.
+            safety: ProcessInterruptionSafety::Interruptible,
             ..self.clone()
         }
     }
@@ -411,6 +414,9 @@ pub struct AgentSession {
     endpoint: AgentEndpoint,
     transcript: Option<std::fs::File>,
     ended: bool,
+    /// Прерывание, защёлкнутое в критической фазе за время сессии; первое побеждает.
+    /// Сессия помнит его, потому что результат платформы собирают после её закрытия.
+    deferred_interruption: Option<ProcessInterruptionReason>,
 }
 
 impl AgentSession {
@@ -508,6 +514,7 @@ impl AgentSession {
             endpoint,
             transcript,
             ended: false,
+            deferred_interruption: None,
         };
         session.run(JSON_MODE_COMMAND, policy)?.outcome()?;
         session.run(CONNECT_COMMAND, policy)?.outcome()?;
@@ -533,6 +540,9 @@ impl AgentSession {
             if done {
                 break;
             }
+        }
+        if let Some(reason) = deferred_interruption {
+            self.deferred_interruption.get_or_insert(reason);
         }
         let reply = AgentReply {
             messages,
@@ -830,16 +840,7 @@ impl AgentSession {
     pub fn shutdown(mut self, policy: &WaitPolicy) -> Option<AgentReply> {
         // Ответ на shutdown может и не прийти — сессию закрывает сам агент; ждать его
         // дольше короткого срока незачем, даже если бюджет команды не ограничен.
-        let grace = Instant::now() + SHUTDOWN_GRACE;
-        let capped = WaitPolicy {
-            deadline: Some(
-                policy
-                    .deadline
-                    .map_or(grace, |deadline| deadline.min(grace)),
-            ),
-            cancellation: policy.cancellation.clone(),
-            safety: ProcessInterruptionSafety::Interruptible,
-        };
+        let capped = policy.cleanup();
         // Агент может закрыть соединение, не ответив: EOF здесь — не отказ.
         let reply = self.run(SHUTDOWN_COMMAND, &capped).ok();
         self.disconnect();
@@ -884,6 +885,11 @@ impl AgentSession {
                 endpoint: self.endpoint.to_string(),
                 source,
             })
+    }
+
+    /// Прерывание, защёлкнутое в критической фазе за время сессии.
+    pub fn deferred_interruption(&self) -> Option<ProcessInterruptionReason> {
+        self.deferred_interruption
     }
 
     /// Читает канал до первого полного JSON-массива. Всё до открывающей скобки — не
@@ -1268,22 +1274,6 @@ mod tests {
             unbounded.deadline.is_some(),
             "cleanup must be bounded even when the command has no deadline"
         );
-    }
-
-    /// Прерывание в критической фазе не теряется: ответ несёт его вызывающему, чтобы
-    /// тот сказал о нём в результате, а не промолчал.
-    #[test]
-    fn a_reply_carries_the_deferred_interruption() {
-        let reply = AgentReply {
-            messages: Vec::new(),
-            deferred_interruption: Some(ProcessInterruptionReason::Cancelled),
-        };
-
-        assert_eq!(
-            reply.deferred_interruption,
-            Some(ProcessInterruptionReason::Cancelled)
-        );
-        assert_eq!(AgentReply::default().deferred_interruption, None);
     }
 
     #[test]

@@ -385,6 +385,7 @@ fn with_session(
     let outcome = handle
         .exchange(config)
         .and_then(|exchange| work(&mut handle, &wait, &exchange));
+    let deferred = handle.session().deferred_interruption();
     handle.finish(&wait);
-    outcome.map(|transcript| platform_result(transcript, log))
+    outcome.map(|transcript| platform_result(transcript, log, deferred))
 }
