@@ -1058,20 +1058,26 @@ const OFF_AXIS: &str = "`governs` must read `product` or `process`";
 /// вызов в файле. Строка обязана найтись — иначе фикстура молча осталась бы
 /// здоровой и проверяла бы не то, что обещает.
 fn with_governs(file: RecordFile, governs: &str) -> RecordFile {
+    with_props(file, &[("governs", governs)])
+}
+
+/// Та же запись, но с переписанными полями.
+///
+/// Полей здесь несколько, потому что статус в одиночку не меняется: `planned`-правило
+/// обязано объявить `check: null`, а `superseded`-решение — `realized: null`. Подмени
+/// одно поле — и фикстура ловит не то нарушение, которое обещает.
+fn with_props(file: RecordFile, changes: &[(&str, &str)]) -> RecordFile {
     let (directory, name, text) = file;
-    let mut replaced = String::with_capacity(text.len());
-    let mut found = false;
-    for line in text.lines() {
-        if line.starts_with("governs:") {
-            replaced.push_str(&format!("governs: {governs}"));
-            found = true;
-        } else {
-            replaced.push_str(line);
-        }
-        replaced.push('\n');
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    for (key, value) in changes {
+        let prefix = format!("{key}:");
+        let line = lines
+            .iter_mut()
+            .find(|line| line.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("фикстура {name} не называет `{key}`"));
+        *line = format!("{key}: {value}");
     }
-    assert!(found, "фикстура {name} не называет `governs`");
-    (directory, name, replaced)
+    (directory, name, lines.join("\n") + "\n")
 }
 
 /// Мини-реестр под ось: решение и выведенное из него правило.
@@ -1148,6 +1154,252 @@ fn governs_reads_product_or_process() {
         wrong.is_empty(),
         "`governs` may read anything at all:\n{}",
         wrong.join("\n")
+    );
+}
+
+const OFF_SET: &str = "`status` must read `active`, `planned` or `superseded`";
+
+/// Мини-реестр под перечень: решение и выведенное из него правило, каждому свой статус.
+fn status_case(decision: &[(&str, &str)], rule: &[(&str, &str)]) -> serde_json::Value {
+    registry_case(vec![
+        with_props(decision_file(DECISION_FILE, DECISION_ID, RULE_ID), decision),
+        with_props(rule_file(RULE_FILE, RULE_ID, DECISION_ID), rule),
+    ])
+}
+
+/// Перечень `status` закрыт, и закрыт он гейтом, а не только таблицей в README.
+///
+/// `status` — не колонка индекса, а условие, по которому ветвится сам разбор: `planned`
+/// разрешает правилу не называть фальсификатор, `superseded` — решению не предъявлять
+/// свидетельство, `active` требует действующего решения под действующим правилом.
+/// Сверяется слово целиком, поэтому промах мимо перечня не нарушает правил, а отключает
+/// проверку: фикстура ниже — правило со `status: activ` под `planned`-решением — до
+/// этой проверки проходила гейт молча, объявляя себя действующей под решением, которое
+/// ещё не принято. Этим ось `governs` и `status` не схожи: там слово вне перечня ничего
+/// не переключает, а снимает адресата обещания.
+///
+/// Перечень закрыт с обеих сторон. Опубликованное значение обязано проходить — включая
+/// `superseded`, которого нет ни в одной живой записи: сузься перечень до двух слов,
+/// реестр бы этого не заметил, и поймать такое может только выдуманный реестр.
+#[test]
+fn status_reads_active_planned_or_superseded() {
+    let sound = status_case(&[("status", "active")], &[("status", "active")]);
+    // Запланированное правило объявляет отсутствие проверки, заменённое решение —
+    // отсутствие свидетельства. Оба слова перечень обязан пропускать.
+    let planned_rule = status_case(&[], &[("status", "planned"), ("check", "null")]);
+    let superseded_decision = status_case(
+        &[("status", "superseded"), ("realized", "null")],
+        &[("status", "planned"), ("check", "null")],
+    );
+    // Правило под ними не действует: иначе сработала бы ветка «действующее правило
+    // под недействующим решением», и нарушений в фикстуре стало бы два.
+    let decision_off_the_set = status_case(
+        &[("status", "banana")],
+        &[("status", "planned"), ("check", "null")],
+    );
+    let rule_off_the_set = status_case(&[], &[("status", "activ")]);
+    // Статус пишется одним способом: `Active` — не значение перечня, а похожее слово.
+    let wrong_case = status_case(&[], &[("status", "Active")]);
+    // Ровно тот случай, ради которого перечень и закрывается: решение не принято,
+    // правило объявляет себя действующим, и одна буква прячет расхождение целиком.
+    let typo_switches_a_check_off = status_case(
+        &[("status", "planned"), ("realized", "null")],
+        &[("status", "activ")],
+    );
+    // Пустое поле — прежняя претензия и ровно одна: про отсутствующее значение гейт
+    // не может сказать заодно, что оно вне перечня.
+    let rule_without_status = status_case(&[], &[("status", "")]);
+
+    let judged = python_validation_errors(&[
+        sound,
+        planned_rule,
+        superseded_decision,
+        decision_off_the_set,
+        rule_off_the_set,
+        wrong_case,
+        typo_switches_a_check_off,
+        rule_without_status,
+    ]);
+    let mut wrong = Vec::new();
+
+    for (name, errors) in [
+        ("an active rule", &judged[0]),
+        ("a planned rule", &judged[1]),
+        ("a superseded decision", &judged[2]),
+    ] {
+        if !errors.is_empty() {
+            wrong.push(format!("{name} must pass: {errors:?}"));
+        }
+    }
+    sole_error(
+        "a decision off the set",
+        &judged[3],
+        &format!("decisions/{DECISION_FILE}: {OFF_SET}"),
+        &mut wrong,
+    );
+    sole_error(
+        "a rule off the set",
+        &judged[4],
+        &format!("invariants/{RULE_FILE}: {OFF_SET}"),
+        &mut wrong,
+    );
+    sole_error("a rule shouting the status", &judged[5], OFF_SET, &mut wrong);
+    sole_error(
+        "a typo that switches a check off",
+        &judged[6],
+        &format!("invariants/{RULE_FILE}: {OFF_SET}"),
+        &mut wrong,
+    );
+    sole_error(
+        "a rule with no status at all",
+        &judged[7],
+        &format!("invariants/{RULE_FILE}: missing prop `status`"),
+        &mut wrong,
+    );
+
+    assert!(
+        wrong.is_empty(),
+        "`status` may read anything at all:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// Сливает индексы тем же кодом, которым git сводит расхождение в `spec/arch/index.md`,
+/// и заодно называет драйвер, под именем которого этот код зарегистрирован.
+const MERGE_PROBE: &str = r#"
+import json, sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, "scripts/arch")
+import registry
+
+def index(rows):
+    return "\n".join(registry.INDEX_HEADER) + "".join("\n" + row for row in rows) + "\n"
+
+merged = []
+for sides in json.load(sys.stdin):
+    try:
+        text = registry.merge_index(*(index(rows) for rows in sides))
+    except ValueError as error:
+        merged.append({"rejected": str(error)})
+    else:
+        merged.append({"rows": text.splitlines()[len(registry.INDEX_HEADER):]})
+
+current = registry.INDEX_PATH.read_text(encoding="utf-8")
+json.dump(
+    {
+        "driver": registry.MERGE_DRIVER,
+        # Индекс, слитый сам с собой, обязан выйти собой: шапка и строка у порождения
+        # и у слияния одни, и разойдись они — каждое слияние портило бы весь файл.
+        "identity": registry.merge_index(current, current, current) == current,
+        "merged": merged,
+    },
+    sys.stdout,
+    ensure_ascii=False,
+)
+"#;
+
+/// Строка индекса. Слиянию видно только первую колонку — символ; остальные стоят
+/// здесь потому, что без них это не строка индекса, а не потому, что их читают.
+fn index_row(symbol: &str, status: &str) -> String {
+    format!(
+        "| `{symbol}` | решение · process | {status} \
+         | да | Суть | [decisions/x.md](decisions/x.md) |"
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct MergeAnswer {
+    driver: String,
+    identity: bool,
+    merged: Vec<serde_json::Value>,
+}
+
+/// Порождённый индекс не останавливает слияние.
+///
+/// `index.md` порождается и коммитится, поэтому две ветки, заведшие по записи, расходятся
+/// в нём всегда: строки отсортированы по символу, и две новые встают в одно место.
+/// Выбирать человеку тут нечего — сторона конфликта ни на что не влияет, разрешение
+/// всегда одно, — и ручное разрешение генерируемого файла кончается тем, что его правят
+/// руками. Поэтому расхождение сводит драйвер, а `.gitattributes` направляет к нему файл.
+///
+/// Драйвер сливает строки, а не перепорождает индекс: посреди слияния записей чужой
+/// стороны на диске ещё нет, и порождение дало бы индекс без них — зато без конфликта,
+/// то есть устаревший молча. Сведённое неверно ловит гейт свежести, а не тихий коммит.
+#[test]
+fn the_generated_index_does_not_stop_a_merge() {
+    let (alef, mem, zayn) = ("DEC.2026-01-01.A", "DEC.2026-01-01.M", "DEC.2026-01-01.Z");
+    let (a, m, z) = (
+        index_row(alef, "active"),
+        index_row(mem, "active"),
+        index_row(zayn, "active"),
+    );
+    // Та же запись после правки: строка меняется, символ остаётся ключом.
+    let m_superseded = index_row(mem, "superseded");
+
+    let answer: MergeAnswer = ask_registry(
+        MERGE_PROBE,
+        &vec![
+            // Обе стороны завели по записи, и чужая встаёт выше нашей.
+            vec![vec![&m], vec![&m, &z], vec![&a, &m]],
+            // Мы завели запись, они правили соседнюю.
+            vec![vec![&m], vec![&m, &z], vec![&m_superseded]],
+            // Они убрали запись, которой мы не касались.
+            vec![vec![&a, &m], vec![&a, &m], vec![&a]],
+            // Строку, которой формат не описывает, драйвер не проглатывает: иначе
+            // предыдущее неудачное слияние растворилось бы в следующем.
+            vec![
+                vec![&m],
+                vec![&m, &"<<<<<<< HEAD".to_string()],
+                vec![&m, &z],
+            ],
+        ],
+        "merge an index",
+    );
+
+    let mut wrong = Vec::new();
+    let expected: [Option<Vec<&String>>; 4] = [
+        Some(vec![&a, &m, &z]),
+        Some(vec![&m_superseded, &z]),
+        Some(vec![&a]),
+        None,
+    ];
+    for (number, (got, want)) in answer.merged.iter().zip(expected).enumerate() {
+        let rows = got
+            .get("rows")
+            .and_then(|rows| serde_json::from_value::<Vec<String>>(rows.clone()).ok());
+        let agree = match (&rows, &want) {
+            (Some(rows), Some(want)) => rows.iter().collect::<Vec<_>>() == *want,
+            (None, None) => true,
+            _ => false,
+        };
+        if !agree {
+            wrong.push(format!("case {number}: {got}"));
+        }
+    }
+
+    assert!(
+        answer.identity,
+        "merge_index does not reproduce the index it was given on all three sides"
+    );
+    assert!(
+        wrong.is_empty(),
+        "the merge driver resolves a diverged index wrongly:\n{}",
+        wrong.join("\n")
+    );
+
+    // Имя драйвера живёт в трёх местах, и молчит только одно расхождение: атрибут,
+    // называющий незарегистрированный драйвер, git берёт обычным текстовым слиянием.
+    let attributes = std::fs::read_to_string(repo_root().join(".gitattributes"))
+        .expect("the repository declares attributes");
+    let routed = attributes.lines().any(|line| {
+        line.split_whitespace().next() == Some("spec/arch/index.md")
+            && line.contains(&format!("merge={}", answer.driver))
+    });
+    assert!(
+        routed,
+        ".gitattributes does not route spec/arch/index.md to merge={}",
+        answer.driver
     );
 }
 
