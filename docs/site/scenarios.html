@@ -103,14 +103,17 @@
       var badge = {
         ok:      '<span class="pill ok">доступно</span>',
         tool:    '<span class="pill warn">нужен инструмент</span>',
-        subject: '<span class="pill no">не про этот предмет</span>'
+        subject: '<span class="pill no">не про этот предмет</span>',
+        target:  '<span class="pill no">не для этой цели</span>'
       }[r.status];
       var stateCell = badge + (r.why ? '<div class="why">' + esc(r.why) + '</div>' : '') +
                   (r.fix ? '<div class="why fix">' + esc(r.fix) + '</div>' : '');
 
       var chain;
-      if (r.noProvider) chain = '<span class="dash">платформа не нужна</span>';
-      else if (r.status === 'subject') chain = '<span class="dash">—</span>';
+      // Сначала отказ, потом «платформа не нужна»: у операции, которой для этой цели
+      // нет, исполнителя нет не потому, что он не требуется.
+      if (r.status === 'subject' || r.status === 'target') chain = '<span class="dash">—</span>';
+      else if (r.noProvider) chain = '<span class="dash">платформа не нужна</span>';
       else {
         chain = '<span class="chain">' + r.chain.map(function (p) {
           return pill(p, r.selected && p.key === r.selected.key);
