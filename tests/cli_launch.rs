@@ -354,6 +354,69 @@ fn write_config(
     fs::write(path, config).expect("config");
 }
 
+/// Конфиг с объявленным клиентским адресом: файловая цель, у которой есть оба адреса.
+fn write_config_with_web_url(
+    path: &Path,
+    work_path: &Path,
+    platform_path: &Path,
+    url: &str,
+    extra: &str,
+) {
+    fs::write(
+        path,
+        format!(
+            "workPath: '{work}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\n  web:\n    url: '{url}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    path: '{platform}'\n{extra}",
+            work = work_path.display(),
+            platform = platform_path.display(),
+        ),
+    )
+    .expect("config");
+}
+
+/// Рабочее место с тонким клиентом и объявленным клиентским адресом.
+fn setup_web_project(url: &str, extra: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let dir = temp_workspace();
+    let work_path = dir.path().join("work");
+    let install_dir = dir.path().join("platform");
+    let config_path = dir.path().join("v8project.yaml");
+
+    fs::create_dir_all(dir.path().join("project")).expect("base");
+    fs::create_dir_all(&work_path).expect("work");
+    write_script(&install_dir.join("bin").join("1cv8"));
+    write_script(&install_dir.join("bin").join("1cv8c"));
+    write_config_with_web_url(&config_path, &work_path, &install_dir, url, extra);
+
+    (dir, config_path, install_dir)
+}
+
+fn launch_json(config_path: &Path, arguments: &[&str]) -> Value {
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+        ])
+        .args(arguments)
+        .output()
+        .expect("run command");
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "no json envelope: {error}\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
+fn planned_args(payload: &Value) -> Vec<String> {
+    payload["data"]["plan"]["args"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no planned args: {payload}"))
+        .iter()
+        .map(|arg| arg.as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
 fn setup_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     setup_project_with_thin_script("sleep 1")
 }
@@ -1857,4 +1920,176 @@ fn launch_web_dry_run_names_the_opener_and_the_address() {
         args.last().and_then(Value::as_str),
         Some("http://localhost/demo")
     );
+}
+
+/// У цели два адреса, и тонкий клиент открывается любым. `--via web` берёт клиентский и
+/// передаёт его как ws-соединение.
+#[test]
+fn a_thin_client_goes_through_the_web_address_when_asked() {
+    let (_dir, config_path, install_dir) = setup_web_project("http://localhost/base", "");
+
+    let payload = launch_json(
+        &config_path,
+        &["launch", "thin", "--via", "web", "--dry-run"],
+    );
+
+    assert_eq!(payload["ok"], true, "{payload}");
+    assert_eq!(payload["data"]["via"], "web", "{payload}");
+    assert_eq!(payload["data"]["url"], "http://localhost/base", "{payload}");
+    assert_eq!(
+        payload["data"]["plan"]["program"]
+            .as_str()
+            .expect("program"),
+        canonical_path_string(&install_dir.join("bin").join("1cv8c"))
+    );
+    let args = planned_args(&payload);
+    let at = args
+        .iter()
+        .position(|arg| arg == "/WS")
+        .unwrap_or_else(|| panic!("no /WS in {args:?}"));
+    assert_eq!(args[at + 1], "http://localhost/base", "{args:?}");
+    assert!(
+        !args.iter().any(|arg| arg == "/IBConnectionString"),
+        "клиентский адрес заменяет административный, а не дополняет: {args:?}"
+    );
+}
+
+/// Умолчание у файловой цели — административный адрес, и объявленный `web.url` его не
+/// подменяет: путь выбирает вид цели, а не наличие публикации.
+#[test]
+fn a_thin_client_keeps_the_connection_address_by_default() {
+    let (_dir, config_path, _install) = setup_web_project("http://localhost/base", "");
+
+    let payload = launch_json(&config_path, &["launch", "thin", "--dry-run"]);
+
+    assert_eq!(payload["data"]["via"], "connection", "{payload}");
+    assert!(payload["data"]["url"].is_null(), "{payload}");
+    let args = planned_args(&payload);
+    assert!(
+        args.iter().any(|arg| arg == "/IBConnectionString"),
+        "{args:?}"
+    );
+    assert!(!args.iter().any(|arg| arg == "/WS"), "{args:?}");
+}
+
+/// Развилка есть только у тонкого клиента: у остальных режимов адрес один, и ключ,
+/// которому нечего выбирать, отвергается, а не игнорируется молча.
+#[test]
+fn via_is_refused_where_there_is_no_choice() {
+    let (_dir, config_path, _install) = setup_web_project("http://localhost/base", "");
+
+    for mode in ["designer", "thick", "ordinary", "web"] {
+        let payload = launch_json(&config_path, &["launch", mode, "--via", "web", "--dry-run"]);
+
+        assert_eq!(payload["ok"], false, "{mode}: {payload}");
+        assert_eq!(payload["error"]["kind"], "validation", "{mode}: {payload}");
+    }
+}
+
+/// Адреса нет — отказывает и `launch web`, и тонкий клиент по вебу, одним и тем же текстом:
+/// не хватает им одного и того же.
+#[test]
+fn a_web_launch_without_an_address_is_refused_the_same_way_for_both_paths() {
+    let dir = temp_workspace();
+    let work_path = dir.path().join("work");
+    let install_dir = dir.path().join("platform");
+    let config_path = dir.path().join("v8project.yaml");
+    fs::create_dir_all(dir.path().join("project")).expect("base");
+    fs::create_dir_all(&work_path).expect("work");
+    write_script(&install_dir.join("bin").join("1cv8c"));
+    write_config(&config_path, dir.path(), &work_path, &install_dir, None);
+
+    for arguments in [
+        vec!["launch", "thin", "--via", "web", "--dry-run"],
+        vec!["launch", "web", "--dry-run"],
+    ] {
+        let payload = launch_json(&config_path, &arguments);
+
+        assert_eq!(payload["ok"], false, "{arguments:?}: {payload}");
+        assert_eq!(
+            payload["error"]["kind"], "validation",
+            "{arguments:?}: {payload}"
+        );
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("infobase.web.url"),
+            "{arguments:?}: {payload}"
+        );
+    }
+}
+
+/// Поле `via` есть у каждого режима, а не только там, где был выбор: иначе его
+/// отсутствие пришлось бы толковать.
+#[test]
+fn every_launch_names_the_address_it_used() {
+    let (_dir, config_path, _install) = setup_web_project("http://localhost/base", "");
+
+    for (arguments, expected) in [
+        (vec!["launch", "designer", "--dry-run"], "connection"),
+        (vec!["launch", "thick", "--dry-run"], "connection"),
+        (vec!["launch", "web", "--dry-run"], "web"),
+        (vec!["launch", "thin", "--via", "web", "--dry-run"], "web"),
+    ] {
+        let payload = launch_json(&config_path, &arguments);
+
+        assert_eq!(payload["ok"], true, "{arguments:?}: {payload}");
+        assert_eq!(payload["data"]["via"], expected, "{arguments:?}: {payload}");
+    }
+}
+
+/// Пароль из userinfo не показывается нигде, где раннер показывает адрес: ни в плане,
+/// ни в поле `url`, ни в сообщении. Имя пользователя остаётся — по нему адрес узнаётся.
+#[test]
+fn a_client_address_is_reported_without_its_userinfo_password() {
+    let (_dir, config_path, _install) = setup_web_project("http://alice:s3cret@localhost/base", "");
+
+    for arguments in [
+        vec!["launch", "thin", "--via", "web", "--dry-run"],
+        vec!["launch", "web", "--dry-run"],
+    ] {
+        let payload = launch_json(&config_path, &arguments);
+        let rendered = payload.to_string();
+
+        assert!(
+            !rendered.contains("s3cret"),
+            "{arguments:?} показал пароль: {payload}"
+        );
+        assert!(
+            rendered.contains("alice"),
+            "{arguments:?} потерял имя пользователя: {payload}"
+        );
+        assert_eq!(
+            payload["data"]["url"], "http://alice:***@localhost/base",
+            "{arguments:?}: {payload}"
+        );
+    }
+}
+
+/// Пользовательские ключи запуска дописываются после наших и своего адреса не отменяют:
+/// раннер не теряет `/WS` и не падает, даже когда рядом положили второй адрес.
+#[test]
+fn additional_launch_keys_do_not_displace_the_web_address() {
+    let (_dir, config_path, _install) = setup_web_project(
+        "http://localhost/base",
+        "  enterprise:\n    additional-launch-keys: ['/IBConnectionString', 'File=/tmp/other']\n",
+    );
+
+    let payload = launch_json(
+        &config_path,
+        &["launch", "thin", "--via", "web", "--dry-run"],
+    );
+
+    assert_eq!(payload["ok"], true, "{payload}");
+    let args = planned_args(&payload);
+    let ws = args
+        .iter()
+        .position(|arg| arg == "/WS")
+        .unwrap_or_else(|| panic!("no /WS in {args:?}"));
+    let theirs = args
+        .iter()
+        .position(|arg| arg == "/IBConnectionString")
+        .unwrap_or_else(|| panic!("user key dropped: {args:?}"));
+    assert!(ws < theirs, "наш адрес идёт первым: {args:?}");
 }

@@ -30,6 +30,17 @@ impl V8Connection {
     /// Build CLI arguments for a V8 utility launch.
     pub fn args(&self) -> Vec<String> {
         let mut args = self.connection_args.clone();
+        args.extend(self.credential_args());
+        args
+    }
+
+    /// Только реквизиты базы, без адреса: `/N` и `/P`.
+    ///
+    /// Отделены от адреса, потому что связка «адрес + реквизиты» верна не всегда.
+    /// У автономной цели `infobase.user` и `infobase.password` — учётные данные
+    /// SSH-шлюза, а не базы, и клиенту их отдавать нельзя.
+    pub fn credential_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
         if let Some(user) = &self.user {
             args.push("/N".to_owned());
             args.push(user.clone());

@@ -113,7 +113,7 @@ impl<'a> EnterpriseDsl<'a> {
         launch.internal_out = Some(self.log_file.display().to_string());
         build_launch_args(
             self.client_mode,
-            &self.connection,
+            &LaunchAddress::Connection(&self.connection),
             &self.additional_launch_keys,
             &launch,
         )
@@ -131,9 +131,40 @@ impl From<LaunchClientModeRequest> for LaunchClientMode {
     }
 }
 
+/// Чем клиент открывает базу в командной строке.
+///
+/// Административный адрес несёт реквизиты базы рядом с собой; клиентский — не всегда:
+/// у автономной цели `infobase.user`/`password` принадлежат SSH-шлюзу, и клиенту их
+/// отдавать нельзя. Поэтому реквизиты у веб-адреса — отдельное, необязательное поле.
+pub enum LaunchAddress<'a> {
+    /// `infobase.connection` вместе с `/N` и `/P`.
+    Connection(&'a V8Connection),
+    /// `infobase.web.url` как ws-соединение; реквизиты прилагаются, только если они
+    /// действительно реквизиты базы.
+    Web {
+        url: &'a str,
+        credentials: Option<&'a V8Connection>,
+    },
+}
+
+impl LaunchAddress<'_> {
+    fn args(&self) -> Vec<String> {
+        match self {
+            Self::Connection(connection) => connection.args(),
+            Self::Web { url, credentials } => {
+                let mut args = vec!["/WS".to_owned(), (*url).to_owned()];
+                if let Some(connection) = credentials {
+                    args.extend(connection.credential_args());
+                }
+                args
+            }
+        }
+    }
+}
+
 pub fn build_launch_args(
     mode: LaunchClientMode,
-    connection: &V8Connection,
+    address: &LaunchAddress<'_>,
     additional_launch_keys: &[String],
     launch: &LaunchOptions,
 ) -> Vec<String> {
@@ -145,7 +176,7 @@ pub fn build_launch_args(
     }
     .to_owned()];
     args.push("/DisableStartupDialogs".to_owned());
-    args.extend(connection.args());
+    args.extend(address.args());
     if matches!(mode, LaunchClientMode::Ordinary) {
         args.push("/RunModeOrdinaryApplication".to_owned());
     }
@@ -201,12 +232,40 @@ pub fn mask_launch_args(args: &[String], secrets: &[&str]) -> Vec<String> {
             }
             Some(start) => masked.push(format!("{}{MASKED_LAUNCH_VALUE}", &arg[..start])),
             None => masked.push(mask_literal_secrets(
-                &mask_connection_string_password(arg),
+                &mask_url_userinfo(&mask_connection_string_password(arg)),
                 secrets,
             )),
         }
     }
     masked
+}
+
+/// Прячет пароль из userinfo адреса: `http://alice:pass@host/base` → `http://alice:***@host/base`.
+///
+/// Маскируется только то, что после `:`. Голое имя пользователя секретом не является, а
+/// спрятать его целиком значит сделать адрес неузнаваемым — а он нужен человеку, чтобы
+/// понять, куда именно раннер собрался.
+pub fn mask_url_userinfo(value: &str) -> String {
+    let Some(scheme_end) = value.find("://") else {
+        return value.to_owned();
+    };
+    let authority_start = scheme_end + "://".len();
+    let authority_end = value[authority_start..]
+        .find(['/', '?', '#'])
+        .map_or(value.len(), |at| authority_start + at);
+    let authority = &value[authority_start..authority_end];
+    let Some(at) = authority.rfind('@') else {
+        return value.to_owned();
+    };
+    let Some(colon) = authority[..at].find(':') else {
+        return value.to_owned();
+    };
+    format!(
+        "{}{}:{MASKED_LAUNCH_VALUE}{}",
+        &value[..authority_start],
+        &authority[..colon],
+        &value[authority_start + at..]
+    )
 }
 
 /// Byte offset at which a `/P` key's value starts, or `arg.len()` when the value is detached.
@@ -320,7 +379,7 @@ fn reserved_launch_key(arg: &str) -> Option<(bool, bool)> {
 mod tests {
     use super::{
         build_launch_args, mask_launch_args, normalize_launch_payload_path, EnterpriseDsl,
-        LaunchClientMode,
+        LaunchAddress, LaunchClientMode,
     };
     use crate::domain::runner::LaunchOptions;
     use crate::platform::connection::V8Connection;
@@ -390,7 +449,7 @@ mod tests {
     fn builds_expected_run_unit_tests_arguments() {
         let args = build_launch_args(
             LaunchClientMode::Thin,
-            &V8Connection::from_connection_string("File=/tmp/ib"),
+            &LaunchAddress::Connection(&V8Connection::from_connection_string("File=/tmp/ib")),
             &["/TESTMANAGER".to_owned()],
             &LaunchOptions {
                 c: Some("RunUnitTests=/tmp/path with space/тест config.json".to_owned()),
@@ -417,7 +476,7 @@ mod tests {
     fn builds_expected_vanessa_arguments() {
         let args = build_launch_args(
             LaunchClientMode::Thin,
-            &V8Connection::from_connection_string("File=/tmp/ib"),
+            &LaunchAddress::Connection(&V8Connection::from_connection_string("File=/tmp/ib")),
             &["/TESTMANAGER".to_owned()],
             &LaunchOptions {
                 execute: Some("/tmp/va/vanessa automation.epf".to_owned()),
@@ -447,7 +506,7 @@ mod tests {
     fn ordinary_mode_adds_run_mode_and_filters_reserved_raw_keys() {
         let args = build_launch_args(
             LaunchClientMode::Ordinary,
-            &V8Connection::from_connection_string("File=/tmp/ib"),
+            &LaunchAddress::Connection(&V8Connection::from_connection_string("File=/tmp/ib")),
             &[
                 "/TESTMANAGER".to_owned(),
                 "/DisableStartupDialogs".to_owned(),
@@ -494,7 +553,7 @@ mod tests {
     fn internal_out_has_priority_over_user_out() {
         let args = build_launch_args(
             LaunchClientMode::Thin,
-            &V8Connection::from_connection_string("File=/tmp/ib"),
+            &LaunchAddress::Connection(&V8Connection::from_connection_string("File=/tmp/ib")),
             &[],
             &LaunchOptions {
                 out: Some("user.log".to_owned()),

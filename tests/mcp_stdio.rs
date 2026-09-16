@@ -1137,11 +1137,49 @@ async fn mcp_stdio_launch_app_returns_success_for_thin_client() {
     let payload: Value = response.structured_content.expect("structured payload");
     assert_envelope_success(&payload, "launch");
     assert_eq!(payload["data"]["ok"], true);
+    // Настоящий запуск, не превью: адрес назван и здесь.
+    assert_eq!(payload["data"]["via"], "connection", "{payload}");
     assert_launch_platform_resolution(&payload["data"]);
     wait_for_invocation_count(&enterprise_calls_log, 1).await;
     assert!(!fs::read_to_string(enterprise_calls_log)
         .expect("enterprise calls")
         .contains("RunUnitTests="));
+
+    client.cancel().await.expect("cancel client");
+}
+
+/// Поверхности не расходятся: `via` есть и у MCP, и отвергается он там по тем же
+/// правилам — у толстого клиента развилки нет.
+#[tokio::test]
+async fn mcp_stdio_launch_app_refuses_via_where_there_is_no_choice() {
+    let (_dir, config_path, _designer_calls_log, _enterprise_calls_log, _captured_config) =
+        setup_designer_suite_project();
+    let transport = TokioChildProcess::new(
+        tokio::process::Command::new(v8_runner_binary()).configure(|cmd| {
+            cmd.arg("--config")
+                .arg(config_path.as_os_str())
+                .arg("mcp")
+                .arg("serve")
+                .arg("stdio");
+        }),
+    )
+    .expect("spawn stdio transport");
+
+    let client = ().serve(transport).await.expect("connect rmcp client");
+    let response = client
+        .peer()
+        .call_tool(
+            CallToolRequestParams::new("launch_app").with_arguments(
+                serde_json::from_value(json!({ "utilityType": "thick", "via": "web" }))
+                    .expect("arguments"),
+            ),
+        )
+        .await
+        .expect("call tool");
+
+    assert_eq!(response.is_error, Some(true));
+    let payload: Value = response.structured_content.expect("structured payload");
+    assert_eq!(payload["error"]["kind"], "validation", "{payload}");
 
     client.cancel().await.expect("cancel client");
 }
