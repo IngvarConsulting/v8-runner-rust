@@ -56,6 +56,16 @@ Apply this gate at the stated phase for non-trivial changes, especially when the
 8. Before completion or commit, reconcile only against artifacts explicitly cited by the task or directly relevant to touched files/public contracts: approved plan, ADR, реестр `spec/arch/` (`index.md` первым), `spec/architecture/change-checklist.md`, other relevant `spec/` architecture documents, issue/PR notes, skeptic review, or explicit task notes. Compare the actual diff against the stated contracts, invariants, ownership rules, data-flow paths, conversions, mappings, registries, and public re-exports; verify that promised deletions happened. An unlisted addition or retained duplicate requires updating the relevant plan or decision and repeating review before commit.
 9. Actionable non-trivial findings must be fixed, re-reviewed, waived by the rule above, or marked out of scope only when they are unrelated to the current task. When worker subagents are available, use at most one focused worker/fix pass per related finding group before re-review.
 
+## Registry Index Merges
+
+`spec/arch/index.md` is generated and committed, so any two branches that add or change a record diverge in it. Register the merge driver once per clone, before the first merge or rebase:
+
+```sh
+python3 scripts/arch/registry.py --install-merge-driver
+```
+
+`.gitattributes` routes the file to that driver. Without the registration git falls back to the ordinary text merge and reports a conflict; resolve it by regenerating, never by hand-editing the index. `spec/arch/README.md` holds both commands.
+
 ## Repo-Local Skill
 
 `SKILL/SKILL.md` is the skill for using `v8-runner` in other 1C projects. When implementing tasks, update it if commands, workflows, configuration contracts, constraints, or diagnostic practices that matter for external use change.

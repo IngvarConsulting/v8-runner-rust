@@ -1,3 +1,9 @@
 README.md text eol=lf
 LICENSE text eol=lf
 FORK_NOTICE.md text eol=lf
+
+# Индекс реестра порождается и коммитится, поэтому две ветки, заведшие по записи,
+# расходятся в нём всегда. Слияние правится не руками: драйвер регистрируется
+# командой `python3 scripts/arch/registry.py --install-merge-driver`. Без неё git
+# берёт обычное текстовое слияние — то есть ровно то, что было до драйвера.
+spec/arch/index.md merge=arch-index
