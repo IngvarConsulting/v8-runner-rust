@@ -310,10 +310,20 @@ json.dump(answer, sys.stdout, ensure_ascii=False)
 
 /// Поля так, как их читает `scripts/arch/registry.py`: `{"props": …}` либо `{"rejected": …}`
 /// на каждый текст, по порядку.
-fn python_front_matter(texts: &[&str]) -> Vec<serde_json::Value> {
+/// Спрашивает `scripts/arch/registry.py` его же кодом: фикстуры уходят пробе на stdin,
+/// ответ приходит json'ом.
+///
+/// Проб две — про разбор полей и про суд над записью, — а способ спросить один. Разойдись
+/// они каталогом запуска или обращением с непрошедшей пробой, и проверка гейта зависела бы
+/// от того, которая из проб её задаёт.
+fn ask_registry<T: serde::de::DeserializeOwned>(
+    probe: &str,
+    input: &impl serde::Serialize,
+    cannot: &str,
+) -> T {
     let mut probe = Command::new(python())
         .arg("-c")
-        .arg(FRONT_MATTER_PROBE)
+        .arg(probe)
         .current_dir(repo_root())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -324,16 +334,20 @@ fn python_front_matter(texts: &[&str]) -> Vec<serde_json::Value> {
         .stdin
         .take()
         .expect("probe takes its input on stdin")
-        .write_all(&serde_json::to_vec(texts).expect("fixtures serialize"))
+        .write_all(&serde_json::to_vec(input).expect("fixtures serialize"))
         .expect("probe reads its input");
     let output = probe.wait_with_output().expect("probe answers");
 
     assert!(
         output.status.success(),
-        "registry.py cannot read front matter at all:\n{}",
+        "registry.py cannot {cannot} at all:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("probe answers json")
+}
+
+fn python_front_matter(texts: &[&str]) -> Vec<serde_json::Value> {
+    ask_registry(FRONT_MATTER_PROBE, &texts, "read front matter")
 }
 
 /// Поля в том же виде, в каком их отдаёт разбор `registry.py`.
@@ -717,4 +731,307 @@ fn contains(whole: &serde_json::Value, fragment: &serde_json::Value) -> bool {
             .all(|(key, value)| whole.get(key).is_some_and(|found| contains(found, value))),
         _ => whole == fragment,
     }
+}
+
+/// Запись реестра как файл: каталог, имя файла, текст.
+type RecordFile = (String, String, String);
+
+const DECISION_FILE: &str = "2026-09-16-an-example-decision.md";
+const DECISION_ID: &str = "DEC.2026-09-16.AN-EXAMPLE-DECISION";
+const EVIDENCE: &str = "tests/arch_registry.rs::a_symbol_and_its_path_spell_each_other";
+
+/// Решение, которое заводит правило фикстуры.
+///
+/// Запись не проверить по одному файлу: правило обязано сослаться на решение, а
+/// решение — назвать правило в `establishes`. Поэтому фикстура здесь — не файл, а
+/// маленький реестр целиком, и нарушение в нём ровно одно.
+fn decision_file(name: &str, id: &str, establishes: &str) -> RecordFile {
+    (
+        "decisions".to_owned(),
+        name.to_owned(),
+        format!(
+            "---\n\
+             id: {id}\n\
+             status: active\n\
+             governs: process\n\
+             realized: {EVIDENCE}\n\
+             supersedes: []\n\
+             superseded-by: null\n\
+             establishes: [{establishes}]\n\
+             ---\n\
+             \n\
+             # Решение\n"
+        ),
+    )
+}
+
+/// Инвариант, выведенный из этого решения.
+fn rule_file(name: &str, id: &str, decision: &str) -> RecordFile {
+    (
+        "invariants".to_owned(),
+        name.to_owned(),
+        format!(
+            "---\n\
+             id: {id}\n\
+             status: active\n\
+             governs: process\n\
+             decision: {decision}\n\
+             check: {EVIDENCE}\n\
+             scope: [docs]\n\
+             ---\n\
+             \n\
+             # Правило\n"
+        ),
+    )
+}
+
+/// Контракт: та же запись, но с формой, закреплённой в файле, и с примером.
+///
+/// Он здесь не ради контрактов, а ради того, что префикс вида берётся из
+/// `SYMBOL_PREFIX` по виду записи, а не зашит одним `INV.` на всех.
+fn contract_file(name: &str, id: &str, decision: &str) -> RecordFile {
+    (
+        "contracts".to_owned(),
+        name.to_owned(),
+        format!(
+            "---\n\
+             id: {id}\n\
+             status: active\n\
+             governs: product\n\
+             version: 1\n\
+             decision: {decision}\n\
+             producer: src/output/text.rs\n\
+             artifact: docs/schemas/text-output.json\n\
+             consumers: [cli]\n\
+             check: {EVIDENCE}\n\
+             scope: [wire]\n\
+             ---\n\
+             \n\
+             # Контракт\n\
+             \n\
+             ## Пример\n\
+             \n\
+             ```json\n\
+             {{}}\n\
+             ```\n"
+        ),
+    )
+}
+
+/// Мини-реестр как вход пробы: файлы и, если нужно, подменённый префикс вида.
+fn registry_case(files: Vec<RecordFile>) -> serde_json::Value {
+    serde_json::json!({ "files": files, "prefix": {} })
+}
+
+/// Тот же реестр, но вид записи назван другим префиксом — так, как это однажды и было.
+fn registry_case_with_prefix(
+    files: Vec<RecordFile>,
+    kind: &str,
+    prefix: &str,
+) -> serde_json::Value {
+    serde_json::json!({ "files": files, "prefix": { kind: prefix } })
+}
+
+/// Судит фикстуры тем же кодом, которым гейт `registry.py --check` судит реестр.
+///
+/// Фикстура на диск не кладётся, и причина — предмет одной из проверок ниже: файл с
+/// базовым именем `CON` на Windows не создаётся, так что тест про имена, которые
+/// Windows отвергает, был бы единственным, кто на Windows и падает. Запись собирает
+/// `record_from` — та же сборка, что у обхода каталога, поэтому судится здесь ровно та
+/// форма, которую гейт и получает; путь при этом остаётся именем, а не файлом.
+const REGISTRY_PROBE: &str = r#"
+import json, pathlib, sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, "scripts/arch")
+import registry
+
+# Запись называет себя путём от корня реестра, и корень тут чисто именной: без этой
+# подмены `Record.relative` меряет путь от настоящего spec/arch и падает на первой же
+# найденной ошибке — там, где ошибку надо не поднять, а вернуть.
+registry.ARCH_ROOT = pathlib.PurePosixPath("spec/arch")
+prefixes = dict(registry.SYMBOL_PREFIX)
+
+answer = []
+for case in json.load(sys.stdin):
+    registry.SYMBOL_PREFIX = {**prefixes, **case["prefix"]}
+    found = [
+        registry.record_from(
+            registry.ARCH_ROOT / directory / name, text, registry.KIND_BY_DIR[directory]
+        )
+        for directory, name, text in case["files"]
+    ]
+    answer.append(registry.validation_errors(sorted(found, key=lambda record: record.id)))
+json.dump(answer, sys.stdout, ensure_ascii=False)
+"#;
+
+/// Претензии `registry.py` к каждому мини-реестру, по порядку.
+fn python_validation_errors(cases: &[serde_json::Value]) -> Vec<Vec<String>> {
+    ask_registry(REGISTRY_PROBE, &cases, "judge a record")
+}
+
+/// Одно нарушение на фикстуру: гейт обязан назвать именно его и больше ничего.
+fn sole_error(name: &str, errors: &[String], expected: &str, wrong: &mut Vec<String>) {
+    match errors {
+        [only] if only.contains(expected) => {}
+        _ => wrong.push(format!("{name}: expected `{expected}`, got {errors:?}")),
+    }
+}
+
+/// Символ и путь восстанавливают друг друга — это обещание реестра, а не примета.
+///
+/// `spec/arch/README.md` обещает про `id`: «Совпадает с путём файла; по одному
+/// восстанавливается другое». Обещание держит навигацию: по символу из чужого текста
+/// открывают файл, не заглядывая в индекс. Обратный ход собирается из двух половин —
+/// префикс вида называет каталог, остальное имя файла, — и обе обязаны сойтись.
+/// Разойдись они, и ссылка по символу ведёт не в тот файл или никуда, а индекс подмену
+/// повторяет: он порождается из тех же записей и потому с ними согласен.
+#[test]
+fn a_symbol_and_its_path_spell_each_other() {
+    let sound = registry_case(vec![
+        decision_file(DECISION_FILE, DECISION_ID, "INV.DOCS.EXAMPLE"),
+        rule_file("INV.DOCS.EXAMPLE.md", "INV.DOCS.EXAMPLE", DECISION_ID),
+    ]);
+    let sound_contract = registry_case(vec![
+        decision_file(DECISION_FILE, DECISION_ID, "CTR.WIRE.EXAMPLE"),
+        contract_file("CTR.WIRE.EXAMPLE.md", "CTR.WIRE.EXAMPLE", DECISION_ID),
+    ]);
+    let rule_renamed = registry_case(vec![
+        decision_file(DECISION_FILE, DECISION_ID, "INV.DOCS.OTHER"),
+        rule_file("INV.DOCS.EXAMPLE.md", "INV.DOCS.OTHER", DECISION_ID),
+    ]);
+    let decision_renamed = registry_case(vec![
+        decision_file(
+            DECISION_FILE,
+            "DEC.2026-09-16.SOMETHING-ELSE",
+            "INV.DOCS.EXAMPLE",
+        ),
+        rule_file(
+            "INV.DOCS.EXAMPLE.md",
+            "INV.DOCS.EXAMPLE",
+            "DEC.2026-09-16.SOMETHING-ELSE",
+        ),
+    ]);
+    let decision_misfiled = registry_case(vec![
+        decision_file("an-example-decision.md", DECISION_ID, "INV.DOCS.EXAMPLE"),
+        rule_file("INV.DOCS.EXAMPLE.md", "INV.DOCS.EXAMPLE", DECISION_ID),
+    ]);
+    // Символ обещает каталог `contracts/`, а лежит запись в `invariants/`: по символу
+    // её не найти, а два таких файла дали бы в индексе две строки на один символ.
+    let rule_in_the_wrong_registry = registry_case(vec![
+        decision_file(DECISION_FILE, DECISION_ID, "CTR.WIRE.EXAMPLE"),
+        rule_file("CTR.WIRE.EXAMPLE.md", "CTR.WIRE.EXAMPLE", DECISION_ID),
+    ]);
+
+    let judged = python_validation_errors(&[
+        sound,
+        sound_contract,
+        rule_renamed,
+        decision_renamed,
+        decision_misfiled,
+        rule_in_the_wrong_registry,
+    ]);
+    let mut wrong = Vec::new();
+
+    for (name, errors) in [
+        ("a sound rule", &judged[0]),
+        ("a sound contract", &judged[1]),
+    ] {
+        if !errors.is_empty() {
+            wrong.push(format!("{name} must pass: {errors:?}"));
+        }
+    }
+    sole_error(
+        "a rule whose id is not its filename",
+        &judged[2],
+        "`id` must read `INV.DOCS.EXAMPLE`",
+        &mut wrong,
+    );
+    sole_error(
+        "a decision whose id is not its filename",
+        &judged[3],
+        &format!("`id` must read `{DECISION_ID}`"),
+        &mut wrong,
+    );
+    sole_error(
+        "a decision filed under a name that spells no symbol",
+        &judged[4],
+        "decisions/an-example-decision.md: filename must read",
+        &mut wrong,
+    );
+    sole_error(
+        "a rule whose symbol names another registry",
+        &judged[5],
+        "`id` must open with `INV.`",
+        &mut wrong,
+    );
+
+    assert!(
+        wrong.is_empty(),
+        "the symbol and the path may drift apart:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// Имя записи — то, что git выкладывает на диск, и на Windows тоже.
+///
+/// `CON` был первым префиксом контрактов, и дерево переставало выкладываться на Windows
+/// целиком: базовое имя из списка DOS-устройств система отказывается создавать с любым
+/// расширением. Поэтому фикстура здесь и переименовывает вид записи — воспроизводится
+/// ровно тот случай, а не выдуманный. Под нынешними префиксами проверка молчит всегда:
+/// `DEC`, `INV` и `CTR` устройствами не зовутся. Это не делает её лишней — она сторожит
+/// не запись, а нашу же константу, которую однажды уже так и меняли.
+///
+/// Запрет ровно такой, каким его ставит система, и обе границы здесь закреплены.
+/// Смотрит он на базовое имя — то, что до первой точки, — поэтому `INV.DOCS.CON.md`
+/// Windows создаёт и реестр принимает. Список кончается на `COM1`…`COM9`: `COM0`
+/// система не резервирует. Строгость сверх системной заявляла бы правило шире того,
+/// что проверено, — ровно та же ошибка, что и пропуск настоящего имени устройства.
+#[test]
+fn a_record_name_survives_a_windows_checkout() {
+    let contracts_called_con = registry_case_with_prefix(
+        vec![
+            decision_file(DECISION_FILE, DECISION_ID, "CON.WIRE.EXAMPLE"),
+            contract_file("CON.WIRE.EXAMPLE.md", "CON.WIRE.EXAMPLE", DECISION_ID),
+        ],
+        "contract",
+        "CON",
+    );
+    let device_name_deeper = registry_case(vec![
+        decision_file(DECISION_FILE, DECISION_ID, "INV.DOCS.CON"),
+        rule_file("INV.DOCS.CON.md", "INV.DOCS.CON", DECISION_ID),
+    ]);
+    // Устройства нумеруются с единицы: `COM1` система резервирует, `COM0` — нет.
+    let port_zero = registry_case_with_prefix(
+        vec![
+            decision_file(DECISION_FILE, DECISION_ID, "COM0.WIRE.EXAMPLE"),
+            contract_file("COM0.WIRE.EXAMPLE.md", "COM0.WIRE.EXAMPLE", DECISION_ID),
+        ],
+        "contract",
+        "COM0",
+    );
+
+    let judged = python_validation_errors(&[contracts_called_con, device_name_deeper, port_zero]);
+    let mut wrong = Vec::new();
+
+    sole_error(
+        "a prefix that makes every record of its kind a device",
+        &judged[0],
+        "`CON` is a Windows device name",
+        &mut wrong,
+    );
+    for (name, errors) in [
+        ("a device name past the first dot", &judged[1]),
+        ("a port number the system does not reserve", &judged[2]),
+    ] {
+        if !errors.is_empty() {
+            wrong.push(format!("{name} is not a device: {errors:?}"));
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "the tree may grow a name Windows refuses to check out:\n{}",
+        wrong.join("\n")
+    );
 }
