@@ -54,12 +54,36 @@ REQUIRED_PROPS = {
     ),
 }
 
+# Перечни, которые README объявляет закрытыми. Гейт читает оба поля точным
+# равенством, поэтому значение вне перечня не отвергается само собой: оно
+# оказывается «ни тем ни другим», и каждая проверка, что на него ветвится, молча
+# перестаёт применяться. Перечень `scope` README называет открытым — его здесь нет.
+STATUSES = ("active", "planned", "superseded")
 # Кто заметит нарушение: потребитель или только мы. Ось решает не предмет
 # записи, а адресат обещания, и от неё зависит, чем правка оплачивается.
 GOVERNS = ("product", "process")
 
+# Форма значения, обещанная README наравне со смыслом поля. Проверки ниже читают её
+# как известную: `scope` обходят циклом, `superseded-by` сравнивают с символом. Поле
+# не той формы не роняет проверку — оно заставляет её отвечать про другое.
+# `check` и `realized` не здесь: одно правило держат и один адрес, и список.
+LIST_PROPS = ("supersedes", "establishes", "changes", "scope", "consumers")
+SINGLE_PROPS = (
+    "id",
+    "status",
+    "governs",
+    "version",
+    "artifact",
+    "producer",
+    "decision",
+    "superseded-by",
+)
+
 FRONT_MATTER = re.compile(r"\A---\n(.*?)\n---\n(.*)\Z", re.S)
-DECISION_FILENAME = re.compile(r"\A(\d{4}-\d{2}-\d{2})-([a-z0-9-]+)\.md\Z")
+# Дата пишется теми же ASCII-цифрами, что и остальное имя: `\d` принимает и
+# арабо-индийские, и тогда символ решения собирается из знаков, которых нет ни в
+# одной ссылке на него.
+DECISION_FILENAME = re.compile(r"\A([0-9]{4}-[0-9]{2}-[0-9]{2})-([a-z0-9-]+)\.md\Z")
 
 EXAMPLE_HEADING = re.compile(r"^## Пример\s*$", re.M)
 FENCED_BLOCK = re.compile(r"^```[a-z]*\n(.*?)^```\s*$", re.M | re.S)
@@ -178,7 +202,17 @@ def record_from(path: Path, text: str, kind: str) -> Record:
     проверка гейта другую.
     """
     props, body = parse_front_matter(text)
-    return Record(id=props.get("id") or "", kind=kind, path=path, props=props, body=body)
+    # Символом `id` бывает только скаляр. Списком он молча ронял разбор всего реестра
+    # — `by_id` не берёт в ключи список, — поэтому запись без читаемого символа несёт
+    # пустой: о самом поле говорит `shape_errors`, а остальные проверки его не ищут.
+    symbol = props.get("id")
+    return Record(
+        id=symbol if isinstance(symbol, str) else "",
+        kind=kind,
+        path=path,
+        props=props,
+        body=body,
+    )
 
 
 def records(root: Path = ARCH_ROOT) -> list[Record]:
@@ -209,11 +243,94 @@ def expected_symbol(record: Record) -> str:
     return record.path.stem
 
 
+def shape_errors(record: Record) -> list[str]:
+    """Поля, чья форма разошлась с опубликованной.
+
+    README называет форму каждого поля рядом с его смыслом, и проверки ниже читают её
+    как известную. Форма не та — и проверка не падает, а отвечает про другое: `in` по
+    строке ищет подстроку, `by_id.get` по списку роняет весь разбор. Поэтому форма
+    сверяется первой, а всё, что от неё зависит, ниже за неё и прячется.
+    """
+    wrong: list[str] = []
+    for key in LIST_PROPS:
+        if key in record.props and not isinstance(record.props[key], list):
+            wrong.append(f"{record.relative}: `{key}` must be a list")
+    for key in SINGLE_PROPS:
+        value = record.props.get(key)
+        if not isinstance(value, list):
+            continue
+        # `key:` без значения разбирается в пустой список. У обязательного поля об
+        # этом уже сказано словом «missing», и второе сообщение сказало бы то же.
+        if not value and key in REQUIRED_PROPS[record.kind]:
+            continue
+        wrong.append(f"{record.relative}: `{key}` takes a single value, not a list")
+    return wrong
+
+
+def cited_rule_errors(record: Record, key: str, by_id: dict[str, Record]) -> list[str]:
+    """Символы, названные пропом решения, — и то, чем они оказались.
+
+    `establishes` называет правило, выведенное из решения, `changes` — правило, чью
+    наблюдаемую форму решение меняет. Оба поля ведут от решения к правилу, и символ,
+    за которым записи нет, — обещание, по которому не прийти.
+    """
+    cited = record.props.get(key)
+    if not isinstance(cited, list):
+        return []
+    wrong: list[str] = []
+    for rule_id in cited:
+        rule = by_id.get(rule_id) if isinstance(rule_id, str) else None
+        if rule is None:
+            wrong.append(f"{record.relative}: {key} cites missing rule {rule_id}")
+        elif rule.kind not in ("contract", "invariant"):
+            wrong.append(f"{record.relative}: {key} cites a non-rule {rule_id}")
+    return wrong
+
+
+def supersession_claims(found: list[Record]) -> dict[tuple[str, str], Record]:
+    """Каждая заявленная пара «заменённое решение → преемник» и тот, кто её заявил.
+
+    Заявить замену может любая из двух записей: старая полем `superseded-by`, новая
+    перечнем `supersedes`. Пара здесь и есть предмет проверки — иначе одна
+    ненаписанная половина стоит двух сообщений, и автор ищет вторую правку там, где
+    её нет.
+    """
+    claims: dict[tuple[str, str], Record] = {}
+    for record in found:
+        if record.kind != "decision" or not record.id:
+            continue
+        successor = record.props.get("superseded-by")
+        if isinstance(successor, str) and successor:
+            claims.setdefault((record.id, successor), record)
+        superseded = record.props.get("supersedes")
+        if isinstance(superseded, list):
+            for old_id in superseded:
+                if isinstance(old_id, str) and old_id:
+                    claims.setdefault((old_id, record.id), record)
+    return claims
+
+
 def validation_errors(found: list[Record]) -> list[str]:
     """Return violations of the published record schema."""
-    by_id = {record.id: record for record in found}
+    by_id = {record.id: record for record in found if record.id}
     errors: list[str] = []
+
+    # Символ называет ровно одну запись. Имя файла и префикс вида его уже диктуют, но
+    # порознь: стоит двум видам назваться одним префиксом, и один символ лежит в двух
+    # каталогах сразу. Тогда ссылка по нему приводит к той записи, что победила в
+    # `by_id`, а индекс печатает на него две строки — обе выглядят правдой.
+    first_named_by: dict[str, Record] = {}
     for record in found:
+        if not record.id:
+            continue
+        first = first_named_by.setdefault(record.id, record)
+        if first is not record:
+            errors.append(
+                f"{record.relative}: symbol {record.id} already names {first.relative}"
+            )
+
+    for record in found:
+        errors.extend(shape_errors(record))
         for key in REQUIRED_PROPS[record.kind]:
             # Правило, у которого фальсификатор ещё не написан, заводится со
             # `status: planned` и `check: null`. Так долг виден в индексе, а не
@@ -261,59 +378,102 @@ def validation_errors(found: list[Record]) -> list[str]:
                 f"{record.relative}: `{base}` is a Windows device name; choose another symbol"
             )
 
-        if record.kind in {"invariant", "contract"}:
-            list_keys = ("scope",) + (("consumers",) if record.kind == "contract" else ())
-            for key in list_keys:
-                if not isinstance(record.props.get(key), list) or not record.props[key]:
-                    errors.append(f"{record.relative}: `{key}` must be a non-empty list")
-            owner = by_id.get(record.props.get("decision"))
-            if owner is None or owner.kind != "decision":
-                errors.append(f"{record.relative}: decision does not resolve to a decision")
-            elif record.props.get("status") == "active" and owner.props.get("status") != "active":
-                errors.append(f"{record.relative}: active rule cites a non-active decision")
-            elif record.id not in (owner.props.get("establishes") or []):
+        # Оба перечня закрыты, и обе оси решают, какие проверки к записи применяются,
+        # а не описывают её. Опечатка в них не отвергалась и не бросалась в глаза:
+        # индекс печатает значение как есть, и колонка выглядит заполненной.
+        for key, published in (("status", STATUSES), ("governs", GOVERNS)):
+            value = record.props.get(key)
+            if isinstance(value, str) and value and value not in published:
                 errors.append(
-                    f"{owner.relative}: does not establish its rule {record.id}"
+                    f"{record.relative}: `{key}` must be one of {', '.join(published)}"
                 )
+
+        if record.kind in {"invariant", "contract"}:
+            owner_id = record.props.get("decision")
+            if isinstance(owner_id, str):
+                owner = by_id.get(owner_id)
+                established = owner.props.get("establishes") if owner else None
+                if owner is None or owner.kind != "decision":
+                    errors.append(f"{record.relative}: decision does not resolve to a decision")
+                elif (
+                    record.props.get("status") == "active"
+                    and owner.props.get("status") != "active"
+                ):
+                    errors.append(f"{record.relative}: active rule cites a non-active decision")
+                # Перечень решения обходится членством, а не подстрокой, и только если
+                # он перечень: у правила без читаемого символа искать нечего.
+                elif record.id and isinstance(established, list) and record.id not in established:
+                    errors.append(
+                        f"{owner.relative}: does not establish its rule {record.id}"
+                    )
         if record.kind == "contract":
-            artifact = str(record.props.get("artifact", ""))
-            if artifact and not (REPO_ROOT / artifact).is_file():
+            artifact = record.props.get("artifact")
+            if isinstance(artifact, str) and artifact and not (REPO_ROOT / artifact).is_file():
                 errors.append(f"{record.relative}: artifact {artifact} does not exist")
-            version = str(record.props.get("version", ""))
-            if not version.isdecimal() or int(version) < 1:
+            version = record.props.get("version")
+            if isinstance(version, str) and (not version.isdecimal() or int(version) < 1):
                 errors.append(f"{record.relative}: version must be a positive integer")
             if not example_block(record.body).strip():
                 errors.append(
                     f"{record.relative}: no `## Пример` section with a fenced block"
                 )
         if record.kind == "decision":
-            if "changes" in record.props:
-                changed_contracts = record.props.get("changes")
-                if not isinstance(changed_contracts, list) or not changed_contracts:
+            # `changes` заводят ради перечисления, поэтому пустым он не бывает;
+            # `establishes: []` — обычное решение, которое правил не завело.
+            if record.props.get("changes") == []:
+                errors.append(f"{record.relative}: `changes` must not be empty")
+            # Правилом бывает и контракт, и инвариант: инвариант перечисляет имена
+            # поверхности не реже, чем контракт, и запрет ссылаться на него оставлял
+            # бы такую правку без объявленной причины.
+            #
+            # `establishes` на неизменяемом решении историчен: позже владельцем того же
+            # правила становится другое решение, и обратный ход «правило → нынешний
+            # владелец» выше остаётся обязательным. Существовать названное правило
+            # обязано всё равно — иначе решение ссылается в пустоту.
+            errors.extend(cited_rule_errors(record, "changes", by_id))
+            errors.extend(cited_rule_errors(record, "establishes", by_id))
+
+            # Замену объявляют два поля сразу, и поодиночке ни одно её не описывает:
+            # `superseded` без преемника — тупик, потому что текст старого решения не
+            # правят никогда и спросить, чем его заменили, больше не у кого.
+            status = record.props.get("status")
+            successor = record.props.get("superseded-by")
+            if status in STATUSES and not isinstance(successor, list):
+                if status == "superseded" and successor is None:
                     errors.append(
-                        f"{record.relative}: `changes` must be a list and not empty"
+                        f"{record.relative}: `status: superseded` names no successor "
+                        f"in `superseded-by`"
                     )
-                else:
-                    # `changes` называет опубликованное правило, которое это
-                    # решение меняет. Правилом бывает и контракт, и инвариант:
-                    # инвариант перечисляет имена поверхности не реже, чем
-                    # контракт, и запрет ссылаться на него оставлял такую
-                    # правку без объявленной причины.
-                    for rule_id in changed_contracts:
-                        rule = by_id.get(rule_id)
-                        if rule is None:
-                            errors.append(
-                                f"{record.relative}: changes cites missing rule "
-                                f"{rule_id}"
-                            )
-                        elif rule.kind not in ("contract", "invariant"):
-                            errors.append(
-                                f"{record.relative}: changes cites a non-rule "
-                                f"{rule_id}"
-                            )
-            # `establishes` is historical on an immutable decision. A later
-            # decision may become the current owner of the same mutable rule;
-            # the rule -> current owner direction above remains mandatory.
+                elif status != "superseded" and successor is not None:
+                    errors.append(
+                        f"{record.relative}: names a successor in `superseded-by` "
+                        f"without `status: superseded`"
+                    )
+
+    # Половина замены, записанная с одной стороны, не лучше ненаписанной: `supersedes`
+    # ищут от предка к потомку, `superseded-by` — обратно, и разойдясь они дают две
+    # разные истории одного решения. Претензия к паре одна, чья бы половина ни молчала.
+    for (old_id, new_id), claimant in supersession_claims(found).items():
+        old, new = by_id.get(old_id), by_id.get(new_id)
+        unknown = next(
+            (
+                symbol
+                for symbol, named in ((old_id, old), (new_id, new))
+                if named is None or named.kind != "decision"
+            ),
+            None,
+        )
+        if unknown is not None:
+            errors.append(
+                f"{claimant.relative}: supersession names {unknown}, which is no decision"
+            )
+        elif old.props.get("superseded-by") != new_id:
+            errors.append(f"{old.relative}: does not name {new_id} in `superseded-by`")
+        elif not (
+            isinstance(new.props.get("supersedes"), list)
+            and old_id in new.props["supersedes"]
+        ):
+            errors.append(f"{new.relative}: does not name {old_id} in `supersedes`")
     return errors
 
 
