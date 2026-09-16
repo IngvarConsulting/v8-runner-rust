@@ -17,12 +17,16 @@ Usage:
     registry.py                 # печатает индекс в stdout
     registry.py --write-index   # записывает spec/arch/index.md
     registry.py --check         # молча выходит с 1, если индекс устарел
+    registry.py --merge-index O A B   # драйвер слияния индекса для git
+    registry.py --install-merge-driver  # регистрирует драйвер в этом клоне
 """
 
 from __future__ import annotations
 
 import argparse
 import re
+import shlex
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,6 +67,27 @@ DECISION_FILENAME = re.compile(r"\A(\d{4}-\d{2}-\d{2})-([a-z0-9-]+)\.md\Z")
 
 EXAMPLE_HEADING = re.compile(r"^## Пример\s*$", re.M)
 FENCED_BLOCK = re.compile(r"^```[a-z]*\n(.*?)^```\s*$", re.M | re.S)
+
+# Шапка индекса. Владелец у неё один, потому что читателей стало двое: порождение
+# и слияние. Слиянию она нужна целиком — ни одна из сливаемых сторон источником
+# формы не является, обе лишь прошлый вывод этого файла.
+INDEX_HEADER = (
+    "<!-- ПОРОЖДАЕТСЯ scripts/arch/registry.py --write-index; руками не правится -->",
+    "",
+    "# Индекс реестра",
+    "",
+    "| Символ | Вид | Статус | Проверяется | Суть | Файл |",
+    "| --- | --- | --- | --- | --- | --- |",
+)
+
+# Строка индекса открывается символом записи: он и есть её ключ.
+INDEX_ROW = re.compile(r"\A\| `([^`]+)` \|")
+
+# Имя драйвера слияния. Его называют три места — `.gitattributes`, конфиг клона и
+# документация, — и разойтись им нельзя: git молча берёт встроенное слияние,
+# когда атрибут называет незарегистрированный драйвер.
+MERGE_DRIVER = "arch-index"
+DRIVER_SCRIPT = "scripts/arch/registry.py"
 
 # A symbol becomes a filename, and Windows still refuses these as base names
 # whatever the extension follows. `CON` was the first contract prefix and made
@@ -400,14 +425,7 @@ def validation_errors(found: list[Record]) -> list[str]:
 def render_index(found: list[Record]) -> str:
     """One line per symbol, sorted, with no fact that props do not carry."""
     kind_ru = {"decision": "решение", "invariant": "инвариант", "contract": "контракт"}
-    lines = [
-        "<!-- ПОРОЖДАЕТСЯ scripts/arch/registry.py --write-index; руками не правится -->",
-        "",
-        "# Индекс реестра",
-        "",
-        "| Символ | Вид | Статус | Проверяется | Суть | Файл |",
-        "| --- | --- | --- | --- | --- | --- |",
-    ]
+    lines = list(INDEX_HEADER)
     for record in found:
         # Колонка отвечает за оба вида: у решения — есть ли свидетельство
         # реализации, у правила — написан ли фальсификатор. И там и там читатель
@@ -425,11 +443,113 @@ def render_index(found: list[Record]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def index_rows(text: str) -> dict[str, str]:
+    """Строки порождённого индекса, по символу записи.
+
+    Читается ровно то, что печатает `render_index`: шапка и дальше по строке на
+    символ. Строку, которой формат не описывает, разбор не пропускает и не
+    считает пустой: молча съеденная строка — это запись, пропавшая из индекса.
+    """
+    if not text.strip():
+        return {}
+    lines = text.splitlines()
+    if INDEX_HEADER[-1] not in lines:
+        raise ValueError("index does not carry the generated table header")
+    rows: dict[str, str] = {}
+    for line in lines[lines.index(INDEX_HEADER[-1]) + 1 :]:
+        if not line.strip():
+            continue
+        match = INDEX_ROW.match(line)
+        if match is None:
+            raise ValueError(f"index line is not a record row: {line!r}")
+        if match.group(1) in rows:
+            raise ValueError(f"index names {match.group(1)} twice")
+        rows[match.group(1)] = line
+    return rows
+
+
+def merge_index(ancestor: str, ours: str, theirs: str) -> str:
+    """Слияние двух индексов: трёхсторонне, ключ — символ, единица — строка.
+
+    Драйвер зовётся посреди слияния, и записей на диске к этому моменту ещё нет:
+    в рабочем дереве лежит наша сторона, чужая живёт только во временном файле.
+    Перепородить индекс отсюда нельзя — вышел бы индекс без чужих записей, зато
+    без конфликта, то есть устаревший молча. Поэтому сливаются сами строки.
+
+    Единица — строка целиком, потому что строка на символ и есть опубликованная
+    форма индекса. Стороны, правящие одну запись врозь, разрешаются в нашу
+    пользу: правку записи такое слияние всё равно остановит на самой записи, а
+    несвежий индекс назовёт `--check`.
+    """
+    base, mine, other = index_rows(ancestor), index_rows(ours), index_rows(theirs)
+    merged: dict[str, str] = {}
+    for symbol in set(mine) | set(other):
+        was, a, b = base.get(symbol), mine.get(symbol), other.get(symbol)
+        if a == b:
+            row = a
+        elif a is None:
+            # Записи нет у нас: либо мы её убрали, либо чужая сторона завела.
+            row = None if was == b else b
+        elif b is None:
+            row = None if was == a else a
+        elif was == a:
+            row = b
+        else:
+            row = a
+        if row is not None:
+            merged[symbol] = row
+    return "\n".join(list(INDEX_HEADER) + [merged[symbol] for symbol in sorted(merged)]) + "\n"
+
+
+def install_merge_driver() -> int:
+    """Регистрирует драйвер слияния индекса в конфиге этого клона.
+
+    Драйвер живёт в конфиге, а не в репозитории: иначе клон исполнял бы чужую
+    команду. Поэтому шаг ручной, и делает его эта же программа — чтобы имя
+    драйвера и его вызов не переписывались руками в третьем месте.
+    """
+    command = (
+        f"{shlex.quote(Path(sys.executable).as_posix())} "
+        f"{shlex.quote(DRIVER_SCRIPT)} --merge-index %O %A %B"
+    )
+    settings = (
+        (f"merge.{MERGE_DRIVER}.name", "порождённый индекс реестра spec/arch"),
+        (f"merge.{MERGE_DRIVER}.driver", command),
+    )
+    for key, value in settings:
+        subprocess.run(["git", "config", key, value], cwd=REPO_ROOT, check=True)
+    print(f"merge.{MERGE_DRIVER}.driver = {command}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--write-index", action="store_true")
     parser.add_argument("--check", action="store_true")
+    parser.add_argument(
+        "--merge-index", nargs=3, metavar=("ANCESTOR", "OURS", "THEIRS")
+    )
+    parser.add_argument("--install-merge-driver", action="store_true")
     arguments = parser.parse_args(argv)
+
+    if arguments.install_merge_driver:
+        return install_merge_driver()
+
+    # Слияние отвечает раньше разбора записей: посреди слияния дерево записей
+    # наполовину чужое, и суд над ним сказал бы не про индекс, а про полудерево.
+    if arguments.merge_index:
+        ancestor, ours, theirs = (Path(name) for name in arguments.merge_index)
+        texts = [
+            name.read_text(encoding="utf-8") if name.is_file() else ""
+            for name in (ancestor, ours, theirs)
+        ]
+        try:
+            merged = merge_index(*texts)
+        except ValueError as error:
+            print(f"индекс не сливается: {error}", file=sys.stderr)
+            return 1
+        ours.write_text(merged, encoding="utf-8")
+        return 0
 
     found = records()
     errors = validation_errors(found)
