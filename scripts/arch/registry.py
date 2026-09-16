@@ -62,6 +62,12 @@ REQUIRED_PROPS = {
 # записи, а адресат обещания, и от неё зависит, чем правка оплачивается.
 GOVERNS = ("product", "process")
 
+# Состояние записи, и по нему ветвится сам разбор: `planned` разрешает правилу не
+# называть фальсификатор, `superseded` — решению не предъявлять свидетельство,
+# `active` требует действующего решения под действующим правилом. Слово мимо
+# перечня поэтому не нарушает правило, а отменяет его.
+STATUSES = ("active", "planned", "superseded")
+
 FRONT_MATTER = re.compile(r"\A---\n(.*?)\n---\n(.*)\Z", re.S)
 DECISION_FILENAME = re.compile(r"\A(\d{4}-\d{2}-\d{2})-([a-z0-9-]+)\.md\Z")
 
@@ -291,6 +297,17 @@ def validation_errors(found: list[Record]) -> list[str]:
             elif key in ("check", "realized"):
                 if any(not name.strip() for name in prop_values(record.props[key])):
                     errors.append(f"{record.relative}: `{key}` has a blank entry")
+
+        # Перечень закрыт: слову мимо него отказывают и тогда, когда оно выглядит
+        # уместным. Опечатка в `status` не нарушает правил — она отключает проверку:
+        # ветки, что смотрят на статус, сверяют его целиком и незнакомому слову
+        # молчат, а запись при этом объявляет себя действующей. Пустое поле тут не
+        # судится: о нём уже сказано претензией выше, и второй раз гейт не говорит.
+        status = record.props.get("status")
+        if status not in ("", [], None) and status not in STATUSES:
+            errors.append(
+                f"{record.relative}: `status` must read `active`, `planned` or `superseded`"
+            )
 
         # Символ и путь восстанавливают друг друга. Имя файла даёт символ, префикс
         # вида — каталог; без второй половины обратный ход не собирается:
