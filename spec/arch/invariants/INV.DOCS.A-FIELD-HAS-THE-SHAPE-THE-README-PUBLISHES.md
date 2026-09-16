@@ -7,8 +7,8 @@ check: [tests/arch_registry.rs::a_field_has_the_shape_the_readme_publishes, test
 scope: [docs]
 ---
 
-# Перечень записан перечнем, символ — символом
+# Перечень записан перечнем, одно значение — одним значением
 
-`supersedes`, `establishes`, `changes`, `scope` и `consumers` несут перечень. `id`,
-`status`, `governs`, `version`, `artifact`, `producer`, `decision` и `superseded-by`
-несут одно значение. `check` и `realized` принимают и адрес, и перечень адресов.
+`id`, `status`, `governs`, `version`, `artifact`, `producer`, `decision` и
+`superseded-by` списком не бывают. `scope`, `consumers` и `changes` несут список.
+Остальные поля читает `prop_values`, и обе формы для них равны.
