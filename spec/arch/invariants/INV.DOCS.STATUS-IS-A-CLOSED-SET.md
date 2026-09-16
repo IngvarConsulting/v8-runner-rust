@@ -3,11 +3,13 @@ id: INV.DOCS.STATUS-IS-A-CLOSED-SET
 status: active
 governs: process
 decision: DEC.2026-09-16.STATUS-IS-A-CLOSED-SET
-check: [tests/arch_registry.rs::status_reads_active_planned_or_superseded, tests/arch_registry.rs::registry_records_match_the_published_schema_and_the_index_is_current]
+check: tests/arch_registry.rs::status_reads_active_planned_or_superseded
 scope: [docs]
 ---
 
-# Значение `status` входит в опубликованный перечень
+# `status` читается как `active`, `planned` или `superseded`
 
-`status` любой записи — `active`, `planned` или `superseded`. Слово вне перечня
-отклоняется; пустое значение называет проверка обязательных полей.
+Поле `status` любой записи любого из трёх реестров принимает одно из трёх значений и
+никакое другое. Запись с четвёртым значением реестром отклоняется: по `status` реестр
+ветвит собственные проверки, и незнакомое слово там не нарушает правило, а отменяет
+его.

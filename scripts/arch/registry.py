@@ -62,10 +62,10 @@ REQUIRED_PROPS = {
 # записи, а адресат обещания, и от неё зависит, чем правка оплачивается.
 GOVERNS = ("product", "process")
 
-# Перечень статусов README публикует так же закрыто, как ось `governs`. Гейт читает
-# поле точным равенством, поэтому значение вне перечня не отвергалось само собой: оно
-# оказывалось «ни тем ни другим», и всякая проверка, что на него ветвится, молча
-# переставала применяться.
+# Состояние записи, и по нему ветвится сам разбор: `planned` разрешает правилу не
+# называть фальсификатор, `superseded` — решению не предъявлять свидетельство,
+# `active` требует действующего решения под действующим правилом. Слово мимо
+# перечня поэтому не нарушает правило, а отменяет его.
 STATUSES = ("active", "planned", "superseded")
 
 # Форма значения, обещанная README наравне со смыслом поля. Проверки ниже читают её как
@@ -402,6 +402,17 @@ def validation_errors(found: list[Record]) -> list[str]:
                 if any(not name.strip() for name in prop_values(record.props[key])):
                     errors.append(f"{record.relative}: `{key}` has a blank entry")
 
+        # Перечень закрыт: слову мимо него отказывают и тогда, когда оно выглядит
+        # уместным. Опечатка в `status` не нарушает правил — она отключает проверку:
+        # ветки, что смотрят на статус, сверяют его целиком и незнакомому слову
+        # молчат, а запись при этом объявляет себя действующей. Пустое поле тут не
+        # судится: о нём уже сказано претензией выше, и второй раз гейт не говорит.
+        status = record.props.get("status")
+        if isinstance(status, str) and status and status not in STATUSES:
+            errors.append(
+                f"{record.relative}: `status` must read `active`, `planned` or `superseded`"
+            )
+
         # Символ и путь восстанавливают друг друга. Имя файла даёт символ, префикс
         # вида — каталог; без второй половины обратный ход не собирается:
         # `CTR.WIRE.FOO`, лежащий в `invariants/`, не находится по символу, а два
@@ -434,15 +445,6 @@ def validation_errors(found: list[Record]) -> list[str]:
         if governs not in ("", [], None) and governs not in GOVERNS:
             errors.append(
                 f"{record.relative}: `governs` must read `product` or `process`"
-            )
-
-        # Перечень статусов закрыт так же, как ось. Опечатку в нём не поймать глазами:
-        # индекс печатает значение как есть, и колонка выглядит заполненной, — а
-        # проверка, которая ветвится на `active`, перестаёт применяться молча.
-        status = record.props.get("status")
-        if isinstance(status, str) and status and status not in STATUSES:
-            errors.append(
-                f"{record.relative}: `status` must be one of {', '.join(STATUSES)}"
             )
 
         if record.kind in {"invariant", "contract"}:

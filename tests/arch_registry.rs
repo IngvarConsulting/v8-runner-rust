@@ -1092,20 +1092,26 @@ const OFF_AXIS: &str = "`governs` must read `product` or `process`";
 /// вызов в файле. Строка обязана найтись — иначе фикстура молча осталась бы
 /// здоровой и проверяла бы не то, что обещает.
 fn with_governs(file: RecordFile, governs: &str) -> RecordFile {
+    with_props(file, &[("governs", governs)])
+}
+
+/// Та же запись, но с переписанными полями.
+///
+/// Полей здесь несколько, потому что статус в одиночку не меняется: `planned`-правило
+/// обязано объявить `check: null`, а `superseded`-решение — `realized: null`. Подмени
+/// одно поле — и фикстура ловит не то нарушение, которое обещает.
+fn with_props(file: RecordFile, changes: &[(&str, &str)]) -> RecordFile {
     let (directory, name, text) = file;
-    let mut replaced = String::with_capacity(text.len());
-    let mut found = false;
-    for line in text.lines() {
-        if line.starts_with("governs:") {
-            replaced.push_str(&format!("governs: {governs}"));
-            found = true;
-        } else {
-            replaced.push_str(line);
-        }
-        replaced.push('\n');
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    for (key, value) in changes {
+        let prefix = format!("{key}:");
+        let line = lines
+            .iter_mut()
+            .find(|line| line.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("фикстура {name} не называет `{key}`"));
+        *line = format!("{key}: {value}");
     }
-    assert!(found, "фикстура {name} не называет `governs`");
-    (directory, name, replaced)
+    (directory, name, lines.join("\n") + "\n")
 }
 
 /// Мини-реестр под ось: решение и выведенное из него правило.
@@ -1181,6 +1187,135 @@ fn governs_reads_product_or_process() {
     assert!(
         wrong.is_empty(),
         "`governs` may read anything at all:\n{}",
+        wrong.join("\n")
+    );
+}
+
+const OFF_SET: &str = "`status` must read `active`, `planned` or `superseded`";
+
+/// Мини-реестр под перечень: решение и выведенное из него правило, каждому свой статус.
+fn status_case(decision: &[(&str, &str)], rule: &[(&str, &str)]) -> serde_json::Value {
+    registry_case(vec![
+        with_props(decision_file(DECISION_FILE, DECISION_ID, RULE_ID), decision),
+        with_props(rule_file(RULE_FILE, RULE_ID, DECISION_ID), rule),
+    ])
+}
+
+/// Перечень `status` закрыт, и закрыт он гейтом, а не только таблицей в README.
+///
+/// `status` — не колонка индекса, а условие, по которому ветвится сам разбор: `planned`
+/// разрешает правилу не называть фальсификатор, `superseded` — решению не предъявлять
+/// свидетельство, `active` требует действующего решения под действующим правилом.
+/// Сверяется слово целиком, поэтому промах мимо перечня не нарушает правил, а отключает
+/// проверку: фикстура ниже — правило со `status: activ` под `planned`-решением — до
+/// этой проверки проходила гейт молча, объявляя себя действующей под решением, которое
+/// ещё не принято. Этим ось `governs` и `status` не схожи: там слово вне перечня ничего
+/// не переключает, а снимает адресата обещания.
+///
+/// Перечень закрыт с обеих сторон. Опубликованное значение обязано проходить — включая
+/// `superseded`, которого нет ни в одной живой записи: сузься перечень до двух слов,
+/// реестр бы этого не заметил, и поймать такое может только выдуманный реестр.
+#[test]
+fn status_reads_active_planned_or_superseded() {
+    let sound = status_case(&[("status", "active")], &[("status", "active")]);
+    // Запланированное правило объявляет отсутствие проверки, заменённое решение —
+    // отсутствие свидетельства. Оба слова перечень обязан пропускать.
+    let planned_rule = status_case(&[], &[("status", "planned"), ("check", "null")]);
+    // Замена объявляется обеими записями, поэтому здесь их две: половина замены сама
+    // по себе отказ, и без преемника фикстура спорила бы не о том, о чём заведена.
+    let supersedes_the_replaced = format!("[{DECISION_ID}]");
+    let superseded_decision = registry_case(vec![
+        with_props(
+            decision_file(DECISION_FILE, DECISION_ID, RULE_ID),
+            &[
+                ("status", "superseded"),
+                ("realized", "null"),
+                ("superseded-by", SUCCESSOR_ID),
+            ],
+        ),
+        with_props(
+            decision_file(SUCCESSOR_FILE, SUCCESSOR_ID, ""),
+            &[("supersedes", supersedes_the_replaced.as_str())],
+        ),
+        with_props(
+            rule_file(RULE_FILE, RULE_ID, DECISION_ID),
+            &[("status", "planned"), ("check", "null")],
+        ),
+    ]);
+    // Правило под ними не действует: иначе сработала бы ветка «действующее правило
+    // под недействующим решением», и нарушений в фикстуре стало бы два.
+    let decision_off_the_set = status_case(
+        &[("status", "banana")],
+        &[("status", "planned"), ("check", "null")],
+    );
+    let rule_off_the_set = status_case(&[], &[("status", "activ")]);
+    // Статус пишется одним способом: `Active` — не значение перечня, а похожее слово.
+    let wrong_case = status_case(&[], &[("status", "Active")]);
+    // Ровно тот случай, ради которого перечень и закрывается: решение не принято,
+    // правило объявляет себя действующим, и одна буква прячет расхождение целиком.
+    let typo_switches_a_check_off = status_case(
+        &[("status", "planned"), ("realized", "null")],
+        &[("status", "activ")],
+    );
+    // Пустое поле — прежняя претензия и ровно одна: про отсутствующее значение гейт
+    // не может сказать заодно, что оно вне перечня.
+    let rule_without_status = status_case(&[], &[("status", "")]);
+
+    let judged = python_validation_errors(&[
+        sound,
+        planned_rule,
+        superseded_decision,
+        decision_off_the_set,
+        rule_off_the_set,
+        wrong_case,
+        typo_switches_a_check_off,
+        rule_without_status,
+    ]);
+    let mut wrong = Vec::new();
+
+    for (name, errors) in [
+        ("an active rule", &judged[0]),
+        ("a planned rule", &judged[1]),
+        ("a superseded decision", &judged[2]),
+    ] {
+        if !errors.is_empty() {
+            wrong.push(format!("{name} must pass: {errors:?}"));
+        }
+    }
+    sole_error(
+        "a decision off the set",
+        &judged[3],
+        &format!("decisions/{DECISION_FILE}: {OFF_SET}"),
+        &mut wrong,
+    );
+    sole_error(
+        "a rule off the set",
+        &judged[4],
+        &format!("invariants/{RULE_FILE}: {OFF_SET}"),
+        &mut wrong,
+    );
+    sole_error(
+        "a rule shouting the status",
+        &judged[5],
+        OFF_SET,
+        &mut wrong,
+    );
+    sole_error(
+        "a typo that switches a check off",
+        &judged[6],
+        &format!("invariants/{RULE_FILE}: {OFF_SET}"),
+        &mut wrong,
+    );
+    sole_error(
+        "a rule with no status at all",
+        &judged[7],
+        &format!("invariants/{RULE_FILE}: missing prop `status`"),
+        &mut wrong,
+    );
+
+    assert!(
+        wrong.is_empty(),
+        "`status` may read anything at all:\n{}",
         wrong.join("\n")
     );
 }
@@ -1660,90 +1795,6 @@ fn a_supersession_is_recorded_by_both_decisions() {
     assert!(
         wrong.is_empty(),
         "half a supersession passes for a whole one:\n{}",
-        wrong.join("\n")
-    );
-}
-
-/// Статус — закрытый перечень, как и ось `governs`.
-///
-/// Гейт читает поле точным равенством, поэтому значение вне перечня не отвергалось: оно
-/// оказывалось «ни тем ни другим», и всякая проверка, что на него ветвится, молча
-/// переставала применяться. Последняя пара фикстур показывает цену буквой: тот же
-/// реестр под `active` отвергается за правило поверх непринятого решения, а под `activ`
-/// проходил целиком. Глазами опечатку не поймать — индекс печатает значение как есть,
-/// и колонка выглядит заполненной.
-#[test]
-fn status_reads_active_planned_or_superseded() {
-    let unknown_status = registry_case(vec![decision_file_with(
-        DECISION_FILE,
-        DECISION_ID,
-        &format!(
-            "status: activ\n\
-             governs: process\n\
-             realized: {EVIDENCE}\n\
-             supersedes: []\n\
-             superseded-by: null\n\
-             establishes: []\n"
-        ),
-    )]);
-    let intended = decision_file_with(
-        DECISION_FILE,
-        DECISION_ID,
-        "status: planned\n\
-         governs: process\n\
-         realized: null\n\
-         supersedes: []\n\
-         superseded-by: null\n\
-         establishes: [INV.DOCS.EXAMPLE]\n",
-    );
-    let rule_over_an_unrealized_decision = registry_case(vec![
-        intended.clone(),
-        rule_file("INV.DOCS.EXAMPLE.md", "INV.DOCS.EXAMPLE", DECISION_ID),
-    ]);
-    let same_registry_with_a_typo = registry_case(vec![
-        intended,
-        rule_file_with(
-            "INV.DOCS.EXAMPLE.md",
-            "INV.DOCS.EXAMPLE",
-            &format!(
-                "status: activ\n\
-                 governs: process\n\
-                 decision: {DECISION_ID}\n\
-                 check: {EVIDENCE}\n\
-                 scope: [docs]\n"
-            ),
-        ),
-    ]);
-
-    let judged = python_validation_errors(&[
-        unknown_status,
-        rule_over_an_unrealized_decision,
-        same_registry_with_a_typo,
-    ]);
-    let mut wrong = Vec::new();
-
-    sole_error(
-        "a status outside the published set",
-        &judged[0],
-        "`status` must be one of active, planned, superseded",
-        &mut wrong,
-    );
-    sole_error(
-        "an active rule over a decision that is only intended",
-        &judged[1],
-        "active rule cites a non-active decision",
-        &mut wrong,
-    );
-    sole_error(
-        "the same registry with the status misspelt",
-        &judged[2],
-        "`status` must be one of active, planned, superseded",
-        &mut wrong,
-    );
-
-    assert!(
-        wrong.is_empty(),
-        "a status may carry a value nothing publishes:\n{}",
         wrong.join("\n")
     );
 }
