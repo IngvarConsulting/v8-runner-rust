@@ -2093,3 +2093,92 @@ fn additional_launch_keys_do_not_displace_the_web_address() {
         .unwrap_or_else(|| panic!("user key dropped: {args:?}"));
     assert!(ws < theirs, "наш адрес идёт первым: {args:?}");
 }
+
+/// У автономной цели `infobase.user` и `infobase.password` — учётные данные SSH-шлюза, а
+/// не базы. Тонкий клиент к ней идёт по вебу без всякого ключа и **без** `/N` и `/P`:
+/// иначе раннер отдал бы пароль шлюза в командную строку клиента.
+#[test]
+fn a_standalone_thin_client_carries_the_address_without_the_gate_credentials() {
+    let dir = temp_workspace();
+    let work_path = dir.path().join("work");
+    let install_dir = dir.path().join("platform");
+    let exchange = dir.path().join("exchange");
+    let config_path = dir.path().join("v8project.yaml");
+    fs::create_dir_all(dir.path().join("project")).expect("base");
+    fs::create_dir_all(&work_path).expect("work");
+    fs::create_dir_all(&exchange).expect("exchange");
+    write_script(&install_dir.join("bin").join("1cv8c"));
+    fs::write(
+        &config_path,
+        format!(
+            "workPath: '{work}'\nformat: DESIGNER\ninfobase:\n  user: gate-user\n  password: gate-secret\n  web:\n    url: 'http://localhost/standalone'\n  standalone:\n    gate: 127.0.0.1:1543\n    exchange:\n      dir: '{exchange}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    path: '{platform}'\n",
+            work = work_path.display(),
+            exchange = exchange.display(),
+            platform = install_dir.display(),
+        ),
+    )
+    .expect("config");
+
+    let payload = launch_json(&config_path, &["launch", "thin", "--dry-run"]);
+
+    assert_eq!(payload["ok"], true, "{payload}");
+    assert_eq!(
+        payload["data"]["via"], "web",
+        "умолчание автономной цели — веб: {payload}"
+    );
+    let args = planned_args(&payload);
+    let at = args
+        .iter()
+        .position(|arg| arg == "/WS")
+        .unwrap_or_else(|| panic!("no /WS in {args:?}"));
+    assert_eq!(args[at + 1], "http://localhost/standalone", "{args:?}");
+    assert!(
+        !args.iter().any(|arg| arg == "/N" || arg == "/P"),
+        "реквизиты шлюза клиенту не принадлежат: {args:?}"
+    );
+    assert!(
+        !args.iter().any(|arg| arg.contains("gate-secret")),
+        "пароль шлюза не должен попадать в командную строку: {args:?}"
+    );
+}
+
+/// Маскируется отчёт, а не запуск: в процесс уходит настоящий адрес, иначе клиент никуда
+/// не подключится. Проверяется на живом запуске, а не на превью.
+#[test]
+fn a_real_web_launch_passes_the_unmasked_address_to_the_client() {
+    let dir = temp_workspace();
+    let work_path = dir.path().join("work");
+    let install_dir = dir.path().join("platform");
+    let config_path = dir.path().join("v8project.yaml");
+    let args_log = dir.path().join("thin.args.log");
+    fs::create_dir_all(dir.path().join("project")).expect("base");
+    fs::create_dir_all(&work_path).expect("work");
+    write_logging_script(&install_dir.join("bin").join("1cv8c"), &args_log);
+    write_config_with_web_url(
+        &config_path,
+        &work_path,
+        &install_dir,
+        "http://alice:s3cret@localhost/base",
+        "",
+    );
+
+    let payload = launch_json(&config_path, &["launch", "thin", "--via", "web"]);
+
+    assert_eq!(payload["ok"], true, "{payload}");
+    assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
+    assert_eq!(payload["data"]["via"], "web", "{payload}");
+    assert_eq!(
+        payload["data"]["url"], "http://alice:***@localhost/base",
+        "отчёт несёт замаскированный адрес: {payload}"
+    );
+    assert!(
+        !payload.to_string().contains("s3cret"),
+        "отчёт не должен нести пароль: {payload}"
+    );
+
+    let dispatched = read_args_log(&args_log);
+    assert!(
+        dispatched.contains("http://alice:s3cret@localhost/base"),
+        "в процесс обязан уйти настоящий адрес, иначе клиент не подключится: {dispatched:?}"
+    );
+}

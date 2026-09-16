@@ -146,7 +146,7 @@ pub fn execute(
     };
     let process_request = ProcessRequest {
         program: location.path.clone(),
-        args: build_launch_args(client_mode, &address, &additional_launch_keys, &launch),
+        args: build_launch_args(client_mode, address, &additional_launch_keys, &launch),
         workdir: None,
         stdout_log_path: None,
         stderr_log_path: external_epf_wait
@@ -549,9 +549,11 @@ fn execute_web(
     let (program, leading) = crate::platform::browser::opener();
     let mut plan_args = leading.clone();
     plan_args.push(url.to_owned());
-    // План показывает адрес без пароля: браузеру идёт настоящий, в отчёт — замаскированный.
-    let plan_args: Vec<String> = plan_args.iter().map(|arg| mask_url_userinfo(arg)).collect();
+    // Браузеру идёт настоящий адрес, в отчёт — замаскированный. Считаем один раз:
+    // четыре независимых места маскировки разъехались бы.
+    let reported_url = mask_url_userinfo(url);
     if args.dry_run {
+        let plan_args: Vec<String> = plan_args.iter().map(|arg| mask_url_userinfo(arg)).collect();
         log_live_stage(
             "launch: preview",
             "[Launch] preview only, browser not opened",
@@ -563,15 +565,14 @@ fn execute_web(
             via: LaunchVia::Web,
             binary: program.clone(),
             platform_resolution: None,
-            url: Some(mask_url_userinfo(url)),
+            url: Some(reported_url.clone()),
             provider_dispatched: false,
             plan: Some(LaunchPlan {
                 program,
                 args: plan_args,
             }),
             message: Some(format!(
-                "Previewed веб-клиент at {}; browser not opened",
-                mask_url_userinfo(url)
+                "Previewed веб-клиент at {reported_url}; browser not opened"
             )),
             mcp_readiness: None,
             external_epf_wait: None,
@@ -588,13 +589,10 @@ fn execute_web(
         via: LaunchVia::Web,
         binary: program,
         platform_resolution: None,
-        url: Some(mask_url_userinfo(url)),
+        url: Some(reported_url.clone()),
         provider_dispatched: true,
         plan: None,
-        message: Some(format!(
-            "Opened веб-клиент at {} (pid {pid})",
-            mask_url_userinfo(url)
-        )),
+        message: Some(format!("Opened веб-клиент at {reported_url} (pid {pid})")),
         mcp_readiness: None,
         external_epf_wait: None,
     })
