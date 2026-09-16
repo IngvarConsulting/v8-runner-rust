@@ -264,3 +264,37 @@ fn a_renderer_never_spells_the_outcome_word_itself() {
         );
     }
 }
+
+/// Показ команды маскирует один владелец — `platform::secrets`. Пока его писала каждая
+/// поверхность сама, превью запуска печатало `Pwd=***`, а отказ настоящего запуска той
+/// же базы — `Pwd=s3cret`, и в stderr, и в журнал действий: правило, у которого четыре
+/// исполнителя, — это четыре разных правила. Признак повтора — модуль, который строит
+/// показ запрошенного процесса сам, не позвав владельца.
+#[test]
+fn a_process_command_is_shown_only_through_the_secrets_owner() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let owner = repo_path("src/platform/secrets.rs");
+
+    for file in collect_rust_files(&repo_path("src")) {
+        if file == owner {
+            continue;
+        }
+        let production = production_tokens(&file);
+        // `cmd:` — это поле показа у `ProcessError`; вместе с типом запроса оно и
+        // означает, что модуль показывает argv запрошенного процесса. Поле `command`
+        // журнала само по себе не признак: им называют и имя команды CLI.
+        let requests_a_process = production.contains("ProcessRequest")
+            || production.contains("InteractiveProcessRequest");
+        if !(requests_a_process && production.contains("cmd:")) {
+            continue;
+        }
+
+        assert!(
+            production.contains("render_masked_command"),
+            "{} shows a process command and must take the string from platform::secrets",
+            file.strip_prefix(repo_root)
+                .expect("relative path")
+                .display()
+        );
+    }
+}

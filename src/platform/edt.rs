@@ -15,6 +15,7 @@ use crate::platform::process::{
     ProcessError, ProcessExecutionPolicy, ProcessInterruptionReason, ProcessRequest, ProcessRunner,
 };
 use crate::platform::result::PlatformCommandResult;
+use crate::platform::secrets::render_masked_command;
 
 const INTERACTIVE_EDT_ERROR_MARKER: &str = "Run '$exception printStackTrace' for error details";
 
@@ -71,13 +72,10 @@ impl<'a> EdtDsl<'a> {
             path: workspace.clone(),
             source,
         })?;
-        let request = InteractiveProcessRequest::new(binary.clone())
-            .with_args(["-data".to_owned(), workspace.display().to_string()]);
+        let args = vec!["-data".to_owned(), workspace.display().to_string()];
+        let request = InteractiveProcessRequest::new(binary.clone()).with_args(args.clone());
         debug!(
-            command = render_process_command(
-                &binary,
-                &["-data".to_owned(), workspace.display().to_string()]
-            ),
+            command = render_masked_command(&binary, &args),
             startup_timeout_ms = startup_timeout.as_millis() as u64,
             command_timeout_ms = command_timeout.as_millis() as u64,
             "starting interactive edt session"
@@ -238,7 +236,7 @@ impl<'a> EdtDsl<'a> {
 
         let process = match &self.backend {
             EdtBackend::OneShot { runner } => {
-                let rendered_command = render_process_command(&self.binary, args);
+                let rendered_command = render_masked_command(&self.binary, args);
                 debug!(
                     command = rendered_command.as_str(),
                     timeout_ms = self.timeout.map(|value| value.as_millis() as u64),
@@ -615,12 +613,6 @@ fn process_arguments(workspace: &Path, command_arguments: &[String]) -> Vec<Stri
     ];
     args.extend(command_arguments.iter().cloned());
     args
-}
-
-fn render_process_command(binary: &Path, args: &[String]) -> String {
-    let mut parts = vec![binary.display().to_string()];
-    parts.extend(args.iter().cloned());
-    parts.join(" ")
 }
 
 fn render_interactive_session_command(binary: &Path, workspace: &Path, command: &str) -> String {
