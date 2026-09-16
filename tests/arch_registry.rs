@@ -746,18 +746,29 @@ const EVIDENCE: &str = "tests/arch_registry.rs::a_symbol_and_its_path_spell_each
 /// решение — назвать правило в `establishes`. Поэтому фикстура здесь — не файл, а
 /// маленький реестр целиком, и нарушение в нём ровно одно.
 fn decision_file(name: &str, id: &str, establishes: &str) -> RecordFile {
+    decision_file_with(
+        name,
+        id,
+        &format!(
+            "status: active\n\
+             governs: process\n\
+             realized: {EVIDENCE}\n\
+             supersedes: []\n\
+             superseded-by: null\n\
+             establishes: [{establishes}]\n"
+        ),
+    )
+}
+
+/// То же решение, но пропы называет вызывающий: замену и статус фикстуры меняют.
+fn decision_file_with(name: &str, id: &str, props: &str) -> RecordFile {
     (
         "decisions".to_owned(),
         name.to_owned(),
         format!(
             "---\n\
              id: {id}\n\
-             status: active\n\
-             governs: process\n\
-             realized: {EVIDENCE}\n\
-             supersedes: []\n\
-             superseded-by: null\n\
-             establishes: [{establishes}]\n\
+             {props}\
              ---\n\
              \n\
              # Решение\n"
@@ -1136,6 +1147,160 @@ fn governs_reads_product_or_process() {
     assert!(
         wrong.is_empty(),
         "`governs` may read anything at all:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// Символ, которым решение называет чужую запись, обязан в эту запись разрешаться.
+///
+/// `establishes` ведёт к правилу, `supersedes` и `superseded-by` — к решению. Символ,
+/// не ведущий никуда, публикует обещание, за которым нет ни записи, ни проверки: в
+/// тексте решения имя названо уверенно, а индекс о нём молчит, потому что строки у
+/// него нет. Отказ поэтому называет и путь, по которому запись надо написать, — путь
+/// собирается той же грамматикой, которую гейт требует от имени файла.
+///
+/// `establishes` заменённого решения — история: правило, выведенное из обращения
+/// преемником, файла уже не имеет, а переписать список заменённой записи нельзя.
+/// Без этой поблажки судьба `retired` из `spec/archive/FATE.md` стала бы недостижимой.
+#[test]
+fn every_symbol_a_decision_names_resolves_to_a_record() {
+    const OLDER_FILE: &str = "2026-09-15-an-earlier-decision.md";
+    const OLDER_ID: &str = "DEC.2026-09-15.AN-EARLIER-DECISION";
+
+    let active = |supersedes: &str, establishes: &str| {
+        format!(
+            "status: active\n\
+             governs: process\n\
+             realized: {EVIDENCE}\n\
+             supersedes: [{supersedes}]\n\
+             superseded-by: null\n\
+             establishes: [{establishes}]\n"
+        )
+    };
+    let replaced = |successor: &str, establishes: &str| {
+        format!(
+            "status: superseded\n\
+             governs: process\n\
+             realized: null\n\
+             supersedes: []\n\
+             superseded-by: {successor}\n\
+             establishes: [{establishes}]\n"
+        )
+    };
+
+    // Все три пропа заполнены и разрешаются. Без здоровой фикстуры «ровно один отказ»
+    // ниже оказался бы совпадением, а не проверкой.
+    let sound = registry_case(vec![
+        decision_file_with(DECISION_FILE, DECISION_ID, &active(OLDER_ID, RULE_ID)),
+        decision_file_with(OLDER_FILE, OLDER_ID, &replaced(DECISION_ID, "")),
+        rule_file(RULE_FILE, RULE_ID, DECISION_ID),
+    ]);
+    // Заменённое решение отвечает за свой `establishes` только историей.
+    let retired = registry_case(vec![
+        decision_file_with(
+            OLDER_FILE,
+            OLDER_ID,
+            &replaced(DECISION_ID, "INV.DOCS.NOBODY-WROTE-THIS"),
+        ),
+        decision_file_with(DECISION_FILE, DECISION_ID, &active("", "")),
+    ]);
+    let rule_never_written = registry_case(vec![decision_file_with(
+        DECISION_FILE,
+        DECISION_ID,
+        &active("", "INV.DOCS.NOBODY-WROTE-THIS"),
+    )]);
+    // Правило выводится из решения, а не решение из решения.
+    let establishes_a_decision = registry_case(vec![
+        decision_file_with(DECISION_FILE, DECISION_ID, &active("", OLDER_ID)),
+        decision_file_with(OLDER_FILE, OLDER_ID, &active("", "")),
+    ]);
+    // Строка не из реестра не разрешается ни во что и файла не подсказывает.
+    let not_a_symbol = registry_case(vec![decision_file_with(
+        DECISION_FILE,
+        DECISION_ID,
+        &active("", "mcp-tools"),
+    )]);
+    let supersedes_nothing = registry_case(vec![decision_file_with(
+        DECISION_FILE,
+        DECISION_ID,
+        &active("DEC.2026-09-15.NOBODY-WROTE-THIS", ""),
+    )]);
+    // Заменяют решение, а не выведенное из него правило.
+    let supersedes_a_rule = registry_case(vec![
+        decision_file_with(DECISION_FILE, DECISION_ID, &active(RULE_ID, RULE_ID)),
+        rule_file(RULE_FILE, RULE_ID, DECISION_ID),
+    ]);
+    // `superseded-by` — скаляр, и разрешается он так же, как список `supersedes`.
+    let superseded_by_nothing = registry_case(vec![decision_file_with(
+        OLDER_FILE,
+        OLDER_ID,
+        &replaced("DEC.2026-09-17.NOBODY-WROTE-THIS", ""),
+    )]);
+
+    let judged = python_validation_errors(&[
+        sound,
+        retired,
+        rule_never_written,
+        establishes_a_decision,
+        not_a_symbol,
+        supersedes_nothing,
+        supersedes_a_rule,
+        superseded_by_nothing,
+    ]);
+    let mut wrong = Vec::new();
+
+    for (name, errors) in [
+        ("a registry whose symbols all resolve", &judged[0]),
+        (
+            "a superseded decision keeping its list as history",
+            &judged[1],
+        ),
+    ] {
+        if !errors.is_empty() {
+            wrong.push(format!("{name} must pass: {errors:?}"));
+        }
+    }
+    sole_error(
+        "a rule named by a decision and never written",
+        &judged[2],
+        "names INV.DOCS.NOBODY-WROTE-THIS, which has no record — write \
+         invariants/INV.DOCS.NOBODY-WROTE-THIS.md",
+        &mut wrong,
+    );
+    sole_error(
+        "a decision established as if it were a rule",
+        &judged[3],
+        &format!("`establishes` names the decision {OLDER_ID} where a rule is required"),
+        &mut wrong,
+    );
+    sole_error(
+        "a string that spells no symbol at all",
+        &judged[4],
+        "names mcp-tools, which is not a rule symbol",
+        &mut wrong,
+    );
+    sole_error(
+        "a superseded decision that was never written",
+        &judged[5],
+        "which has no record — write decisions/2026-09-15-nobody-wrote-this.md",
+        &mut wrong,
+    );
+    sole_error(
+        "a rule superseded as if it were a decision",
+        &judged[6],
+        &format!("`supersedes` names the invariant {RULE_ID} where a decision is required"),
+        &mut wrong,
+    );
+    sole_error(
+        "a successor that was never written",
+        &judged[7],
+        "which has no record — write decisions/2026-09-17-nobody-wrote-this.md",
+        &mut wrong,
+    );
+
+    assert!(
+        wrong.is_empty(),
+        "the registry publishes rules that do not exist:\n{}",
         wrong.join("\n")
     );
 }
