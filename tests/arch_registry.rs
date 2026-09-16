@@ -4,7 +4,7 @@
 //! потому что разбор записей и порождение индекса живут там же, где формат.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 fn repo_root() -> PathBuf {
@@ -262,231 +262,6 @@ fn every_decision_names_evidence_that_resolves() {
     );
 }
 
-/// Пробник: прогоняет выдуманный мини-реестр через ту же `validation_errors`,
-/// которой пользуется `--check`, и отдаёт её отказы списком.
-///
-/// Скрипт едет на stdin, а не лежит файлом рядом со `scripts/arch/registry.py`:
-/// схема записей живёт в одном месте, и второй её носитель устарел бы первым.
-/// Модуль смотрит на выдуманный корень обоими концами — `records(root)` читает
-/// оттуда, `ARCH_ROOT` оттуда же считает путь записи для текста отказа.
-const REGISTRY_PROBE: &str = r#"
-import importlib.util
-import json
-import pathlib
-import sys
-
-spec = importlib.util.spec_from_file_location("registry", sys.argv[1])
-registry = importlib.util.module_from_spec(spec)
-# Запись — dataclass с отложенными аннотациями, и разрешает она их через
-# `sys.modules`: модуль, загруженный мимо него, разваливается на `@dataclass`.
-sys.modules[spec.name] = registry
-spec.loader.exec_module(registry)
-
-root = pathlib.Path(sys.argv[2]).resolve()
-registry.ARCH_ROOT = root
-print(json.dumps(registry.validation_errors(registry.records(root))))
-"#;
-
-/// Отказы реестра о мини-реестре, разложенном в `root`.
-fn python_validation_errors(root: &Path) -> Vec<String> {
-    let mut probe = Command::new(python())
-        .arg("-")
-        .arg("scripts/arch/registry.py")
-        .arg(root)
-        .current_dir(repo_root())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("registry probe runs python3");
-    probe
-        .stdin
-        .take()
-        .expect("probe takes a script on stdin")
-        .write_all(REGISTRY_PROBE.as_bytes())
-        .expect("probe script is written");
-    let output = probe.wait_with_output().expect("probe finishes");
-    assert!(
-        output.status.success(),
-        "registry probe failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).expect("probe prints a json list of errors")
-}
-
-/// Выдуманная запись: символ, пропы и заголовок — ровно столько, сколько нужно
-/// схеме, чтобы отказать по одной названной причине, а не по пяти сразу.
-fn fabricated_record(symbol: &str, props: &str) -> String {
-    format!("---\nid: {symbol}\n{props}---\n\n# Выдуманная запись\n")
-}
-
-/// Мини-реестр в раскладке `spec/arch`: каталог вида записи, файл на запись.
-///
-/// Записи — решения и правила без формы: проп `artifact` контракта реестр ищет от
-/// настоящего корня репозитория, и выдуманный контракт дал бы лишний отказ о нём.
-fn fabricated(records: &[(&str, String)]) -> tempfile::TempDir {
-    let root = tempfile::tempdir().expect("temporary registry");
-    for (relative, text) in records {
-        let path = root.path().join(relative);
-        std::fs::create_dir_all(path.parent().expect("record lies in a registry directory"))
-            .expect("registry directory is created");
-        std::fs::write(&path, text).expect("record is written");
-    }
-    root
-}
-
-/// Мини-реестр обязан дать ровно один отказ, и отказ обязан назвать предмет.
-///
-/// «Ровно один» держит фикстуру честной: отказ по другой причине не сойдёт за
-/// проверяемый, и испорченная заготовка записи будет видна сразу.
-fn sole_error(records: &[(&str, String)], names: &str) {
-    let root = fabricated(records);
-    let errors = python_validation_errors(root.path());
-    assert_eq!(
-        errors.len(),
-        1,
-        "fixture must fail for exactly one reason:\n{}",
-        errors.join("\n")
-    );
-    assert!(
-        errors[0].contains(names),
-        "error does not name {names}:\n{}",
-        errors[0]
-    );
-}
-
-/// Символ, которым решение называет чужую запись, обязан в эту запись разрешаться.
-///
-/// `establishes` ведёт к правилу, `supersedes` и `superseded-by` — к решению.
-/// Ненайденный символ публикует обещание, за которым нет ни записи, ни проверки,
-/// поэтому отказ называет ещё и путь, по которому запись надо написать.
-#[test]
-fn every_symbol_a_decision_names_resolves_to_a_record() {
-    const NEWER: &str = "DEC.2026-01-02.A-FABRICATED-SUCCESSOR";
-    const OLDER: &str = "DEC.2026-01-01.A-FABRICATED-DECISION";
-    const RULE: &str = "INV.DOCS.A-FABRICATED-RULE";
-    const NEWER_FILE: &str = "decisions/2026-01-02-a-fabricated-successor.md";
-    const OLDER_FILE: &str = "decisions/2026-01-01-a-fabricated-decision.md";
-    const RULE_FILE: &str = "invariants/INV.DOCS.A-FABRICATED-RULE.md";
-    const SOUND_DECISION: &str = "status: active\ngoverns: process\nrealized: tests/probe.rs::a\n";
-    const SOUND_RULE: &str =
-        "status: active\ngoverns: process\ncheck: tests/probe.rs::a\nscope: [docs]\n";
-
-    let successor = |extra: &str| fabricated_record(NEWER, &format!("{SOUND_DECISION}{extra}"));
-    let rule = || fabricated_record(RULE, &format!("{SOUND_RULE}decision: {NEWER}\n"));
-
-    // Здоровая фикстура: все три пропа заполнены и разрешаются. Без неё «ровно
-    // один отказ» ниже мог бы оказаться совпадением, а не проверкой.
-    let sound = fabricated(&[
-        (
-            NEWER_FILE,
-            successor(&format!("supersedes: [{OLDER}]\nestablishes: [{RULE}]\n")),
-        ),
-        (
-            OLDER_FILE,
-            fabricated_record(
-                OLDER,
-                &format!(
-                    "status: superseded\ngoverns: process\nrealized: null\nsuperseded-by: {NEWER}\nestablishes: []\n"
-                ),
-            ),
-        ),
-        (RULE_FILE, rule()),
-    ]);
-    let errors = python_validation_errors(sound.path());
-    assert!(
-        errors.is_empty(),
-        "a registry whose symbols all resolve must pass:\n{}",
-        errors.join("\n")
-    );
-
-    // Заменённое решение отвечает за свой `establishes` только историей: правило,
-    // выведенное из обращения преемником, файла уже не имеет, и требовать его
-    // значило бы запереть судьбу `retired` из `spec/archive/FATE.md` навсегда.
-    let retired = fabricated(&[
-        (
-            OLDER_FILE,
-            fabricated_record(
-                OLDER,
-                &format!(
-                    "status: superseded\ngoverns: process\nrealized: null\nsuperseded-by: {NEWER}\nestablishes: [INV.DOCS.A-RETIRED-RULE]\n"
-                ),
-            ),
-        ),
-        (
-            NEWER_FILE,
-            successor(&format!("supersedes: [{OLDER}]\nestablishes: []\n")),
-        ),
-    ]);
-    let errors = python_validation_errors(retired.path());
-    assert!(
-        errors.is_empty(),
-        "a superseded decision keeps its list as history:\n{}",
-        errors.join("\n")
-    );
-
-    // `establishes` называет правило, записи которого нет: отказ называет файл,
-    // который автору осталось написать.
-    sole_error(
-        &[(
-            NEWER_FILE,
-            successor("establishes: [INV.DOCS.A-RULE-NOBODY-WROTE]\n"),
-        )],
-        "invariants/INV.DOCS.A-RULE-NOBODY-WROTE.md",
-    );
-
-    // `establishes` называет решение: правило выводится из решения, а не наоборот.
-    sole_error(
-        &[
-            (NEWER_FILE, successor(&format!("establishes: [{OLDER}]\n"))),
-            (
-                OLDER_FILE,
-                fabricated_record(OLDER, &format!("{SOUND_DECISION}establishes: []\n")),
-            ),
-        ],
-        "names the decision DEC.2026-01-01.A-FABRICATED-DECISION where a rule is required",
-    );
-
-    // Символ не из реестра не разрешается ни во что и файла не подсказывает.
-    sole_error(
-        &[(NEWER_FILE, successor("establishes: [mcp-tools]\n"))],
-        "names mcp-tools, which is not a rule symbol",
-    );
-
-    // `supersedes` называет решение, которого нет: имя решения выводит путь файла.
-    sole_error(
-        &[(
-            NEWER_FILE,
-            successor("supersedes: [DEC.2026-01-01.A-DECISION-NOBODY-WROTE]\n"),
-        )],
-        "decisions/2026-01-01-a-decision-nobody-wrote.md",
-    );
-
-    // `supersedes` называет правило: заменяют решение, а не выведенное из него.
-    sole_error(
-        &[
-            (
-                NEWER_FILE,
-                successor(&format!("supersedes: [{RULE}]\nestablishes: [{RULE}]\n")),
-            ),
-            (RULE_FILE, rule()),
-        ],
-        "names the invariant INV.DOCS.A-FABRICATED-RULE where a decision is required",
-    );
-
-    // `superseded-by` — скаляр, и разрешается он так же, как список `supersedes`.
-    sole_error(
-        &[(
-            OLDER_FILE,
-            fabricated_record(
-                OLDER,
-                "status: superseded\ngoverns: process\nrealized: null\nsuperseded-by: DEC.2026-01-03.A-SUCCESSOR-NOBODY-WROTE\n",
-            ),
-        )],
-        "decisions/2026-01-03-a-successor-nobody-wrote.md",
-    );
-}
-
 /// Раздел «Пример» у контракта — не проза, а проверяемый экземпляр формы.
 ///
 /// Если артефакт контракта — схема, пример обязан её пройти; если артефакт не схема,
@@ -644,4 +419,496 @@ fn contains(whole: &serde_json::Value, fragment: &serde_json::Value) -> bool {
             .all(|(key, value)| whole.get(key).is_some_and(|found| contains(found, value))),
         _ => whole == fragment,
     }
+}
+
+/// Запись реестра как файл: каталог, имя файла, текст.
+type RecordFile = (String, String, String);
+
+const DECISION_FILE: &str = "2026-09-16-an-example-decision.md";
+const DECISION_ID: &str = "DEC.2026-09-16.AN-EXAMPLE-DECISION";
+const EVIDENCE: &str = "tests/arch_registry.rs::a_symbol_and_its_path_spell_each_other";
+
+/// Решение, которое заводит правило фикстуры.
+///
+/// Запись не проверить по одному файлу: правило обязано сослаться на решение, а
+/// решение — назвать правило в `establishes`. Поэтому фикстура здесь — не файл, а
+/// маленький реестр целиком, и нарушение в нём ровно одно.
+fn decision_file(name: &str, id: &str, establishes: &str) -> RecordFile {
+    decision_file_with(
+        name,
+        id,
+        &format!(
+            "status: active\n\
+             governs: process\n\
+             realized: {EVIDENCE}\n\
+             supersedes: []\n\
+             superseded-by: null\n\
+             establishes: [{establishes}]\n"
+        ),
+    )
+}
+
+/// То же решение, но пропы называет вызывающий: замену и статус фикстуры меняют.
+fn decision_file_with(name: &str, id: &str, props: &str) -> RecordFile {
+    (
+        "decisions".to_owned(),
+        name.to_owned(),
+        format!(
+            "---\n\
+             id: {id}\n\
+             {props}\
+             ---\n\
+             \n\
+             # Решение\n"
+        ),
+    )
+}
+
+/// Инвариант, выведенный из этого решения.
+fn rule_file(name: &str, id: &str, decision: &str) -> RecordFile {
+    (
+        "invariants".to_owned(),
+        name.to_owned(),
+        format!(
+            "---\n\
+             id: {id}\n\
+             status: active\n\
+             governs: process\n\
+             decision: {decision}\n\
+             check: {EVIDENCE}\n\
+             scope: [docs]\n\
+             ---\n\
+             \n\
+             # Правило\n"
+        ),
+    )
+}
+
+/// Контракт: та же запись, но с формой, закреплённой в файле, и с примером.
+///
+/// Он здесь не ради контрактов, а ради того, что префикс вида берётся из
+/// `SYMBOL_PREFIX` по виду записи, а не зашит одним `INV.` на всех.
+fn contract_file(name: &str, id: &str, decision: &str) -> RecordFile {
+    (
+        "contracts".to_owned(),
+        name.to_owned(),
+        format!(
+            "---\n\
+             id: {id}\n\
+             status: active\n\
+             governs: product\n\
+             version: 1\n\
+             decision: {decision}\n\
+             producer: src/output/text.rs\n\
+             artifact: docs/schemas/text-output.json\n\
+             consumers: [cli]\n\
+             check: {EVIDENCE}\n\
+             scope: [wire]\n\
+             ---\n\
+             \n\
+             # Контракт\n\
+             \n\
+             ## Пример\n\
+             \n\
+             ```json\n\
+             {{}}\n\
+             ```\n"
+        ),
+    )
+}
+
+/// Мини-реестр как вход пробы: файлы и, если нужно, подменённый префикс вида.
+fn registry_case(files: Vec<RecordFile>) -> serde_json::Value {
+    serde_json::json!({ "files": files, "prefix": {} })
+}
+
+/// Тот же реестр, но вид записи назван другим префиксом — так, как это однажды и было.
+fn registry_case_with_prefix(
+    files: Vec<RecordFile>,
+    kind: &str,
+    prefix: &str,
+) -> serde_json::Value {
+    serde_json::json!({ "files": files, "prefix": { kind: prefix } })
+}
+
+/// Судит фикстуры тем же кодом, которым гейт `registry.py --check` судит реестр.
+///
+/// Фикстура на диск не кладётся, и причина — предмет одной из проверок ниже: файл с
+/// базовым именем `CON` на Windows не создаётся, так что тест про имена, которые
+/// Windows отвергает, был бы единственным, кто на Windows и падает. Запись собирает
+/// `record_from` — та же сборка, что у обхода каталога, поэтому судится здесь ровно та
+/// форма, которую гейт и получает; путь при этом остаётся именем, а не файлом.
+const REGISTRY_PROBE: &str = r#"
+import json, pathlib, sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, "scripts/arch")
+import registry
+
+# Запись называет себя путём от корня реестра, и корень тут чисто именной: без этой
+# подмены `Record.relative` меряет путь от настоящего spec/arch и падает на первой же
+# найденной ошибке — там, где ошибку надо не поднять, а вернуть.
+registry.ARCH_ROOT = pathlib.PurePosixPath("spec/arch")
+prefixes = dict(registry.SYMBOL_PREFIX)
+
+answer = []
+for case in json.load(sys.stdin):
+    registry.SYMBOL_PREFIX = {**prefixes, **case["prefix"]}
+    found = [
+        registry.record_from(
+            registry.ARCH_ROOT / directory / name, text, registry.KIND_BY_DIR[directory]
+        )
+        for directory, name, text in case["files"]
+    ]
+    answer.append(registry.validation_errors(sorted(found, key=lambda record: record.id)))
+json.dump(answer, sys.stdout, ensure_ascii=False)
+"#;
+
+/// Претензии `registry.py` к каждому мини-реестру, по порядку.
+fn python_validation_errors(cases: &[serde_json::Value]) -> Vec<Vec<String>> {
+    let mut probe = Command::new(python())
+        .arg("-c")
+        .arg(REGISTRY_PROBE)
+        .current_dir(repo_root())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("registry guard runs python3");
+    probe
+        .stdin
+        .take()
+        .expect("probe takes its input on stdin")
+        .write_all(&serde_json::to_vec(cases).expect("fixtures serialize"))
+        .expect("probe reads its input");
+    let output = probe.wait_with_output().expect("probe answers");
+
+    assert!(
+        output.status.success(),
+        "registry.py cannot judge a record at all:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("probe answers json")
+}
+
+/// Одно нарушение на фикстуру: гейт обязан назвать именно его и больше ничего.
+fn sole_error(name: &str, errors: &[String], expected: &str, wrong: &mut Vec<String>) {
+    match errors {
+        [only] if only.contains(expected) => {}
+        _ => wrong.push(format!("{name}: expected `{expected}`, got {errors:?}")),
+    }
+}
+
+/// Символ и путь восстанавливают друг друга — это обещание реестра, а не примета.
+///
+/// `spec/arch/README.md` обещает про `id`: «Совпадает с путём файла; по одному
+/// восстанавливается другое». Обещание держит навигацию: по символу из чужого текста
+/// открывают файл, не заглядывая в индекс. Обратный ход собирается из двух половин —
+/// префикс вида называет каталог, остальное имя файла, — и обе обязаны сойтись.
+/// Разойдись они, и ссылка по символу ведёт не в тот файл или никуда, а индекс подмену
+/// повторяет: он порождается из тех же записей и потому с ними согласен.
+#[test]
+fn a_symbol_and_its_path_spell_each_other() {
+    let sound = registry_case(vec![
+        decision_file(DECISION_FILE, DECISION_ID, "INV.DOCS.EXAMPLE"),
+        rule_file("INV.DOCS.EXAMPLE.md", "INV.DOCS.EXAMPLE", DECISION_ID),
+    ]);
+    let sound_contract = registry_case(vec![
+        decision_file(DECISION_FILE, DECISION_ID, "CTR.WIRE.EXAMPLE"),
+        contract_file("CTR.WIRE.EXAMPLE.md", "CTR.WIRE.EXAMPLE", DECISION_ID),
+    ]);
+    let rule_renamed = registry_case(vec![
+        decision_file(DECISION_FILE, DECISION_ID, "INV.DOCS.OTHER"),
+        rule_file("INV.DOCS.EXAMPLE.md", "INV.DOCS.OTHER", DECISION_ID),
+    ]);
+    let decision_renamed = registry_case(vec![
+        decision_file(
+            DECISION_FILE,
+            "DEC.2026-09-16.SOMETHING-ELSE",
+            "INV.DOCS.EXAMPLE",
+        ),
+        rule_file(
+            "INV.DOCS.EXAMPLE.md",
+            "INV.DOCS.EXAMPLE",
+            "DEC.2026-09-16.SOMETHING-ELSE",
+        ),
+    ]);
+    let decision_misfiled = registry_case(vec![
+        decision_file("an-example-decision.md", DECISION_ID, "INV.DOCS.EXAMPLE"),
+        rule_file("INV.DOCS.EXAMPLE.md", "INV.DOCS.EXAMPLE", DECISION_ID),
+    ]);
+    // Символ обещает каталог `contracts/`, а лежит запись в `invariants/`: по символу
+    // её не найти, а два таких файла дали бы в индексе две строки на один символ.
+    let rule_in_the_wrong_registry = registry_case(vec![
+        decision_file(DECISION_FILE, DECISION_ID, "CTR.WIRE.EXAMPLE"),
+        rule_file("CTR.WIRE.EXAMPLE.md", "CTR.WIRE.EXAMPLE", DECISION_ID),
+    ]);
+
+    let judged = python_validation_errors(&[
+        sound,
+        sound_contract,
+        rule_renamed,
+        decision_renamed,
+        decision_misfiled,
+        rule_in_the_wrong_registry,
+    ]);
+    let mut wrong = Vec::new();
+
+    for (name, errors) in [
+        ("a sound rule", &judged[0]),
+        ("a sound contract", &judged[1]),
+    ] {
+        if !errors.is_empty() {
+            wrong.push(format!("{name} must pass: {errors:?}"));
+        }
+    }
+    sole_error(
+        "a rule whose id is not its filename",
+        &judged[2],
+        "`id` must read `INV.DOCS.EXAMPLE`",
+        &mut wrong,
+    );
+    sole_error(
+        "a decision whose id is not its filename",
+        &judged[3],
+        &format!("`id` must read `{DECISION_ID}`"),
+        &mut wrong,
+    );
+    sole_error(
+        "a decision filed under a name that spells no symbol",
+        &judged[4],
+        "decisions/an-example-decision.md: filename must read",
+        &mut wrong,
+    );
+    sole_error(
+        "a rule whose symbol names another registry",
+        &judged[5],
+        "`id` must open with `INV.`",
+        &mut wrong,
+    );
+
+    assert!(
+        wrong.is_empty(),
+        "the symbol and the path may drift apart:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// Имя записи — то, что git выкладывает на диск, и на Windows тоже.
+///
+/// `CON` был первым префиксом контрактов, и дерево переставало выкладываться на Windows
+/// целиком: базовое имя из списка DOS-устройств система отказывается создавать с любым
+/// расширением. Поэтому фикстура здесь и переименовывает вид записи — воспроизводится
+/// ровно тот случай, а не выдуманный. Под нынешними префиксами проверка молчит всегда:
+/// `DEC`, `INV` и `CTR` устройствами не зовутся. Это не делает её лишней — она сторожит
+/// не запись, а нашу же константу, которую однажды уже так и меняли.
+///
+/// Запрет ровно такой, каким его ставит система, и обе границы здесь закреплены.
+/// Смотрит он на базовое имя — то, что до первой точки, — поэтому `INV.DOCS.CON.md`
+/// Windows создаёт и реестр принимает. Список кончается на `COM1`…`COM9`: `COM0`
+/// система не резервирует. Строгость сверх системной заявляла бы правило шире того,
+/// что проверено, — ровно та же ошибка, что и пропуск настоящего имени устройства.
+#[test]
+fn a_record_name_survives_a_windows_checkout() {
+    let contracts_called_con = registry_case_with_prefix(
+        vec![
+            decision_file(DECISION_FILE, DECISION_ID, "CON.WIRE.EXAMPLE"),
+            contract_file("CON.WIRE.EXAMPLE.md", "CON.WIRE.EXAMPLE", DECISION_ID),
+        ],
+        "contract",
+        "CON",
+    );
+    let device_name_deeper = registry_case(vec![
+        decision_file(DECISION_FILE, DECISION_ID, "INV.DOCS.CON"),
+        rule_file("INV.DOCS.CON.md", "INV.DOCS.CON", DECISION_ID),
+    ]);
+    // Устройства нумеруются с единицы: `COM1` система резервирует, `COM0` — нет.
+    let port_zero = registry_case_with_prefix(
+        vec![
+            decision_file(DECISION_FILE, DECISION_ID, "COM0.WIRE.EXAMPLE"),
+            contract_file("COM0.WIRE.EXAMPLE.md", "COM0.WIRE.EXAMPLE", DECISION_ID),
+        ],
+        "contract",
+        "COM0",
+    );
+
+    let judged = python_validation_errors(&[contracts_called_con, device_name_deeper, port_zero]);
+    let mut wrong = Vec::new();
+
+    sole_error(
+        "a prefix that makes every record of its kind a device",
+        &judged[0],
+        "`CON` is a Windows device name",
+        &mut wrong,
+    );
+    for (name, errors) in [
+        ("a device name past the first dot", &judged[1]),
+        ("a port number the system does not reserve", &judged[2]),
+    ] {
+        if !errors.is_empty() {
+            wrong.push(format!("{name} is not a device: {errors:?}"));
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "the tree may grow a name Windows refuses to check out:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// Символ, которым решение называет чужую запись, обязан в эту запись разрешаться.
+///
+/// `establishes` ведёт к правилу, `supersedes` и `superseded-by` — к решению. Символ,
+/// не ведущий никуда, публикует обещание, за которым нет ни записи, ни проверки: в
+/// тексте решения имя названо уверенно, а индекс о нём молчит, потому что строки у
+/// него нет. Отказ поэтому называет и путь, по которому запись надо написать, — путь
+/// собирается той же грамматикой, которую гейт требует от имени файла.
+///
+/// `establishes` заменённого решения — история: правило, выведенное из обращения
+/// преемником, файла уже не имеет, а переписать список заменённой записи нельзя.
+/// Без этой поблажки судьба `retired` из `spec/archive/FATE.md` стала бы недостижимой.
+#[test]
+fn every_symbol_a_decision_names_resolves_to_a_record() {
+    const OLDER_FILE: &str = "2026-09-15-an-earlier-decision.md";
+    const OLDER_ID: &str = "DEC.2026-09-15.AN-EARLIER-DECISION";
+    const RULE_FILE: &str = "INV.DOCS.EXAMPLE.md";
+    const RULE_ID: &str = "INV.DOCS.EXAMPLE";
+
+    let active = |supersedes: &str, establishes: &str| {
+        format!(
+            "status: active\n\
+             governs: process\n\
+             realized: {EVIDENCE}\n\
+             supersedes: [{supersedes}]\n\
+             superseded-by: null\n\
+             establishes: [{establishes}]\n"
+        )
+    };
+    let replaced = |successor: &str, establishes: &str| {
+        format!(
+            "status: superseded\n\
+             governs: process\n\
+             realized: null\n\
+             supersedes: []\n\
+             superseded-by: {successor}\n\
+             establishes: [{establishes}]\n"
+        )
+    };
+
+    // Все три пропа заполнены и разрешаются. Без здоровой фикстуры «ровно один отказ»
+    // ниже оказался бы совпадением, а не проверкой.
+    let sound = registry_case(vec![
+        decision_file_with(DECISION_FILE, DECISION_ID, &active(OLDER_ID, RULE_ID)),
+        decision_file_with(OLDER_FILE, OLDER_ID, &replaced(DECISION_ID, "")),
+        rule_file(RULE_FILE, RULE_ID, DECISION_ID),
+    ]);
+    // Заменённое решение отвечает за свой `establishes` только историей.
+    let retired = registry_case(vec![
+        decision_file_with(
+            OLDER_FILE,
+            OLDER_ID,
+            &replaced(DECISION_ID, "INV.DOCS.NOBODY-WROTE-THIS"),
+        ),
+        decision_file_with(DECISION_FILE, DECISION_ID, &active("", "")),
+    ]);
+    let rule_never_written = registry_case(vec![decision_file_with(
+        DECISION_FILE,
+        DECISION_ID,
+        &active("", "INV.DOCS.NOBODY-WROTE-THIS"),
+    )]);
+    // Правило выводится из решения, а не решение из решения.
+    let establishes_a_decision = registry_case(vec![
+        decision_file_with(DECISION_FILE, DECISION_ID, &active("", OLDER_ID)),
+        decision_file_with(OLDER_FILE, OLDER_ID, &active("", "")),
+    ]);
+    // Строка не из реестра не разрешается ни во что и файла не подсказывает.
+    let not_a_symbol = registry_case(vec![decision_file_with(
+        DECISION_FILE,
+        DECISION_ID,
+        &active("", "mcp-tools"),
+    )]);
+    let supersedes_nothing = registry_case(vec![decision_file_with(
+        DECISION_FILE,
+        DECISION_ID,
+        &active("DEC.2026-09-15.NOBODY-WROTE-THIS", ""),
+    )]);
+    // Заменяют решение, а не выведенное из него правило.
+    let supersedes_a_rule = registry_case(vec![
+        decision_file_with(DECISION_FILE, DECISION_ID, &active(RULE_ID, RULE_ID)),
+        rule_file(RULE_FILE, RULE_ID, DECISION_ID),
+    ]);
+    // `superseded-by` — скаляр, и разрешается он так же, как список `supersedes`.
+    let superseded_by_nothing = registry_case(vec![decision_file_with(
+        OLDER_FILE,
+        OLDER_ID,
+        &replaced("DEC.2026-09-17.NOBODY-WROTE-THIS", ""),
+    )]);
+
+    let judged = python_validation_errors(&[
+        sound,
+        retired,
+        rule_never_written,
+        establishes_a_decision,
+        not_a_symbol,
+        supersedes_nothing,
+        supersedes_a_rule,
+        superseded_by_nothing,
+    ]);
+    let mut wrong = Vec::new();
+
+    for (name, errors) in [
+        ("a registry whose symbols all resolve", &judged[0]),
+        (
+            "a superseded decision keeping its list as history",
+            &judged[1],
+        ),
+    ] {
+        if !errors.is_empty() {
+            wrong.push(format!("{name} must pass: {errors:?}"));
+        }
+    }
+    sole_error(
+        "a rule named by a decision and never written",
+        &judged[2],
+        "names INV.DOCS.NOBODY-WROTE-THIS, which has no record — write \
+         invariants/INV.DOCS.NOBODY-WROTE-THIS.md",
+        &mut wrong,
+    );
+    sole_error(
+        "a decision established as if it were a rule",
+        &judged[3],
+        &format!("`establishes` names the decision {OLDER_ID} where a rule is required"),
+        &mut wrong,
+    );
+    sole_error(
+        "a string that spells no symbol at all",
+        &judged[4],
+        "names mcp-tools, which is not a rule symbol",
+        &mut wrong,
+    );
+    sole_error(
+        "a superseded decision that was never written",
+        &judged[5],
+        "which has no record — write decisions/2026-09-15-nobody-wrote-this.md",
+        &mut wrong,
+    );
+    sole_error(
+        "a rule superseded as if it were a decision",
+        &judged[6],
+        &format!("`supersedes` names the invariant {RULE_ID} where a decision is required"),
+        &mut wrong,
+    );
+    sole_error(
+        "a successor that was never written",
+        &judged[7],
+        "which has no record — write decisions/2026-09-17-nobody-wrote-this.md",
+        &mut wrong,
+    );
+
+    assert!(
+        wrong.is_empty(),
+        "the registry publishes rules that do not exist:\n{}",
+        wrong.join("\n")
+    );
 }

@@ -60,19 +60,20 @@ GOVERNS = ("product", "process")
 
 FRONT_MATTER = re.compile(r"\A---\n(.*?)\n---\n(.*)\Z", re.S)
 DECISION_FILENAME = re.compile(r"\A(\d{4}-\d{2}-\d{2})-([a-z0-9-]+)\.md\Z")
-DECISION_SYMBOL = re.compile(r"\ADEC\.(\d{4}-\d{2}-\d{2})\.([A-Z0-9-]+)\Z")
-SYMBOL_ANYWHERE = re.compile(r"\b(?:DEC\.\d{4}-\d{2}-\d{2}|INV|CTR)\.[A-Z0-9.-]+\b")
+
+EXAMPLE_HEADING = re.compile(r"^## Пример\s*$", re.M)
+FENCED_BLOCK = re.compile(r"^```[a-z]*\n(.*?)^```\s*$", re.M | re.S)
 
 # A symbol becomes a filename, and Windows still refuses these as base names
 # whatever the extension follows. `CON` was the first contract prefix and made
 # the whole tree impossible to check out on Windows.
-EXAMPLE_HEADING = re.compile(r"^## Пример\s*$", re.M)
-FENCED_BLOCK = re.compile(r"^```[a-z]*\n(.*?)^```\s*$", re.M | re.S)
-
+#
+# Digits start at one: the system reserves COM1..COM9 and LPT1..LPT9, and `COM0`
+# is an ordinary name. Widening the list back would ban a name nothing refuses.
 DOS_DEVICE_NAMES = frozenset(
     ["CON", "PRN", "AUX", "NUL"]
-    + [f"COM{digit}" for digit in range(10)]
-    + [f"LPT{digit}" for digit in range(10)]
+    + [f"COM{digit}" for digit in range(1, 10)]
+    + [f"LPT{digit}" for digit in range(1, 10)]
 )
 
 
@@ -169,6 +170,18 @@ def prop_values(value: object) -> list[str]:
     return [str(value)]
 
 
+def record_from(path: Path, text: str, kind: str) -> Record:
+    """One record, assembled from one file's name and text.
+
+    Собирается запись здесь, а не в `records()`, потому что читателей у неё двое:
+    обход каталога и фальсификатор, который подсовывает выдуманные записи, не
+    трогая диск. Две сборки разошлись бы молча — гейт судил бы одну форму, а
+    проверка гейта другую.
+    """
+    props, body = parse_front_matter(text)
+    return Record(id=props.get("id") or "", kind=kind, path=path, props=props, body=body)
+
+
 def symbol_kind(symbol: str) -> str:
     """Вид записи, который обещает сам символ; пусто — символ не из реестра."""
     for kind, prefix in SYMBOL_PREFIX.items():
@@ -180,13 +193,17 @@ def symbol_kind(symbol: str) -> str:
 def record_path(symbol: str) -> str:
     """Путь записи, которую символ обязан называть, — от корня реестра.
 
-    Символ и путь выводятся друг из друга, поэтому отказ по ненайденному символу
-    может назвать не только пропажу, но и файл, который автору осталось написать.
+    Символ и путь восстанавливают друг друга, поэтому отказ по ненайденному символу
+    называет не только пропажу, но и файл, который автору осталось написать. Имя
+    решения собирается и тут же сверяется той же грамматикой, которую гейт требует
+    от файла: подсказать путь, по которому запись положить нельзя, хуже, чем не
+    подсказывать вовсе.
     """
     kind = symbol_kind(symbol)
     if kind == "decision":
-        match = DECISION_SYMBOL.match(symbol)
-        return "" if match is None else f"decisions/{match[1]}-{match[2].lower()}.md"
+        date, _, slug = symbol.partition(".")[2].partition(".")
+        name = f"{date}-{slug.lower()}.md"
+        return f"decisions/{name}" if DECISION_FILENAME.match(name) else ""
     for directory, named in KIND_BY_DIR.items():
         if named == kind:
             return f"{directory}/{symbol}.md"
@@ -201,14 +218,17 @@ def records(root: Path = ARCH_ROOT) -> list[Record]:
         if not base.is_dir():
             continue
         for path in sorted(base.glob("*.md")):
-            props, body = parse_front_matter(path.read_text(encoding="utf-8"))
-            identifier = props.get("id") or ""
-            found.append(Record(id=identifier, kind=kind, path=path, props=props, body=body))
+            found.append(record_from(path, path.read_text(encoding="utf-8"), kind))
     return sorted(found, key=lambda record: record.id)
 
 
 def expected_symbol(record: Record) -> str:
-    """The symbol a record's own path demands."""
+    """The symbol a record's own filename spells, prefix aside.
+
+    Вторую половину — префикс вида, который называет каталог, — держит отдельная
+    проверка в `validation_errors`: путь, у которого половины спорят, одного
+    символа не диктует.
+    """
     if record.kind == "decision":
         match = DECISION_FILENAME.match(record.path.name)
         if not match:
@@ -246,6 +266,30 @@ def validation_errors(found: list[Record]) -> list[str]:
             elif key in ("check", "realized"):
                 if any(not name.strip() for name in prop_values(record.props[key])):
                     errors.append(f"{record.relative}: `{key}` has a blank entry")
+
+        # Символ и путь восстанавливают друг друга. Имя файла даёт символ, префикс
+        # вида — каталог; без второй половины обратный ход не собирается:
+        # `CTR.WIRE.FOO`, лежащий в `invariants/`, не находится по символу, а два
+        # таких файла дали бы в индексе две строки на один символ. Разойдясь, путь
+        # и символ не подают знака: индекс порождается из тех же записей.
+        expected = expected_symbol(record)
+        if record.kind == "decision" and not expected:
+            errors.append(f"{record.relative}: filename must read `<YYYY-MM-DD>-<slug>.md`")
+        elif record.id and record.id != expected:
+            errors.append(f"{record.relative}: `id` must read `{expected}`")
+        prefix = SYMBOL_PREFIX[record.kind]
+        if record.id and not record.id.startswith(f"{prefix}."):
+            errors.append(f"{record.relative}: `id` must open with `{prefix}.`")
+
+        # Символ становится именем файла, и базовое имя устройства Windows
+        # отказывается создавать с любым расширением: перестаёт выкладываться всё
+        # дерево, а не одна запись.
+        base = record.path.name.split(".", 1)[0]
+        if base.upper() in DOS_DEVICE_NAMES:
+            errors.append(
+                f"{record.relative}: `{base}` is a Windows device name; choose another symbol"
+            )
+
         if record.kind in {"invariant", "contract"}:
             list_keys = ("scope",) + (("consumers",) if record.kind == "contract" else ())
             for key in list_keys:
