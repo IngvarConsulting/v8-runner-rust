@@ -778,17 +778,28 @@ fn decision_file_with(name: &str, id: &str, props: &str) -> RecordFile {
 
 /// Инвариант, выведенный из этого решения.
 fn rule_file(name: &str, id: &str, decision: &str) -> RecordFile {
+    rule_file_with(
+        name,
+        id,
+        &format!(
+            "status: active\n\
+             governs: process\n\
+             decision: {decision}\n\
+             check: {EVIDENCE}\n\
+             scope: [docs]\n"
+        ),
+    )
+}
+
+/// То же правило, но пропы называет вызывающий: форму и статус фикстуры меняют.
+fn rule_file_with(name: &str, id: &str, props: &str) -> RecordFile {
     (
         "invariants".to_owned(),
         name.to_owned(),
         format!(
             "---\n\
              id: {id}\n\
-             status: active\n\
-             governs: process\n\
-             decision: {decision}\n\
-             check: {EVIDENCE}\n\
-             scope: [docs]\n\
+             {props}\
              ---\n\
              \n\
              # Правило\n"
@@ -934,6 +945,22 @@ fn a_symbol_and_its_path_spell_each_other() {
         rule_file("CTR.WIRE.EXAMPLE.md", "CTR.WIRE.EXAMPLE", DECISION_ID),
     ]);
 
+    // Дата пишется теми же ASCII-цифрами, что и остальное имя. `\d` принимает и
+    // арабо-индийские, и символ решения собирается из знаков, которых не набрать ни в
+    // одной ссылке на него.
+    let decision_dated_in_other_digits = registry_case(vec![
+        decision_file(
+            "\u{664}\u{660}\u{662}\u{666}-\u{660}\u{669}-\u{661}\u{666}-an-example-decision.md",
+            "DEC.\u{664}\u{660}\u{662}\u{666}-\u{660}\u{669}-\u{661}\u{666}.AN-EXAMPLE-DECISION",
+            "INV.DOCS.EXAMPLE",
+        ),
+        rule_file(
+            "INV.DOCS.EXAMPLE.md",
+            "INV.DOCS.EXAMPLE",
+            "DEC.\u{664}\u{660}\u{662}\u{666}-\u{660}\u{669}-\u{661}\u{666}.AN-EXAMPLE-DECISION",
+        ),
+    ]);
+
     let judged = python_validation_errors(&[
         sound,
         sound_contract,
@@ -941,6 +968,7 @@ fn a_symbol_and_its_path_spell_each_other() {
         decision_renamed,
         decision_misfiled,
         rule_in_the_wrong_registry,
+        decision_dated_in_other_digits,
     ]);
     let mut wrong = Vec::new();
 
@@ -968,6 +996,12 @@ fn a_symbol_and_its_path_spell_each_other() {
         "a decision filed under a name that spells no symbol",
         &judged[4],
         "decisions/an-example-decision.md: filename must read",
+        &mut wrong,
+    );
+    sole_error(
+        "a decision dated in digits no reference can spell",
+        &judged[6],
+        "filename must read",
         &mut wrong,
     );
     sole_error(
@@ -1187,10 +1221,27 @@ fn status_reads_active_planned_or_superseded() {
     // Запланированное правило объявляет отсутствие проверки, заменённое решение —
     // отсутствие свидетельства. Оба слова перечень обязан пропускать.
     let planned_rule = status_case(&[], &[("status", "planned"), ("check", "null")]);
-    let superseded_decision = status_case(
-        &[("status", "superseded"), ("realized", "null")],
-        &[("status", "planned"), ("check", "null")],
-    );
+    // Замена объявляется обеими записями, поэтому здесь их две: половина замены сама
+    // по себе отказ, и без преемника фикстура спорила бы не о том, о чём заведена.
+    let supersedes_the_replaced = format!("[{DECISION_ID}]");
+    let superseded_decision = registry_case(vec![
+        with_props(
+            decision_file(DECISION_FILE, DECISION_ID, RULE_ID),
+            &[
+                ("status", "superseded"),
+                ("realized", "null"),
+                ("superseded-by", SUCCESSOR_ID),
+            ],
+        ),
+        with_props(
+            decision_file(SUCCESSOR_FILE, SUCCESSOR_ID, ""),
+            &[("supersedes", supersedes_the_replaced.as_str())],
+        ),
+        with_props(
+            rule_file(RULE_FILE, RULE_ID, DECISION_ID),
+            &[("status", "planned"), ("check", "null")],
+        ),
+    ]);
     // Правило под ними не действует: иначе сработала бы ветка «действующее правило
     // под недействующим решением», и нарушений в фикстуре стало бы два.
     let decision_off_the_set = status_case(
@@ -1243,7 +1294,12 @@ fn status_reads_active_planned_or_superseded() {
         &format!("invariants/{RULE_FILE}: {OFF_SET}"),
         &mut wrong,
     );
-    sole_error("a rule shouting the status", &judged[5], OFF_SET, &mut wrong);
+    sole_error(
+        "a rule shouting the status",
+        &judged[5],
+        OFF_SET,
+        &mut wrong,
+    );
     sole_error(
         "a typo that switches a check off",
         &judged[6],
@@ -1447,14 +1503,16 @@ fn every_symbol_a_decision_names_resolves_to_a_record() {
         decision_file_with(OLDER_FILE, OLDER_ID, &replaced(DECISION_ID, "")),
         rule_file(RULE_FILE, RULE_ID, DECISION_ID),
     ]);
-    // Заменённое решение отвечает за свой `establishes` только историей.
+    // Заменённое решение отвечает за свой `establishes` только историей. Преемник
+    // называет его в `supersedes`: половина замены — сама по себе отказ, и без неё
+    // фикстура спорила бы не о том, о чём заведена.
     let retired = registry_case(vec![
         decision_file_with(
             OLDER_FILE,
             OLDER_ID,
             &replaced(DECISION_ID, "INV.DOCS.NOBODY-WROTE-THIS"),
         ),
-        decision_file_with(DECISION_FILE, DECISION_ID, &active("", "")),
+        decision_file_with(DECISION_FILE, DECISION_ID, &active(OLDER_ID, "")),
     ]);
     let rule_never_written = registry_case(vec![decision_file_with(
         DECISION_FILE,
@@ -1553,6 +1611,297 @@ fn every_symbol_a_decision_names_resolves_to_a_record() {
     assert!(
         wrong.is_empty(),
         "the registry publishes rules that do not exist:\n{}",
+        wrong.join("\n")
+    );
+}
+
+const SUCCESSOR_FILE: &str = "2026-09-17-a-later-decision.md";
+const SUCCESSOR_ID: &str = "DEC.2026-09-17.A-LATER-DECISION";
+
+/// Решение с выписанными полями замены: статус, кого заменяет и кто заменил.
+///
+/// `realized: null` ставится ровно там, где его допускает гейт, — у принятого
+/// направления и у заменённой записи, — чтобы фикстура не спорила сама с собой.
+fn succession_file(
+    name: &str,
+    id: &str,
+    status: &str,
+    supersedes: &str,
+    superseded_by: &str,
+) -> RecordFile {
+    let realized = match status {
+        "planned" | "superseded" => "null",
+        _ => EVIDENCE,
+    };
+    decision_file_with(
+        name,
+        id,
+        &format!(
+            "status: {status}\n\
+             governs: process\n\
+             realized: {realized}\n\
+             supersedes: {supersedes}\n\
+             superseded-by: {superseded_by}\n\
+             establishes: []\n"
+        ),
+    )
+}
+
+/// Символ называет ровно одну запись, иначе по нему открывается то одна, то другая.
+///
+/// Имя файла и префикс вида диктуют символ порознь, и вместе уникальности ещё не дают:
+/// стоит двум видам назваться одним префиксом, и `INV.DOCS.EXAMPLE` лежит и в
+/// `invariants/`, и в `contracts/`. Обе записи проходят все проверки имени, ссылка по
+/// символу приводит к той, что победила в отображении символов, а индекс печатает на
+/// один символ две строки — и обе выглядят правдой. Префикс контрактов уже меняли
+/// однажды, поэтому фикстура меняет его, а не выдумывает случай.
+#[test]
+fn a_symbol_names_exactly_one_record() {
+    let sound = registry_case(vec![
+        decision_file(DECISION_FILE, DECISION_ID, "INV.DOCS.EXAMPLE"),
+        rule_file("INV.DOCS.EXAMPLE.md", "INV.DOCS.EXAMPLE", DECISION_ID),
+    ]);
+    let two_kinds_one_prefix = registry_case_with_prefix(
+        vec![
+            decision_file(DECISION_FILE, DECISION_ID, "INV.DOCS.EXAMPLE"),
+            rule_file("INV.DOCS.EXAMPLE.md", "INV.DOCS.EXAMPLE", DECISION_ID),
+            contract_file("INV.DOCS.EXAMPLE.md", "INV.DOCS.EXAMPLE", DECISION_ID),
+        ],
+        "contract",
+        "INV",
+    );
+
+    let judged = python_validation_errors(&[sound, two_kinds_one_prefix]);
+    let mut wrong = Vec::new();
+
+    if !judged[0].is_empty() {
+        wrong.push(format!("a sound registry must pass: {:?}", judged[0]));
+    }
+    sole_error(
+        "one symbol in two registries",
+        &judged[1],
+        "symbol INV.DOCS.EXAMPLE already names",
+        &mut wrong,
+    );
+
+    assert!(
+        wrong.is_empty(),
+        "one symbol may name two records:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// Заменённое решение называет того, кто его заменил.
+///
+/// «Как менять» описывает замену как парную правку: у нового `supersedes`, у старого
+/// `status: superseded` и `superseded-by`. Статус без преемника — тупик: текст старого
+/// решения не правят никогда, поэтому пришедший по символу узнаёт, что решение
+/// отменено, и не узнаёт, чем; спросить больше не у кого. Названный преемник при живом
+/// статусе объявляет замену, которой не было, и запись читается по-разному смотря в
+/// какое поле.
+#[test]
+fn a_superseded_decision_names_its_successor() {
+    let replaced = succession_file(DECISION_FILE, DECISION_ID, "superseded", "[]", SUCCESSOR_ID);
+    let successor = succession_file(
+        SUCCESSOR_FILE,
+        SUCCESSOR_ID,
+        "active",
+        &format!("[{DECISION_ID}]"),
+        "null",
+    );
+    let sound = registry_case(vec![replaced, successor.clone()]);
+    let status_without_successor = registry_case(vec![succession_file(
+        DECISION_FILE,
+        DECISION_ID,
+        "superseded",
+        "[]",
+        "null",
+    )]);
+    // Обе половины пары написаны, не написан только статус: связь цела, а индекс
+    // по-прежнему показывает заменённое решение действующим.
+    let successor_without_status = registry_case(vec![
+        succession_file(DECISION_FILE, DECISION_ID, "active", "[]", SUCCESSOR_ID),
+        successor,
+    ]);
+
+    let judged =
+        python_validation_errors(&[sound, status_without_successor, successor_without_status]);
+    let mut wrong = Vec::new();
+
+    if !judged[0].is_empty() {
+        wrong.push(format!("a written supersession must pass: {:?}", judged[0]));
+    }
+    sole_error(
+        "a superseded decision with no successor",
+        &judged[1],
+        "`status: superseded` names no successor",
+        &mut wrong,
+    );
+    sole_error(
+        "a successor named by a decision that still lives",
+        &judged[2],
+        "without `status: superseded`",
+        &mut wrong,
+    );
+
+    assert!(
+        wrong.is_empty(),
+        "a decision may be replaced by nobody:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// Замену объявляют обе записи, и порознь их половины лгут по-разному.
+///
+/// `supersedes` читают от предка к потомку, `superseded-by` — обратно, и оба хода
+/// нужны: по первому находят, что стало с прежним решением, по второму — откуда взялось
+/// нынешнее. Записанная с одной стороны связь даёт две разные истории одного решения:
+/// по одной запись заменена, по другой — нет. Разрешается ли сам символ в запись,
+/// держит `INV.DOCS.A-SYMBOL-RESOLVES-TO-A-RECORD`; здесь предмет — отвечают ли
+/// половины друг другу.
+#[test]
+fn a_supersession_is_recorded_by_both_decisions() {
+    let silent_successor = registry_case(vec![
+        succession_file(DECISION_FILE, DECISION_ID, "superseded", "[]", SUCCESSOR_ID),
+        succession_file(SUCCESSOR_FILE, SUCCESSOR_ID, "active", "[]", "null"),
+    ]);
+    let silent_predecessor = registry_case(vec![
+        succession_file(DECISION_FILE, DECISION_ID, "active", "[]", "null"),
+        succession_file(
+            SUCCESSOR_FILE,
+            SUCCESSOR_ID,
+            "active",
+            &format!("[{DECISION_ID}]"),
+            "null",
+        ),
+    ]);
+
+    let judged = python_validation_errors(&[silent_successor, silent_predecessor]);
+    let mut wrong = Vec::new();
+
+    sole_error(
+        "a successor that does not claim its predecessor",
+        &judged[0],
+        &format!("does not name {DECISION_ID} in `supersedes`"),
+        &mut wrong,
+    );
+    sole_error(
+        "a predecessor that does not name its successor",
+        &judged[1],
+        &format!("does not name {SUCCESSOR_ID} in `superseded-by`"),
+        &mut wrong,
+    );
+
+    assert!(
+        wrong.is_empty(),
+        "half a supersession passes for a whole one:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// Форма значения совпадает с той, которую README публикует рядом со смыслом поля.
+///
+/// Форма не та — и проверка не падает, а отвечает про другое. `superseded-by` списком
+/// называл двух преемников там, где обещан один, и `prop_values` разрешал обоих.
+/// `status` списком ронял гейт целиком: проверка принадлежности перечню хеширует
+/// значение, и вместо строки об одной записи реестр не судил ни одной.
+#[test]
+fn a_field_has_the_shape_the_readme_publishes() {
+    let sound = registry_case(vec![
+        decision_file(DECISION_FILE, DECISION_ID, "INV.DOCS.EXAMPLE"),
+        rule_file("INV.DOCS.EXAMPLE.md", "INV.DOCS.EXAMPLE", DECISION_ID),
+    ]);
+    let two_successors = registry_case(vec![succession_file(
+        DECISION_FILE,
+        DECISION_ID,
+        "superseded",
+        "[]",
+        "[DEC.2026-09-18.ONE, DEC.2026-09-18.OTHER]",
+    )]);
+    let a_status_that_is_a_list = registry_case(vec![decision_file_with(
+        DECISION_FILE,
+        DECISION_ID,
+        &format!(
+            "status: [active]\n\
+             governs: process\n\
+             realized: {EVIDENCE}\n\
+             supersedes: []\n\
+             superseded-by: null\n\
+             establishes: []\n"
+        ),
+    )]);
+    let a_scope_that_is_not_a_list = registry_case(vec![
+        decision_file(DECISION_FILE, DECISION_ID, "INV.DOCS.EXAMPLE"),
+        rule_file_with(
+            "INV.DOCS.EXAMPLE.md",
+            "INV.DOCS.EXAMPLE",
+            &format!(
+                "status: active\n\
+                 governs: process\n\
+                 decision: {DECISION_ID}\n\
+                 check: {EVIDENCE}\n\
+                 scope: docs\n"
+            ),
+        ),
+    ]);
+    // Решение здесь ничего не заводит: записи без читаемого символа в `establishes` не
+    // место, и назови оно её — гейт справедливо сказал бы об этом вторым сообщением,
+    // а предмет фикстуры один.
+    let a_symbol_written_as_a_list = registry_case(vec![
+        decision_file(DECISION_FILE, DECISION_ID, ""),
+        rule_file_with(
+            "INV.DOCS.EXAMPLE.md",
+            "[INV.DOCS.EXAMPLE]",
+            &format!(
+                "status: active\n\
+                 governs: process\n\
+                 decision: {DECISION_ID}\n\
+                 check: {EVIDENCE}\n\
+                 scope: [docs]\n"
+            ),
+        ),
+    ]);
+
+    let judged = python_validation_errors(&[
+        sound,
+        two_successors,
+        a_status_that_is_a_list,
+        a_scope_that_is_not_a_list,
+        a_symbol_written_as_a_list,
+    ]);
+    let mut wrong = Vec::new();
+
+    if !judged[0].is_empty() {
+        wrong.push(format!("a sound registry must pass: {:?}", judged[0]));
+    }
+    sole_error(
+        "two successors where one is promised",
+        &judged[1],
+        "`superseded-by` takes a single value, not a list",
+        &mut wrong,
+    );
+    sole_error(
+        "a status written as a list",
+        &judged[2],
+        "`status` takes a single value, not a list",
+        &mut wrong,
+    );
+    sole_error(
+        "a scope that is not a list",
+        &judged[3],
+        "`scope` must be a list",
+        &mut wrong,
+    );
+    sole_error(
+        "a symbol written as a list",
+        &judged[4],
+        "`id` takes a single value, not a list",
+        &mut wrong,
+    );
+
+    assert!(
+        wrong.is_empty(),
+        "a field may carry a shape nothing publishes:\n{}",
         wrong.join("\n")
     );
 }
