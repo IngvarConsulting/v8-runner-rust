@@ -1264,6 +1264,145 @@ fn status_reads_active_planned_or_superseded() {
     );
 }
 
+/// Сливает индексы тем же кодом, которым git сводит расхождение в `spec/arch/index.md`,
+/// и заодно называет драйвер, под именем которого этот код зарегистрирован.
+const MERGE_PROBE: &str = r#"
+import json, sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, "scripts/arch")
+import registry
+
+def index(rows):
+    return "\n".join(registry.INDEX_HEADER) + "".join("\n" + row for row in rows) + "\n"
+
+merged = []
+for sides in json.load(sys.stdin):
+    try:
+        text = registry.merge_index(*(index(rows) for rows in sides))
+    except ValueError as error:
+        merged.append({"rejected": str(error)})
+    else:
+        merged.append({"rows": text.splitlines()[len(registry.INDEX_HEADER):]})
+
+current = registry.INDEX_PATH.read_text(encoding="utf-8")
+json.dump(
+    {
+        "driver": registry.MERGE_DRIVER,
+        # Индекс, слитый сам с собой, обязан выйти собой: шапка и строка у порождения
+        # и у слияния одни, и разойдись они — каждое слияние портило бы весь файл.
+        "identity": registry.merge_index(current, current, current) == current,
+        "merged": merged,
+    },
+    sys.stdout,
+    ensure_ascii=False,
+)
+"#;
+
+/// Строка индекса. Слиянию видно только первую колонку — символ; остальные стоят
+/// здесь потому, что без них это не строка индекса, а не потому, что их читают.
+fn index_row(symbol: &str, status: &str) -> String {
+    format!(
+        "| `{symbol}` | решение · process | {status} \
+         | да | Суть | [decisions/x.md](decisions/x.md) |"
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct MergeAnswer {
+    driver: String,
+    identity: bool,
+    merged: Vec<serde_json::Value>,
+}
+
+/// Порождённый индекс не останавливает слияние.
+///
+/// `index.md` порождается и коммитится, поэтому две ветки, заведшие по записи, расходятся
+/// в нём всегда: строки отсортированы по символу, и две новые встают в одно место.
+/// Выбирать человеку тут нечего — сторона конфликта ни на что не влияет, разрешение
+/// всегда одно, — и ручное разрешение генерируемого файла кончается тем, что его правят
+/// руками. Поэтому расхождение сводит драйвер, а `.gitattributes` направляет к нему файл.
+///
+/// Драйвер сливает строки, а не перепорождает индекс: посреди слияния записей чужой
+/// стороны на диске ещё нет, и порождение дало бы индекс без них — зато без конфликта,
+/// то есть устаревший молча. Сведённое неверно ловит гейт свежести, а не тихий коммит.
+#[test]
+fn the_generated_index_does_not_stop_a_merge() {
+    let (alef, mem, zayn) = ("DEC.2026-01-01.A", "DEC.2026-01-01.M", "DEC.2026-01-01.Z");
+    let (a, m, z) = (
+        index_row(alef, "active"),
+        index_row(mem, "active"),
+        index_row(zayn, "active"),
+    );
+    // Та же запись после правки: строка меняется, символ остаётся ключом.
+    let m_superseded = index_row(mem, "superseded");
+
+    let answer: MergeAnswer = ask_registry(
+        MERGE_PROBE,
+        &vec![
+            // Обе стороны завели по записи, и чужая встаёт выше нашей.
+            vec![vec![&m], vec![&m, &z], vec![&a, &m]],
+            // Мы завели запись, они правили соседнюю.
+            vec![vec![&m], vec![&m, &z], vec![&m_superseded]],
+            // Они убрали запись, которой мы не касались.
+            vec![vec![&a, &m], vec![&a, &m], vec![&a]],
+            // Строку, которой формат не описывает, драйвер не проглатывает: иначе
+            // предыдущее неудачное слияние растворилось бы в следующем.
+            vec![
+                vec![&m],
+                vec![&m, &"<<<<<<< HEAD".to_string()],
+                vec![&m, &z],
+            ],
+        ],
+        "merge an index",
+    );
+
+    let mut wrong = Vec::new();
+    let expected: [Option<Vec<&String>>; 4] = [
+        Some(vec![&a, &m, &z]),
+        Some(vec![&m_superseded, &z]),
+        Some(vec![&a]),
+        None,
+    ];
+    for (number, (got, want)) in answer.merged.iter().zip(expected).enumerate() {
+        let rows = got
+            .get("rows")
+            .and_then(|rows| serde_json::from_value::<Vec<String>>(rows.clone()).ok());
+        let agree = match (&rows, &want) {
+            (Some(rows), Some(want)) => rows.iter().collect::<Vec<_>>() == *want,
+            (None, None) => true,
+            _ => false,
+        };
+        if !agree {
+            wrong.push(format!("case {number}: {got}"));
+        }
+    }
+
+    assert!(
+        answer.identity,
+        "merge_index does not reproduce the index it was given on all three sides"
+    );
+    assert!(
+        wrong.is_empty(),
+        "the merge driver resolves a diverged index wrongly:\n{}",
+        wrong.join("\n")
+    );
+
+    // Имя драйвера живёт в трёх местах, и молчит только одно расхождение: атрибут,
+    // называющий незарегистрированный драйвер, git берёт обычным текстовым слиянием.
+    let attributes = std::fs::read_to_string(repo_root().join(".gitattributes"))
+        .expect("the repository declares attributes");
+    let routed = attributes.lines().any(|line| {
+        line.split_whitespace().next() == Some("spec/arch/index.md")
+            && line.contains(&format!("merge={}", answer.driver))
+    });
+    assert!(
+        routed,
+        ".gitattributes does not route spec/arch/index.md to merge={}",
+        answer.driver
+    );
+}
+
 /// Символ, которым решение называет чужую запись, обязан в эту запись разрешаться.
 ///
 /// `establishes` ведёт к правилу, `supersedes` и `superseded-by` — к решению. Символ,
