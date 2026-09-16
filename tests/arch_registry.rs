@@ -2,9 +2,16 @@
 //!
 //! Реестр описан в `spec/arch/README.md`. Проверка запускает `scripts/arch/registry.py`,
 //! потому что разбор записей и порождение индекса живут там же, где формат.
+//!
+//! Остальным проверкам нужны сами поля, и читает их [`front_matter`] — построчно, тем же
+//! подмножеством YAML. Два читателя одного формата обязаны сходиться на всём: запись,
+//! которую один разобрал, а второй нет, валит второго сообщением о пропущенном пропе, и
+//! ненаписанным выглядит тест, а не разбор. Сходимость держит
+//! [`both_gates_read_one_front_matter_form`].
 
+use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 fn repo_root() -> PathBuf {
@@ -36,40 +43,135 @@ fn registry_records_match_the_published_schema_and_the_index_is_current() {
     );
 }
 
-fn evidence_entries(value: &str) -> Vec<String> {
-    let trimmed = value.trim();
-    if let Some(inner) = trimmed
-        .strip_prefix('[')
-        .and_then(|rest| rest.strip_suffix(']'))
-    {
-        return inner
-            .split(',')
-            .map(|item| item.trim().to_string())
-            .filter(|item| !item.is_empty())
-            .collect();
-    }
-    vec![trimmed.to_string()]
+/// Значение пропа: скаляр, плоский список или `null`.
+///
+/// Ровно то, что разбирает `parse_front_matter` в `scripts/arch/registry.py`, и не больше:
+/// запись, которой нужна вложенность, переросла свой предмет.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Prop {
+    Null,
+    Scalar(String),
+    List(Vec<String>),
 }
 
-fn unresolved_evidence(root: &std::path::Path, dir: &str, prop: &str) -> Vec<String> {
-    let mut unresolved = Vec::new();
-    let base = root.join(dir);
-    for entry in std::fs::read_dir(&base).expect("registry directory is readable") {
-        let path = entry.expect("directory entry").path();
-        if path.extension().and_then(|value| value.to_str()) != Some("md") {
+/// Поля записи из блока между `---`.
+///
+/// Разбор построчный и повторяет `parse_front_matter` из `scripts/arch/registry.py`: те же
+/// два вида списка — потоковый `[a, b]` и блочный `- a` со следующей строки, — те же два
+/// написания пустоты и тот же отказ на строке, которую формат не описывает. Отказ
+/// возвращается значением, а не пустотой: неразобранная запись обязана выглядеть
+/// неразобранной, иначе страж сообщает про ненаписанный тест там, где не понял строку.
+fn front_matter(text: &str) -> Result<BTreeMap<String, Prop>, String> {
+    let opened = text
+        .strip_prefix("---\n")
+        .ok_or_else(|| "record does not open with a front-matter block".to_owned())?;
+    let closed = opened
+        .find("\n---\n")
+        .ok_or_else(|| "record does not open with a front-matter block".to_owned())?;
+
+    let mut props = BTreeMap::new();
+    let mut block_key: Option<String> = None;
+    for (index, line) in opened[..closed].lines().enumerate() {
+        let number = index + 1;
+        // Пустая строка и комментарий блочный список не закрывают: его закрывает
+        // только следующий ключ.
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
             continue;
         }
+        if let Some(item) = line.trim_start().strip_prefix("- ") {
+            // Продолжить можно только список, открытый пустым значением, поэтому
+            // одиночный `- item` — испорченная запись, а не молча усыновлённый сирота.
+            let Some(Prop::List(items)) = block_key.as_ref().and_then(|key| props.get_mut(key))
+            else {
+                return Err(format!(
+                    "front matter line {number} starts a list with no key"
+                ));
+            };
+            items.push(item.trim().to_owned());
+            continue;
+        }
+        block_key = None;
+        let Some((key, raw)) = line.split_once(':') else {
+            return Err(format!(
+                "front matter line {number} is not `key: value`: {line:?}"
+            ));
+        };
+        let (key, raw) = (key.trim().to_owned(), raw.trim());
+        let value = if let Some(inner) = raw
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
+            Prop::List(
+                inner
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            )
+        } else if raw.is_empty() {
+            block_key = Some(key.clone());
+            Prop::List(Vec::new())
+        } else if raw == "null" || raw == "~" {
+            Prop::Null
+        } else {
+            Prop::Scalar(raw.to_owned())
+        };
+        props.insert(key, value);
+    }
+    Ok(props)
+}
+
+/// Каждый адрес `путь::имя`, названный пропом.
+///
+/// Повторяет `evidence_names` из `scripts/arch/registry.py`: отсутствующий проп, `null` и
+/// пустой список одинаково не называют ничего, а вид списка на результат не влияет.
+fn evidence_names(props: &BTreeMap<String, Prop>, key: &str) -> Vec<String> {
+    match props.get(key) {
+        Some(Prop::Scalar(value)) => vec![value.clone()],
+        Some(Prop::List(items)) => items.clone(),
+        Some(Prop::Null) | None => Vec::new(),
+    }
+}
+
+/// Значение пропа так, как его прочитал разбор, — для сообщения о нарушении.
+fn shown(value: Option<&Prop>) -> String {
+    match value {
+        None => "nothing".to_owned(),
+        Some(Prop::Null) => "null".to_owned(),
+        Some(Prop::Scalar(value)) => value.clone(),
+        Some(Prop::List(items)) => format!("[{}]", items.join(", ")),
+    }
+}
+
+/// Файлы записей одного реестра, по порядку: отчёт стража не должен зависеть от того,
+/// в каком порядке каталог отдал записи.
+fn record_paths(base: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(base)
+        .expect("registry directory is readable")
+        .map(|entry| entry.expect("directory entry").path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("md"))
+        .collect();
+    paths.sort();
+    paths
+}
+
+fn unresolved_evidence(root: &Path, dir: &str, prop: &str) -> Vec<String> {
+    let mut unresolved = Vec::new();
+    for path in record_paths(&root.join(dir)) {
         let text = std::fs::read_to_string(&path).expect("record is readable");
-        let prefix = format!("{prop}: ");
-        let Some(line) = text.lines().find(|line| line.starts_with(&prefix)) else {
+        let props = match front_matter(&text) {
+            Ok(props) => props,
+            Err(error) => {
+                unresolved.push(format!("{}: {error}", path.display()));
+                continue;
+            }
+        };
+        if !props.contains_key(prop) {
             unresolved.push(format!("{}: no {prop} prop", path.display()));
             continue;
-        };
-        let value = line.trim_start_matches(&prefix).trim();
-        if value == "null" {
-            continue;
         }
-        for item in evidence_entries(value) {
+        for item in evidence_names(&props, prop) {
             let (file, name) = match item.split_once("::") {
                 Some((file, name)) => (file, Some(name)),
                 None => (item.as_str(), None),
@@ -90,6 +192,261 @@ fn unresolved_evidence(root: &std::path::Path, dir: &str, prop: &str) -> Vec<Str
     unresolved
 }
 
+/// Записи, на которых формат полей можно понять двояко.
+///
+/// Мелкие краевые случаи живут рядом с утверждением о них, а не в `tests/fixtures/`:
+/// смотреть на них нужно вместе с ним.
+const FRONT_MATTER_FIXTURES: &[(&str, &str)] = &[
+    (
+        "check as a block list",
+        "---
+id: INV.DOCS.EXAMPLE
+status: active
+check:
+  - tests/arch_registry.rs::both_gates_read_one_front_matter_form
+  - tests/arch_registry.rs::a_list_reads_the_same_in_both_forms
+scope:
+  - docs
+  - ci
+---
+
+# Правило
+",
+    ),
+    (
+        "check as a flow list",
+        "---
+id: INV.DOCS.EXAMPLE
+status: active
+check: [tests/arch_registry.rs::both_gates_read_one_front_matter_form, tests/arch_registry.rs::a_list_reads_the_same_in_both_forms]
+scope: [docs, ci]
+---
+
+# Правило
+",
+    ),
+    (
+        "a blank line and a comment inside a block list",
+        "---
+scope:
+  - docs
+
+  # области перечислены по алфавиту
+  - ci
+status: active
+---
+
+# Правило
+",
+    ),
+    (
+        "both spellings of nothing",
+        "---
+status: planned
+check: null
+superseded-by: ~
+---
+
+# Правило
+",
+    ),
+    (
+        "a block list with no items",
+        "---
+check:
+scope: [docs]
+---
+
+# Правило
+",
+    ),
+    (
+        "a list item with no key above it",
+        "---
+id: INV.DOCS.EXAMPLE
+- tests/arch_registry.rs::orphan
+---
+
+# Правило
+",
+    ),
+    (
+        "a line that is not a pair",
+        "---
+id: INV.DOCS.EXAMPLE
+status
+---
+
+# Правило
+",
+    ),
+    (
+        "no front-matter block at all",
+        "# Правило
+
+Текст без полей.
+",
+    ),
+];
+
+/// Разбирает те же тексты тем же кодом, которым их читает гейт `registry.py --check`.
+const FRONT_MATTER_PROBE: &str = r#"
+import json, sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, "scripts/arch")
+import registry
+
+answer = []
+for text in json.load(sys.stdin):
+    try:
+        props, _ = registry.parse_front_matter(text)
+    except ValueError as error:
+        answer.append({"rejected": str(error)})
+    else:
+        answer.append({"props": props})
+json.dump(answer, sys.stdout, ensure_ascii=False)
+"#;
+
+/// Поля так, как их читает `scripts/arch/registry.py`: `{"props": …}` либо `{"rejected": …}`
+/// на каждый текст, по порядку.
+/// Спрашивает `scripts/arch/registry.py` его же кодом: фикстуры уходят пробе на stdin,
+/// ответ приходит json'ом.
+///
+/// Проб две — про разбор полей и про суд над записью, — а способ спросить один. Разойдись
+/// они каталогом запуска или обращением с непрошедшей пробой, и проверка гейта зависела бы
+/// от того, которая из проб её задаёт.
+fn ask_registry<T: serde::de::DeserializeOwned>(
+    probe: &str,
+    input: &impl serde::Serialize,
+    cannot: &str,
+) -> T {
+    let mut probe = Command::new(python())
+        .arg("-c")
+        .arg(probe)
+        .current_dir(repo_root())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("registry guard runs python3");
+    probe
+        .stdin
+        .take()
+        .expect("probe takes its input on stdin")
+        .write_all(&serde_json::to_vec(input).expect("fixtures serialize"))
+        .expect("probe reads its input");
+    let output = probe.wait_with_output().expect("probe answers");
+
+    assert!(
+        output.status.success(),
+        "registry.py cannot {cannot} at all:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("probe answers json")
+}
+
+fn python_front_matter(texts: &[&str]) -> Vec<serde_json::Value> {
+    ask_registry(FRONT_MATTER_PROBE, &texts, "read front matter")
+}
+
+/// Поля в том же виде, в каком их отдаёт разбор `registry.py`.
+fn as_json(props: &BTreeMap<String, Prop>) -> serde_json::Value {
+    props
+        .iter()
+        .map(|(key, value)| {
+            let value = match value {
+                Prop::Null => serde_json::Value::Null,
+                Prop::Scalar(value) => serde_json::Value::String(value.clone()),
+                Prop::List(items) => items
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            };
+            (key.clone(), value)
+        })
+        .collect()
+}
+
+/// Формат полей один, а читают его двое: `scripts/arch/registry.py` — потому что там же
+/// живёт схема и порождается индекс, и [`front_matter`] — потому что остальным проверкам
+/// нужны сами поля.
+///
+/// Расхождение таких читателей не выглядит расхождением. Запись, которую один разобрал, а
+/// второй нет, валит второго сообщением о пропе, а не о разборе, и автор ищет ненаписанный
+/// тест там, где второй читатель не понял строку; в CI это к тому же падает после того,
+/// как локально прошло. Поэтому сверяются и разобранные поля, и сам факт отказа.
+///
+/// Текст отказа не сверяется: одинаковым его держит не формат, а совпадение.
+#[test]
+fn both_gates_read_one_front_matter_form() {
+    let texts: Vec<&str> = FRONT_MATTER_FIXTURES
+        .iter()
+        .map(|(_, text)| *text)
+        .collect();
+    let mut wrong = Vec::new();
+
+    for ((name, text), theirs) in FRONT_MATTER_FIXTURES
+        .iter()
+        .zip(python_front_matter(&texts))
+    {
+        let ours = front_matter(text);
+        let agree = match (&ours, theirs.get("props")) {
+            (Ok(props), Some(theirs)) => &as_json(props) == theirs,
+            (Err(_), None) => true,
+            _ => false,
+        };
+        if !agree {
+            wrong.push(format!(
+                "{name}:\n  registry.py:   {theirs}\n  front_matter:  {}",
+                match &ours {
+                    Ok(props) => as_json(props).to_string(),
+                    Err(error) => format!("rejected: {error}"),
+                }
+            ));
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "the two gates read the same record differently:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// Блочный список и потоковый — одно значение.
+///
+/// Блочный вид заведён под давлением длины: `check` называет до трёх адресов вида
+/// `путь::имя_теста`, и в одну строку это уже даёт под триста знаков. Если он читается
+/// иначе, страж говорит «правило не называет фальсификатор» ровно там, где правило его
+/// называет, — и чинят такое переписыванием записи обратно в длинную строку.
+#[test]
+fn a_list_reads_the_same_in_both_forms() {
+    let fixture = |name: &str| {
+        let (_, text) = FRONT_MATTER_FIXTURES
+            .iter()
+            .find(|(fixture, _)| *fixture == name)
+            .expect("fixture is named");
+        front_matter(text).expect("fixture parses")
+    };
+
+    let block = fixture("check as a block list");
+    assert_eq!(
+        block,
+        fixture("check as a flow list"),
+        "a list must not depend on how it is spelled"
+    );
+    assert_eq!(
+        evidence_names(&block, "check"),
+        [
+            "tests/arch_registry.rs::both_gates_read_one_front_matter_form",
+            "tests/arch_registry.rs::a_list_reads_the_same_in_both_forms"
+        ],
+        "a block list names its falsifiers; reading it as nothing is the false negative"
+    );
+}
+
 /// Правило со `status: planned` обязано объявлять отсутствие проверки полем
 /// `check: null`, а действующее — называть её. Пустое поле у действующего правила
 /// и названная проверка у запланированного одинаково прячут состояние долга.
@@ -99,32 +456,28 @@ fn planned_rules_declare_a_missing_check() {
     let mut wrong = Vec::new();
 
     for dir in ["spec/arch/invariants", "spec/arch/contracts"] {
-        let base = root.join(dir);
-        for entry in std::fs::read_dir(&base).expect("registry directory is readable") {
-            let path = entry.expect("directory entry").path();
-            if path.extension().and_then(|value| value.to_str()) != Some("md") {
-                continue;
-            }
+        for path in record_paths(&root.join(dir)) {
             let text = std::fs::read_to_string(&path).expect("record is readable");
-            let status = text
-                .lines()
-                .find_map(|line| line.strip_prefix("status: "))
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            let check = text
-                .lines()
-                .find_map(|line| line.strip_prefix("check: "))
-                .unwrap_or_default()
-                .trim()
-                .to_string();
+            let props = match front_matter(&text) {
+                Ok(props) => props,
+                Err(error) => {
+                    wrong.push(format!("{}: {error}", path.display()));
+                    continue;
+                }
+            };
+            let status = match props.get("status") {
+                Some(Prop::Scalar(value)) => value.as_str(),
+                _ => "",
+            };
+            let check = props.get("check");
 
-            match status.as_str() {
-                "planned" if check != "null" => wrong.push(format!(
-                    "{}: planned rule must declare `check: null`, found {check}",
-                    path.display()
+            match status {
+                "planned" if check != Some(&Prop::Null) => wrong.push(format!(
+                    "{}: planned rule must declare `check: null`, found {}",
+                    path.display(),
+                    shown(check)
                 )),
-                "active" if check == "null" || check.is_empty() => wrong.push(format!(
+                "active" if evidence_names(&props, "check").is_empty() => wrong.push(format!(
                     "{}: active rule must name its falsifier",
                     path.display()
                 )),
@@ -211,49 +564,9 @@ fn every_rule_names_a_falsifier_that_exists() {
 #[test]
 fn every_decision_names_evidence_that_resolves() {
     let root = repo_root();
-    let decisions = root.join("spec/arch/decisions");
-    let mut unresolved = Vec::new();
-
-    for entry in std::fs::read_dir(&decisions).expect("decisions directory is readable") {
-        let path = entry.expect("directory entry").path();
-        if path.extension().and_then(|value| value.to_str()) != Some("md") {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path).expect("record is readable");
-        let Some(line) = text.lines().find(|line| line.starts_with("realized: ")) else {
-            unresolved.push(format!("{}: no realized prop", path.display()));
-            continue;
-        };
-        let value = line.trim_start_matches("realized: ").trim();
-        if value == "null" {
-            continue;
-        }
-        // Решение может держаться несколькими свидетельствами: список в квадратных
-        // скобках, как и у `check` правил.
-        let entries = value
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .split(',')
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty());
-        for entry in entries {
-            let (file, name) = match entry.split_once("::") {
-                Some((file, name)) => (file, Some(name)),
-                None => (entry, None),
-            };
-            let evidence = root.join(file);
-            if !evidence.is_file() {
-                unresolved.push(format!("{}: missing evidence {file}", path.display()));
-                continue;
-            }
-            if let Some(name) = name {
-                let body = std::fs::read_to_string(&evidence).expect("evidence is readable");
-                if !body.contains(&format!("fn {name}(")) {
-                    unresolved.push(format!("{}: {file} has no test {name}", path.display()));
-                }
-            }
-        }
-    }
+    // Решение держится теми же свидетельствами и тем же пропом-списком, что и правило,
+    // — разбор у них общий, и расходиться им не на чем.
+    let unresolved = unresolved_evidence(&root, "spec/arch/decisions", "realized");
 
     assert!(
         unresolved.is_empty(),
@@ -273,11 +586,7 @@ fn every_contract_shows_an_example_checked_against_its_form() {
     let contracts = root.join("spec/arch/contracts");
     let mut wrong = Vec::new();
 
-    for entry in std::fs::read_dir(&contracts).expect("contracts directory is readable") {
-        let path = entry.expect("directory entry").path();
-        if path.extension().and_then(|value| value.to_str()) != Some("md") {
-            continue;
-        }
+    for path in record_paths(&contracts) {
         let text = std::fs::read_to_string(&path).expect("record is readable");
         let name = path
             .file_name()
@@ -285,11 +594,14 @@ fn every_contract_shows_an_example_checked_against_its_form() {
             .unwrap_or_default()
             .to_owned();
 
-        let Some(artifact) = text
-            .lines()
-            .find_map(|line| line.strip_prefix("artifact: "))
-            .map(|value| value.trim().to_owned())
-        else {
+        let props = match front_matter(&text) {
+            Ok(props) => props,
+            Err(error) => {
+                wrong.push(format!("{name}: {error}"));
+                continue;
+            }
+        };
+        let Some(Prop::Scalar(artifact)) = props.get("artifact").cloned() else {
             wrong.push(format!("{name}: no artifact prop"));
             continue;
         };
@@ -555,29 +867,7 @@ json.dump(answer, sys.stdout, ensure_ascii=False)
 
 /// Претензии `registry.py` к каждому мини-реестру, по порядку.
 fn python_validation_errors(cases: &[serde_json::Value]) -> Vec<Vec<String>> {
-    let mut probe = Command::new(python())
-        .arg("-c")
-        .arg(REGISTRY_PROBE)
-        .current_dir(repo_root())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("registry guard runs python3");
-    probe
-        .stdin
-        .take()
-        .expect("probe takes its input on stdin")
-        .write_all(&serde_json::to_vec(cases).expect("fixtures serialize"))
-        .expect("probe reads its input");
-    let output = probe.wait_with_output().expect("probe answers");
-
-    assert!(
-        output.status.success(),
-        "registry.py cannot judge a record at all:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).expect("probe answers json")
+    ask_registry(REGISTRY_PROBE, &cases, "judge a record")
 }
 
 /// Одно нарушение на фикстуру: гейт обязан назвать именно его и больше ничего.
