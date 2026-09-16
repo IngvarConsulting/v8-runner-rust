@@ -4,131 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>v8-runner · Как устроено</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="styles.css?v=12">
+<link rel="canonical" href="architecture.html">
+<meta http-equiv="refresh" content="0; url=architecture.html">
+<link rel="stylesheet" href="styles.css?v=14">
 </head>
 <body>
-<div class="topbar"><div class="in">
-  <a class="brand" href="index.html">v8-runner</a>
-  <nav>
-    <a href="index.html">Начало</a>
-    <a href="scenarios.html">Команды</a>
-    <a href="usecases.html">Сценарии</a>
-    <a href="inside.html" aria-current="page">Как устроено</a>
-    <a href="architecture.html">Архитектура</a>
-    <a class="gh" href="https://github.com/IngvarConsulting/v8-runner-rust" aria-label="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span class="gh-stars" hidden></span></a>
-  </nav>
-</div></div>
-
 <main class="page">
-<h1>Как устроено</h1>
-<p class="lede">Исполнителя выбирает не ключ в конфиге, а пара «операция и цель».</p>
-
-<div class="axes">
-  <div class="axis"><div class="axis-t">Исходники</div><div class="axis-b">формат и тип</div></div>
-  <div class="arr">→</div>
-  <div class="axis"><div class="axis-t">Операция</div><div class="axis-b">глагол раннера</div></div>
-  <div class="arr">→</div>
-  <div class="axis"><div class="axis-t">Цель</div><div class="axis-b">вид базы</div></div>
-  <div class="arr">→</div>
-  <div class="axis hot"><div class="axis-t">Провайдер</div><div class="axis-b">по матрице умолчаний</div></div>
-</div>
-
-<h2>Исходники</h2>
-<p><strong>Формат</strong> — XML платформы или проект EDT. EDT перед работой с базой экспортируется в XML.<br>
-<strong>Тип</strong> — конфигурация, расширение, внешняя обработка, внешний отчёт. Любой тип бывает в любом формате.</p>
-
-<h2>Провайдеры</h2>
-<div class="tablewrap"><table>
-<thead><tr><th>Провайдер</th><th>Что это</th><th>Решение по</th></tr></thead>
-<tbody>
-<tr><td class="k"><span class="pill batch">Designer</span></td><td>процесс Конфигуратора на команду</td><td>коду выхода и появлению артефакта</td></tr>
-<tr><td class="k"><span class="pill agent">agent</span></td><td>агентский shell по SSH: Конфигуратор в режиме агента или шлюз ibsrv — набор команд одинаковый. У файловой базы и кластера такой точки входа нет: Конфигуратор в агентском режиме поднимает сам раннер, поэтому платформа нужна на его машине</td><td>JSON: <code>type</code> и закрытый <code>error-type</code></td></tr>
-<tr><td class="k"><span class="pill ibcmd">ibcmd</span></td><td>утилита платформы; для автономного сервера — через <code>--pid</code></td><td>коду выхода и машинному выводу</td></tr>
-<tr><td class="k"><span class="pill rs">ibcmd-rs</span></td><td>конвертер XML ↔ CF без платформы</td><td>коду выхода</td></tr>
-<tr><td class="k"><span class="pill neutral">webinst</span></td><td>публикация базы на Apache или IIS</td><td>коду выхода и появлению публикации</td></tr>
-</tbody></table></div>
-<p class="hint">Проза инструмента никогда не решает — только переносится как улика.</p>
-
-<h2>Цели: два адреса</h2>
-<p>У базы всегда два адреса, и они разные. По одному раннер её <strong>администрирует</strong>, по другому её <strong>открывают</strong> клиентом или браузером. Строка подключения вида <code>ws=…</code> относится ко второму и не говорит, чем администрировать: за публикацией может стоять файловая база, кластер или автономный сервер.</p>
-<div class="tablewrap"><table>
-<thead><tr><th>Цель</th><th>Раннер администрирует</th><th>Клиент открывает</th></tr></thead>
-<tbody>
-<tr><td class="k">файловая</td><td><code>connection: File=…</code></td><td>адреса нет, пока не сделан <code>publish</code></td></tr>
-<tr><td class="k">кластер 1С</td><td><code>connection: Srvr=…;Ref=…</code></td><td>адреса нет, пока не сделан <code>publish</code></td></tr>
-<tr><td class="k">автономный сервер</td><td><code>standalone.gate</code> — SSH-шлюз</td><td>HTTP-адрес самого сервера</td></tr>
-</tbody></table></div>
-<p>Кластер и автономный сервер могут стоять на другой машине, и их файловая система раннеру недоступна. Поэтому <code>workPath</code> всегда локален, пути в командах, адресованных цели, разрешаются на её стороне, а результат с удалённой цели забирается объявленным каналом обмена, а не чтением чужого пути. Режим, где раннер сам поднимает процесс, работает только с локальной точкой входа.</p>
-<p class="hint">Следствие для диагностики: журнал платформы на стороне цели и технологический журнал сервера раннеру не видны — квитанция их не обещает.</p>
-
-<p class="hint">Адрес для клиента живёт в <code>infobase.web.url</code>: у автономного сервера он известен сразу, у остальных появляется после публикации.</p>
-
-<h2>Выбор провайдера</h2>
-<ol>
-  <li>Умолчания заданы нами и живут в коде — матрица <code>(операция, цель) → цепочка</code>.</li>
-  <li>Раннер берёт первого готового в этом окружении.</li>
-  <li><code>providers.&lt;операция&gt;</code> в конфиге переопределяет жёстко: неготовый — отказ, без отката.</li>
-  <li>На проводе и в CLI провайдера нет: вызывающий не выбирает исполнителя.</li>
-  <li>Квитанция объясняет выбор: <code>selected</code>, <code>origin</code>, <code>skipped</code>.</li>
-</ol>
-
-<h2>Эксперименты: как включить и выключить</h2>
-<p>Часть строк матрицы помечена <strong>экспериментальными</strong>: исполнитель реализован и прогнан, но в цепочку умолчаний не входит — раннер сам его не выберет. Включается он только явно, на одну операцию, ключом <code>providers.&lt;операция&gt;</code>; выключается удалением ключа. Другого выключателя нет: ни флага CLI, ни переменной окружения, ни состояния на диске.</p>
-<div class="tablewrap"><table>
-<thead><tr><th>Режим (операция)</th><th>Экспериментальный исполнитель</th><th>Включить</th><th>Что даёт</th></tr></thead>
-<tbody>
-<tr><td class="k">build</td><td><span class="pill agent">agent</span></td><td><code>providers.build: agent</code></td><td>загрузка и <code>update-db-cfg</code> одной сессией, поколение записывается</td></tr>
-<tr><td class="k">dump</td><td><span class="pill agent">agent</span></td><td><code>providers.dump: agent</code></td><td>пропуск выгрузки по поколению; инкремент и частичная — на месте</td></tr>
-<tr><td class="k">make</td><td><span class="pill agent">agent</span></td><td><code>providers.make: agent</code></td><td>cf/cfe через <code>dump-cfg</code>, epf/erf через загрузку из файлов</td></tr>
-<tr><td class="k">extensions</td><td><span class="pill agent">agent</span></td><td><code>providers.extensions: agent</code></td><td>состав и свойства расширений группой <code>config extensions</code></td></tr>
-<tr><td class="k">infobase.configuration.export</td><td><span class="pill agent">agent</span></td><td><code>providers.infobase.configuration.export: agent</code></td><td>только рабочая конфигурация</td></tr>
-<tr><td class="k">infobase.dump</td><td><span class="pill ibcmd">ibcmd</span></td><td><code>providers.infobase.dump: ibcmd</code></td><td>до появления проверки монопольного доступа</td></tr>
-<tr><td class="k">infobase.restore</td><td><span class="pill ibcmd">ibcmd</span></td><td><code>providers.infobase.restore: ibcmd</code></td><td>то же</td></tr>
-</tbody></table></div>
-<p>Ключ пишется в <code>v8project.yaml</code> или в личный слой <code>v8project.local.yaml</code> — второй удобен, чтобы включить эксперимент у себя и не трогать общий конфиг:</p>
-<pre><code>providers:
-  build: agent
-  dump: agent</code></pre>
-<p>Проверить, что включилось, можно по квитанции в ответе любой команды: <code>provider.selected</code> называет исполнителя, <code>provider.origin.kind: override</code> — что его назначил ключ, а не умолчание. Валидация отвергает ключ там, где выбирать не из чего (у автономного сервера исполнитель один — <span class="pill agent">agent</span> через шлюз, ключ ему не нужен и не разрешён) и там, где названный исполнитель операцию не реализует; отказ называет, кто её реализует.</p>
-<p class="hint">Экспериментальный исполнитель не откатывается: если он не готов (нет платформы для управляемого агента, точка входа не отвечает), команда отказывает, а не берёт следующего по цепочке. Место <span class="pill agent">agent</span> в цепочке умолчаний решится вместе с долгоживущей сессией: пока старт агента на каждую команду съедает выигрыш.</p>
-
-<h2>Изменилась ли база</h2>
-<p>У раннера две независимые проверки. По файлам исходников он считает хеши и хранит их в <code>workPath</code> — это отвечает на вопрос «что изменилось у меня». У платформы он спрашивает <strong>идентификатор поколения</strong> конфигурации — это отвечает на вопрос «менялась ли база».</p>
-<div class="tablewrap"><table>
-<tbody>
-<tr><td class="k">что это</td><td>40-значный токен конфигурации; меняется при любом её изменении</td></tr>
-<tr><td class="k">как сравнивать</td><td>только на равно и не равно: «больше» и «меньше» смысла не имеют</td></tr>
-<tr><td class="k">у кого спросить</td><td>Конфигуратор <code>/GetConfigGenerationID</code>, <code>ibcmd config generation-id</code>, агентская сессия — около секунды</td></tr>
-<tr><td class="k">на что не отвечает</td><td>не говорит, что именно изменилось и кто менял; для этого нужно сравнение конфигураций</td></tr>
-<tr><td class="k">предмет</td><td>свой токен у основной конфигурации и у каждого расширения</td></tr>
-</tbody></table></div>
-<p class="hint">Замер: токен основной конфигурации у Конфигуратора и <code>ibcmd</code> совпадает, а токены расширений у них разные — сравнивать нужно значения, полученные одним и тем же инструментом.</p>
-
-<h2>Агент: два режима</h2>
-<div class="tablewrap"><table>
-<thead><tr><th></th><th>managed</th><th>attached</th></tr></thead>
-<tbody>
-<tr><td class="k">кто поднял</td><td>раннер</td><td>вы</td></tr>
-<tr><td class="k">где бывает</td><td>любая цель</td><td>автономный сервер — всегда, он держит свой шлюз сам; файловая база и кластер — только если агент Конфигуратора подняли вы</td></tr>
-<tr><td class="k">признак в конфиге</td><td>ключей <code>tools.designer_agent.attach</code> нет — раннер поднимает сам</td><td><code>infobase.standalone.gate</code> / <code>tools.designer_agent.attach</code></td></tr>
-<tr><td class="k">флаги запуска</td><td>раннер плюс ваши</td><td>только ваши</td></tr>
-<tr><td class="k">если недоступен</td><td>ошибка запуска</td><td><code>endpoint_unreachable</code>, свой рядом не поднимает</td></tr>
-</tbody></table></div>
-
-<h2>Правила</h2>
-<div class="tablewrap"><table>
-<tbody>
-<tr><td class="k">замок</td><td>команда владеет <code>workPath</code> целиком; сессия агента живёт столько же</td></tr>
-<tr><td class="k">дедлайн</td><td>у каждой команды; отмена засчитывается только после терминального состояния процесса</td></tr>
-<tr><td class="k">публикация</td><td>полная замена цели идёт через staging и backup</td></tr>
-<tr><td class="k">превью</td><td><code>--dry-run</code> не берёт замок и ничего не создаёт</td></tr>
-<tr><td class="k">секреты</td><td>маскируются во всех выводах</td></tr>
-</tbody></table></div>
-
-<p class="hint">Unica вызывает CLI с <code>--json-message</code>. MCP — для хостов, подключающих раннер напрямую; там 8 инструментов. Слои раннера и время жизни компонентов — на странице <a href="architecture.html">Архитектура</a>.</p>
+<h1>Страница переехала</h1>
+<p class="lede">«Как устроено» и «Архитектура» теперь одна страница: <a href="architecture.html">Архитектура</a>.</p>
 </main>
-<script src="site.js" defer></script>
 </body>
 </html>
