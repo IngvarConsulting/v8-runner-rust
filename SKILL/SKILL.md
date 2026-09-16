@@ -146,6 +146,9 @@ v8-runner init
   `pid=null`, and a `plan` with the selected `program` and the composed `args`; credential values
   inside `plan.args` are replaced by `***`, so the plan is readable but not reusable as a manual
   command line. It cannot be combined with `--wait-for-exit` or `--wait-ready`.
+- Need to read a failed launch: the command in the error text and in `logs/mcp/actions.log` is
+  masked the same way, and there the user name is hidden too (`/N ***`, `Usr=***`) because those
+  lines outlive the run. Server, base and paths stay readable; run `--dry-run` to see the account.
 - Need an observable local external EPF runtime gate: use `launch thin --execute <file.epf> --output <out> --stderr-output <stderr> --wait-for-exit --wait-timeout-ms <ms>`. This opt-in mode is limited to explicit `.epf` files, reports PID/exit-or-timeout/artifacts, treats timeout as a CLI failure after terminating the client group, and rejects raw or configured `/C`, `/Execute`, and `/Out` aliases; callers must inspect the reported exit code because non-zero EPF exit is observational rather than a CLI failure; plain launch remains asynchronous.
 - Need onec-client-mcp-devkit launched inside 1C without VA authoring: use `v8-runner launch mcp --wait-ready ...` when the caller needs a ready MCP endpoint; tune readiness with `tools.client_mcp.wait_ready_timeout_ms` when the project needs a shorter or longer wait, raise `execution_timeout` too when extending beyond the global command budget, and use bare `launch mcp` only for fire-and-forget startup.
 

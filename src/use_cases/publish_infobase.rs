@@ -14,6 +14,7 @@ use crate::domain::capability::{Operation, Provider};
 use crate::domain::publish::{PublishAction, PublishPlan, PublishResult};
 use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessRequest;
+use crate::platform::secrets::mask_preview_args;
 use crate::platform::utilities::PlatformUtilities;
 use crate::platform::webinst::webinst_args;
 use crate::support::error::AppError;
@@ -84,6 +85,7 @@ pub fn execute(
         &dir,
         &config.infobase.connection,
     );
+    let secrets: Vec<&str> = config.infobase.password.as_deref().into_iter().collect();
     let result = |provider_dispatched: bool, plan: Option<PublishPlan>| PublishResult {
         provider: Some(receipt.clone()),
         ok: true,
@@ -108,7 +110,8 @@ pub fn execute(
             false,
             Some(PublishPlan {
                 program: location.path.clone(),
-                args: args.clone(),
+                // `-connstr` несёт строку соединения целиком, а в ней бывает `Pwd=`.
+                args: mask_preview_args(&args, &secrets),
             }),
         );
         preview.message = Some(format!(
