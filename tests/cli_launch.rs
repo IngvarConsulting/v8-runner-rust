@@ -94,6 +94,11 @@ const IDLE_WAIT_TIMEOUT_MS: u64 = 60_000;
 /// секунд — срок взят с тройным запасом к измеренному худшему случаю.
 const EXPIRING_WAIT_TIMEOUT_MS: u64 = 30_000;
 
+/// Клиент обязан пережить этот бюджет с запасом: завершись фикстура сама, ожидание
+/// вернуло бы штатный выход, и тест перестал бы проверять таймаут. Кратность названа
+/// здесь, чтобы поднятый бюджет не разошёлся с временем жизни клиента молча.
+const CLIENT_OUTLIVES_WAIT_SECS: u64 = 4 * EXPIRING_WAIT_TIMEOUT_MS / 1_000;
+
 /// Файл признака создаётся перенаправлением до того, как в него что-то записано,
 /// поэтому готовностью считается прочитанное значение, а не существование файла.
 fn published_pid(path: &Path) -> Option<String> {
@@ -1389,7 +1394,7 @@ fn thin_external_epf_wait_timeout_terminates_client_group() {
     let marker = temp_workspace();
     let descendant_pid = marker.path().join("descendant.pid");
     let script = format!(
-        "sleep 30 &\nprintf '%s' $! > '{}'\nwait",
+        "sleep {CLIENT_OUTLIVES_WAIT_SECS} &\nprintf '%s' $! > '{}'\nwait",
         descendant_pid.display()
     );
     let (_dir, config_path, _install_dir, work_path) = setup_project_with_thin_script(&script);
