@@ -10,7 +10,7 @@ Use this skill to operate `v8-runner` as the automation layer for local 1C devel
 Keep this file as the decision entrypoint. Load only the reference file that matches the task:
 
 - `references/command-selection.md` for choosing the right command sequence.
-- `references/config-and-backends.md` for `v8project.yaml`, source sets, formats, builders, and backend limits.
+- `references/config-and-backends.md` for `v8project.yaml`, source sets, formats, per-operation providers, and backend limits.
 - `references/project-workflows.md` for common build, syntax, dump, launch, and source sync workflows across Designer and EDT projects.
 - `references/file-and-artifact-workflows.md` for dump, convert, load, make/artifacts, and staged publication.
 - `references/testing.md` for YaXUnit, Vanessa Automation, syntax checks, and artifacts.
@@ -49,7 +49,7 @@ Useful global flags:
 1. Check whether `v8project.yaml` exists in the 1C project root.
 2. If it is missing and source files already exist, run the narrowest `v8-runner config init ...` command that fits the project shape.
 3. If it is missing and the only goal is to export CF/CFE/DT from an existing infobase, create a
-   minimal `v8project.yaml` with `workPath`, `builder`, `infobase`, platform discovery settings and
+   minimal `v8project.yaml` with `workPath`, `format`, `infobase`, platform discovery settings and
    `source-set: []`; do not bootstrap project sources that the user did not request.
 4. If it is missing and the current source of truth is an existing infobase that must become
    project sources, run `v8-runner bootstrap --connection <CONNECTION> --platform-version <VERSION>`.
@@ -62,7 +62,6 @@ Minimal infobase-only shape:
 ```yaml
 workPath: build/v8-runner
 format: DESIGNER
-builder: DESIGNER
 infobase:
   connection: "File=/absolute/path/to/ib"
 source-set: []
@@ -74,7 +73,6 @@ Useful bootstrap commands:
 v8-runner config init
 v8-runner config init --connection "File=build/ib"
 v8-runner config init --format edt
-v8-runner config init --builder IBCMD
 v8-runner bootstrap --connection "File=/path/to/ib" --platform-version 8.3.27
 v8-runner tools download yaxunit --sources
 v8-runner tools download vanessa
@@ -87,14 +85,14 @@ v8-runner init
 - Source files changed and infobase may be stale: run `v8-runner build`.
 - Only one source-set changed: use commands that accept `--source-set <NAME>` instead of rebuilding or materializing everything.
 - Branch switch, rebase, large object moves, stale source-backed tool extension state, or suspicious incremental state: run `v8-runner build --full-rebuild`.
-- Syntax check: inspect `format` and `builder`, then choose `syntax designer-modules`, `syntax designer-config`, or `syntax edt`.
+- Syntax check: inspect `format`, then choose `syntax designer-modules`, `syntax designer-config`, or `syntax edt`. `syntax` has one executor (Designer) and takes no `providers` key.
 - Behavior validation: run the relevant `v8-runner test ...` command; tests build first unless the
   caller explicitly requests `--no-build` for an already prepared infobase.
 - Missing local YAxUnit, Vanessa Automation, or onec-client-mcp-devkit setup: run
   `v8-runner tools download yaxunit --sources`, `v8-runner tools download vanessa`, and
   `v8-runner tools download client-mcp --sources` for source-backed setup. Omit
-  `--sources` on `yaxunit` or `client-mcp` to download `.cfe` artifacts when
-  `builder=DESIGNER`.
+  `--sources` on `yaxunit` or `client-mcp` to download `.cfe` artifacts; loading a
+  `.cfe` needs the Designer executor.
 - Vanessa Automation debugging or scenario authoring: use `v8-runner launch mcp va --wait-ready ...` to start the client MCP server with VA loaded and verify the VA MCP tools before driving `.feature` workflows.
 - Extension properties need synchronization: use `v8-runner extensions` or `extensions --name <SOURCE_SET>`.
 - Infobase changes need to become Git-visible files: check `git status`, then run the relevant `v8-runner dump ...` command.
@@ -103,8 +101,9 @@ v8-runner init
   add `--extension <name>` and use `.cfe` for an extension. This is not `make`, which builds
   artifacts from project sources.
 - Need a complete portable DT image including data: use `v8-runner infobase dump --output <file.dt>`.
-  A DT is not a backup. Runner treats `builder` as a provider preference for infobase exports,
-  skips experimental IBCMD DT, and selects a ready Designer before spawn when available.
+  A DT is not a backup. The executor comes from the matrix (`providers.infobase.dump`),
+  experimental IBCMD DT is skipped unless named explicitly, and a ready Designer is
+  selected before spawn when available.
 - For infobase export failures, distinguish `capability_unavailable` (no implemented adapter)
   from `environment_unavailable` (adapter exists, but binary/version/connection is not ready).
   Never retry another provider after the selected provider has been spawned.

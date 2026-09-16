@@ -8,7 +8,7 @@ settings before CLI overrides.
 
 - `workPath`: generated state, temp files, and workspace location.
 - `format`: `DESIGNER` or `EDT`.
-- `builder`: `DESIGNER` or `IBCMD`.
+- `providers.<operation>`: optional per-operation executor override. Omit it to use the defaults below.
 - `infobase.connection`: often `File=build/ib` for local automation.
 - `source-set`: ordered configuration and extension sources.
 - `tools.platform.path`, `version`, and `strict`: platform discovery hints. `path` is always an
@@ -21,21 +21,38 @@ settings before CLI overrides.
 - `tools.client_mcp.extension`: optional tool extension prepared by `build`; it is not a project `source-set`.
 - `tools.client_mcp.wait_ready_timeout_ms`: optional readiness timeout for `launch mcp --wait-ready`; falls back to `execution_timeout` and is still capped by the command deadline.
 
+## Choosing The Executor
+
+There is no global backend switch. The executor is chosen per operation from a capability
+matrix, and `providers.<operation>` names one explicitly.
+
+- Valid keys: `init`, `build`, `load`, `dump`, `extensions`, `infobase.configuration.export`,
+  `infobase.dump`, `infobase.restore`, `syntax`, `make`.
+- Defaults: `init`, `build`, `dump`, `infobase.configuration.export` try Designer then `ibcmd`;
+  `infobase.dump` and `infobase.restore` use Designer (experimental IBCMD DT only when named);
+  `load`, `syntax`, `make` are Designer-only; `extensions` is `ibcmd`-only.
+- The key is accepted only for an operation that has a real choice on this target; naming an
+  executor for a single-executor operation is a config error.
+- An override is strict: if the named executor is not ready the command refuses with a reason
+  and never falls back to the default chain.
+- The key is allowed in `v8project.local.yaml` too; the response receipt names the file it came from.
+
 ## Format And Backend Rules
 
-- `format=DESIGNER`, `builder=DESIGNER`: supports init, build, extensions, dump, Designer syntax checks, tests, make/load/artifact workflows if configured.
-- `format=DESIGNER`, `builder=IBCMD`: supports init, build, extensions, and dump for file infobases and server infobases with `infobase.dbms`.
-- `format=EDT`, `builder=DESIGNER`: supports init, build through EDT export to Designer files, EDT syntax checks, extensions, and tests.
-- `format=EDT`, `builder=IBCMD`: supports init and build through EDT export to Designer files followed by IBCMD import/apply; requires a file infobase.
+- `format=DESIGNER`: init, build, extensions, dump, Designer syntax checks, tests, and
+  make/load/artifact workflows if configured.
+- `format=EDT`: init and build through EDT export to Designer files, EDT syntax checks,
+  extensions, and tests.
+- `ibcmd` as the executor for `build` covers file infobases and server infobases with `infobase.dbms`;
+  for an EDT project it runs after the EDT export to Designer files and requires a file infobase.
 - `extensions` supports Designer and EDT projects, but only extension `source-set` entries are actionable.
-- `syntax designer-config` and `syntax designer-modules` require Designer format with Designer backend.
-- `syntax edt` requires EDT format with Designer backend.
+- `syntax designer-config` and `syntax designer-modules` require `format=DESIGNER`; `syntax edt` requires `format=EDT`.
 - IBCMD dump uses project-local standalone-server data under `workPath/ibcmd-data`.
 - `dump --mode partial` with IBCMD degrades to incremental dump and must be called out in user-facing summaries.
-- `convert` is CLI-only, repo-aware, uses configured `source-set`, does not use `builder`, and does not require an infobase.
-- `load` supports `.cf` and `.cfe` only for `format=DESIGNER`, `builder=DESIGNER`.
-- `tools.client_mcp.extension.source` is prepared during `build`, skipped when unchanged, and refreshed by `build --full-rebuild`; `.artifact.path` must point to `.cfe` and currently requires `builder=DESIGNER`.
-- `make` / `artifacts` require `builder=DESIGNER` and publish `.cf`, `.cfe`, `.epf`, or `.erf` depending on target/source-set.
+- `convert` is CLI-only, repo-aware, uses configured `source-set`, takes no `providers` key, and does not require an infobase.
+- `load` supports `.cf` and `.cfe` only for `format=DESIGNER`.
+- `tools.client_mcp.extension.source` is prepared during `build`, skipped when unchanged, and refreshed by `build --full-rebuild`; `.artifact.path` must point to `.cfe` and currently needs the Designer executor.
+- `make` / `artifacts` are Designer-only and publish `.cf`, `.cfe`, `.epf`, or `.erf` depending on target/source-set.
 
 ## Source-Set Notes
 
@@ -56,7 +73,7 @@ Prefer `--source-set <NAME>` for narrow build, dump, convert, and artifact flows
 `v8project.yaml` is the default config filename. Use `--config <path>` only when the active project config is not at the default path or the user explicitly asks for that command form.
 
 `v8project.local.yaml` is an automatic local overlay only. It may override only `workPath`,
-`infobase.*`, `tools.*`, `tests.*`, and `mcp.*`; it must not define `source-set`, `format`, or
-`builder`, and it must not be used as `--config`. `--workdir` wins over both config files.
+`infobase.*`, `tools.*`, `tests.*`, `providers`, and `mcp.*`; it must not define `source-set` or
+`format`, and it must not be used as `--config`. `--workdir` wins over both config files.
 `config init` creates the sibling local overlay as an empty mapping with a schema modeline and adds
 `v8project.local.yaml` to `.gitignore` when needed.
