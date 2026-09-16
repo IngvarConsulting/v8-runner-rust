@@ -60,15 +60,13 @@ GOVERNS = ("product", "process")
 
 FRONT_MATTER = re.compile(r"\A---\n(.*?)\n---\n(.*)\Z", re.S)
 DECISION_FILENAME = re.compile(r"\A(\d{4}-\d{2}-\d{2})-([a-z0-9-]+)\.md\Z")
-DECISION_SYMBOL = re.compile(r"\ADEC\.(\d{4}-\d{2}-\d{2})\.([A-Z0-9-]+)\Z")
-SYMBOL_ANYWHERE = re.compile(r"\b(?:DEC\.\d{4}-\d{2}-\d{2}|INV|CTR)\.[A-Z0-9.-]+\b")
+
+EXAMPLE_HEADING = re.compile(r"^## Пример\s*$", re.M)
+FENCED_BLOCK = re.compile(r"^```[a-z]*\n(.*?)^```\s*$", re.M | re.S)
 
 # A symbol becomes a filename, and Windows still refuses these as base names
 # whatever the extension follows. `CON` was the first contract prefix and made
 # the whole tree impossible to check out on Windows.
-EXAMPLE_HEADING = re.compile(r"^## Пример\s*$", re.M)
-FENCED_BLOCK = re.compile(r"^```[a-z]*\n(.*?)^```\s*$", re.M | re.S)
-
 DOS_DEVICE_NAMES = frozenset(
     ["CON", "PRN", "AUX", "NUL"]
     + [f"COM{digit}" for digit in range(10)]
@@ -221,6 +219,30 @@ def validation_errors(found: list[Record]) -> list[str]:
             elif key in ("check", "realized"):
                 if any(not name.strip() for name in evidence_names(record.props[key])):
                     errors.append(f"{record.relative}: `{key}` has a blank entry")
+
+        # Символ и путь восстанавливают друг друга. Имя файла даёт символ, префикс
+        # вида — каталог; без второй половины обратный ход не собирается, и
+        # `CTR.WIRE.FOO`, лежащий в `invariants/`, не находится ни по символу, ни
+        # дважды в индексе как один символ. Разойдясь, путь и символ не подают
+        # знака: индекс порождается из тех же записей и повторяет подмену.
+        expected = expected_symbol(record)
+        if record.kind == "decision" and not expected:
+            errors.append(f"{record.relative}: filename must read `<ГГГГ-ММ-ДД>-<slug>.md`")
+        elif record.id and record.id != expected:
+            errors.append(f"{record.relative}: `id` must read `{expected}`")
+        prefix = SYMBOL_PREFIX[record.kind]
+        if record.id and not record.id.startswith(f"{prefix}."):
+            errors.append(f"{record.relative}: `id` must open with `{prefix}.`")
+
+        # Символ становится именем файла, и базовое имя из DOS_DEVICE_NAMES
+        # Windows отказывается создавать с любым расширением: не выкладывается
+        # уже всё дерево, а не одна запись.
+        base = record.path.name.split(".", 1)[0]
+        if base.upper() in DOS_DEVICE_NAMES:
+            errors.append(
+                f"{record.relative}: `{base}` is a Windows device name; choose another symbol"
+            )
+
         if record.kind in {"invariant", "contract"}:
             list_keys = ("scope",) + (("consumers",) if record.kind == "contract" else ())
             for key in list_keys:
