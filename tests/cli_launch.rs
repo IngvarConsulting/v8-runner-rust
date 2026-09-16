@@ -47,16 +47,12 @@ fn write_bounded_logging_script(path: &Path, args_log: &Path) {
 }
 
 fn read_args_log(path: &Path) -> String {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if let Ok(args) = fs::read_to_string(path) {
-            if !args.is_empty() {
-                return args;
-            }
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-    panic!("timed out waiting for args log '{}'", path.display())
+    let mut args = String::new();
+    wait_until(&format!("args log '{}'", path.display()), || {
+        args = fs::read_to_string(path).unwrap_or_default();
+        !args.is_empty()
+    });
+    args
 }
 
 fn wait_for_file(path: &Path, timeout: Duration) -> bool {
@@ -68,6 +64,52 @@ fn wait_for_file(path: &Path, timeout: Duration) -> bool {
         thread::sleep(Duration::from_millis(20));
     }
     path.exists()
+}
+
+/// Готовность фикстуры — наблюдаемый признак, а не отмеренный срок. Отмеренный срок
+/// на загруженной машине истекает раньше, чем фикстуру успевают запланировать, и тогда
+/// падает ожидание, а не проверяемое поведение.
+const CONDITION_DEADLINE: Duration = Duration::from_secs(45);
+const CONDITION_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + CONDITION_DEADLINE;
+    while Instant::now() < deadline {
+        if ready() {
+            return;
+        }
+        thread::sleep(CONDITION_POLL_INTERVAL);
+    }
+    assert!(ready(), "timed out waiting for {what}");
+}
+
+/// Срок, которому истекать не положено: он ограничивает зависание, а не расписывает,
+/// за сколько загруженная машина обязана дойти до фикстуры. Берётся с запасом, которого
+/// ей не перебить.
+const IDLE_WAIT_TIMEOUT_MS: u64 = 60_000;
+
+/// Ожидание, которому положено сработать: его длительность тест платит целиком,
+/// поэтому запас меньше. Загруженная машина (несколько десятков счётных процессов,
+/// параллельный прогон и `nice -n 20`) публиковала признак готовности до девяти
+/// секунд — срок взят с тройным запасом к измеренному худшему случаю.
+const EXPIRING_WAIT_TIMEOUT_MS: u64 = 30_000;
+
+/// Файл признака создаётся перенаправлением до того, как в него что-то записано,
+/// поэтому готовностью считается прочитанное значение, а не существование файла.
+fn published_pid(path: &Path) -> Option<String> {
+    let pid = fs::read_to_string(path).ok()?;
+    let pid = pid.trim().to_owned();
+    (!pid.is_empty()).then_some(pid)
+}
+
+fn process_alive(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("probe descendant")
+        .success()
 }
 
 struct FakeHttpRequest {
@@ -94,7 +136,7 @@ fn start_fake_mcp_server(tools: &[&str]) -> (u16, JoinHandle<()>) {
         loop {
             let Ok((mut stream, _)) = listener.accept() else {
                 assert!(
-                    started.elapsed() <= Duration::from_secs(30),
+                    started.elapsed() <= Duration::from_millis(IDLE_WAIT_TIMEOUT_MS),
                     "fake MCP server timed out waiting for requests"
                 );
                 thread::sleep(Duration::from_millis(10));
@@ -256,7 +298,7 @@ impl Drop for UnresponsiveEndpoint {
 
 fn read_http_json_request(stream: &mut TcpStream) -> FakeHttpRequest {
     stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
+        .set_read_timeout(Some(Duration::from_millis(IDLE_WAIT_TIMEOUT_MS)))
         .expect("read timeout");
     let mut bytes = Vec::new();
     let mut buffer = [0; 1024];
@@ -1213,8 +1255,14 @@ fn launch_mcp_wait_ready_terminates_process_on_readiness_failure() {
         terminated.display()
     );
     let (_dir, config_path, _install_dir, _work_path) = setup_project_with_thin_script(&script);
-    prepend_config(&config_path, "execution_timeout: 15000\n");
-    insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 5000\n");
+    prepend_config(
+        &config_path,
+        &format!("execution_timeout: {IDLE_WAIT_TIMEOUT_MS}\n"),
+    );
+    insert_client_mcp_config(
+        &config_path,
+        &format!("    wait_ready_timeout_ms: {EXPIRING_WAIT_TIMEOUT_MS}\n"),
+    );
     let endpoint = UnresponsiveEndpoint::start();
     let port = endpoint.port();
 
@@ -1238,20 +1286,22 @@ fn launch_mcp_wait_ready_terminates_process_on_readiness_failure() {
         .as_str()
         .expect("error message")
         .contains("MCP endpoint did not become ready"));
-    assert!(
-        wait_for_file(&started, Duration::from_secs(10)),
-        "launch process should have started before the readiness timeout"
-    );
-    assert!(
-        wait_for_file(&terminated, Duration::from_secs(10)),
-        "wait-ready failure should terminate the launched client process"
+    wait_until("the launch process to start", || started.exists());
+    wait_until(
+        "the wait-ready failure to terminate the launched client process",
+        || terminated.exists(),
     );
 }
 
 #[test]
 fn launch_mcp_wait_ready_uses_configured_wait_timeout() {
     let (_dir, config_path, _install_dir, _work_path) = setup_project();
-    prepend_config(&config_path, "execution_timeout: 15000\n");
+    // Настроенный срок и общий бюджет разведены так, что взявшая не тот срок регрессия
+    // выходит за границу, а загруженной машине этой границы не перебить.
+    prepend_config(
+        &config_path,
+        &format!("execution_timeout: {IDLE_WAIT_TIMEOUT_MS}\n"),
+    );
     insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 500\n");
     let endpoint = UnresponsiveEndpoint::start();
     let port = endpoint.port();
@@ -1278,8 +1328,9 @@ fn launch_mcp_wait_ready_uses_configured_wait_timeout() {
         .expect("error message")
         .contains("MCP endpoint did not become ready"));
     assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "wait-ready should use tools.client_mcp.wait_ready_timeout_ms instead of the global execution_timeout"
+        started.elapsed() < Duration::from_millis(IDLE_WAIT_TIMEOUT_MS) / 2,
+        "wait-ready should use tools.client_mcp.wait_ready_timeout_ms instead of the global execution_timeout; elapsed={:?}",
+        started.elapsed()
     );
 }
 
@@ -1307,7 +1358,7 @@ fn thin_external_epf_wait_returns_structured_exit_and_artifacts() {
             &stderr.display().to_string(),
             "--wait-for-exit",
             "--wait-timeout-ms",
-            "5000",
+            &IDLE_WAIT_TIMEOUT_MS.to_string(),
         ])
         .output()
         .expect("run command");
@@ -1347,7 +1398,7 @@ fn thin_external_epf_wait_timeout_terminates_client_group() {
     let stderr = work_path.join("runtime.stderr");
     fs::write(&epf, "epf").expect("epf");
 
-    let command_output = v8_runner_command()
+    let command = v8_runner_command()
         .args([
             "--config",
             &config_path.display().to_string(),
@@ -1362,30 +1413,32 @@ fn thin_external_epf_wait_timeout_terminates_client_group() {
             &stderr.display().to_string(),
             "--wait-for-exit",
             "--wait-timeout-ms",
-            "5000",
+            &EXPIRING_WAIT_TIMEOUT_MS.to_string(),
         ])
-        .output()
-        .expect("run command");
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn command");
+
+    // Потомка называет сама фикстура, и после срабатывания таймаута её уже убили:
+    // признак читается, пока клиент жив, и ожиданием, а не отмеренным сроком.
+    wait_until("client fixture to publish its descendant pid", || {
+        published_pid(&descendant_pid).is_some()
+    });
+    let pid = published_pid(&descendant_pid).expect("descendant pid");
+
+    let command_output = command.wait_with_output().expect("run command");
 
     assert!(!command_output.status.success());
     let payload: Value = serde_json::from_slice(&command_output.stdout).expect("json");
     assert_eq!(payload["ok"], false);
     assert_eq!(payload["error"]["kind"], "runtime");
     assert_eq!(payload["data"]["external_epf_wait"]["timed_out"], true);
-    assert!(
-        wait_for_file(&descendant_pid, Duration::from_secs(10)),
-        "client fixture did not publish its descendant pid before the wait timeout"
-    );
-    let pid = fs::read_to_string(descendant_pid).expect("descendant pid");
-    assert!(
-        !std::process::Command::new("kill")
-            .args(["-0", pid.trim()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .expect("probe descendant")
-            .success(),
-        "timeout must terminate the entire client process group"
+    // Группу убивают, а снимают её записи асинхронно, поэтому исчезновение потомка —
+    // тоже условие, а не мгновенный снимок.
+    wait_until(
+        "the whole client process group to be terminated by the wait timeout",
+        || !process_alive(&pid),
     );
 }
 
