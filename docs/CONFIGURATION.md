@@ -674,6 +674,21 @@ canonical installation root; последующие `1cv8`, `1cv8c` и `ibcmd` �
 | Без `path` и без `version` | Обычный поиск по default roots и `PATH`. |
 | `strict: true`, без `path` | Не создаёт boundary; с `version` работает как version-only поиск, без `version` не меняет обычный поиск. |
 
+Установка платформы бывает неполной, и это норма: тонкий клиент платформа доставляет отдельно и
+обновляет сама под версию опубликованной базы, поэтому рядом с полной установкой живут каталоги
+версий, где есть только `1cv8c`. Версия, подходящая под маску, может не содержать нужного команде
+компонента.
+
+Отказ на этот случай называет опись, а не только имя файла:
+
+```text
+utility '1cv8' was not found: version 8.5.1 is installed (8.5.1.1519, 8.5.1.1469) but has no full
+client; full client is installed in 8.5.4.1306, 8.3.27.2074
+```
+
+Компоненты в тексте отказа: `1cv8` — full client, `1cv8c` — thin client, `ibcmd` — server tools,
+`webinst` — web server extensions.
+
 ## `tools.enterprise`
 
 ### `tools.enterprise.additional-launch-keys`

@@ -37,6 +37,20 @@ impl UtilityType {
     pub fn is_platform(self) -> bool {
         !matches!(self, Self::EdtCli)
     }
+
+    /// Компонент установки, который приносит эту утилиту. Установка бывает неполной:
+    /// тонкий клиент платформа доставляет отдельно и обновляет сама, поэтому версия,
+    /// в которой есть `1cv8c`, может не содержать ни Конфигуратора, ни серверных утилит.
+    /// Отказ называет компонент, а не только имя файла.
+    pub fn component(self) -> &'static str {
+        match self {
+            Self::V8 => "full client",
+            Self::V8C => "thin client",
+            Self::Ibcmd => "server tools",
+            Self::Webinst => "web server extensions",
+            Self::EdtCli => "EDT CLI",
+        }
+    }
 }
 
 impl fmt::Display for UtilityType {
@@ -240,8 +254,13 @@ pub struct UtilityLocation {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum LocatorError {
-    #[error("utility '{0}' was not found")]
-    NotFound(UtilityType),
+    /// `detail` называет, что именно установлено и какого компонента не хватает.
+    /// Без него текст остаётся прежним — на него ссылается пример контракта `convert`.
+    #[error("utility '{utility}' was not found{}", detail.as_deref().map(|detail| format!(": {detail}")).unwrap_or_default())]
+    NotFound {
+        utility: UtilityType,
+        detail: Option<String>,
+    },
     #[error("utility '{utility}' was not found inside strict platform boundary '{boundary}'")]
     StrictBoundaryNotFound {
         utility: UtilityType,
@@ -561,7 +580,20 @@ impl Locator {
                     required,
                     strict_boundary.as_deref(),
                 )),
-                PlatformResolutionPolicy::Lenient => Err(LocatorError::NotFound(utility)),
+                PlatformResolutionPolicy::Lenient => Err(LocatorError::NotFound {
+                    utility,
+                    detail: missing_platform_detail(
+                        utility,
+                        required,
+                        &installed_platforms(
+                            self.platform_hint
+                                .as_deref()
+                                .map(|hint| vec![hint.to_path_buf()])
+                                .unwrap_or_default()
+                                .as_slice(),
+                        ),
+                    ),
+                }),
             };
         }
 
@@ -571,13 +603,17 @@ impl Locator {
             ResolutionSource::DefaultRoot,
         );
         candidates.extend(path_candidates(utility, &self.path_roots));
-        let location = select_candidate(
-            utility,
-            candidates,
-            self.effective_platform_version_requirement(),
-            None,
-        )
-        .ok_or(LocatorError::NotFound(utility))?;
+        let required = self.effective_platform_version_requirement();
+        let location = select_candidate(utility, candidates, required, None).ok_or_else(|| {
+            LocatorError::NotFound {
+                utility,
+                detail: missing_platform_detail(
+                    utility,
+                    required,
+                    &installed_platforms(&self.platform_roots),
+                ),
+            }
+        })?;
         self.pin_platform(&location);
         Ok(location)
     }
@@ -623,7 +659,10 @@ impl Locator {
             edt_candidates_any_version(utility, &self.edt_roots, ResolutionSource::DefaultRoot);
         candidates.extend(path_candidates(utility, &self.path_roots));
         select_edt_candidate(candidates, utility, self.edt_version.as_ref())
-            .ok_or(LocatorError::NotFound(utility))
+            .ok_or(LocatorError::NotFound {
+                utility,
+                detail: None,
+            })
     }
 }
 
@@ -748,6 +787,126 @@ fn platform_candidates_any_version(
     }
 
     candidates
+}
+
+/// Установка платформы, найденная в корне поиска: версия и состав компонентов.
+#[derive(Debug, Clone)]
+struct InstalledPlatform {
+    version: PlatformVersion,
+    components: Vec<UtilityType>,
+}
+
+/// Перечисляет установки платформы в корнях поиска вместе с их составом.
+///
+/// Каталог версии бывает неполным: у самообновляющегося тонкого клиента в нём лежит
+/// только `1cv8c`. Поэтому отказ строится не по одному отсутствующему файлу, а по описи.
+fn installed_platforms(roots: &[PathBuf]) -> Vec<InstalledPlatform> {
+    let mut found: Vec<InstalledPlatform> = Vec::new();
+
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(version) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(PlatformVersion::parse_strict)
+            else {
+                continue;
+            };
+            if found.iter().any(|known| known.version == version) {
+                continue;
+            }
+
+            let components = [
+                UtilityType::V8,
+                UtilityType::V8C,
+                UtilityType::Ibcmd,
+                UtilityType::Webinst,
+            ]
+            .into_iter()
+            .filter(|utility| {
+                let executable = utility.executable_name();
+                is_valid_executable(&path.join(executable))
+                    || is_valid_executable(&path.join("bin").join(executable))
+            })
+            .collect();
+
+            found.push(InstalledPlatform {
+                version,
+                components,
+            });
+        }
+    }
+
+    found.sort_by(|left, right| right.version.cmp(&left.version));
+    found
+}
+
+/// Не больше пяти версий в строке: длинный список читать некому.
+fn name_versions(installations: &[&InstalledPlatform]) -> String {
+    const SHOWN: usize = 5;
+    let names: Vec<String> = installations
+        .iter()
+        .take(SHOWN)
+        .map(|installation| installation.version.to_string())
+        .collect();
+    match installations.len().saturating_sub(SHOWN) {
+        0 => names.join(", "),
+        rest => format!("{} and {rest} more", names.join(", ")),
+    }
+}
+
+/// Объясняет, почему утилиты нет: что установлено, чего в установленном не хватает
+/// и где искомый компонент всё-таки есть.
+fn missing_platform_detail(
+    utility: UtilityType,
+    required: Option<&PlatformVersionRequirement>,
+    installations: &[InstalledPlatform],
+) -> Option<String> {
+    if !utility.is_platform() {
+        return None;
+    }
+    let component = utility.component();
+    if installations.is_empty() {
+        return Some("no 1C platform installation was found".to_owned());
+    }
+
+    let matching: Vec<&InstalledPlatform> = installations
+        .iter()
+        .filter(|installation| {
+            required.is_none_or(|required| required.matches(&installation.version))
+        })
+        .collect();
+    let providers: Vec<&InstalledPlatform> = installations
+        .iter()
+        .filter(|installation| installation.components.contains(&utility))
+        .collect();
+    let elsewhere = match providers.as_slice() {
+        [] => format!("{component} is not installed in any version"),
+        _ => format!("{component} is installed in {}", name_versions(&providers)),
+    };
+
+    Some(match (required, matching.as_slice()) {
+        (Some(required), []) => format!(
+            "no installation matches version {required}; installed: {}; {elsewhere}",
+            name_versions(&installations.iter().collect::<Vec<_>>())
+        ),
+        (Some(required), matching) => format!(
+            "version {required} is installed ({}) but has no {component}; {elsewhere}",
+            name_versions(matching)
+        ),
+        (None, _) => format!(
+            "no installation has {component}; installed: {}",
+            name_versions(&installations.iter().collect::<Vec<_>>())
+        ),
+    })
 }
 
 fn edt_candidates_any_version(
@@ -1779,12 +1938,15 @@ mod tests {
 
         assert_eq!(first.path, canonical(&v8));
         assert_eq!(first.source, ResolutionSource::Explicit);
-        assert_eq!(
+        assert!(matches!(
             locator
                 .locate(UtilityType::V8C)
                 .expect_err("configured path must not fallback"),
-            LocatorError::NotFound(UtilityType::V8C)
-        );
+            LocatorError::NotFound {
+                utility: UtilityType::V8C,
+                ..
+            }
+        ));
     }
 
     #[cfg(unix)]
@@ -1808,12 +1970,15 @@ mod tests {
         fs::remove_file(&hint).expect("remove hint");
 
         assert_eq!(first.path, canonical(&actual));
-        assert_eq!(
+        assert!(matches!(
             locator
                 .locate(UtilityType::V8)
                 .expect_err("current hint is gone"),
-            LocatorError::NotFound(UtilityType::V8)
-        );
+            LocatorError::NotFound {
+                utility: UtilityType::V8,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1882,6 +2047,85 @@ mod tests {
         assert_eq!(location.path, canonical(&binary));
         assert_eq!(location.source, ResolutionSource::Path);
         assert_eq!(location.installation_root, canonical(&path_root));
+    }
+
+    /// Тонкий клиент платформа доставляет отдельно и обновляет сама, поэтому рядом с
+    /// полной установкой живут каталоги версий, где нет ни Конфигуратора, ни серверных
+    /// утилит. Замер на macOS 16.09.2026: восемь установок, семь из них — только `1cv8c`.
+    /// Отказ обязан назвать это, а не только имя файла.
+    #[test]
+    fn a_missing_component_is_named_together_with_the_installations_that_have_it() {
+        let root = tempdir().expect("root");
+        touch_versioned_platform_executable(root.path(), "8.5.1.1519", UtilityType::V8C, false);
+        touch_versioned_platform_executable(root.path(), "8.5.1.1469", UtilityType::V8C, false);
+        touch_versioned_platform_executable(root.path(), "8.5.4.1306", UtilityType::V8, false);
+        touch_versioned_platform_executable(root.path(), "8.5.4.1306", UtilityType::V8C, false);
+
+        let mut locator = lenient_locator(
+            None,
+            Some("8.5.1"),
+            vec![root.path().to_path_buf()],
+            Vec::new(),
+        );
+
+        let error = locator.locate(UtilityType::V8).expect_err("no full client");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("version 8.5.1 is installed (8.5.1.1519, 8.5.1.1469)"),
+            "отказ обязан назвать найденные установки: {message}"
+        );
+        assert!(
+            message.contains("has no full client"),
+            "отказ обязан назвать компонент: {message}"
+        );
+        assert!(
+            message.contains("full client is installed in 8.5.4.1306"),
+            "отказ обязан назвать, где компонент есть: {message}"
+        );
+    }
+
+    /// Ни одной установки под маску: отказ перечисляет то, что стоит, чтобы маску было
+    /// с чем сравнить.
+    #[test]
+    fn a_version_without_any_installation_lists_what_is_installed() {
+        let root = tempdir().expect("root");
+        touch_versioned_platform_executable(root.path(), "8.3.27.2074", UtilityType::V8, false);
+
+        let mut locator = lenient_locator(
+            None,
+            Some("8.6"),
+            vec![root.path().to_path_buf()],
+            Vec::new(),
+        );
+
+        let message = locator
+            .locate(UtilityType::V8)
+            .expect_err("no such version")
+            .to_string();
+
+        assert!(
+            message.contains("no installation matches version 8.6"),
+            "отказ обязан назвать маску: {message}"
+        );
+        assert!(
+            message.contains("installed: 8.3.27.2074"),
+            "отказ обязан перечислить установленное: {message}"
+        );
+    }
+
+    /// Текст отказа для EDT закреплён примером контракта `convert` и меняться не должен.
+    #[test]
+    fn a_missing_edt_cli_keeps_its_pinned_wording() {
+        let root = tempdir().expect("root");
+        let mut locator = lenient_locator(None, None, Vec::new(), vec![root.path().to_path_buf()]);
+
+        let message = locator
+            .locate(UtilityType::EdtCli)
+            .expect_err("no edt cli")
+            .to_string();
+
+        assert_eq!(message, "utility '1cedtcli' was not found");
     }
 
     #[test]
@@ -2306,7 +2550,10 @@ mod tests {
             locator
                 .locate(UtilityType::EdtCli)
                 .expect_err("canonical EDT version mismatch"),
-            LocatorError::NotFound(UtilityType::EdtCli)
+            LocatorError::NotFound {
+                utility: UtilityType::EdtCli,
+                detail: None,
+            }
         );
     }
 
