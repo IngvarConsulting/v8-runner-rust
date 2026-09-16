@@ -88,6 +88,11 @@ a:focus-visible, button:focus-visible, textarea:focus-visible { outline: 2px sol
 .topbar nav { display: flex; gap: 18px; flex-wrap: wrap; }
 .topbar nav a { border: 0; color: var(--ink-2); font-size: 0.95rem; white-space: nowrap; }
 .topbar nav a[aria-current="page"] { color: var(--ink); font-weight: 700; }
+.topbar nav a.gh { display: inline-flex; align-items: center; gap: 5px; }
+.topbar nav a.gh svg { width: 18px; height: 18px; fill: currentColor; display: block; }
+.topbar nav a.gh:hover { color: var(--ink); }
+.gh-stars { font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+.gh-stars::before { content: "\2605"; margin-right: 3px; color: var(--ink-3); }
 
 .page { max-width: 1180px; margin: 0 auto; padding: 32px 24px 96px; }
 .lede { max-width: 72ch; color: var(--ink-2); font-size: 1.08rem; }

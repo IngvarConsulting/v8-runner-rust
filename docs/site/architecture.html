@@ -6,7 +6,7 @@
 <title>v8-runner · Архитектура</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="styles.css?v=11">
+<link rel="stylesheet" href="styles.css?v=12">
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -17,18 +17,18 @@
     <a href="usecases.html">Сценарии</a>
     <a href="inside.html">Как устроено</a>
     <a href="architecture.html" aria-current="page">Архитектура</a>
-    <a href="https://github.com/IngvarConsulting/v8-runner-rust">GitHub</a>
+    <a class="gh" href="https://github.com/IngvarConsulting/v8-runner-rust" aria-label="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span class="gh-stars" hidden></span></a>
   </nav>
 </div></div>
 
 <main class="page">
 <h1>Архитектура</h1>
-<p class="lede">Раннер сам ничего не делает с базой: он оркестрирует чужие процессы — утилиты платформы 1С и EDT. Поэтому архитектура состоит из двух частей: слои внутри процесса и внешние процессы с их временем жизни.</p>
+<p class="lede">Раннер сам ничего не делает с базой: он оркестрирует чужие процессы — утилиты платформы 1С и EDT. Поэтому в архитектуре три части: слои внутри процесса; внешние процессы и развёртывание 1С, до которого они дотягиваются; время жизни всего этого.</p>
 
 <h2>Слои</h2>
 <pre class="mermaid">
 flowchart TB
-  subgraph adapters["Адаптеры — знают транспорт"]
+  subgraph adapters["Адаптеры транспорта"]
     CLI["cli<br/>аргументы, текст и JSON"]
     MCP["mcp<br/>8 инструментов, stdio и HTTP"]
   end
@@ -76,6 +76,485 @@ flowchart LR
   R -->|"процесс на операцию"| W["webinst"]
 </pre>
 
+<h2 id="deploy">Варианты развёртывания 1С</h2>
+<p>Вид цели решает, какими утилитами раннер работает, по какому каналу отдаёт команду и откуда забирает результат. Видов три — файловая база, кластер 1С, автономный сервер, — а машин под ними бывает сколько угодно. Ниже восемь развёрток, которые встречаются на практике.</p>
+<ul class="toc">
+  <li><a href="#d-file">1. Файловая база</a></li>
+  <li><a href="#d-file-web">2. Файловая база и веб-сервер</a></li>
+  <li><a href="#d-cluster-local">3. Кластер на своей машине</a></li>
+  <li><a href="#d-cluster-remote">4. Кластер на другой машине, несколько rphost</a></li>
+  <li><a href="#d-ras">5. Кластер, RAS поднят удалённо</a></li>
+  <li><a href="#d-cluster-web">6. Кластер и веб-сервер</a></li>
+  <li><a href="#d-standalone-local">7. Автономный сервер на своей машине</a></li>
+  <li><a href="#d-standalone-remote">8. Автономный сервер на другой машине</a></li>
+</ul>
+
+<h3 id="d-legend">Как читать схемы</h3>
+<p>Схемы нарисованы в нотации ArchiMate, уровень технологий: рамка — машина (node), прямоугольник — процесс (system software), скруглённый блок — точка входа (technology service), «документ» и цилиндр — данные (artifact), синий блок — сам раннер (application component). Подпись на стрелке называет канал и протокол; пунктир — сеть, сплошная — процесс или файл на той же машине. Серое — то, с чем раннер не разговаривает.</p>
+<pre class="mermaid">
+flowchart TB
+  L1["процесс<br/>утилита платформы"]
+  L2(["точка входа<br/>SSH-шлюз, HTTP"])
+  L3@{ shape: doc, label: "файл или каталог" }
+  L4@{ shape: cyl, label: "база данных СУБД" }
+  L5["v8-runner"]
+  L6["вне раннера"]
+  class L1 sw
+  class L2 svc
+  class L3 art
+  class L4 art
+  class L5 run
+  class L6 off
+  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
+  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
+  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
+  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
+  classDef off fill:#e4e4e7,stroke:#9a9aa2,color:#33333a;
+</pre>
+<p class="hint">Сам раннер ничего не исполняет. Утилиту он вызывает запуском процесса — аргументы командной строки, код выхода и журнал; с агентом и шлюзом говорит сессией SSH. Поэтому на стрелке от раннера стоит вид вызова, а не имя команды. Где раннер поднимает процесс сам, у стрелки написано «поднимает»: агент Конфигуратора он запускает и только потом к нему подключается, а шлюз автономного сервера поднимаете вы — туда идёт одна сессия.</p>
+
+<h3 id="d-map">Общая карта</h3>
+<p>Раннер запускает утилиты у себя и достаёт цель тремя способами: файлом, сетевым протоколом платформы и SSH. Четвёртого нет — консоль кластера и его RAS остаются вне раннера. Здесь показан только канал администрирования; чем и откуда базу открывает человек, видно в каждом варианте отдельно.</p>
+<pre class="mermaid">
+flowchart LR
+  subgraph HOST["машина раннера"]
+    R["v8-runner<br/>CLI · MCP"]
+    EDT["1cedtcli"]
+    DES["1cv8 DESIGNER"]
+    IBC["ibcmd"]
+    WEB["webinst"]
+    AGT(["1cv8 /AgentMode<br/>127.0.0.1:1543"])
+  end
+  SRC@{ shape: doc, label: "исходники<br/>XML, проект EDT" }
+  FDB@{ shape: doc, label: "файловая база<br/>каталог с 1Cv8.1CD" }
+  CLU["кластер 1С<br/>ragent · rmngr · rphost"]
+  DBMS@{ shape: cyl, label: "СУБД" }
+  GATE(["автономный сервер<br/>SSH-шлюз ibsrv 1543"])
+  WS(["Apache · IIS"])
+  R -->|"одна живая сессия"| EDT
+  R -->|"процесс на операцию"| DES
+  R -->|"процесс на операцию"| IBC
+  R -->|"процесс на операцию"| WEB
+  R -->|"поднимает"| AGT
+  R -->|"SSH 127.0.0.1:1543"| AGT
+  R -.->|"SSH · SFTP"| GATE
+  EDT --> SRC
+  DES --> SRC
+  DES -->|"файл"| FDB
+  DES -.->|"TCP 1541"| CLU
+  IBC -->|"--db-path"| FDB
+  IBC -.->|"--dbms: прямо в СУБД"| DBMS
+  AGT -->|"файл"| FDB
+  AGT -.->|"TCP 1541"| CLU
+  WEB -->|"публикация"| WS
+  CLU --> DBMS
+  class R run
+  class DES,IBC,WEB,EDT,CLU sw
+  class AGT,GATE,WS svc
+  class SRC,FDB,DBMS art
+  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
+  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
+  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
+  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
+  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
+</pre>
+<p class="hint">Утилиты EDT к базе не подключаются: <code>1cedtcli</code> работает только с исходниками, поэтому во всех восьми вариантах он одинаков.</p>
+
+<h3 id="d-file">1. Файловая база</h3>
+<p>Всё на одной машине: и раннер, и платформа, и каталог базы. Самый частый случай для разработчика и для CI, который поднимает базу с нуля.</p>
+<pre class="mermaid">
+flowchart LR
+  subgraph HOST["машина раннера"]
+    R["v8-runner"]
+    DES["1cv8 DESIGNER"]
+    IBC["ibcmd"]
+    AGT(["1cv8 /AgentMode<br/>127.0.0.1:1543"])
+    CLI["1cv8c · клиент"]
+    IB@{ shape: doc, label: "каталог базы<br/>1Cv8.1CD" }
+    WP@{ shape: doc, label: "workPath<br/>журналы, хеши, .cf, .dt" }
+  end
+  R -->|"процесс на операцию"| DES
+  R -->|"процесс на операцию"| IBC
+  R -->|"поднимает"| AGT
+  R -->|"SSH 127.0.0.1:1543"| AGT
+  R -->|"процесс на запуск"| CLI
+  DES -->|"файл, монопольно"| IB
+  IBC -->|"--db-path"| IB
+  AGT -->|"файл"| IB
+  CLI -->|"файл"| IB
+  DES --> WP
+  class R run
+  class DES,IBC,CLI sw
+  class AGT svc
+  class IB,WP art
+  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
+  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
+  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
+  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
+  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
+</pre>
+<ul class="opts">
+  <li><strong>Администрирование</strong> — <code>infobase.connection: "File=…"</code>; каталог базы обязан быть виден раннеру.</li>
+  <li><strong>Исполнители</strong> — <code>designer</code> по умолчанию, <code>ibcmd</code> следующим в цепочке там, где матрица его знает, и умолчанием у <code>extensions</code>; <code>agent</code> — по ключу. Точный состав по операциям — в таблице ниже.</li>
+  <li><strong>Обмен</strong> — общий диск: <code>.cf</code>, <code>.dt</code> и выгрузка XML пишутся прямо туда, куда сказано.</li>
+  <li><strong>Клиент и тесты</strong> — <code>1cv8c</code> по той же строке; YAxUnit получает задание через <code>/C RunUnitTests=…</code>, Vanessa — через <code>/Execute</code> и <code>/TESTMANAGER</code>, отчёт возвращается файлом в <code>workPath</code>.</li>
+  <li><strong>Условие</strong> — платформа на машине раннера; операции Конфигуратора берут базу монопольно, чужой открытый сеанс их сорвёт.</li>
+</ul>
+
+<h3 id="d-file-web">2. Файловая база и веб-сервер</h3>
+<p>Файловая база и веб-сервер Apache или IIS на одной машине с раннером. У базы два адреса: по файловому пути её администрируют, по HTTP — открывают веб-клиентом.</p>
+<pre class="mermaid">
+flowchart LR
+  subgraph HOST["машина раннера"]
+    R["v8-runner"]
+    WEBI["webinst"]
+    DES["1cv8 DESIGNER"]
+    CLI["1cv8c · клиент"]
+    WS(["Apache · IIS<br/>модуль wsap · wsisapi"])
+    PUB@{ shape: doc, label: "каталог публикации<br/>default.vrd" }
+    IB@{ shape: doc, label: "каталог базы<br/>1Cv8.1CD" }
+  end
+  BR(["браузер · тонкий клиент"])
+  R -->|"процесс на операцию"| WEBI
+  R -->|"процесс на операцию"| DES
+  R -->|"процесс на запуск"| CLI
+  CLI -->|"File=…, файл"| IB
+  WEBI -->|"-dir, -wsdir, -connstr File=…"| PUB
+  WEBI -->|"-confpath: правка конфига"| WS
+  WS -->|"файл"| IB
+  WS --> PUB
+  DES -->|"файл, монопольно"| IB
+  BR -.->|"HTTP · HTTPS, ws=…"| WS
+  class R run
+  class WEBI,DES,CLI sw
+  class WS,BR svc
+  class PUB,IB art
+  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
+  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
+  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
+  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
+  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
+</pre>
+<ul class="opts">
+  <li><strong>Администрирование</strong> — <code>infobase.connection: "File=…"</code>. Строка <code>ws=…</code> здесь не принимается: она называет клиентский адрес, а не канал администрирования.</li>
+  <li><strong>Публикация</strong> — <code>publish</code> собирает <code>webinst</code> из секции <code>infobase.web</code>: <code>server</code>, <code>wsdir</code>, <code>dir</code>, <code>conf</code>, <code>os-auth</code>. <code>default.vrd</code> замещается целиком, поэтому у команды есть превью, а снятие публикации — отдельный <code>publish --delete</code>.</li>
+  <li><strong>Где стоит веб-сервер</strong> — на машине раннера: <code>webinst</code> запускается локально, и <code>dir</code> обязан существовать на его файловой системе. Модуль веб-сервера открывает ту же файловую базу с диска, значит и ему она должна быть видна.</li>
+  <li><strong>Два пути у клиента</strong> — тонкий клиент открывает эту базу и по строке подключения <code>File=…</code> прямо с диска, и по веб-адресу через Apache или IIS. Первый путь запускает сам раннер — <code>launch thin</code>; второй он умеет только показать браузером: <code>launch web</code> по <code>infobase.web.url</code>. Клиентские запуски раннера веб-адрес не берут.</li>
+  <li><strong>Цена</strong> — пока в опубликованной базе есть живой сеанс, он держит её открытой, и монопольные операции Конфигуратора отказывают.</li>
+</ul>
+
+<h3 id="d-cluster-local">3. Кластер на своей машине</h3>
+<p>Сервер 1С и раннер стоят на одной машине. Данные базы держит СУБД, а раннер работает с ней через кластер — по строке подключения.</p>
+<pre class="mermaid">
+flowchart LR
+  subgraph BOX["одна машина"]
+    subgraph HOST["раннер и утилиты"]
+      R["v8-runner"]
+      DES["1cv8 DESIGNER"]
+      IBC["ibcmd"]
+      AGT(["1cv8 /AgentMode<br/>127.0.0.1:1543"])
+      CLI["1cv8c · клиент"]
+      WP@{ shape: doc, label: "workPath<br/>.cf, .dt, журналы" }
+    end
+    subgraph SRV["сервер 1С"]
+      RAG["ragent 1540<br/>rmngr 1541"]
+      RPH["rphost 1560–1591"]
+    end
+  end
+  DBMS@{ shape: cyl, label: "СУБД" }
+  R -->|"процесс на операцию"| DES
+  R -->|"процесс на запуск"| CLI
+  R -->|"процесс на операцию"| IBC
+  R -->|"поднимает"| AGT
+  R -->|"SSH 127.0.0.1:1543"| AGT
+  DES -->|"Srvr=…;Ref=…, TCP"| RAG
+  CLI -->|"TCP"| RAG
+  AGT -->|"TCP"| RAG
+  IBC -->|"--dbms, --database-server"| DBMS
+  RAG --> RPH
+  RPH --> DBMS
+  DES --> WP
+  class R run
+  class DES,IBC,CLI,RAG,RPH sw
+  class AGT svc
+  class WP,DBMS art
+  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
+  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
+  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
+  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
+  style BOX fill:#fbfbfc,stroke:#c3c9d0,color:#4b5560
+  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
+  style SRV fill:#f1f8ea,stroke:#8aad76,color:#12210c
+</pre>
+<ul class="opts">
+  <li><strong>Администрирование</strong> — <code>infobase.connection: "Srvr=localhost:1541;Ref=demo"</code>: утилиты раннера подключаются к кластеру обычными клиентами.</li>
+  <li><strong>Исполнители</strong> — <code>designer</code> по умолчанию, <code>ibcmd</code> в цепочке и умолчанием у <code>extensions</code>, <code>agent</code> — по ключу. <code>ibcmd</code> в кластер не ходит вовсе: серверную цель он открывает прямо в СУБД, поэтому секция <code>infobase.dbms</code> нужна везде, где исполнителем становится он сам, — начиная с <code>init</code>.</li>
+  <li><strong>Обмен</strong> — Конфигуратор работает на машине раннера, поэтому <code>.cf</code>, <code>.dt</code> и выгрузка XML остаются у него. Файлов сервера раннер не касается.</li>
+  <li><strong>Клиент и тесты</strong> — клиент поднимается по строке подключения; отчёт теста возвращается файлом в <code>workPath</code>.</li>
+  <li><strong>Что даёт соседство</strong> — ничего сверх удобства: канал к кластеру сетевой, файловая система сервера раннеру не принадлежит, журналы сервера ему не видны.</li>
+</ul>
+
+<h3 id="d-cluster-remote">4. Кластер на другой машине, несколько rphost</h3>
+<p>Рабочая или тестовая база на сервере приложений с пулом рабочих процессов. Раннер дотягивается до неё по сети: файловая система сервера и его журналы ему недоступны.</p>
+<pre class="mermaid">
+flowchart LR
+  subgraph HOST["машина раннера"]
+    R["v8-runner"]
+    DES["1cv8 DESIGNER"]
+    CLI["1cv8c · клиент"]
+    WP@{ shape: doc, label: "workPath<br/>.cf, .dt, отчёты тестов" }
+  end
+  subgraph SRV["сервер приложений 1С"]
+    RAG["ragent 1540 · rmngr 1541"]
+    RP1["rphost"]
+    RP2["rphost"]
+    RP3["rphost"]
+    LOG@{ shape: doc, label: "журнал регистрации,<br/>технологический журнал" }
+  end
+  DBMS@{ shape: cyl, label: "СУБД<br/>5432 · 1433" }
+  R -->|"процесс на операцию"| DES
+  R -->|"процесс на запуск"| CLI
+  DES -.->|"TCP 1541, дальше 1560–1591"| RAG
+  CLI -.->|"TCP"| RAG
+  RAG --> RP1
+  RAG --> RP2
+  RAG --> RP3
+  RP1 --> DBMS
+  RP2 --> DBMS
+  RP3 --> DBMS
+  RP1 --> LOG
+  DES --> WP
+  class R run
+  class DES,CLI,RAG,RP1,RP2,RP3 sw
+  class WP,DBMS art
+  class LOG off
+  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
+  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
+  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
+  classDef off fill:#e4e4e7,stroke:#9a9aa2,color:#33333a;
+  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
+  style SRV fill:#f1f8ea,stroke:#8aad76,color:#12210c
+</pre>
+<ul class="opts">
+  <li><strong>Администрирование</strong> — <code>infobase.connection: "Srvr=srv:1541;Ref=demo"</code>; раннеру нужен доступ к портам кластера и ничего больше.</li>
+  <li><strong>Рабочие процессы</strong> — сеанс отдаёт менеджер кластера одному из <code>rphost</code>; какому — раннер не выбирает и не знает. Соединение продолжается на порт из диапазона рабочих процессов, поэтому открытого наружу 1541 недостаточно.</li>
+  <li><strong>Обмен</strong> — результат остаётся на машине раннера: Конфигуратор здесь клиент, и путь выгрузки — его собственный.</li>
+  <li><strong>Чего не видно</strong> — журнал регистрации и технологический журнал сервера. Раннер их не читает, и квитанция их не обещает.</li>
+  <li><strong>Монопольные операции</strong> — чужие сеансы в других <code>rphost</code> сорвут <code>update-db-cfg</code> и снимок базы. Сеансами раннер не управляет: блокировку ставит администратор кластера.</li>
+  <li><strong>Агент</strong> — Конфигуратор в агентском режиме поднимается на машине раннера и ходит к кластеру тем же TCP, поэтому платформа нужна локально. Исключение одно: конфиг назвал уже поднятого агента ключом <code>tools.designer_agent.attach</code> — такого раннер не запускает, и платформа ему не нужна.</li>
+</ul>
+
+<h3 id="d-ras">5. Кластер, RAS поднят удалённо</h3>
+<p>Сервер администрирования вынесен на отдельную машину, консоль и скрипты ходят к кластеру через него. Для раннера это соседний канал: он им не пользуется.</p>
+<pre class="mermaid">
+flowchart LR
+  subgraph HOST["машина раннера"]
+    R["v8-runner"]
+    DES["1cv8 DESIGNER"]
+  end
+  subgraph SRV["сервер 1С"]
+    RAG["ragent 1540 · rmngr 1541"]
+    RPH["rphost"]
+  end
+  subgraph ADMIN["машина с RAS"]
+    RAS(["RAS 1545"])
+    RAC["rac · консоль"]
+  end
+  R -->|"процесс на операцию"| DES
+  DES -.->|"TCP 1541, Srvr=…;Ref=…"| RAG
+  RAS -.->|"TCP 1541"| RAG
+  RAC --> RAS
+  RAG --> RPH
+  class R run
+  class DES,RAG,RPH sw
+  class RAS,RAC off
+  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
+  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
+  classDef off fill:#e4e4e7,stroke:#9a9aa2,color:#33333a;
+  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
+  style SRV fill:#f1f8ea,stroke:#8aad76,color:#12210c
+  style ADMIN fill:#eeeef0,stroke:#a8a8b0,color:#33333a
+</pre>
+<ul class="opts">
+  <li><strong>Раннер к RAS не обращается</strong> — ни <code>ras</code>, ни <code>rac</code> в списке исполнителей нет, и ни одной команды администрирования кластера он не отправляет. К базе он ходит только строкой подключения.</li>
+  <li><strong>Что остаётся за RAS</strong> — сеансы, соединения, лицензии, блокировка начала сеансов, регламентные задания. Это делается консолью или скриптами, где бы сервер администрирования ни стоял.</li>
+  <li><strong>Следствие в обе стороны</strong> — недоступный RAS командам раннера не мешает; но и то, что решается только через него — выгнать сеансы перед монопольной операцией, — раннер не сделает.</li>
+</ul>
+
+<h3 id="d-cluster-web">6. Кластер и веб-сервер</h3>
+<p>Кластерная база, опубликованная на Apache или IIS. Веб-сервер держит подключение к кластеру по сети; файловый доступ к базе ему не нужен.</p>
+<pre class="mermaid">
+flowchart LR
+  subgraph HOST["машина раннера"]
+    R["v8-runner"]
+    WEBI["webinst"]
+    CLI["1cv8c · клиент"]
+    WS(["Apache · IIS<br/>модуль wsap · wsisapi"])
+    PUB@{ shape: doc, label: "каталог публикации<br/>default.vrd" }
+  end
+  subgraph SRV["сервер 1С"]
+    RAG["ragent · rmngr 1541"]
+    RPH["rphost"]
+  end
+  BR(["браузер · тонкий клиент"])
+  R -->|"процесс на операцию"| WEBI
+  R -->|"процесс на запуск"| CLI
+  CLI -.->|"Srvr=…;Ref=…, TCP 1541"| RAG
+  WEBI -->|"-dir, -wsdir, -connstr Srvr=…;Ref=…"| PUB
+  WEBI -->|"-confpath: правка конфига"| WS
+  WS --> PUB
+  WS -.->|"TCP 1541"| RAG
+  BR -.->|"HTTP · HTTPS, ws=…"| WS
+  RAG --> RPH
+  class R run
+  class WEBI,CLI,RAG,RPH sw
+  class WS,BR svc
+  class PUB art
+  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
+  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
+  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
+  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
+  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
+  style SRV fill:#f1f8ea,stroke:#8aad76,color:#12210c
+</pre>
+<ul class="opts">
+  <li><strong>Публикация</strong> — <code>publish</code> собирает <code>webinst</code> из секции <code>infobase.web</code>; в <code>-connstr</code> уходит <code>infobase.connection</code> как есть, то есть <code>Srvr=…;Ref=…</code>.</li>
+  <li><strong>Где стоит веб-сервер</strong> — там же, где раннер. Веб-сервер, стоящий рядом с кластером, раннер опубликовать не может: <code>webinst</code> он запускает только у себя, и каталог публикации ищет на своей файловой системе.</li>
+  <li><strong>Что нужно веб-серверу</strong> — доступ к кластеру по TCP; файловый доступ к базе ему не требуется.</li>
+  <li><strong>Два пути у клиента</strong> — тонкий клиент идёт в кластер и напрямую по <code>Srvr=…;Ref=…</code>, и по веб-адресу через Apache или IIS. Первый путь запускает раннер — <code>launch thin</code>; второй открывает браузером <code>launch web</code> по <code>infobase.web.url</code>.</li>
+</ul>
+
+<h3 id="d-standalone-local">7. Автономный сервер на своей машине</h3>
+<p><code>ibsrv</code> поднимаете вы, раннер его не запускает и не ищет. Разговор идёт не с утилитой платформы, а с процессом сервера — через его SSH-шлюз.</p>
+<pre class="mermaid">
+flowchart LR
+  subgraph BOX["одна машина"]
+    subgraph HOST["раннер"]
+      R["v8-runner"]
+      WP@{ shape: doc, label: "workPath<br/>всегда локален" }
+    end
+    subgraph SRV["автономный сервер"]
+      GATE(["SSH-шлюз 1543<br/>ibsrv --enable-ssh-gate"])
+      IBSRV["ibsrv<br/>поднят вами"]
+      UD@{ shape: doc, label: "каталог пользователя шлюза<br/>users-data и имя пользователя" }
+      HTTPS(["HTTP 8314"])
+      DB@{ shape: cyl, label: "база данных" }
+    end
+  end
+  BR(["браузер · тонкий клиент"])
+  R -->|"SSH: команда строкой, ответ JSON"| GATE
+  R -->|"exchange: dir — ссылки и копии"| UD
+  R -->|"файл"| WP
+  GATE --> IBSRV
+  IBSRV --> UD
+  IBSRV --> DB
+  IBSRV --> HTTPS
+  BR -->|"HTTP"| HTTPS
+  class R run
+  class IBSRV sw
+  class GATE,HTTPS,BR svc
+  class WP,UD,DB art
+  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
+  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
+  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
+  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
+  style BOX fill:#fbfbfc,stroke:#c3c9d0,color:#4b5560
+  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
+  style SRV fill:#f1f8ea,stroke:#8aad76,color:#12210c
+</pre>
+<ul class="opts">
+  <li><strong>Администрирование</strong> — <code>infobase.standalone.gate: "localhost:1543"</code>; <code>infobase.connection</code> при этом пустая, вид цели объявлен один раз.</li>
+  <li><strong>Как разговаривает</strong> — SSH-сессия встроенного клиента, без псевдотерминала. Первая команда переводит шлюз в машинный режим, дальше идут команды шлюза: <code>config load-config-from-files</code>, <code>config dump-cfg</code>, <code>config update-db-cfg</code> и прочие.</li>
+  <li><strong>Обмен</strong> — объявляется ключом <code>exchange</code>: <code>sftp</code> по тому же соединению или <code>{ dir: … }</code> — каталог пользователя шлюза, видимый раннеру. На одной машине дешевле второй: файлы переносятся ссылками, мимо сети и мимо SFTP. Без объявленного канала команда отказывает на валидации, до всякой сессии.</li>
+  <li><strong>Исполнитель один</strong> — <code>agent</code> через шлюз; <code>providers.&lt;операция&gt;</code> для этой цели не нужен и не разрешён. Платформа на машине раннера не требуется.</li>
+  <li><strong>Клиент</strong> — HTTP самого сервера: адрес известен сразу и публикации не требует. Открывают его браузером или тонким клиентом по веб-подключению; из этих двух раннер умеет только браузер — <code>launch web</code>. <code>test</code> и <code>launch thin · thick · designer</code> отказывают типизированно: они идут по строке подключения, которой у автономного сервера нет.</li>
+</ul>
+
+<h3 id="d-standalone-remote">8. Автономный сервер на другой машине</h3>
+<p>Автономный сервер на отдельной машине. Раннеру не нужна ни платформа, ни доступ к чужому диску — нужен SSH до шлюза и объявленный канал файлов.</p>
+<pre class="mermaid">
+flowchart LR
+  subgraph HOST["машина раннера"]
+    R["v8-runner"]
+    WP@{ shape: doc, label: "workPath<br/>остаётся здесь" }
+    SRC@{ shape: doc, label: "исходники и артефакты" }
+  end
+  subgraph SRV["другая машина"]
+    GATE(["SSH-шлюз 1543"])
+    IBSRV["ibsrv"]
+    UD@{ shape: doc, label: "каталог пользователя шлюза<br/>пути разрешаются здесь" }
+    HTTPS(["HTTP 8314"])
+  end
+  DB@{ shape: cyl, label: "база данных" }
+  BR(["браузер · тонкий клиент"])
+  R -->|"файл"| WP
+  R -->|"файл"| SRC
+  R -.->|"SSH: команда строкой, ответ JSON"| GATE
+  SRC -.->|"SFTP того же соединения"| UD
+  GATE --> IBSRV
+  IBSRV --> UD
+  IBSRV --> DB
+  IBSRV --> HTTPS
+  BR -.->|"HTTP"| HTTPS
+  class R run
+  class IBSRV sw
+  class GATE,HTTPS,BR svc
+  class WP,SRC,UD,DB art
+  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
+  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
+  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
+  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
+  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
+  style SRV fill:#f1f8ea,stroke:#8aad76,color:#12210c
+</pre>
+<ul class="opts">
+  <li><strong>Администрирование</strong> — <code>gate: "srv.example:1543"</code>, учётные данные берутся из <code>infobase.user</code> и <code>infobase.password</code>: шлюз пускает по пользователю базы.</li>
+  <li><strong>Пути</strong> — разрешаются на стороне сервера, относительно каталога пользователя шлюза. <code>workPath</code> остаётся локальным и внутрь <code>exchange.dir</code> не кладётся — валидация это проверяет.</li>
+  <li><strong>Канал файлов</strong> — <code>sftp</code>; вариант <code>{ dir: … }</code> годится, только если этот каталог смонтирован у раннера.</li>
+  <li><strong>Замер 15.09.2026</strong> — шлюз <code>ibsrv</code> 8.3.27 отдаёт по SFTP чтение и каталоги, а запись не принимает ни с какими флагами: <code>dump --mode full</code>, <code>make</code> и экспорт <code>.cf</code> работают, <code>build</code> и инкрементальная выгрузка отказывают типизированно, с путём и кодом шлюза.</li>
+  <li><strong>Своего агента раннер тут не поднимает</strong> — процесс он запускает только у себя, и управляемый агент всегда слушает 127.0.0.1. К автономному серверу он только подключается: ключи <code>tools.designer_agent</code> вместе с ним отвергаются валидацией.</li>
+  <li><strong>После <code>update-db-cfg</code></strong> — сервер 15–20 секунд «обновляется» и отвергает SSH-логин; раннер ждёт шлюз до 30 секунд.</li>
+</ul>
+
+<h3 id="d-ops">Что доступно по виду цели</h3>
+<p>Местоположение цели на этот список не влияет: он зависит от вида. Первый исполнитель в клетке — умолчание; следующего реализованного раннер пробует, если первый не готов, а экспериментальные включаются только ключом <code>providers.&lt;операция&gt;</code>.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Операция</th><th>Файловая база</th><th>Кластер 1С</th><th>Автономный сервер</th></tr></thead>
+<tbody>
+<tr><td class="k">init</td><td><span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span></td><td><span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span></td><td><span class="pill no">нет</span> сервер поднят вами</td></tr>
+<tr><td class="k">build</td><td><span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span> <span class="pill agent">agent</span></td><td><span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span> <span class="pill agent">agent</span></td><td><span class="pill agent">agent</span> через шлюз</td></tr>
+<tr><td class="k">load</td><td><span class="pill batch">designer</span></td><td><span class="pill batch">designer</span></td><td><span class="pill no">нет</span> у шлюза нет <code>compare-cfg</code></td></tr>
+<tr><td class="k">dump</td><td><span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span> <span class="pill agent">agent</span></td><td><span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span> <span class="pill agent">agent</span></td><td><span class="pill agent">agent</span></td></tr>
+<tr><td class="k">make</td><td><span class="pill batch">designer</span> <span class="pill agent">agent</span></td><td><span class="pill batch">designer</span> <span class="pill agent">agent</span></td><td><span class="pill agent">agent</span></td></tr>
+<tr><td class="k">extensions</td><td><span class="pill ibcmd">ibcmd</span> <span class="pill agent">agent</span></td><td><span class="pill ibcmd">ibcmd</span> <span class="pill agent">agent</span></td><td><span class="pill agent">agent</span></td></tr>
+<tr><td class="k">infobase configuration export</td><td><span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span> <span class="pill agent">agent</span></td><td><span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span> <span class="pill agent">agent</span></td><td><span class="pill agent">agent</span></td></tr>
+<tr><td class="k">infobase dump · restore</td><td><span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span> <span class="pill agent">agent</span></td><td><span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span> <span class="pill agent">agent</span></td><td><span class="pill no">нет</span> <code>dump-ib</code> роняет <code>ibsrv</code> 8.3.27</td></tr>
+<tr><td class="k">syntax</td><td><span class="pill batch">designer</span></td><td><span class="pill batch">designer</span></td><td><span class="pill no">нет</span></td></tr>
+<tr><td class="k">test</td><td>клиент: <code>1cv8c</code>, иначе <code>--client-mode</code></td><td>клиент: <code>1cv8c</code>, иначе <code>--client-mode</code></td><td><span class="pill no">нет</span> нужна строка подключения</td></tr>
+<tr><td class="k">launch</td><td>designer · thin · thick · ordinary · mcp; web — когда объявлен <code>infobase.web.url</code></td><td>designer · thin · thick · ordinary · mcp; web — когда объявлен <code>infobase.web.url</code></td><td><code>launch web</code> — браузером; тонкий клиент по тому же адресу открывают руками</td></tr>
+<tr><td class="k">publish</td><td><span class="pill neutral">webinst</span></td><td><span class="pill neutral">webinst</span></td><td>не нужна: сервер отдаёт HTTP сам</td></tr>
+</tbody></table></div>
+<p class="hint">У тонкого клиента два пути, и раннер умеет только первый: по строке подключения — прямо в файловую базу или кластер (<code>launch thin</code>), по веб-адресу — через Apache, IIS или автономный сервер (<code>launch web</code> открывает его браузером, клиентом этот адрес открывают руками). <code>ibcmd</code> серверную цель открывает прямо в СУБД, мимо кластера, и без секции <code>infobase.dbms</code> такую команду не выполнит; у файловой базы ему хватает пути к каталогу. Какие строки помечены экспериментальными и как их включить — на странице <a href="inside.html">Как устроено</a>.</p>
+
+<h3 id="d-protocols">Каналы и протоколы</h3>
+<div class="tablewrap"><table>
+<thead><tr><th>Канал</th><th>Между кем</th><th>Чем</th><th>Что ходит</th></tr></thead>
+<tbody>
+<tr><td class="k">запуск утилиты</td><td>раннер → <code>1cv8</code>, <code>1cv8c</code>, <code>ibcmd</code>, <code>webinst</code>, <code>1cedtcli</code></td><td>процесс ОС: аргументы, код выхода, журнал</td><td>команда и её артефакты на диске</td></tr>
+<tr><td class="k">файловая база</td><td>Конфигуратор, <code>ibcmd</code>, клиент → каталог с <code>1Cv8.1CD</code></td><td>файловый доступ; у операций с конфигурацией — монопольный</td><td>данные базы</td></tr>
+<tr><td class="k">кластер</td><td>Конфигуратор, клиент, агент → <code>ragent</code> 1540, <code>rmngr</code> 1541, <code>rphost</code> 1560–1591</td><td>протокол платформы поверх TCP</td><td>сеанс работы с ИБ</td></tr>
+<tr><td class="k">СУБД</td><td><code>ibcmd</code> → сервер СУБД (5432, 1433, …)</td><td><code>--dbms</code>, <code>--database-server</code>, <code>--database-name</code></td><td>всё, что <code>ibcmd</code> делает с серверной целью: создание базы, расширения, сборка, выгрузка</td></tr>
+<tr><td class="k">агент Конфигуратора</td><td>раннер → <code>1cv8 /AgentMode</code> на 127.0.0.1:1543</td><td>SSH встроенным клиентом, без псевдотерминала: команда строкой, ответ JSON</td><td>команды сессии; файлы — через <code>AgentBaseDir</code> в <code>workPath</code></td></tr>
+<tr><td class="k">шлюз автономного сервера</td><td>раннер → <code>ibsrv</code> на <code>host:1543</code></td><td>SSH встроенным клиентом: команда строкой, ответ JSON</td><td>команды сессии</td></tr>
+<tr><td class="k">обмен файлами с целью</td><td>раннер ↔ каталог пользователя шлюза</td><td><code>exchange: sftp</code> — подсистема SFTP того же соединения; <code>exchange: { dir }</code> — видимый каталог</td><td>исходники, списки, <code>.cf</code>, <code>.cfe</code>, результаты выгрузки</td></tr>
+<tr><td class="k">публикация</td><td><code>webinst</code> → Apache или IIS на машине раннера</td><td>запуск процесса, запись каталога публикации и правка конфига веб-сервера</td><td><code>default.vrd</code> целиком</td></tr>
+<tr><td class="k">веб-клиент</td><td>браузер, тонкий клиент → веб-сервер 80 · 443</td><td>HTTP, HTTPS; адрес вида <code>ws=…</code></td><td>сеанс пользователя</td></tr>
+<tr><td class="k">автономный сервер, клиент</td><td>браузер, тонкий клиент → <code>ibsrv</code> 8314</td><td>HTTP, HTTPS</td><td>сеанс пользователя</td></tr>
+<tr><td class="k">клиентский MCP</td><td>раннер → клиент 1С, поднятый командой <code>launch mcp</code> с <code>/C runMcp</code></td><td>HTTP на 127.0.0.1, путь <code>/mcp</code></td><td>проверка готовности и инструменты внутри клиента</td></tr>
+<tr><td class="k">MCP-сервер раннера</td><td>ИИ-хост → раннер</td><td>stdio или HTTP на 127.0.0.1:3000</td><td>вызовы восьми инструментов</td></tr>
+<tr><td class="k"><span class="dash">вне раннера</span></td><td>консоль кластера, <code>rac</code> → RAS 1545</td><td>—</td><td>сеансы, лицензии, блокировки — раннер их не трогает</td></tr>
+</tbody></table></div>
+
 <h2>Сколько живёт</h2>
 <div class="tablewrap"><table>
 <thead><tr><th>Компонент</th><th>Где</th><th>Сколько живёт</th><th>Сколько штук</th></tr></thead>
@@ -107,7 +586,29 @@ flowchart LR
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.12.0/mermaid.min.js"></script>
 <script>
   var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  // Схемы развёртывания нарисованы палитрой ArchiMate для светлой темы; в тёмной те же
+  // роли берут тёмные тона. Замена идёт до отрисовки и трогает только эти цвета.
+  var palette = {
+    '#cfe4fa': '#1d3550', '#3f7ba6': '#6ea6d2', '#0d2233': '#d9e8f7',
+    '#cde8b9': '#2a4423', '#4f7a3c': '#7fae68', '#12210c': '#dfeed5',
+    '#e7f3dc': '#22381e',
+    '#f6e8c8': '#44371f', '#a4813a': '#b79141', '#241c0c': '#f2e4c4',
+    '#e4e4e7': '#2c3037', '#9a9aa2': '#787f8a', '#33333a': '#c7ccd5',
+    '#eef5fb': '#16222e', '#8fb4cf': '#3f6a8c',
+    '#f1f8ea': '#18261a', '#8aad76': '#4c7340',
+    '#fbfbfc': '#1b2027', '#c3c9d0': '#3b434d', '#4b5560': '#97a2af',
+    '#eeeef0': '#26262b', '#a8a8b0': '#5a5a63'
+  };
+  if (dark) {
+    document.querySelectorAll('pre.mermaid').forEach(function (block) {
+      // именно innerHTML: в textContent теряются <br/> внутри подписей
+      block.innerHTML = block.innerHTML.replace(/#[0-9a-f]{6}/g, function (colour) {
+        return palette[colour] || colour;
+      });
+    });
+  }
   mermaid.initialize({ startOnLoad: true, theme: dark ? 'dark' : 'neutral', securityLevel: 'loose', fontFamily: 'Golos Text, system-ui, sans-serif' });
 </script>
+<script src="site.js" defer></script>
 </body>
 </html>
