@@ -524,9 +524,9 @@ fn registry_case_with_prefix(
 ///
 /// Фикстура на диск не кладётся, и причина — предмет одной из проверок ниже: файл с
 /// базовым именем `CON` на Windows не создаётся, так что тест про имена, которые
-/// Windows отвергает, был бы единственным, кто на Windows и падает. Поля читает
-/// `parse_front_matter`, вид каталога — `KIND_BY_DIR`; второго читателя формы здесь не
-/// заводится, путь остаётся именем, а не файлом.
+/// Windows отвергает, был бы единственным, кто на Windows и падает. Запись собирает
+/// `record_from` — та же сборка, что у обхода каталога, поэтому судится здесь ровно та
+/// форма, которую гейт и получает; путь при этом остаётся именем, а не файлом.
 const REGISTRY_PROBE: &str = r#"
 import json, pathlib, sys
 
@@ -543,18 +543,12 @@ prefixes = dict(registry.SYMBOL_PREFIX)
 answer = []
 for case in json.load(sys.stdin):
     registry.SYMBOL_PREFIX = {**prefixes, **case["prefix"]}
-    found = []
-    for directory, name, text in case["files"]:
-        props, body = registry.parse_front_matter(text)
-        found.append(
-            registry.Record(
-                id=props.get("id") or "",
-                kind=registry.KIND_BY_DIR[directory],
-                path=registry.ARCH_ROOT / directory / name,
-                props=props,
-                body=body,
-            )
+    found = [
+        registry.record_from(
+            registry.ARCH_ROOT / directory / name, text, registry.KIND_BY_DIR[directory]
         )
+        for directory, name, text in case["files"]
+    ]
     answer.append(registry.validation_errors(sorted(found, key=lambda record: record.id)))
 json.dump(answer, sys.stdout, ensure_ascii=False)
 "#;
@@ -672,7 +666,7 @@ fn a_symbol_and_its_path_spell_each_other() {
     sole_error(
         "a decision filed under a name that spells no symbol",
         &judged[4],
-        "filename must read",
+        "decisions/an-example-decision.md: filename must read",
         &mut wrong,
     );
     sole_error(

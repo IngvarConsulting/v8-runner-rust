@@ -2,18 +2,18 @@
 id: DEC.2026-09-16.A-RECORD-NAME-SURVIVES-A-WINDOWS-CHECKOUT
 status: active
 governs: process
-realized: tests/arch_registry.rs::a_record_name_survives_a_windows_checkout
+realized: [tests/arch_registry.rs::a_record_name_survives_a_windows_checkout, tests/arch_registry.rs::registry_records_match_the_published_schema_and_the_index_is_current]
 supersedes: []
 superseded-by: null
 establishes: [INV.DOCS.A-RECORD-NAME-SURVIVES-A-WINDOWS-CHECKOUT]
 ---
 
-# Имя записи обязано выкладываться на Windows
+# Имя файла записи не ломает выкладку на Windows
 
 **Решение.** Реестр отклоняет запись, чьё базовое имя файла — то, что стоит до первой
-точки, — совпадает с именем DOS-устройства: CON, PRN, AUX, NUL, COM0…COM9, LPT0…LPT9.
-Запрет ровно такой, какой ставит система: `INV.DOCS.CON.md` Windows создаёт, и реестр
-такое имя принимает.
+точки, — есть в списке имён DOS-устройств `scripts/arch/registry.py`. Смотрит проверка
+туда же, куда смотрит система: на базовое имя, а не на весь символ. Поэтому
+`INV.DOCS.CON.md` Windows создаёт, и реестр такое имя принимает.
 
 **Почему.** CON был первым префиксом контрактов, и дерево переставало выкладываться на
 Windows целиком — не одна запись, а весь репозиторий. Список устройств лежал в
@@ -28,4 +28,7 @@ windows-latest, и цена возврата — красная сборка у 
 меняет префикс, а не выдумывает запись.
 
 **Не затрагивает.** Части символа после первой точки: `INV.DOCS.CON` система создаёт, и
-запрещать его значило бы заявить правило шире того случая, который его породил.
+запрещать его значило бы заявить правило шире того случая, который его породил. Точность
+самого списка: `COM0` и `LPT0` Windows, похоже, не резервирует, но список взят шире на два
+имени, которых никто не просит. Ошибка в эту сторону стоит невозможного символа, в
+обратную — невыкладываемого дерева.

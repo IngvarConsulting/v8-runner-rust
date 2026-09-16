@@ -166,6 +166,18 @@ def evidence_names(value: object) -> list[str]:
     return [str(value)]
 
 
+def record_from(path: Path, text: str, kind: str) -> Record:
+    """One record, assembled from one file's name and text.
+
+    Собирается запись здесь, а не в `records()`, потому что читателей у неё двое:
+    обход каталога и фальсификатор, который подсовывает выдуманные записи, не
+    трогая диск. Две сборки разошлись бы молча — гейт судил бы одну форму, а
+    проверка гейта другую.
+    """
+    props, body = parse_front_matter(text)
+    return Record(id=props.get("id") or "", kind=kind, path=path, props=props, body=body)
+
+
 def records(root: Path = ARCH_ROOT) -> list[Record]:
     """Every record of every registry, ordered by symbol."""
     found: list[Record] = []
@@ -174,14 +186,17 @@ def records(root: Path = ARCH_ROOT) -> list[Record]:
         if not base.is_dir():
             continue
         for path in sorted(base.glob("*.md")):
-            props, body = parse_front_matter(path.read_text(encoding="utf-8"))
-            identifier = props.get("id") or ""
-            found.append(Record(id=identifier, kind=kind, path=path, props=props, body=body))
+            found.append(record_from(path, path.read_text(encoding="utf-8"), kind))
     return sorted(found, key=lambda record: record.id)
 
 
 def expected_symbol(record: Record) -> str:
-    """The symbol a record's own path demands."""
+    """The symbol a record's own filename spells, prefix aside.
+
+    Вторую половину — префикс вида, который называет каталог, — держит отдельная
+    проверка в `validation_errors`: путь, у которого половины спорят, одного
+    символа не диктует.
+    """
     if record.kind == "decision":
         match = DECISION_FILENAME.match(record.path.name)
         if not match:
@@ -221,22 +236,22 @@ def validation_errors(found: list[Record]) -> list[str]:
                     errors.append(f"{record.relative}: `{key}` has a blank entry")
 
         # Символ и путь восстанавливают друг друга. Имя файла даёт символ, префикс
-        # вида — каталог; без второй половины обратный ход не собирается, и
-        # `CTR.WIRE.FOO`, лежащий в `invariants/`, не находится ни по символу, ни
-        # дважды в индексе как один символ. Разойдясь, путь и символ не подают
-        # знака: индекс порождается из тех же записей и повторяет подмену.
+        # вида — каталог; без второй половины обратный ход не собирается:
+        # `CTR.WIRE.FOO`, лежащий в `invariants/`, не находится по символу, а два
+        # таких файла дали бы в индексе две строки на один символ. Разойдясь, путь
+        # и символ не подают знака: индекс порождается из тех же записей.
         expected = expected_symbol(record)
         if record.kind == "decision" and not expected:
-            errors.append(f"{record.relative}: filename must read `<ГГГГ-ММ-ДД>-<slug>.md`")
+            errors.append(f"{record.relative}: filename must read `<YYYY-MM-DD>-<slug>.md`")
         elif record.id and record.id != expected:
             errors.append(f"{record.relative}: `id` must read `{expected}`")
         prefix = SYMBOL_PREFIX[record.kind]
         if record.id and not record.id.startswith(f"{prefix}."):
             errors.append(f"{record.relative}: `id` must open with `{prefix}.`")
 
-        # Символ становится именем файла, и базовое имя из DOS_DEVICE_NAMES
-        # Windows отказывается создавать с любым расширением: не выкладывается
-        # уже всё дерево, а не одна запись.
+        # Символ становится именем файла, и базовое имя устройства Windows
+        # отказывается создавать с любым расширением: перестаёт выкладываться всё
+        # дерево, а не одна запись.
         base = record.path.name.split(".", 1)[0]
         if base.upper() in DOS_DEVICE_NAMES:
             errors.append(
