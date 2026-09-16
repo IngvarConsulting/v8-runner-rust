@@ -264,3 +264,39 @@ fn a_renderer_never_spells_the_outcome_word_itself() {
         );
     }
 }
+
+/// Раскладка выгрузки платформе не называется: она одна.
+///
+/// `DEC.2026-09-16.ONLY-THE-HIERARCHICAL-DUMP-FORMAT-IS-SUPPORTED`. Линейная раскладка
+/// вне охвата, иерархическая — платформенное умолчание, поэтому назвать её нечем и
+/// незачем. Появившийся аргумент раскладки означает либо вторую поддержанную раскладку,
+/// либо зависимость от того, что умолчание не изменится, — оба случая решаются решением,
+/// а не правкой аргументов.
+#[test]
+fn the_runner_never_names_a_dump_format() {
+    // Ищется аргумент в кавычках, а не слово в прозе: `--output-format=` агентского
+    // shell — про форму ответа, а не про раскладку выгрузки, и под запрет не попадает.
+    const FORBIDDEN: &[&str] = &["\"-Format\"", "\"--format=", "--format={"];
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut named = Vec::new();
+
+    for file in collect_rust_files(&root) {
+        let text = fs::read_to_string(&file).expect("source file is readable");
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            let line = trimmed.replace("--output-format=", "");
+            if FORBIDDEN.iter().any(|argument| line.contains(argument)) {
+                named.push(format!("{}: {}", file.display(), trimmed));
+            }
+        }
+    }
+
+    assert!(
+        named.is_empty(),
+        "the dump layout is not named to the platform; one layout is supported and it is the platform default:\n{}",
+        named.join("\n")
+    );
+}
