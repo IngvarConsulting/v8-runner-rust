@@ -181,7 +181,7 @@ flowchart LR
 </pre>
 
 <h2 id="deploy">Варианты развёртывания 1С</h2>
-<p>Вид цели решает, какими утилитами раннер работает, по какому каналу отдаёт команду и откуда забирает результат. Видов три — файловая база, кластер 1С, автономный сервер, — а машин под ними бывает сколько угодно. Ниже восемь развёрток, которые встречаются на практике.</p>
+<p>Вид цели решает, какими утилитами раннер работает, по какому каналу отдаёт команду и откуда забирает результат. Видов три — файловая база, кластер 1С, автономный сервер, — а машин под ними бывает сколько угодно. Ниже одиннадцать развёрток, которые встречаются на практике. Последние три отличаются не видом цели, а тем, кто владеет её процессом: служба, ваша консоль или контейнер.</p>
 <ul class="toc">
   <li><a href="#d-file">1. Файловая база</a></li>
   <li><a href="#d-file-web">2. Файловая база и веб-сервер</a></li>
@@ -191,6 +191,9 @@ flowchart LR
   <li><a href="#d-cluster-web">6. Кластер и веб-сервер</a></li>
   <li><a href="#d-standalone-local">7. Автономный сервер на своей машине</a></li>
   <li><a href="#d-standalone-remote">8. Автономный сервер на другой машине</a></li>
+  <li><a href="#d-console">9. Кластер поднят из консоли</a></li>
+  <li><a href="#d-docker-cluster">10. Кластер 1С в контейнере</a></li>
+  <li><a href="#d-docker-standalone">11. Автономный сервер в контейнере</a></li>
 </ul>
 
 <h3 id="d-legend">Как читать схемы</h3>
@@ -262,7 +265,7 @@ flowchart LR
   classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
   style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
 </pre>
-<p class="hint">Утилиты EDT к базе не подключаются: <code>1cedtcli</code> работает только с исходниками, поэтому во всех восьми вариантах он одинаков.</p>
+<p class="hint">Утилиты EDT к базе не подключаются: <code>1cedtcli</code> работает только с исходниками, поэтому во всех одиннадцати вариантах он одинаков.</p>
 
 <h3 id="d-file">1. Файловая база</h3>
 <p>Всё на одной машине: и раннер, и платформа, и каталог базы. Самый частый случай для разработчика и для CI, который поднимает базу с нуля.</p>
@@ -620,8 +623,138 @@ flowchart LR
   <li><strong>После <code>update-db-cfg</code></strong> — сервер 15–20 секунд «обновляется» и отвергает SSH-логин; раннер ждёт шлюз до 30 секунд.</li>
 </ul>
 
+<h3 id="d-console">9. Кластер поднят из консоли, а не службой</h3>
+<p>Обычный приём разработки: сервер 1С запускают руками в окне терминала, чтобы служба не висела постоянно. Канал до него тот же, что у службы, — меняется владелец процесса.</p>
+<pre class="mermaid">
+flowchart LR
+  subgraph BOX["одна машина"]
+    subgraph HOST["раннер и утилиты"]
+      R["v8-runner"]
+      DES["1cv8 DESIGNER"]
+      CLI["1cv8c · клиент"]
+    end
+    subgraph CON["ваша консоль"]
+      RAG["ragent, запущенный руками<br/>1540 · 1541"]
+      RPH["rphost"]
+      LOG@{ shape: doc, label: "журнал сервера<br/>у вас перед глазами" }
+    end
+  end
+  DBMS@{ shape: cyl, label: "СУБД" }
+  R -->|"процесс на операцию"| DES
+  R -->|"процесс на запуск"| CLI
+  DES -->|"Srvr=localhost:1541;Ref=…"| RAG
+  CLI -->|"TCP"| RAG
+  RAG --> RPH
+  RAG --> LOG
+  RPH --> DBMS
+  class R run
+  class DES,CLI,RAG,RPH sw
+  class DBMS art
+  class LOG off
+  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
+  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
+  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
+  classDef off fill:#e4e4e7,stroke:#9a9aa2,color:#33333a;
+  style BOX fill:#fbfbfc,stroke:#c3c9d0,color:#4b5560
+  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
+  style CON fill:#f1f8ea,stroke:#8aad76,color:#12210c
+</pre>
+<ul class="opts">
+  <li><strong>Администрирование</strong> — <code>infobase.connection: "Srvr=localhost:1541;Ref=demo"</code>. От службы канал не отличается ничем; если <code>ragent</code> поднят на своём порту, он должен стоять в строке подключения.</li>
+  <li><strong>Кто владеет процессом</strong> — вы. Раннер кластер не поднимает, не останавливает и не перезапускает. Закрытая посреди команды консоль даёт транспортный сбой, а не отказ сценария, — и это разные коды выхода.</li>
+  <li><strong>Каталог данных и права</strong> — сервер работает под вашей учётной записью и кладёт базы и журналы туда, куда вы ему указали; у службы это другой пользователь и другой каталог.</li>
+  <li><strong>Что здесь лучше</strong> — журнал сервера виден прямо в окне. Раннер его по-прежнему не читает и в квитанции не обещает, но человеку он доступен сразу.</li>
+  <li><strong>Что не меняется</strong> — монопольные операции так же спорят с чужими сеансами, а сеансами раннер не управляет.</li>
+</ul>
+
+<h3 id="d-docker-cluster">10. Кластер 1С в контейнере</h3>
+<p>Сервер 1С и СУБД подняты в контейнерах, раннер работает на хосте. Про Docker раннер не знает ничего: для него это цель на другой машине, к которой ведёт опубликованный порт.</p>
+<pre class="mermaid">
+flowchart LR
+  subgraph HOST["машина раннера"]
+    R["v8-runner"]
+    DES["1cv8 DESIGNER"]
+    CLI["1cv8c · клиент"]
+    WP@{ shape: doc, label: "workPath<br/>.cf, .dt, отчёты" }
+  end
+  subgraph C1["контейнер сервера 1С"]
+    RAG["ragent 1540 · rmngr 1541"]
+    RPH["rphost 1560–1591"]
+  end
+  subgraph C2["контейнер СУБД"]
+    DBMS@{ shape: cyl, label: "база данных" }
+  end
+  R -->|"процесс на операцию"| DES
+  R -->|"процесс на запуск"| CLI
+  DES -.->|"опубликованные порты"| RAG
+  CLI -.->|"TCP"| RAG
+  DES --> WP
+  RAG --> RPH
+  RPH -.-> DBMS
+  class R run
+  class DES,CLI,RAG,RPH sw
+  class WP,DBMS art
+  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
+  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
+  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
+  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
+  style C1 fill:#f1f8ea,stroke:#8aad76,color:#12210c
+  style C2 fill:#f1f8ea,stroke:#8aad76,color:#12210c
+</pre>
+<ul class="opts">
+  <li><strong>Администрирование</strong> — прежняя строка <code>Srvr=…;Ref=…</code> на опубликованный порт.</li>
+  <li><strong>Публиковать нужно два порта, а не один</strong> — менеджер отдаёт клиенту адрес рабочего процесса, поэтому кроме 1541 наружу должен смотреть и диапазон <code>rphost</code>. Иначе соединение обрывается уже после удачного коннекта к менеджеру.</li>
+  <li><strong>Имя должно резолвиться</strong> — кластер называет клиенту то имя, под которым видит себя сам. На хосте оно обязано указывать в контейнер: имя контейнера в <code>hosts</code>, общая сеть или сеть хоста.</li>
+  <li><strong>Платформа нужна на хосте</strong> — Конфигуратор и клиент раннер запускает у себя, контейнер их не отдаёт. Версия платформы на хосте и в контейнере должна совпадать.</li>
+  <li><strong>Обмен</strong> — <code>.cf</code>, <code>.dt</code> и выгрузка остаются у раннера: файловая система контейнера ему не принадлежит, как и любая чужая.</li>
+</ul>
+
+<h3 id="d-docker-standalone">11. Автономный сервер в контейнере</h3>
+<p>Тот же <code>ibsrv</code>, но поднятый контейнером. Единственный вариант, где на машине раннера не нужно ни одной утилиты 1С.</p>
+<pre class="mermaid">
+flowchart LR
+  subgraph HOST["машина раннера"]
+    R["v8-runner"]
+    WP@{ shape: doc, label: "workPath<br/>остаётся здесь" }
+  end
+  subgraph C["контейнер ibsrv"]
+    GATE(["SSH-шлюз 1543"])
+    IBSRV["ibsrv"]
+    UD@{ shape: doc, label: "каталог пользователя шлюза<br/>смонтирован томом" }
+    HTTPS(["HTTP 8314"])
+    DB@{ shape: cyl, label: "база данных" }
+  end
+  BR(["браузер · тонкий клиент"])
+  R --> WP
+  R -.->|"SSH: команда строкой, ответ JSON"| GATE
+  R -.->|"exchange: sftp"| UD
+  R -->|"exchange: dir — если том виден раннеру"| UD
+  GATE --> IBSRV
+  IBSRV --> UD
+  IBSRV --> DB
+  IBSRV --> HTTPS
+  BR -.->|"HTTP"| HTTPS
+  class R run
+  class IBSRV sw
+  class GATE,HTTPS,BR svc
+  class WP,UD,DB art
+  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
+  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
+  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
+  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
+  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
+  style C fill:#f1f8ea,stroke:#8aad76,color:#12210c
+</pre>
+<ul class="opts">
+  <li><strong>Администрирование</strong> — <code>infobase.standalone.gate</code> на опубликованный порт шлюза. Контейнер поднимаете вы; раннер его не запускает и о Docker не знает.</li>
+  <li><strong>Платформа раннеру не нужна вовсе</strong> — команды исполняет сервер внутри контейнера, раннеру хватает SSH.</li>
+  <li><strong>Порта два</strong> — 1543 для шлюза и 8314 для клиента: без первого не подключится раннер, без второго базу не откроют люди.</li>
+  <li><strong>Обмен — здесь есть выбор</strong> — <code>sftp</code> через шлюз или <code>{ dir: … }</code>, если каталог пользователя шлюза смонтирован томом и виден раннеру. Второй путь снимает ограничение на запись, которое есть у SFTP-шлюза <code>ibsrv</code> 8.3.27.</li>
+  <li><strong>Клиент</strong> — HTTP контейнера, адрес известен сразу и публикации не требует.</li>
+</ul>
+
 <h3 id="d-ops">Что доступно по виду цели</h3>
-<p>Местоположение цели на этот список не влияет: он зависит от вида. Первый исполнитель в клетке — умолчание; следующего реализованного раннер пробует, если первый не готов, а экспериментальные включаются только ключом <code>providers.&lt;операция&gt;</code>.</p>
+<p>Ни местоположение цели, ни владелец её процесса — служба, консоль, контейнер — на этот список не влияют: он зависит только от вида. Первый исполнитель в клетке — умолчание; следующего реализованного раннер пробует, если первый не готов, а экспериментальные включаются только ключом <code>providers.&lt;операция&gt;</code>.</p>
 <div class="tablewrap"><table>
 <thead><tr><th>Операция</th><th>Файловая база</th><th>Кластер 1С</th><th>Автономный сервер</th></tr></thead>
 <tbody>
