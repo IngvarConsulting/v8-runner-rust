@@ -3,8 +3,9 @@
 //! Реестр описан в `spec/arch/README.md`. Проверка запускает `scripts/arch/registry.py`,
 //! потому что разбор записей и порождение индекса живут там же, где формат.
 
-use std::path::PathBuf;
-use std::process::Command;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -258,6 +259,231 @@ fn every_decision_names_evidence_that_resolves() {
         unresolved.is_empty(),
         "decisions cite evidence that does not exist:\n{}",
         unresolved.join("\n")
+    );
+}
+
+/// Пробник: прогоняет выдуманный мини-реестр через ту же `validation_errors`,
+/// которой пользуется `--check`, и отдаёт её отказы списком.
+///
+/// Скрипт едет на stdin, а не лежит файлом рядом со `scripts/arch/registry.py`:
+/// схема записей живёт в одном месте, и второй её носитель устарел бы первым.
+/// Модуль смотрит на выдуманный корень обоими концами — `records(root)` читает
+/// оттуда, `ARCH_ROOT` оттуда же считает путь записи для текста отказа.
+const REGISTRY_PROBE: &str = r#"
+import importlib.util
+import json
+import pathlib
+import sys
+
+spec = importlib.util.spec_from_file_location("registry", sys.argv[1])
+registry = importlib.util.module_from_spec(spec)
+# Запись — dataclass с отложенными аннотациями, и разрешает она их через
+# `sys.modules`: модуль, загруженный мимо него, разваливается на `@dataclass`.
+sys.modules[spec.name] = registry
+spec.loader.exec_module(registry)
+
+root = pathlib.Path(sys.argv[2]).resolve()
+registry.ARCH_ROOT = root
+print(json.dumps(registry.validation_errors(registry.records(root))))
+"#;
+
+/// Отказы реестра о мини-реестре, разложенном в `root`.
+fn python_validation_errors(root: &Path) -> Vec<String> {
+    let mut probe = Command::new(python())
+        .arg("-")
+        .arg("scripts/arch/registry.py")
+        .arg(root)
+        .current_dir(repo_root())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("registry probe runs python3");
+    probe
+        .stdin
+        .take()
+        .expect("probe takes a script on stdin")
+        .write_all(REGISTRY_PROBE.as_bytes())
+        .expect("probe script is written");
+    let output = probe.wait_with_output().expect("probe finishes");
+    assert!(
+        output.status.success(),
+        "registry probe failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("probe prints a json list of errors")
+}
+
+/// Выдуманная запись: символ, пропы и заголовок — ровно столько, сколько нужно
+/// схеме, чтобы отказать по одной названной причине, а не по пяти сразу.
+fn fabricated_record(symbol: &str, props: &str) -> String {
+    format!("---\nid: {symbol}\n{props}---\n\n# Выдуманная запись\n")
+}
+
+/// Мини-реестр в раскладке `spec/arch`: каталог вида записи, файл на запись.
+///
+/// Записи — решения и правила без формы: проп `artifact` контракта реестр ищет от
+/// настоящего корня репозитория, и выдуманный контракт дал бы лишний отказ о нём.
+fn fabricated(records: &[(&str, String)]) -> tempfile::TempDir {
+    let root = tempfile::tempdir().expect("temporary registry");
+    for (relative, text) in records {
+        let path = root.path().join(relative);
+        std::fs::create_dir_all(path.parent().expect("record lies in a registry directory"))
+            .expect("registry directory is created");
+        std::fs::write(&path, text).expect("record is written");
+    }
+    root
+}
+
+/// Мини-реестр обязан дать ровно один отказ, и отказ обязан назвать предмет.
+///
+/// «Ровно один» держит фикстуру честной: отказ по другой причине не сойдёт за
+/// проверяемый, и испорченная заготовка записи будет видна сразу.
+fn sole_error(records: &[(&str, String)], names: &str) {
+    let root = fabricated(records);
+    let errors = python_validation_errors(root.path());
+    assert_eq!(
+        errors.len(),
+        1,
+        "fixture must fail for exactly one reason:\n{}",
+        errors.join("\n")
+    );
+    assert!(
+        errors[0].contains(names),
+        "error does not name {names}:\n{}",
+        errors[0]
+    );
+}
+
+/// Символ, которым решение называет чужую запись, обязан в эту запись разрешаться.
+///
+/// `establishes` ведёт к правилу, `supersedes` и `superseded-by` — к решению.
+/// Ненайденный символ публикует обещание, за которым нет ни записи, ни проверки,
+/// поэтому отказ называет ещё и путь, по которому запись надо написать.
+#[test]
+fn every_symbol_a_decision_names_resolves_to_a_record() {
+    const NEWER: &str = "DEC.2026-01-02.A-FABRICATED-SUCCESSOR";
+    const OLDER: &str = "DEC.2026-01-01.A-FABRICATED-DECISION";
+    const RULE: &str = "INV.DOCS.A-FABRICATED-RULE";
+    const NEWER_FILE: &str = "decisions/2026-01-02-a-fabricated-successor.md";
+    const OLDER_FILE: &str = "decisions/2026-01-01-a-fabricated-decision.md";
+    const RULE_FILE: &str = "invariants/INV.DOCS.A-FABRICATED-RULE.md";
+    const SOUND_DECISION: &str = "status: active\ngoverns: process\nrealized: tests/probe.rs::a\n";
+    const SOUND_RULE: &str =
+        "status: active\ngoverns: process\ncheck: tests/probe.rs::a\nscope: [docs]\n";
+
+    let successor = |extra: &str| fabricated_record(NEWER, &format!("{SOUND_DECISION}{extra}"));
+    let rule = || fabricated_record(RULE, &format!("{SOUND_RULE}decision: {NEWER}\n"));
+
+    // Здоровая фикстура: все три пропа заполнены и разрешаются. Без неё «ровно
+    // один отказ» ниже мог бы оказаться совпадением, а не проверкой.
+    let sound = fabricated(&[
+        (
+            NEWER_FILE,
+            successor(&format!("supersedes: [{OLDER}]\nestablishes: [{RULE}]\n")),
+        ),
+        (
+            OLDER_FILE,
+            fabricated_record(
+                OLDER,
+                &format!(
+                    "status: superseded\ngoverns: process\nrealized: null\nsuperseded-by: {NEWER}\nestablishes: []\n"
+                ),
+            ),
+        ),
+        (RULE_FILE, rule()),
+    ]);
+    let errors = python_validation_errors(sound.path());
+    assert!(
+        errors.is_empty(),
+        "a registry whose symbols all resolve must pass:\n{}",
+        errors.join("\n")
+    );
+
+    // Заменённое решение отвечает за свой `establishes` только историей: правило,
+    // выведенное из обращения преемником, файла уже не имеет, и требовать его
+    // значило бы запереть судьбу `retired` из `spec/archive/FATE.md` навсегда.
+    let retired = fabricated(&[
+        (
+            OLDER_FILE,
+            fabricated_record(
+                OLDER,
+                &format!(
+                    "status: superseded\ngoverns: process\nrealized: null\nsuperseded-by: {NEWER}\nestablishes: [INV.DOCS.A-RETIRED-RULE]\n"
+                ),
+            ),
+        ),
+        (
+            NEWER_FILE,
+            successor(&format!("supersedes: [{OLDER}]\nestablishes: []\n")),
+        ),
+    ]);
+    let errors = python_validation_errors(retired.path());
+    assert!(
+        errors.is_empty(),
+        "a superseded decision keeps its list as history:\n{}",
+        errors.join("\n")
+    );
+
+    // `establishes` называет правило, записи которого нет: отказ называет файл,
+    // который автору осталось написать.
+    sole_error(
+        &[(
+            NEWER_FILE,
+            successor("establishes: [INV.DOCS.A-RULE-NOBODY-WROTE]\n"),
+        )],
+        "invariants/INV.DOCS.A-RULE-NOBODY-WROTE.md",
+    );
+
+    // `establishes` называет решение: правило выводится из решения, а не наоборот.
+    sole_error(
+        &[
+            (NEWER_FILE, successor(&format!("establishes: [{OLDER}]\n"))),
+            (
+                OLDER_FILE,
+                fabricated_record(OLDER, &format!("{SOUND_DECISION}establishes: []\n")),
+            ),
+        ],
+        "names the decision DEC.2026-01-01.A-FABRICATED-DECISION where a rule is required",
+    );
+
+    // Символ не из реестра не разрешается ни во что и файла не подсказывает.
+    sole_error(
+        &[(NEWER_FILE, successor("establishes: [mcp-tools]\n"))],
+        "names mcp-tools, which is not a rule symbol",
+    );
+
+    // `supersedes` называет решение, которого нет: имя решения выводит путь файла.
+    sole_error(
+        &[(
+            NEWER_FILE,
+            successor("supersedes: [DEC.2026-01-01.A-DECISION-NOBODY-WROTE]\n"),
+        )],
+        "decisions/2026-01-01-a-decision-nobody-wrote.md",
+    );
+
+    // `supersedes` называет правило: заменяют решение, а не выведенное из него.
+    sole_error(
+        &[
+            (
+                NEWER_FILE,
+                successor(&format!("supersedes: [{RULE}]\nestablishes: [{RULE}]\n")),
+            ),
+            (RULE_FILE, rule()),
+        ],
+        "names the invariant INV.DOCS.A-FABRICATED-RULE where a decision is required",
+    );
+
+    // `superseded-by` — скаляр, и разрешается он так же, как список `supersedes`.
+    sole_error(
+        &[(
+            OLDER_FILE,
+            fabricated_record(
+                OLDER,
+                "status: superseded\ngoverns: process\nrealized: null\nsuperseded-by: DEC.2026-01-03.A-SUCCESSOR-NOBODY-WROTE\n",
+            ),
+        )],
+        "decisions/2026-01-03-a-successor-nobody-wrote.md",
     );
 }
 
