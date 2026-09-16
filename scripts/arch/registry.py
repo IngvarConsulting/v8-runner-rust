@@ -221,6 +221,18 @@ def validation_errors(found: list[Record]) -> list[str]:
             elif key in ("check", "realized"):
                 if any(not name.strip() for name in evidence_names(record.props[key])):
                     errors.append(f"{record.relative}: `{key}` has a blank entry")
+
+        # Ось закрыта: `governs` называет адресата обещания, а не тему записи, и
+        # третьего адресата у нас нет. Индекс печатает значение рядом с видом
+        # записи, поэтому свободный ярлык не остаётся в одной записи — он входит
+        # в общую колонку и читается как ещё один вид. Пустое значение здесь уже
+        # названо выше, вторую претензию на ту же запись не заводим.
+        governs = record.props.get("governs")
+        if governs not in ("", [], None) and governs not in GOVERNS:
+            errors.append(
+                f"{record.relative}: `governs` must read `product` or `process`"
+            )
+
         if record.kind in {"invariant", "contract"}:
             list_keys = ("scope",) + (("consumers",) if record.kind == "contract" else ())
             for key in list_keys:

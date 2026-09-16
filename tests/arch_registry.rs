@@ -3,8 +3,9 @@
 //! Реестр описан в `spec/arch/README.md`. Проверка запускает `scripts/arch/registry.py`,
 //! потому что разбор записей и порождение индекса живут там же, где формат.
 
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -418,4 +419,201 @@ fn contains(whole: &serde_json::Value, fragment: &serde_json::Value) -> bool {
             .all(|(key, value)| whole.get(key).is_some_and(|found| contains(found, value))),
         _ => whole == fragment,
     }
+}
+
+/// Запись реестра как файл: каталог, имя файла, текст.
+type RecordFile = (String, String, String);
+
+const DECISION_FILE: &str = "2026-09-16-an-example-decision.md";
+const DECISION_ID: &str = "DEC.2026-09-16.AN-EXAMPLE-DECISION";
+const RULE_FILE: &str = "INV.DOCS.EXAMPLE.md";
+const RULE_ID: &str = "INV.DOCS.EXAMPLE";
+const EVIDENCE: &str = "tests/arch_registry.rs::governs_reads_product_or_process";
+const OFF_AXIS: &str = "`governs` must read `product` or `process`";
+
+/// Решение, которое заводит правило фикстуры.
+///
+/// Запись не проверить по одному файлу: правило обязано сослаться на решение, а
+/// решение — назвать правило в `establishes`. Поэтому фикстура здесь — не файл, а
+/// маленький реестр целиком, и нарушение в нём ровно одно.
+fn decision_file(governs: &str) -> RecordFile {
+    (
+        "decisions".to_owned(),
+        DECISION_FILE.to_owned(),
+        format!(
+            "---\n\
+             id: {DECISION_ID}\n\
+             status: active\n\
+             governs: {governs}\n\
+             realized: {EVIDENCE}\n\
+             supersedes: []\n\
+             superseded-by: null\n\
+             establishes: [{RULE_ID}]\n\
+             ---\n\
+             \n\
+             # Решение\n"
+        ),
+    )
+}
+
+/// Инвариант, выведенный из этого решения.
+fn rule_file(governs: &str) -> RecordFile {
+    (
+        "invariants".to_owned(),
+        RULE_FILE.to_owned(),
+        format!(
+            "---\n\
+             id: {RULE_ID}\n\
+             status: active\n\
+             governs: {governs}\n\
+             decision: {DECISION_ID}\n\
+             check: {EVIDENCE}\n\
+             scope: [docs]\n\
+             ---\n\
+             \n\
+             # Правило\n"
+        ),
+    )
+}
+
+/// Мини-реестр как вход пробы: решение и выведенное из него правило.
+fn registry_case(decision_governs: &str, rule_governs: &str) -> serde_json::Value {
+    serde_json::json!([decision_file(decision_governs), rule_file(rule_governs)])
+}
+
+/// Судит фикстуры тем же кодом, которым гейт `registry.py --check` судит реестр.
+///
+/// Фикстура на диск не кладётся: проверяется не файл, а разбор полей, и лишний
+/// каталог во время теста означал бы ещё один путь, по которому реестр можно
+/// прочитать. Поля читает `parse_front_matter`, вид каталога — `KIND_BY_DIR`;
+/// второго читателя формы здесь не заводится, путь остаётся именем, а не файлом.
+const REGISTRY_PROBE: &str = r#"
+import json, pathlib, sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, "scripts/arch")
+import registry
+
+# Запись называет себя путём от корня реестра, и корень тут чисто именной: без этой
+# подмены `Record.relative` меряет путь от настоящего spec/arch и падает на первой же
+# найденной ошибке — там, где ошибку надо не поднять, а вернуть.
+registry.ARCH_ROOT = pathlib.PurePosixPath("spec/arch")
+
+answer = []
+for case in json.load(sys.stdin):
+    found = []
+    for directory, name, text in case:
+        props, body = registry.parse_front_matter(text)
+        found.append(
+            registry.Record(
+                id=props.get("id") or "",
+                kind=registry.KIND_BY_DIR[directory],
+                path=registry.ARCH_ROOT / directory / name,
+                props=props,
+                body=body,
+            )
+        )
+    answer.append(registry.validation_errors(sorted(found, key=lambda record: record.id)))
+json.dump(answer, sys.stdout, ensure_ascii=False)
+"#;
+
+/// Претензии `registry.py` к каждому мини-реестру, по порядку.
+fn python_validation_errors(cases: &[serde_json::Value]) -> Vec<Vec<String>> {
+    let mut probe = Command::new(python())
+        .arg("-c")
+        .arg(REGISTRY_PROBE)
+        .current_dir(repo_root())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("registry guard runs python3");
+    probe
+        .stdin
+        .take()
+        .expect("probe takes its input on stdin")
+        .write_all(&serde_json::to_vec(cases).expect("fixtures serialize"))
+        .expect("probe reads its input");
+    let output = probe.wait_with_output().expect("probe answers");
+
+    assert!(
+        output.status.success(),
+        "registry.py cannot judge a record at all:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("probe answers json")
+}
+
+/// Одно нарушение на фикстуру: гейт обязан назвать именно его и больше ничего.
+fn sole_error(name: &str, errors: &[String], expected: &str, wrong: &mut Vec<String>) {
+    match errors {
+        [only] if only.contains(expected) => {}
+        _ => wrong.push(format!("{name}: expected `{expected}`, got {errors:?}")),
+    }
+}
+
+/// Ось `governs` закрыта, и закрыта она гейтом, а не только таблицей в README.
+///
+/// `spec/arch/README.md` публикует перечень: `product` или `process` — кто заметит
+/// нарушение, потребитель или только мы. От ответа зависит, чем правка оплачивается,
+/// и индекс печатает значение рядом с видом записи. Слово вне перечня адресата не
+/// уточняет, а снимает: по индексу больше не отделить видимое снаружи от видимого
+/// только нам, а опечатка в поле не отличается от осознанного выбора.
+#[test]
+fn governs_reads_product_or_process() {
+    let sound = registry_case("process", "process");
+    // Оба значения проходят и на решении, и на правиле: перечень закрыт, но не сужен.
+    let sound_product = registry_case("process", "product");
+    let decision_off_axis = registry_case("banana", "process");
+    let rule_off_axis = registry_case("process", "banana");
+    // Ось пишется одним способом. `Process` — это не значение оси, а похожее на него
+    // слово, и пропусти его гейт, в индексе встали бы две колонки под одним смыслом.
+    let wrong_case = registry_case("process", "Process");
+    // Пустое поле — прежняя претензия и ровно одна: про отсутствующее значение гейт
+    // не может сказать заодно, что оно вне перечня.
+    let rule_without_governs = registry_case("process", "");
+
+    let judged = python_validation_errors(&[
+        sound,
+        sound_product,
+        decision_off_axis,
+        rule_off_axis,
+        wrong_case,
+        rule_without_governs,
+    ]);
+    let mut wrong = Vec::new();
+
+    for (name, errors) in [
+        ("a process rule", &judged[0]),
+        ("a product rule", &judged[1]),
+    ] {
+        if !errors.is_empty() {
+            wrong.push(format!("{name} must pass: {errors:?}"));
+        }
+    }
+    sole_error(
+        "a decision off the axis",
+        &judged[2],
+        &format!("decisions/{DECISION_FILE}: {OFF_AXIS}"),
+        &mut wrong,
+    );
+    sole_error(
+        "a rule off the axis",
+        &judged[3],
+        &format!("invariants/{RULE_FILE}: {OFF_AXIS}"),
+        &mut wrong,
+    );
+    sole_error("a rule shouting the axis", &judged[4], OFF_AXIS, &mut wrong);
+    sole_error(
+        "a rule with no governs at all",
+        &judged[5],
+        &format!("invariants/{RULE_FILE}: missing prop `governs`"),
+        &mut wrong,
+    );
+
+    assert!(
+        wrong.is_empty(),
+        "`governs` may read anything at all:\n{}",
+        wrong.join("\n")
+    );
 }
