@@ -2964,7 +2964,7 @@ mod tests {
             base.path(),
             &work,
             SourceFormat::Edt,
-            BuilderBackend::Designer,
+            Default::default(),
             SourceSetPurpose::Configuration,
             "main",
             &source_dir,
