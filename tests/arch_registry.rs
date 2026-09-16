@@ -692,9 +692,11 @@ fn a_symbol_and_its_path_spell_each_other() {
 /// `DEC`, `INV` и `CTR` устройствами не зовутся. Это не делает её лишней — она сторожит
 /// не запись, а нашу же константу, которую однажды уже так и меняли.
 ///
-/// Запрет ровно такой, каким его ставит система: базовое имя — то, что до первой точки.
-/// `INV.DOCS.CON.md` Windows создаёт, и выдумывать здесь строгость сверх системной
-/// значило бы заявлять правило шире того, что проверено.
+/// Запрет ровно такой, каким его ставит система, и обе границы здесь закреплены.
+/// Смотрит он на базовое имя — то, что до первой точки, — поэтому `INV.DOCS.CON.md`
+/// Windows создаёт и реестр принимает. Список кончается на `COM1`…`COM9`: `COM0`
+/// система не резервирует. Строгость сверх системной заявляла бы правило шире того,
+/// что проверено, — ровно та же ошибка, что и пропуск настоящего имени устройства.
 #[test]
 fn a_record_name_survives_a_windows_checkout() {
     let contracts_called_con = registry_case_with_prefix(
@@ -709,8 +711,17 @@ fn a_record_name_survives_a_windows_checkout() {
         decision_file(DECISION_FILE, DECISION_ID, "INV.DOCS.CON"),
         rule_file("INV.DOCS.CON.md", "INV.DOCS.CON", DECISION_ID),
     ]);
+    // Устройства нумеруются с единицы: `COM1` система резервирует, `COM0` — нет.
+    let port_zero = registry_case_with_prefix(
+        vec![
+            decision_file(DECISION_FILE, DECISION_ID, "COM0.WIRE.EXAMPLE"),
+            contract_file("COM0.WIRE.EXAMPLE.md", "COM0.WIRE.EXAMPLE", DECISION_ID),
+        ],
+        "contract",
+        "COM0",
+    );
 
-    let judged = python_validation_errors(&[contracts_called_con, device_name_deeper]);
+    let judged = python_validation_errors(&[contracts_called_con, device_name_deeper, port_zero]);
     let mut wrong = Vec::new();
 
     sole_error(
@@ -719,11 +730,13 @@ fn a_record_name_survives_a_windows_checkout() {
         "`CON` is a Windows device name",
         &mut wrong,
     );
-    if !judged[1].is_empty() {
-        wrong.push(format!(
-            "a device name past the first dot is not a device: {:?}",
-            judged[1]
-        ));
+    for (name, errors) in [
+        ("a device name past the first dot", &judged[1]),
+        ("a port number the system does not reserve", &judged[2]),
+    ] {
+        if !errors.is_empty() {
+            wrong.push(format!("{name} is not a device: {errors:?}"));
+        }
     }
 
     assert!(

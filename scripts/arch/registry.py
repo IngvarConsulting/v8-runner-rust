@@ -67,10 +67,13 @@ FENCED_BLOCK = re.compile(r"^```[a-z]*\n(.*?)^```\s*$", re.M | re.S)
 # A symbol becomes a filename, and Windows still refuses these as base names
 # whatever the extension follows. `CON` was the first contract prefix and made
 # the whole tree impossible to check out on Windows.
+#
+# Digits start at one: the system reserves COM1..COM9 and LPT1..LPT9, and `COM0`
+# is an ordinary name. Widening the list back would ban a name nothing refuses.
 DOS_DEVICE_NAMES = frozenset(
     ["CON", "PRN", "AUX", "NUL"]
-    + [f"COM{digit}" for digit in range(10)]
-    + [f"LPT{digit}" for digit in range(10)]
+    + [f"COM{digit}" for digit in range(1, 10)]
+    + [f"LPT{digit}" for digit in range(1, 10)]
 )
 
 
