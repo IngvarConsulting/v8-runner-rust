@@ -37,7 +37,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `make` / `artifacts` | `format=DESIGNER`, провайдер `designer`; `agent` только по `providers.make: agent` | Экспорт `.cf` / `.cfe` и публикация `.epf` / `.erf`; у `agent` `.cf`/`.cfe` — `config dump-cfg` в каталог агента, `.epf`/`.erf` — исходники копируются в каталог агента (файловые параметры через ссылку агент не разрешает), сборка `load-external-…-from-files` и обратная выгрузка для сверки вида и имени, как у Конфигуратора |
 | `syntax` | `format=DESIGNER` или `format=EDT` | Designer checks для `DESIGNER`, EDT `validate` для `EDT` |
 | `infobase restore` | провайдер `designer`; `ibcmd` только по `providers.infobase.restore`; `agent` только по `providers.infobase.restore: agent`; у автономного сервера (`infobase.standalone`) строки нет — снимок снимают средствами сервера | Загрузка полной ИБ из DT; обязателен `--create` или `--replace`; у `agent` DT подкладывается в каталог агента жёсткой ссылкой или копией, `infobase-tools restore-ib`, после чего агент сам завершает сеанс и рвёт соединение — это не ошибка |
-| `launch` | Не зависит от `format` | Прямой запуск 1C utility по позиционному mode; `launch web` открывает `infobase.web.url` в браузере |
+| `launch` | Не зависит от `format` | Прямой запуск 1C utility по позиционному mode; `launch web` открывает `infobase.web.url` в браузере, а `launch thin --via web` — тонким клиентом по тому же адресу |
 | `publish` | Файловая и кластерная база, провайдер только `webinst` | Публикует базу на веб-сервере из `infobase.web`; `--delete` снимает публикацию; `--dry-run` показывает команду `webinst` со всеми параметрами и замаскированным паролем в `-connstr` |
 | MCP | `stdio` и `streamable HTTP` | Публикует 8 инструментов, уже более узкая поверхность, чем CLI |
 
@@ -535,15 +535,22 @@ v8-runner publish [--delete] [--dry-run]
 ### `launch`
 
 ```bash
-v8-runner launch <designer|thin|thick|ordinary> [--dry-run] [FLAGS]
+v8-runner launch <designer|thin|thick|ordinary> [--via <web|connection>] [--dry-run] [FLAGS]
 v8-runner launch web [--dry-run]
-v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--wait-ready] [FLAGS]
+v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--via <web|connection>] [--wait-ready] [FLAGS]
 ```
 
 - Для обычного запуска (`designer`/`thin`/`thick`/`ordinary`) режим задаётся позиционным
   аргументом.
 - `designer` использует `1cv8`.
 - `thin` использует `1cv8c`.
+- `--via` выбирает, каким из двух адресов цели открыть базу: `connection` —
+  `infobase.connection`, `web` — `infobase.web.url` как ws-соединение. Умолчание задаёт вид
+  цели: у автономного сервера — `web` (другого адреса у него нет), у файловой и кластерной —
+  `connection`. Ключ принимается только там, где клиент тонкий (`launch thin` и
+  `launch mcp --mode thin`); у остальных режимов адрес один, и ключ отвергается.
+- Ответ несёт `via` у каждого режима, а `url` — там, где адрес клиентский. Пароль из
+  userinfo в показанном адресе замаскирован; в процесс уходит настоящий.
 - `thick` и `ordinary` используют `1cv8`.
 - `mcp` запускает клиентский MCP-сервер onec-client-mcp-devkit через `/C runMcp`.
 - `launch mcp` по умолчанию использует `--mode thin` и `1cv8c`.
@@ -624,7 +631,7 @@ v8-runner mcp serve http
 | `run_all_tests` | `full`, `runner`, `profile`, `feature`, `filterTag`, `ignoreTag`, `scenarioFilter` | Компактный вывод по умолчанию; `runner=vanessa` запускает Vanessa Automation с выбранным профилем и фильтрами |
 | `run_module_tests` | `moduleName`, `full` | Отклоняет пустой `moduleName` |
 | `dump_config` | `mode`, `extension`, `objects` | Пустой `mode` нормализуется в `INCREMENTAL` |
-| `launch_app` | `utilityType`, `mcpScenario`, `mode`, `mcpConfig`, `mcpPort`, `waitReady` | `utilityType=mcp` запускает client MCP; `mcpScenario=va` загружает Vanessa Automation; остальные MCP-поля доступны только для `utilityType=mcp` |
+| `launch_app` | `utilityType`, `mcpScenario`, `mode`, `mcpConfig`, `mcpPort`, `waitReady`, `via` | `utilityType=mcp` запускает client MCP; `mcpScenario=va` загружает Vanessa Automation; остальные MCP-поля доступны только для `utilityType=mcp`; `via` (`web` или `connection`) выбирает адрес и принимается только у тонкого клиента |
 | `check_syntax_edt` | `projectName` | Пустой `projectName` значит “все EDT-проекты” |
 | `check_syntax_designer_config` | Designer-config flags в `camelCase` | Область расширений нормализуется в service layer |
 | `check_syntax_designer_modules` | Designer-modules flags в `camelCase` | Область расширений нормализуется в service layer |

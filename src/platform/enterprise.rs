@@ -113,7 +113,7 @@ impl<'a> EnterpriseDsl<'a> {
         launch.internal_out = Some(self.log_file.display().to_string());
         build_launch_args(
             self.client_mode,
-            &self.connection,
+            LaunchAddress::Connection(&self.connection),
             &self.additional_launch_keys,
             &launch,
         )
@@ -131,9 +131,41 @@ impl From<LaunchClientModeRequest> for LaunchClientMode {
     }
 }
 
+/// Чем клиент открывает базу в командной строке.
+///
+/// Административный адрес несёт реквизиты базы рядом с собой; клиентский — не всегда:
+/// у автономной цели `infobase.user`/`password` принадлежат SSH-шлюзу, и клиенту их
+/// отдавать нельзя. Поэтому реквизиты у веб-адреса — отдельное, необязательное поле.
+#[derive(Debug, Clone, Copy)]
+pub enum LaunchAddress<'a> {
+    /// `infobase.connection` вместе с `/N` и `/P`.
+    Connection(&'a V8Connection),
+    /// `infobase.web.url` как ws-соединение; реквизиты прилагаются, только если они
+    /// действительно реквизиты базы.
+    Web {
+        url: &'a str,
+        credentials: Option<&'a V8Connection>,
+    },
+}
+
+impl LaunchAddress<'_> {
+    fn args(&self) -> Vec<String> {
+        match *self {
+            Self::Connection(connection) => connection.args(),
+            Self::Web { url, credentials } => {
+                let mut args = vec!["/WS".to_owned(), url.to_string()];
+                if let Some(connection) = credentials {
+                    args.extend(connection.credential_args());
+                }
+                args
+            }
+        }
+    }
+}
+
 pub fn build_launch_args(
     mode: LaunchClientMode,
-    connection: &V8Connection,
+    address: LaunchAddress<'_>,
     additional_launch_keys: &[String],
     launch: &LaunchOptions,
 ) -> Vec<String> {
@@ -145,7 +177,7 @@ pub fn build_launch_args(
     }
     .to_owned()];
     args.push("/DisableStartupDialogs".to_owned());
-    args.extend(connection.args());
+    args.extend(address.args());
     if matches!(mode, LaunchClientMode::Ordinary) {
         args.push("/RunModeOrdinaryApplication".to_owned());
     }
@@ -226,7 +258,8 @@ fn reserved_launch_key(arg: &str) -> Option<(bool, bool)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_launch_args, normalize_launch_payload_path, EnterpriseDsl, LaunchClientMode,
+        build_launch_args, normalize_launch_payload_path, EnterpriseDsl, LaunchAddress,
+        LaunchClientMode,
     };
     use crate::domain::runner::LaunchOptions;
     use crate::platform::connection::V8Connection;
@@ -242,11 +275,71 @@ mod tests {
         assert_eq!(normalized, "C:/tmp/path with space/cfg.json");
     }
 
+    /// Форма argv веб-пути: `/WS` с голым адресом вместо строки подключения. Живой
+    /// прогон на платформе — приёмка у владельца, но форма закреплена здесь.
+    #[test]
+    fn builds_a_web_address_launch_without_a_connection_string() {
+        let connection = V8Connection::from_connection_string("File=/tmp/ib");
+        let args = build_launch_args(
+            LaunchClientMode::Thin,
+            LaunchAddress::Web {
+                url: "http://localhost/base",
+                credentials: Some(&connection),
+            },
+            &[],
+            &LaunchOptions::default(),
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "ENTERPRISE".to_owned(),
+                "/DisableStartupDialogs".to_owned(),
+                "/WS".to_owned(),
+                "http://localhost/base".to_owned(),
+            ]
+        );
+    }
+
+    /// У автономной цели `infobase.user` и `infobase.password` — данные SSH-шлюза, а не
+    /// базы, поэтому реквизиты к адресу не прилагаются.
+    #[test]
+    fn a_web_address_without_credentials_carries_no_user_keys() {
+        let mut connection = V8Connection::from_connection_string("File=/tmp/ib");
+        connection.user = Some("gate".to_owned());
+        connection.password = Some("gate-secret".to_owned());
+
+        let with_credentials = build_launch_args(
+            LaunchClientMode::Thin,
+            LaunchAddress::Web {
+                url: "http://localhost/base",
+                credentials: Some(&connection),
+            },
+            &[],
+            &LaunchOptions::default(),
+        );
+        let without = build_launch_args(
+            LaunchClientMode::Thin,
+            LaunchAddress::Web {
+                url: "http://localhost/base",
+                credentials: None,
+            },
+            &[],
+            &LaunchOptions::default(),
+        );
+
+        assert!(with_credentials.contains(&"/N".to_owned()));
+        assert!(with_credentials.contains(&"gate-secret".to_owned()));
+        assert!(!without.contains(&"/N".to_owned()));
+        assert!(!without.contains(&"/P".to_owned()));
+        assert!(!without.iter().any(|arg| arg.contains("gate-secret")));
+    }
+
     #[test]
     fn builds_expected_run_unit_tests_arguments() {
         let args = build_launch_args(
             LaunchClientMode::Thin,
-            &V8Connection::from_connection_string("File=/tmp/ib"),
+            LaunchAddress::Connection(&V8Connection::from_connection_string("File=/tmp/ib")),
             &["/TESTMANAGER".to_owned()],
             &LaunchOptions {
                 c: Some("RunUnitTests=/tmp/path with space/тест config.json".to_owned()),
@@ -273,7 +366,7 @@ mod tests {
     fn builds_expected_vanessa_arguments() {
         let args = build_launch_args(
             LaunchClientMode::Thin,
-            &V8Connection::from_connection_string("File=/tmp/ib"),
+            LaunchAddress::Connection(&V8Connection::from_connection_string("File=/tmp/ib")),
             &["/TESTMANAGER".to_owned()],
             &LaunchOptions {
                 execute: Some("/tmp/va/vanessa automation.epf".to_owned()),
@@ -303,7 +396,7 @@ mod tests {
     fn ordinary_mode_adds_run_mode_and_filters_reserved_raw_keys() {
         let args = build_launch_args(
             LaunchClientMode::Ordinary,
-            &V8Connection::from_connection_string("File=/tmp/ib"),
+            LaunchAddress::Connection(&V8Connection::from_connection_string("File=/tmp/ib")),
             &[
                 "/TESTMANAGER".to_owned(),
                 "/DisableStartupDialogs".to_owned(),
@@ -350,7 +443,7 @@ mod tests {
     fn internal_out_has_priority_over_user_out() {
         let args = build_launch_args(
             LaunchClientMode::Thin,
-            &V8Connection::from_connection_string("File=/tmp/ib"),
+            LaunchAddress::Connection(&V8Connection::from_connection_string("File=/tmp/ib")),
             &[],
             &LaunchOptions {
                 out: Some("user.log".to_owned()),

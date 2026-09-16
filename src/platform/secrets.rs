@@ -84,10 +84,21 @@ pub fn render_masked_command(program: &Path, args: &[String]) -> String {
 fn mask(args: &[String], hidden: Hidden, secrets: &[&str]) -> Vec<String> {
     let mut masked = Vec::with_capacity(args.len());
     let mut mask_detached_value = false;
+    let mut mask_address_value = false;
     for arg in args {
         if mask_detached_value {
             mask_detached_value = false;
             masked.push(MASKED_VALUE.to_owned());
+            continue;
+        }
+        if mask_address_value {
+            mask_address_value = false;
+            masked.push(mask_literals(mask_url_userinfo(arg), secrets));
+            continue;
+        }
+        if is_client_address_key(arg) {
+            mask_address_value = true;
+            masked.push(arg.clone());
             continue;
         }
         let mut rewritten = String::with_capacity(arg.len());
@@ -112,10 +123,10 @@ fn mask(args: &[String], hidden: Hidden, secrets: &[&str]) -> Vec<String> {
                         rewritten.push_str(&word[..start]);
                         rewritten.push_str(MASKED_VALUE);
                     }
-                    None => rewritten.push_str(&mask_url_userinfo(&mask_hidden_key_runs(
-                        &mask_segments(word, hidden),
-                        hidden,
-                    ))),
+                    None => rewritten.push_str(&mask_userinfo(
+                        &mask_hidden_key_runs(&mask_segments(word, hidden), hidden),
+                        true,
+                    )),
                 }
             }
             rewritten.push_str(spacing);
@@ -267,29 +278,53 @@ fn split(value: &str, honour_quotes: bool) -> Vec<&str> {
     found
 }
 
-/// Маскирует пароль в userinfo адреса: `https://user:s3cret@host/ws`.
+/// Прячет пароль в объявленном клиентском адресе, оставляя сам адрес узнаваемым.
 ///
-/// Адрес веб-клиента объявляют в `infobase.web.url` и кладут в аргументы браузера
-/// одним токеном, а userinfo прячет в нём пароль там, где ключа `=` нет вовсе.
-fn mask_url_userinfo(word: &str) -> String {
-    let Some(scheme_end) = word.find("://") else {
-        return word.to_owned();
+/// Адрес приходит из `infobase.web.url`, которое не валидируется, поэтому схемы в нём
+/// может не быть: раз это заведомо адрес, схема и не требуется.
+pub fn mask_url_userinfo(value: &str) -> String {
+    mask_userinfo(value, false)
+}
+
+/// Ключ, за которым идёт клиентский адрес: его значение маскируется как адрес,
+/// а не целиком — адрес человеку нужен, чтобы понять, куда раннер собрался.
+fn is_client_address_key(arg: &str) -> bool {
+    arg.strip_prefix('/')
+        .or_else(|| arg.strip_prefix('-'))
+        .is_some_and(|rest| rest.eq_ignore_ascii_case("ws"))
+}
+
+/// Прячет пароль из userinfo адреса: `http://alice:pass@host/base` → `http://alice:***@host/base`.
+///
+/// Маскируется только то, что после `:`. Голое имя пользователя секретом не является, а
+/// спрятать его целиком значит сделать адрес неузнаваемым.
+///
+/// `require_scheme` разделяет два случая. У значения `/WS` схемы может не быть вовсе —
+/// поле `infobase.web.url` не валидируется, — поэтому там адресом считается и голый
+/// authority. В любом другом аргументе без схемы на адрес похож и путь вида
+/// `C:\dir@host`, и маскировать его значило бы портить читаемое.
+fn mask_userinfo(value: &str, require_scheme: bool) -> String {
+    let authority_start = match value.find("://") {
+        Some(scheme_end) => scheme_end + "://".len(),
+        None if require_scheme => return value.to_owned(),
+        None if value.starts_with("//") => "//".len(),
+        None => 0,
     };
-    let authority_start = scheme_end + "://".len();
-    let authority_end = word[authority_start..]
-        .find('/')
-        .map_or(word.len(), |at| authority_start + at);
-    let Some(at) = word[authority_start..authority_end].rfind('@') else {
-        return word.to_owned();
+    let authority_end = value[authority_start..]
+        .find(['/', '?', '#'])
+        .map_or(value.len(), |at| authority_start + at);
+    let authority = &value[authority_start..authority_end];
+    let Some(at) = authority.rfind('@') else {
+        return value.to_owned();
     };
-    let at = authority_start + at;
-    let Some(colon) = word[authority_start..at].find(':') else {
-        return word.to_owned();
+    let Some(colon) = authority[..at].find(':') else {
+        return value.to_owned();
     };
     format!(
-        "{}{MASKED_VALUE}{}",
-        &word[..authority_start + colon + 1],
-        &word[at..]
+        "{}{}:{MASKED_VALUE}{}",
+        &value[..authority_start],
+        &authority[..colon],
+        &value[authority_start + at..]
     )
 }
 
@@ -354,7 +389,7 @@ fn mask_literals(arg: String, secrets: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{mask_preview_args, render_masked_command};
+    use super::{mask_preview_args, mask_url_userinfo, render_masked_command};
     use std::path::Path;
 
     fn preview(args: &[&str], secrets: &[&str]) -> Vec<String> {
@@ -525,25 +560,6 @@ mod tests {
         );
     }
 
-    /// Адрес веб-клиента приезжает одним токеном, и пароль в нём стоит не за `=`,
-    /// а в userinfo. Сам адрес остаётся читаемым: по нему и одобряют план.
-    #[test]
-    fn masks_the_password_of_a_url_userinfo() {
-        assert_eq!(
-            preview(&["https://alice:s3cret@host/ws"], &[]),
-            vec!["https://alice:***@host/ws"]
-        );
-        assert_eq!(
-            preview(&["http://localhost/demo"], &[]),
-            vec!["http://localhost/demo"]
-        );
-        // `@` в пути не делает пароля из того, что стоит перед ним.
-        assert_eq!(
-            preview(&["https://host/ws@2"], &[]),
-            vec!["https://host/ws@2"]
-        );
-    }
-
     /// Пароль пользователя хранилища приезжает тем же путём, что `/WSP`.
     #[test]
     fn masks_the_repository_password_and_access_code() {
@@ -565,6 +581,68 @@ mod tests {
             ]
         );
         assert_eq!(preview(&["/UC=s3cret"], &[]), vec!["/UC=***"]);
+    }
+
+    /// Разбор адреса написан руками, поэтому таблица форм: со схемой и без неё, IPv6,
+    /// `@` в пути и запросе, пустой пароль, голое имя пользователя, повторное применение.
+    #[test]
+    fn mask_url_userinfo_hides_the_password_in_every_shape_of_address() {
+        for (value, expected) in [
+            (
+                "http://alice:s3cret@host/base",
+                "http://alice:***@host/base",
+            ),
+            (
+                "https://alice:s3cret@host:443/b?x=1#f",
+                "https://alice:***@host:443/b?x=1#f",
+            ),
+            // Схемы может не быть вовсе: поле не валидируется.
+            ("//alice:s3cret@host/base", "//alice:***@host/base"),
+            ("alice:s3cret@host/base", "alice:***@host/base"),
+            // Пароль с разделителями внутри: маскируется от первого `:` до последней `@`.
+            ("http://alice:p@ss:word@host/b", "http://alice:***@host/b"),
+            (
+                "http://alice:s3cret@[2001:db8::1]:8080/b",
+                "http://alice:***@[2001:db8::1]:8080/b",
+            ),
+            // Прятать нечего.
+            ("http://alice@host/base", "http://alice@host/base"),
+            ("http://host/base", "http://host/base"),
+            (
+                "http://[2001:db8::1]:8080/base",
+                "http://[2001:db8::1]:8080/base",
+            ),
+            ("http://host/path@with-at", "http://host/path@with-at"),
+            ("http://host/base?q=a@b", "http://host/base?q=a@b"),
+            // Уже замаскированное второй раз не портится.
+            ("http://alice:***@host/base", "http://alice:***@host/base"),
+        ] {
+            assert_eq!(mask_url_userinfo(value), expected, "вход: {value}");
+        }
+    }
+
+    /// Маскируется значение `/WS`, а не всё, что похоже на адрес: путь с `@` и строка
+    /// подключения остаются читаемыми.
+    #[test]
+    fn only_the_client_address_is_masked_as_an_address() {
+        let masked = preview(
+            &[
+                "/WS",
+                "http://alice:s3cret@host/base",
+                "/C",
+                "C:\\dir@host",
+                "/IBConnectionString",
+                "Srvr=host;Ref=base",
+            ],
+            &[],
+        );
+
+        assert_eq!(masked[1], "http://alice:***@host/base");
+        assert_eq!(
+            masked[3], "C:\\dir@host",
+            "путь не адрес и портиться не должен"
+        );
+        assert_eq!(masked[5], "Srvr=host;Ref=base");
     }
 
     #[test]
