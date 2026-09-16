@@ -244,6 +244,7 @@ pub(crate) fn map_agent_error(error: AgentError) -> AppError {
         | AgentError::SessionClosed { .. }
         | AgentError::Transport { .. }
         | AgentError::UserDirUnknown { .. }
+        | AgentError::UnsafeEntryName { .. }
         | AgentError::Exchange { .. } => AppError::Platform(error.to_string()),
         AgentError::Workspace { .. } => AppError::Runtime(error.to_string()),
         AgentError::Unreachable { .. }

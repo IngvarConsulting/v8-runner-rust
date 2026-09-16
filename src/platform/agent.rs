@@ -292,6 +292,12 @@ pub enum AgentError {
     #[error("sftp exchange with the agent failed at '{path}': {detail}")]
     Exchange { path: String, detail: String },
 
+    /// Точка входа назвала запись каталога именем, непригодным как компонент пути.
+    /// Отдельный вид, а не текст внутри `Exchange`: по нему решают, и решать по прозе
+    /// нельзя (`DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES`).
+    #[error("entry point returned an unusable directory entry name at '{path}': {detail}")]
+    UnsafeEntryName { path: String, detail: String },
+
     #[error("managed agent could not be launched: {0}")]
     Launch(#[source] crate::platform::process::ProcessError),
 
@@ -579,6 +585,12 @@ impl AgentSession {
                     self.drop_sftp();
                     reopened = true;
                 }
+                Err(error @ SftpError::UnsafeName { .. }) => {
+                    return Err(AgentError::UnsafeEntryName {
+                        path: path.to_owned(),
+                        detail: error.to_string(),
+                    })
+                }
                 Err(error) => {
                     return Err(AgentError::Exchange {
                         path: path.to_owned(),
@@ -750,6 +762,10 @@ impl AgentSession {
     pub fn sftp_remove_all(&mut self, remote: &str) -> Result<(), AgentError> {
         let path = Self::sftp_path(remote);
         match self.sftp_list(remote) {
+            // Отказ по имени — не «это файл, а не каталог»: рекурсию останавливают,
+            // иначе непригодное имя тихо превратилось бы в попытку удалить путь как
+            // файл и настоящая причина осталась бы только в debug-журнале.
+            Err(error @ AgentError::UnsafeEntryName { .. }) => Err(error),
             Ok(entries) => {
                 for (name, _) in entries {
                     self.sftp_remove_all(&format!("{remote}/{name}"))?;
