@@ -746,18 +746,29 @@ const EVIDENCE: &str = "tests/arch_registry.rs::a_symbol_and_its_path_spell_each
 /// решение — назвать правило в `establishes`. Поэтому фикстура здесь — не файл, а
 /// маленький реестр целиком, и нарушение в нём ровно одно.
 fn decision_file(name: &str, id: &str, establishes: &str) -> RecordFile {
+    decision_file_with(
+        name,
+        id,
+        &format!(
+            "status: active\n\
+             governs: process\n\
+             realized: {EVIDENCE}\n\
+             supersedes: []\n\
+             superseded-by: null\n\
+             establishes: [{establishes}]\n"
+        ),
+    )
+}
+
+/// То же решение, но пропы называет вызывающий: замену и статус фикстуры меняют.
+fn decision_file_with(name: &str, id: &str, props: &str) -> RecordFile {
     (
         "decisions".to_owned(),
         name.to_owned(),
         format!(
             "---\n\
              id: {id}\n\
-             status: active\n\
-             governs: process\n\
-             realized: {EVIDENCE}\n\
-             supersedes: []\n\
-             superseded-by: null\n\
-             establishes: [{establishes}]\n\
+             {props}\
              ---\n\
              \n\
              # Решение\n"
@@ -767,17 +778,28 @@ fn decision_file(name: &str, id: &str, establishes: &str) -> RecordFile {
 
 /// Инвариант, выведенный из этого решения.
 fn rule_file(name: &str, id: &str, decision: &str) -> RecordFile {
+    rule_file_with(
+        name,
+        id,
+        &format!(
+            "status: active\n\
+             governs: process\n\
+             decision: {decision}\n\
+             check: {EVIDENCE}\n\
+             scope: [docs]\n"
+        ),
+    )
+}
+
+/// То же правило, но пропы называет вызывающий: форму и статус фикстуры меняют.
+fn rule_file_with(name: &str, id: &str, props: &str) -> RecordFile {
     (
         "invariants".to_owned(),
         name.to_owned(),
         format!(
             "---\n\
              id: {id}\n\
-             status: active\n\
-             governs: process\n\
-             decision: {decision}\n\
-             check: {EVIDENCE}\n\
-             scope: [docs]\n\
+             {props}\
              ---\n\
              \n\
              # Правило\n"
@@ -923,6 +945,22 @@ fn a_symbol_and_its_path_spell_each_other() {
         rule_file("CTR.WIRE.EXAMPLE.md", "CTR.WIRE.EXAMPLE", DECISION_ID),
     ]);
 
+    // Дата пишется теми же ASCII-цифрами, что и остальное имя. `\d` принимает и
+    // арабо-индийские, и символ решения собирается из знаков, которых не набрать ни в
+    // одной ссылке на него.
+    let decision_dated_in_other_digits = registry_case(vec![
+        decision_file(
+            "\u{664}\u{660}\u{662}\u{666}-\u{660}\u{669}-\u{661}\u{666}-an-example-decision.md",
+            "DEC.\u{664}\u{660}\u{662}\u{666}-\u{660}\u{669}-\u{661}\u{666}.AN-EXAMPLE-DECISION",
+            "INV.DOCS.EXAMPLE",
+        ),
+        rule_file(
+            "INV.DOCS.EXAMPLE.md",
+            "INV.DOCS.EXAMPLE",
+            "DEC.\u{664}\u{660}\u{662}\u{666}-\u{660}\u{669}-\u{661}\u{666}.AN-EXAMPLE-DECISION",
+        ),
+    ]);
+
     let judged = python_validation_errors(&[
         sound,
         sound_contract,
@@ -930,6 +968,7 @@ fn a_symbol_and_its_path_spell_each_other() {
         decision_renamed,
         decision_misfiled,
         rule_in_the_wrong_registry,
+        decision_dated_in_other_digits,
     ]);
     let mut wrong = Vec::new();
 
@@ -957,6 +996,12 @@ fn a_symbol_and_its_path_spell_each_other() {
         "a decision filed under a name that spells no symbol",
         &judged[4],
         "decisions/an-example-decision.md: filename must read",
+        &mut wrong,
+    );
+    sole_error(
+        "a decision dated in digits no reference can spell",
+        &judged[6],
+        "filename must read",
         &mut wrong,
     );
     sole_error(
@@ -1032,6 +1077,831 @@ fn a_record_name_survives_a_windows_checkout() {
     assert!(
         wrong.is_empty(),
         "the tree may grow a name Windows refuses to check out:\n{}",
+        wrong.join("\n")
+    );
+}
+
+const RULE_FILE: &str = "INV.DOCS.EXAMPLE.md";
+const RULE_ID: &str = "INV.DOCS.EXAMPLE";
+const OFF_AXIS: &str = "`governs` must read `product` or `process`";
+
+/// Та же запись, но с другим словом на оси `governs`.
+///
+/// Значение подменяется в готовой фикстуре, а не передаётся в сборщик: ось есть у
+/// всех трёх видов, и четвёртый аргумент ради одного теста переписал бы каждый
+/// вызов в файле. Строка обязана найтись — иначе фикстура молча осталась бы
+/// здоровой и проверяла бы не то, что обещает.
+fn with_governs(file: RecordFile, governs: &str) -> RecordFile {
+    with_props(file, &[("governs", governs)])
+}
+
+/// Та же запись, но с переписанными полями.
+///
+/// Полей здесь несколько, потому что статус в одиночку не меняется: `planned`-правило
+/// обязано объявить `check: null`, а `superseded`-решение — `realized: null`. Подмени
+/// одно поле — и фикстура ловит не то нарушение, которое обещает.
+fn with_props(file: RecordFile, changes: &[(&str, &str)]) -> RecordFile {
+    let (directory, name, text) = file;
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    for (key, value) in changes {
+        let prefix = format!("{key}:");
+        let line = lines
+            .iter_mut()
+            .find(|line| line.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("фикстура {name} не называет `{key}`"));
+        *line = format!("{key}: {value}");
+    }
+    (directory, name, lines.join("\n") + "\n")
+}
+
+/// Мини-реестр под ось: решение и выведенное из него правило.
+fn governs_case(decision_governs: &str, rule_governs: &str) -> serde_json::Value {
+    registry_case(vec![
+        with_governs(
+            decision_file(DECISION_FILE, DECISION_ID, RULE_ID),
+            decision_governs,
+        ),
+        with_governs(rule_file(RULE_FILE, RULE_ID, DECISION_ID), rule_governs),
+    ])
+}
+
+/// Ось `governs` закрыта, и закрыта она гейтом, а не только таблицей в README.
+///
+/// `spec/arch/README.md` публикует перечень: `product` или `process` — кто заметит
+/// нарушение, потребитель или только мы. От ответа зависит, чем правка оплачивается,
+/// и индекс печатает значение рядом с видом записи. Слово вне перечня адресата не
+/// уточняет, а снимает: по индексу больше не отделить видимое снаружи от видимого
+/// только нам, а опечатка в поле не отличается от осознанного выбора.
+#[test]
+fn governs_reads_product_or_process() {
+    let sound = governs_case("process", "process");
+    // Оба значения проходят и на решении, и на правиле: перечень закрыт, но не сужен.
+    let sound_product = governs_case("process", "product");
+    let decision_off_axis = governs_case("banana", "process");
+    let rule_off_axis = governs_case("process", "banana");
+    // Ось пишется одним способом. `Process` — это не значение оси, а похожее на него
+    // слово, и пропусти его гейт, в индексе встали бы две колонки под одним смыслом.
+    let wrong_case = governs_case("process", "Process");
+    // Пустое поле — прежняя претензия и ровно одна: про отсутствующее значение гейт
+    // не может сказать заодно, что оно вне перечня.
+    let rule_without_governs = governs_case("process", "");
+
+    let judged = python_validation_errors(&[
+        sound,
+        sound_product,
+        decision_off_axis,
+        rule_off_axis,
+        wrong_case,
+        rule_without_governs,
+    ]);
+    let mut wrong = Vec::new();
+
+    for (name, errors) in [
+        ("a process rule", &judged[0]),
+        ("a product rule", &judged[1]),
+    ] {
+        if !errors.is_empty() {
+            wrong.push(format!("{name} must pass: {errors:?}"));
+        }
+    }
+    sole_error(
+        "a decision off the axis",
+        &judged[2],
+        &format!("decisions/{DECISION_FILE}: {OFF_AXIS}"),
+        &mut wrong,
+    );
+    sole_error(
+        "a rule off the axis",
+        &judged[3],
+        &format!("invariants/{RULE_FILE}: {OFF_AXIS}"),
+        &mut wrong,
+    );
+    sole_error("a rule shouting the axis", &judged[4], OFF_AXIS, &mut wrong);
+    sole_error(
+        "a rule with no governs at all",
+        &judged[5],
+        &format!("invariants/{RULE_FILE}: missing prop `governs`"),
+        &mut wrong,
+    );
+
+    assert!(
+        wrong.is_empty(),
+        "`governs` may read anything at all:\n{}",
+        wrong.join("\n")
+    );
+}
+
+const OFF_SET: &str = "`status` must read `active`, `planned` or `superseded`";
+
+/// Мини-реестр под перечень: решение и выведенное из него правило, каждому свой статус.
+fn status_case(decision: &[(&str, &str)], rule: &[(&str, &str)]) -> serde_json::Value {
+    registry_case(vec![
+        with_props(decision_file(DECISION_FILE, DECISION_ID, RULE_ID), decision),
+        with_props(rule_file(RULE_FILE, RULE_ID, DECISION_ID), rule),
+    ])
+}
+
+/// Перечень `status` закрыт, и закрыт он гейтом, а не только таблицей в README.
+///
+/// `status` — не колонка индекса, а условие, по которому ветвится сам разбор: `planned`
+/// разрешает правилу не называть фальсификатор, `superseded` — решению не предъявлять
+/// свидетельство, `active` требует действующего решения под действующим правилом.
+/// Сверяется слово целиком, поэтому промах мимо перечня не нарушает правил, а отключает
+/// проверку: фикстура ниже — правило со `status: activ` под `planned`-решением — до
+/// этой проверки проходила гейт молча, объявляя себя действующей под решением, которое
+/// ещё не принято. Этим ось `governs` и `status` не схожи: там слово вне перечня ничего
+/// не переключает, а снимает адресата обещания.
+///
+/// Перечень закрыт с обеих сторон. Опубликованное значение обязано проходить — включая
+/// `superseded`, которого нет ни в одной живой записи: сузься перечень до двух слов,
+/// реестр бы этого не заметил, и поймать такое может только выдуманный реестр.
+#[test]
+fn status_reads_active_planned_or_superseded() {
+    let sound = status_case(&[("status", "active")], &[("status", "active")]);
+    // Запланированное правило объявляет отсутствие проверки, заменённое решение —
+    // отсутствие свидетельства. Оба слова перечень обязан пропускать.
+    let planned_rule = status_case(&[], &[("status", "planned"), ("check", "null")]);
+    // Замена объявляется обеими записями, поэтому здесь их две: половина замены сама
+    // по себе отказ, и без преемника фикстура спорила бы не о том, о чём заведена.
+    let supersedes_the_replaced = format!("[{DECISION_ID}]");
+    let superseded_decision = registry_case(vec![
+        with_props(
+            decision_file(DECISION_FILE, DECISION_ID, RULE_ID),
+            &[
+                ("status", "superseded"),
+                ("realized", "null"),
+                ("superseded-by", SUCCESSOR_ID),
+            ],
+        ),
+        with_props(
+            decision_file(SUCCESSOR_FILE, SUCCESSOR_ID, ""),
+            &[("supersedes", supersedes_the_replaced.as_str())],
+        ),
+        with_props(
+            rule_file(RULE_FILE, RULE_ID, DECISION_ID),
+            &[("status", "planned"), ("check", "null")],
+        ),
+    ]);
+    // Правило под ними не действует: иначе сработала бы ветка «действующее правило
+    // под недействующим решением», и нарушений в фикстуре стало бы два.
+    let decision_off_the_set = status_case(
+        &[("status", "banana")],
+        &[("status", "planned"), ("check", "null")],
+    );
+    let rule_off_the_set = status_case(&[], &[("status", "activ")]);
+    // Статус пишется одним способом: `Active` — не значение перечня, а похожее слово.
+    let wrong_case = status_case(&[], &[("status", "Active")]);
+    // Ровно тот случай, ради которого перечень и закрывается: решение не принято,
+    // правило объявляет себя действующим, и одна буква прячет расхождение целиком.
+    let typo_switches_a_check_off = status_case(
+        &[("status", "planned"), ("realized", "null")],
+        &[("status", "activ")],
+    );
+    // Пустое поле — прежняя претензия и ровно одна: про отсутствующее значение гейт
+    // не может сказать заодно, что оно вне перечня.
+    let rule_without_status = status_case(&[], &[("status", "")]);
+
+    let judged = python_validation_errors(&[
+        sound,
+        planned_rule,
+        superseded_decision,
+        decision_off_the_set,
+        rule_off_the_set,
+        wrong_case,
+        typo_switches_a_check_off,
+        rule_without_status,
+    ]);
+    let mut wrong = Vec::new();
+
+    for (name, errors) in [
+        ("an active rule", &judged[0]),
+        ("a planned rule", &judged[1]),
+        ("a superseded decision", &judged[2]),
+    ] {
+        if !errors.is_empty() {
+            wrong.push(format!("{name} must pass: {errors:?}"));
+        }
+    }
+    sole_error(
+        "a decision off the set",
+        &judged[3],
+        &format!("decisions/{DECISION_FILE}: {OFF_SET}"),
+        &mut wrong,
+    );
+    sole_error(
+        "a rule off the set",
+        &judged[4],
+        &format!("invariants/{RULE_FILE}: {OFF_SET}"),
+        &mut wrong,
+    );
+    sole_error(
+        "a rule shouting the status",
+        &judged[5],
+        OFF_SET,
+        &mut wrong,
+    );
+    sole_error(
+        "a typo that switches a check off",
+        &judged[6],
+        &format!("invariants/{RULE_FILE}: {OFF_SET}"),
+        &mut wrong,
+    );
+    sole_error(
+        "a rule with no status at all",
+        &judged[7],
+        &format!("invariants/{RULE_FILE}: missing prop `status`"),
+        &mut wrong,
+    );
+
+    assert!(
+        wrong.is_empty(),
+        "`status` may read anything at all:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// Сливает индексы тем же кодом, которым git сводит расхождение в `spec/arch/index.md`,
+/// и заодно называет драйвер, под именем которого этот код зарегистрирован.
+const MERGE_PROBE: &str = r#"
+import json, sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, "scripts/arch")
+import registry
+
+def index(rows):
+    return "\n".join(registry.INDEX_HEADER) + "".join("\n" + row for row in rows) + "\n"
+
+merged = []
+for sides in json.load(sys.stdin):
+    try:
+        text = registry.merge_index(*(index(rows) for rows in sides))
+    except ValueError as error:
+        merged.append({"rejected": str(error)})
+    else:
+        merged.append({"rows": text.splitlines()[len(registry.INDEX_HEADER):]})
+
+current = registry.INDEX_PATH.read_text(encoding="utf-8")
+json.dump(
+    {
+        "driver": registry.MERGE_DRIVER,
+        # Индекс, слитый сам с собой, обязан выйти собой: шапка и строка у порождения
+        # и у слияния одни, и разойдись они — каждое слияние портило бы весь файл.
+        "identity": registry.merge_index(current, current, current) == current,
+        "merged": merged,
+    },
+    sys.stdout,
+    ensure_ascii=False,
+)
+"#;
+
+/// Строка индекса. Слиянию видно только первую колонку — символ; остальные стоят
+/// здесь потому, что без них это не строка индекса, а не потому, что их читают.
+fn index_row(symbol: &str, status: &str) -> String {
+    format!(
+        "| `{symbol}` | решение · process | {status} \
+         | да | Суть | [decisions/x.md](decisions/x.md) |"
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct MergeAnswer {
+    driver: String,
+    identity: bool,
+    merged: Vec<serde_json::Value>,
+}
+
+/// Порождённый индекс не останавливает слияние.
+///
+/// `index.md` порождается и коммитится, поэтому две ветки, заведшие по записи, расходятся
+/// в нём всегда: строки отсортированы по символу, и две новые встают в одно место.
+/// Выбирать человеку тут нечего — сторона конфликта ни на что не влияет, разрешение
+/// всегда одно, — и ручное разрешение генерируемого файла кончается тем, что его правят
+/// руками. Поэтому расхождение сводит драйвер, а `.gitattributes` направляет к нему файл.
+///
+/// Драйвер сливает строки, а не перепорождает индекс: посреди слияния записей чужой
+/// стороны на диске ещё нет, и порождение дало бы индекс без них — зато без конфликта,
+/// то есть устаревший молча. Сведённое неверно ловит гейт свежести, а не тихий коммит.
+#[test]
+fn the_generated_index_does_not_stop_a_merge() {
+    let (alef, mem, zayn) = ("DEC.2026-01-01.A", "DEC.2026-01-01.M", "DEC.2026-01-01.Z");
+    let (a, m, z) = (
+        index_row(alef, "active"),
+        index_row(mem, "active"),
+        index_row(zayn, "active"),
+    );
+    // Та же запись после правки: строка меняется, символ остаётся ключом.
+    let m_superseded = index_row(mem, "superseded");
+
+    let answer: MergeAnswer = ask_registry(
+        MERGE_PROBE,
+        &vec![
+            // Обе стороны завели по записи, и чужая встаёт выше нашей.
+            vec![vec![&m], vec![&m, &z], vec![&a, &m]],
+            // Мы завели запись, они правили соседнюю.
+            vec![vec![&m], vec![&m, &z], vec![&m_superseded]],
+            // Они убрали запись, которой мы не касались.
+            vec![vec![&a, &m], vec![&a, &m], vec![&a]],
+            // Строку, которой формат не описывает, драйвер не проглатывает: иначе
+            // предыдущее неудачное слияние растворилось бы в следующем.
+            vec![
+                vec![&m],
+                vec![&m, &"<<<<<<< HEAD".to_string()],
+                vec![&m, &z],
+            ],
+        ],
+        "merge an index",
+    );
+
+    let mut wrong = Vec::new();
+    let expected: [Option<Vec<&String>>; 4] = [
+        Some(vec![&a, &m, &z]),
+        Some(vec![&m_superseded, &z]),
+        Some(vec![&a]),
+        None,
+    ];
+    for (number, (got, want)) in answer.merged.iter().zip(expected).enumerate() {
+        let rows = got
+            .get("rows")
+            .and_then(|rows| serde_json::from_value::<Vec<String>>(rows.clone()).ok());
+        let agree = match (&rows, &want) {
+            (Some(rows), Some(want)) => rows.iter().collect::<Vec<_>>() == *want,
+            (None, None) => true,
+            _ => false,
+        };
+        if !agree {
+            wrong.push(format!("case {number}: {got}"));
+        }
+    }
+
+    assert!(
+        answer.identity,
+        "merge_index does not reproduce the index it was given on all three sides"
+    );
+    assert!(
+        wrong.is_empty(),
+        "the merge driver resolves a diverged index wrongly:\n{}",
+        wrong.join("\n")
+    );
+
+    // Имя драйвера живёт в трёх местах, и молчит только одно расхождение: атрибут,
+    // называющий незарегистрированный драйвер, git берёт обычным текстовым слиянием.
+    let attributes = std::fs::read_to_string(repo_root().join(".gitattributes"))
+        .expect("the repository declares attributes");
+    let routed = attributes.lines().any(|line| {
+        line.split_whitespace().next() == Some("spec/arch/index.md")
+            && line.contains(&format!("merge={}", answer.driver))
+    });
+    assert!(
+        routed,
+        ".gitattributes does not route spec/arch/index.md to merge={}",
+        answer.driver
+    );
+}
+
+/// Символ, которым решение называет чужую запись, обязан в эту запись разрешаться.
+///
+/// `establishes` ведёт к правилу, `supersedes` и `superseded-by` — к решению. Символ,
+/// не ведущий никуда, публикует обещание, за которым нет ни записи, ни проверки: в
+/// тексте решения имя названо уверенно, а индекс о нём молчит, потому что строки у
+/// него нет. Отказ поэтому называет и путь, по которому запись надо написать, — путь
+/// собирается той же грамматикой, которую гейт требует от имени файла.
+///
+/// `establishes` заменённого решения — история: правило, выведенное из обращения
+/// преемником, файла уже не имеет, а переписать список заменённой записи нельзя.
+/// Без этой поблажки судьба `retired` из `spec/archive/FATE.md` стала бы недостижимой.
+#[test]
+fn every_symbol_a_decision_names_resolves_to_a_record() {
+    const OLDER_FILE: &str = "2026-09-15-an-earlier-decision.md";
+    const OLDER_ID: &str = "DEC.2026-09-15.AN-EARLIER-DECISION";
+
+    let active = |supersedes: &str, establishes: &str| {
+        format!(
+            "status: active\n\
+             governs: process\n\
+             realized: {EVIDENCE}\n\
+             supersedes: [{supersedes}]\n\
+             superseded-by: null\n\
+             establishes: [{establishes}]\n"
+        )
+    };
+    let replaced = |successor: &str, establishes: &str| {
+        format!(
+            "status: superseded\n\
+             governs: process\n\
+             realized: null\n\
+             supersedes: []\n\
+             superseded-by: {successor}\n\
+             establishes: [{establishes}]\n"
+        )
+    };
+
+    // Все три пропа заполнены и разрешаются. Без здоровой фикстуры «ровно один отказ»
+    // ниже оказался бы совпадением, а не проверкой.
+    let sound = registry_case(vec![
+        decision_file_with(DECISION_FILE, DECISION_ID, &active(OLDER_ID, RULE_ID)),
+        decision_file_with(OLDER_FILE, OLDER_ID, &replaced(DECISION_ID, "")),
+        rule_file(RULE_FILE, RULE_ID, DECISION_ID),
+    ]);
+    // Заменённое решение отвечает за свой `establishes` только историей. Преемник
+    // называет его в `supersedes`: половина замены — сама по себе отказ, и без неё
+    // фикстура спорила бы не о том, о чём заведена.
+    let retired = registry_case(vec![
+        decision_file_with(
+            OLDER_FILE,
+            OLDER_ID,
+            &replaced(DECISION_ID, "INV.DOCS.NOBODY-WROTE-THIS"),
+        ),
+        decision_file_with(DECISION_FILE, DECISION_ID, &active(OLDER_ID, "")),
+    ]);
+    let rule_never_written = registry_case(vec![decision_file_with(
+        DECISION_FILE,
+        DECISION_ID,
+        &active("", "INV.DOCS.NOBODY-WROTE-THIS"),
+    )]);
+    // Правило выводится из решения, а не решение из решения.
+    let establishes_a_decision = registry_case(vec![
+        decision_file_with(DECISION_FILE, DECISION_ID, &active("", OLDER_ID)),
+        decision_file_with(OLDER_FILE, OLDER_ID, &active("", "")),
+    ]);
+    // Строка не из реестра не разрешается ни во что и файла не подсказывает.
+    let not_a_symbol = registry_case(vec![decision_file_with(
+        DECISION_FILE,
+        DECISION_ID,
+        &active("", "mcp-tools"),
+    )]);
+    let supersedes_nothing = registry_case(vec![decision_file_with(
+        DECISION_FILE,
+        DECISION_ID,
+        &active("DEC.2026-09-15.NOBODY-WROTE-THIS", ""),
+    )]);
+    // Заменяют решение, а не выведенное из него правило.
+    let supersedes_a_rule = registry_case(vec![
+        decision_file_with(DECISION_FILE, DECISION_ID, &active(RULE_ID, RULE_ID)),
+        rule_file(RULE_FILE, RULE_ID, DECISION_ID),
+    ]);
+    // `superseded-by` — скаляр, и разрешается он так же, как список `supersedes`.
+    let superseded_by_nothing = registry_case(vec![decision_file_with(
+        OLDER_FILE,
+        OLDER_ID,
+        &replaced("DEC.2026-09-17.NOBODY-WROTE-THIS", ""),
+    )]);
+
+    let judged = python_validation_errors(&[
+        sound,
+        retired,
+        rule_never_written,
+        establishes_a_decision,
+        not_a_symbol,
+        supersedes_nothing,
+        supersedes_a_rule,
+        superseded_by_nothing,
+    ]);
+    let mut wrong = Vec::new();
+
+    for (name, errors) in [
+        ("a registry whose symbols all resolve", &judged[0]),
+        (
+            "a superseded decision keeping its list as history",
+            &judged[1],
+        ),
+    ] {
+        if !errors.is_empty() {
+            wrong.push(format!("{name} must pass: {errors:?}"));
+        }
+    }
+    sole_error(
+        "a rule named by a decision and never written",
+        &judged[2],
+        "names INV.DOCS.NOBODY-WROTE-THIS, which has no record — write \
+         invariants/INV.DOCS.NOBODY-WROTE-THIS.md",
+        &mut wrong,
+    );
+    sole_error(
+        "a decision established as if it were a rule",
+        &judged[3],
+        &format!("`establishes` names the decision {OLDER_ID} where a rule is required"),
+        &mut wrong,
+    );
+    sole_error(
+        "a string that spells no symbol at all",
+        &judged[4],
+        "names mcp-tools, which is not a rule symbol",
+        &mut wrong,
+    );
+    sole_error(
+        "a superseded decision that was never written",
+        &judged[5],
+        "which has no record — write decisions/2026-09-15-nobody-wrote-this.md",
+        &mut wrong,
+    );
+    sole_error(
+        "a rule superseded as if it were a decision",
+        &judged[6],
+        &format!("`supersedes` names the invariant {RULE_ID} where a decision is required"),
+        &mut wrong,
+    );
+    sole_error(
+        "a successor that was never written",
+        &judged[7],
+        "which has no record — write decisions/2026-09-17-nobody-wrote-this.md",
+        &mut wrong,
+    );
+
+    assert!(
+        wrong.is_empty(),
+        "the registry publishes rules that do not exist:\n{}",
+        wrong.join("\n")
+    );
+}
+
+const SUCCESSOR_FILE: &str = "2026-09-17-a-later-decision.md";
+const SUCCESSOR_ID: &str = "DEC.2026-09-17.A-LATER-DECISION";
+
+/// Решение с выписанными полями замены: статус, кого заменяет и кто заменил.
+///
+/// `realized: null` ставится ровно там, где его допускает гейт, — у принятого
+/// направления и у заменённой записи, — чтобы фикстура не спорила сама с собой.
+fn succession_file(
+    name: &str,
+    id: &str,
+    status: &str,
+    supersedes: &str,
+    superseded_by: &str,
+) -> RecordFile {
+    let realized = match status {
+        "planned" | "superseded" => "null",
+        _ => EVIDENCE,
+    };
+    decision_file_with(
+        name,
+        id,
+        &format!(
+            "status: {status}\n\
+             governs: process\n\
+             realized: {realized}\n\
+             supersedes: {supersedes}\n\
+             superseded-by: {superseded_by}\n\
+             establishes: []\n"
+        ),
+    )
+}
+
+/// Символ называет ровно одну запись, иначе по нему открывается то одна, то другая.
+///
+/// Имя файла и префикс вида диктуют символ порознь, и вместе уникальности ещё не дают:
+/// стоит двум видам назваться одним префиксом, и `INV.DOCS.EXAMPLE` лежит и в
+/// `invariants/`, и в `contracts/`. Обе записи проходят все проверки имени, ссылка по
+/// символу приводит к той, что победила в отображении символов, а индекс печатает на
+/// один символ две строки — и обе выглядят правдой. Префикс контрактов уже меняли
+/// однажды, поэтому фикстура меняет его, а не выдумывает случай.
+#[test]
+fn a_symbol_names_exactly_one_record() {
+    let sound = registry_case(vec![
+        decision_file(DECISION_FILE, DECISION_ID, "INV.DOCS.EXAMPLE"),
+        rule_file("INV.DOCS.EXAMPLE.md", "INV.DOCS.EXAMPLE", DECISION_ID),
+    ]);
+    let two_kinds_one_prefix = registry_case_with_prefix(
+        vec![
+            decision_file(DECISION_FILE, DECISION_ID, "INV.DOCS.EXAMPLE"),
+            rule_file("INV.DOCS.EXAMPLE.md", "INV.DOCS.EXAMPLE", DECISION_ID),
+            contract_file("INV.DOCS.EXAMPLE.md", "INV.DOCS.EXAMPLE", DECISION_ID),
+        ],
+        "contract",
+        "INV",
+    );
+
+    let judged = python_validation_errors(&[sound, two_kinds_one_prefix]);
+    let mut wrong = Vec::new();
+
+    if !judged[0].is_empty() {
+        wrong.push(format!("a sound registry must pass: {:?}", judged[0]));
+    }
+    sole_error(
+        "one symbol in two registries",
+        &judged[1],
+        "symbol INV.DOCS.EXAMPLE already names",
+        &mut wrong,
+    );
+
+    assert!(
+        wrong.is_empty(),
+        "one symbol may name two records:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// Заменённое решение называет того, кто его заменил.
+///
+/// «Как менять» описывает замену как парную правку: у нового `supersedes`, у старого
+/// `status: superseded` и `superseded-by`. Статус без преемника — тупик: текст старого
+/// решения не правят никогда, поэтому пришедший по символу узнаёт, что решение
+/// отменено, и не узнаёт, чем; спросить больше не у кого. Названный преемник при живом
+/// статусе объявляет замену, которой не было, и запись читается по-разному смотря в
+/// какое поле.
+#[test]
+fn a_superseded_decision_names_its_successor() {
+    let replaced = succession_file(DECISION_FILE, DECISION_ID, "superseded", "[]", SUCCESSOR_ID);
+    let successor = succession_file(
+        SUCCESSOR_FILE,
+        SUCCESSOR_ID,
+        "active",
+        &format!("[{DECISION_ID}]"),
+        "null",
+    );
+    let sound = registry_case(vec![replaced, successor.clone()]);
+    let status_without_successor = registry_case(vec![succession_file(
+        DECISION_FILE,
+        DECISION_ID,
+        "superseded",
+        "[]",
+        "null",
+    )]);
+    // Обе половины пары написаны, не написан только статус: связь цела, а индекс
+    // по-прежнему показывает заменённое решение действующим.
+    let successor_without_status = registry_case(vec![
+        succession_file(DECISION_FILE, DECISION_ID, "active", "[]", SUCCESSOR_ID),
+        successor,
+    ]);
+
+    let judged =
+        python_validation_errors(&[sound, status_without_successor, successor_without_status]);
+    let mut wrong = Vec::new();
+
+    if !judged[0].is_empty() {
+        wrong.push(format!("a written supersession must pass: {:?}", judged[0]));
+    }
+    sole_error(
+        "a superseded decision with no successor",
+        &judged[1],
+        "`status: superseded` names no successor",
+        &mut wrong,
+    );
+    sole_error(
+        "a successor named by a decision that still lives",
+        &judged[2],
+        "without `status: superseded`",
+        &mut wrong,
+    );
+
+    assert!(
+        wrong.is_empty(),
+        "a decision may be replaced by nobody:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// Замену объявляют обе записи, и порознь их половины лгут по-разному.
+///
+/// `supersedes` читают от предка к потомку, `superseded-by` — обратно, и оба хода
+/// нужны: по первому находят, что стало с прежним решением, по второму — откуда взялось
+/// нынешнее. Записанная с одной стороны связь даёт две разные истории одного решения:
+/// по одной запись заменена, по другой — нет. Разрешается ли сам символ в запись,
+/// держит `INV.DOCS.A-SYMBOL-RESOLVES-TO-A-RECORD`; здесь предмет — отвечают ли
+/// половины друг другу.
+#[test]
+fn a_supersession_is_recorded_by_both_decisions() {
+    let silent_successor = registry_case(vec![
+        succession_file(DECISION_FILE, DECISION_ID, "superseded", "[]", SUCCESSOR_ID),
+        succession_file(SUCCESSOR_FILE, SUCCESSOR_ID, "active", "[]", "null"),
+    ]);
+    let silent_predecessor = registry_case(vec![
+        succession_file(DECISION_FILE, DECISION_ID, "active", "[]", "null"),
+        succession_file(
+            SUCCESSOR_FILE,
+            SUCCESSOR_ID,
+            "active",
+            &format!("[{DECISION_ID}]"),
+            "null",
+        ),
+    ]);
+
+    let judged = python_validation_errors(&[silent_successor, silent_predecessor]);
+    let mut wrong = Vec::new();
+
+    sole_error(
+        "a successor that does not claim its predecessor",
+        &judged[0],
+        &format!("does not name {DECISION_ID} in `supersedes`"),
+        &mut wrong,
+    );
+    sole_error(
+        "a predecessor that does not name its successor",
+        &judged[1],
+        &format!("does not name {SUCCESSOR_ID} in `superseded-by`"),
+        &mut wrong,
+    );
+
+    assert!(
+        wrong.is_empty(),
+        "half a supersession passes for a whole one:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// Форма значения совпадает с той, которую README публикует рядом со смыслом поля.
+///
+/// Форма не та — и проверка не падает, а отвечает про другое. `superseded-by` списком
+/// называл двух преемников там, где обещан один, и `prop_values` разрешал обоих.
+/// `status` списком ронял гейт целиком: проверка принадлежности перечню хеширует
+/// значение, и вместо строки об одной записи реестр не судил ни одной.
+#[test]
+fn a_field_has_the_shape_the_readme_publishes() {
+    let sound = registry_case(vec![
+        decision_file(DECISION_FILE, DECISION_ID, "INV.DOCS.EXAMPLE"),
+        rule_file("INV.DOCS.EXAMPLE.md", "INV.DOCS.EXAMPLE", DECISION_ID),
+    ]);
+    let two_successors = registry_case(vec![succession_file(
+        DECISION_FILE,
+        DECISION_ID,
+        "superseded",
+        "[]",
+        "[DEC.2026-09-18.ONE, DEC.2026-09-18.OTHER]",
+    )]);
+    let a_status_that_is_a_list = registry_case(vec![decision_file_with(
+        DECISION_FILE,
+        DECISION_ID,
+        &format!(
+            "status: [active]\n\
+             governs: process\n\
+             realized: {EVIDENCE}\n\
+             supersedes: []\n\
+             superseded-by: null\n\
+             establishes: []\n"
+        ),
+    )]);
+    let a_scope_that_is_not_a_list = registry_case(vec![
+        decision_file(DECISION_FILE, DECISION_ID, "INV.DOCS.EXAMPLE"),
+        rule_file_with(
+            "INV.DOCS.EXAMPLE.md",
+            "INV.DOCS.EXAMPLE",
+            &format!(
+                "status: active\n\
+                 governs: process\n\
+                 decision: {DECISION_ID}\n\
+                 check: {EVIDENCE}\n\
+                 scope: docs\n"
+            ),
+        ),
+    ]);
+    // Решение здесь ничего не заводит: записи без читаемого символа в `establishes` не
+    // место, и назови оно её — гейт справедливо сказал бы об этом вторым сообщением,
+    // а предмет фикстуры один.
+    let a_symbol_written_as_a_list = registry_case(vec![
+        decision_file(DECISION_FILE, DECISION_ID, ""),
+        rule_file_with(
+            "INV.DOCS.EXAMPLE.md",
+            "[INV.DOCS.EXAMPLE]",
+            &format!(
+                "status: active\n\
+                 governs: process\n\
+                 decision: {DECISION_ID}\n\
+                 check: {EVIDENCE}\n\
+                 scope: [docs]\n"
+            ),
+        ),
+    ]);
+
+    let judged = python_validation_errors(&[
+        sound,
+        two_successors,
+        a_status_that_is_a_list,
+        a_scope_that_is_not_a_list,
+        a_symbol_written_as_a_list,
+    ]);
+    let mut wrong = Vec::new();
+
+    if !judged[0].is_empty() {
+        wrong.push(format!("a sound registry must pass: {:?}", judged[0]));
+    }
+    sole_error(
+        "two successors where one is promised",
+        &judged[1],
+        "`superseded-by` takes a single value, not a list",
+        &mut wrong,
+    );
+    sole_error(
+        "a status written as a list",
+        &judged[2],
+        "`status` takes a single value, not a list",
+        &mut wrong,
+    );
+    sole_error(
+        "a scope that is not a list",
+        &judged[3],
+        "`scope` must be a list",
+        &mut wrong,
+    );
+    sole_error(
+        "a symbol written as a list",
+        &judged[4],
+        "`id` takes a single value, not a list",
+        &mut wrong,
+    );
+
+    assert!(
+        wrong.is_empty(),
+        "a field may carry a shape nothing publishes:\n{}",
         wrong.join("\n")
     );
 }

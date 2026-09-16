@@ -2,8 +2,8 @@
 id: CTR.MCP.PUBLISHED-TOOL-SURFACE
 status: active
 governs: product
-version: 1
-decision: DEC.2026-04-20.MCP-DOES-NOT-MIRROR-CLI
+version: 2
+decision: DEC.2026-09-16.A-THIN-CLIENT-OPENS-EITHER-ADDRESS
 artifact: docs/schemas/mcp-tools.json
 producer: src/mcp/service.rs
 consumers: [mcp, docs]

@@ -2,8 +2,8 @@
 id: CTR.WIRE.LAUNCH-DATA
 status: active
 governs: product
-version: 2
-decision: DEC.2026-09-14.LAUNCH-OPENS-THE-PUBLISHED-BASE
+version: 3
+decision: DEC.2026-09-16.A-THIN-CLIENT-OPENS-EITHER-ADDRESS
 artifact: docs/schemas/command-data/launch.schema.json
 producer: src/domain/launch.rs
 consumers: [cli, mcp, unica]
@@ -22,6 +22,11 @@ scope: [wire, cli, mcp]
 говорит о том же вторым полем — вызывающему не приходится выводить факт запуска из
 отсутствия значения.
 
+`via` называет, каким из двух адресов цели открыта база: `connection` — административным,
+`web` — клиентским. Поле есть у каждого режима, а не только у тонкого клиента, где есть
+выбор: иначе его отсутствие пришлось бы толковать. `url` заполнен там, где адрес
+клиентский, и пароль из userinfo в нём замаскирован.
+
 ## Пример
 
 ```json
@@ -30,6 +35,7 @@ scope: [wire, cli, mcp]
   "mode": "designer",
   "pid": null,
   "binary": "/opt/1cv8/bin/1cv8",
+  "via": "connection",
   "platform_resolution": {
     "path": "/opt/1cv8/bin/1cv8",
     "version": null,
