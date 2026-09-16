@@ -1035,3 +1035,107 @@ fn a_record_name_survives_a_windows_checkout() {
         wrong.join("\n")
     );
 }
+
+const RULE_FILE: &str = "INV.DOCS.EXAMPLE.md";
+const RULE_ID: &str = "INV.DOCS.EXAMPLE";
+const OFF_AXIS: &str = "`governs` must read `product` or `process`";
+
+/// Та же запись, но с другим словом на оси `governs`.
+///
+/// Значение подменяется в готовой фикстуре, а не передаётся в сборщик: ось есть у
+/// всех трёх видов, и четвёртый аргумент ради одного теста переписал бы каждый
+/// вызов в файле. Строка обязана найтись — иначе фикстура молча осталась бы
+/// здоровой и проверяла бы не то, что обещает.
+fn with_governs(file: RecordFile, governs: &str) -> RecordFile {
+    let (directory, name, text) = file;
+    let mut replaced = String::with_capacity(text.len());
+    let mut found = false;
+    for line in text.lines() {
+        if line.starts_with("governs:") {
+            replaced.push_str(&format!("governs: {governs}"));
+            found = true;
+        } else {
+            replaced.push_str(line);
+        }
+        replaced.push('\n');
+    }
+    assert!(found, "фикстура {name} не называет `governs`");
+    (directory, name, replaced)
+}
+
+/// Мини-реестр под ось: решение и выведенное из него правило.
+fn governs_case(decision_governs: &str, rule_governs: &str) -> serde_json::Value {
+    registry_case(vec![
+        with_governs(
+            decision_file(DECISION_FILE, DECISION_ID, RULE_ID),
+            decision_governs,
+        ),
+        with_governs(rule_file(RULE_FILE, RULE_ID, DECISION_ID), rule_governs),
+    ])
+}
+
+/// Ось `governs` закрыта, и закрыта она гейтом, а не только таблицей в README.
+///
+/// `spec/arch/README.md` публикует перечень: `product` или `process` — кто заметит
+/// нарушение, потребитель или только мы. От ответа зависит, чем правка оплачивается,
+/// и индекс печатает значение рядом с видом записи. Слово вне перечня адресата не
+/// уточняет, а снимает: по индексу больше не отделить видимое снаружи от видимого
+/// только нам, а опечатка в поле не отличается от осознанного выбора.
+#[test]
+fn governs_reads_product_or_process() {
+    let sound = governs_case("process", "process");
+    // Оба значения проходят и на решении, и на правиле: перечень закрыт, но не сужен.
+    let sound_product = governs_case("process", "product");
+    let decision_off_axis = governs_case("banana", "process");
+    let rule_off_axis = governs_case("process", "banana");
+    // Ось пишется одним способом. `Process` — это не значение оси, а похожее на него
+    // слово, и пропусти его гейт, в индексе встали бы две колонки под одним смыслом.
+    let wrong_case = governs_case("process", "Process");
+    // Пустое поле — прежняя претензия и ровно одна: про отсутствующее значение гейт
+    // не может сказать заодно, что оно вне перечня.
+    let rule_without_governs = governs_case("process", "");
+
+    let judged = python_validation_errors(&[
+        sound,
+        sound_product,
+        decision_off_axis,
+        rule_off_axis,
+        wrong_case,
+        rule_without_governs,
+    ]);
+    let mut wrong = Vec::new();
+
+    for (name, errors) in [
+        ("a process rule", &judged[0]),
+        ("a product rule", &judged[1]),
+    ] {
+        if !errors.is_empty() {
+            wrong.push(format!("{name} must pass: {errors:?}"));
+        }
+    }
+    sole_error(
+        "a decision off the axis",
+        &judged[2],
+        &format!("decisions/{DECISION_FILE}: {OFF_AXIS}"),
+        &mut wrong,
+    );
+    sole_error(
+        "a rule off the axis",
+        &judged[3],
+        &format!("invariants/{RULE_FILE}: {OFF_AXIS}"),
+        &mut wrong,
+    );
+    sole_error("a rule shouting the axis", &judged[4], OFF_AXIS, &mut wrong);
+    sole_error(
+        "a rule with no governs at all",
+        &judged[5],
+        &format!("invariants/{RULE_FILE}: missing prop `governs`"),
+        &mut wrong,
+    );
+
+    assert!(
+        wrong.is_empty(),
+        "`governs` may read anything at all:\n{}",
+        wrong.join("\n")
+    );
+}
