@@ -7,6 +7,8 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+use crate::platform::secrets::render_masked_command;
+
 const EXECUTABLE_BUSY_MAX_RETRIES: usize = 5;
 const EXECUTABLE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(10);
 #[cfg(any(windows, test))]
@@ -983,71 +985,10 @@ fn terminate_windows_process_tree(pid: u32) {
     let _ = pid;
 }
 
+/// Показ команды для отказа и журнала. Секреты маскирует
+/// [`crate::platform::secrets`] — единственный владелец правила.
 fn render_command(request: &ProcessRequest) -> String {
-    let mut parts = Vec::with_capacity(request.args.len() + 1);
-    parts.push(request.program.display().to_string());
-    let mut skip_next = false;
-    for arg in &request.args {
-        if skip_next {
-            parts.push("***".to_owned());
-            skip_next = false;
-        } else if is_sensitive_flag(arg) {
-            parts.push(arg.clone());
-            skip_next = true;
-        } else if let Some((key, _)) = split_sensitive_assignment(arg) {
-            parts.push(format!("{key}=***"));
-        } else {
-            parts.push(arg.clone());
-        }
-    }
-    parts.join(" ")
-}
-
-fn is_sensitive_flag(arg: &str) -> bool {
-    const FLAGS: &[&str] = &[
-        "/N",
-        "-N",
-        "/P",
-        "-P",
-        "--user",
-        "--database-user",
-        "--db-user",
-        "--target-database-user",
-        "--target-db-user",
-        "--password",
-        "--database-password",
-        "--db-pwd",
-        "--target-database-password",
-        "--target-db-pwd",
-    ];
-
-    FLAGS.iter().any(|flag| arg.eq_ignore_ascii_case(flag))
-}
-
-fn split_sensitive_assignment(arg: &str) -> Option<(&str, &str)> {
-    const FLAGS: &[&str] = &[
-        "/N",
-        "-N",
-        "/P",
-        "-P",
-        "--user",
-        "--database-user",
-        "--db-user",
-        "--target-database-user",
-        "--target-db-user",
-        "--password",
-        "--database-password",
-        "--db-pwd",
-        "--target-database-password",
-        "--target-db-pwd",
-    ];
-
-    let (key, value) = arg.split_once('=')?;
-    if FLAGS.iter().any(|flag| key.eq_ignore_ascii_case(flag)) {
-        Some((key, value))
-    } else {
-        None
-    }
+    render_masked_command(&request.program, &request.args)
 }
 
 #[cfg(test)]
@@ -1174,9 +1115,12 @@ mod tests {
         assert!(!rendered.contains("target-secret"));
     }
 
+    /// Пароль внутри строки соединения приезжает одним аргументом, и до 16.09.2026
+    /// показ команды печатал его целиком — а этот показ уходит в текст отказа и в
+    /// журнал. Читаемым остаётся всё, что не секрет: адрес сервера и имя базы.
     #[test]
-    fn render_command_keeps_infobase_connection_string_visible() {
-        let request = ProcessRequest {
+    fn render_command_masks_the_password_inside_a_connection_string() {
+        let rendered = render_command(&ProcessRequest {
             program: PathBuf::from("1cv8c"),
             args: vec![
                 "/IBConnectionString".to_owned(),
@@ -1186,63 +1130,63 @@ mod tests {
             stdout_log_path: None,
             stderr_log_path: None,
             startup_probe: None,
-        };
+        });
 
-        let rendered = render_command(&request);
-
-        assert!(rendered.contains("/IBConnectionString Srvr=host;Ref=base;Usr=alice;Pwd=secret"));
+        assert_eq!(
+            rendered,
+            "1cv8c /IBConnectionString Srvr=host;Ref=base;Usr=***;Pwd=***"
+        );
     }
 
+    /// Строка соединения приезжает и склеенной с ключом, и с закавыченным паролем,
+    /// внутри которого есть `;`. Ни одна из этих форм не должна показать пароль.
     #[test]
-    fn render_command_keeps_infobase_connection_string_assignment_visible() {
-        let request = ProcessRequest {
-            program: PathBuf::from("1cv8c"),
-            args: vec!["/IBConnectionString=File=/tmp/ib;usr=alice;PWD=secret".to_owned()],
-            workdir: None,
-            stdout_log_path: None,
-            stderr_log_path: None,
-            startup_probe: None,
-        };
+    fn render_command_masks_the_password_in_every_connection_string_form() {
+        for (arg, password) in [
+            (
+                "/IBConnectionString=File=/tmp/ib;usr=alice;PWD=secret",
+                "secret",
+            ),
+            (
+                "/IBConnectionStringSrvr=host;Ref=base;Usr=alice;Pwd=secret",
+                "secret",
+            ),
+            ("File=/tmp/ib;Usr=alice;Pwd=\"sec;ret\";Ref=base", "sec;ret"),
+            ("\"Srvr=host;Ref=base;Usr=alice;Pwd=secret\"", "secret"),
+        ] {
+            let rendered = render_command(&ProcessRequest {
+                program: PathBuf::from("1cv8c"),
+                args: vec![arg.to_owned()],
+                workdir: None,
+                stdout_log_path: None,
+                stderr_log_path: None,
+                startup_probe: None,
+            });
 
-        let rendered = render_command(&request);
-
-        assert!(rendered.contains("/IBConnectionString=File=/tmp/ib;usr=alice;PWD=secret"));
+            assert!(!rendered.contains(password), "{arg} -> {rendered}");
+            assert!(!rendered.contains("alice"), "{arg} -> {rendered}");
+        }
     }
 
+    /// `/WSP` — пароль пользователя веб-сервера, и до 16.09.2026 его не знал ни один
+    /// из двух маскировщиков. В argv он попадает через `--raw-key`.
     #[test]
-    fn render_command_keeps_combined_infobase_connection_token_visible() {
-        let request = ProcessRequest {
-            program: PathBuf::from("1cv8c"),
-            args: vec!["/IBConnectionStringSrvr=host;Ref=base;Usr=alice;Pwd=secret".to_owned()],
-            workdir: None,
-            stdout_log_path: None,
-            stderr_log_path: None,
-            startup_probe: None,
-        };
-
-        let rendered = render_command(&request);
-
-        assert!(rendered.contains("/IBConnectionStringSrvr=host;Ref=base;Usr=alice;Pwd=secret"));
-    }
-
-    #[test]
-    fn render_command_keeps_quoted_infobase_connection_values_visible() {
-        let request = ProcessRequest {
+    fn render_command_masks_the_web_server_password() {
+        let rendered = render_command(&ProcessRequest {
             program: PathBuf::from("1cv8c"),
             args: vec![
-                "/IBConnectionString".to_owned(),
-                "File=/tmp/ib;Usr=alice;Pwd=\"sec;ret\";Ref=base".to_owned(),
+                "/WSN".to_owned(),
+                "alice".to_owned(),
+                "/WSP".to_owned(),
+                "secret".to_owned(),
             ],
             workdir: None,
             stdout_log_path: None,
             stderr_log_path: None,
             startup_probe: None,
-        };
+        });
 
-        let rendered = render_command(&request);
-
-        assert!(rendered
-            .contains("/IBConnectionString File=/tmp/ib;Usr=alice;Pwd=\"sec;ret\";Ref=base"));
+        assert_eq!(rendered, "1cv8c /WSN *** /WSP ***");
     }
 
     #[cfg(unix)]

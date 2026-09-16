@@ -832,6 +832,64 @@ fn launch_json_exposes_platform_resolution_metadata() {
     );
 }
 
+/// Превью маскировало пароль внутри строки соединения, а отказ настоящего запуска
+/// печатал его целиком — в stderr и в журнал действий, который живёт дольше запуска.
+/// Читаемым остаётся всё, что не секрет: по отказу должно быть видно, куда шли.
+#[test]
+fn launch_failure_never_echoes_the_password_inside_the_connection_string() {
+    let dir = temp_workspace();
+    let base_path = dir.path().join("project");
+    let work_path = dir.path().join("work");
+    let install_dir = dir.path().join("platform");
+    let config_path = dir.path().join("v8project.yaml");
+    let action_log = dir.path().join("actions.log");
+
+    fs::create_dir_all(&base_path).expect("base");
+    fs::create_dir_all(&work_path).expect("work");
+    write_script(&install_dir.join("bin").join("1cv8"));
+    write_false_executable(&install_dir.join("bin").join("1cv8c"));
+    write_config(&config_path, &base_path, &work_path, &install_dir, None);
+    let config = fs::read_to_string(&config_path).expect("config");
+    fs::write(
+        &config_path,
+        config.replace(
+            "connection: 'File=/tmp/ib'",
+            "connection: 'Srvr=\"srv:1541\";Ref=ut;Usr=Admin;Pwd=s3cret'",
+        ),
+    )
+    .expect("config with credentials in the connection string");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--no-color",
+            "--log-level",
+            "debug",
+            "launch",
+            "thin",
+        ])
+        .env("V8TR_ACTION_LOG_FILE", &action_log)
+        .output()
+        .expect("run command");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("exited before startup completed"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("s3cret"), "{stderr}");
+    assert!(stderr.contains("Pwd=***"), "{stderr}");
+    assert!(stderr.contains("Ref=ut"), "{stderr}");
+
+    let log = fs::read_to_string(&action_log).expect("action log");
+    assert!(!log.contains("s3cret"), "{log}");
+    // Без положительного якоря проверка журнала прошла бы и тогда, когда показ
+    // команды перестал бы в него попадать вовсе.
+    assert!(log.contains("Pwd=***"), "{log}");
+}
+
 #[test]
 fn launch_fails_when_process_exits_during_startup_probe() {
     let (_dir, config_path, install_dir, _work_path) = setup_project_with_failing_thin_binary();

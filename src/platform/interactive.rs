@@ -12,6 +12,7 @@ use crate::platform::process::{
     ProcessExecutionPolicy, ProcessInterruption, ProcessInterruptionAction,
     ProcessInterruptionReason, ProcessInterruptionSafety,
 };
+use crate::platform::secrets::render_masked_command;
 
 const DEFAULT_PROMPT: &[u8] = b"1C:EDT>";
 const EXECUTABLE_BUSY_MAX_RETRIES: usize = 5;
@@ -191,7 +192,7 @@ impl InteractiveProcessExecutor {
         request: InteractiveProcessRequest,
         startup_timeout: Duration,
     ) -> Result<Self, InteractiveProcessError> {
-        let rendered_command = render_command(&request);
+        let rendered_command = render_masked_command(&request.program, &request.args);
         let mut child = spawn_command(&request, &rendered_command)?;
         let stdin = child
             .stdin
@@ -909,13 +910,6 @@ fn find_prompt(buffer: &[u8], prompt: &[u8]) -> Option<(usize, usize)> {
     }
 
     None
-}
-
-fn render_command(request: &InteractiveProcessRequest) -> String {
-    let mut parts = Vec::with_capacity(request.args.len() + 1);
-    parts.push(request.program.display().to_string());
-    parts.extend(request.args.iter().cloned());
-    parts.join(" ")
 }
 
 fn spawn_command(

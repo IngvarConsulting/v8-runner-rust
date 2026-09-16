@@ -8,11 +8,11 @@ use crate::domain::launch::{
 };
 use crate::domain::runner::{launch_key_alias_matches, LaunchOptions};
 use crate::platform::enterprise::{
-    build_launch_args, mask_launch_args, mask_url_userinfo, normalize_launch_payload_path,
-    LaunchAddress, LaunchClientMode,
+    build_launch_args, normalize_launch_payload_path, LaunchAddress, LaunchClientMode,
 };
 use crate::platform::locator::{ResolutionSource, UtilityLocation, UtilityType, UtilityVersion};
 use crate::platform::process::{ManagedSpawnMode, ProcessRequest};
+use crate::platform::secrets::{mask_preview_args, mask_url_userinfo};
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::client_mcp_readiness;
@@ -161,7 +161,7 @@ pub fn execute(
     if args.dry_run {
         let connection = config.v8_connection();
         let secrets: Vec<&str> = connection.password.as_deref().into_iter().collect();
-        let masked = mask_launch_args(&process_request.args, &secrets);
+        let masked = mask_preview_args(&process_request.args, &secrets);
         log_live_stage(
             "launch: preview",
             "[Launch] preview only, client process not dispatched",
