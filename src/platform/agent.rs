@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::platform::process::ProcessInterruptionSafety;
+use crate::platform::process::{ProcessInterruptionReason, ProcessInterruptionSafety};
 
 use russh::client;
 use russh::ChannelMsg;
@@ -145,9 +145,12 @@ pub struct AgentMessage {
 }
 
 /// Ответ агента на одну команду: массив сообщений и итог, выведенный из него.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AgentReply {
     pub messages: Vec<AgentMessage>,
+    /// Прерывание, пришедшее в критической фазе и отложенное до её исхода: команда
+    /// доведена, но вызывающий обязан сказать об этом в результате.
+    pub deferred_interruption: Option<ProcessInterruptionReason>,
 }
 
 impl AgentMessage {
@@ -340,6 +343,18 @@ pub struct WaitPolicy {
     pub safety: ProcessInterruptionSafety,
 }
 
+impl WaitPolicy {
+    /// Та же политика со сроком и отменой, но фаза объявлена критической: команда,
+    /// меняющая информационную базу, доводится до исхода, а прерывание записывается
+    /// и отдаётся вызывающему отложенным предупреждением.
+    pub fn critical(&self) -> Self {
+        Self {
+            safety: ProcessInterruptionSafety::CriticalNonAbortable,
+            ..self.clone()
+        }
+    }
+}
+
 impl Default for WaitPolicy {
     fn default() -> Self {
         Self {
@@ -487,8 +502,9 @@ impl AgentSession {
     pub fn run(&mut self, command: &str, policy: &WaitPolicy) -> Result<AgentReply, AgentError> {
         self.send(command)?;
         let mut messages = Vec::new();
+        let mut deferred_interruption = None;
         loop {
-            let raw = self.read_reply(command, policy)?;
+            let raw = self.read_reply(command, policy, &mut deferred_interruption)?;
             let batch: Vec<AgentMessage> =
                 serde_json::from_slice(&raw).map_err(|error| AgentError::InvalidReply {
                     detail: error.to_string(),
@@ -500,7 +516,10 @@ impl AgentSession {
                 break;
             }
         }
-        let reply = AgentReply { messages };
+        let reply = AgentReply {
+            messages,
+            deferred_interruption,
+        };
         debug!(command, messages = reply.messages.len(), "agent replied");
         Ok(reply)
     }
@@ -841,8 +860,22 @@ impl AgentSession {
 
     /// Читает канал до первого полного JSON-массива. Всё до открывающей скобки — не
     /// ответ (баннер или приглашение до JSON-режима) и записывается только в журнал.
-    fn read_reply(&mut self, command: &str, policy: &WaitPolicy) -> Result<Vec<u8>, AgentError> {
+    fn read_reply(
+        &mut self,
+        command: &str,
+        policy: &WaitPolicy,
+        deferred: &mut Option<ProcessInterruptionReason>,
+    ) -> Result<Vec<u8>, AgentError> {
         let started = Instant::now();
+        // Критическая фаза меняет базу, и бросать её на полпути дороже, чем ждать
+        // (`DEC.2026-04-20.A-MUTATING-CRITICAL-PHASE-IS-NOT-HARD-KILLED`): отмена и
+        // истёкший срок записываются, а команда ждёт исхода. Ожидание ограничивает
+        // смерть канала — ровно так же, как на пути Конфигуратора его ограничивает
+        // выход процесса.
+        let critical = matches!(
+            policy.safety,
+            ProcessInterruptionSafety::CriticalNonAbortable
+        );
         loop {
             if let Some(reply) = self.take_complete_array()? {
                 if let Some(log) = self.transcript.as_mut() {
@@ -858,20 +891,29 @@ impl AgentSession {
                 });
             }
             if policy.cancellation.is_cancelled() {
-                return Err(AgentError::Cancelled {
-                    command: command.to_owned(),
-                });
+                if !critical {
+                    return Err(AgentError::Cancelled {
+                        command: command.to_owned(),
+                    });
+                }
+                deferred.get_or_insert(ProcessInterruptionReason::Cancelled);
             }
             let wait = match policy.deadline {
                 Some(deadline) => {
                     let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        return Err(AgentError::TimedOut {
-                            command: command.to_owned(),
-                            timeout_ms: started.elapsed().as_millis() as u64,
-                        });
+                    match (remaining.is_zero(), critical) {
+                        (true, false) => {
+                            return Err(AgentError::TimedOut {
+                                command: command.to_owned(),
+                                timeout_ms: started.elapsed().as_millis() as u64,
+                            })
+                        }
+                        (true, true) => {
+                            deferred.get_or_insert(ProcessInterruptionReason::TimedOut);
+                            WAIT_SLICE
+                        }
+                        (false, _) => remaining.min(WAIT_SLICE),
                     }
-                    remaining.min(WAIT_SLICE)
                 }
                 None => WAIT_SLICE,
             };
@@ -1139,20 +1181,69 @@ pub fn user_dir(base_dir: &Path, user: &str) -> Result<PathBuf, AgentError> {
 mod tests {
     use super::*;
 
+    /// Критический класс объявляет только фазу: срок и отмена остаются теми же, иначе
+    /// меняющая команда получила бы собственный бюджет вместо остатка общего.
+    #[test]
+    fn a_critical_policy_keeps_the_deadline_and_the_cancellation() {
+        let cancellation = CancellationToken::new();
+        let deadline = Instant::now() + Duration::from_secs(7);
+        let base = WaitPolicy {
+            deadline: Some(deadline),
+            cancellation: cancellation.clone(),
+            safety: ProcessInterruptionSafety::GracefulThenKill,
+        };
+
+        let critical = base.critical();
+
+        assert_eq!(critical.deadline, Some(deadline));
+        assert!(matches!(
+            critical.safety,
+            ProcessInterruptionSafety::CriticalNonAbortable
+        ));
+        assert!(!critical.cancellation.is_cancelled());
+        cancellation.cancel();
+        assert!(
+            critical.cancellation.is_cancelled(),
+            "critical policy must observe the same cancellation token, not a fresh one"
+        );
+    }
+
+    /// Прерывание в критической фазе не теряется: ответ несёт его вызывающему, чтобы
+    /// тот сказал о нём в результате, а не промолчал.
+    #[test]
+    fn a_reply_carries_the_deferred_interruption() {
+        let reply = AgentReply {
+            messages: Vec::new(),
+            deferred_interruption: Some(ProcessInterruptionReason::Cancelled),
+        };
+
+        assert_eq!(
+            reply.deferred_interruption,
+            Some(ProcessInterruptionReason::Cancelled)
+        );
+        assert_eq!(AgentReply::default().deferred_interruption, None);
+    }
+
     #[test]
     fn reply_outcome_is_decided_by_type_and_error_type_not_by_prose() {
         let reply: Vec<AgentMessage> = serde_json::from_str(
             r#"[{"type":"log","message":"Ошибка: всё плохо"},{"type":"success","message":""}]"#,
         )
         .expect("parse");
-        let reply = AgentReply { messages: reply };
+        let reply = AgentReply {
+            messages: reply,
+            deferred_interruption: None,
+        };
         assert!(reply.outcome().is_ok());
 
         let reply: Vec<AgentMessage> = serde_json::from_str(
             r#"[{"type":"error","error-type":"InfoBaseNotFound","message":"Успешно"}]"#,
         )
         .expect("parse");
-        let reply = AgentReply { messages: reply };
+        let reply = AgentReply {
+            messages: reply,
+            deferred_interruption: None,
+        };
         match reply.outcome() {
             Err(AgentError::Command { error_type, .. }) => {
                 assert_eq!(error_type, AgentErrorType::InfoBaseNotFound)
@@ -1230,6 +1321,7 @@ mod tests {
         .expect("message");
         assert!(!notice.is_terminal());
         let reply = AgentReply {
+            deferred_interruption: None,
             messages: serde_json::from_str(
                 r#"[{"message":"Принятие изменений...","type":"log"},{"body":"9d88","type":"generation-id"},{"message":"Обновление конфигурации базы данных успешно завершено","type":"log"},{"type":"success"}]"#,
             )
@@ -1242,6 +1334,7 @@ mod tests {
     #[test]
     fn an_extension_properties_message_alone_ends_the_reply() {
         let reply = AgentReply {
+            deferred_interruption: None,
             messages: serde_json::from_str(
                 r#"[{"type":"extension-properties","body":{"name":"Зонд"}}]"#,
             )

@@ -264,6 +264,7 @@ fn run_external_agent_export(
                     "make: external export",
                     "[агент] exporting external artifact package",
                 );
+                // Загрузка внешней обработки меняет содержимое базы: фаза критическая.
                 run_command(
                     handle,
                     &format!(
@@ -271,7 +272,7 @@ fn run_external_agent_export(
                         argument(&xml),
                         argument(&out)
                     ),
-                    wait,
+                    &wait.critical(),
                 )?;
 
                 log_live_stage(

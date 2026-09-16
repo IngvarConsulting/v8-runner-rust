@@ -16,6 +16,7 @@ use crate::use_cases::agent_session::{
     tidy, transcript_log, unstage, wait_policy, write_bytes, AgentHandle, Exchange,
     GenerationLedger,
 };
+use crate::use_cases::interruption::deferred_process_interruption_message;
 
 pub(super) struct AgentLoader {
     utilities: PlatformUtilities,
@@ -163,7 +164,11 @@ fn load_and_update(
     source_context: &SourceSetContext,
     extension: Option<&str>,
     partial_paths: Option<&[PathBuf]>,
-) -> Result<(), AppError> {
+) -> Result<Vec<String>, AppError> {
+    // Обе команды меняют базу: загрузка переписывает конфигурацию, а `update-db-cfg`
+    // перестраивает таблицы. Класс совпадает с путём Конфигуратора
+    // (`build_project.rs`: `load_config_from_files_full` и `update_db_cfg`).
+    let critical = wait.critical();
     let mut load = format!(
         "config load-config-from-files --dir={} --update-config-dump-info",
         argument(exposed)
@@ -201,11 +206,11 @@ fn load_and_update(
     if let Some(extension) = extension {
         load.push_str(&format!(" --extension={}", argument(extension)));
     }
-    let loaded = run_command(handle, &load, wait);
+    let loaded = run_command_deferring(handle, "load", &load, &critical);
     if partial_paths.is_some() {
         tidy(handle, exchange, &format!("{exposed}.list.txt"));
     }
-    loaded?;
+    let load_warning = loaded?;
 
     if let Some(error) = interruption_before_safe_point(
         context,
@@ -223,15 +228,27 @@ fn load_and_update(
     if let Some(extension) = extension {
         update.push_str(&format!(" --extension={}", argument(extension)));
     }
-    run_command(handle, &update, wait)?;
-    Ok(())
+    let update_warning = run_command_deferring(handle, "update_db_cfg", &update, &critical)?;
+    Ok([load_warning, update_warning]
+        .into_iter()
+        .flatten()
+        .collect())
 }
 
-fn run_command(handle: &mut AgentHandle, command: &str, wait: &WaitPolicy) -> Result<(), AppError> {
+/// Выполняет команду и возвращает отложенное предупреждение, если прерывание пришло
+/// в критической фазе: команда доведена, но об этом обязаны сказать в результате.
+fn run_command_deferring(
+    handle: &mut AgentHandle,
+    completed_action: &str,
+    command: &str,
+    wait: &WaitPolicy,
+) -> Result<Option<String>, AppError> {
     let reply = handle
         .session()
         .run(command, wait)
         .map_err(map_agent_error)?;
     reply.outcome().map_err(map_agent_error)?;
-    Ok(())
+    Ok(reply
+        .deferred_interruption
+        .map(|reason| deferred_process_interruption_message(completed_action, reason)))
 }

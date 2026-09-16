@@ -126,10 +126,12 @@ pub(super) fn restore_snapshot(
                 "infobase restore: agent",
                 "[агент] restoring infobase snapshot",
             );
+            // Загрузка снимка подменяет базу целиком: фаза критическая, её не бросают
+            // на полпути (`DEC.2026-04-20.A-MUTATING-CRITICAL-PHASE-IS-NOT-HARD-KILLED`).
             let outcome = run_command(
                 handle,
                 &format!("infobase-tools restore-ib --file={}", argument(&relative)),
-                wait,
+                &wait.critical(),
             );
             // После загрузки сессии уже нет: убрать копию DT по SFTP не выйдет, а из
             // каталога — можно.
