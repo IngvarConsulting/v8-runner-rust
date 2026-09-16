@@ -113,7 +113,7 @@ impl<'a> EnterpriseDsl<'a> {
         launch.internal_out = Some(self.log_file.display().to_string());
         build_launch_args(
             self.client_mode,
-            &self.connection,
+            LaunchAddress::Connection(&self.connection),
             &self.additional_launch_keys,
             &launch,
         )
@@ -131,9 +131,41 @@ impl From<LaunchClientModeRequest> for LaunchClientMode {
     }
 }
 
+/// Чем клиент открывает базу в командной строке.
+///
+/// Административный адрес несёт реквизиты базы рядом с собой; клиентский — не всегда:
+/// у автономной цели `infobase.user`/`password` принадлежат SSH-шлюзу, и клиенту их
+/// отдавать нельзя. Поэтому реквизиты у веб-адреса — отдельное, необязательное поле.
+#[derive(Debug, Clone, Copy)]
+pub enum LaunchAddress<'a> {
+    /// `infobase.connection` вместе с `/N` и `/P`.
+    Connection(&'a V8Connection),
+    /// `infobase.web.url` как ws-соединение; реквизиты прилагаются, только если они
+    /// действительно реквизиты базы.
+    Web {
+        url: &'a str,
+        credentials: Option<&'a V8Connection>,
+    },
+}
+
+impl LaunchAddress<'_> {
+    fn args(&self) -> Vec<String> {
+        match *self {
+            Self::Connection(connection) => connection.args(),
+            Self::Web { url, credentials } => {
+                let mut args = vec!["/WS".to_owned(), url.to_string()];
+                if let Some(connection) = credentials {
+                    args.extend(connection.credential_args());
+                }
+                args
+            }
+        }
+    }
+}
+
 pub fn build_launch_args(
     mode: LaunchClientMode,
-    connection: &V8Connection,
+    address: LaunchAddress<'_>,
     additional_launch_keys: &[String],
     launch: &LaunchOptions,
 ) -> Vec<String> {
@@ -145,7 +177,7 @@ pub fn build_launch_args(
     }
     .to_owned()];
     args.push("/DisableStartupDialogs".to_owned());
-    args.extend(connection.args());
+    args.extend(address.args());
     if matches!(mode, LaunchClientMode::Ordinary) {
         args.push("/RunModeOrdinaryApplication".to_owned());
     }
@@ -180,18 +212,33 @@ pub const MASKED_LAUNCH_VALUE: &str = "***";
 
 /// Rewrite composed launch arguments so no credential value survives into a preview.
 ///
-/// Three independent rules apply, because a secret can reach argv three ways: as the
+/// Four independent rules apply, because a secret can reach argv four ways: as the
 /// value of the `/P` key the runner itself appends, as a `Pwd=` segment inside a raw
-/// connection string, and as a literal the caller glued to a key the runner does not
-/// recognise. `secrets` carries values known to be confidential, masked wherever they
-/// appear.
+/// connection string, as a literal the caller glued to a key the runner does not
+/// recognise, and as userinfo inside the client address after `/WS`. `secrets` carries
+/// values known to be confidential, masked wherever they appear.
+///
+/// Userinfo прячется только у значения `/WS`, а не у каждого аргумента подряд: без схемы
+/// на адрес похож и путь вида `C:\dir@host`, и сплошная маскировка портила бы аргументы,
+/// никаких секретов не содержащие.
 pub fn mask_launch_args(args: &[String], secrets: &[&str]) -> Vec<String> {
     let mut masked = Vec::with_capacity(args.len());
     let mut mask_detached_value = false;
+    let mut mask_next_address = false;
     for arg in args {
         if mask_detached_value {
             mask_detached_value = false;
             masked.push(MASKED_LAUNCH_VALUE.to_owned());
+            continue;
+        }
+        if mask_next_address {
+            mask_next_address = false;
+            masked.push(mask_url_userinfo(arg));
+            continue;
+        }
+        if is_client_address_key(arg) {
+            mask_next_address = true;
+            masked.push(arg.clone());
             continue;
         }
         match password_key_value_start(arg) {
@@ -207,6 +254,45 @@ pub fn mask_launch_args(args: &[String], secrets: &[&str]) -> Vec<String> {
         }
     }
     masked
+}
+
+/// Прячет пароль из userinfo адреса: `http://alice:pass@host/base` → `http://alice:***@host/base`.
+///
+/// Маскируется только то, что после `:`. Голое имя пользователя секретом не является, а
+/// спрятать его целиком значит сделать адрес неузнаваемым — а он нужен человеку, чтобы
+/// понять, куда именно раннер собрался.
+pub fn mask_url_userinfo(value: &str) -> String {
+    // Адрес приходит из `infobase.web.url`, а это поле не валидируется вовсе, поэтому
+    // схемы может не быть. Начало authority ищем во всех трёх видах: со схемой,
+    // схемо-относительный и голый.
+    let authority_start = match value.find("://") {
+        Some(scheme_end) => scheme_end + "://".len(),
+        None if value.starts_with("//") => "//".len(),
+        None => 0,
+    };
+    let authority_end = value[authority_start..]
+        .find(['/', '?', '#'])
+        .map_or(value.len(), |at| authority_start + at);
+    let authority = &value[authority_start..authority_end];
+    let Some(at) = authority.rfind('@') else {
+        return value.to_owned();
+    };
+    let Some(colon) = authority[..at].find(':') else {
+        return value.to_owned();
+    };
+    format!(
+        "{}{}:{MASKED_LAUNCH_VALUE}{}",
+        &value[..authority_start],
+        &authority[..colon],
+        &value[authority_start + at..]
+    )
+}
+
+/// Ключ, за которым идёт клиентский адрес: его значение маскируется как адрес, а не целиком.
+fn is_client_address_key(arg: &str) -> bool {
+    arg.strip_prefix('/')
+        .or_else(|| arg.strip_prefix('-'))
+        .is_some_and(|rest| rest.eq_ignore_ascii_case("ws"))
 }
 
 /// Byte offset at which a `/P` key's value starts, or `arg.len()` when the value is detached.
@@ -319,8 +405,8 @@ fn reserved_launch_key(arg: &str) -> Option<(bool, bool)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_launch_args, mask_launch_args, normalize_launch_payload_path, EnterpriseDsl,
-        LaunchClientMode,
+        build_launch_args, mask_launch_args, mask_url_userinfo, normalize_launch_payload_path,
+        EnterpriseDsl, LaunchAddress, LaunchClientMode,
     };
     use crate::domain::runner::LaunchOptions;
     use crate::platform::connection::V8Connection;
@@ -386,11 +472,133 @@ mod tests {
         assert_eq!(normalized, "C:/tmp/path with space/cfg.json");
     }
 
+    /// Форма argv веб-пути: `/WS` с голым адресом вместо строки подключения. Живой
+    /// прогон на платформе — приёмка у владельца, но форма закреплена здесь.
+    #[test]
+    fn builds_a_web_address_launch_without_a_connection_string() {
+        let connection = V8Connection::from_connection_string("File=/tmp/ib");
+        let args = build_launch_args(
+            LaunchClientMode::Thin,
+            LaunchAddress::Web {
+                url: "http://localhost/base",
+                credentials: Some(&connection),
+            },
+            &[],
+            &LaunchOptions::default(),
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "ENTERPRISE".to_owned(),
+                "/DisableStartupDialogs".to_owned(),
+                "/WS".to_owned(),
+                "http://localhost/base".to_owned(),
+            ]
+        );
+    }
+
+    /// У автономной цели `infobase.user` и `infobase.password` — данные SSH-шлюза, а не
+    /// базы, поэтому реквизиты к адресу не прилагаются.
+    #[test]
+    fn a_web_address_without_credentials_carries_no_user_keys() {
+        let mut connection = V8Connection::from_connection_string("File=/tmp/ib");
+        connection.user = Some("gate".to_owned());
+        connection.password = Some("gate-secret".to_owned());
+
+        let with_credentials = build_launch_args(
+            LaunchClientMode::Thin,
+            LaunchAddress::Web {
+                url: "http://localhost/base",
+                credentials: Some(&connection),
+            },
+            &[],
+            &LaunchOptions::default(),
+        );
+        let without = build_launch_args(
+            LaunchClientMode::Thin,
+            LaunchAddress::Web {
+                url: "http://localhost/base",
+                credentials: None,
+            },
+            &[],
+            &LaunchOptions::default(),
+        );
+
+        assert!(with_credentials.contains(&"/N".to_owned()));
+        assert!(with_credentials.contains(&"gate-secret".to_owned()));
+        assert!(!without.contains(&"/N".to_owned()));
+        assert!(!without.contains(&"/P".to_owned()));
+        assert!(!without.iter().any(|arg| arg.contains("gate-secret")));
+    }
+
+    /// Разбор адреса написан руками, поэтому таблица форм: со схемой и без неё, IPv6,
+    /// `@` в пути и запросе, пустой пароль, голое имя пользователя, повторное применение.
+    #[test]
+    fn mask_url_userinfo_hides_the_password_in_every_shape_of_address() {
+        for (value, expected) in [
+            (
+                "http://alice:s3cret@host/base",
+                "http://alice:***@host/base",
+            ),
+            (
+                "https://alice:s3cret@host:443/b?x=1#f",
+                "https://alice:***@host:443/b?x=1#f",
+            ),
+            // Схемы может не быть вовсе: поле не валидируется.
+            ("//alice:s3cret@host/base", "//alice:***@host/base"),
+            ("alice:s3cret@host/base", "alice:***@host/base"),
+            // Пароль с разделителями внутри: маскируется от первого `:` до последней `@`.
+            ("http://alice:p@ss:word@host/b", "http://alice:***@host/b"),
+            (
+                "http://alice:s3cret@[2001:db8::1]:8080/b",
+                "http://alice:***@[2001:db8::1]:8080/b",
+            ),
+            // Прятать нечего.
+            ("http://alice@host/base", "http://alice@host/base"),
+            ("http://host/base", "http://host/base"),
+            (
+                "http://[2001:db8::1]:8080/base",
+                "http://[2001:db8::1]:8080/base",
+            ),
+            ("http://host/path@with-at", "http://host/path@with-at"),
+            ("http://host/base?q=a@b", "http://host/base?q=a@b"),
+            // Уже замаскированное второй раз не портится.
+            ("http://alice:***@host/base", "http://alice:***@host/base"),
+        ] {
+            assert_eq!(mask_url_userinfo(value), expected, "вход: {value}");
+        }
+    }
+
+    /// Маскируется значение `/WS`, а не всё, что похоже на адрес: путь с `@` и строка
+    /// подключения остаются читаемыми.
+    #[test]
+    fn only_the_client_address_is_masked_as_an_address() {
+        let masked = mask_launch_args(
+            &[
+                "/WS".to_owned(),
+                "http://alice:s3cret@host/base".to_owned(),
+                "/C".to_owned(),
+                "C:\\dir@host".to_owned(),
+                "/IBConnectionString".to_owned(),
+                "Srvr=host;Ref=base".to_owned(),
+            ],
+            &[],
+        );
+
+        assert_eq!(masked[1], "http://alice:***@host/base");
+        assert_eq!(
+            masked[3], "C:\\dir@host",
+            "путь не адрес и портиться не должен"
+        );
+        assert_eq!(masked[5], "Srvr=host;Ref=base");
+    }
+
     #[test]
     fn builds_expected_run_unit_tests_arguments() {
         let args = build_launch_args(
             LaunchClientMode::Thin,
-            &V8Connection::from_connection_string("File=/tmp/ib"),
+            LaunchAddress::Connection(&V8Connection::from_connection_string("File=/tmp/ib")),
             &["/TESTMANAGER".to_owned()],
             &LaunchOptions {
                 c: Some("RunUnitTests=/tmp/path with space/тест config.json".to_owned()),
@@ -417,7 +625,7 @@ mod tests {
     fn builds_expected_vanessa_arguments() {
         let args = build_launch_args(
             LaunchClientMode::Thin,
-            &V8Connection::from_connection_string("File=/tmp/ib"),
+            LaunchAddress::Connection(&V8Connection::from_connection_string("File=/tmp/ib")),
             &["/TESTMANAGER".to_owned()],
             &LaunchOptions {
                 execute: Some("/tmp/va/vanessa automation.epf".to_owned()),
@@ -447,7 +655,7 @@ mod tests {
     fn ordinary_mode_adds_run_mode_and_filters_reserved_raw_keys() {
         let args = build_launch_args(
             LaunchClientMode::Ordinary,
-            &V8Connection::from_connection_string("File=/tmp/ib"),
+            LaunchAddress::Connection(&V8Connection::from_connection_string("File=/tmp/ib")),
             &[
                 "/TESTMANAGER".to_owned(),
                 "/DisableStartupDialogs".to_owned(),
@@ -494,7 +702,7 @@ mod tests {
     fn internal_out_has_priority_over_user_out() {
         let args = build_launch_args(
             LaunchClientMode::Thin,
-            &V8Connection::from_connection_string("File=/tmp/ib"),
+            LaunchAddress::Connection(&V8Connection::from_connection_string("File=/tmp/ib")),
             &[],
             &LaunchOptions {
                 out: Some("user.log".to_owned()),
