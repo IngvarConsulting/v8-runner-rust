@@ -682,12 +682,14 @@ canonical installation root; последующие `1cv8`, `1cv8c` и `ibcmd` �
 Отказ на этот случай называет опись, а не только имя файла:
 
 ```text
-utility '1cv8' was not found: version 8.5.1 is installed (8.5.1.1519, 8.5.1.1469) but has no full
-client; full client is installed in 8.5.4.1306, 8.3.27.2074
+utility '1cv8' was not found: version 8.5.1 is installed (8.5.1.1519, 8.5.1.1469) but has no full client; full client found in 8.5.4.1306, 8.3.27.2074
 ```
 
 Компоненты в тексте отказа: `1cv8` — full client, `1cv8c` — thin client, `ibcmd` — server tools,
-`webinst` — web server extensions.
+`webinst` — web server extensions. Опись строится по тому же пути, по которому шёл поиск: если задан
+`path`, она описывает указанную установку, а не корни по умолчанию. Когда не нашлось ни одной
+установки, отказ называет корни, в которых искал. У `1cedtcli` описи нет — EDT не компонент
+платформы, и её отказ остаётся прежним.
 
 ## `tools.enterprise`
 
