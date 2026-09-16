@@ -117,13 +117,19 @@ pub fn nearest_existing_canonical_path(path: &Path) -> std::io::Result<PathBuf> 
     };
 
     let mut existing = absolute.as_path();
-    while !existing.exists() {
-        existing = existing.parent().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("no existing ancestor for path '{}'", path.display()),
-            )
-        })?;
+    loop {
+        match std::fs::symlink_metadata(existing) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                existing = existing.parent().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("no existing ancestor for path '{}'", path.display()),
+                    )
+                })?;
+            }
+            Err(error) => return Err(error),
+        }
     }
 
     let existing_canonical = std::fs::canonicalize(existing)?;
@@ -134,25 +140,49 @@ pub fn nearest_existing_canonical_path(path: &Path) -> std::io::Result<PathBuf> 
     let suffix = absolute
         .strip_prefix(existing)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
-    let suffix =
-        suffix
-            .components()
-            .try_fold(PathBuf::new(), |mut acc, component| match component {
-                Component::Normal(part) => {
-                    acc.push(part);
-                    Ok(acc)
+    let mut resolved = existing_canonical;
+    for component in suffix.components() {
+        // A missing directory may be traversed in the planned path, but a file may not.
+        match std::fs::metadata(&resolved) {
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    format!("cannot traverse file '{}'", resolved.display()),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        match component {
+            Component::Normal(part) => {
+                resolved.push(part);
+                // After `..`, a new component can name an existing symlink. Resolve it
+                // before processing the next component; never collapse it lexically.
+                match std::fs::symlink_metadata(&resolved) {
+                    Ok(_) => resolved = std::fs::canonicalize(&resolved)?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
                 }
-                _ => Err(std::io::Error::new(
+            }
+            Component::ParentDir => {
+                resolved.pop(); // At a filesystem root, pop leaves the root unchanged.
+            }
+            Component::CurDir => {}
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!(
                         "path '{}' contains unsupported component '{}'",
                         path.display(),
                         component.as_os_str().to_string_lossy()
                     ),
-                )),
-            })?;
+                ));
+            }
+        }
+    }
 
-    Ok(existing_canonical.join(suffix))
+    Ok(resolved)
 }
 
 pub fn stable_path_identity(path: &Path) -> String {
@@ -235,6 +265,93 @@ mod tests {
                 .join("nested")
                 .join("target")
         );
+    }
+
+    #[test]
+    fn planned_path_resolves_missing_parent_components_without_writes() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("missing/../work");
+
+        assert_eq!(
+            nearest_existing_canonical_path(&path).expect("planned path"),
+            fs::canonicalize(dir.path())
+                .expect("canonical root")
+                .join("work")
+        );
+        assert_eq!(fs::read_dir(dir.path()).expect("entries").count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn planned_path_resolves_symlinks_reached_after_missing_parent_components() {
+        let dir = tempdir().expect("tempdir");
+        let real = dir.path().join("real/nested");
+        fs::create_dir_all(&real).expect("real directory");
+        std::os::unix::fs::symlink(&real, dir.path().join("link")).expect("symlink");
+        let canonical_real = fs::canonicalize(&real).expect("canonical real");
+
+        for prefix in ["", "missing/../"] {
+            assert_eq!(
+                nearest_existing_canonical_path(&dir.path().join(format!("{prefix}link/child")))
+                    .expect("symlink child"),
+                canonical_real.join("child")
+            );
+            assert_eq!(
+                nearest_existing_canonical_path(&dir.path().join(format!("{prefix}link/../child")))
+                    .expect("symlink parent"),
+                canonical_real.parent().expect("real parent").join("child")
+            );
+        }
+        assert!(!dir.path().join("missing").exists());
+        assert!(!real.join("child").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn planned_path_rejects_dangling_symlinks_instead_of_treating_them_as_missing() {
+        let dir = tempdir().expect("tempdir");
+        std::os::unix::fs::symlink(dir.path().join("absent"), dir.path().join("link"))
+            .expect("dangling symlink");
+
+        for suffix in ["link", "link/child", "missing/../link/child"] {
+            assert_eq!(
+                nearest_existing_canonical_path(&dir.path().join(suffix))
+                    .expect_err("dangling link")
+                    .kind(),
+                std::io::ErrorKind::NotFound
+            );
+        }
+        assert!(!dir.path().join("missing").exists());
+    }
+
+    #[test]
+    fn planned_path_rejects_regular_file_traversal_even_before_parent_components() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("file"), "content").expect("file");
+
+        for suffix in ["file/child", "file/../child", "missing/../file/../child"] {
+            assert!(
+                nearest_existing_canonical_path(&dir.path().join(suffix)).is_err(),
+                "must reject file traversal: {suffix}"
+            );
+        }
+        assert!(!dir.path().join("missing").exists());
+    }
+
+    #[test]
+    fn planned_path_parent_components_stop_at_filesystem_root() {
+        let dir = tempdir().expect("tempdir");
+        let canonical_dir = fs::canonicalize(dir.path()).expect("canonical directory");
+        let mut path = dir.path().join("missing");
+        for _ in 0..canonical_dir.components().count() + 3 {
+            path.push("..");
+        }
+
+        assert_eq!(
+            nearest_existing_canonical_path(&path).expect("root"),
+            canonical_dir.ancestors().last().expect("filesystem root")
+        );
+        assert_eq!(fs::read_dir(dir.path()).expect("entries").count(), 0);
     }
 
     #[cfg(unix)]

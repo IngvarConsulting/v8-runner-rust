@@ -25,7 +25,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `config init` | Работает без существующего конфига | Создаёт `v8project.yaml`, sibling `v8project.local.yaml`, `.gitignore` entry, autodetect-ит supported `source-set` и aggregate external roots |
 | `tools download <tool>` | CLI-only загрузка latest releases | Загружает выбранный YAxUnit, Vanessa Automation single или onec-client-mcp-devkit; обновляет local overlay для Vanessa/client MCP и при `yaxunit --sources` добавляет YAxUnit как `source-set` `tests` |
 | `init` | провайдер `designer` (умолчание) или `ibcmd` | Конфигуратор создаёт файловую ИБ, серверную оставляет ручной предпосылкой; `providers.init: ibcmd` создаёт файловую или серверную через `ibcmd infobase create` (серверной нужна `infobase.dbms`); при `format=EDT` дополнительно импортирует EDT workspace |
-| `extensions` | `format=DESIGNER` или `format=EDT`; провайдер `ibcmd`, `agent` только по `providers.extensions: agent` | Обновляет свойства extension `source-set`; `list`/`info`/`create`/`delete`/`activate` — состав расширений ИБ; у `agent` всё это группа `config extensions` одной сессией на команду, состав читается из структурного ответа `properties get`, синоним при `create` уходит в форме `NStr()` |
+| `extensions` | `format=DESIGNER` или `format=EDT`; провайдер `ibcmd`, `agent` только по `providers.extensions: agent` | Обновляет свойства extension `source-set` или установленного расширения, названного платформенным именем (`--installed-name`); `list`/`info`/`create`/`delete`/`activate` — состав расширений ИБ; у `agent` всё это группа `config extensions` одной сессией на команду, состав читается из структурного ответа `properties get`, синоним при `create` уходит в форме `NStr()` |
 | `build` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.build: agent` при `format=DESIGNER`; у автономного сервера (`infobase.standalone`) — только `agent` через SSH-шлюз сервера, платформа на машине раннера не нужна | Incremental/full загрузка в ИБ; при `format=EDT` сначала экспортирует изменённые EDT `source-set`; у `agent` загрузка и `update-db-cfg` — одна сессия на команду, исходники выставляются агенту ссылкой в `AgentBaseDir`, после загрузки записывается поколение конфигурации |
 | `test` | Та же матрица, что и у `build` | По умолчанию запускает `build` |
 | `test --no-build` | Подготовленная file/server ИБ; source-set и build tooling не требуются | Запускает выбранный test engine без build |
@@ -81,6 +81,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `load` | артефакт, режим, расширение; `compatibility_state: not_probed` |
 | `dump` | набор, режим, целевой путь |
 | `artifacts` | вид артефакта и выход, `published: false` |
+| `extensions` | целевые имена, отключаемые свойства безопасности, ИБ, учётку и путь `ibcmd` |
 
 - **Закрытый признак есть у обеих форм, но он разный.** У экспортной это `mode`
   (`preview` против `apply`), и `provider_dispatched` там появляется только в
@@ -230,12 +231,25 @@ v8-runner tools download client-mcp [--sources] [--force]
 ### `extensions`
 
 ```bash
-v8-runner extensions [--name <SOURCE_SET>...]
+v8-runner extensions [--name <SOURCE_SET>...] [--installed-name <PLATFORM_NAME>...] [--dry-run]
+v8-runner extensions --name TESTS --installed-name YAXUNIT
 ```
 
-- Работает только с `source-set`, у которых `type=EXTENSION`.
-- Без `--name` обрабатывает все extension `source-set` из конфига.
+- Отключает безопасный режим и защиту от опасных действий через IBCMD.
+- `--name` выбирает только `source-set` с `type=EXTENSION`; неизвестное имя — ошибка.
+- `--installed-name` передаёт платформенное имя установленного расширения без требования
+  соответствующего `source-set`. Валидный конфиг проекта всё равно нужен.
+- Без обоих селекторов обрабатывает все extension `source-set` из конфига. При наличии
+  любого селектора обрабатывает только явно выбранные цели: сначала `--name`, затем
+  `--installed-name`. Точные повторы выполняются один раз; регистр и пробелы сохраняются.
+- Пробельное/пустое имя, управляющие символы и начальный `-` в `--installed-name`
+  отклоняются до блокировки, очистки и вызова платформы. Селекторы нельзя смешивать с подкомандами.
 - Возвращает пошаговый результат по каждому целевому расширению.
+- `--dry-run` разрешает цели и находит `ibcmd`, возвращает планируемые `steps` с
+  `provider_dispatched=false`, не запускает платформу и не трогает `workPath`.
+  Наличие расширений в ИБ в превью не проверяется. С `--clean-before-execution` несовместим.
+- Ошибка обновления, в том числе отсутствующего расширения, возвращает platform error
+  и неуспешный шаг с целевым именем; следующие цели не выполняются.
 
 #### Состав расширений информационной базы
 
@@ -247,10 +261,9 @@ v8-runner extensions delete --name <NAME> [--dry-run]
 v8-runner extensions activate --name <NAME> --active <yes|no> [--dry-run]
 ```
 
-- Предмет здесь другой: `extensions` без подкоманды правит свойства extension
-  `source-set` рабочего пространства, а подкоманды читают и меняют состав
-  расширений, **установленных в информационной базе**. Это разные вещи, и
-  совпадение имён их не объединяет.
+- `extensions` без подкоманды правит свойства безопасности выбранных расширений;
+  подкоманды читают и меняют состав расширений, **установленных в информационной базе**.
+  Их `--name` всегда означает платформенное имя.
 - **Семейство IBCMD-only.** У Designer нет батч-ключа, который перечисляет
   установленные расширения, поэтому у `extensions` в матрице один исполнитель —
   `ibcmd`; при его отсутствии операция отказывает, а не уходит на Designer.
