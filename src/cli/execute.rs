@@ -39,7 +39,7 @@ use crate::domain::infobase_export::{
 };
 use crate::domain::init::{InitResult, InitStep, InitStepStatus};
 use crate::domain::issue::{Issue, IssueSeverity};
-use crate::domain::launch::{LaunchMode, LaunchResult};
+use crate::domain::launch::{LaunchMode, LaunchResult, LaunchVia};
 use crate::domain::load::{
     CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
 };
@@ -2876,6 +2876,7 @@ fn map_launch_request(args: &LaunchArgs) -> Result<LaunchRequest, UseCaseError> 
         target,
         launch: map_direct_launch_options(target, &args.launch, client_mcp.is_some())?,
         client_mcp,
+        via: map_launch_via(args.via.as_deref())?,
         dry_run: args.dry_run,
     })
 }
@@ -3005,6 +3006,20 @@ fn map_mcp_options(args: &LaunchArgs) -> Result<ClientMcpOptionsRequest, UseCase
         port: args.mcp_port,
         addon,
         wait_ready: args.wait_ready,
+    })
+}
+
+/// `--via` уже ограничен clap до двух значений; отказ остаётся на случай,
+/// когда адаптер вызывают не из clap.
+fn map_launch_via(value: Option<&str>) -> Result<Option<LaunchVia>, UseCaseError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    LaunchVia::parse(value).map(Some).ok_or_else(|| {
+        UseCaseError::new(
+            UseCaseErrorKind::Validation,
+            "--via accepts only `web` or `connection`",
+        )
     })
 }
 
@@ -4337,6 +4352,7 @@ mod tests {
         );
         assert_eq!(
             map_launch_request(&LaunchArgs {
+                via: None,
                 target: "thin".to_owned(),
                 mcp_scenario: None,
                 mcp_mode: None,
@@ -4357,6 +4373,7 @@ mod tests {
             })
             .expect("request"),
             LaunchRequest {
+                via: None,
                 target: LaunchTargetRequest::thin_client(),
                 launch: LaunchOptions {
                     c: Some("Command".to_owned()),
@@ -4373,6 +4390,7 @@ mod tests {
         );
         assert_eq!(
             map_launch_request(&LaunchArgs {
+                via: None,
                 target: "ordinary".to_owned(),
                 mcp_scenario: None,
                 mcp_mode: None,
@@ -4388,6 +4406,7 @@ mod tests {
         );
         assert_eq!(
             map_launch_request(&LaunchArgs {
+                via: None,
                 target: "thin".to_owned(),
                 mcp_scenario: None,
                 mcp_mode: None,
@@ -4403,6 +4422,7 @@ mod tests {
         );
         assert_eq!(
             map_launch_request(&LaunchArgs {
+                via: None,
                 target: "mcp".to_owned(),
                 mcp_scenario: Some("va".to_owned()),
                 mcp_mode: Some("ordinary".to_owned()),
@@ -4414,6 +4434,7 @@ mod tests {
             })
             .expect("request"),
             LaunchRequest {
+                via: None,
                 target: LaunchTargetRequest::client_mcp_with_mode(ClientMcpMode::Ordinary),
                 launch: LaunchOptions {
                     c: None,
@@ -4490,6 +4511,7 @@ mod tests {
         })
         .expect_err("dump mode should be rejected");
         let launch_error = map_launch_request(&LaunchArgs {
+            via: None,
             target: "garbage".to_owned(),
             mcp_scenario: None,
             mcp_mode: None,
@@ -4808,6 +4830,7 @@ mod tests {
         let error = execute_command(
             &config,
             &Command::Launch(LaunchArgs {
+                via: None,
                 target: "garbage".to_owned(),
                 mcp_scenario: None,
                 mcp_mode: None,

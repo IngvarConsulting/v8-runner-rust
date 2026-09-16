@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use crate::command_envelope::{test_envelope, Envelope, EnvelopeError};
 use crate::config::model::AppConfig;
+use crate::domain::launch::LaunchVia;
 use crate::domain::runner::{
     ExecutionPolicy, LaunchClientModeRequest, LaunchOptions, RunnerKind, RunnerOutputFormat,
     RunnerProfile, ScenarioExecutionRequest,
@@ -571,6 +572,8 @@ fn map_launch_app_request(
                 addon: map_mcp_launch_addon(request.mcp_scenario.as_deref())?,
                 wait_ready: request.wait_ready.unwrap_or(false),
             }),
+            via: map_launch_via_input(request.via.as_deref())
+                .map_err(|error| launch_adapter_business_error(error, "via"))?,
             // Preview is a CLI capability; the MCP surface exposes no preview input,
             // exactly as it does not for `infobase --dry-run`.
             dry_run: false,
@@ -596,6 +599,8 @@ fn map_launch_app_request(
         target,
         launch: LaunchOptions::default(),
         client_mcp: None,
+        via: map_launch_via_input(request.via.as_deref())
+            .map_err(|error| launch_adapter_business_error(error, "via"))?,
         dry_run: false,
     })
 }
@@ -630,6 +635,18 @@ fn map_mcp_port(port: Option<u16>) -> Result<Option<u16>, McpServiceError<McpCom
         ));
     }
     Ok(port)
+}
+
+fn map_launch_via_input(value: Option<&str>) -> Result<Option<LaunchVia>, UseCaseError> {
+    let Some(value) = normalize_optional_string(value) else {
+        return Ok(None);
+    };
+    LaunchVia::parse(&value).map(Some).ok_or_else(|| {
+        UseCaseError::new(
+            UseCaseErrorKind::Validation,
+            "via accepts only `web` or `connection`",
+        )
+    })
 }
 
 fn map_mcp_launch_mode(
@@ -1031,7 +1048,7 @@ mod tests {
     use crate::domain::execution::{ExecutionStepKind, StepResult};
     use crate::domain::issue::{Issue, IssueSeverity, ModuleIssue};
     use crate::domain::launch::{
-        LaunchMode, LaunchResult, PlatformResolution, PlatformResolutionSource,
+        LaunchMode, LaunchResult, LaunchVia, PlatformResolution, PlatformResolutionSource,
     };
     use crate::domain::runner::RunnerKind;
     use crate::domain::syntax::{SyntaxCheckResult, SyntaxCheckStatus, SyntaxIssueSummary};
@@ -1879,6 +1896,7 @@ mod tests {
 
         for (alias, result_mode, request_mode) in cases {
             let port = StubPort::with_launch_result(Ok(LaunchResult {
+                via: LaunchVia::Connection,
                 ok: true,
                 mode: result_mode,
                 pid: Some(42),
@@ -1914,6 +1932,7 @@ mod tests {
     #[test]
     fn launch_app_maps_client_mcp_vanessa_options() {
         let port = StubPort::with_launch_result(Ok(LaunchResult {
+            via: LaunchVia::Connection,
             ok: true,
             mode: LaunchMode::Mcp,
             pid: Some(42),
@@ -1933,6 +1952,7 @@ mod tests {
             .launch_app(
                 McpCallContext::http(),
                 &McpLaunchAppRequest {
+                    via: None,
                     utility_type: "mcp".to_owned(),
                     mcp_scenario: Some("va".to_owned()),
                     mode: Some("ordinary".to_owned()),
@@ -1966,6 +1986,7 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_launch_result(Ok(LaunchResult {
+                via: LaunchVia::Connection,
                 ok: true,
                 mode: LaunchMode::Thin,
                 pid: Some(42),
@@ -2011,6 +2032,7 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_launch_result(Ok(LaunchResult {
+                via: LaunchVia::Connection,
                 ok: true,
                 mode: LaunchMode::Thin,
                 pid: Some(42),
@@ -2050,6 +2072,7 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_launch_result(Ok(LaunchResult {
+                via: LaunchVia::Connection,
                 ok: true,
                 mode: LaunchMode::Mcp,
                 pid: Some(42),
@@ -2094,6 +2117,7 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_launch_result(Ok(LaunchResult {
+                via: LaunchVia::Connection,
                 ok: true,
                 mode: LaunchMode::Mcp,
                 pid: Some(42),
@@ -2138,6 +2162,7 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_launch_result(Ok(LaunchResult {
+                via: LaunchVia::Connection,
                 ok: true,
                 mode: LaunchMode::Designer,
                 pid: None,
@@ -2183,6 +2208,7 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_launch_result(Ok(LaunchResult {
+                via: LaunchVia::Connection,
                 ok: true,
                 mode: LaunchMode::Designer,
                 pid: None,

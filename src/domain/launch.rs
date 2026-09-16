@@ -17,7 +17,11 @@ pub struct LaunchResult {
     /// `web`: a browser is not a platform utility.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform_resolution: Option<PlatformResolution>,
-    /// Address opened by `launch web`.
+    /// Which address the base was opened by. Present for every mode, not only for the
+    /// ones that have a choice: no caller has to read an absent field as "by connection".
+    pub via: LaunchVia,
+    /// Client address opened by `launch web` or by a thin client going through the web.
+    /// Any userinfo password in it is masked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// `false` when the run stopped at a preview instead of dispatching the client process.
@@ -33,6 +37,31 @@ pub struct LaunchResult {
     /// Direct external EPF wait outcome when explicitly requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_epf_wait: Option<ExternalEpfWaitResult>,
+}
+
+/// Which of the target's two addresses opens the base.
+///
+/// A target has an administrative address and a client one, and a client can be opened by
+/// either. The target kind sets the default; `--via` overrides it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum LaunchVia {
+    /// The administrative address — `infobase.connection`.
+    Connection,
+    /// The client address — `infobase.web.url`, as a ws connection.
+    Web,
+}
+
+impl LaunchVia {
+    /// Парсит объявленный адрес. Словарь один на обе поверхности: разойдись CLI и MCP
+    /// в значениях, они разошлись бы и в поведении.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "web" => Some(Self::Web),
+            "connection" => Some(Self::Connection),
+            _ => None,
+        }
+    }
 }
 
 /// Compact machine-facing plan produced by a non-executing launch preview.

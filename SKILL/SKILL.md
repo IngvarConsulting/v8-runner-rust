@@ -140,6 +140,7 @@ v8-runner init
   platform, authenticates and leaves a journal trace, so it is an action. The preview names the
   target infobase, the account and the utility, and never echoes the connection string.
 - Need a 1C UI session: use `v8-runner launch designer`, `launch thin`, `launch thick`, or `launch ordinary`.
+- Need the thin client against a published base: `launch thin --via web` opens `infobase.web.url` as a ws connection. A standalone-server target takes that path by default — it has no other address — while `launch web` still opens the same address in a browser. `--via` is accepted only where the client is thin.
 - Need to know which binary and arguments a launch would use without starting a client: append
   `--dry-run` to `launch designer|thin|thick|ordinary`. It returns `provider_dispatched=false`,
   `pid=null`, and a `plan` with the selected `program` and the composed `args`; credential values
