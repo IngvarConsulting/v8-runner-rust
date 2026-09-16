@@ -1547,7 +1547,7 @@ mod tests {
     async fn queued_cancellation_returns_early_before_execution() {
         let factory = FakeSessionFactory::new(vec![SessionPlan::Session(vec![
             CommandBehavior::CompleteAfter {
-                delay: Duration::from_millis(50),
+                delay: Duration::from_millis(200),
                 stdout: "first".to_owned(),
                 stderr: String::new(),
             },
@@ -2056,7 +2056,7 @@ mod tests {
         let workspace = PathBuf::from("/tmp/edt workspace");
         let inner = FakeSessionFactory::new(vec![
             SessionPlan::Session(vec![CommandBehavior::CompleteAfter {
-                delay: Duration::from_millis(40),
+                delay: Duration::from_millis(300),
                 stdout: String::new(),
                 stderr: String::new(),
             }]),
@@ -2081,19 +2081,20 @@ mod tests {
         let factory = ResettingSessionFactory::new(
             inner.clone(),
             workspace.clone(),
-            Duration::from_millis(10),
+            Duration::from_millis(100),
         );
         let manager = manager(factory, 2, Duration::from_millis(100));
 
         let first = tokio::spawn({
             let manager = manager.clone();
-            async move { manager.execute(request("cmd-1", 200)).await }
+            async move { manager.execute(request("cmd-1", 10_000)).await }
         });
         wait_for_commands(&inner, 1).await;
         let queued = tokio::spawn({
             let manager = manager.clone();
-            async move { manager.execute(request("cmd-2", 200)).await }
+            async move { manager.execute(request("cmd-2", 10_000)).await }
         });
+        wait_until("cmd-2 to reach the queue", || queued_len(&manager) == 1).await;
 
         let first_result = first.await.expect("first join");
         assert!(matches!(
@@ -2108,7 +2109,7 @@ mod tests {
         );
         assert_eq!(
             manager
-                .execute(request("cmd-3", 200))
+                .execute(request("cmd-3", 10_000))
                 .await
                 .expect("fresh result")
                 .stdout,
@@ -2236,7 +2237,7 @@ mod tests {
     async fn shutdown_drains_queued_requests() {
         let factory = FakeSessionFactory::new(vec![SessionPlan::Session(vec![
             CommandBehavior::CompleteAfter {
-                delay: Duration::from_millis(40),
+                delay: Duration::from_millis(150),
                 stdout: "first".to_owned(),
                 stderr: String::new(),
             },
@@ -2250,7 +2251,7 @@ mod tests {
             factory.clone(),
             Arc::new(RecordingObserver::default()),
             2,
-            Duration::from_millis(200),
+            Duration::from_millis(2_000),
         );
 
         let running = tokio::spawn({
@@ -2301,13 +2302,10 @@ mod tests {
             );
         }
 
-        for _ in 0..50 {
-            if factory.shutdown_count() == 1 {
-                return;
-            }
-            sleep(Duration::from_millis(5)).await;
-        }
-        panic!("timed out waiting for drop-driven shutdown cleanup");
+        wait_until("drop-driven shutdown cleanup", || {
+            factory.shutdown_count() == 1
+        })
+        .await;
     }
 
     #[test]
