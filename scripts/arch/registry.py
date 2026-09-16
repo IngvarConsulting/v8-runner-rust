@@ -58,6 +58,11 @@ REQUIRED_PROPS = {
 # записи, а адресат обещания, и от неё зависит, чем правка оплачивается.
 GOVERNS = ("product", "process")
 
+# Состояние записи, и по нему ветвится сам разбор: `planned` разрешает правилу не
+# называть фальсификатор, `superseded` — решению не предъявлять свидетельство,
+# `active` требует действующего решения под действующим правилом.
+STATUSES = ("active", "planned", "superseded")
+
 FRONT_MATTER = re.compile(r"\A---\n(.*?)\n---\n(.*)\Z", re.S)
 DECISION_FILENAME = re.compile(r"\A(\d{4}-\d{2}-\d{2})-([a-z0-9-]+)\.md\Z")
 
@@ -237,6 +242,19 @@ def validation_errors(found: list[Record]) -> list[str]:
             elif key in ("check", "realized"):
                 if any(not name.strip() for name in evidence_names(record.props[key])):
                     errors.append(f"{record.relative}: `{key}` has a blank entry")
+
+        # Перечень закрыт, и закрыт с обеих сторон: слову мимо него отказывают и
+        # тогда, когда оно выглядит уместным. Опечатка в `status` не нарушает
+        # правил — она отключает проверку: ветки, что смотрят на `status`, сверяют
+        # его целиком и незнакомому слову молчат. Пустое поле тут не судится: о нём уже
+        # сказано претензией выше, и второй раз о том же гейт не говорит.
+        for key, published in (("status", STATUSES), ("governs", GOVERNS)):
+            value = record.props.get(key)
+            if value and value not in published:
+                errors.append(
+                    f"{record.relative}: `{key}` must be one of "
+                    f"{', '.join(published)}; found `{value}`"
+                )
 
         # Символ и путь восстанавливают друг друга. Имя файла даёт символ, префикс
         # вида — каталог; без второй половины обратный ход не собирается:

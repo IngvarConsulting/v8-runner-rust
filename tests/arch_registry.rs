@@ -506,6 +506,25 @@ fn contract_file(name: &str, id: &str, decision: &str) -> RecordFile {
     )
 }
 
+/// Та же запись, но с переписанными полями.
+///
+/// Фальсификатор обязан отличаться от здоровой фикстуры ровно тем, что проверяет:
+/// собранный заново, он разошёлся бы с ней и вторым полем, и нарушений в нём стало бы
+/// два, а проба требует одного.
+fn with_props(file: RecordFile, changes: &[(&str, &str)]) -> RecordFile {
+    let (directory, name, text) = file;
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    for (key, value) in changes {
+        let prefix = format!("{key}: ");
+        let line = lines
+            .iter_mut()
+            .find(|line| line.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("fixture has no `{key}` prop to rewrite"));
+        *line = format!("{prefix}{value}");
+    }
+    (directory, name, lines.join("\n") + "\n")
+}
+
 /// Мини-реестр как вход пробы: файлы и, если нужно, подменённый префикс вида.
 fn registry_case(files: Vec<RecordFile>) -> serde_json::Value {
     serde_json::json!({ "files": files, "prefix": {} })
@@ -742,6 +761,126 @@ fn a_record_name_survives_a_windows_checkout() {
     assert!(
         wrong.is_empty(),
         "the tree may grow a name Windows refuses to check out:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// Слово, по которому реестр судит, обязано быть из опубликованного перечня.
+///
+/// `status` — не колонка индекса, а условие: `planned` разрешает правилу не называть
+/// фальсификатор, `superseded` — решению не предъявлять свидетельство, `active` требует
+/// действующего решения под действующим правилом. Сверяется слово целиком, поэтому
+/// промах мимо перечня не нарушает правил, а отключает проверку: правило со
+/// `status: activ` под `planned`-решением до этой проверки проходило гейт молча —
+/// объявляло себя действующим под непринятым решением, и это никого не касалось.
+/// `governs` ничего не переключает и ломается иначе, но так же тихо: он уходит в
+/// индекс как есть, и колонка перестаёт группироваться.
+///
+/// Перечень закрыт с обеих сторон, и фикстуры держат обе. Опубликованное значение
+/// обязано проходить — включая `superseded`, которого нет ни в одной живой записи:
+/// сузься перечень до двух слов, реестр бы этого не заметил. Неопубликованное обязано
+/// отвергаться — и тогда, когда выглядит уместным: четвёртая ось заводится решением,
+/// а не правкой одного поля.
+#[test]
+fn a_closed_field_admits_only_published_values() {
+    let sound_rule = registry_case(vec![
+        decision_file(DECISION_FILE, DECISION_ID, "INV.DOCS.EXAMPLE"),
+        rule_file("INV.DOCS.EXAMPLE.md", "INV.DOCS.EXAMPLE", DECISION_ID),
+    ]);
+    // `governs: product` носит контракт фикстуры, `process` — правило и решение.
+    let sound_contract = registry_case(vec![
+        decision_file(DECISION_FILE, DECISION_ID, "CTR.WIRE.EXAMPLE"),
+        contract_file("CTR.WIRE.EXAMPLE.md", "CTR.WIRE.EXAMPLE", DECISION_ID),
+    ]);
+    let planned_rule = registry_case(vec![
+        decision_file(DECISION_FILE, DECISION_ID, "INV.DOCS.EXAMPLE"),
+        with_props(
+            rule_file("INV.DOCS.EXAMPLE.md", "INV.DOCS.EXAMPLE", DECISION_ID),
+            &[("status", "planned"), ("check", "null")],
+        ),
+    ]);
+    // Заменённое решение: правило под ним ещё не действует, иначе его поймала бы
+    // ветка «действующее правило под недействующим решением».
+    let superseded_decision = registry_case(vec![
+        with_props(
+            decision_file(DECISION_FILE, DECISION_ID, "INV.DOCS.EXAMPLE"),
+            &[("status", "superseded"), ("realized", "null")],
+        ),
+        with_props(
+            rule_file("INV.DOCS.EXAMPLE.md", "INV.DOCS.EXAMPLE", DECISION_ID),
+            &[("status", "planned"), ("check", "null")],
+        ),
+    ]);
+    let misspelled_governs = registry_case(vec![
+        decision_file(DECISION_FILE, DECISION_ID, "INV.DOCS.EXAMPLE"),
+        with_props(
+            rule_file("INV.DOCS.EXAMPLE.md", "INV.DOCS.EXAMPLE", DECISION_ID),
+            &[("governs", "proces")],
+        ),
+    ]);
+    // Ровно тот случай, ради которого перечень и закрывается: решение не действует,
+    // правило объявляет себя действующим, и одна буква прячет расхождение целиком.
+    let misspelled_status_switches_a_check_off = registry_case(vec![
+        with_props(
+            decision_file(DECISION_FILE, DECISION_ID, "INV.DOCS.EXAMPLE"),
+            &[("status", "planned"), ("realized", "null")],
+        ),
+        with_props(
+            rule_file("INV.DOCS.EXAMPLE.md", "INV.DOCS.EXAMPLE", DECISION_ID),
+            &[("status", "activ")],
+        ),
+    ]);
+    let axis_nobody_published = registry_case(vec![
+        with_props(
+            decision_file(DECISION_FILE, DECISION_ID, "INV.DOCS.EXAMPLE"),
+            &[("governs", "architecture")],
+        ),
+        rule_file("INV.DOCS.EXAMPLE.md", "INV.DOCS.EXAMPLE", DECISION_ID),
+    ]);
+
+    let judged = python_validation_errors(&[
+        sound_rule,
+        sound_contract,
+        planned_rule,
+        superseded_decision,
+        misspelled_governs,
+        misspelled_status_switches_a_check_off,
+        axis_nobody_published,
+    ]);
+    let mut wrong = Vec::new();
+
+    for (name, errors) in [
+        ("active, process", &judged[0]),
+        ("product on a contract", &judged[1]),
+        ("planned", &judged[2]),
+        ("superseded", &judged[3]),
+    ] {
+        if !errors.is_empty() {
+            wrong.push(format!("published `{name}` must pass: {errors:?}"));
+        }
+    }
+    sole_error(
+        "a misspelled governs",
+        &judged[4],
+        "`governs` must be one of product, process; found `proces`",
+        &mut wrong,
+    );
+    sole_error(
+        "a misspelled status that switches a check off",
+        &judged[5],
+        "`status` must be one of active, planned, superseded; found `activ`",
+        &mut wrong,
+    );
+    sole_error(
+        "an axis nobody published",
+        &judged[6],
+        "`governs` must be one of product, process; found `architecture`",
+        &mut wrong,
+    );
+
+    assert!(
+        wrong.is_empty(),
+        "a field the registry judges by may hold a word it does not know:\n{}",
         wrong.join("\n")
     );
 }
