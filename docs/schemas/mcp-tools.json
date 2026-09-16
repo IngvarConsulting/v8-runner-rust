@@ -416,6 +416,13 @@
           "description": "Client type to launch. Examples: mcp, client-mcp; thin-client, thin, tc; thick-client, thick; designer, configurator.",
           "type": "string"
         },
+        "via": {
+          "description": "Which address opens the base: web for infobase.web.url, connection for infobase.connection. Thin client only; the default follows the target kind.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "waitReady": {
           "description": "Wait until the client MCP endpoint responds to initialize and tools/list.",
           "type": [
