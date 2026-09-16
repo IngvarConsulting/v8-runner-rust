@@ -350,6 +350,18 @@ pub struct WaitPolicy {
 }
 
 impl WaitPolicy {
+    /// Та же политика, урезанная до срока очистки. Очистка входит в срок команды
+    /// (`DEC.2026-04-20.EVERY-COMMAND-HAS-A-DEADLINE`), поэтому берётся меньшее из
+    /// остатка бюджета и запаса на завершение: неограниченного ожидания здесь быть
+    /// не должно, а растянуть срок команды эта политика не может.
+    pub fn cleanup(&self) -> Self {
+        let grace = Instant::now() + SHUTDOWN_GRACE;
+        Self {
+            deadline: Some(self.deadline.map_or(grace, |deadline| deadline.min(grace))),
+            ..self.clone()
+        }
+    }
+
     /// Та же политика со сроком и отменой, но фаза объявлена критической: команда,
     /// меняющая информационную базу, доводится до исхода, а прерывание записывается
     /// и отдаётся вызывающему отложенным предупреждением.
@@ -1221,6 +1233,40 @@ mod tests {
         assert!(
             critical.cancellation.is_cancelled(),
             "critical policy must observe the same cancellation token, not a fresh one"
+        );
+    }
+
+    /// Очистка входит в срок команды и не заводит собственного: она берёт меньшее из
+    /// остатка бюджета и запаса на завершение.
+    #[test]
+    fn a_cleanup_policy_never_outlives_the_command_budget() {
+        let soon = Instant::now() + Duration::from_millis(50);
+        let capped = WaitPolicy {
+            deadline: Some(soon),
+            cancellation: CancellationToken::new(),
+            safety: ProcessInterruptionSafety::GracefulThenKill,
+        }
+        .cleanup();
+        assert_eq!(
+            capped.deadline,
+            Some(soon),
+            "a remaining budget shorter than the grace must win"
+        );
+
+        let far = Instant::now() + Duration::from_secs(3_600);
+        let bounded = WaitPolicy {
+            deadline: Some(far),
+            cancellation: CancellationToken::new(),
+            safety: ProcessInterruptionSafety::GracefulThenKill,
+        }
+        .cleanup();
+        let bounded = bounded.deadline.expect("cleanup always has a deadline");
+        assert!(bounded < far, "cleanup must not inherit the whole budget");
+
+        let unbounded = WaitPolicy::default().cleanup();
+        assert!(
+            unbounded.deadline.is_some(),
+            "cleanup must be bounded even when the command has no deadline"
         );
     }
 

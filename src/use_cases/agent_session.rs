@@ -75,11 +75,15 @@ impl AgentHandle {
     /// закрывается явно, иначе точка входа держит блокировку Конфигуратора и после
     /// разрыва SSH (шлюз `ibsrv` 8.3.27 держал её до перезапуска сервера — замер
     /// 15.09.2026). Ответ не важен: после `restore-ib` сессии уже нет.
+    ///
+    /// Срок очистки урезан: прежде `disconnect` наследовал весь остаток бюджета
+    /// команды и мог держать её столько же ещё раз.
     pub(crate) fn finish(self, wait: &WaitPolicy) {
+        let wait = wait.cleanup();
         match self {
-            Self::Managed(agent) => agent.shutdown(wait),
+            Self::Managed(agent) => agent.shutdown(&wait),
             Self::Attached { mut session, .. } | Self::Gate { mut session, .. } => {
-                let _ = session.run(agent::DISCONNECT_COMMAND, wait);
+                let _ = session.run(agent::DISCONNECT_COMMAND, &wait);
                 session.close();
             }
         }
