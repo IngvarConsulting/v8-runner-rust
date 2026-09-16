@@ -1234,6 +1234,10 @@ mod tests {
         manager.inner.queue.lock().expect("queue lock").len()
     }
 
+    fn admission_capacity(manager: &EdtSessionManager) -> usize {
+        manager.inner.admission.available_permits()
+    }
+
     fn manager_with_observer(
         factory: impl SessionFactory + 'static,
         observer: Arc<RecordingObserver>,
@@ -1261,14 +1265,21 @@ mod tests {
         EdtSessionRequest::new(command, Instant::now() + Duration::from_millis(after_ms))
     }
 
-    async fn wait_for_commands(factory: &FakeSessionFactory, expected: usize) {
-        for _ in 0..50 {
-            if factory.commands().len() >= expected {
+    async fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+        for _ in 0..1_000 {
+            if ready() {
                 return;
             }
             sleep(Duration::from_millis(5)).await;
         }
-        panic!("timed out waiting for {expected} commands");
+        panic!("timed out waiting for {what}");
+    }
+
+    async fn wait_for_commands(factory: &FakeSessionFactory, expected: usize) {
+        wait_until(&format!("{expected} commands"), || {
+            factory.commands().len() >= expected
+        })
+        .await;
     }
 
     #[test]
@@ -1569,7 +1580,7 @@ mod tests {
                     .await
             }
         });
-        sleep(Duration::from_millis(10)).await;
+        wait_until("cmd-2 to reach the queue", || queued_len(&manager) == 1).await;
         cancellation.cancel();
 
         assert_eq!(
@@ -1834,7 +1845,7 @@ mod tests {
     async fn running_cancellation_is_cooperative_and_capacity_recovers_after_completion() {
         let factory = FakeSessionFactory::new(vec![SessionPlan::Session(vec![
             CommandBehavior::CompleteAfter {
-                delay: Duration::from_millis(60),
+                delay: Duration::from_millis(200),
                 stdout: "first".to_owned(),
                 stderr: String::new(),
             },
@@ -1852,7 +1863,7 @@ mod tests {
             let cancellation = cancellation.clone();
             async move {
                 manager
-                    .execute(request("cmd-1", 300).with_cancellation(cancellation))
+                    .execute(request("cmd-1", 10_000).with_cancellation(cancellation))
                     .await
             }
         });
@@ -1864,13 +1875,16 @@ mod tests {
             Err(EdtSessionError::RunningCancelled)
         );
         assert_eq!(
-            manager.execute(request("cmd-2", 300)).await,
+            manager.execute(request("cmd-2", 10_000)).await,
             Err(EdtSessionError::QueueFull)
         );
-        sleep(Duration::from_millis(70)).await;
+        wait_until("queue capacity to recover", || {
+            admission_capacity(&manager) > 0
+        })
+        .await;
         assert_eq!(
             manager
-                .execute(request("cmd-2", 300))
+                .execute(request("cmd-2", 10_000))
                 .await
                 .expect("second result")
                 .stdout,
@@ -1983,7 +1997,7 @@ mod tests {
     async fn running_timeout_forces_lazy_restart_and_drains_queued_calls() {
         let factory = FakeSessionFactory::new(vec![
             SessionPlan::Session(vec![CommandBehavior::CompleteAfter {
-                delay: Duration::from_millis(60),
+                delay: Duration::from_millis(300),
                 stdout: "late".to_owned(),
                 stderr: String::new(),
             }]),
@@ -2002,14 +2016,15 @@ mod tests {
 
         let first = tokio::spawn({
             let manager = manager.clone();
-            async move { manager.execute(request("cmd-1", 20)).await }
+            async move { manager.execute(request("cmd-1", 100)).await }
         });
         wait_for_commands(&factory, 1).await;
 
         let queued = tokio::spawn({
             let manager = manager.clone();
-            async move { manager.execute(request("cmd-2", 200)).await }
+            async move { manager.execute(request("cmd-2", 10_000)).await }
         });
+        wait_until("cmd-2 to reach the queue", || queued_len(&manager) == 1).await;
 
         assert_eq!(
             first.await.expect("first join"),
@@ -2021,10 +2036,9 @@ mod tests {
                 reason: EdtSessionDrainReason::Restart
             })
         );
-        sleep(Duration::from_millis(40)).await;
         assert_eq!(
             manager
-                .execute(request("cmd-3", 200))
+                .execute(request("cmd-3", 10_000))
                 .await
                 .expect("fresh result")
                 .stdout,
@@ -2248,7 +2262,7 @@ mod tests {
             let manager = manager.clone();
             async move { manager.execute(request("cmd-2", 300)).await }
         });
-        sleep(Duration::from_millis(10)).await;
+        wait_until("cmd-2 to reach the queue", || queued_len(&manager) == 1).await;
 
         manager.shutdown().expect("shutdown");
 
