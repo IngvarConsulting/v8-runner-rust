@@ -172,7 +172,13 @@ mod tests {
             .locate(UtilityType::EdtCli)
             .expect_err("expected not found");
 
-        assert!(matches!(error, LocatorError::NotFound(UtilityType::EdtCli)));
+        assert!(matches!(
+            error,
+            LocatorError::NotFound {
+                utility: UtilityType::EdtCli,
+                ..
+            }
+        ));
     }
 
     #[cfg(unix)]
