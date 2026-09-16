@@ -613,15 +613,65 @@ fn a_standalone_snapshot_is_refused_before_any_session() {
     assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));
 }
 
-/// Клиент к шлюзу не запускается: у автономного сервера нет строки подключения, его
-/// адрес — `infobase.web.url`.
+/// У автономного сервера один адрес — клиентский, — и тонкий клиент идёт по нему без
+/// всякого ключа. Не объявлен адрес — отказ называет именно его, а не платформу: платформы
+/// на этой машине нет вовсе, и до её поиска дело не доходит.
 #[test]
-fn a_client_launch_against_a_standalone_server_points_at_launch_web() {
+fn a_thin_client_against_a_standalone_server_asks_for_the_web_address() {
     let harness = harness();
 
     let (code, payload) = run(&harness, &["launch", "thin", "--dry-run"]);
 
     assert_ne!(code, 0, "{payload}");
-    assert_eq!(payload["error"]["kind"], "capability", "{payload}");
-    assert!(error_message(&payload).contains("launch web"), "{payload}");
+    assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+    assert!(
+        error_message(&payload).contains("infobase.web.url"),
+        "{payload}"
+    );
+}
+
+/// Второй путь открыли только тонкому клиенту. Остальные режимы против автономной цели
+/// отказывают ровно как до его появления: у неё нет административного адреса, а по
+/// клиентскому ходит только тонкий.
+#[test]
+fn a_non_thin_mode_against_a_standalone_server_is_still_refused() {
+    let harness = harness();
+
+    for mode in [
+        vec!["launch", "designer", "--dry-run"],
+        vec!["launch", "thick", "--dry-run"],
+        vec!["launch", "ordinary", "--dry-run"],
+        vec!["launch", "mcp", "--mode", "thick", "--dry-run"],
+    ] {
+        let (code, payload) = run(&harness, &mode);
+
+        assert_ne!(code, 0, "{mode:?}: {payload}");
+        assert_eq!(
+            payload["error"]["kind"], "capability",
+            "{mode:?}: {payload}"
+        );
+        assert!(
+            error_message(&payload).contains("launch web"),
+            "{mode:?}: {payload}"
+        );
+    }
+}
+
+/// Административного адреса у автономной цели нет, поэтому просить его — ошибка
+/// конфигурации, а не пустой запуск.
+#[test]
+fn via_connection_against_a_standalone_server_is_refused() {
+    let harness = harness();
+
+    let (code, payload) = run(
+        &harness,
+        &["launch", "thin", "--via", "connection", "--dry-run"],
+    );
+
+    assert_ne!(code, 0, "{payload}");
+    assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+    assert!(
+        error_message(&payload).contains("no administrative connection string"),
+        "{payload}"
+    );
 }
