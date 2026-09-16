@@ -88,6 +88,11 @@ a:focus-visible, button:focus-visible, textarea:focus-visible { outline: 2px sol
 .topbar nav { display: flex; gap: 18px; flex-wrap: wrap; }
 .topbar nav a { border: 0; color: var(--ink-2); font-size: 0.95rem; white-space: nowrap; }
 .topbar nav a[aria-current="page"] { color: var(--ink); font-weight: 700; }
+.topbar nav a.gh { display: inline-flex; align-items: center; gap: 5px; }
+.topbar nav a.gh svg { width: 18px; height: 18px; fill: currentColor; display: block; }
+.topbar nav a.gh:hover { color: var(--ink); }
+.gh-stars { font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+.gh-stars::before { content: "\2605"; margin-right: 3px; color: var(--ink-3); }
 
 .page { max-width: 1180px; margin: 0 auto; padding: 32px 24px 96px; }
 .lede { max-width: 72ch; color: var(--ink-2); font-size: 1.08rem; }
@@ -130,6 +135,21 @@ td.c { text-align: center; }
 .card .meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
 
 .mermaid { background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin: 16px 0; overflow-x: auto; }
+
+/* прокрутка вбок видна: тень у края появляется, только пока в ту сторону есть что листать */
+.mermaid.scrollx, .tablewrap.scrollx, .axes.scrollx {
+  background-image:
+    linear-gradient(to right, var(--paper) 40%, transparent),
+    linear-gradient(to left, var(--paper) 40%, transparent),
+    linear-gradient(to right, color-mix(in srgb, var(--ink) 18%, transparent), transparent),
+    linear-gradient(to left, color-mix(in srgb, var(--ink) 18%, transparent), transparent);
+  background-repeat: no-repeat;
+  background-size: 36px 100%, 36px 100%, 18px 100%, 18px 100%;
+  background-position: left center, right center, left center, right center;
+  background-attachment: local, local, scroll, scroll;
+  scroll-behavior: smooth;
+  overscroll-behavior-x: contain;
+}
 
 .toc { display: flex; gap: 6px 18px; flex-wrap: wrap; margin: 20px 0 0; padding: 0; list-style: none; font-size: 0.93rem; }
 .toc li a { color: var(--ink-2); }
@@ -220,4 +240,28 @@ ul.opts.cmds code { margin-right: 6px; }
   .brand { flex: 0 0 auto; }
   h1 { font-size: 1.6rem; }
   .tablewrap { border: 0; background: none; box-shadow: none; }
+}
+
+/* телефон: широкая таблица разбирается на карточки — шапку подставляет site.js */
+@media (max-width: 720px) {
+  table.stack thead { display: none; }
+  table.stack, table.stack tbody, table.stack tr, table.stack td { display: block; width: 100%; }
+  table.stack tr { padding: 12px 2px 14px; border-bottom: 1px solid var(--line); }
+  table.stack tbody tr:last-child { border-bottom: 0; }
+  table.stack td { border: 0; padding: 2px 10px; max-width: none; }
+  table.stack td:first-child,
+  table.stack td.k { white-space: normal; }
+  table.stack td:first-child { font-weight: 700; color: var(--ink); font-size: 1rem; padding-bottom: 8px; }
+  table.stack td:not(:first-child) { color: var(--ink-2); margin-bottom: 8px; }
+  table.stack td:not(:first-child)::before {
+    content: attr(data-label);
+    display: block;
+    font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--ink-3); font-weight: 700; margin-bottom: 1px;
+  }
+  table.stack td:not(:first-child):empty { display: none; }
+  .tablewrap { border: 0; background: none; box-shadow: none; }
+  .tablewrap table.stack { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); }
+  /* mermaid ужимает схему по ширине экрана до нечитаемого: на телефоне лучше листать */
+  .mermaid svg { max-width: none !important; min-width: 620px; height: auto; }
 }
