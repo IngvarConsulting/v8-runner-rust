@@ -181,7 +181,7 @@ flowchart LR
 </pre>
 
 <h2 id="deploy">Варианты развёртывания 1С</h2>
-<p>Вид цели решает, какими утилитами раннер работает, по какому каналу отдаёт команду и откуда забирает результат. Видов три — файловая база, кластер 1С, автономный сервер, — а машин под ними бывает сколько угодно. Ниже одиннадцать развёрток, которые встречаются на практике. Последние три отличаются не видом цели, а тем, кто владеет её процессом: служба, ваша консоль или контейнер.</p>
+<p>Вид цели решает, какими утилитами раннер работает, по какому каналу отдаёт команду и откуда забирает результат. Видов три — файловая база, кластер 1С, автономный сервер, — а машин под ними бывает сколько угодно. Ниже тринадцать развёрток, которые встречаются на практике. Девятая, десятая и одиннадцатая отличаются не видом цели, а тем, кто владеет её процессом: служба, ваша консоль или контейнер. Последние две — тем, где стоит веб-сервер; там раннер команду теряет, а не приобретает.</p>
 <ul class="toc">
   <li><a href="#d-file">1. Файловая база</a></li>
   <li><a href="#d-file-web">2. Файловая база и веб-сервер</a></li>
@@ -194,6 +194,8 @@ flowchart LR
   <li><a href="#d-console">9. Кластер поднят из консоли</a></li>
   <li><a href="#d-docker-cluster">10. Кластер 1С в контейнере</a></li>
   <li><a href="#d-docker-standalone">11. Автономный сервер в контейнере</a></li>
+  <li><a href="#d-web-remote">12. Веб-сервер на отдельной машине</a></li>
+  <li><a href="#d-web-docker">13. Веб-сервер в контейнере</a></li>
 </ul>
 
 <h3 id="d-legend">Как читать схемы</h3>
@@ -751,6 +753,107 @@ flowchart LR
   <li><strong>Порта два</strong> — 1543 для шлюза и 8314 для клиента: без первого не подключится раннер, без второго базу не откроют люди.</li>
   <li><strong>Обмен — здесь есть выбор</strong> — <code>sftp</code> через шлюз или <code>{ dir: … }</code>, если каталог пользователя шлюза смонтирован томом и виден раннеру. Второй путь снимает ограничение на запись, которое есть у SFTP-шлюза <code>ibsrv</code> 8.3.27.</li>
   <li><strong>Клиент</strong> — HTTP контейнера, адрес известен сразу и публикации не требует.</li>
+</ul>
+
+<h3 id="d-web-remote">12. Веб-сервер на отдельной машине</h3>
+<p>Публикацию держит отдельный веб-сервер, и его файловая система раннеру не принадлежит. Вариант интересен тем, что раннер здесь команду <strong>теряет</strong>, а не приобретает: <code>publish</code> становится невозможен.</p>
+<pre class="mermaid">
+flowchart LR
+  subgraph HOST["машина раннера"]
+    R["v8-runner"]
+    D["1cv8 DESIGNER"]
+    WI["webinst<br/>публиковать нечего"]
+    WP@{ shape: doc, label: "workPath" }
+  end
+  subgraph WEB["машина веб-сервера"]
+    AP["Apache · IIS<br/>модуль wsap · wsisapi"]
+    VRD@{ shape: doc, label: "каталог публикации<br/>default.vrd" }
+    CONF@{ shape: doc, label: "конфиг веб-сервера" }
+  end
+  subgraph SRV["сервер 1С"]
+    CL["ragent · rmngr 1541"]
+    RP["rphost"]
+  end
+  BR(["браузер · тонкий клиент"])
+  R --> D
+  R --> WI
+  R --> WP
+  D -.->|"Srvr=…;Ref=…, TCP 1541"| CL
+  CL --> RP
+  AP --> VRD
+  AP --> CONF
+  AP -.->|"TCP 1541"| CL
+  BR -.->|"HTTP · HTTPS, ws=…"| AP
+  class R run
+  class D,CL,RP sw
+  class BR svc
+  class WP art
+  class WI,AP,VRD,CONF off
+  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
+  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
+  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
+  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
+  classDef off fill:#e4e4e7,stroke:#9a9aa2,color:#33333a;
+  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
+  style WEB fill:#eeeef0,stroke:#a8a8b0,color:#33333a
+  style SRV fill:#f1f8ea,stroke:#8aad76,color:#12210c
+</pre>
+<ul class="opts">
+  <li><strong>Почему <code>publish</code> не работает</strong> — <code>webinst</code> раннер запускает у себя, и оба пути в его аргументах открываются на его файловой системе: <code>-dir</code> — каталог публикации, <code>-confpath</code> — конфиг веб-сервера. Ни того, ни другого у раннера нет, и валидация отказывает ещё до запуска: <code>dir</code> обязан быть существующим каталогом.</li>
+  <li><strong>Что остаётся</strong> — всё остальное. Публикация не участвует ни в одной другой команде: <code>build</code>, <code>dump</code>, <code>test</code>, <code>extensions</code> идут по строке подключения и об этом веб-сервере не знают.</li>
+  <li><strong>Адрес клиента</strong> — <code>infobase.web.url</code> объявляется вручную. Публикация ему не нужна: <code>launch web</code> и <code>launch thin --via web</code> открывают объявленный адрес, кто бы его ни опубликовал.</li>
+  <li><strong>Если смонтировать раннеру каталог публикации</strong> — <code>publish</code> пройдёт у <code>apache24</code> и <code>iis</code>: им <code>conf</code> необязателен, и <code>default.vrd</code> запишется через монтирование. У <code>apache2</code> и <code>apache22</code> валидация откажет — им <code>conf</code> обязателен.</li>
+  <li><strong>Если смонтировать и конфиг</strong> — <code>webinst</code> отработает целиком, но запишет туда пути так, как их видит раннер, а читать их будет веб-сервер. Совпадут они только при одинаковом пути монтирования с обеих сторон.</li>
+  <li><strong>Чего требует сам веб-сервер</strong> — модуля расширения той же версии платформы и доступа к базе: до кластера по TCP, а до файловой базы — по тому самому пути, который записан в <code>default.vrd</code>.</li>
+</ul>
+
+<h3 id="d-web-docker">13. Веб-сервер в контейнере</h3>
+<p>Тот же случай, но веб-сервер поднят контейнером. Разница с предыдущим одна и важная: том обычно виден обеим сторонам — только по разным путям.</p>
+<pre class="mermaid">
+flowchart LR
+  subgraph HOST["машина раннера"]
+    R["v8-runner"]
+    WI["webinst"]
+    VOL@{ shape: doc, label: "том с каталогом публикации<br/>путь раннера" }
+  end
+  subgraph C["контейнер веб-сервера"]
+    AP["Apache<br/>модуль wsap"]
+    VRDC@{ shape: doc, label: "тот же том<br/>путь внутри контейнера" }
+    CONF@{ shape: doc, label: "конфиг из образа<br/>настроен заранее" }
+    HTTPP(["HTTP 80 · 443"])
+  end
+  subgraph SRV["сервер 1С"]
+    CL["ragent · rmngr 1541"]
+  end
+  BR(["браузер · тонкий клиент"])
+  R -->|"процесс на операцию"| WI
+  WI -->|"-dir: пишет default.vrd"| VOL
+  VOL -.->|"один том, два пути"| VRDC
+  AP --> VRDC
+  AP --> CONF
+  AP -.->|"TCP 1541"| CL
+  AP --> HTTPP
+  BR -.->|"HTTP · HTTPS, ws=…"| HTTPP
+  class R run
+  class WI,CL sw
+  class BR,HTTPP svc
+  class VOL art
+  class AP,VRDC,CONF off
+  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
+  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
+  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
+  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
+  classDef off fill:#e4e4e7,stroke:#9a9aa2,color:#33333a;
+  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
+  style C fill:#eeeef0,stroke:#a8a8b0,color:#33333a
+  style SRV fill:#f1f8ea,stroke:#8aad76,color:#12210c
+</pre>
+<ul class="opts">
+  <li><strong>Что работает</strong> — раннер пишет <code>default.vrd</code> в том своим путём, веб-сервер читает его своим. Содержимое файла от пути не зависит: в нём строка подключения, а не расположение публикации.</li>
+  <li><strong>Что не работает</strong> — правка конфига веб-сервера. Внутри контейнера и модуль, и каталог лежат по другим путям, поэтому писать туда с машины раннера нечего: виртуальный каталог настраивается один раз в образе.</li>
+  <li><strong>Отсюда рабочий приём</strong> — <code>apache24</code> без <code>conf</code>: <code>publish</code> обновляет только <code>default.vrd</code>, а конфигурация веб-сервера живёт в образе и не трогается.</li>
+  <li><strong>Файловая база сюда не годится</strong> — веб-сервер обязан открыть её по тому же пути, который стоит в <code>default.vrd</code>, а внутри контейнера он другой. Для кластерной базы вопроса нет: <code>Srvr=…;Ref=…</code> — сетевой адрес, и нужен только TCP до кластера.</li>
+  <li><strong>Про Docker раннер по-прежнему не знает</strong> — для него это каталог на своей файловой системе и больше ничего.</li>
 </ul>
 
 <h3 id="d-ops">Что доступно по виду цели</h3>
