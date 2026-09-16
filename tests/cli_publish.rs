@@ -142,6 +142,36 @@ fn publish_dry_run_names_the_command_and_touches_nothing() {
     assert!(!project.calls.exists(), "a preview must not run webinst");
 }
 
+/// `-connstr` несёт строку соединения целиком, а в ней бывает `Pwd=`. Превью
+/// публикации печатало её как есть, хотя превью запуска пароль уже закрывало.
+/// Остальные параметры публикации остаются читаемыми: по ним и одобряют план.
+#[test]
+fn publish_preview_never_echoes_the_password_of_the_connection_string() {
+    let dir = temp_workspace();
+    let www = dir.path().join("www");
+    let project = write_project(dir.path(), &web_yaml(&www, ""));
+    let config = fs::read_to_string(&project.config).expect("config");
+    fs::write(
+        &project.config,
+        config.replace(
+            &format!("connection: 'File={}'", dir.path().join("ib").display()),
+            "connection: 'Srvr=srv:1541;Ref=ut;Usr=Admin;Pwd=s3cret'",
+        ),
+    )
+    .expect("config with a password in the connection string");
+
+    let (code, payload) = run(&project.config, &["publish", "--dry-run"]);
+
+    assert_eq!(code, 0, "{payload}");
+    let args = payload["data"]["plan"]["args"].to_string();
+    assert!(!args.contains("s3cret"), "{args}");
+    assert!(
+        args.contains("Srvr=srv:1541;Ref=ut;Usr=Admin;Pwd=***"),
+        "{args}"
+    );
+    assert!(!project.calls.exists(), "a preview must not run webinst");
+}
+
 /// Предусловия утилиты называются до запуска, а не после её отказа.
 #[test]
 fn publish_refuses_before_webinst_when_a_precondition_is_missing() {
