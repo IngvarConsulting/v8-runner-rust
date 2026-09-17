@@ -145,7 +145,7 @@ fn write_http_designer_config(
     idle_ttl_secs: u64,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\nmcp:\n  http:\n    bind_address: {}\n    path: /mcp\n    stateful_sessions: {}\n    max_sessions: {}\n    idle_ttl_secs: {}\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\nmcp:\n  http:\n    bind_address: {}\n    path: /mcp\n    stateful_sessions: {}\n    max_sessions: {}\n    idle_ttl_secs: {}\n    allowed_hosts:\n      - runner.test\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         bind_address,
         stateful_sessions,
@@ -500,21 +500,25 @@ async fn initialize_session(client: &reqwest::Client, url: &str) -> (String, Val
     (session_id, extract_sse_json(&body))
 }
 
+fn initialize_payload() -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": { "name": "http-test", "version": "1.0.0" }
+        }
+    })
+}
+
 async fn initialize_stateless(client: &reqwest::Client, url: &str) -> reqwest::Response {
     client
         .post(url)
         .header("Accept", ACCEPT_BOTH)
         .header("Content-Type", "application/json")
-        .json(&json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-11-25",
-                "capabilities": {},
-                "clientInfo": { "name": "http-test", "version": "1.0.0" }
-            }
-        }))
+        .json(&initialize_payload())
         .send()
         .await
         .expect("stateless initialize request")
@@ -1095,6 +1099,77 @@ async fn mcp_http_initialize_burst_respects_capacity_and_recovers_after_delete()
 
     let recovered = initialize_stateless(&client, &url).await;
     assert_eq!(recovered.status(), reqwest::StatusCode::OK);
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_http_answers_only_the_hosts_it_was_told() {
+    let (_dir, config_path, url) = setup_http_designer_project(true, 4, 900);
+    let mut server = HttpServerProcess::spawn(&config_path, &url).await;
+    let client = reqwest::Client::builder()
+        .timeout(HTTP_CLIENT_TIMEOUT)
+        .build()
+        .expect("http client");
+
+    // Так выглядит страница, переразрешившая своё имя в петлю: соединение идёт на
+    // `127.0.0.1`, а `Host` называет чужое имя, подделать которое браузер не может.
+    let rebound = client
+        .post(&url)
+        .header("Host", "evil.com")
+        .header("Accept", ACCEPT_BOTH)
+        .header("Content-Type", "application/json")
+        .json(&initialize_payload())
+        .send()
+        .await
+        .expect("a request naming another host");
+    assert_eq!(rebound.status(), reqwest::StatusCode::FORBIDDEN);
+    let body = rebound.text().await.expect("refusal body");
+    assert!(
+        body.contains("Host"),
+        "the refusal names the header: {body}"
+    );
+    assert!(
+        !body.contains("evil.com"),
+        "the refusal does not echo the value back: {body}"
+    );
+
+    let foreign_origin = client
+        .post(&url)
+        .header("Origin", "http://evil.com")
+        .header("Accept", ACCEPT_BOTH)
+        .header("Content-Type", "application/json")
+        .json(&initialize_payload())
+        .send()
+        .await
+        .expect("a request from another origin");
+    assert_eq!(foreign_origin.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Проверка стоит слоем, а не в обработчике маршрута: путь, которого нет,
+    // отвечает тем же отказом, а не 404 мимо проверки.
+    let off_route = client
+        .get(url.replace("/mcp", "/nowhere"))
+        .header("Host", "evil.com")
+        .send()
+        .await
+        .expect("a request off the route");
+    assert_eq!(off_route.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let loopback = initialize_stateless(&client, &url).await;
+    assert_eq!(loopback.status(), reqwest::StatusCode::OK);
+
+    // Названный в `mcp.http.allowed_hosts` отвечает так же, как петля: иначе ключ
+    // умел бы только запрещать, и открыть слушатель им было бы нельзя.
+    let listed = client
+        .post(&url)
+        .header("Host", "runner.test")
+        .header("Accept", ACCEPT_BOTH)
+        .header("Content-Type", "application/json")
+        .json(&initialize_payload())
+        .send()
+        .await
+        .expect("a request naming a listed host");
+    assert_eq!(listed.status(), reqwest::StatusCode::OK);
 
     server.shutdown().await;
 }

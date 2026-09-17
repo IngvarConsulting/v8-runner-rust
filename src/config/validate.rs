@@ -8,6 +8,7 @@ use crate::config::model::{
     ToolExtensionInput, ToolExtensionSourceConfig, VanessaProfileConfig,
 };
 use crate::platform::locator::PlatformVersionRequirement;
+use crate::support::authority::host_of_authority;
 use crate::support::edt_project::{self, EdtProjectKind};
 use crate::support::path::is_safe_path_segment;
 use crate::support::source_descriptor::{self, SourceDescriptorPurpose, SourceSetRootScanError};
@@ -229,6 +230,9 @@ pub enum ConfigValidationError {
 
     #[error("mcp.http.idle_ttl_secs must be greater than or equal to 1")]
     InvalidMcpIdleTtlSecs,
+
+    #[error("mcp.http.allowed_hosts entry must be a host, optionally with a port: {0}")]
+    InvalidMcpAllowedHost(String),
 
     #[error("mcp.execution.max_concurrent_calls must be greater than or equal to 1")]
     InvalidMcpMaxConcurrentCalls,
@@ -1014,6 +1018,16 @@ fn validate_mcp_config(config: &AppConfig) -> Result<(), ConfigValidationError> 
 
     if config.mcp.http.idle_ttl_secs == 0 {
         return Err(ConfigValidationError::InvalidMcpIdleTtlSecs);
+    }
+
+    // Проверяется только форма: разбирается ли запись как хост. Годится ли этот
+    // хост по существу — вопрос политики, и его задаёт сам слушатель.
+    for allowed in &config.mcp.http.allowed_hosts {
+        if host_of_authority(allowed).is_none() {
+            return Err(ConfigValidationError::InvalidMcpAllowedHost(
+                allowed.clone(),
+            ));
+        }
     }
 
     if config.mcp.execution.max_concurrent_calls == 0 {
@@ -2650,6 +2664,55 @@ mod tests {
             err,
             ConfigValidationError::InvalidMcpBindAddress(value) if value == "localhost"
         ));
+    }
+
+    #[test]
+    fn rejects_an_allowed_host_that_is_not_a_host() {
+        let base = tempdir().expect("base");
+        let work = tempdir().expect("work");
+        let source_dir = base.path().join("src");
+        std::fs::create_dir_all(&source_dir).expect("source dir");
+
+        let config = |allowed: &str| AppConfig {
+            base_path: base.path().to_path_buf(),
+            work_path: work.path().to_path_buf(),
+            execution_timeout: 300_000,
+            format: SourceFormat::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
+            infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            source_sets: vec![SourceSetConfig {
+                name: "main".to_owned(),
+                purpose: SourceSetPurpose::Configuration,
+                path: source_dir
+                    .strip_prefix(base.path())
+                    .expect("relative")
+                    .to_path_buf(),
+            }],
+            build: BuildConfig::default(),
+            tools: ToolsConfig::default(),
+            mcp: crate::config::model::McpConfig {
+                http: crate::config::model::McpHttpConfig {
+                    allowed_hosts: vec![allowed.to_owned()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            tests: TestsConfig::default(),
+        };
+
+        for allowed in ["", "runner/../evil", "evil.com@runner", "http://runner"] {
+            let err = validate(&config(allowed)).expect_err("expected an invalid allowed host");
+            assert!(
+                matches!(err, ConfigValidationError::InvalidMcpAllowedHost(ref value) if value == allowed),
+                "{allowed:?} is rejected, got {err:?}"
+            );
+        }
+
+        for allowed in ["runner", "runner.local:3000", "10.0.0.5", "[::1]"] {
+            validate(&config(allowed))
+                .unwrap_or_else(|error| panic!("{allowed:?} is accepted: {error}"));
+        }
     }
 
     #[test]
