@@ -135,11 +135,14 @@ def extract_binary(args: argparse.Namespace) -> None:
     if descriptor is None:
         raise ValueError(f"no archive is published for {args.target}")
     binary = _archive_binary(dist, args.target, descriptor)
-    output = Path(args.output)
+    # Имя берётся из описания архива, а не от вызывающего: иначе то же
+    # соответствие «цель — имя файла» жило бы ещё и в матрице рабочего процесса.
+    output = Path(args.output_dir) / PurePosixPath(descriptor["binaryPath"]).name
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_bytes(binary)
     if os.name != "nt":
         output.chmod(output.stat().st_mode | 0o111)
+    print(output)
 
 
 def payload_asset_names() -> set[str]:
@@ -392,7 +395,7 @@ def parser() -> argparse.ArgumentParser:
     verify.add_argument("--target", required=True)
     verify.add_argument("--version", required=True)
     extract = commands.add_parser("extract-binary")
-    for name in ("dist", "target", "output"):
+    for name in ("dist", "target", "output-dir"):
         extract.add_argument(f"--{name}", required=True)
     manifest = commands.add_parser("write-manifest")
     manifest.add_argument("--dist", required=True)

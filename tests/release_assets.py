@@ -6,12 +6,13 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import struct
 import tarfile
 import tempfile
 import unittest
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -216,21 +217,29 @@ class ReleaseAssetsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             dist = Path(temp_dir)
             self.populate_release(module, dist)
-            output = dist / "native" / "v8-runner"
+            output_dir = dist / "native"
 
-            for target in module.ARCHIVE_ASSETS:
+            for target, descriptor in module.ARCHIVE_ASSETS.items():
                 module.extract_binary(
                     argparse.Namespace(
-                        dist=str(dist), target=target, output=str(output)
+                        dist=str(dist), target=target, output_dir=str(output_dir)
                     )
                 )
-                self.assertEqual(output.read_bytes(), self.binary_for(target))
+                # Имя выбирает описание архива, а не вызывающий: на Windows оно `.exe`.
+                expected_name = PurePosixPath(descriptor["binaryPath"]).name
+                extracted = output_dir / expected_name
+                self.assertEqual(extracted.read_bytes(), self.binary_for(target))
+                if os.name != "nt":
+                    self.assertTrue(
+                        os.access(extracted, os.X_OK),
+                        f"{expected_name} is extracted runnable",
+                    )
 
             with self.assertRaisesRegex(ValueError, "no archive is published"):
                 module.extract_binary(
                     argparse.Namespace(
                         dist=str(dist), target="powerpc-unknown-linux-gnu",
-                        output=str(output),
+                        output_dir=str(output_dir),
                     )
                 )
 

@@ -12,6 +12,8 @@ from __future__ import annotations
 import importlib.util
 import re
 import unittest
+
+import yaml
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -78,6 +80,37 @@ class ReleaseGovernanceTest(unittest.TestCase):
         self.assertIn("notice-v8-runner-fork.txt", workflow)
         self.assertIn("gh attestation verify", workflow)
         self.assertIn("--deny-self-hosted-runners", workflow)
+
+    def test_release_workflow_is_a_workflow_github_will_start(self) -> None:
+        """Граф работ сходится, и каждая работа на месте.
+
+        Проверки по подстроке этого не видят: строка `needs: [publish, audit-native]`
+        остаётся на месте и тогда, когда самой работы `publish` в файле уже нет, —
+        так один неаккуратно удалённый шаг однажды унёс с собой заголовок работы,
+        и оба набора тестов остались зелёными на файле, который GitHub не запустит.
+        """
+        workflow = yaml.safe_load(
+            (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        )
+        jobs = workflow["jobs"]
+        self.assertEqual(
+            set(jobs),
+            {"preflight", "build", "publish", "audit-native", "audit-draft", "freeze"},
+        )
+        for name, job in jobs.items():
+            needs = job.get("needs", [])
+            needs = [needs] if isinstance(needs, str) else needs
+            for dependency in needs:
+                self.assertIn(dependency, jobs, f"{name} needs a job that is not there")
+            self.assertTrue(job.get("steps"), f"{name} has no steps")
+
+        # Публикует только `publish`: у матричной сборки нет прав на запись в релиз,
+        # и шаг публикации, съехавший в неё, выполнялся бы по разу на платформу.
+        self.assertEqual(jobs["publish"]["permissions"]["contents"], "write")
+        self.assertEqual(jobs["build"]["permissions"]["contents"], "read")
+        build_steps = " ".join(str(step) for step in jobs["build"]["steps"])
+        self.assertNotIn("softprops/action-gh-release", build_steps)
+        self.assertNotIn("write-manifest", build_steps)
 
     def test_a_platform_is_published_in_one_form_only(self) -> None:
         """Одна платформа — один ассет.

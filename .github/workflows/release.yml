@@ -186,6 +186,15 @@ jobs:
           path: dist/${{ matrix.artifact_name }}.${{ matrix.archive_ext }}
           if-no-files-found: error
 
+  publish:
+    name: Publish audited draft
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
       - name: Checkout exact release tag
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -222,7 +231,8 @@ jobs:
             Maintained fork: https://github.com/IngvarConsulting/v8-runner-rust
             Corresponding source and build scripts: ${{ github.server_url }}/${{ github.repository }}/tree/${{ inputs.tag }}
 
-            One archive per platform. Each holds the `v8-runner` binary, the licence and the fork notice.
+            One archive per platform. Each holds the `v8-runner` binary (`v8-runner.exe` on Windows),
+            this README, the licence, the fork notice and the `examples/` directory.
 
             | Archive | Operating system | CPU |
             | --- | --- | --- |
@@ -257,19 +267,15 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             asset: v8-runner-linux-x86_64-musl.tar.gz
-            binary: v8-runner
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset: v8-runner-windows-x86_64.zip
-            binary: v8-runner.exe
           - os: macos-15-intel
             target: x86_64-apple-darwin
             asset: v8-runner-macos-x86_64.tar.gz
-            binary: v8-runner
           - os: macos-latest
             target: aarch64-apple-darwin
             asset: v8-runner-macos-aarch64.tar.gz
-            binary: v8-runner
     steps:
       - name: Checkout exact release tag
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -286,11 +292,12 @@ jobs:
         shell: bash
         run: |
           python3 scripts/release/release_assets.py verify-assets --dist dist --tag "${RELEASE_TAG}" --commit "${GITHUB_SHA}"
-          # Извлекает тот же код, что проверяет архив: запускается ровно тот файл,
-          # чью сумму несёт манифест, и одинаково на всех трёх системах.
-          python3 scripts/release/release_assets.py extract-binary \
-            --dist dist --target "${{ matrix.target }}" --output "native/${{ matrix.binary }}"
-          python3 scripts/release/release_assets.py verify-binary --binary "native/${{ matrix.binary }}" --target "${{ matrix.target }}" --version "${RELEASE_TAG#v}"
+          # `verify-assets` выше уже сверил архив и вложенный бинарник с манифестом,
+          # поэтому извлечение тем же кодом даёт ровно тот файл, чью сумму несёт
+          # манифест. Имя файла называет сам скрипт — на Windows оно другое.
+          binary="$(python3 scripts/release/release_assets.py extract-binary \
+            --dist dist --target "${{ matrix.target }}" --output-dir native)"
+          python3 scripts/release/release_assets.py verify-binary --binary "${binary}" --target "${{ matrix.target }}" --version "${RELEASE_TAG#v}"
 
   audit-draft:
     name: Audit draft release
