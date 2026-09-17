@@ -346,3 +346,47 @@ fn the_shipped_skill_never_names_the_removed_builder_key() {
         offenders.join("\n")
     );
 }
+
+/// Маскирование секретов имеет одного владельца, и второй набор правил рядом с ним —
+/// то, как эта дыра появилась в прошлый раз.
+///
+/// `run_tests` вёл собственный словарь флагов: знал `/P` и `/N` и не знал `/WSP`, `/UC`,
+/// `/AccessToken`. Предыдущий guard его не видел, потому что смотрел только на модули,
+/// показывающие argv процесса, а этот чистил чужую прозу. Здесь признак другой: файл,
+/// который сам пишет регулярное выражение по секретному ключу, обязан звать владельца.
+#[test]
+fn secret_masking_rules_live_with_their_owner() {
+    let owner = repo_path("src/platform/secrets.rs");
+    // Ключи взяты из словаря владельца: их появление в регулярном выражении и означает
+    // «здесь маскируют секрет».
+    const SECRET_KEY_MARKERS: &[&str] = &["/P", "pwd=", "password=", "/WSP", "/UC"];
+    let mut offenders = Vec::new();
+
+    for file in collect_rust_files(&repo_path("src")) {
+        if file == owner {
+            continue;
+        }
+        // `production_tokens` убирает пробелы целиком, поэтому `Regex :: new` из текста
+        // токенов снова читается как `Regex::new`. Искомые ключи пробелов не содержат.
+        let production = production_tokens(&file);
+        let writes_a_secret_regex = production.contains("Regex::new")
+            && SECRET_KEY_MARKERS
+                .iter()
+                .any(|marker| production.contains(marker));
+        if !writes_a_secret_regex {
+            continue;
+        }
+        // Нужен вызов, а не упоминание: `platform::secrets` встречается и в прозе
+        // комментария, поэтому признаком делегирования служит путь к элементу.
+        if !production.contains("platform::secrets::") {
+            offenders.push(file.display().to_string());
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these modules mask secrets with their own rules instead of calling \
+         platform::secrets, which is the single owner:\n{}",
+        offenders.join("\n")
+    );
+}

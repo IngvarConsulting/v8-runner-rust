@@ -46,7 +46,7 @@ const IDENTITY_FLAGS: &[&str] = &[
 /// Секретные параметры строки соединения: пароль базы и пароли веб-сервера и прокси
 /// (`IBConnectionString`, «Связи»). Набор отдельный от ключей командной строки —
 /// иначе `p=` или `user=` внутри чужого значения маскировались бы зря.
-const SECRET_SEGMENTS: &[&str] = &["pwd", "wsp", "wsppwd"];
+const SECRET_SEGMENTS: &[&str] = &["pwd", "wsp", "wsppwd", "password"];
 
 /// Параметры строки соединения, называющие пользователя.
 const IDENTITY_SEGMENTS: &[&str] = &["usr", "wsn", "wspuser"];
@@ -66,6 +66,23 @@ enum Hidden {
 /// маскируются везде, где встретятся, даже приклеенными к незнакомому ключу.
 pub fn mask_preview_args(args: &[String], secrets: &[&str]) -> Vec<String> {
     mask(args, Hidden::Secrets, secrets)
+}
+
+/// Маскирует секреты в чужой прозе — выводе инструмента, а не в argv раннера.
+///
+/// Прячет и имя пользователя: проза уходит в отчёт о тесте и в журнал CI, живёт дольше
+/// запуска и человеком сейчас не читается. `secrets` несёт известные значения — они
+/// маскируются везде, где встретятся, в том числе приклеенными к незнакомому ключу,
+/// чего одна только сверка со словарём флагов сделать не может.
+pub fn mask_text(text: &str, secrets: &[&str]) -> String {
+    mask(
+        std::slice::from_ref(&text.to_owned()),
+        Hidden::SecretsAndIdentities,
+        secrets,
+    )
+    .into_iter()
+    .next()
+    .unwrap_or_default()
 }
 
 /// Составляет показ команды для отказа и журнала.
