@@ -2,7 +2,7 @@
 id: DEC.2026-09-12.A-LABEL-MAY-ONLY-MAKE-A-VERDICT-STRICTER
 status: active
 governs: product
-realized: tests/cli_syntax.rs::syntax_text_success_warning_includes_diagnostic_path
+realized: tests/cli_syntax.rs::syntax_with_an_unreadable_log_refuses_instead_of_reporting_clean
 supersedes: []
 superseded-by: null
 establishes: [INV.PLATFORM.A-LABEL-ONLY-TIGHTENS-A-VERDICT]

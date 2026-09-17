@@ -234,7 +234,7 @@ window.RUNNER_DATA = (function () {
       what: 'Проверяет синтаксис.',
       cmd: function (ctx) { return (ctx.format === 'EDT' ? 'v8-runner syntax edt' : 'v8-runner syntax designer-config'); },
       applies: function (ctx) { return ctx.format === 'EDT' ? needEdt(ctx) : (ctx.type === 'EXTERNAL' ? { kind: 'subject', why: 'для внешних наборов не описана', fix: '' } : standaloneRefuses(ctx, 'проверка синтаксиса идёт Конфигуратором по строке подключения, которой у этой цели нет')); },
-      today: function (ctx) { return ctx.format === 'EDT' ? { chain: [P.edt], config: ['tools.edt_cli.*'], note: 'validate; одна общая сессия EDT при interactive-mode=true' } : { chain: ctx.tools.designer ? [P.designer] : [], config: ['infobase.connection'], note: 'вердикт по коду выхода: 0 чисто, 101 есть замечания' }; },
+      today: function (ctx) { return ctx.format === 'EDT' ? { chain: [P.edt], config: ['tools.edt_cli.*'], note: 'validate; одна общая сессия EDT при interactive-mode=true' } : { chain: ctx.tools.designer ? [P.designer] : [], config: ['infobase.connection'], note: 'вердикт по коду выхода: 0 чисто, 101 есть замечания; нечитаемый журнал делает вердикт неизвестным' }; },
       target: function (ctx) { return this.today(ctx); }
     },
     {

@@ -164,8 +164,12 @@ fn syntax_text_clean_success_stays_compact() {
     assert!(!stdout.contains("platform log"));
 }
 
+/// Инструмент вышел нулём, а журнал с его замечаниями прочитать не удалось. До
+/// 2026-09-17 это давало «завершено с предупреждениями» и код возврата 0, то есть CI
+/// зеленел на проверке, чьих замечаний никто не видел. Теперь вердикт неизвестен, и
+/// неизвестность названа отдельно, а не сведена к чистоте.
 #[test]
-fn syntax_text_success_warning_includes_diagnostic_path() {
+fn syntax_with_an_unreadable_log_refuses_instead_of_reporting_clean() {
     let (_dir, config_path) = setup_project(
         "args=\"$*\"\nprintf 'RAW_STDOUT\\n'\nif printf '%s' \"$args\" | grep -F -q -- '/Out'; then\n  exit 0\nfi\nexit 0",
     );
@@ -181,11 +185,14 @@ fn syntax_text_success_warning_includes_diagnostic_path() {
         .output()
         .expect("run command");
 
-    assert!(output.status.success());
+    assert!(
+        !output.status.success(),
+        "an unread verdict must not be reported as a pass"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("▲ Syntax check designer-config completed with warnings"));
-    assert!(stdout.contains("[warning] log"));
-    assert!(stdout.contains("[diagnostic] platform log -> "));
+    assert!(stdout.contains("[warning] log"), "{stdout}");
+    assert!(stdout.contains("[diagnostic] platform log -> "), "{stdout}");
+    assert!(!stdout.contains("status: clean"), "{stdout}");
 }
 
 #[test]
