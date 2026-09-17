@@ -746,6 +746,34 @@ mod tests {
     }
 
     #[test]
+    fn a_local_overlay_cannot_unpin_a_declared_host_key() {
+        // `null` в локальном слое — общий способ сбросить значение проекта. Для
+        // отпечатка ключа это значило бы «снять сверку», причём молча и из файла,
+        // которого нет в репозитории. Схема такое запрещает, и загрузчик тоже.
+        let dir = tempdir().expect("tempdir");
+        let config_dir = dir.path().join("project");
+        let config_path = write_minimal_project_config(
+            &config_dir,
+            "workPath: work\nformat: DESIGNER\ninfobase:\n  connection: \"File=build/ib\"\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\ntools:\n  designer_agent:\n    attach: 127.0.0.1:1543\n    base-dir: /tmp/agent\n    host-fingerprint: 'SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU'\n",
+        );
+        std::fs::write(
+            config_dir.join(LOCAL_CONFIG_FILE_NAME),
+            "tools:\n  designer_agent:\n    host-fingerprint: null\n",
+        )
+        .expect("local overlay");
+
+        let error = load_config(config_path.to_str(), None)
+            .expect_err("a declared fingerprint cannot be reset to null");
+
+        assert!(
+            error
+                .to_string()
+                .contains("local config overlay contains unsupported key or value"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn load_config_rejects_local_null_for_required_fields() {
         let dir = tempdir().expect("tempdir");
         let config_dir = dir.path().join("project");

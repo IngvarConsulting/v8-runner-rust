@@ -12,13 +12,15 @@
 use std::collections::VecDeque;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::platform::process::{ProcessInterruptionReason, ProcessInterruptionSafety};
 
 use russh::client;
+use russh::keys::ssh_key::{Fingerprint, HashAlg};
 use russh::ChannelMsg;
 use serde::Deserialize;
 use thiserror::Error;
@@ -242,6 +244,15 @@ pub enum AgentError {
     #[error("agent at {endpoint} rejected the credentials of user '{user}'")]
     AuthenticationRejected { endpoint: String, user: String },
 
+    #[error(
+        "agent at {endpoint} presented {presented} as its host key, but {expected} was expected"
+    )]
+    HostKeyRejected {
+        endpoint: String,
+        expected: String,
+        presented: String,
+    },
+
     #[error("agent at {endpoint} did not open a shell channel: {source}")]
     Channel {
         endpoint: String,
@@ -336,6 +347,9 @@ pub struct AgentSessionRequest {
     pub user: String,
     pub password: String,
     pub transcript_log: Option<PathBuf>,
+
+    /// Чей ключ считать своим на том конце.
+    pub host_key: HostKeyExpectation,
 }
 
 /// Ожидание ответа: срок, отмена и класс безопасности, переданные с границы команды.
@@ -414,9 +428,60 @@ fn ssh_client_config() -> client::Config {
     }
 }
 
-/// Обработчик событий SSH-клиента. Ключ хоста принимается: у управляемого агента его
-/// создала платформа на этой же машине, у чужого — назвал пользователь в `attach`.
-struct ClientEvents;
+/// Чего раннер ждёт от ключа хоста на том конце.
+#[derive(Debug, Clone, Default)]
+pub enum HostKeyExpectation {
+    /// Ожидания нет: ключ принимается и называется, чтобы владелец мог его закрепить.
+    #[default]
+    Unpinned,
+
+    /// Ключ объявлен: принимается только он.
+    Pinned(Fingerprint),
+}
+
+impl HostKeyExpectation {
+    /// Ожидание из отпечатка, объявленного в конфигурации.
+    pub fn declared(fingerprint: &str) -> Result<Self, String> {
+        Fingerprint::from_str(fingerprint)
+            .map(HostKeyExpectation::Pinned)
+            .map_err(|_| format!("not an SSH key fingerprint: {fingerprint}"))
+    }
+
+    /// Ожидание из того самого файла, который раннер отдал платформе.
+    ///
+    /// Агент публикует ключ из переданного файла как есть: на 8.3.27.1859 замерен
+    /// явный ED25519 (`references/1c/designer-agent/request-surface.md`). Поэтому
+    /// открытая часть этого файла и есть то, что предъявит агент.
+    ///
+    /// Нечитаемый файл ожидания не даёт: ключ мог быть под паролем, которого у раннера
+    /// нет, а платформа его спросит. Отказывать здесь значило бы ломать работающий
+    /// запуск ради проверки, поэтому такой случай проходит как `Unpinned` — вслух.
+    pub fn of_host_key_file(path: &Path) -> Self {
+        match russh::keys::load_secret_key(path, None) {
+            Ok(key) => HostKeyExpectation::Pinned(key.public_key().fingerprint(HashAlg::Sha256)),
+            Err(error) => {
+                warn!(
+                    path = %path.display(),
+                    %error,
+                    "the managed agent host key cannot be read, so its identity is not checked"
+                );
+                HostKeyExpectation::Unpinned
+            }
+        }
+    }
+}
+
+/// Обработчик событий SSH-клиента.
+///
+/// Ключ хоста сверяется здесь и больше нигде: это единственное место, где библиотека
+/// спрашивает раннер, тот ли сервер ответил.
+struct ClientEvents {
+    expectation: HostKeyExpectation,
+
+    /// Куда лечь увиденному ключу. Обработчик уезжает в `connect` по значению, а
+    /// разбираться с отказом приходится снаружи — иначе причина осталась бы внутри.
+    presented: Arc<Mutex<Option<String>>>,
+}
 
 impl client::Handler for ClientEvents {
     type Error = russh::Error;
@@ -425,8 +490,40 @@ impl client::Handler for ClientEvents {
         &mut self,
         server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        debug!(key = ?server_public_key, "agent host key accepted");
-        Ok(true)
+        let key = match server_public_key {
+            russh::keys::PublicKeyOrCertificate::PublicKey { key, .. } => key,
+            // Сертификат не проверяется, а отвергается. Библиотека спрашивает про него
+            // *вместо* ключа, поэтому принять сертификат, внутри которого лежит нужный
+            // ключ, значило бы обойти закрепление: за сертификатом стоят удостоверяющий
+            // центр, срок и principals, которых раннер не смотрит. Агент сертификатов
+            // и не предъявляет.
+            russh::keys::PublicKeyOrCertificate::Certificate(_) => {
+                *self.presented.lock().expect("host key slot") =
+                    Some("a host certificate".to_owned());
+                return Ok(false);
+            }
+        };
+
+        match &self.expectation {
+            HostKeyExpectation::Unpinned => {
+                let presented = key.fingerprint(HashAlg::Sha256);
+                *self.presented.lock().expect("host key slot") = Some(presented.to_string());
+                warn!(
+                    fingerprint = %presented,
+                    "the agent host key is not checked because none was declared; \
+                     declare this fingerprint to pin it"
+                );
+                Ok(true)
+            }
+            HostKeyExpectation::Pinned(expected) => {
+                // Считается тем же алгоритмом, каким записано ожидание: отпечатки разных
+                // алгоритмов не равны никогда, и `SHA512:` сверялся бы с `SHA256:` вечно
+                // не сходясь — то есть объявленный ключ читался бы как подменённый.
+                let presented = key.fingerprint(expected.algorithm());
+                *self.presented.lock().expect("host key slot") = Some(presented.to_string());
+                Ok(*expected == presented)
+            }
+        }
     }
 }
 
@@ -462,19 +559,39 @@ impl AgentSession {
         let named = endpoint.to_string();
         debug!(endpoint = %named, user = request.user.as_str(), "opening agent session");
 
+        let expectation = request.host_key.clone();
+        let presented: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let (connection, channel) =
             runtime.block_on(async {
                 let config = Arc::new(ssh_client_config());
                 let mut connection = client::connect(
                     config,
                     (endpoint.host.as_str(), endpoint.port),
-                    ClientEvents,
+                    ClientEvents {
+                        expectation: expectation.clone(),
+                        presented: presented.clone(),
+                    },
                 )
                 .await
                 .map_err(|error| match error {
                     russh::Error::IO(source) => AgentError::Unreachable {
                         endpoint: named.clone(),
                         source,
+                    },
+                    // Отказ по ключу — не сбой рукопожатия: сервер ответил исправно,
+                    // просто это не тот сервер. Причина едет отдельно, потому что через
+                    // `Result<bool, _>` обработчика она пройти не может.
+                    russh::Error::UnknownKey => AgentError::HostKeyRejected {
+                        endpoint: named.clone(),
+                        expected: match &expectation {
+                            HostKeyExpectation::Pinned(fingerprint) => fingerprint.to_string(),
+                            HostKeyExpectation::Unpinned => "any public key".to_owned(),
+                        },
+                        presented: presented
+                            .lock()
+                            .expect("host key slot")
+                            .clone()
+                            .unwrap_or_else(|| "nothing".to_owned()),
                     },
                     source => AgentError::Handshake {
                         endpoint: named.clone(),
@@ -1366,6 +1483,7 @@ mod tests {
             user: std::env::var("V8_GATE_USER").unwrap_or_default(),
             password: std::env::var("V8_GATE_PASSWORD").unwrap_or_default(),
             transcript_log: None,
+            host_key: HostKeyExpectation::Unpinned,
         };
         let wait = WaitPolicy {
             deadline: Some(Instant::now() + Duration::from_secs(60)),
@@ -1499,6 +1617,7 @@ mod tests {
             user: String::new(),
             password: String::new(),
             transcript_log: None,
+            host_key: HostKeyExpectation::Unpinned,
         };
         assert!(matches!(
             AgentSession::open(&request, &WaitPolicy::default()),

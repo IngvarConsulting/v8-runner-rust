@@ -68,6 +68,9 @@ pub enum ConfigValidationError {
     #[error("infobase.standalone.gate: {0}")]
     StandaloneGateInvalid(String),
 
+    #[error("{key} must be an SSH key fingerprint like `SHA256:<base64>`: {value}")]
+    InvalidHostFingerprint { key: &'static str, value: String },
+
     #[error(
         "files travel between the runner and a standalone server only through a declared channel: set infobase.standalone.exchange to `sftp` (through the gate) or to `{{ dir: … }}` — the gate user's directory (`<users-data>/<user>` of ibsrv) as the runner sees it"
     )]
@@ -721,6 +724,23 @@ fn validate_connection_contract(config: &AppConfig) -> Result<(), ConfigValidati
     Ok(())
 }
 
+/// Проверяется только форма: разбирается ли запись как отпечаток ключа. Тот ли это
+/// ключ — вопрос к серверу, и его задаёт сессия.
+fn validate_host_fingerprint(
+    key: &'static str,
+    value: Option<&str>,
+) -> Result<(), ConfigValidationError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    crate::platform::agent::HostKeyExpectation::declared(value)
+        .map(|_| ())
+        .map_err(|_| ConfigValidationError::InvalidHostFingerprint {
+            key,
+            value: value.to_owned(),
+        })
+}
+
 /// Автономный сервер: цель объявлена один раз, шлюз назван, канал обмена объявлен, и
 /// рабочий каталог раннера не лежит на стороне цели.
 fn validate_standalone_target(
@@ -736,6 +756,10 @@ fn validate_standalone_target(
     standalone
         .gate_endpoint()
         .map_err(ConfigValidationError::StandaloneGateInvalid)?;
+    validate_host_fingerprint(
+        "infobase.standalone.host-fingerprint",
+        standalone.host_fingerprint.as_deref(),
+    )?;
     if standalone.exchange.is_none() {
         return Err(ConfigValidationError::StandaloneExchangeMissing);
     }
@@ -1088,6 +1112,10 @@ fn validate_designer_agent_config(config: &AppConfig) -> Result<(), ConfigValida
     if agent.startup_timeout_ms == 0 {
         return Err(ConfigValidationError::InvalidDesignerAgentStartupTimeoutMs);
     }
+    validate_host_fingerprint(
+        "tools.designer_agent.host-fingerprint",
+        agent.host_fingerprint.as_deref(),
+    )?;
     if agent.attach.is_some() {
         let keys = agent.managed_keys_present();
         if !keys.is_empty() {
@@ -2713,6 +2741,61 @@ mod tests {
             validate(&config(allowed))
                 .unwrap_or_else(|error| panic!("{allowed:?} is accepted: {error}"));
         }
+    }
+
+    #[test]
+    fn rejects_a_host_fingerprint_that_is_not_one() {
+        let base = tempdir().expect("base");
+        let work = tempdir().expect("work");
+        let source_dir = base.path().join("src");
+        std::fs::create_dir_all(&source_dir).expect("source dir");
+
+        let config = |fingerprint: &str| AppConfig {
+            base_path: base.path().to_path_buf(),
+            work_path: work.path().to_path_buf(),
+            execution_timeout: 300_000,
+            format: SourceFormat::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
+            infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            source_sets: vec![SourceSetConfig {
+                name: "main".to_owned(),
+                purpose: SourceSetPurpose::Configuration,
+                path: source_dir
+                    .strip_prefix(base.path())
+                    .expect("relative")
+                    .to_path_buf(),
+            }],
+            build: BuildConfig::default(),
+            tools: ToolsConfig {
+                designer_agent: crate::config::model::DesignerAgentConfig {
+                    attach: Some("127.0.0.1:1543".to_owned()),
+                    base_dir: Some(std::path::PathBuf::from("/tmp/agent")),
+                    host_fingerprint: Some(fingerprint.to_owned()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            mcp: Default::default(),
+            tests: TestsConfig::default(),
+        };
+
+        for fingerprint in ["", "SHA1:abc", "deadbeef", "SHA256", "ssh-ed25519 AAAA"] {
+            let err = validate(&config(fingerprint)).expect_err("expected an invalid fingerprint");
+            assert!(
+                matches!(
+                    err,
+                    ConfigValidationError::InvalidHostFingerprint { key, ref value }
+                        if key == "tools.designer_agent.host-fingerprint" && value == fingerprint
+                ),
+                "{fingerprint:?} is rejected, got {err:?}"
+            );
+        }
+
+        validate(&config(
+            "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
+        ))
+        .expect("a well-formed fingerprint is accepted");
     }
 
     #[test]

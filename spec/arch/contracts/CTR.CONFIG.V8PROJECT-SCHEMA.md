@@ -2,8 +2,8 @@
 id: CTR.CONFIG.V8PROJECT-SCHEMA
 status: active
 governs: product
-version: 4
-decision: DEC.2026-09-17.THE-HTTP-LISTENER-ANSWERS-ONLY-KNOWN-HOSTS
+version: 5
+decision: DEC.2026-09-17.A-HOST-KEY-IS-CHECKED-AGAINST-WHAT-WAS-DECLARED
 artifact: docs/schemas/v8project.schema.json
 producer: src/config/schema.rs
 consumers: [docs, cli]
