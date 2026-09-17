@@ -16,7 +16,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 use support::fake_agent::{
-    process_is_alive, read_or_empty, start_fake_agent, write_fake_designer, FakeAgent,
+    fingerprint_of, process_is_alive, random_host_key, read_or_empty,
+    start_fake_agent_with_host_key, write_fake_designer, write_host_key_file, FakeAgent,
     AGENT_PASSWORD,
 };
 use support::{temp_workspace, v8_runner_command, wait_until};
@@ -35,6 +36,21 @@ struct Harness {
 /// Проект с версионной раскладкой платформы: строгий поиск не уходит за её пределы.
 /// `agent` — принимает ли двойник пароль; `None` — на порту никто не слушает.
 fn harness(with_designer: bool, agent: Option<bool>, attach: bool) -> Harness {
+    harness_with(with_designer, agent, attach, random_host_key(), |_| {
+        String::new()
+    })
+}
+
+/// То же, но ключ хоста двойника и добавка к `tools.designer_agent` — от вызывающего.
+/// Так проверяется сверка ключа: двойник держит один ключ, конфигурация называет другой.
+fn harness_with(
+    with_designer: bool,
+    agent: Option<bool>,
+    attach: bool,
+    host_key: russh::keys::PrivateKey,
+    agent_extra: impl Fn(&russh::keys::PrivateKey) -> String,
+) -> Harness {
+    let extra_yaml = agent_extra(&host_key);
     let dir = temp_workspace();
     let root = dir.path().to_path_buf();
     let base_path = root.join("project");
@@ -62,13 +78,16 @@ fn harness(with_designer: bool, agent: Option<bool>, attach: bool) -> Harness {
         base
     });
     let port = match agent {
-        Some(accept_password) => start_fake_agent(FakeAgent::new(
-            accept_password,
-            commands_log.clone(),
-            attached_base.clone(),
-            base_dir_file.clone(),
-            designer_pid_file.clone(),
-        )),
+        Some(accept_password) => start_fake_agent_with_host_key(
+            FakeAgent::new(
+                accept_password,
+                commands_log.clone(),
+                attached_base.clone(),
+                base_dir_file.clone(),
+                designer_pid_file.clone(),
+            ),
+            host_key,
+        ),
         None => support::free_tcp_port(),
     };
     if with_designer {
@@ -81,11 +100,11 @@ fn harness(with_designer: bool, agent: Option<bool>, attach: bool) -> Harness {
     }
     let agent_yaml = if let Some(base) = attached_base.as_ref() {
         format!(
-            "    attach: 127.0.0.1:{port}\n    base-dir: {}\n",
+            "    attach: 127.0.0.1:{port}\n    base-dir: {}\n{extra_yaml}",
             base.display()
         )
     } else {
-        format!("    port: {port}\n")
+        format!("    port: {port}\n{extra_yaml}")
     };
     let config_path = root.join("v8project.yaml");
     fs::write(
@@ -109,6 +128,59 @@ fn harness(with_designer: bool, agent: Option<bool>, attach: bool) -> Harness {
         dir,
         port,
     }
+}
+
+/// Чужой агент закрепляется объявленным отпечатком.
+#[test]
+fn an_attached_agent_that_presents_another_key_is_refused_by_name() {
+    let someone_else = fingerprint_of(&random_host_key());
+    let expected = someone_else.clone();
+    let harness = harness_with(false, Some(true), true, random_host_key(), move |_| {
+        format!("    host-fingerprint: '{someone_else}'\n")
+    });
+
+    let (code, payload) = run_dump(&harness, &["--mode", "full"]);
+
+    assert_ne!(code, 0, "{payload}");
+    let message = payload["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains(&expected), "{message}");
+    // Учётные данные не ушли: до аутентификации дело не дошло.
+    assert!(
+        read_or_empty(&harness.commands_log).is_empty(),
+        "the agent saw no command: {}",
+        read_or_empty(&harness.commands_log)
+    );
+}
+
+/// Управляемый агент закрепляется тем же файлом, который раннер отдаёт платформе.
+///
+/// Именно это утверждение несёт решение: раннер не занимает порт `1543`, а подключается
+/// к тому, кто ответил. Здесь ответил не тот.
+#[test]
+fn a_managed_agent_is_pinned_by_the_host_key_file_it_was_given() {
+    let harness = harness_with(true, Some(true), false, random_host_key(), |_| {
+        String::new()
+    });
+    let key_file = harness.dir.path().join("host_key");
+    write_host_key_file(&key_file, &random_host_key());
+    let config = std::fs::read_to_string(&harness.config_path).expect("config");
+    std::fs::write(
+        &harness.config_path,
+        config.replace(
+            "  designer_agent:\n",
+            &format!("  designer_agent:\n    host-key: {}\n", key_file.display()),
+        ),
+    )
+    .expect("rewrite config");
+
+    let (code, payload) = run_dump(&harness, &["--mode", "full"]);
+
+    assert_ne!(
+        code, 0,
+        "a key the agent does not hold is refused: {payload}"
+    );
+    let message = payload["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("host key"), "{message}");
 }
 
 fn run_dump(harness: &Harness, extra: &[&str]) -> (i32, Value) {

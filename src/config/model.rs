@@ -103,6 +103,10 @@ pub struct StandaloneConfig {
     /// `host:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`, port 1543 by default).
     pub gate: String,
 
+    /// `SHA256:…` fingerprint the gate must present. Absent: the key is accepted and named.
+    #[serde(default)]
+    pub host_fingerprint: Option<String>,
+
     /// How files travel between the runner and the gate user's directory: `sftp` through
     /// the gate itself, or `{ dir: … }` — that directory as the runner sees it.
     #[serde(default)]
@@ -843,6 +847,10 @@ pub struct DesignerAgentConfig {
     /// Private host key for the managed agent. Absent: `/AgentSSHHostKeyAuto`.
     pub host_key: Option<PathBuf>,
 
+    /// `SHA256:…` fingerprint the attached agent must present. Attached mode only:
+    /// the managed agent's key is the one the runner hands it in `host-key`.
+    pub host_fingerprint: Option<String>,
+
     /// Time limit for the managed agent to accept the first authenticated session.
     #[serde(
         default = "default_designer_agent_startup_timeout_ms",
@@ -858,6 +866,7 @@ impl Default for DesignerAgentConfig {
             base_dir: None,
             port: None,
             host_key: None,
+            host_fingerprint: None,
             startup_timeout_ms: default_designer_agent_startup_timeout_ms(),
         }
     }
@@ -893,6 +902,9 @@ impl DesignerAgentConfig {
         let mut keys = Vec::new();
         if self.base_dir.is_some() {
             keys.push("base-dir");
+        }
+        if self.host_fingerprint.is_some() {
+            keys.push("host-fingerprint");
         }
         keys
     }

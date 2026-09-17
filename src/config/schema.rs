@@ -545,6 +545,14 @@ struct InfobaseSchema {
 struct InfobaseStandaloneSchema {
     /// `host:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`, port 1543 by default).
     gate: String,
+    /// SHA256 fingerprint the gate must present, as `SHA256:<base64>`.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "String")]
+    host_fingerprint: Option<String>,
     /// How files travel between the runner and the gate user's directory: `sftp` through
     /// the gate, or `{ dir: … }` — that directory as the runner sees it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -888,6 +896,14 @@ struct DesignerAgentSchema {
     /// Private host key file for the runner-launched agent. Absent: the platform generates one (`/AgentSSHHostKeyAuto`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     host_key: Option<PathBuf>,
+    /// SHA256 fingerprint the attached agent must present, as `SHA256:<base64>`. Attached mode only.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "String")]
+    host_fingerprint: Option<String>,
     /// Time limit for the runner-launched agent to accept the first authenticated session, in milliseconds.
     #[serde(
         rename = "startup_timeout_ms",
@@ -1342,6 +1358,18 @@ mod tests {
             &["McpHttpSchema"],
             "allowed_hosts",
             "Host header values",
+        );
+        assert_property_description_contains(
+            &main_schema,
+            &["DesignerAgentSchema"],
+            "host-fingerprint",
+            "SHA256 fingerprint",
+        );
+        assert_property_description_contains(
+            &main_schema,
+            &["InfobaseStandaloneSchema"],
+            "host-fingerprint",
+            "SHA256 fingerprint",
         );
         assert_property_description_contains(
             &main_schema,

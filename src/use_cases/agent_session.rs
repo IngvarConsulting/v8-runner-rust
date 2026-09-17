@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::model::{AppConfig, DesignerAgentMode};
 use crate::platform::agent::{
-    self, AgentEndpoint, AgentError, AgentLaunch, AgentSession, AgentSessionRequest, ManagedAgent,
-    WaitPolicy,
+    self, AgentEndpoint, AgentError, AgentLaunch, AgentSession, AgentSessionRequest,
+    HostKeyExpectation, ManagedAgent, WaitPolicy,
 };
 use crate::platform::locator::UtilityType;
 use crate::platform::utilities::PlatformUtilities;
@@ -182,6 +182,7 @@ pub(crate) fn connect(
             user,
             password,
             transcript_log: Some(transcript_log),
+            host_key: declared_expectation(standalone.host_fingerprint.as_deref())?,
         };
         let session = open_gate_session(&request, wait)?;
         return Ok(AgentHandle::Gate { session, exchange });
@@ -200,6 +201,7 @@ pub(crate) fn connect(
                 user,
                 password,
                 transcript_log: Some(transcript_log),
+                host_key: declared_expectation(agent.host_fingerprint.as_deref())?,
             };
             // Чужая точка входа не поднимается заново: недоступная — типизированный отказ.
             let session = AgentSession::open(&request, wait).map_err(map_agent_error)?;
@@ -225,6 +227,13 @@ pub(crate) fn connect(
                 user,
                 password,
                 transcript_log: Some(transcript_log),
+                // Тот же файл, что уезжает агенту в `/AgentSSHHostKey`: он публикует
+                // ключ оттуда как есть, поэтому открытая часть файла и есть ожидание.
+                host_key: launch
+                    .host_key
+                    .as_deref()
+                    .map(HostKeyExpectation::of_host_key_file)
+                    .unwrap_or_default(),
             };
             let managed = ManagedAgent::launch(
                 utilities.runner_for(UtilityType::V8),
@@ -236,6 +245,14 @@ pub(crate) fn connect(
             .map_err(map_agent_error)?;
             Ok(AgentHandle::Managed(managed))
         }
+    }
+}
+
+/// Ожидание из объявленного отпечатка. Не объявлен — ожидания нет.
+fn declared_expectation(fingerprint: Option<&str>) -> Result<HostKeyExpectation, AppError> {
+    match fingerprint {
+        Some(declared) => HostKeyExpectation::declared(declared).map_err(AppError::Validation),
+        None => Ok(HostKeyExpectation::Unpinned),
     }
 }
 
@@ -258,6 +275,9 @@ pub(crate) fn map_agent_error(error: AgentError) -> AppError {
         AgentError::Unreachable { .. }
         | AgentError::Handshake { .. }
         | AgentError::AuthenticationRejected { .. }
+        // Тот же класс, что и отвергнутые учётные данные: сервер ответил, но работать
+        // с этой точкой входа как объявлено нельзя.
+        | AgentError::HostKeyRejected { .. }
         | AgentError::Channel { .. }
         | AgentError::Launch(_)
         | AgentError::StartupTimedOut { .. } => AppError::EnvironmentUnavailable(error.to_string()),

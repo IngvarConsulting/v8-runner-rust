@@ -16,7 +16,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use support::fake_agent::{read_or_empty, start_fake_agent, FakeAgent, AGENT_PASSWORD};
+use support::fake_agent::{
+    fingerprint_of, fingerprint_with, random_host_key, read_or_empty,
+    start_fake_agent_with_host_key, FakeAgent, AGENT_PASSWORD,
+};
 use support::{temp_workspace, v8_runner_command};
 
 struct Harness {
@@ -25,6 +28,8 @@ struct Harness {
     commands_log: PathBuf,
     user_dir: PathBuf,
     port: u16,
+    /// Что объявлено в `infobase.standalone.host-fingerprint`, если объявлено.
+    declared_fingerprint: Option<String>,
 }
 
 const GATE_USER: &str = "agent";
@@ -84,6 +89,15 @@ enum Channel {
 }
 
 fn harness_with_channel(channel: Channel) -> Harness {
+    harness_with(channel, random_host_key(), |_| None)
+}
+
+fn harness_with(
+    channel: Channel,
+    host_key: russh::keys::PrivateKey,
+    declared: impl Fn(&russh::keys::PrivateKey) -> Option<String>,
+) -> Harness {
+    let declared_fingerprint = declared(&host_key);
     let dir = temp_workspace();
     let root = dir.path().to_path_buf();
     let project = root.join("project");
@@ -114,12 +128,13 @@ fn harness_with_channel(channel: Channel) -> Harness {
     let commands_log = root.join("gate-commands.log");
     let mut gate = FakeAgent::gate(commands_log.clone(), GATE_USER, user_dir.clone());
     gate.sftp_read_only = channel == Channel::SftpReadOnly;
-    let port = start_fake_agent(gate);
+    let port = start_fake_agent_with_host_key(gate, host_key);
     let harness = Harness {
         config_path: root.join("v8project.yaml"),
         commands_log,
         user_dir,
         port,
+        declared_fingerprint,
         dir,
     };
     let infobase = match channel {
@@ -132,10 +147,71 @@ fn harness_with_channel(channel: Channel) -> Harness {
 
 fn sftp_infobase(harness: &Harness) -> String {
     format!(
-        "  user: {GATE_USER}\n  password: '{password}'\n  standalone:\n    gate: 127.0.0.1:{port}\n    exchange: sftp\n",
+        "  user: {GATE_USER}\n  password: '{password}'\n  standalone:\n    gate: 127.0.0.1:{port}\n{fingerprint}    exchange: sftp\n",
         password = AGENT_PASSWORD,
         port = harness.port,
+        fingerprint = harness.declared_fingerprint.as_deref().map_or_else(
+            String::new,
+            |value| format!("    host-fingerprint: '{value}'\n")
+        ),
     )
+}
+
+/// Объявленный отпечаток закрепляет шлюз: тот же ключ пускают, чужой — нет.
+///
+/// Раньше ключ хоста принимался любой, и подменивший адрес получал бы учётные данные
+/// пользователя базы: их раннер отправляет сразу после рукопожатия.
+#[test]
+fn a_declared_fingerprint_lets_the_gate_through() {
+    let harness = harness_with(Channel::Sftp, random_host_key(), |key| {
+        Some(fingerprint_of(key))
+    });
+
+    let (code, payload) = run(&harness, &["dump", "--mode", "full"]);
+
+    assert_eq!(code, 0, "{payload}");
+}
+
+/// Отпечаток сверяется тем алгоритмом, каким записан.
+///
+/// Отпечатки разных алгоритмов не равны никогда, поэтому сверка, всегда считавшая
+/// `SHA256`, читала бы объявленный `SHA512` как подменённый ключ — и объявивший его
+/// не смог бы подключиться вовсе.
+#[test]
+fn a_declared_fingerprint_is_compared_with_its_own_algorithm() {
+    let harness = harness_with(Channel::Sftp, random_host_key(), |key| {
+        Some(fingerprint_with(key, russh::keys::ssh_key::HashAlg::Sha512))
+    });
+
+    let (code, payload) = run(&harness, &["dump", "--mode", "full"]);
+
+    assert_eq!(code, 0, "{payload}");
+}
+
+#[test]
+fn a_gate_that_presents_another_key_is_refused_by_name() {
+    // Шлюз держит свой ключ, а в конфигурации назван отпечаток другого — ровно то,
+    // что увидел бы владелец при подмене адреса.
+    let someone_else = fingerprint_of(&random_host_key());
+    let harness = harness_with(Channel::Sftp, random_host_key(), |_| {
+        Some(someone_else.clone())
+    });
+
+    let (code, payload) = run(&harness, &["dump", "--mode", "full"]);
+
+    assert_ne!(code, 0, "{payload}");
+    let message = payload["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        message.contains("host key"),
+        "the refusal says what was wrong: {message}"
+    );
+    assert!(
+        message.contains(&someone_else),
+        "the refusal names what was expected: {message}"
+    );
 }
 
 fn sftp_lines(harness: &Harness) -> Vec<String> {
