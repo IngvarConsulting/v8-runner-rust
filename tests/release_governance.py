@@ -203,8 +203,11 @@ class ReleaseGovernanceTest(unittest.TestCase):
         )
 
         # Линтер обязан идти и на Windows: код под cfg(windows) на Linux не собирается.
-        lint_step = job.split("- name: Lint")[1].split("- name: ")[0]
-        self.assertIn("matrix.os != 'macos-latest'", lint_step)
+        # Цель там боевая, а не все: тестовая полна мёртвого кода из-за cfg(unix)-гейтов
+        # на самих тестах, и это снимается отдельной работой.
+        self.assertIn("cargo clippy --locked --bins -- -D warnings", job)
+        windows_lint = job.split("- name: Lint (production target)")[1]
+        self.assertIn("matrix.os == 'windows-latest'", windows_lint.split("run:")[0])
 
         assignments = re.findall(r"^\s*RUSTFLAGS\s*[:=]", ci, re.M)
         self.assertEqual(

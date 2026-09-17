@@ -497,6 +497,10 @@ fn set_dir_permissions(path: &Path) -> std::io::Result<()> {
         permissions.set_mode(0o700);
         fs::set_permissions(path, permissions)?;
     }
+    // На Windows прав доступа в этом смысле нет: блок выше пуст, и параметр остаётся
+    // неиспользованным — это не упущение, а форма самой функции.
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -508,6 +512,10 @@ fn set_file_permissions(path: &Path) -> std::io::Result<()> {
         permissions.set_mode(0o600);
         fs::set_permissions(path, permissions)?;
     }
+    // На Windows прав доступа в этом смысле нет: блок выше пуст, и параметр остаётся
+    // неиспользованным — это не упущение, а форма самой функции.
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 

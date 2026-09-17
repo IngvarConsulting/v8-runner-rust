@@ -224,7 +224,8 @@ Windows runner contract for this helper layer is explicit:
 | Шаг | Где | Блокирует | Почему так |
 | --- | --- | --- | --- |
 | `cargo fmt --all --check` | ubuntu | да | форматирование от площадки не зависит |
-| `cargo clippy --locked --all-targets -- -D warnings` | ubuntu и windows | да | код под `cfg(windows)` на Linux не компилируется, под `cfg(unix)` — на Windows; одной площадки мало. `-D warnings` идёт аргументом: через `RUSTFLAGS` правило дошло бы до зависимостей и обнулило общий кэш |
+| `cargo clippy --locked --all-targets -- -D warnings` | ubuntu | да | `-D warnings` идёт аргументом: через `RUSTFLAGS` правило дошло бы до зависимостей и обнулило общий кэш |
+| `cargo clippy --locked --bins -- -D warnings` | windows | да | код под `cfg(windows)` на Linux не компилируется вовсе, поэтому одной площадки мало. Цель боевая, а не все: тестовая на Windows полна мёртвого кода из-за `#![cfg(unix)]` на самих тестах — первый прогон насчитал 112 таких мест против четырёх в боевом коде. Снимется вместе с расгейчиванием Windows-тестов |
 | `cargo deny check licenses sources` | ubuntu | да | обе проверки герметичны: считаются по `Cargo.lock`, в сеть не ходят |
 | `cargo deny check advisories bans` | ubuntu | нет | база RustSec тянется в рантайме, и блокирующая проверка краснела бы без правок кода |
 
