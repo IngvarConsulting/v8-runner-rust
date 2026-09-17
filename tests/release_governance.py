@@ -106,38 +106,25 @@ class ReleaseGovernanceTest(unittest.TestCase):
                 jobs[current].append(line)
         return {name: "\n".join(lines) for name, lines in jobs.items()}
 
-    def test_release_workflow_is_a_workflow_github_will_start(self) -> None:
-        """Граф работ сходится, и каждая работа на месте.
+    def test_only_the_publish_job_publishes(self) -> None:
+        """Шаги публикации живут в своей работе и никуда не съезжают.
 
-        Проверки по подстроке этого не видят: строка `needs: [publish, audit-native]`
-        остаётся на месте и тогда, когда самой работы `publish` в файле уже нет, —
-        так один неаккуратно удалённый шаг однажды унёс с собой заголовок работы,
-        и оба набора тестов остались зелёными на файле, который GitHub не запустит.
+        Разрешимость `needs` по всем файлам держит
+        `test_every_workflow_job_graph_resolves`; здесь — то, чего она не видит.
+        Однажды удаление шага унесло заголовок работы `publish`, и её пять шагов
+        оказались внутри матричной сборки: у той нет прав на запись в релиз, а
+        выполнялись бы они по разу на платформу, затирая друг другу `dist`.
         """
         jobs = self._release_jobs()
         self.assertEqual(
             set(jobs),
             {"preflight", "build", "publish", "audit-native", "audit-draft", "freeze"},
         )
-        for name, block in jobs.items():
-            declared = re.search(r"^    needs: (.+)$", block, re.M)
-            if declared:
-                value = declared.group(1).strip()
-                needs = (
-                    [item.strip() for item in value.strip("[]").split(",")]
-                    if value.startswith("[")
-                    else [value]
-                )
-                for dependency in needs:
-                    self.assertIn(dependency, jobs, f"{name} needs a job that is not there")
-            self.assertIn("\n    steps:", f"\n{block}", f"{name} has no steps")
-
-        # Публикует только `publish`: у матричной сборки нет прав на запись в релиз,
-        # и шаг публикации, съехавший в неё, выполнялся бы по разу на платформу.
         self.assertIn("      contents: write", jobs["publish"])
         self.assertIn("      contents: read", jobs["build"])
-        self.assertNotIn("softprops/action-gh-release", jobs["build"])
-        self.assertNotIn("write-manifest", jobs["build"])
+        for step in ("softprops/action-gh-release", "write-manifest", "download-artifact"):
+            self.assertNotIn(step, jobs["build"], f"{step} drifted into the matrix job")
+            self.assertIn(step, jobs["publish"], f"{step} left the publish job")
 
     def test_a_platform_is_published_in_one_form_only(self) -> None:
         """Одна платформа — один ассет.
