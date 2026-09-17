@@ -45,6 +45,9 @@ const RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 const WAIT_SLICE: Duration = Duration::from_millis(200);
 
+/// Интервал keepalive: даёт каналу трафик, на котором TCP способен заметить мёртвый шлюз.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Тип сообщения агента по документации (Приложение 4, 4.7.8) плюс два, которых в ней
 /// нет (живые ответы 8.3.27 от 15.09.2026): `extension-properties` — ответ агента на
 /// `extensions properties get --extension=`, итоговый (после него `success` не
@@ -386,6 +389,31 @@ impl Default for WaitPolicy {
     }
 }
 
+/// Настройка SSH-клиента.
+///
+/// Keepalive включён, но обрыв по неотвеченным keepalive выключен (`keepalive_max: 0`), и
+/// это не половинчатость, а единственная работающая комбинация.
+///
+/// Обрыв по счётчику уже пробовали и сняли: агент однопоточен и, занятый долгой командой,
+/// не шлёт по каналу ничего — три неотвеченных keepalive рвали сессию на 46-й секунде
+/// выгрузки УТ (замер 15.09.2026, `DEC.2026-09-14.AGENT-ENDPOINT-IS-MANAGED-OR-ATTACHED`).
+/// Клиент `russh` сбрасывает счётчик на любых данных от сервера, так что порог означал бы
+/// «сколько агенту позволено молчать»; измерение даёт этой тишине нижнюю границу и не даёт
+/// верхней, а выбирать порог по догадке — значит снова рвать живую работу.
+///
+/// Сами пакеты при этом нужны: без них по каналу в тишине не идёт ничего, и полуоткрытое
+/// соединение с мёртвым шлюзом не замечает никто — ни TCP, которому нечем ошибиться, ни
+/// раннер, ждущий терминального сообщения в критической фазе. С keepalive запись рано или
+/// поздно упирается в таймаут TCP, канал закрывается, и ожидание получает конец.
+fn ssh_client_config() -> client::Config {
+    client::Config {
+        inactivity_timeout: None,
+        keepalive_interval: Some(KEEPALIVE_INTERVAL),
+        keepalive_max: 0,
+        ..client::Config::default()
+    }
+}
+
 /// Обработчик событий SSH-клиента. Ключ хоста принимается: у управляемого агента его
 /// создала платформа на этой же машине, у чужого — назвал пользователь в `attach`.
 struct ClientEvents;
@@ -436,14 +464,7 @@ impl AgentSession {
 
         let (connection, channel) =
             runtime.block_on(async {
-                // Без keepalive: агент однопоточен и, занятый долгой командой, не отвечает
-                // на глобальные запросы — три неотвеченных keepalive рвали сессию на 46-й
-                // секунде выгрузки УТ (замер 15.09.2026). Зависание ловит срок команды.
-                let config = Arc::new(client::Config {
-                    inactivity_timeout: None,
-                    keepalive_interval: None,
-                    ..client::Config::default()
-                });
+                let config = Arc::new(ssh_client_config());
                 let mut connection = client::connect(
                     config,
                     (endpoint.host.as_str(), endpoint.port),
@@ -1239,6 +1260,30 @@ mod tests {
         assert!(
             critical.cancellation.is_cancelled(),
             "critical policy must observe the same cancellation token, not a fresh one"
+        );
+    }
+
+    /// Keepalive идёт, а обрыв по его счётчику — нет. Порог означал бы «сколько агенту
+    /// позволено молчать», а занятый агент молчит: три неотвеченных keepalive уже рвали
+    /// сессию на 46-й секунде выгрузки УТ (замер 15.09.2026). Измерение даёт этой тишине
+    /// нижнюю границу и не даёт верхней, поэтому любой порог здесь — догадка, которая
+    /// снова оборвёт живую работу.
+    #[test]
+    fn keepalive_runs_without_a_teardown_threshold() {
+        let config = ssh_client_config();
+
+        assert_eq!(
+            config.keepalive_interval,
+            Some(KEEPALIVE_INTERVAL),
+            "without keepalive traffic a half-open channel to a dead gate is noticed by nobody"
+        );
+        assert_eq!(
+            config.keepalive_max, 0,
+            "a non-zero threshold tears the session down while the agent is merely busy"
+        );
+        assert_eq!(
+            config.inactivity_timeout, None,
+            "the command deadline owns how long an operation may take, not the transport"
         );
     }
 
