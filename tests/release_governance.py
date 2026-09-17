@@ -12,8 +12,6 @@ from __future__ import annotations
 import importlib.util
 import re
 import unittest
-
-import yaml
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,6 +79,33 @@ class ReleaseGovernanceTest(unittest.TestCase):
         self.assertIn("gh attestation verify", workflow)
         self.assertIn("--deny-self-hosted-runners", workflow)
 
+    @staticmethod
+    def _release_jobs() -> dict[str, str]:
+        """Работы рабочего процесса и их тела, без сторонних библиотек.
+
+        Питон здесь живёт на стандартной библиотеке: `pip install` в CI нет ни
+        одного, и разбор YAML пришлось бы туда завозить ради одной проверки.
+        Структура читается по отступам — так же, как реестр читает своё
+        front matter.
+        """
+        text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        body = text.split("\njobs:\n", 1)[1]
+        jobs: dict[str, list[str]] = {}
+        current: str | None = None
+        for line in body.splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            header = re.fullmatch(r"  ([A-Za-z0-9_-]+):", line)
+            if header:
+                current = header.group(1)
+                jobs[current] = []
+                continue
+            if not line.startswith("  "):
+                break
+            if current is not None:
+                jobs[current].append(line)
+        return {name: "\n".join(lines) for name, lines in jobs.items()}
+
     def test_release_workflow_is_a_workflow_github_will_start(self) -> None:
         """Граф работ сходится, и каждая работа на месте.
 
@@ -89,28 +114,30 @@ class ReleaseGovernanceTest(unittest.TestCase):
         так один неаккуратно удалённый шаг однажды унёс с собой заголовок работы,
         и оба набора тестов остались зелёными на файле, который GitHub не запустит.
         """
-        workflow = yaml.safe_load(
-            (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-        )
-        jobs = workflow["jobs"]
+        jobs = self._release_jobs()
         self.assertEqual(
             set(jobs),
             {"preflight", "build", "publish", "audit-native", "audit-draft", "freeze"},
         )
-        for name, job in jobs.items():
-            needs = job.get("needs", [])
-            needs = [needs] if isinstance(needs, str) else needs
-            for dependency in needs:
-                self.assertIn(dependency, jobs, f"{name} needs a job that is not there")
-            self.assertTrue(job.get("steps"), f"{name} has no steps")
+        for name, block in jobs.items():
+            declared = re.search(r"^    needs: (.+)$", block, re.M)
+            if declared:
+                value = declared.group(1).strip()
+                needs = (
+                    [item.strip() for item in value.strip("[]").split(",")]
+                    if value.startswith("[")
+                    else [value]
+                )
+                for dependency in needs:
+                    self.assertIn(dependency, jobs, f"{name} needs a job that is not there")
+            self.assertIn("\n    steps:", f"\n{block}", f"{name} has no steps")
 
         # Публикует только `publish`: у матричной сборки нет прав на запись в релиз,
         # и шаг публикации, съехавший в неё, выполнялся бы по разу на платформу.
-        self.assertEqual(jobs["publish"]["permissions"]["contents"], "write")
-        self.assertEqual(jobs["build"]["permissions"]["contents"], "read")
-        build_steps = " ".join(str(step) for step in jobs["build"]["steps"])
-        self.assertNotIn("softprops/action-gh-release", build_steps)
-        self.assertNotIn("write-manifest", build_steps)
+        self.assertIn("      contents: write", jobs["publish"])
+        self.assertIn("      contents: read", jobs["build"])
+        self.assertNotIn("softprops/action-gh-release", jobs["build"])
+        self.assertNotIn("write-manifest", jobs["build"])
 
     def test_a_platform_is_published_in_one_form_only(self) -> None:
         """Одна платформа — один ассет.
