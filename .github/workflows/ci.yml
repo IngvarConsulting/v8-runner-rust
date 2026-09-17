@@ -17,10 +17,19 @@ defaults:
 env:
   CARGO_TERM_COLOR: always
 
+# Пуш в открытый PR отменяет предыдущий прогон той же ветки: без этого каждая правка
+# запускала полную матрицу из пяти джоб, а устаревшие прогоны никто не снимал.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # Имя джобы входит в список обязательных проверок ветки master: переименование
+  # молча убрало бы её из списка, и слияния встали бы.
   contract:
     name: Contract (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -38,18 +47,55 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # v1
+        with:
+          # Тот же компилятор, которым собирается релиз: иначе гейт описывает набор
+          # замечаний одной версии, а выпуск собирается другой.
+          toolchain: "1.95.0"
+          components: clippy, rustfmt
 
       - name: Cache cargo registry and build output
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Check formatting
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all --check
+
+      # Линтер идёт и на Linux, и на Windows: код под `cfg(windows)` на Linux не
+      # компилируется вовсе, а под `cfg(unix)` — на Windows, поэтому одной площадки
+      # недостаточно. `-D warnings` передаётся аргументом, а не через RUSTFLAGS:
+      # RUSTFLAGS распространился бы на зависимости и обнулил общий кэш сборки.
+      - name: Lint
+        if: matrix.os != 'macos-latest'
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      # Лицензии и источники считаются по Cargo.lock и в сеть не ходят, поэтому стоят
+      # гейтом. Уязвимости и дубли версий идут предупреждением: база RustSec тянется в
+      # рантайме, и блокирующая проверка краснела бы без единой правки кода.
+      - name: Install cargo-deny
+        if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@855644a7653423ffddd406c14064ba886514841d # cargo-deny
+        with:
+          tool: cargo-deny
+
+      - name: Check dependency licences and sources
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo deny check licenses sources
+
+      - name: Report dependency advisories and duplicates
+        if: matrix.os == 'ubuntu-latest'
+        continue-on-error: true
+        run: cargo deny check advisories bans
 
       - name: Run contract regression scope
         run: |
           V8_RUNNER_CI_SCOPE=contract bash scripts/test/ci-rust.sh
 
+  # Имя джобы входит в список обязательных проверок ветки master — не переименовывать.
   happy-path:
     name: Happy Path (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -70,7 +116,9 @@ jobs:
           python-version: "3.x"
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # v1
+        with:
+          toolchain: "1.95.0"
 
       - name: Cache cargo registry and build output
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2

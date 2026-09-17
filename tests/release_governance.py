@@ -117,6 +117,50 @@ class ReleaseGovernanceTest(unittest.TestCase):
         self.assertIn("MIN_CONSOLIDATED_MANIFEST_VERSION", verifier)
         self.assertIn("consolidated release assets require", verifier)
 
+    def test_ci_and_release_pin_the_same_toolchain(self) -> None:
+        """CI обязана проверять тот компилятор, которым собирается выпуск.
+
+        Пин живёт в двух файлах, и разъехаться они могут молча: следующий подъём версии
+        в release.yml оставил бы CI на прежней, а свойство «CI гоняет релизный
+        компилятор» умерло бы незаметно.
+        """
+        pins = {}
+        for name in ("ci.yml", "release.yml"):
+            workflow = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
+            found = set(re.findall(r'toolchain:\s*"([^"]+)"', workflow))
+            self.assertTrue(found, f"{name} does not pin a toolchain version")
+            self.assertEqual(
+                1, len(found), f"{name} pins more than one toolchain version: {found}"
+            )
+            pins[name] = found.pop()
+
+        self.assertEqual(
+            pins["ci.yml"],
+            pins["release.yml"],
+            "ci.yml and release.yml must pin the same toolchain, "
+            f"got {pins['ci.yml']} and {pins['release.yml']}",
+        )
+
+    def test_ci_enforces_formatting_and_lints(self) -> None:
+        """Гейты живут шагами существующей джобы, а не отдельной.
+
+        Список обязательных проверок ветки master привязан к именам джоб, и новая
+        джоба была бы неблокирующей, пока его не поправит администратор.
+        """
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("cargo fmt --all --check", ci)
+        self.assertIn("cargo clippy --locked --all-targets -- -D warnings", ci)
+        self.assertIn("cargo deny check licenses sources", ci)
+        # Ищется присваивание, а не упоминание: слово встречается в комментарии,
+        # который объясняет, почему так делать не надо.
+        assignments = re.findall(r"^\s*RUSTFLAGS\s*[:=]", ci, re.M)
+        self.assertEqual(
+            [],
+            assignments,
+            "-D warnings must be an argument: RUSTFLAGS would reach dependencies "
+            "and invalidate the shared build cache",
+        )
+
     def test_consolidated_contract_accepts_v07_prereleases_only(self) -> None:
         verifier = load_release_verifier()
 
