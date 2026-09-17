@@ -2,9 +2,11 @@ use std::io::Read;
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
-use reqwest::StatusCode;
+use reqwest::{StatusCode, Url};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
+
+use crate::support::authority::host_of_url;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const RETRY_ATTEMPTS: usize = 3;
@@ -46,6 +48,9 @@ pub enum DownloadError {
 
     #[error("refusing to download over a plain-text connection: {url}")]
     InsecureScheme { url: String },
+
+    #[error("not a usable download address: {url}")]
+    UnusableUrl { url: String },
 }
 
 pub fn get_text(
@@ -63,39 +68,23 @@ pub fn get_text(
 /// должно ехать по TLS: без него содержимое выбирает любой посредник. Исключение одно и
 /// узкое: петлевой адрес, потому что фикстуры тестов поднимают обычный HTTP на
 /// `127.0.0.1`, и там посредника нет по построению.
-fn ensure_transport_is_protected(url: &str) -> Result<(), DownloadError> {
-    let refuse = || DownloadError::InsecureScheme {
-        url: url.to_owned(),
-    };
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return Err(refuse());
-    };
+///
+/// Петля опознаётся разбором адреса, а не сравнением подстрок: `127.evil.com` и
+/// `127.0.0.1@evil.com` начинаются как петлевой адрес, но ведут наружу.
+fn ensure_transport_is_protected(url: &Url) -> Result<(), DownloadError> {
+    let scheme = url.scheme();
     if scheme.eq_ignore_ascii_case("https") {
         return Ok(());
     }
+    let refuse = || DownloadError::InsecureScheme {
+        url: url.as_str().to_owned(),
+    };
     if !scheme.eq_ignore_ascii_case("http") {
         return Err(refuse());
     }
-    let host = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default()
-        .rsplit_once(':')
-        .map_or(
-            rest.split(['/', '?', '#']).next().unwrap_or_default(),
-            |(host, _)| host,
-        )
-        .trim_start_matches('[')
-        .trim_end_matches(']');
-    let loopback = host.eq_ignore_ascii_case("localhost")
-        || host == "::1"
-        || host
-            .split_once('.')
-            .is_some_and(|(first, _)| first == "127");
-    if loopback {
-        Ok(())
-    } else {
-        Err(refuse())
+    match host_of_url(url) {
+        Some(host) if host.is_loopback() => Ok(()),
+        _ => Err(refuse()),
     }
 }
 
@@ -104,7 +93,10 @@ pub fn get_bytes(
     timeout: Option<Duration>,
     cancellation: &CancellationToken,
 ) -> Result<Vec<u8>, DownloadError> {
-    ensure_transport_is_protected(url)?;
+    let url = Url::parse(url).map_err(|_| DownloadError::UnusableUrl {
+        url: url.to_owned(),
+    })?;
+    ensure_transport_is_protected(&url)?;
     if timeout.is_some_and(|value| value.is_zero()) {
         return Err(DownloadError::TimedOut { timeout_ms: 0 });
     }
@@ -117,7 +109,7 @@ pub fn get_bytes(
         let request_timeout = remaining_budget(timeout, started)?;
         let client = build_client(request_timeout)?;
 
-        match download_once(&client, url, timeout, started, cancellation) {
+        match download_once(&client, &url, timeout, started, cancellation) {
             Ok(bytes) => return Ok(bytes),
             Err(error) if attempt < RETRY_ATTEMPTS && error.is_retryable() => {
                 last_error = Some(error);
@@ -143,9 +135,12 @@ fn build_client(timeout: Option<Duration>) -> Result<Client, DownloadError> {
             if attempt.previous().len() >= 10 {
                 return attempt.error("too many redirects");
             }
-            match ensure_transport_is_protected(attempt.url().as_str()) {
+            match ensure_transport_is_protected(attempt.url()) {
                 Ok(()) => attempt.follow(),
-                Err(_) => attempt.stop(),
+                // Не `stop()`: остановка выдала бы отказ за обычный ответ `302`, и
+                // тот, кто разбирается, почему загрузка не идёт, не узнал бы, что
+                // раннер отказался уходить с TLS.
+                Err(_) => attempt.error("refusing to follow a redirect off TLS"),
             }
         }));
     if let Some(timeout) = timeout {
@@ -156,15 +151,15 @@ fn build_client(timeout: Option<Duration>) -> Result<Client, DownloadError> {
 
 fn download_once(
     client: &Client,
-    url: &str,
+    url: &Url,
     timeout: Option<Duration>,
     started: Instant,
     cancellation: &CancellationToken,
 ) -> Result<Vec<u8>, DownloadError> {
     ensure_not_cancelled(cancellation)?;
-    let url_text = url.to_owned();
+    let url_text = url.as_str().to_owned();
     let mut response = client
-        .get(url)
+        .get(url.clone())
         .header("Accept", "application/vnd.github+json")
         .send()
         .map_err(|source| DownloadError::Request {
@@ -277,7 +272,8 @@ impl DownloadError {
             | DownloadError::Cancelled
             | DownloadError::InvalidUtf8(_)
             // Повторять нечего: адрес тот же, и второй раз он безопаснее не станет.
-            | DownloadError::InsecureScheme { .. } => false,
+            | DownloadError::InsecureScheme { .. }
+            | DownloadError::UnusableUrl { .. } => false,
         }
     }
 }
@@ -285,6 +281,136 @@ impl DownloadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::thread::JoinHandle;
+
+    /// Разбор отделён от правила: опечатка в адресе теста должна падать здесь,
+    /// а не выглядеть как отказ по существу.
+    fn transport_verdict(url: &str) -> Result<(), DownloadError> {
+        let url = Url::parse(url).expect("a well-formed test address");
+        ensure_transport_is_protected(&url)
+    }
+
+    /// Поднимает петлевой сервер, отвечающий заготовками по очереди.
+    ///
+    /// Чужое имя в `Location` до сети не доходит: правило проверяется на переходе,
+    /// до того как адрес пойдёт в резолвер, — поэтому тест герметичен.
+    ///
+    /// Каждая заготовка закрывает соединение: иначе клиент отправил бы следующий
+    /// запрос в то же самое, а сервер уже ждёт новое, и переход разваливается.
+    fn serve(responses: Vec<&'static str>) -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind the loopback server");
+        let address = listener.local_addr().expect("local address of the server");
+        let handle = std::thread::spawn(move || {
+            for response in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buffer = [0_u8; 2048];
+                let _ = stream.read(&mut buffer);
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        (format!("http://{address}/start"), handle)
+    }
+
+    fn fetch(url: &str) -> Result<Vec<u8>, DownloadError> {
+        get_bytes(
+            url,
+            Some(Duration::from_secs(10)),
+            &CancellationToken::new(),
+        )
+    }
+
+    #[test]
+    fn plain_http_is_allowed_only_where_the_address_really_is_the_loopback() {
+        for url in [
+            "https://example.com/tool.zip",
+            "http://127.0.0.1:3000/tool.zip",
+            "http://localhost:3000/tool.zip",
+            "http://[::1]:3000/tool.zip",
+        ] {
+            transport_verdict(url).unwrap_or_else(|error| panic!("{url} is allowed: {error}"));
+        }
+    }
+
+    #[test]
+    fn an_address_that_only_looks_like_the_loopback_is_refused() {
+        // Каждая запись начинается как петлевой адрес и ведёт наружу. Последняя —
+        // самая тихая: `127.0.0.1` здесь userinfo, а соединение идёт на `evil.com`.
+        for url in [
+            "http://127.evil.com/tool.zip",
+            "http://127.0.0.1.nip.io/tool.zip",
+            "http://127.0.0.1@evil.com/tool.zip",
+            "http://example.com/tool.zip",
+            "ftp://127.0.0.1/tool.zip",
+        ] {
+            let error = transport_verdict(url).expect_err("{url} is refused");
+            assert!(
+                matches!(&error, DownloadError::InsecureScheme { .. }),
+                "{url} is refused as insecure, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_redirect_that_leaves_tls_is_refused_at_the_hop() {
+        // Ровно тот сценарий, ради которого правило проверяется на каждом переходе:
+        // адрес отвечает редиректом на имя, которое лишь начинается как петля.
+        let (url, server) = serve(vec![concat!(
+            "HTTP/1.1 302 Found\r\n",
+            "Location: http://127.evil.com/payload.cfe\r\n",
+            "Connection: close\r\n",
+            "Content-Length: 0\r\n\r\n"
+        )]);
+
+        let error = fetch(&url).expect_err("a redirect off TLS is refused");
+        server.join().expect("the server thread finishes");
+
+        assert!(
+            matches!(&error, DownloadError::Request { .. }),
+            "a refused hop is reported as a failed request, got {error:?}"
+        );
+        assert!(!error.is_retryable(), "a refused hop is not retried");
+    }
+
+    #[test]
+    fn a_redirect_that_stays_on_the_loopback_is_followed() {
+        let (url, server) = serve(vec![
+            concat!(
+                "HTTP/1.1 302 Found\r\n",
+                "Location: /next\r\n",
+                "Connection: close\r\n",
+                "Content-Length: 0\r\n\r\n"
+            ),
+            concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Connection: close\r\n",
+                "Content-Length: 5\r\n\r\n",
+                "HELLO"
+            ),
+        ]);
+
+        let bytes = fetch(&url).expect("a hop that stays on the loopback is followed");
+        server.join().expect("the server thread finishes");
+
+        assert_eq!(bytes, b"HELLO");
+    }
+
+    #[test]
+    fn an_address_that_is_not_an_address_is_named_as_such() {
+        let error = fetch("example.com/tool.zip").expect_err("a bare name is not an address");
+
+        assert!(
+            matches!(&error, DownloadError::UnusableUrl { url } if url == "example.com/tool.zip"),
+            "got {error:?}"
+        );
+        assert!(!error.is_retryable(), "a malformed address is not retried");
+    }
 
     #[test]
     fn download_size_limit_accepts_boundary_size() {
