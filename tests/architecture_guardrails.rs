@@ -346,3 +346,96 @@ fn the_shipped_skill_never_names_the_removed_builder_key() {
         offenders.join("\n")
     );
 }
+
+/// Маскирование секретов имеет одного владельца, и второй набор правил рядом с ним —
+/// то, как эта дыра появилась в прошлый раз.
+///
+/// `run_tests` вёл собственный словарь флагов: знал `/P` и `/N` и не знал `/WSP`, `/UC`,
+/// `/AccessToken`. Предыдущий guard его не видел, потому что смотрел только на модули,
+/// показывающие argv процесса, а этот чистил чужую прозу. Здесь признак другой: файл,
+/// который сам пишет регулярное выражение по секретному ключу, обязан звать владельца.
+#[test]
+fn secret_masking_rules_live_with_their_owner() {
+    let owner = repo_path("src/platform/secrets.rs");
+    // Ключи взяты из словаря владельца: их появление в регулярном выражении и означает
+    // «здесь маскируют секрет».
+    const SECRET_KEY_MARKERS: &[&str] = &["/P", "pwd=", "password=", "/WSP", "/UC"];
+    let mut offenders = Vec::new();
+
+    for file in collect_rust_files(&repo_path("src")) {
+        if file == owner {
+            continue;
+        }
+        // `production_tokens` убирает пробелы целиком, поэтому `Regex :: new` из текста
+        // токенов снова читается как `Regex::new`. Искомые ключи пробелов не содержат.
+        let production = production_tokens(&file);
+        let writes_a_secret_regex = production.contains("Regex::new")
+            && SECRET_KEY_MARKERS
+                .iter()
+                .any(|marker| production.contains(marker));
+        if !writes_a_secret_regex {
+            continue;
+        }
+        // Нужен вызов, а не упоминание: `platform::secrets` встречается и в прозе
+        // комментария, поэтому признаком делегирования служит путь к элементу.
+        if !production.contains("platform::secrets::") {
+            offenders.push(file.display().to_string());
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these modules mask secrets with their own rules instead of calling \
+         platform::secrets, which is the single owner:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn the_loopback_question_is_answered_in_one_place() {
+    // Корень проблемы: «петлевой ли адрес» решали сравнением подстрок, и `127.evil.com`
+    // с `127.0.0.1@evil.com` проходили проверку. Владелец ответа один — `support::authority`,
+    // потому что только разбор адреса знает про userinfo, скобки IPv6 и запись байтов.
+    let owner = repo_path("src/support/authority.rs");
+    // Первыми идут формы, которыми ошибка и была написана: сравнение по подстроке
+    // и по префиксу. Без них защита стерегла бы только аккуратные написания — те,
+    // которые и так безобидны, — и молчала бы ровно про тот дефект, чьё имя носит.
+    const LOOPBACK_DECISION_MARKERS: &[&str] = &[
+        "starts_with(\"127",
+        "starts_with(\"::1",
+        "contains(\"127",
+        "contains(\"localhost",
+        "ends_with(\"localhost",
+        // Целиком закрытые литералы: `"127.0.0.1:3000"` из значения по умолчанию
+        // ни под один из них не подходит, а плечо `match` и `Some("127")` — да.
+        "\"127.\"",
+        "\"127\"",
+        "\"localhost\"",
+        "\"::1\"",
+        ".is_loopback()",
+    ];
+    let mut offenders = Vec::new();
+
+    for file in collect_rust_files(&repo_path("src")) {
+        if file == owner {
+            continue;
+        }
+        let production = production_tokens(&file);
+        let decides_about_loopback = LOOPBACK_DECISION_MARKERS
+            .iter()
+            .any(|marker| production.contains(marker));
+        if !decides_about_loopback {
+            continue;
+        }
+        if !production.contains("support::authority::") {
+            offenders.push(file.display().to_string());
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these modules decide what a loopback address is on their own instead of calling \
+         support::authority, which is the single owner:\n{}",
+        offenders.join("\n")
+    );
+}

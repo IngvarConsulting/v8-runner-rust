@@ -3515,6 +3515,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-casefold",
  "unicode-normalization",
+ "url",
  "uuid",
  "walkdir",
  "windows-sys 0.61.2",
