@@ -43,6 +43,9 @@ pub enum DownloadError {
 
     #[error("response is not UTF-8: {0}")]
     InvalidUtf8(#[from] std::string::FromUtf8Error),
+
+    #[error("refusing to download over a plain-text connection: {url}")]
+    InsecureScheme { url: String },
 }
 
 pub fn get_text(
@@ -54,11 +57,54 @@ pub fn get_text(
     String::from_utf8(bytes).map_err(DownloadError::InvalidUtf8)
 }
 
+/// Адрес, по которому допустимо качать.
+///
+/// Всё, что приезжает извне и потом исполняется — расширения `.cfe`, архивы исходников, —
+/// должно ехать по TLS: без него содержимое выбирает любой посредник. Исключение одно и
+/// узкое: петлевой адрес, потому что фикстуры тестов поднимают обычный HTTP на
+/// `127.0.0.1`, и там посредника нет по построению.
+fn ensure_transport_is_protected(url: &str) -> Result<(), DownloadError> {
+    let refuse = || DownloadError::InsecureScheme {
+        url: url.to_owned(),
+    };
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return Err(refuse());
+    };
+    if scheme.eq_ignore_ascii_case("https") {
+        return Ok(());
+    }
+    if !scheme.eq_ignore_ascii_case("http") {
+        return Err(refuse());
+    }
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit_once(':')
+        .map_or(
+            rest.split(['/', '?', '#']).next().unwrap_or_default(),
+            |(host, _)| host,
+        )
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host == "::1"
+        || host
+            .split_once('.')
+            .is_some_and(|(first, _)| first == "127");
+    if loopback {
+        Ok(())
+    } else {
+        Err(refuse())
+    }
+}
+
 pub fn get_bytes(
     url: &str,
     timeout: Option<Duration>,
     cancellation: &CancellationToken,
 ) -> Result<Vec<u8>, DownloadError> {
+    ensure_transport_is_protected(url)?;
     if timeout.is_some_and(|value| value.is_zero()) {
         return Err(DownloadError::TimedOut { timeout_ms: 0 });
     }
@@ -90,7 +136,18 @@ fn build_client(timeout: Option<Duration>) -> Result<Client, DownloadError> {
         .unwrap_or(CONNECT_TIMEOUT);
     let mut builder = Client::builder()
         .connect_timeout(connect_timeout)
-        .user_agent("v8-runner");
+        .user_agent("v8-runner")
+        // Правило схемы проверяется и на каждом переходе: иначе `https`, отвечающий
+        // редиректом на `http`, тихо уводил бы загрузку с TLS.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("too many redirects");
+            }
+            match ensure_transport_is_protected(attempt.url().as_str()) {
+                Ok(()) => attempt.follow(),
+                Err(_) => attempt.stop(),
+            }
+        }));
     if let Some(timeout) = timeout {
         builder = builder.timeout(timeout);
     }
@@ -218,7 +275,9 @@ impl DownloadError {
             | DownloadError::ResponseTooLarge { .. }
             | DownloadError::TimedOut { .. }
             | DownloadError::Cancelled
-            | DownloadError::InvalidUtf8(_) => false,
+            | DownloadError::InvalidUtf8(_)
+            // Повторять нечего: адрес тот же, и второй раз он безопаснее не станет.
+            | DownloadError::InsecureScheme { .. } => false,
         }
     }
 }
