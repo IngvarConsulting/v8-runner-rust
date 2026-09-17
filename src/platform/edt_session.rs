@@ -542,8 +542,23 @@ struct EdtSessionManagerInner {
 }
 
 impl EdtSessionManagerInner {
+    /// Начинает остановку: закрывает приём и будит воркера.
+    ///
+    /// Флаг меняется под `queue`, потому что воркер проверяет его и паркуется, держа
+    /// тот же мьютекс (`next_request`). Смена флага без мьютекса с этой проверкой не
+    /// сериализуется: `notify_all` успевает уйти до того, как воркер встал на условную
+    /// переменную, сигнал теряется, и воркер спит до конца процесса. Постановка в
+    /// очередь (`execute_observed`) уже сделана так же: состояние меняется под
+    /// мьютексом, сигнал идёт после.
     fn begin_shutdown(&self) -> Result<(), String> {
-        if self.shutdown_started.swap(true, Ordering::SeqCst) {
+        let already_started = {
+            let _queue = match self.queue.lock() {
+                Ok(queue) => queue,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            self.shutdown_started.swap(true, Ordering::SeqCst)
+        };
+        if already_started {
             return Ok(());
         }
         self.shutdown_token.cancel();
@@ -576,7 +591,10 @@ impl EdtSessionManagerInner {
         Ok(true)
     }
 
-    fn next_request(&self) -> Option<Arc<QueuedRequest>> {
+    // `factory` нужен только тестовому шву `pre_queue_park`; в обычной сборке он не
+    // используется.
+    #[cfg_attr(not(test), allow(unused_variables))]
+    fn next_request(&self, factory: &dyn SessionFactory) -> Option<Arc<QueuedRequest>> {
         let mut queue = match self.queue.lock() {
             Ok(queue) => queue,
             Err(poisoned) => poisoned.into_inner(),
@@ -592,6 +610,8 @@ impl EdtSessionManagerInner {
             if self.shutdown_started.load(Ordering::SeqCst) {
                 return None;
             }
+            #[cfg(test)]
+            factory.pre_queue_park();
             queue = match self.queue_ready.wait(queue) {
                 Ok(queue) => queue,
                 Err(poisoned) => poisoned.into_inner(),
@@ -873,6 +893,25 @@ mod tests {
     use tokio::time::{sleep, timeout};
     use tokio_util::sync::CancellationToken;
 
+    /// Открывает окно «флаг проверен, парковка ещё не сделана» детерминированно:
+    /// воркер сообщает, что вошёл в него (всё ещё держа `queue`), и ждёт разрешения
+    /// продолжить. Срабатывает один раз.
+    struct ParkGate {
+        entered: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl ParkGate {
+        fn trip(&self) {
+            let entered = self.entered.lock().expect("park gate entered lock").take();
+            let release = self.release.lock().expect("park gate release lock").take();
+            if let (Some(entered), Some(release)) = (entered, release) {
+                entered.send(()).expect("worker announces the park window");
+                release.recv().expect("test releases the park window");
+            }
+        }
+    }
+
     #[derive(Clone)]
     struct FakeSessionFactory {
         plans: Arc<Mutex<VecDeque<SessionPlan>>>,
@@ -882,6 +921,7 @@ mod tests {
         first_pre_dispatch_waits_for_deadline: bool,
         post_mark_running_cancel: Option<CancellationToken>,
         shutdowns: Arc<AtomicUsize>,
+        park_gate: Option<Arc<ParkGate>>,
     }
 
     impl FakeSessionFactory {
@@ -894,7 +934,13 @@ mod tests {
                 first_pre_dispatch_waits_for_deadline: false,
                 post_mark_running_cancel: None,
                 shutdowns: Arc::new(AtomicUsize::new(0)),
+                park_gate: None,
             }
+        }
+
+        fn with_park_gate(mut self, gate: Arc<ParkGate>) -> Self {
+            self.park_gate = Some(gate);
+            self
         }
 
         fn with_first_pre_dispatch_wait_for_deadline(mut self) -> Self {
@@ -963,6 +1009,12 @@ mod tests {
         fn post_mark_running(&self, _request: &EdtSessionRequest) {
             if let Some(cancellation) = &self.post_mark_running_cancel {
                 cancellation.cancel();
+            }
+        }
+
+        fn pre_queue_park(&self) {
+            if let Some(gate) = &self.park_gate {
+                gate.trip();
             }
         }
     }
@@ -2306,6 +2358,50 @@ mod tests {
             factory.shutdown_count() == 1
         })
         .await;
+    }
+
+    /// Регресс: `begin_shutdown` меняла `shutdown_started` и звала `notify_all`, не
+    /// беря `queue`. Воркер проверяет тот же флаг и паркуется, держа этот мьютекс,
+    /// поэтому сигнал, пришедший внутри этого окна, никого не будил: воркер спал до
+    /// конца процесса, `join_worker` выжидал grace дважды, выставлял залипающий
+    /// `shutdown_timed_out`, и каждая следующая остановка сразу отдавала `TimedOut`.
+    ///
+    /// Шов `pre_queue_park` открывает это окно детерминированно. На исправленном коде
+    /// порядок вынужденный и от часов не зависит: воркер паркуется, только освободив
+    /// мьютекс, `begin_shutdown` до этого момента стоит на нём.
+    #[test]
+    fn shutdown_wakes_a_worker_that_is_about_to_park() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let gate = Arc::new(ParkGate {
+            entered: Mutex::new(Some(entered_tx)),
+            release: Mutex::new(Some(release_rx)),
+        });
+        let factory =
+            FakeSessionFactory::new(vec![SessionPlan::Session(vec![])]).with_park_gate(gate);
+        let manager = manager(factory, 1, Duration::from_millis(200));
+
+        entered_rx
+            .recv()
+            .expect("worker must reach the window before parking");
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let outcome = thread::scope(|scope| {
+            let shutdown = scope.spawn(|| {
+                started_tx
+                    .send(())
+                    .expect("shutdown thread announces itself");
+                manager.shutdown()
+            });
+            started_rx.recv().expect("shutdown thread started");
+            release_tx.send(()).expect("worker proceeds into the park");
+            shutdown.join().expect("shutdown thread")
+        });
+
+        assert!(
+            outcome.is_ok(),
+            "shutdown must wake a worker parked inside the window: {outcome:?}"
+        );
     }
 
     #[test]

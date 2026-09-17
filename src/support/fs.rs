@@ -258,6 +258,76 @@ pub fn advisory_lock_owner_id(guard: &AdvisoryLockGuard) -> &str {
     &guard.metadata.owner_id
 }
 
+/// Читает журнал платформы, сам определяя кодировку.
+///
+/// 1С пишет `/Out` и `--file` не всегда в UTF-8: на русской Windows это обычно cp1251,
+/// а с отметкой порядка байтов — UTF-16. `read_to_string` на таком файле отдаёт
+/// `InvalidData`, замечания инструмента пропадают, и проверка выглядит чистой.
+///
+/// Порядок разбора: отметка порядка байтов важнее содержимого, потому что она
+/// однозначна; дальше пробуется UTF-8, потому что он самопроверяемый — случайный
+/// cp1251-текст почти никогда не складывается в корректную последовательность; и лишь
+/// в остатке текст читается как cp1251, где допустим любой байт и ошибиться уже нельзя.
+pub fn read_platform_log(path: &Path) -> std::io::Result<String> {
+    decode_platform_log(&std::fs::read(path)?)
+}
+
+const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
+const UTF16LE_BOM: &[u8] = &[0xFF, 0xFE];
+const UTF16BE_BOM: &[u8] = &[0xFE, 0xFF];
+
+fn decode_platform_log(bytes: &[u8]) -> std::io::Result<String> {
+    if let Some(rest) = bytes.strip_prefix(UTF16LE_BOM) {
+        return decode_utf16(rest, u16::from_le_bytes);
+    }
+    if let Some(rest) = bytes.strip_prefix(UTF16BE_BOM) {
+        return decode_utf16(rest, u16::from_be_bytes);
+    }
+    let bytes = bytes.strip_prefix(UTF8_BOM).unwrap_or(bytes);
+    match std::str::from_utf8(bytes) {
+        Ok(text) => Ok(text.to_owned()),
+        Err(_) => Ok(decode_cp1251(bytes)),
+    }
+}
+
+fn decode_utf16(bytes: &[u8], unit: fn([u8; 2]) -> u16) -> std::io::Result<String> {
+    if !bytes.len().is_multiple_of(2) {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            "utf-16 log has an odd number of bytes",
+        ));
+    }
+    let units: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| unit(*pair))
+        .collect();
+    String::from_utf16(&units)
+        .map_err(|error| std::io::Error::new(ErrorKind::InvalidData, error.to_string()))
+}
+
+/// Верхняя половина cp1251: младшие 128 позиций совпадают с ASCII.
+const CP1251_HIGH: [char; 128] = [
+    'Ђ', 'Ѓ', '‚', 'ѓ', '„', '…', '†', '‡', '€', '‰', 'Љ', '‹', 'Њ', 'Ќ', 'Ћ', 'Џ', 'ђ', '‘', '’',
+    '“', '”', '•', '–', '—', '\u{98}', '™', 'љ', '›', 'њ', 'ќ', 'ћ', 'џ', '\u{a0}', 'Ў', 'ў', 'Ј',
+    '¤', 'Ґ', '¦', '§', 'Ё', '©', 'Є', '«', '¬', '\u{ad}', '®', 'Ї', '°', '±', 'І', 'і', 'ґ', 'µ',
+    '¶', '·', 'ё', '№', 'є', '»', 'ј', 'Ѕ', 'ѕ', 'ї', 'А', 'Б', 'В', 'Г', 'Д', 'Е', 'Ж', 'З', 'И',
+    'Й', 'К', 'Л', 'М', 'Н', 'О', 'П', 'Р', 'С', 'Т', 'У', 'Ф', 'Х', 'Ц', 'Ч', 'Ш', 'Щ', 'Ъ', 'Ы',
+    'Ь', 'Э', 'Ю', 'Я', 'а', 'б', 'в', 'г', 'д', 'е', 'ж', 'з', 'и', 'й', 'к', 'л', 'м', 'н', 'о',
+    'п', 'р', 'с', 'т', 'у', 'ф', 'х', 'ц', 'ч', 'ш', 'щ', 'ъ', 'ы', 'ь', 'э', 'ю', 'я',
+];
+
+fn decode_cp1251(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| match *byte {
+            ascii @ 0x00..=0x7F => ascii as char,
+            high => CP1251_HIGH[usize::from(high - 0x80)],
+        })
+        .collect()
+}
+
 pub fn read_advisory_lock_metadata(path: &Path) -> std::io::Result<AdvisoryLockMetadata> {
     let raw = std::fs::read(path)?;
     serde_json::from_slice(&raw).map_err(|error| std::io::Error::new(ErrorKind::InvalidData, error))
@@ -745,10 +815,11 @@ mod tests {
     use super::replace_dir_atomically;
     use super::{
         acquire_advisory_lock, advisory_lock_owner_id, advisory_system_lock_path,
-        publish_file_atomically, publish_file_atomically_impl, read_advisory_lock_metadata,
-        remove_path_if_exists, replace_file_atomically, replace_file_rollback_error,
-        try_acquire_advisory_lock, try_acquire_advisory_lock_with_hook, AdvisoryLockMetadata,
-        ReplaceFileFailureState, ReplaceFileTestPoint, REPLACE_FILE_TEST_HOOK, TOOL_NAME,
+        decode_platform_log, publish_file_atomically, publish_file_atomically_impl,
+        read_advisory_lock_metadata, remove_path_if_exists, replace_file_atomically,
+        replace_file_rollback_error, try_acquire_advisory_lock,
+        try_acquire_advisory_lock_with_hook, AdvisoryLockMetadata, ReplaceFileFailureState,
+        ReplaceFileTestPoint, CP1251_HIGH, REPLACE_FILE_TEST_HOOK, TOOL_NAME,
     };
     use std::fs;
     use std::io::ErrorKind;
@@ -1202,5 +1273,52 @@ mod tests {
             fs::read_to_string(target_dir.join("payload.txt")).expect("target payload"),
             "payload"
         );
+    }
+
+    /// 1С пишет журнал не только в UTF-8: на русской Windows это обычно cp1251, а с
+    /// отметкой порядка байтов — UTF-16. Раньше такой журнал не читался вовсе, и
+    /// замечания инструмента пропадали.
+    #[test]
+    fn a_platform_log_is_decoded_by_its_own_encoding() {
+        let text = "{CommonModules.Тест(12,3)}: Ошибка компиляции";
+
+        let utf8 = decode_platform_log(text.as_bytes()).expect("utf-8");
+        assert_eq!(utf8, text);
+
+        let mut with_bom = vec![0xEF, 0xBB, 0xBF];
+        with_bom.extend_from_slice(text.as_bytes());
+        assert_eq!(decode_platform_log(&with_bom).expect("utf-8 bom"), text);
+
+        let mut utf16le = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            utf16le.extend_from_slice(&unit.to_le_bytes());
+        }
+        assert_eq!(decode_platform_log(&utf16le).expect("utf-16le"), text);
+
+        let mut utf16be = vec![0xFE, 0xFF];
+        for unit in text.encode_utf16() {
+            utf16be.extend_from_slice(&unit.to_be_bytes());
+        }
+        assert_eq!(decode_platform_log(&utf16be).expect("utf-16be"), text);
+
+        // cp1251: кириллица — по одному байту, начиная с 0xC0 для «А».
+        let cp1251: Vec<u8> = text
+            .chars()
+            .map(|ch| match ch {
+                ascii if ascii.is_ascii() => ascii as u8,
+                cyrillic => {
+                    let index = CP1251_HIGH
+                        .iter()
+                        .position(|candidate| *candidate == cyrillic)
+                        .expect("character is representable in cp1251");
+                    0x80 + index as u8
+                }
+            })
+            .collect();
+        assert!(
+            std::str::from_utf8(&cp1251).is_err(),
+            "the cp1251 sample must not be valid utf-8, or the test proves nothing"
+        );
+        assert_eq!(decode_platform_log(&cp1251).expect("cp1251"), text);
     }
 }

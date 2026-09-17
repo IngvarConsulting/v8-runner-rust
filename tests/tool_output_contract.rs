@@ -75,9 +75,10 @@ const PROSE_DEBT: &[(&str, &str)] = &[];
 /// finding is a sentence the platform wrote for a human, and the runner carries it. Labelling it
 /// is not the same act as deciding whether to change an infobase.
 const LABELS_NOT_VERDICTS: &[(&str, &str)] = &[
-    // Designer syntax check. The verdict is `status_from_exit_code` alone (0 clean, 101 issues
-    // found, anything else tool failed); these markers decide whether a line is a finding and
-    // how severe it reads, and an unrecognised severity is an error.
+    // Designer syntax check. The verdict is the exit code plus whether the tool's log could be
+    // read at all (0 clean, 101 issues found, anything else tool failed; an expected-but-unread
+    // log turns clean into tool failed) — never the prose. These markers decide whether a line is
+    // a finding and how severe it reads, and an unrecognised severity is an error.
     ("src/parsers/designer_validation.rs", "неразрешим"),
     ("src/parsers/designer_validation.rs", "ошиб"),
     ("src/parsers/designer_validation.rs", "ошибок не обнаружено"),

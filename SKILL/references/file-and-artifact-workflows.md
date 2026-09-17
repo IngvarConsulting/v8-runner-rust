@@ -27,15 +27,15 @@ v8-runner dump --mode incremental --source-set <NAME>
 v8-runner dump --mode incremental --extension <EXTENSION>
 ```
 
-`partial` requires at least one `--object`. With `builder=IBCMD`, object-scoped partial dump degrades to incremental dump with a warning.
+`partial` requires at least one `--object`. When `ibcmd` executes the dump, object-scoped partial dump degrades to incremental dump with a warning.
 
 Use `TYPE:NAME` as the canonical partial selector form, for example `Catalog:Items`.
 The dotted `TYPE.NAME` form remains compatible. The Designer list and JSON
 `data.selectors[*].normalized` use `TYPE.NAME`; JSON `data.selectors[*].requested`
 preserves the submitted selector. Before the platform starts, selector syntax is validated:
 `TYPE` and `NAME` must be non-empty, exactly one `:` or `.` separator is required, and
-control characters are rejected. With `builder=DESIGNER`, Designer validates whether the
-metadata root type exists. With `builder=IBCMD`, the object list is not used because partial
+control characters are rejected. When Designer executes the dump it validates whether the
+metadata root type exists; when `ibcmd` does, the object list is not used because partial
 degrades to incremental.
 
 For `format=EDT`, dump uses an internal Designer snapshot under `workPath/designer/<sourceSetName>`, then imports the result into the EDT target.
@@ -58,9 +58,9 @@ exists and sources are not requested, create the minimal infobase-only config de
 skill entrypoint instead of running `bootstrap`.
 
 This differs from `make`: `make` builds from project sources, while this command reads the
-working or database configuration from the configured infobase. The configured `builder` sets the
-preferred provider; runner may choose a ready alternate during pure preflight, but never after
-dispatch.
+working or database configuration from the configured infobase. The executor comes from the
+matrix or from `providers.infobase.configuration.export`; runner may choose a ready alternate
+during pure preflight, but never after dispatch.
 
 Use a DT only as a portable full-infobase image, not as a backup:
 
@@ -70,7 +70,7 @@ v8-runner infobase dump --output dist/base.dt
 
 DT export uses the implemented Designer adapter. IBCMD DT remains experimental until a
 no-active-connections or exclusive-access preflight is implemented and proved; if Designer is
-ready, runner selects it even when `builder=IBCMD`.
+ready, runner selects it even when `providers.infobase.dump: ibcmd` names the other one.
 
 Load a DT image back with the paired command, stating which irreversible change is allowed:
 
@@ -102,7 +102,7 @@ v8-runner convert --output <DIR>
 It is not a dump alias:
 
 - it does not use an infobase;
-- it does not use `builder`;
+- it takes no `providers` key;
 - direction is derived from configured `format`;
 - without `--output`, results are published under `workPath/convert/out/<sourceSetName>/<designer|edt>/`;
 - `--output` is a target root and mirrors `source-set.path` relative to the primary config directory.
@@ -121,7 +121,7 @@ v8-runner load --path <FILE> --extension <NAME>
 
 Rules:
 
-- supported only for `format=DESIGNER`, `builder=DESIGNER`;
+- supported only for `format=DESIGNER`, and `load` is Designer-only;
 - `.cfe` requires `--extension`;
 - `--mode merge` requires `--settings`;
 - use `--mode load` for the first installation of an extension; JSON reports
@@ -150,6 +150,6 @@ Behavior:
 - main configuration exports to `.cf`;
 - extension export uses `.cfe`;
 - external data processors and reports publish `.epf` / `.erf` into the output directory;
-- `builder=DESIGNER` is required.
+- `make` is Designer-only.
 
 Full dump and package/external artifact publication use staged publication with backup/rollback semantics. Incremental and partial dump are non-atomic update modes.

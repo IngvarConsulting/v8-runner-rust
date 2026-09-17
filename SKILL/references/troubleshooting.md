@@ -12,7 +12,7 @@ test -f v8project.yaml
 Inspect `v8project.yaml` fields that affect the failing command:
 
 - `format`
-- `builder`
+- `providers` overrides, if any
 - `connection`
 - primary config directory
 - `workPath`

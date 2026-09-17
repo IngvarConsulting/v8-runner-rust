@@ -16,14 +16,16 @@ use crate::use_cases::agent_session::{
     tidy, transcript_log, unstage, wait_policy, write_bytes, AgentHandle, Exchange,
     GenerationLedger,
 };
+use crate::use_cases::interruption::deferred_process_interruption_message;
 
 pub(super) struct AgentLoader {
     utilities: PlatformUtilities,
     /// Управляемому агенту нужна платформа на этой машине; чужому — ничего.
     managed: bool,
     location: Option<UtilityLocation>,
-    handle: Option<AgentHandle>,
-    wait: Option<WaitPolicy>,
+    /// Сессия и её политика ожидания живут вместе: политика несёт абсолютный срок
+    /// команды, и сессия без неё означала бы ожидание без срока.
+    session: Option<(AgentHandle, WaitPolicy)>,
     run: String,
 }
 
@@ -39,8 +41,7 @@ impl AgentLoader {
                     Ok(crate::config::model::DesignerAgentMode::Attached { .. })
                 ),
             location: None,
-            handle: None,
-            wait: None,
+            session: None,
             run: run_id(),
         }
     }
@@ -51,7 +52,7 @@ impl AgentLoader {
         context: &ExecutionContext,
         config: &AppConfig,
     ) -> Result<(&mut AgentHandle, WaitPolicy), AppError> {
-        if self.handle.is_none() {
+        if self.session.is_none() {
             let wait = wait_policy(context);
             let transcript = transcript_log(config, "build")?;
             log_timeline_stage(
@@ -67,11 +68,13 @@ impl AgentLoader {
                 transcript,
                 &wait,
             )?;
-            self.wait = Some(wait);
-            self.handle = Some(handle);
+            self.session = Some((handle, wait));
         }
-        let wait = handle_wait(&self.wait);
-        Ok((self.handle.as_mut().expect("handle was just opened"), wait))
+        let (handle, wait) = self
+            .session
+            .as_mut()
+            .expect("agent session was just opened");
+        Ok((handle, wait.clone()))
     }
 }
 
@@ -132,7 +135,7 @@ impl SourceSetLoader for AgentLoader {
             partial_paths,
         );
         unstage(handle, &exchange, &exposed);
-        outcome?;
+        let warnings = outcome?;
 
         commit_step_state(source_set, source_context, &config.work_path, commit)?;
 
@@ -140,19 +143,14 @@ impl SourceSetLoader for AgentLoader {
         // и не станет выгружать то, что не менялось.
         let token = generation_id(handle.session(), extension, &wait)?;
         GenerationLedger::new(config).record(&source_set.name, &token, "build")?;
-        Ok(Vec::new())
+        Ok(warnings)
     }
 
     fn finish(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            let wait = handle_wait(&self.wait);
+        if let Some((handle, wait)) = self.session.take() {
             handle.finish(&wait);
         }
     }
-}
-
-fn handle_wait(wait: &Option<WaitPolicy>) -> WaitPolicy {
-    wait.clone().unwrap_or_default()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -166,7 +164,11 @@ fn load_and_update(
     source_context: &SourceSetContext,
     extension: Option<&str>,
     partial_paths: Option<&[PathBuf]>,
-) -> Result<(), AppError> {
+) -> Result<Vec<String>, AppError> {
+    // Обе команды меняют базу: загрузка переписывает конфигурацию, а `update-db-cfg`
+    // перестраивает таблицы. Класс совпадает с путём Конфигуратора
+    // (`build_project.rs`: `load_config_from_files_full` и `update_db_cfg`).
+    let critical = wait.critical();
     let mut load = format!(
         "config load-config-from-files --dir={} --update-config-dump-info",
         argument(exposed)
@@ -204,11 +206,11 @@ fn load_and_update(
     if let Some(extension) = extension {
         load.push_str(&format!(" --extension={}", argument(extension)));
     }
-    let loaded = run_command(handle, &load, wait);
+    let loaded = run_command_deferring(handle, "load", &load, &critical);
     if partial_paths.is_some() {
         tidy(handle, exchange, &format!("{exposed}.list.txt"));
     }
-    loaded?;
+    let load_warning = loaded?;
 
     if let Some(error) = interruption_before_safe_point(
         context,
@@ -226,15 +228,27 @@ fn load_and_update(
     if let Some(extension) = extension {
         update.push_str(&format!(" --extension={}", argument(extension)));
     }
-    run_command(handle, &update, wait)?;
-    Ok(())
+    let update_warning = run_command_deferring(handle, "update_db_cfg", &update, &critical)?;
+    Ok([load_warning, update_warning]
+        .into_iter()
+        .flatten()
+        .collect())
 }
 
-fn run_command(handle: &mut AgentHandle, command: &str, wait: &WaitPolicy) -> Result<(), AppError> {
+/// Выполняет команду и возвращает отложенное предупреждение, если прерывание пришло
+/// в критической фазе: команда доведена, но об этом обязаны сказать в результате.
+fn run_command_deferring(
+    handle: &mut AgentHandle,
+    completed_action: &str,
+    command: &str,
+    wait: &WaitPolicy,
+) -> Result<Option<String>, AppError> {
     let reply = handle
         .session()
         .run(command, wait)
         .map_err(map_agent_error)?;
     reply.outcome().map_err(map_agent_error)?;
-    Ok(())
+    Ok(reply
+        .deferred_interruption
+        .map(|reason| deferred_process_interruption_message(completed_action, reason)))
 }

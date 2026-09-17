@@ -8,7 +8,11 @@
 //! или выгрузки и сравниваемый перед следующей выгрузкой.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use crate::platform::process::{
+    ProcessInterruption, ProcessInterruptionAction, ProcessInterruptionReason,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -75,11 +79,15 @@ impl AgentHandle {
     /// закрывается явно, иначе точка входа держит блокировку Конфигуратора и после
     /// разрыва SSH (шлюз `ibsrv` 8.3.27 держал её до перезапуска сервера — замер
     /// 15.09.2026). Ответ не важен: после `restore-ib` сессии уже нет.
+    ///
+    /// Срок очистки урезан: прежде `disconnect` наследовал весь остаток бюджета
+    /// команды и мог держать её столько же ещё раз.
     pub(crate) fn finish(self, wait: &WaitPolicy) {
+        let wait = wait.cleanup();
         match self {
-            Self::Managed(agent) => agent.shutdown(wait),
+            Self::Managed(agent) => agent.shutdown(&wait),
             Self::Attached { mut session, .. } | Self::Gate { mut session, .. } => {
-                let _ = session.run(agent::DISCONNECT_COMMAND, wait);
+                let _ = session.run(agent::DISCONNECT_COMMAND, &wait);
                 session.close();
             }
         }
@@ -112,12 +120,17 @@ fn open_gate_session(
     }
 }
 
-/// Срок и отмена сессии — с границы команды.
+/// Срок, отмена и класс безопасности сессии — с границы команды.
+///
+/// Класс здесь не теряется: агентский транспорт обязан различать команду, которую можно
+/// бросить на полпути, и ту, что меняет базу. Класс по умолчанию — для команд без
+/// побочного эффекта; меняющие команды называют свой класс сами, через `run_critical`.
 pub(crate) fn wait_policy(context: &ExecutionContext) -> WaitPolicy {
     let policy = context.process_policy(InterruptionSafetyClass::GracefulThenKill, None);
     WaitPolicy {
-        timeout: policy.timeout,
+        deadline: policy.timeout.map(|timeout| Instant::now() + timeout),
         cancellation: policy.cancellation.clone(),
+        safety: policy.safety,
     }
 }
 
@@ -239,6 +252,7 @@ pub(crate) fn map_agent_error(error: AgentError) -> AppError {
         | AgentError::SessionClosed { .. }
         | AgentError::Transport { .. }
         | AgentError::UserDirUnknown { .. }
+        | AgentError::UnsafeEntryName { .. }
         | AgentError::Exchange { .. } => AppError::Platform(error.to_string()),
         AgentError::Workspace { .. } => AppError::Runtime(error.to_string()),
         AgentError::Unreachable { .. }
@@ -403,13 +417,19 @@ pub(crate) fn run_command(
 pub(crate) fn platform_result(
     transcript: String,
     log: PathBuf,
+    interruption: Option<ProcessInterruptionReason>,
 ) -> crate::platform::result::PlatformCommandResult {
     crate::platform::result::PlatformCommandResult {
         process: crate::platform::process::ProcessResult {
             exit_code: 0,
             stdout: transcript,
             stderr: String::new(),
-            interruption: None,
+            // Отложенное прерывание едет тем же полем, что и у процессов платформы,
+            // поэтому о нём рассказывают уже существующие помощники, а не второй путь.
+            interruption: interruption.map(|reason| ProcessInterruption {
+                reason,
+                action: ProcessInterruptionAction::Deferred,
+            }),
         },
         platform_log_path: Some(log),
         platform_log: None,
@@ -856,5 +876,39 @@ mod tests {
         assert_eq!(record.token, "abc");
         assert_eq!(record.after, "build");
         assert!(ledger.read("ext").is_none());
+    }
+
+    /// Отложенное прерывание едет тем же полем, что и у процессов платформы: иначе о нём
+    /// рассказывал бы второй путь, а существующие помощники (`deferred_process_*`) для
+    /// агентских результатов не срабатывали бы никогда.
+    #[test]
+    fn an_agent_result_reports_a_deferred_interruption_like_any_platform_result() {
+        let quiet = platform_result("ok".to_owned(), PathBuf::from("/tmp/agent.log"), None);
+        assert!(quiet.process.interruption.is_none());
+        assert!(
+            crate::use_cases::interruption::deferred_process_interruption_warning("build", &quiet)
+                .is_none()
+        );
+
+        let latched = platform_result(
+            "ok".to_owned(),
+            PathBuf::from("/tmp/agent.log"),
+            Some(ProcessInterruptionReason::Cancelled),
+        );
+
+        let interruption = latched
+            .process
+            .interruption
+            .expect("a latched interruption must reach the platform result");
+        assert_eq!(interruption.reason, ProcessInterruptionReason::Cancelled);
+        assert_eq!(interruption.action, ProcessInterruptionAction::Deferred);
+
+        let warning = crate::use_cases::interruption::deferred_process_interruption_warning(
+            "update_db_cfg",
+            &latched,
+        )
+        .expect("the existing reporter must fire for an agent result");
+        assert!(warning.contains("update_db_cfg"), "{warning}");
+        assert!(warning.contains("critical phase"), "{warning}");
     }
 }

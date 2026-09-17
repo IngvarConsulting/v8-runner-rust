@@ -109,8 +109,10 @@ impl ExtensionAgent {
         self.handle.finish(&self.wait);
     }
 
+    /// Команды, меняющие состав или свойства расширений: фаза критическая, её не
+    /// бросают на полпути. Чтение (`properties`, `list`) идёт мимо этого пути.
     fn run(&mut self, command: &str) -> Result<(), AppError> {
-        run_command(&mut self.handle, command, &self.wait).map(|_| ())
+        run_command(&mut self.handle, command, &self.wait.critical()).map(|_| ())
     }
 }
 
@@ -216,6 +218,7 @@ mod tests {
     fn reply(json: &str) -> crate::platform::agent::AgentReply {
         crate::platform::agent::AgentReply {
             messages: serde_json::from_str(json).expect("messages"),
+            deferred_interruption: None,
         }
     }
 

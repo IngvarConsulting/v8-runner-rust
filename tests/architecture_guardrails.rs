@@ -298,3 +298,51 @@ fn a_process_command_is_shown_only_through_the_secrets_owner() {
         );
     }
 }
+
+/// Ключ `builder` снят решением `DEC.2026-09-14.BUILDER-KEY-IS-REMOVED`: конфиг с ним
+/// не проходит валидацию. `tests/provider_matrix.rs` держит отказ со стороны рантайма,
+/// а здесь — со стороны поставляемого навыка: `SKILL/` читают в чужих проектах, и
+/// вернувшееся туда упоминание снова научило бы агентов писать конфиг, который раннер
+/// отвергает. Единственный владелец выбора исполнителя — `providers.<операция>`.
+#[test]
+fn the_shipped_skill_never_names_the_removed_builder_key() {
+    let skill_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("SKILL");
+    let mut offenders = Vec::new();
+    let mut stack = vec![skill_root.clone()];
+
+    while let Some(path) = stack.pop() {
+        for entry in fs::read_dir(&path).expect("read SKILL directory") {
+            let entry = entry.expect("SKILL directory entry");
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                stack.push(entry_path);
+                continue;
+            }
+            // Расширение не фильтруется: ключ может вернуться и в yaml рядом с навыком,
+            // а «то же самое под другим именем» — это ровно то, что ловит эта проверка.
+            if entry_path.extension().is_none() {
+                continue;
+            }
+            let text = fs::read_to_string(&entry_path).expect("read SKILL file");
+            for (index, line) in text.lines().enumerate() {
+                if line.contains("builder") {
+                    offenders.push(format!(
+                        "{}:{}: {}",
+                        entry_path
+                            .strip_prefix(&skill_root)
+                            .unwrap_or(&entry_path)
+                            .display(),
+                        index + 1,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "SKILL/ must not name the removed `builder` key; use `providers.<operation>` instead:\n{}",
+        offenders.join("\n")
+    );
+}
