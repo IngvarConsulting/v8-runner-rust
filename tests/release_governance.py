@@ -347,6 +347,64 @@ class ReleaseGovernanceTest(unittest.TestCase):
             floating = re.findall(r"^\s*uses:\s*[^\s@]+@(?![0-9a-f]{40}(?:\s|$))[^\s]+", workflow, re.M)
             self.assertEqual([], floating, f"floating action refs in {path}: {floating}")
 
+    def test_every_workflow_job_graph_resolves(self) -> None:
+        """Каждая работа, названная в `needs`, существует.
+
+        GitHub не запускает рабочий процесс с висячей зависимостью — ни одного шага,
+        то есть релиз или проверку просто нечем выпустить. Однажды удаление шага
+        унесло с собой заголовок работы, и оба набора тестов остались зелёными:
+        они сверяли подстроки, а строка `needs: [publish, audit-native]` осталась
+        на месте — пропала работа.
+
+        Это та же проверка, что делает actionlint выше по гейту, но без него: он
+        внешний двоичный файл, а эта примета живёт в дереве и не зависит ни от
+        сети, ни от сторонних модулей. PyYAML здесь нет намеренно — в CI нет ни
+        одного `pip install`, поэтому структура читается по отступам.
+        """
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            jobs = self._workflow_jobs(path)
+            self.assertTrue(jobs, f"{path.name} declares no jobs")
+            for name, block in jobs.items():
+                self.assertIn("\n    steps:", f"\n{block}", f"{path.name}: {name} has no steps")
+                declared = re.search(r"^    needs: (.+)$", block, re.M)
+                if not declared:
+                    continue
+                value = declared.group(1).strip()
+                needs = (
+                    [item.strip() for item in value.strip("[]").split(",")]
+                    if value.startswith("[")
+                    else [value]
+                )
+                for dependency in needs:
+                    self.assertIn(
+                        dependency,
+                        jobs,
+                        f"{path.name}: {name} needs {dependency}, which is not a job there",
+                    )
+
+    @staticmethod
+    def _workflow_jobs(path: Path) -> dict[str, str]:
+        """Работы рабочего процесса и их тела, разбором отступов."""
+        text = path.read_text(encoding="utf-8")
+        if "\njobs:\n" not in text:
+            return {}
+        body = text.split("\njobs:\n", 1)[1]
+        jobs: dict[str, list[str]] = {}
+        current: str | None = None
+        for line in body.splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            header = re.fullmatch(r"  ([A-Za-z0-9_-]+):", line)
+            if header:
+                current = header.group(1)
+                jobs[current] = []
+                continue
+            if not line.startswith("  "):
+                break
+            if current is not None:
+                jobs[current].append(line)
+        return {name: "\n".join(lines) for name, lines in jobs.items()}
+
     def test_package_metadata_names_fork_and_license(self) -> None:
         cargo = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
         self.assertIn('license = "AGPL-3.0-only"', cargo)
