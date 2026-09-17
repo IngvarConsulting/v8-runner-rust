@@ -7,7 +7,6 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
 import stat
 import struct
 import subprocess
@@ -20,11 +19,6 @@ REPOSITORY = "https://github.com/IngvarConsulting/v8-runner-rust"
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 BUILDER_WORKFLOW = ".github/workflows/release.yml"
 MANIFEST_ASSET = "v8-runner-assets.json"
-DIRECT_ASSETS = {
-    "aarch64-apple-darwin": "v8-runner-darwin-arm64",
-    "x86_64-pc-windows-msvc": "v8-runner-win-x64.exe",
-    "x86_64-unknown-linux-musl": "v8-runner-linux-x64",
-}
 ARCHIVE_ASSETS = {
     "x86_64-unknown-linux-musl": {
         "name": "v8-runner-linux-x86_64-musl.tar.gz",
@@ -129,23 +123,27 @@ def verify_binary(path: Path, target: str, version: str) -> None:
         )
 
 
-def prepare_direct(args: argparse.Namespace) -> None:
-    expected = DIRECT_ASSETS.get(args.target)
-    if expected != args.asset_name:
-        raise ValueError(f"direct asset for {args.target} must be {expected!r}")
-    source = Path(args.binary)
+def extract_binary(args: argparse.Namespace) -> None:
+    """Кладёт бинарник из архива рядом, чтобы его можно было запустить.
+
+    Извлечением занимается тот же код, что проверяет архив, поэтому аудит
+    запускает ровно тот файл, чью сумму несёт манифест, — и одинаково на всех
+    трёх системах, без `tar` на одной и `unzip` на другой.
+    """
+    dist = Path(args.dist)
+    descriptor = ARCHIVE_ASSETS.get(args.target)
+    if descriptor is None:
+        raise ValueError(f"no archive is published for {args.target}")
+    binary = _archive_binary(dist, args.target, descriptor)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, output)
+    output.write_bytes(binary)
     if os.name != "nt":
         output.chmod(output.stat().st_mode | 0o111)
-    verify_binary(output, args.target, args.version)
 
 
 def payload_asset_names() -> set[str]:
-    return set(DIRECT_ASSETS.values()) | {
-        descriptor["name"] for descriptor in ARCHIVE_ASSETS.values()
-    }
+    return {descriptor["name"] for descriptor in ARCHIVE_ASSETS.values()}
 
 
 def expected_release_files() -> set[str]:
@@ -274,28 +272,11 @@ def _archive_binary(dist: Path, target: str, descriptor: dict[str, str]) -> byte
         raise ValueError(f"{path.name} contains a different FORK_NOTICE.md")
     binary = members[descriptor["binaryPath"]]
     validate_binary_bytes(binary, target)
-    direct_name = DIRECT_ASSETS.get(target)
-    if direct_name is not None and binary != (dist / direct_name).read_bytes():
-        raise ValueError(f"{path.name} binary differs from direct asset {direct_name}")
     return binary
 
 
 def manifest_entries(dist: Path) -> list[dict[str, object]]:
     entries: list[dict[str, object]] = []
-    for target, name in sorted(DIRECT_ASSETS.items()):
-        path = dist / name
-        validate_binary_bytes(path.read_bytes(), target)
-        entries.append(
-            {
-                "name": name,
-                "role": "direct-binary",
-                "targetTriple": target,
-                "format": "executable",
-                "size": path.stat().st_size,
-                "sha256": digest(path),
-                "buildAttestationRequired": True,
-            }
-        )
     for target, descriptor in sorted(ARCHIVE_ASSETS.items()):
         path = dist / descriptor["name"]
         binary = _archive_binary(dist, target, descriptor)
@@ -410,9 +391,9 @@ def parser() -> argparse.ArgumentParser:
     verify.add_argument("--binary", required=True)
     verify.add_argument("--target", required=True)
     verify.add_argument("--version", required=True)
-    direct = commands.add_parser("prepare-direct")
-    for name in ("binary", "output", "target", "asset-name", "version"):
-        direct.add_argument(f"--{name}", required=True)
+    extract = commands.add_parser("extract-binary")
+    for name in ("dist", "target", "output"):
+        extract.add_argument(f"--{name}", required=True)
     manifest = commands.add_parser("write-manifest")
     manifest.add_argument("--dist", required=True)
     manifest.add_argument("--tag", required=True)
@@ -429,8 +410,8 @@ def main() -> None:
     args = parser().parse_args()
     if args.command == "verify-binary":
         verify_binary(Path(args.binary), args.target, args.version)
-    elif args.command == "prepare-direct":
-        prepare_direct(args)
+    elif args.command == "extract-binary":
+        extract_binary(args)
     elif args.command == "write-manifest":
         write_manifest(Path(args.dist), args.tag, args.commit)
     elif args.command == "verify-assets":
