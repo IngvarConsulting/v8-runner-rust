@@ -2,8 +2,8 @@
 id: CTR.CONFIG.V8PROJECT-SCHEMA
 status: active
 governs: product
-version: 3
-decision: DEC.2026-09-14.TARGET-HAS-TWO-ADDRESSES
+version: 4
+decision: DEC.2026-09-17.THE-HTTP-LISTENER-ANSWERS-ONLY-KNOWN-HOSTS
 artifact: docs/schemas/v8project.schema.json
 producer: src/config/schema.rs
 consumers: [docs, cli]

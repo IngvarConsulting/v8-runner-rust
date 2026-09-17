@@ -439,3 +439,90 @@ fn the_loopback_question_is_answered_in_one_place() {
         offenders.join("\n")
     );
 }
+
+#[test]
+fn the_http_listener_never_hands_out_a_cross_origin_permission() {
+    // Проверка `Origin` у слушателя MCP мягкая нарочно: она пускает любой петлевой
+    // порт и все имена из `mcp.http.allowed_hosts`. Держится это на том, что
+    // межисточниковый запрос браузер гасит сам, не получив разрешения. Стоит выдать
+    // его — и мягкость превратится в дыру: каждое имя из списка станет читаемым из
+    // чужого источника. Поэтому разрешения нет нигде.
+    //
+    // Приметы сравниваются в нижнем регистре: `HeaderName` приводит имя к нему сам,
+    // поэтому написание в исходнике роли не играет, а точное совпадение по регистру
+    // пропустило бы рабочую выдачу.
+    const CROSS_ORIGIN_GRANTS: &[&str] = &[
+        "access-control-allow-origin",
+        "access_control_allow_origin",
+        "corslayer",
+        "tower_http::cors",
+    ];
+    let mut offenders = Vec::new();
+
+    for file in collect_rust_files(&repo_path("src")) {
+        // Документация про правило — не нарушение правила: `///` попадает в токены
+        // как `#[doc="..."]`, и без этого описать запрет рядом с кодом было бы нельзя.
+        let production = without_doc_attributes(&production_tokens(&file)).to_ascii_lowercase();
+        if CROSS_ORIGIN_GRANTS
+            .iter()
+            .any(|grant| production.contains(grant))
+        {
+            offenders.push(file.display().to_string());
+        }
+    }
+
+    let manifest = read("Cargo.toml").to_ascii_lowercase();
+    assert!(
+        !manifest.contains("\"cors\"") && !manifest.contains("'cors'"),
+        "Cargo.toml enables a CORS layer; the MCP Origin rule assumes none is ever built"
+    );
+    assert!(
+        offenders.is_empty(),
+        "these modules hand out a cross-origin permission, which turns the deliberately \
+         lenient MCP Origin rule into a readable cross-origin surface:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// Убирает из токенов содержимое `#[doc="..."]`, оставляя сам код.
+fn without_doc_attributes(tokens: &str) -> String {
+    const OPENING: &str = "#[doc=";
+    let mut kept = String::with_capacity(tokens.len());
+    let mut rest = tokens;
+
+    while let Some(at) = rest.find(OPENING) {
+        kept.push_str(&rest[..at]);
+        let after = &rest[at + OPENING.len()..];
+        match after.find(']') {
+            Some(close) => rest = &after[close + 1..],
+            None => return kept,
+        }
+    }
+    kept.push_str(rest);
+    kept
+}
+
+#[test]
+fn the_http_listener_is_never_served_without_its_host_check() {
+    // Проверка имени хоста — слой поверх маршрутизатора, и снять её можно одной
+    // строкой: сборка останется зелёной везде, кроме `tests/mcp_http.rs`, а тот
+    // объявлен `#![cfg(unix)]` и до Windows не доезжает. Поэтому саму проводку
+    // держит примета: тот, кто поднимает слушатель, обязан навесить слой.
+    let window = free_function_tokens(repo_path("src/mcp/server.rs").as_path(), "serve_http");
+
+    assert!(
+        !window.is_empty(),
+        "serve_http is gone from src/mcp/server.rs; this guard names the wrong function"
+    );
+    for required in [
+        "axum::serve",
+        "from_fn_with_state",
+        "refuse_a_request_that_names_another_host",
+    ] {
+        assert!(
+            window.contains(required),
+            "serve_http no longer wires the host check ({required} is missing): a listener \
+             built without it answers any name, which is the DNS-rebinding hole itself"
+        );
+    }
+}

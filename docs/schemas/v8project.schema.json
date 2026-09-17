@@ -402,6 +402,13 @@
     "McpHttpSchema": {
       "additionalProperties": false,
       "properties": {
+        "allowed_hosts": {
+          "description": "Host header values the HTTP listener answers besides the loopback.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "bind_address": {
           "description": "Socket address for the MCP HTTP listener.",
           "type": "string"

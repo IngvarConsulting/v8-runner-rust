@@ -645,6 +645,9 @@ pub struct McpHttpConfig {
 
     /// Idle session eviction timeout in seconds.
     pub idle_ttl_secs: u64,
+
+    /// Hosts the HTTP listener answers besides the loopback, as `Host` header values.
+    pub allowed_hosts: Vec<String>,
 }
 
 impl Default for McpHttpConfig {
@@ -655,6 +658,7 @@ impl Default for McpHttpConfig {
             stateful_sessions: default_mcp_http_stateful_sessions(),
             max_sessions: default_mcp_http_max_sessions(),
             idle_ttl_secs: default_mcp_http_idle_ttl_secs(),
+            allowed_hosts: Vec::new(),
         }
     }
 }

@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -30,6 +31,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use url::Url;
+
 use crate::config::model::AppConfig;
 use crate::mcp::context::McpCallContext;
 use crate::mcp::edt_syntax;
@@ -45,6 +48,8 @@ use crate::mcp::service::{map_syntax_use_case_result, normalize_check_syntax_edt
 use crate::mcp::telemetry::{
     McpEdtSessionObserver, McpTelemetry, SemaphoreWaitErrorKind, SemaphoreWaitOutcome,
 };
+use crate::support::authority::{host_of_authority, host_of_url, Host};
+
 use crate::platform::edt_session::{
     EdtSessionHostOptions, EdtSessionManager, EdtSessionShutdownError,
 };
@@ -181,16 +186,29 @@ pub fn serve_http(config: AppConfig) -> Result<(), McpServerError> {
                 address: config.mcp.http.bind_address.clone(),
                 source,
             })?;
-        let router = axum::Router::new().route(
-            config.mcp.http.path.as_str(),
-            axum::routing::any({
-                let service = service.clone();
-                move |request| {
+        warn_about_a_listener_nobody_guards(config.as_ref());
+        let router = axum::Router::new()
+            .route(
+                config.mcp.http.path.as_str(),
+                axum::routing::any({
                     let service = service.clone();
-                    async move { service.handle(request).await }
-                }
-            }),
-        );
+                    move |request| {
+                        let service = service.clone();
+                        async move { service.handle(request).await }
+                    }
+                }),
+            )
+            // Слой, а не проверка внутри обработчика: так под проверку попадают и
+            // запросы, не совпавшие ни с одним маршрутом. Отрабатывает он раньше,
+            // чем тело запроса начнут читать, а сессию — занимать.
+            //
+            // Вызов обязан быть последним в цепочке: axum накрывает слоем только
+            // те маршруты, что добавлены до него, — маршрут, приписанный следом,
+            // пройдёт мимо проверки молча.
+            .layer(axum::middleware::from_fn_with_state(
+                KnownHosts::of(config.as_ref()),
+                refuse_a_request_that_names_another_host,
+            ));
         let serve = axum::serve(listener, router).with_graceful_shutdown({
             let shutdown = shutdown.clone();
             async move {
@@ -1005,6 +1023,188 @@ fn session_id_from_headers(headers: &axum::http::HeaderMap) -> Option<SessionId>
         .map(Into::into)
 }
 
+/// Отказывает запросу, назвавшему чужой хост.
+async fn refuse_a_request_that_names_another_host(
+    axum::extract::State(known): axum::extract::State<KnownHosts>,
+    request: Request<Body>,
+    next: axum::middleware::Next,
+) -> Response<Body> {
+    match admission_verdict(&request, &known) {
+        Ok(()) => next.run(request).await,
+        Err(refused) => refusal_response(refused),
+    }
+}
+
+/// Предупреждает, когда слушатель открыт наружу и закрыт только периметром.
+///
+/// Сочетание видно до первого запроса, а отказ виден только по коду `403`, который
+/// клиент MCP покажет без тела. Поэтому о нём говорят на старте, а не молчат до
+/// первой неудачи в контейнере, за которым никто не смотрит.
+fn warn_about_a_listener_nobody_guards(config: &AppConfig) {
+    if !config.mcp.http.allowed_hosts.is_empty() {
+        return;
+    }
+    let reachable_from_outside = config
+        .mcp
+        .http
+        .bind_address
+        .parse::<SocketAddr>()
+        .is_ok_and(|address| !address.ip().to_canonical().is_loopback());
+    if reachable_from_outside {
+        tracing::warn!(
+            bind_address = %config.mcp.http.bind_address,
+            "MCP HTTP listens beyond the loopback while mcp.http.allowed_hosts is empty: \
+             every request naming another host is refused with 403, and the listener \
+             itself has no authentication"
+        );
+    }
+}
+
+/// Хосты, на чьё имя слушатель отвечает.
+///
+/// Защита здесь ровно от одного: браузер на той же машине переразрешает своё имя
+/// в `127.0.0.1` и стучится к слушателю как к своему. Подделать `Host` он не может,
+/// поэтому сверка имени такую страницу и отсекает.
+///
+/// Чего защита НЕ делает: она не закрывает слушатель от не-браузерных клиентов.
+/// `curl -H 'Host: 127.0.0.1:3000' http://10.0.0.5:3000/mcp` заголовок подставит
+/// любой, поэтому не-петлевой bind остаётся открытым всем, кто до него дотянется.
+/// Единственная защита там — периметр, и назвать чужое имя в `allowed_hosts`
+/// значит взять его на себя.
+#[derive(Clone)]
+struct KnownHosts {
+    named: Arc<Vec<Host>>,
+}
+
+impl KnownHosts {
+    fn of(config: &AppConfig) -> Self {
+        Self {
+            named: Arc::new(
+                config
+                    .mcp
+                    .http
+                    .allowed_hosts
+                    .iter()
+                    .filter_map(|allowed| host_of_authority(allowed))
+                    .collect(),
+            ),
+        }
+    }
+
+    fn admits(&self, host: &Host) -> bool {
+        host.is_loopback() || self.named.contains(host)
+    }
+}
+
+/// Заголовок, из-за которого запрос отклонён.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefusedHeader {
+    Host,
+    Origin,
+}
+
+impl RefusedHeader {
+    const fn name(self) -> &'static str {
+        match self {
+            RefusedHeader::Host => "Host",
+            RefusedHeader::Origin => "Origin",
+        }
+    }
+}
+
+/// Пускать ли запрос по его заголовкам.
+///
+/// `Host` обязателен и должен быть ровно один: сборка собрана только с `http1`
+/// (`Cargo.toml`, крейта `h2` в `Cargo.lock` нет), поэтому `:authority` сюда не
+/// приходит и отсутствие заголовка — не протокол версии 2, а причина отказать.
+///
+/// `Origin` проверяется, если он есть. Отсутствие — не повод отказывать: клиенты
+/// вне браузера его не шлют. А `Origin: null` — это не отсутствие: так
+/// представляются песочница, `file:` и `data:`, и адресом это не разбирается.
+fn admission_verdict(request: &Request<Body>, known: &KnownHosts) -> Result<(), RefusedHeader> {
+    // У http/1.1 два канала для имени хоста. Цель запроса в absolute-form
+    // (`GET http://имя/mcp HTTP/1.1`) несёт своё, и по RFC 9112 §3.2.2 верить
+    // положено ему, а не заголовку; hyper его в `Host` не переносит. Клиенты MCP
+    // так не пишут, поэтому здесь требуется, чтобы оба канала назвали известное
+    // имя, — строже, чем велит RFC, и закрыто в обе стороны.
+    if let Some(authority) = request.uri().authority() {
+        let named = host_of_authority(authority.as_str()).ok_or(RefusedHeader::Host)?;
+        if !known.admits(&named) {
+            return Err(RefusedHeader::Host);
+        }
+    }
+
+    let headers = request.headers();
+    let host = exactly_one(headers, &axum::http::header::HOST)
+        .and_then(host_of_authority)
+        .ok_or(RefusedHeader::Host)?;
+    if !known.admits(&host) {
+        return Err(RefusedHeader::Host);
+    }
+
+    let Some(origin) = exactly_one(headers, &axum::http::header::ORIGIN) else {
+        return if headers.contains_key(axum::http::header::ORIGIN) {
+            Err(RefusedHeader::Origin)
+        } else {
+            Ok(())
+        };
+    };
+    let origin = Url::parse(origin).map_err(|_| RefusedHeader::Origin)?;
+    // Браузер сериализует источник как `схема://хост[:порт]` и больше ничем. Всё
+    // остальное — userinfo, путь, запрос — оттуда прийти не может, и принимать
+    // такое значит рассуждать про одни записи, а пускать другие.
+    let shaped_like_an_origin = origin.username().is_empty()
+        && origin.password().is_none()
+        && origin.path() == "/"
+        && origin.query().is_none()
+        && origin.fragment().is_none();
+    let scheme_is_web = origin.scheme() == "http" || origin.scheme() == "https";
+    let admitted = scheme_is_web
+        && shaped_like_an_origin
+        && host_of_url(&origin).is_some_and(|host| known.admits(&host));
+    if admitted {
+        Ok(())
+    } else {
+        Err(RefusedHeader::Origin)
+    }
+}
+
+/// Значение заголовка, если он один.
+///
+/// Повтор `Host` запрещён RFC 9112 §3.2, но hyper его не отбрасывает, а
+/// `HeaderMap::get` молча берёт первый. Считать здесь дешевле, чем гадать, какой
+/// из двух прочитает следующий в цепочке.
+fn exactly_one<'a>(
+    headers: &'a axum::http::HeaderMap,
+    name: &axum::http::HeaderName,
+) -> Option<&'a str> {
+    let mut values = headers.get_all(name).iter();
+    let only = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    // Значение вне печатного ASCII читается как отсутствие: имя хоста таким не бывает.
+    only.to_str().ok()
+}
+
+/// Ответ на запрос, пришедший не на то имя.
+///
+/// Значение заголовка в тело не попадает: его пишет тот, кому отказали.
+fn refusal_response(refused: RefusedHeader) -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .header(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        )
+        .body(Body::from(format!(
+            "Forbidden: the {} header does not name a host this listener answers; \
+             list it in mcp.http.allowed_hosts to allow it",
+            refused.name()
+        )))
+        .expect("valid refusal response")
+}
+
 fn valid_streamable_post_headers(headers: &axum::http::HeaderMap) -> bool {
     let accepts_both = headers
         .get(axum::http::header::ACCEPT)
@@ -1061,9 +1261,13 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        execution_error, max_concurrent_calls, shutdown_grace_period, ErrorReason, ExecutionStage,
-        HttpSessionAdmission, McpTool, McpToolServer,
+        admission_verdict, execution_error, max_concurrent_calls, shutdown_grace_period,
+        ErrorReason, ExecutionStage, HttpSessionAdmission, KnownHosts, McpTool, McpToolServer,
+        RefusedHeader,
     };
+    use axum::body::Body;
+    use axum::http::Request;
+
     use crate::config::model::{
         AppConfig, BuildConfig, McpConfig, McpExecutionConfig, McpHttpConfig, PlatformToolConfig,
         SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig, ToolsConfig,
@@ -1493,6 +1697,169 @@ mod tests {
             })
             .await
             .map(|_| ())
+    }
+
+    fn known_hosts(allowed: &[&str]) -> KnownHosts {
+        let mut config = test_config(1, 30);
+        config.mcp.http.allowed_hosts = allowed.iter().map(|name| (*name).to_owned()).collect();
+        KnownHosts::of(&config)
+    }
+
+    fn asking(target: &str, pairs: &[(&str, &str)]) -> Request<Body> {
+        let mut builder = Request::builder().uri(target);
+        for (name, value) in pairs {
+            builder = builder.header(*name, *value);
+        }
+        builder.body(Body::empty()).expect("a request")
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> Request<Body> {
+        asking("/mcp", pairs)
+    }
+
+    #[test]
+    fn the_loopback_is_answered_without_being_listed() {
+        let known = known_hosts(&[]);
+        for host in ["127.0.0.1:3000", "localhost:3000", "[::1]:3000"] {
+            assert_eq!(
+                admission_verdict(&headers(&[("host", host)]), &known),
+                Ok(()),
+                "{host} is answered"
+            );
+        }
+    }
+
+    #[test]
+    fn a_page_that_rebound_its_own_name_is_refused() {
+        // Та самая атака: браузер разрешает `evil.com` в `127.0.0.1` и стучится
+        // к слушателю как к своему. Подделать `Host` он не может — на этом и ловим.
+        let known = known_hosts(&[]);
+        for host in [
+            "evil.com:3000",
+            "127.evil.com:3000",
+            "127.0.0.1.nip.io:3000",
+        ] {
+            assert_eq!(
+                admission_verdict(&headers(&[("host", host)]), &known),
+                Err(RefusedHeader::Host),
+                "{host} is refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_name_in_an_absolute_request_target_is_checked_too() {
+        // У http/1.1 имя хоста приезжает двумя каналами, и `Host` — не единственный:
+        // absolute-form несёт своё, а hyper его в заголовок не переносит.
+        let known = known_hosts(&[]);
+
+        assert_eq!(
+            admission_verdict(
+                &asking("http://evil.com/mcp", &[("host", "127.0.0.1:3000")]),
+                &known
+            ),
+            Err(RefusedHeader::Host)
+        );
+        assert_eq!(
+            admission_verdict(
+                &asking("http://127.0.0.1:3000/mcp", &[("host", "127.0.0.1:3000")]),
+                &known
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn an_origin_shaped_unlike_a_browser_origin_is_refused() {
+        // Браузер сериализует источник как `схема://хост[:порт]`. Ни userinfo, ни
+        // путь оттуда прийти не могут, и петлевой хост за `@` — не тот источник.
+        let known = known_hosts(&[]);
+        let local = ("host", "127.0.0.1:3000");
+        for origin in [
+            "http://evil.com@127.0.0.1",
+            "http://127.0.0.1/some/path",
+            "http://127.0.0.1/?x=1",
+        ] {
+            assert_eq!(
+                admission_verdict(&headers(&[local, ("origin", origin)]), &known),
+                Err(RefusedHeader::Origin),
+                "{origin} is refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_that_is_missing_or_doubled_is_refused() {
+        let known = known_hosts(&[]);
+        assert_eq!(
+            admission_verdict(&headers(&[]), &known),
+            Err(RefusedHeader::Host)
+        );
+        // Повтор запрещён RFC 9112 §3.2, а `HeaderMap::get` молча берёт первый.
+        assert_eq!(
+            admission_verdict(
+                &headers(&[("host", "127.0.0.1:3000"), ("host", "evil.com:3000")]),
+                &known
+            ),
+            Err(RefusedHeader::Host)
+        );
+    }
+
+    #[test]
+    fn an_origin_is_checked_when_it_is_there_and_not_demanded_when_it_is_not() {
+        let known = known_hosts(&[]);
+        let local = ("host", "127.0.0.1:3000");
+
+        assert_eq!(admission_verdict(&headers(&[local]), &known), Ok(()));
+        // Любой петлевой порт: страница на другом порту петли — не та атака,
+        // а межпортовый запрос браузер и так гасит на CORS.
+        assert_eq!(
+            admission_verdict(
+                &headers(&[local, ("origin", "http://127.0.0.1:6274")]),
+                &known
+            ),
+            Ok(())
+        );
+        for origin in ["http://evil.com", "null", "file://", "not an origin"] {
+            assert_eq!(
+                admission_verdict(&headers(&[local, ("origin", origin)]), &known),
+                Err(RefusedHeader::Origin),
+                "{origin} is refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_listed_host_is_answered_however_its_root_dot_is_written() {
+        let known = known_hosts(&["runner", "10.0.0.5"]);
+        for host in [
+            "runner:3000",
+            "runner.:3000",
+            "RUNNER:3000",
+            "10.0.0.5:3000",
+        ] {
+            assert_eq!(
+                admission_verdict(&headers(&[("host", host)]), &known),
+                Ok(()),
+                "{host} is answered"
+            );
+        }
+        assert_eq!(
+            admission_verdict(&headers(&[("host", "runner.evil.com:3000")]), &known),
+            Err(RefusedHeader::Host)
+        );
+    }
+
+    #[test]
+    fn a_listed_host_also_names_an_origin() {
+        let known = known_hosts(&["runner"]);
+        assert_eq!(
+            admission_verdict(
+                &headers(&[("host", "runner:3000"), ("origin", "http://runner:3000")]),
+                &known
+            ),
+            Ok(())
+        );
     }
 
     fn test_config(max_concurrent_calls: usize, shutdown_grace_period_secs: u64) -> AppConfig {
