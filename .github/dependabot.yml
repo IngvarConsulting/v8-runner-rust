@@ -10,3 +10,19 @@ updates:
    directory: "/"
    schedule:
      interval: weekly
+
+ # Зависимости Rust не обновлялись автоматически вовсе: без этого блока ни обновление
+ # версии, снятой по уязвимости, ни выход стабильной замены предрелизной крипты никто
+ # не увидит.
+ - package-ecosystem: "cargo"
+   directory: "/"
+   schedule:
+     interval: weekly
+   open-pull-requests-limit: 5
+
+ # Экшены запинены по SHA (это требует tests/release_governance.py), поэтому без
+ # обновлятора пины гниют: исправления безопасности в самих экшенах не доезжают.
+ - package-ecosystem: "github-actions"
+   directory: "/"
+   schedule:
+     interval: weekly

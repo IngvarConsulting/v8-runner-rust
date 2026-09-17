@@ -154,9 +154,7 @@ pub async fn execute(
                 if let Some(completion) = execution.completion {
                     completion.wait().await;
                 }
-                let message = format!(
-                    "execution cancelled for command 'syntax' while shared EDT command was running; terminal state was observed before returning the result"
-                );
+                let message = "execution cancelled for command 'syntax' while shared EDT command was running; terminal state was observed before returning the result".to_string();
                 return Ok(Err(SyntaxExecutionFailure::with_payload(
                     AppError::Runtime(message.clone()),
                     failed_result(
@@ -175,9 +173,7 @@ pub async fn execute(
                 if let Some(completion) = execution.completion {
                     completion.wait().await;
                 }
-                let message = format!(
-                    "execution timeout expired for command 'syntax' while shared EDT command was running; terminal state was observed before returning the result"
-                );
+                let message = "execution timeout expired for command 'syntax' while shared EDT command was running; terminal state was observed before returning the result".to_string();
                 return Ok(Err(SyntaxExecutionFailure::with_payload(
                     AppError::Runtime(message.clone()),
                     failed_result(

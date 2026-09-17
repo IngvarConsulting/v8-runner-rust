@@ -2,6 +2,10 @@
 name = "v8-runner"
 version = "0.10.0"
 edition = "2021"
+# Тот же компилятор, которым собираются выпуск и CI. Издание 2021 и Cargo.lock версии 4
+# требуют куда меньшего, так что это не техническое ограничение, а обещание: ниже этой
+# версии проект не проверяется никем.
+rust-version = "1.95"
 license = "AGPL-3.0-only"
 repository = "https://github.com/IngvarConsulting/v8-runner-rust"
 

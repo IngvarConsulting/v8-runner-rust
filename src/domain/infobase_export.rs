@@ -106,16 +106,6 @@ pub enum ProviderImplementation {
     Unsupported,
 }
 
-impl ProviderImplementation {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Implemented => "implemented",
-            Self::Experimental => "experimental",
-            Self::Unsupported => "unsupported",
-        }
-    }
-}
-
 /// Strongest evidence currently attached to an implementation row.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -123,16 +113,6 @@ pub enum ProviderEvidence {
     Documented,
     ArgvTested,
     LiveVerified,
-}
-
-impl ProviderEvidence {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Documented => "documented",
-            Self::ArgvTested => "argv_tested",
-            Self::LiveVerified => "live_verified",
-        }
-    }
 }
 
 /// Исполнитель экспорта — тот же закрытый набор, что у всех операций.

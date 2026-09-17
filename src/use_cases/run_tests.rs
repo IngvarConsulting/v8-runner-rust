@@ -497,6 +497,10 @@ fn set_dir_permissions(path: &Path) -> std::io::Result<()> {
         permissions.set_mode(0o700);
         fs::set_permissions(path, permissions)?;
     }
+    // На Windows прав доступа в этом смысле нет: блок выше пуст, и параметр остаётся
+    // неиспользованным — это не упущение, а форма самой функции.
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -508,6 +512,10 @@ fn set_file_permissions(path: &Path) -> std::io::Result<()> {
         permissions.set_mode(0o600);
         fs::set_permissions(path, permissions)?;
     }
+    // На Windows прав доступа в этом смысле нет: блок выше пуст, и параметр остаётся
+    // неиспользованным — это не упущение, а форма самой функции.
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -738,7 +746,7 @@ mod tests {
         let context = ExecutionContext::cli(CommandName::Test);
         let result = super::run_tests(&context, &config, &args);
         assert!(result.is_err());
-        let error = result.err().expect("error");
+        let error = result.expect_err("error");
         assert!(error.error.to_string().contains("unsafe path characters"));
     }
 

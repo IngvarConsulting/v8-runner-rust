@@ -103,12 +103,11 @@ pub fn execute(
     // отчёт — замаскированный.
     let reported_url = web_url.as_deref().map(mask_url_userinfo);
 
-    let launch = effective_launch_options(config, args)
-        .map_err(|error| UseCaseFailure::without_payload(error))?;
+    let launch = effective_launch_options(config, args).map_err(UseCaseFailure::without_payload)?;
     let external_epf_wait =
         external_epf_wait_plan(config, args, &launch).map_err(UseCaseFailure::without_payload)?;
-    let readiness_url = client_mcp_readiness_url(config, args)
-        .map_err(|error| UseCaseFailure::without_payload(error))?;
+    let readiness_url =
+        client_mcp_readiness_url(config, args).map_err(UseCaseFailure::without_payload)?;
     if args.dry_run {
         // Both options report an outcome observed from a running client, which a preview
         // never starts; answering them with a plan would be a fabricated observation.

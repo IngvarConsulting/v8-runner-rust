@@ -290,7 +290,7 @@ fn ensure_file_infobase(
         };
     }
 
-    if let Err(error) = prepare_infobase_parent(&infobase_dir) {
+    if let Err(error) = prepare_infobase_parent(infobase_dir) {
         return StepOutcome::failed("infobase", "create", started, error);
     }
 
@@ -463,15 +463,13 @@ fn ensure_edt_workspace(
             )),
         );
     }
-    if workspace.exists() && marker.exists() {
-        if projects.is_empty() {
-            return StepOutcome::skipped(
-                "edt_workspace",
-                "import",
-                started,
-                format!("workspace already initialized: {}", workspace.display()),
-            );
-        }
+    if workspace.exists() && marker.exists() && projects.is_empty() {
+        return StepOutcome::skipped(
+            "edt_workspace",
+            "import",
+            started,
+            format!("workspace already initialized: {}", workspace.display()),
+        );
     }
 
     if dry_run {

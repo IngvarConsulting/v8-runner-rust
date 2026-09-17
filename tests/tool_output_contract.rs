@@ -35,7 +35,7 @@ mod guardrail_support;
 
 use guardrail_support::{collect_rust_files, production_items};
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use syn::visit::Visit;
 use syn::{BinOp, Expr, ExprBinary, ExprMatch, ExprMethodCall, ItemConst, ItemStatic, Lit, Pat};
 
@@ -300,7 +300,7 @@ impl<'ast> Visit<'ast> for DecisionLiterals {
     }
 }
 
-fn relative_path(path: &PathBuf) -> String {
+fn relative_path(path: &Path) -> String {
     path.strip_prefix(repo_root())
         .expect("path inside repository")
         .to_string_lossy()

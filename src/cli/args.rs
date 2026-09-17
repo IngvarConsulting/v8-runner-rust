@@ -912,7 +912,7 @@ mod tests {
                 mode,
                 settings,
                 extension,
-                vendor_name,
+                vendor_name: _,
             }) => {
                 assert_eq!(path, "dist/ext.cfe");
                 assert!(!dry_run);

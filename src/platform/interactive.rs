@@ -209,7 +209,7 @@ impl InteractiveProcessExecutor {
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| InteractiveProcessError::MissingStderr {
+            .ok_or(InteractiveProcessError::MissingStderr {
                 cmd: rendered_command,
             })?;
 

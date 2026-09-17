@@ -38,7 +38,7 @@ pub fn execute(
     config: &AppConfig,
     request: &ToolsDownloadRequest,
 ) -> UseCaseResult<ToolsDownloadResult> {
-    tools_download(context, config, request).map_err(|error| UseCaseFailure::without_payload(error))
+    tools_download(context, config, request).map_err(UseCaseFailure::without_payload)
 }
 
 fn tools_download(
@@ -558,7 +558,7 @@ fn write_source_download_marker(target_path: &Path, marker_path: &Path) -> Resul
     })?;
     ensure_dir(parent).map_err(io_error("failed to create download marker parent"))?;
     fs::write(
-        &marker_path,
+        marker_path,
         format!(
             "{{\n  \"tool\": \"v8-runner\",\n  \"target\": \"{}\"\n}}\n",
             target_path.display()

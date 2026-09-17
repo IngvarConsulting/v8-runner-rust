@@ -75,11 +75,11 @@ pub fn execute(
     let mut setter = match (selected.provider, selected.location) {
         (Provider::Agent, location) => {
             match ExtensionAgent::open(context, config, location.map(|l| l.path).as_deref()) {
-                Ok(agent) => SafetySetter::Agent(agent),
+                Ok(agent) => SafetySetter::Agent(Box::new(agent)),
                 Err(error) => return Err(UseCaseFailure::without_payload(error)),
             }
         }
-        (_, Some(location)) => SafetySetter::Ibcmd(
+        (_, Some(location)) => SafetySetter::Ibcmd(Box::new(
             IbcmdDsl::new(
                 location.path,
                 match connection {
@@ -96,7 +96,7 @@ pub fn execute(
             .with_execution_policy(
                 context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
             ),
-        ),
+        )),
         (provider, None) => {
             return Err(UseCaseFailure::without_payload(
                 crate::use_cases::unimplemented_provider(
@@ -120,9 +120,11 @@ pub fn execute(
 
 /// Исполнитель одного и того же действия: `ibcmd` — процессом на цель, агент — одной
 /// сессией на команду.
+// Обе ветки тяжёлые — сессия агента и DSL ibcmd, — и без упаковки размер большей
+// платил бы каждый экземпляр независимо от того, какой исполнитель выбран.
 enum SafetySetter<'a> {
-    Ibcmd(IbcmdDsl<'a>),
-    Agent(ExtensionAgent),
+    Ibcmd(Box<IbcmdDsl<'a>>),
+    Agent(Box<ExtensionAgent>),
 }
 
 impl SafetySetter<'_> {

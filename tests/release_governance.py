@@ -117,6 +117,116 @@ class ReleaseGovernanceTest(unittest.TestCase):
         self.assertIn("MIN_CONSOLIDATED_MANIFEST_VERSION", verifier)
         self.assertIn("consolidated release assets require", verifier)
 
+    def test_ci_and_release_pin_the_same_toolchain(self) -> None:
+        """CI обязана проверять тот компилятор, которым собирается выпуск.
+
+        Пин живёт в трёх местах и разъехаться может молча: следующий подъём версии в
+        release.yml оставил бы CI на прежней, а свойство «CI гоняет релизный компилятор»
+        умерло бы незаметно. Кавычки не требуются: значение без них — та же версия и
+        та же дыра.
+        """
+        pins = {}
+        for name in ("ci.yml", "release.yml"):
+            workflow = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
+            steps = re.findall(r"uses:\s*dtolnay/rust-toolchain@\S+", workflow)
+            found = set(re.findall(r'toolchain:\s*"?([0-9]+\.[0-9]+(?:\.[0-9]+)?)"?', workflow))
+            self.assertEqual(
+                len(steps),
+                len(re.findall(r"toolchain:\s*\S+", workflow)),
+                f"{name}: every rust-toolchain step must pin a version explicitly",
+            )
+            self.assertEqual(
+                1, len(found), f"{name} must pin exactly one toolchain version: {found}"
+            )
+            pins[name] = found.pop()
+
+        self.assertEqual(
+            pins["ci.yml"],
+            pins["release.yml"],
+            "ci.yml and release.yml must pin the same toolchain, "
+            f"got {pins['ci.yml']} and {pins['release.yml']}",
+        )
+
+        # MSRV — обещание того же компилятора, а не отдельное число.
+        cargo = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+        msrv = re.search(r'^rust-version\s*=\s*"([^"]+)"', cargo, re.M)
+        self.assertIsNotNone(msrv, "Cargo.toml must declare rust-version")
+        self.assertTrue(
+            pins["ci.yml"].startswith(msrv.group(1)),
+            f"rust-version {msrv.group(1)} must match the pinned toolchain {pins['ci.yml']}",
+        )
+
+    def test_ci_enforces_formatting_and_lints(self) -> None:
+        """Гейты живут шагами джобы Contract и блокируют по-настоящему.
+
+        Список обязательных проверок ветки master привязан к именам джоб: вынеси их в
+        новую джобу — и они перестанут блокировать, пока его не поправит администратор.
+        Поэтому проверяется не наличие строк в файле, а то, что команды стоят шагами
+        именно этой джобы, без continue-on-error и без сужения до одной площадки.
+        """
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        job = self._workflow_job(ci, "contract")
+
+        gates = {
+            "cargo fmt --all --check": "ubuntu-latest",
+            "cargo clippy --locked --all-targets -- -D warnings": None,
+            "cargo deny check licenses sources": "ubuntu-latest",
+        }
+        for command, _ in gates.items():
+            self.assertIn(
+                command,
+                job,
+                f"{command!r} must be a step of the Contract job, not of a new one",
+            )
+
+        # Команда, закомментированная или обёрнутая в continue-on-error, перестаёт быть
+        # гейтом, оставаясь подстрокой файла.
+        for line in job.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                self.assertNotIn(
+                    "cargo clippy",
+                    stripped,
+                    "the lint gate must not be commented out",
+                )
+
+        blocking = job.split("- name: Run contract regression scope")[0]
+        soft = [
+            step
+            for step in blocking.split("      - name: ")[1:]
+            if "continue-on-error" in step
+        ]
+        self.assertEqual(
+            ["Report dependency advisories and duplicates"],
+            [step.splitlines()[0].strip() for step in soft],
+            "only the advisories report may be non-blocking",
+        )
+
+        # Линтер обязан идти и на Windows: код под cfg(windows) на Linux не собирается.
+        # Цель там боевая, а не все: тестовая полна мёртвого кода из-за cfg(unix)-гейтов
+        # на самих тестах, и это снимается отдельной работой.
+        self.assertIn("cargo clippy --locked --bins -- -D warnings", job)
+        windows_lint = job.split("- name: Lint (production target)")[1]
+        self.assertIn("matrix.os == 'windows-latest'", windows_lint.split("run:")[0])
+
+        assignments = re.findall(r"^\s*RUSTFLAGS\s*[:=]", ci, re.M)
+        self.assertEqual(
+            [],
+            assignments,
+            "-D warnings must be an argument: RUSTFLAGS would reach dependencies "
+            "and invalidate the shared build cache",
+        )
+
+    @staticmethod
+    def _workflow_job(workflow: str, name: str) -> str:
+        """Тело одной джобы: от её ключа до следующего на том же отступе."""
+        lines = workflow.splitlines()
+        start = next(i for i, line in enumerate(lines) if line == f"  {name}:")
+        for offset, line in enumerate(lines[start + 1 :], start=start + 1):
+            if line.startswith("  ") and not line.startswith("   ") and line.strip():
+                return "\n".join(lines[start:offset])
+        return "\n".join(lines[start:])
+
     def test_consolidated_contract_accepts_v07_prereleases_only(self) -> None:
         verifier = load_release_verifier()
 
