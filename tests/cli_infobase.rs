@@ -750,7 +750,6 @@ fn restore_rejects_a_non_dt_input_and_an_unreadable_one_before_dispatch() {
     assert!(!calls.exists(), "a refused request must not dispatch");
 }
 
-#[test]
 /// У `infobase restore` в цепочке умолчаний один Конфигуратор: `ibcmd` для DT
 /// экспериментален и назначается только явно. Без Конфигуратора восстанавливать некому.
 #[test]

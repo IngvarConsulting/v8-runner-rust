@@ -122,10 +122,14 @@ enum ReplaceFileTestPoint {
     RestoreBackup,
 }
 
+/// Тестовый шов, вклинивающийся в замену файла в названной точке.
+#[cfg(test)]
+type ReplaceFileTestHook = Box<dyn Fn(ReplaceFileTestPoint) -> std::io::Result<()>>;
+
 #[cfg(test)]
 thread_local! {
-    static REPLACE_FILE_TEST_HOOK: std::cell::RefCell<Option<Box<dyn Fn(ReplaceFileTestPoint) -> std::io::Result<()>>>> =
-        std::cell::RefCell::new(None);
+    static REPLACE_FILE_TEST_HOOK: std::cell::RefCell<Option<ReplaceFileTestHook>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]

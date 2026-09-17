@@ -3189,7 +3189,7 @@ impl<'a> ArtifactsJsonData<'a> {
     }
 }
 
-fn build_artifacts_envelope<'a>(result: &ArtifactsResult) -> Envelope<ArtifactsJsonData<'_>> {
+fn build_artifacts_envelope(result: &ArtifactsResult) -> Envelope<ArtifactsJsonData<'_>> {
     Envelope {
         ok: result.execution.is_ok(),
         command: CommandName::Artifacts.as_str().to_owned(),

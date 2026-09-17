@@ -1064,6 +1064,10 @@ fn empty_result_from_resolved(
     )
 }
 
+// Принятый waiver: пустой результат перечисляет поля отчёта поимённо, потому что
+// собирается до того, как появилась хоть одна его часть. Структура-аргумент здесь
+// была бы копией самого результата.
+#[allow(clippy::too_many_arguments)]
 fn empty_result(
     provider_dispatched: bool,
     mode: LoadMode,

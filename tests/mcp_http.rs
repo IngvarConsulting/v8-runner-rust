@@ -230,6 +230,9 @@ fn write_edt_configuration_source(path: &Path, project_name: &str) {
     .expect("module marker");
 }
 
+// Принятый waiver: тестовый помощник пишет конфиг по полям, и перечисление полей —
+// это и есть его смысл.
+#[allow(clippy::too_many_arguments)]
 fn write_http_edt_config(
     path: &Path,
     _base_path: &Path,

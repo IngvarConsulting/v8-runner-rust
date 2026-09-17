@@ -487,6 +487,11 @@ fn recreate_directory(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(path)
 }
 
+// Принятый waiver: шаг сборки одного набора берёт контекст, конфиг, набор, его
+// контекст, номер шага, пути частичной загрузки, фиксацию и исполнителя — десять
+// значений без общего владельца. Группировка в структуру — отдельная правка
+// оркестрации, её не делают попутно с включением линтера.
+#[allow(clippy::too_many_arguments)]
 fn execute_source_set_step(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -665,6 +670,8 @@ fn attach_partial_load_list_path(
     }
 }
 
+// Принятый waiver: ibcmd-вариант того же шага и по тем же причинам, что и выше.
+#[allow(clippy::too_many_arguments)]
 fn execute_source_set_step_ibcmd(
     context: &ExecutionContext,
     config: &AppConfig,
