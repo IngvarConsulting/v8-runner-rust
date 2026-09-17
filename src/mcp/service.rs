@@ -1240,7 +1240,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].0.command(), CommandName::Build);
         assert_eq!(requests[0].0.transport(), ExecutionTransport::McpStdio);
-        assert_eq!(requests[0].1.full_rebuild, true);
+        assert!(requests[0].1.full_rebuild);
         assert_eq!(requests[0].1.source_set.as_deref(), Some("main"));
     }
 
@@ -1317,7 +1317,7 @@ mod tests {
         assert_eq!(response.data["report"]["summary"]["failed"], 1);
         assert!(response.error.is_none());
         let requests = service.port.test_requests.borrow();
-        assert_eq!(requests[0].1.full, true);
+        assert!(requests[0].1.full);
         assert_eq!(requests[0].1.scope, TestScopeRequest::All);
         assert_eq!(requests[0].1.execution.profile.kind, RunnerKind::YaXUnit);
     }
@@ -1352,7 +1352,7 @@ mod tests {
 
         assert!(response.ok);
         let requests = service.port.test_requests.borrow();
-        assert_eq!(requests[0].1.full, true);
+        assert!(requests[0].1.full);
         assert_eq!(requests[0].1.scope, TestScopeRequest::All);
         assert_eq!(requests[0].1.execution.profile.kind, RunnerKind::Vanessa);
         assert_eq!(requests[0].1.execution.profile.id, "acceptance");

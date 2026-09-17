@@ -398,7 +398,7 @@ impl McpToolServer {
                             Some(SemaphoreWaitErrorKind::SemaphoreClosed),
                         );
                         ErrorData::internal_error(error.to_string(), None)
-                    }).map(|permit| {
+                    }).inspect(|_permit| {
                         self.telemetry.execution().record_semaphore_wait(
                             self.call_context.transport(),
                             tool.as_str(),
@@ -408,7 +408,6 @@ impl McpToolServer {
                             wait_started.elapsed(),
                             None,
                         );
-                        permit
                     }),
                 }
             }
@@ -438,7 +437,7 @@ impl McpToolServer {
                             Some(SemaphoreWaitErrorKind::SemaphoreClosed),
                         );
                         ErrorData::internal_error(error.to_string(), None)
-                    }).map(|permit| {
+                    }).inspect(|_permit| {
                         self.telemetry.execution().record_semaphore_wait(
                             self.call_context.transport(),
                             tool.as_str(),
@@ -448,7 +447,6 @@ impl McpToolServer {
                             wait_started.elapsed(),
                             None,
                         );
-                        permit
                     }),
                 }
             }

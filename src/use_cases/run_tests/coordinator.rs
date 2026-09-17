@@ -167,7 +167,7 @@ pub(super) fn run_tests(
 
     debug!("preparing test run artifacts");
     let prepare_artifacts_started = Instant::now();
-    let mut artifacts = match create_run_artifacts(config, &runner_id) {
+    let mut artifacts = match create_run_artifacts(config, runner_id) {
         Ok(artifacts) => artifacts,
         Err(error) => {
             let app_error =

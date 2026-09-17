@@ -319,11 +319,9 @@ pub(super) fn shutdown_session(
     active_pid: &AtomicU32,
 ) {
     if let Some(mut session) = session.take() {
-        if session.shutdown(timeout).is_err() {
-            if session.kill().is_err() {
-                let pid = active_pid.load(Ordering::SeqCst);
-                let _ = super::kill_process_group_by_pid(pid);
-            }
+        if session.shutdown(timeout).is_err() && session.kill().is_err() {
+            let pid = active_pid.load(Ordering::SeqCst);
+            let _ = super::kill_process_group_by_pid(pid);
         }
     } else {
         let pid = active_pid.load(Ordering::SeqCst);

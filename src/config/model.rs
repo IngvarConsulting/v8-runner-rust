@@ -473,21 +473,13 @@ pub struct ToolsConfig {
 /// MCP transport-neutral runtime configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "snake_case")]
+#[derive(Default)]
 pub struct McpConfig {
     /// HTTP transport settings for the future MCP server.
     pub http: McpHttpConfig,
 
     /// Shared execution limits for MCP calls.
     pub execution: McpExecutionConfig,
-}
-
-impl Default for McpConfig {
-    fn default() -> Self {
-        Self {
-            http: McpHttpConfig::default(),
-            execution: McpExecutionConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

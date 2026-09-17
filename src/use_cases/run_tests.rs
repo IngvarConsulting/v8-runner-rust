@@ -738,7 +738,7 @@ mod tests {
         let context = ExecutionContext::cli(CommandName::Test);
         let result = super::run_tests(&context, &config, &args);
         assert!(result.is_err());
-        let error = result.err().expect("error");
+        let error = result.expect_err("error");
         assert!(error.error.to_string().contains("unsafe path characters"));
     }
 
