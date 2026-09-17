@@ -166,6 +166,29 @@ jobs:
           bash --version
           python3 --version
 
+      # Разбирает сами рабочие процессы: примета в `release_governance.py` сверяет
+      # их устройство — состав работ и разрешимость `needs`, — но синтаксис, имена
+      # выражений и контекстов знает только actionlint. Гейт появился после того,
+      # как удаление одного шага унесло с собой заголовок работы: оба набора тестов
+      # остались зелёными, потому что сверяли подстроки, а GitHub такой файл не
+      # запускает вовсе.
+      - name: Lint workflows
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Версия и сумма фиксируются вместе с деревом по той же причине, что и у
+          # cargo-deny: гейт блокирующий, а плавающий инструмент краснел бы без
+          # единой правки рабочего процесса.
+          version=1.7.12
+          archive="actionlint_${version}_linux_amd64.tar.gz"
+          expected=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${archive}" \
+            "https://github.com/rhysd/actionlint/releases/download/v${version}/${archive}"
+          echo "${expected}  ${archive}" | sha256sum --check --status
+          tar -xzf "${archive}" actionlint
+          ./actionlint
+
       - name: Verify architecture registry
         run: python3 scripts/arch/registry.py --check
 
