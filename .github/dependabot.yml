@@ -2,15 +2,9 @@
 # package ecosystems to update and where the package manifests are located.
 # Please see the documentation for more information:
 # https://docs.github.com/github/administering-a-repository/configuration-options-for-dependency-updates
-# https://containers.dev/guide/dependabot
 
 version: 2
 updates:
- - package-ecosystem: "devcontainers"
-   directory: "/"
-   schedule:
-     interval: weekly
-
  # Зависимости Rust не обновлялись автоматически вовсе: без этого блока ни обновление
  # версии, снятой по уязвимости, ни выход стабильной замены предрелизной крипты никто
  # не увидит.
