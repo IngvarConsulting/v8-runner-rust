@@ -24,6 +24,7 @@ use crate::support::path::{
 };
 use crate::support::source_descriptor::{self, ExternalDescriptorParseError};
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::destruction_guard::DestructionConsent;
 use crate::use_cases::external_artifacts::ExternalArtifactKind;
 use crate::use_cases::interruption;
 use crate::use_cases::progress::log_live_stage;
@@ -90,6 +91,24 @@ struct ResolvedDumpTarget {
     platform_target_identity: String,
     lock_path: PathBuf,
     edt_base_project_name: Option<String>,
+    /// Разрешено ли уничтожить незафиксированную работу в каталоге цели.
+    consent: DestructionConsent,
+}
+
+impl ResolvedDumpTarget {
+    /// Согласие для публикации каталога платформы.
+    ///
+    /// У формата Designer это то же дерево, что видит человек. У EDT — служебный
+    /// снимок в `workPath/designer/<имя>`, который раннер сам и создаёт: спрашивать
+    /// о нём систему контроля версий незачем, а спросив, можно получить отказ на
+    /// собственном кеше.
+    fn platform_consent(&self) -> DestructionConsent {
+        if self.platform_target_path == self.target_path {
+            self.consent
+        } else {
+            DestructionConsent::RunnerOwned
+        }
+    }
 }
 
 #[cfg(test)]
@@ -186,7 +205,12 @@ fn run_full_dump_designer(
     }
 
     let publish_phase = publication
-        .publish_dir(context, DUMP_BACKUP_PREFIX, "failed to publish staged dump")
+        .publish_dir(
+            context,
+            DUMP_BACKUP_PREFIX,
+            "failed to publish staged dump",
+            resolved.platform_consent(),
+        )
         .map_err(|error| publication.cleanup_failure(error))?;
     debug!(target = %resolved.platform_target_path.display(), "published staged dump");
 
@@ -262,7 +286,12 @@ fn run_full_dump_ibcmd(
     }
 
     let publish_phase = publication
-        .publish_dir(context, DUMP_BACKUP_PREFIX, "failed to publish staged dump")
+        .publish_dir(
+            context,
+            DUMP_BACKUP_PREFIX,
+            "failed to publish staged dump",
+            resolved.platform_consent(),
+        )
         .map_err(|error| publication.cleanup_failure(error))?;
     debug!(target = %resolved.platform_target_path.display(), "published staged dump");
 
@@ -608,7 +637,13 @@ fn finalize_edt_dump(
     }
 
     let publish_phase = publication
-        .publish_dir(context, DUMP_BACKUP_PREFIX, "failed to publish staged dump")
+        .publish_dir(
+            context,
+            DUMP_BACKUP_PREFIX,
+            "failed to publish staged dump",
+            // Здесь публикуется дерево человека, а не служебный снимок.
+            resolved.consent,
+        )
         .map_err(|error| publication.cleanup_failure(error))?;
 
     Ok((
@@ -956,6 +991,11 @@ fn resolve_target(config: &AppConfig, args: &DumpArgs) -> Result<ResolvedDumpTar
         platform_target_identity,
         lock_path,
         edt_base_project_name,
+        consent: if args.discard_uncommitted {
+            DestructionConsent::Granted
+        } else {
+            DestructionConsent::AskFirst
+        },
     })
 }
 
@@ -986,6 +1026,7 @@ mod tests {
     };
     use crate::support::path::{nearest_existing_canonical_path, stable_path_identity};
     use crate::use_cases::context::ExecutionContext;
+    use crate::use_cases::destruction_guard::DestructionConsent;
     use crate::use_cases::external_artifacts::ExternalArtifactKind;
     use crate::use_cases::request::{DumpModeRequest, DumpRequest as DumpArgs};
     use crate::use_cases::result::UseCaseErrorKind;
@@ -1433,6 +1474,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Partial,
                 source_set: None,
                 extension: None,
@@ -1457,6 +1499,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Partial,
                 source_set: None,
                 extension: None,
@@ -1481,6 +1524,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Partial,
                 source_set: None,
                 extension: None,
@@ -1506,6 +1550,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Partial,
                 source_set: None,
                 extension: None,
@@ -1539,6 +1584,7 @@ exit 0"#,
                 &config,
                 &DumpArgs {
                     dry_run: false,
+                    discard_uncommitted: false,
                     mode: DumpModeRequest::Partial,
                     source_set: None,
                     extension: None,
@@ -1564,6 +1610,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Incremental,
                 source_set: None,
                 extension: None,
@@ -1588,6 +1635,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Full,
                 source_set: None,
                 extension: None,
@@ -1617,6 +1665,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Full,
                 source_set: None,
                 extension: None,
@@ -1640,6 +1689,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: Some("ext".to_owned()),
@@ -1670,6 +1720,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -1699,6 +1750,7 @@ exit 0"#,
             platform_target_identity: "id".to_owned(),
             lock_path: dir.path().join(".lock"),
             edt_base_project_name: None,
+            consent: DestructionConsent::RunnerOwned,
         };
 
         let error = validate_publish_target(&resolved).expect_err("expected invalid");
@@ -1750,6 +1802,7 @@ exit 0"#,
             platform_target_identity: identity.clone(),
             lock_path: target.parent().expect("parent").join(".lock"),
             edt_base_project_name: None,
+            consent: DestructionConsent::RunnerOwned,
         };
 
         cleanup_orphan_dirs(&resolved).expect("cleanup");
@@ -1788,6 +1841,7 @@ exit 0"#,
             platform_target_identity: identity.clone(),
             lock_path: target.parent().expect("parent").join(".lock"),
             edt_base_project_name: None,
+            consent: DestructionConsent::RunnerOwned,
         };
 
         cleanup_orphan_dirs(&resolved).expect("cleanup");
@@ -1821,6 +1875,7 @@ exit 0"#,
             platform_target_identity: identity.clone(),
             lock_path: target.parent().expect("parent").join(".lock"),
             edt_base_project_name: None,
+            consent: DestructionConsent::RunnerOwned,
         };
 
         cleanup_orphan_dirs(&resolved).expect("cleanup");
@@ -1862,6 +1917,7 @@ exit 0"#,
             platform_target_identity: identity.clone(),
             lock_path: target.parent().expect("parent").join(".lock"),
             edt_base_project_name: None,
+            consent: DestructionConsent::RunnerOwned,
         };
 
         cleanup_orphan_dirs(&resolved).expect("cleanup");
@@ -1912,6 +1968,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Incremental,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -1943,6 +2000,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Incremental,
                 source_set: Some("ext".to_owned()),
                 extension: Some("ext".to_owned()),
@@ -1977,6 +2035,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2044,6 +2103,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2096,6 +2156,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("ext".to_owned()),
                 extension: Some("ext".to_owned()),
@@ -2126,6 +2187,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2159,6 +2221,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2198,6 +2261,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2246,6 +2310,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("ext".to_owned()),
                 extension: Some("ext".to_owned()),
@@ -2286,6 +2351,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2324,6 +2390,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2355,6 +2422,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2388,6 +2456,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2429,6 +2498,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2469,6 +2539,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2505,6 +2576,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Incremental,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2538,6 +2610,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2587,6 +2660,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2633,6 +2707,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Incremental,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2676,6 +2751,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("ext".to_owned()),
                 extension: Some("ext".to_owned()),
@@ -2717,6 +2793,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2753,6 +2830,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Incremental,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2795,6 +2873,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2845,6 +2924,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Incremental,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2893,6 +2973,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Partial,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -2940,6 +3021,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -3098,6 +3180,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -3161,6 +3244,7 @@ exit 0"#,
             &config,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -3247,6 +3331,7 @@ exit 0"#,
             &config_real,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,
@@ -3258,6 +3343,7 @@ exit 0"#,
             &config_link,
             &DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: DumpModeRequest::Full,
                 source_set: Some("main".to_owned()),
                 extension: None,

@@ -70,6 +70,7 @@ pub fn execute(
         source_set: Some("main".to_owned()),
         extension: None,
         objects: Vec::new(),
+        discard_uncommitted: false,
     };
     match dump_config::execute(context, &config, &dump_request) {
         Ok(dump) => Ok(bootstrap_result(

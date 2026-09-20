@@ -294,7 +294,12 @@ fn publish_full(
         return Err(publication.cleanup_failure(error));
     }
     let publish_phase = publication
-        .publish_dir(context, DUMP_BACKUP_PREFIX, "failed to publish staged dump")
+        .publish_dir(
+            context,
+            DUMP_BACKUP_PREFIX,
+            "failed to publish staged dump",
+            resolved.platform_consent(),
+        )
         .map_err(|error| publication.cleanup_failure(error))?;
     Ok(merge_optional_messages(
         publish_phase.cleanup_warning,

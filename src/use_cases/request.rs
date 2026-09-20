@@ -142,6 +142,9 @@ pub struct DumpRequest {
     pub objects: Vec<String>,
     /// Resolve the target and locate the platform without dumping anything.
     pub dry_run: bool,
+    /// Replace the target directory although it holds work version control cannot
+    /// give back. Only a human can grant this; automated transports never do.
+    pub discard_uncommitted: bool,
 }
 
 /// Transport-neutral convert scope.
@@ -160,6 +163,9 @@ pub struct ConvertRequest {
     pub output_root: Option<String>,
     /// Resolve, validate and locate the EDT CLI without converting anything.
     pub dry_run: bool,
+    /// Replace the target directory although it holds work version control cannot
+    /// give back. Only a human can grant this; automated transports never do.
+    pub discard_uncommitted: bool,
 }
 
 /// Transport-neutral artifact export mode.
