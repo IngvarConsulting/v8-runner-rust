@@ -47,9 +47,9 @@
 <div class="tablewrap"><table>
 <thead><tr><th>предмет</th><th>XML платформы</th><th>проект EDT</th><th>пакет</th></tr></thead>
 <tbody>
-<tr><td class="k">конфигурация</td><td>каталог с <code>Configuration.xml</code> <span class="ref">(<a href="platform.html#t14">14</a>)</span></td><td>проект конфигурации <span class="ref">(<a href="platform.html#t97">97</a>)</span></td><td><code>.cf</code></td></tr>
-<tr><td class="k">расширение</td><td>тот же формат, объявлено расширением <span class="ref">(<a href="platform.html#t31">31</a>)</span></td><td>проект расширения, связан с проектом конфигурации <span class="ref">(<a href="platform.html#t98">98</a>)</span></td><td><code>.cfe</code></td></tr>
-<tr><td class="k">внешние обработки и отчёты</td><td>каталог с несколькими обработками</td><td>проект внешних отчётов и обработок <span class="ref">(<a href="platform.html#t98">98</a>)</span></td><td><code>.epf</code>, <code>.erf</code></td></tr>
+<tr><td class="k">конфигурация</td><td>каталог с <code>Configuration.xml</code> <span class="ref">(<a href="platform.html#t14">14</a>)</span></td><td>проект конфигурации <span class="ref">(<a href="platform.html#t98">98</a>)</span></td><td><code>.cf</code></td></tr>
+<tr><td class="k">расширение</td><td>тот же формат, объявлено расширением <span class="ref">(<a href="platform.html#t31">31</a>)</span></td><td>проект расширения, связан с проектом конфигурации <span class="ref">(<a href="platform.html#t99">99</a>)</span></td><td><code>.cfe</code></td></tr>
+<tr><td class="k">внешние обработки и отчёты</td><td>каталог с несколькими обработками</td><td>проект внешних отчётов и обработок <span class="ref">(<a href="platform.html#t99">99</a>)</span></td><td><code>.epf</code>, <code>.erf</code></td></tr>
 </tbody>
 </table></div>
 
@@ -62,17 +62,14 @@ source-set:
   - name: main
     type: configuration
     path: src/cf
-  - name: my-ext
+  - name: my-ext        # псевдоним в проекте; имя в базе — Name из src/ext/Configuration.xml
     type: extension
     path: src/ext
-    installedName: РасширениеВБазе   # имя на той стороне, по умолчанию равно name
-    namePrefix: Расш_
-    purpose: add-on
   - name: tools
     type: external
     path: src/epf</code></pre>
 
-<p>У формата EDT две ступени. Проект правят в EDT, а с базой платформа обменивается только XML-выгрузкой <span class="ref">(<a href="platform.html#t96">96</a>)</span>. Экспорт проекта в XML раннер держит у себя как кеш: он не лежит под контролем версий и пересчитывается по изменившемуся.</p>
+<p>У формата EDT две ступени. Проект правят в EDT, а с базой платформа обменивается только XML-выгрузкой <span class="ref">(<a href="platform.html#t97">97</a>)</span>. Экспорт проекта в XML раннер держит у себя как кеш: он не лежит под контролем версий и пересчитывается по изменившемуся.</p>
 
 <h2 id="inside">Что лежит в базе</h2>
 <p>Информационная база держит несколько конфигураций сразу <span class="ref">(<a href="platform.html#t1">1</a>)</span>. Для каждого набора исходников в ней есть <strong>своя пара</strong>: то, что правят, и то, с чем работают пользователи <span class="ref">(<a href="platform.html#t7">7</a>)</span>.</p>
@@ -83,7 +80,7 @@ source-set:
 <tr><td class="k">основная конфигурация</td><td>то, что правят в Конфигураторе и куда загружают исходники</td><td>отправка, Конфигуратор</td></tr>
 <tr><td class="k">конфигурация базы данных</td><td>то, по чему построены таблицы и с чем работают сеансы; только для чтения <span class="ref">(<a href="platform.html#t2">2</a>)</span></td><td>только применение</td></tr>
 <tr><td class="k">конфигурации поставщика</td><td>эталоны типовых решений, есть у базы на поддержке <span class="ref">(<a href="platform.html#t8">8</a>)</span>; их может быть несколько, каждая с именем <span class="ref">(<a href="platform.html#t7">7</a>)</span></td><td>обновление поставщика</td></tr>
-<tr><td class="k">расширение и его база данных</td><td>та же пара на каждое установленное расширение <span class="ref">(<a href="platform.html#t39">39</a>)</span></td><td>отправка и применение с именем расширения</td></tr>
+<tr><td class="k">расширение и его база данных</td><td>та же пара на каждое установленное расширение <span class="ref">(<a href="platform.html#t40">40</a>)</span></td><td>отправка и применение с именем расширения</td></tr>
 </tbody>
 </table></div>
 
@@ -190,10 +187,10 @@ stateDiagram-v2
 <thead><tr><th>состояние ссылки</th><th>что это значит</th><th>чем переходят</th></tr></thead>
 <tbody>
 <tr><td class="k">есть с обеих сторон</td><td>обычная работа</td><td><code>push</code>, <code>pull</code></td></tr>
-<tr><td class="k">есть в проекте, нет в базе</td><td>расширение ещё не заведено</td><td><code>push my-ext</code> заводит его сам <span class="ref">(<a href="platform.html#t37">37</a>)</span></td></tr>
+<tr><td class="k">есть в проекте, нет в базе</td><td>расширение ещё не заведено</td><td><code>push my-ext</code> заводит его сам <span class="ref">(<a href="platform.html#t38">38</a>)</span></td></tr>
 <tr><td class="k">есть в базе, нет в проекте</td><td>поставил кто-то другой или пришло с обновлением</td><td><code>pull my-ext</code> после объявления набора исходников</td></tr>
 <tr><td class="k">выключено</td><td>установлено, но не действует</td><td><code>extensions set my-ext --active no</code></td></tr>
-<tr><td class="k">больше не нужно</td><td>уводит данные, которые добавляло <span class="ref">(<a href="platform.html#t40">40</a>)</span></td><td><code>push --delete my-ext</code></td></tr>
+<tr><td class="k">больше не нужно</td><td>уводит данные, которые добавляло <span class="ref">(<a href="platform.html#t41">41</a>)</span></td><td><code>push --delete my-ext</code></td></tr>
 </tbody>
 </table></div>
 
@@ -267,7 +264,7 @@ infobase: File="/srv/ib/demo"
 <tbody>
 <tr><td class="k">что происходит</td><td>выгрузка ложится поверх; чего в базе нет, остаётся на месте</td><td>каталог приводится ровно к базе, лишнее исчезает</td></tr>
 <tr><td class="k">когда нужно</td><td>базу правили мимо исходников, расхождение надо увидеть в системе контроля версий</td><td>каталог считается производным от базы и должен ей соответствовать</td></tr>
-<tr><td class="k">формат EDT</td><td colspan="2">слияния нет ни в одном режиме: EDT сводит изменения интерактивно <span class="ref">(<a href="platform.html#t97">97</a>)</span>, поэтому выгрузка либо заменяет проект, либо отказывается</td></tr>
+<tr><td class="k">формат EDT</td><td colspan="2">слияния нет ни в одном режиме: EDT сводит изменения интерактивно <span class="ref">(<a href="platform.html#t98">98</a>)</span>, поэтому выгрузка либо заменяет проект, либо отказывается</td></tr>
 </tbody>
 </table></div>
 

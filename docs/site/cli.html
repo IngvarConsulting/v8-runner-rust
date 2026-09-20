@@ -109,10 +109,10 @@
 <tr><td class="k"><code>push --full</code></td><td>полная загрузка вместо частичной: память о прошлом разе не используется, каталог отправляется целиком</td><td>меняет</td></tr>
 <tr><td class="k"><code>push --force</code></td><td>отправляет, даже если база ушла вперёд или памяти о ней ещё нет: основная конфигурация на той стороне перезаписывается, её непринятое теряется</td><td>меняет</td></tr>
 <tr><td class="k"><code>push --delete &lt;ссылка&gt;</code></td><td>убирает расширение из базы вместе с его данными</td><td>меняет</td></tr>
-<tr><td class="k"><code>apply</code></td><td>приводит базу данных к основной конфигурации и больше ничего <span class="ref">(<a href="platform.html#t92">92</a>)</span></td><td>меняет</td></tr>
+<tr><td class="k"><code>apply</code></td><td>приводит базу данных к основной конфигурации и больше ничего <span class="ref">(<a href="platform.html#t93">93</a>)</span></td><td>меняет</td></tr>
 <tr><td class="k"><code>apply --sessions disable|force</code></td><td>что делать с чужими сеансами, когда нужен монопольный доступ. По умолчанию их не трогают <span class="ref">(<a href="platform.html#t4">4</a>)</span></td><td>меняет</td></tr>
 <tr><td class="k"><code>load &lt;файл&gt;</code></td><td>загружает пакет <code>.cf</code> или <code>.cfe</code> в основную конфигурацию, целиком заменяя её <span class="ref">(<a href="platform.html#t10">10</a>)</span></td><td>меняет</td></tr>
-<tr><td class="k"><code>load &lt;файл&gt; --mode combine|update</code></td><td>объединяет с пакетом по файлу настроек или обновляет конфигурацию поставщика <span class="ref">(<a href="platform.html#t47">47</a>)</span></td><td>меняет</td></tr>
+<tr><td class="k"><code>load &lt;файл&gt; --mode combine|update</code></td><td>объединяет с пакетом по файлу настроек или обновляет конфигурацию поставщика <span class="ref">(<a href="platform.html#t48">48</a>)</span></td><td>меняет</td></tr>
 </tbody>
 </table></div>
 
@@ -125,7 +125,7 @@
 <tbody>
 <tr><td class="k"><code>init</code></td><td>заводит проект здесь: находит наборы исходников, пишет <code>v8project.yaml</code> и местный слой. Наружу не выходит</td><td>нет</td></tr>
 <tr><td class="k"><code>clone --from &lt;строка&gt;</code></td><td>заводит проект из существующей базы: привязка и первая выгрузка</td><td>читает</td></tr>
-<tr><td class="k"><code>infobase create</code></td><td>создаёт саму информационную базу: файловую или в кластере <span class="ref">(<a href="platform.html#t63">63</a>)</span>; для формата EDT — и рабочую область</td><td>создаёт</td></tr>
+<tr><td class="k"><code>infobase create</code></td><td>создаёт саму информационную базу: файловую или в кластере <span class="ref">(<a href="platform.html#t64">64</a>)</span>; для формата EDT — и рабочую область</td><td>создаёт</td></tr>
 </tbody>
 </table></div>
 
@@ -160,7 +160,7 @@ v8-runner status --all                           # все объявленные
 <thead><tr><th>команда</th><th>что делает</th><th>база</th></tr></thead>
 <tbody>
 <tr><td class="k"><code>infobase save</code></td><td>сохраняет конфигурацию базы в пакет <code>.cf</code> или <code>.cfe</code>: основную или, с <code>--state db</code>, конфигурацию базы данных <span class="ref">(<a href="platform.html#t11">11</a>)</span></td><td>читает</td></tr>
-<tr><td class="k"><code>infobase dump</code></td><td>выгружает базу в переносимый <code>.dt</code>. Это образ для переноса; резервной копией документация его не считает <span class="ref">(<a href="platform.html#t62">62</a>)</span></td><td>читает, монопольно</td></tr>
+<tr><td class="k"><code>infobase dump</code></td><td>выгружает базу в переносимый <code>.dt</code>. Это образ для переноса; резервной копией документация его не считает <span class="ref">(<a href="platform.html#t63">63</a>)</span></td><td>читает, монопольно</td></tr>
 <tr><td class="k"><code>infobase restore</code></td><td>загружает базу из <code>.dt</code>, уничтожая текущие данные</td><td>заменяет</td></tr>
 </tbody>
 </table></div>
@@ -173,21 +173,21 @@ v8-runner status --all                           # все объявленные
 <thead><tr><th>команда</th><th>что делает</th><th>база</th></tr></thead>
 <tbody>
 <tr><td class="k"><code>make</code></td><td>собирает пакет из исходников: <code>.cf</code>, <code>.cfe</code>, <code>.epf</code>, <code>.erf</code>. Для конфигурации и внешних обработок платформа делает это без информационной базы <span class="ref">(<a href="platform.html#t29">29</a>)</span></td><td>нет</td></tr>
-<tr><td class="k"><code>check</code></td><td>проверка конфигурации командой <code>/CheckConfig</code>: целостность, ссылки, синтаксис по режимам, обработчики, модальность <span class="ref">(<a href="platform.html#t67">67</a>)</span>; для формата EDT — проверка проекта</td><td>читает · нет для EDT</td></tr>
-<tr><td class="k"><code>test yaxunit|va</code></td><td>отправляет исходники и прогоняет тесты клиентом <span class="ref">(<a href="platform.html#t71">71</a>, <a href="platform.html#t72">72</a>)</span>; <code>--no-push</code> — только прогон</td><td>меняет, запускает клиент</td></tr>
-<tr><td class="k"><code>convert</code></td><td>переводит исходники между видами: XML платформы, проект EDT, пакет <span class="ref">(<a href="platform.html#t96">96</a>, <a href="platform.html#t29">29</a>)</span></td><td>нет</td></tr>
+<tr><td class="k"><code>check</code></td><td>проверка конфигурации командой <code>/CheckConfig</code>: целостность, ссылки, синтаксис по режимам, обработчики, модальность <span class="ref">(<a href="platform.html#t68">68</a>)</span>; для формата EDT — проверка проекта</td><td>читает · нет для EDT</td></tr>
+<tr><td class="k"><code>test yaxunit|va</code></td><td>отправляет исходники и прогоняет тесты клиентом <span class="ref">(<a href="platform.html#t72">72</a>, <a href="platform.html#t73">73</a>)</span>; <code>--no-push</code> — только прогон</td><td>меняет, запускает клиент</td></tr>
+<tr><td class="k"><code>convert</code></td><td>переводит исходники между видами: XML платформы, проект EDT, пакет <span class="ref">(<a href="platform.html#t97">97</a>, <a href="platform.html#t29">29</a>)</span></td><td>нет</td></tr>
 </tbody>
 </table></div>
 
-<p><code>check</code> назван по тому, что делает платформа: <code>/CheckConfig</code> проверяет целостность, ссылки и обработчики, синтаксис — лишь часть <span class="ref">(<a href="platform.html#t67">67</a>)</span>. Слово «синтаксис» обещало бы меньше, чем приходит в ответе.</p>
+<p><code>check</code> назван по тому, что делает платформа: <code>/CheckConfig</code> проверяет целостность, ссылки и обработчики, синтаксис — лишь часть <span class="ref">(<a href="platform.html#t68">68</a>)</span>. Слово «синтаксис» обещало бы меньше, чем приходит в ответе.</p>
 
 <h3>Окружение</h3>
 
 <div class="tablewrap"><table class="map">
 <thead><tr><th>команда</th><th>что делает</th><th>база</th></tr></thead>
 <tbody>
-<tr><td class="k"><code>extensions list|set</code></td><td>состав установленных расширений и их свойства: активность, безопасный режим, защита от опасных действий <span class="ref">(<a href="platform.html#t42">42</a>)</span></td><td>читает · меняет</td></tr>
-<tr><td class="k"><code>publish</code></td><td>публикует базу на Apache или IIS <span class="ref">(<a href="platform.html#t60">60</a>)</span>; базу при этом не открывает</td><td>нет</td></tr>
+<tr><td class="k"><code>extensions list|set</code></td><td>состав установленных расширений и их свойства: активность, безопасный режим, защита от опасных действий <span class="ref">(<a href="platform.html#t43">43</a>)</span></td><td>читает · меняет</td></tr>
+<tr><td class="k"><code>publish</code></td><td>публикует базу на Apache или IIS <span class="ref">(<a href="platform.html#t61">61</a>)</span>; базу при этом не открывает</td><td>нет</td></tr>
 <tr><td class="k"><code>launch thin|thick|ordinary|designer|mcp</code></td><td>запускает клиент или Конфигуратор по административному адресу; <code>--via web</code> — по опубликованному</td><td>открывает</td></tr>
 <tr><td class="k"><code>launch web</code></td><td>открывает опубликованную базу в браузере</td><td>открывает</td></tr>
 <tr><td class="k"><code>tools download …</code></td><td>скачивание YAxUnit, Vanessa, клиентского MCP</td><td>нет</td></tr>
@@ -221,27 +221,23 @@ v8-runner status --all                           # все объявленные
 
 <h2 id="ext">Расширения — ссылки на той стороне</h2>
 
-<p>У конфигурации и у каждого расширения своя пара «основная ↔ база данных» <span class="ref">(<a href="platform.html#t7">7</a>, <a href="platform.html#t39">39</a>)</span>. Значит база держит несколько независимых ссылок, и указание ссылки — обычный довод команды.</p>
+<p>У конфигурации и у каждого расширения своя пара «основная ↔ база данных» <span class="ref">(<a href="platform.html#t7">7</a>, <a href="platform.html#t40">40</a>)</span>. Значит база держит несколько независимых ссылок, и указание ссылки — обычный довод команды.</p>
 
 <pre class="sh"><code>v8-runner push                    все наборы исходников
 v8-runner push main               только конфигурацию
 v8-runner push my-ext             только расширение
-v8-runner push my-ext:ИмяВБазе    разовая подмена соответствия
 v8-runner pull --all              и расширения, которых в проекте ещё нет</code></pre>
 
 <h3>Имя здесь и имя там — разные имена</h3>
 
-<p>Набор исходников называется так, как удобно проекту. Расширение в базе называется так, как его завели, и в базе это имя уникально <span class="ref">(<a href="platform.html#t35">35</a>)</span>. Соответствие объявлено один раз, рядом с набором исходников:</p>
+<p>Набор исходников называется так, как удобно проекту: это псевдоним, как <code>origin</code>. Расширение в базе называется так, как записано в его <code>Configuration.xml</code>, вместе с префиксом имён и назначением <span class="ref">(<a href="platform.html#t35">35</a>)</span>, и в базе это имя уникально <span class="ref">(<a href="platform.html#t36">36</a>)</span>. Объявлять соответствие в конфигурации не нужно: раннер читает имя из исходников.</p>
 
 <pre class="sh"><code>source-set:
-  - name: my-ext
+  - name: my-ext        # псевдоним в проекте
     type: extension
-    path: src/ext
-    installedName: РасширениеВБазе   # по умолчанию равно name
-    namePrefix: Расш_
-    purpose: add-on</code></pre>
+    path: src/ext       # в src/ext/Configuration.xml: Name, NamePrefix, назначение</code></pre>
 
-<p>Там же объявлены префикс и назначение: платформе они нужны при заведении расширения, а в исходниках их нет <span class="ref">(<a href="platform.html#t34">34</a>)</span>. Раз они объявлены, отправка создаёт отсутствующее расширение сама <span class="ref">(<a href="platform.html#t37">37</a>)</span>, как <code>git push -u</code> создаёт отсутствующую ветку. Отдельной команды «создать расширение» нет: создание — следствие первой отправки.</p>
+<p>Платформе имя, префикс и назначение нужны при заведении расширения <span class="ref">(<a href="platform.html#t34">34</a>)</span>. Раз они лежат в <code>Configuration.xml</code>, отправка создаёт отсутствующее расширение сама <span class="ref">(<a href="platform.html#t38">38</a>)</span>, как <code>git push -u</code> создаёт отсутствующую ветку. Отдельной команды «создать расширение» нет: создание — следствие первой отправки.</p>
 
 <h3>У расширения в базе без проекта есть имя</h3>
 
@@ -294,7 +290,7 @@ v8-runner pull --all              и расширения, которых в п�
 </table></div>
 
 <div class="note">
-<p><strong><code>push --delete</code> опаснее своего тёзки.</strong> Удаление ветки в гите дёшево и достаётся из журнала ссылок. Удаление расширения из базы уводит данные, которые оно добавляло <span class="ref">(<a href="platform.html#t40">40</a>)</span>, и журнала ссылок там нет. Имя знакомое, цена другая, поэтому команда спрашивает подтверждение жёстче, чем гит. Это единственное место, где словарь сознательно расходится с поведением тёзки, и расходится в сторону осторожности.</p>
+<p><strong><code>push --delete</code> опаснее своего тёзки.</strong> Удаление ветки в гите дёшево и достаётся из журнала ссылок. Удаление расширения из базы уводит данные, которые оно добавляло <span class="ref">(<a href="platform.html#t41">41</a>)</span>, и журнала ссылок там нет. Имя знакомое, цена другая, поэтому команда спрашивает подтверждение жёстче, чем гит. Это единственное место, где словарь сознательно расходится с поведением тёзки, и расходится в сторону осторожности.</p>
 </div>
 
 <h2 id="synonyms">Скрытые синонимы</h2>
