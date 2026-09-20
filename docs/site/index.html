@@ -6,86 +6,90 @@
 <title>v8-runner</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="styles.css?v=14">
+<link rel="stylesheet" href="styles.css?v=15">
+<style>
+  ol.path { padding-left: 1.4em; }
+  ol.path li { margin: 8px 0; }
+</style>
 </head>
 <body>
 <div class="topbar"><div class="in">
   <a class="brand" href="index.html">v8-runner</a>
   <nav>
     <a href="index.html" aria-current="page">Начало</a>
-    <a href="pairing.html">База и исходники</a>
+    <a href="platform.html">Платформа</a>
+    <a href="problems.html">Трудности</a>
+    <a href="architecture.html">Компоненты</a>
+    <a href="sources.html">Исходники</a>
     <a href="cli.html">Словарь</a>
-    <a href="scenarios.html">Команды</a>
-    <a href="usecases.html">Сценарии</a>
-    <a href="architecture.html">Архитектура</a>
     <a class="gh" href="https://github.com/IngvarConsulting/v8-runner-rust" aria-label="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span class="gh-stars" hidden></span></a>
   </nav>
 </div></div>
 
 <main class="page">
 <h1>Исходники 1С → действия над базой</h1>
-<p class="lede">v8-runner — программа командной строки, которая делает с базой 1С то, что вы делали бы руками через Конфигуратор, <code>ibcmd</code> и EDT CLI. Она сама находит платформу, выбирает инструмент и отвечает одинаково у человека, в CI и у ИИ-агента.</p>
+<p class="lede">v8-runner — программа командной строки, которая делает с базой 1С то, что вы делали бы руками через Конфигуратор, <code>ibcmd</code> и EDT CLI. Она сама находит платформу, выбирает инструмент и отвечает одинаково человеку, сценарию сборки и языковой модели.</p>
 
-<pre><code>v8-runner init              # найти исходники, записать конфиг
-v8-runner infobase create   # создать базу
+<pre><code># есть исходники, базы нет
+v8-runner init              # найти исходники, записать конфиг
+v8-runner infobase create   # создать базу по адресу из конфига
 v8-runner push              # отправить исходники в базу
-v8-runner test yaxunit all</code></pre>
+v8-runner test yaxunit all
 
-<p><a href="scenarios.html"><strong>Команды под ваши условия →</strong></a></p>
+# есть база, исходников нет
+v8-runner clone --from "File=/srv/ib/demo"   # привязать каталог и выгрузить</code></pre>
+
+<div class="note">
+<p><strong>Сайт описывает целевое состояние.</strong> Каждая страница говорит, каким раннер должен быть и почему. Расхождения с текущим кодом собираются отдельно и превращаются в план работ; здесь их нет.</p>
+</div>
+
+<h2>Как читать</h2>
+<p>Страницы идут от платформы к командам. Каждая следующая опирается на предыдущую и ссылается на неё по номерам.</p>
+<ol class="path">
+  <li><a href="platform.html"><strong>Платформа</strong></a> — что утверждает документация 1С, по одному тезису на строку, каждый со ссылкой на ИТС.</li>
+  <li><a href="problems.html"><strong>Трудности</strong></a> — что в поведении платформы мешает работать без рук, и чем раннер на это отвечает.</li>
+  <li><a href="architecture.html"><strong>Компоненты</strong></a> — из чего состоит система: компоненты платформы, её утилиты, сам раннер и каналы между ними.</li>
+  <li><a href="sources.html"><strong>Исходники и база</strong></a> — какие бывают исходники, что им соответствует в базе, в каких состояниях они бывают.</li>
+  <li><a href="cli.html"><strong>Словарь команд</strong></a> — вся поверхность командной строки и правило, по которому выбрано каждое имя.</li>
+</ol>
+<p>Рядом: <a href="scenarios.html">Подбор</a> команд под ваши условия, <a href="usecases.html">Сценарии</a> с потоками данных и <a href="deployments.html">Расстановки</a> платформы по машинам.</p>
 
 <h2>С чем работает</h2>
 <div class="tablewrap"><table>
 <tbody>
 <tr><td class="k">формат исходников</td><td><ul class="opts"><li>XML платформы</li><li>проект EDT</li></ul></td></tr>
-<tr><td class="k">тип исходников</td><td><ul class="opts"><li>конфигурация</li><li>расширение</li><li>внешняя обработка</li><li>внешний отчёт</li></ul></td></tr>
+<tr><td class="k">предмет</td><td><ul class="opts"><li>конфигурация</li><li>расширение</li><li>внешние обработки и отчёты</li></ul></td></tr>
 <tr><td class="k">где база</td><td><ul class="opts"><li>файловая</li><li>кластер 1С</li><li>автономный сервер</li></ul></td></tr>
 <tr><td class="k">что делаете</td><td><ul class="opts cmds">
 <li><code>status</code> понять, что происходит</li>
-<li><code>init</code> найти исходники, записать конфиг</li>
+<li><code>init</code> · <code>clone</code> завести проект</li>
 <li><code>infobase create</code> создать базу</li>
-<li><code>push</code> отправить исходники в базу</li>
+<li><code>push</code> · <code>apply</code> отправить исходники в базу и применить</li>
 <li><code>pull</code> забрать изменения из базы</li>
-<li><code>test</code> прогнать тесты</li>
-<li><code>load</code> применить .cf или .cfe</li>
-<li><code>make</code> собрать .cf, .cfe, .epf, .erf</li>
-<li><code>infobase configuration export</code> конфигурацию базы в файл</li>
-<li><code>infobase dump</code> · <code>restore</code> снять базу в .dt и вернуть</li>
-<li><code>extensions</code> расширения базы</li>
-<li><code>syntax</code> проверка синтаксиса</li>
-<li><code>publish</code> опубликовать базу на Apache или IIS</li>
-<li><code>launch</code> запустить клиент или Конфигуратор</li>
-<li><code>launch web</code> открыть опубликованную базу в браузере</li>
-<li><code>convert</code> перевести исходники между форматами</li>
+<li><code>load</code> загрузить пакет .cf или .cfe</li>
+<li><code>make</code> собрать пакет из исходников</li>
+<li><code>check</code> · <code>test</code> проверить и прогнать тесты</li>
+<li><code>infobase save</code> · <code>infobase dump</code> · <code>infobase restore</code> конфигурация базы в пакет, база в .dt и обратно</li>
+<li><code>extensions</code> · <code>publish</code> · <code>launch</code> · <code>convert</code></li>
 </ul></td></tr>
 </tbody></table></div>
-
-<h2 id="takes-on">Что раннер берёт на себя</h2>
-<p>Запустить Конфигуратор из командной строки нетрудно. Трудно другое — и это раннер и делает за вас.</p>
-<div class="tablewrap"><table>
-<tbody>
-<tr><td class="k">найти платформу</td><td>версий на машине бывает несколько, пути у них разные на каждой системе</td></tr>
-<tr><td class="k">выбрать инструмент</td><td>одну и ту же работу умеют Конфигуратор, <code>ibcmd</code> и агент, но не всякую и не на всякой базе</td></tr>
-<tr><td class="k">понять, что изменилось</td><td>загружать и выгружать целиком долго, а чтобы работать по изменившемуся, надо помнить прошлое состояние — и платформа помнит его не про вашу базу</td></tr>
-<tr><td class="k">не потерять вашу работу</td><td>полная выгрузка заменяет каталог исходников; раннер сначала спросит, если терять есть что</td></tr>
-<tr><td class="k">ответить понятно</td><td>код возврата и журнал платформы превращаются в квитанцию: что сделано, чем, что пропущено и почему</td></tr>
-</tbody></table></div>
-<p class="hint">Третье и четвёртое — самые коварные: там платформа отвечает успехом на неполную работу. Разбор целиком — на странице <a href="pairing.html">База и исходники</a>.</p>
 
 <h2>Словарь</h2>
 <div class="tablewrap"><table>
 <tbody>
-<tr><td class="k">база</td><td>информационная база 1С: конфигурация и данные, с которыми работают пользователи</td></tr>
-<tr><td class="k">исходники</td><td>та же конфигурация, разложенная в XML-файлы, которые можно держать под контролем версий</td></tr>
-<tr><td class="k">выгрузка</td><td>база → исходники: конфигурация раскладывается в XML-файлы</td></tr>
-<tr><td class="k">загрузка</td><td>исходники → база: XML-файлы собираются обратно в конфигурацию</td></tr>
+<tr><td class="k">база</td><td>информационная база 1С: конфигурации и данные, с которыми работают пользователи. Бывает файловой, в кластере или за автономным сервером; у проекта одна база по умолчанию и сколько угодно именованных</td></tr>
+<tr><td class="k">исходники</td><td>та же конфигурация, разложенная в файлы под контролем версий</td></tr>
 <tr><td class="k">набор исходников</td><td>каталог с одним предметом: конфигурация, расширение или группа внешних обработок</td></tr>
-<tr><td class="k">цель</td><td>информационная база, с которой работаем</td></tr>
-<tr><td class="k">провайдер</td><td>чем платформа исполнит команду: Конфигуратор, агент, ibcmd</td></tr>
-<tr><td class="k">workPath</td><td>рабочий каталог: журналы, временные файлы и память о том, на чём остановились. Один <code>workPath</code> обслуживает одну базу</td></tr>
+<tr><td class="k">пакет</td><td>один файл с предметом: <code>.cf</code>, <code>.cfe</code>, <code>.epf</code>, <code>.erf</code></td></tr>
+<tr><td class="k">выгрузка</td><td>база → исходники</td></tr>
+<tr><td class="k">загрузка</td><td>исходники → база</td></tr>
+<tr><td class="k">применение</td><td>основная конфигурация → конфигурация базы данных</td></tr>
+<tr><td class="k">исполнитель</td><td>чем исполняется команда: Конфигуратор, его агент, ibcmd, шлюз автономного сервера, EDT CLI, webinst, ibcmd-rs</td></tr>
+<tr><td class="k">workPath</td><td>рабочий каталог раннера: журналы, временные файлы и память о том, на чём остановились, отдельная для каждой базы</td></tr>
 <tr><td class="k">квитанция</td><td>ответ команды: что сделано, чем, что пропущено. Текстом или JSON</td></tr>
 <tr><td class="k">превью</td><td><code>--dry-run</code>: показать план, ничего не делая</td></tr>
 </tbody></table></div>
 </main>
-<script src="site.js?v=3" defer></script>
+<script src="site.js?v=6" defer></script>
 </body>
 </html>

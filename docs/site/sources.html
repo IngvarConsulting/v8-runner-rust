@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v8-runner · Исходники и база</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="styles.css?v=15">
+<style>
+  .ref { font-size: 0.9em; color: var(--muted, #7a7f87); }
+  pre.sh { background: var(--code-bg); padding: 12px 16px; border-radius: 8px; overflow-x: auto; margin: 16px 0; }
+  pre.sh code { background: none; padding: 0; }
+  td.k { white-space: nowrap; }
+</style>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">v8-runner</a>
+  <nav>
+    <a href="index.html">Начало</a>
+    <a href="platform.html">Платформа</a>
+    <a href="problems.html">Трудности</a>
+    <a href="architecture.html">Компоненты</a>
+    <a href="sources.html" aria-current="page">Исходники</a>
+    <a href="cli.html">Словарь</a>
+    <a class="gh" href="https://github.com/IngvarConsulting/v8-runner-rust" aria-label="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span class="gh-stars" hidden></span></a>
+  </nav>
+</div></div>
+
+<main class="page">
+<h1>Исходники и база</h1>
+<p class="lede">Одна и та же конфигурация живёт в двух видах: в базе, где с ней работают, и в файлах, которые лежат под контролем версий. Эта страница о том, какие бывают исходники, что им соответствует в базе, в каких состояниях они бывают и какие команды переводят из одного состояния в другое.</p>
+
+<ul class="toc">
+  <li><a href="#kinds">Какие бывают исходники</a></li>
+  <li><a href="#inside">Что лежит в базе</a></li>
+  <li><a href="#map">Что чему соответствует</a></li>
+  <li><a href="#states">Состояния и переходы</a></li>
+  <li><a href="#memory">Три памяти о прошлом разе</a></li>
+  <li><a href="#runner">Что делает раннер</a></li>
+</ul>
+
+<h2 id="kinds">Какие бывают исходники</h2>
+<p>Единица работы раннера — <strong>набор исходников</strong>: один каталог с одним предметом. Предметов три, форматов два, и любой предмет бывает в любом формате.</p>
+
+<div class="tablewrap"><table>
+<thead><tr><th>предмет</th><th>XML платформы</th><th>проект EDT</th><th>пакет</th></tr></thead>
+<tbody>
+<tr><td class="k">конфигурация</td><td>каталог с <code>Configuration.xml</code> <span class="ref">(<a href="platform.html#t14">14</a>)</span></td><td>проект конфигурации <span class="ref">(<a href="platform.html#t77">77</a>)</span></td><td><code>.cf</code></td></tr>
+<tr><td class="k">расширение</td><td>тот же формат, объявлено расширением <span class="ref">(<a href="platform.html#t31">31</a>)</span></td><td>проект расширения, связан с проектом конфигурации <span class="ref">(<a href="platform.html#t78">78</a>)</span></td><td><code>.cfe</code></td></tr>
+<tr><td class="k">внешние обработки и отчёты</td><td>каталог с несколькими обработками</td><td>проект внешних отчётов и обработок <span class="ref">(<a href="platform.html#t78">78</a>)</span></td><td><code>.epf</code>, <code>.erf</code></td></tr>
+</tbody>
+</table></div>
+
+<p>Пакет — четвёртый вид того же предмета: один файл, который платформа умеет применить к базе или разобрать обратно в файлы <span class="ref">(<a href="platform.html#t29">29</a>)</span>. Снимок всей базы в <code>.dt</code> к исходникам не относится: в нём данные.</p>
+
+<p>Наборы объявлены в <code>v8project.yaml</code>. Тип набора раннер определяет по содержимому маркерных файлов: каталог можно назвать как угодно, тип задаёт <code>Configuration.xml</code> внутри.</p>
+
+<pre class="sh"><code>format: DESIGNER            # или EDT — формат один на проект
+source-set:
+  - name: main
+    type: configuration
+    path: src/cf
+  - name: my-ext
+    type: extension
+    path: src/ext
+    installedName: РасширениеВБазе   # имя на той стороне, по умолчанию равно name
+    namePrefix: Расш_
+    purpose: add-on
+  - name: tools
+    type: external
+    path: src/epf</code></pre>
+
+<p>У формата EDT две ступени. Проект правят в EDT, а с базой платформа обменивается только XML-выгрузкой <span class="ref">(<a href="platform.html#t76">76</a>)</span>. Экспорт проекта в XML раннер держит у себя как кеш: он не лежит под контролем версий и пересчитывается по изменившемуся.</p>
+
+<h2 id="inside">Что лежит в базе</h2>
+<p>Информационная база держит несколько конфигураций сразу <span class="ref">(<a href="platform.html#t1">1</a>)</span>. Для каждого набора исходников в ней есть <strong>своя пара</strong>: то, что правят, и то, с чем работают пользователи <span class="ref">(<a href="platform.html#t7">7</a>)</span>.</p>
+
+<div class="tablewrap"><table>
+<thead><tr><th>в базе</th><th>что это</th><th>кто пишет</th></tr></thead>
+<tbody>
+<tr><td class="k">основная конфигурация</td><td>то, что правят в Конфигураторе и куда загружают исходники</td><td>отправка, Конфигуратор</td></tr>
+<tr><td class="k">конфигурация базы данных</td><td>то, по чему построены таблицы и с чем работают сеансы; только для чтения <span class="ref">(<a href="platform.html#t2">2</a>)</span></td><td>только применение</td></tr>
+<tr><td class="k">конфигурации поставщика</td><td>эталоны типовых решений, есть у базы на поддержке <span class="ref">(<a href="platform.html#t8">8</a>)</span>; их может быть несколько, каждая с именем <span class="ref">(<a href="platform.html#t7">7</a>)</span></td><td>обновление поставщика</td></tr>
+<tr><td class="k">расширение и его база данных</td><td>та же пара на каждое установленное расширение <span class="ref">(<a href="platform.html#t39">39</a>)</span></td><td>отправка и применение с именем расширения</td></tr>
+</tbody>
+</table></div>
+
+<h2 id="map">Что чему соответствует</h2>
+<p>Команды ходят по этим стрелкам и ни по каким другим. Отправка и выгрузка работают с основной конфигурацией. До пользователей изменение доходит только после применения.</p>
+
+<pre class="mermaid">
+flowchart LR
+  subgraph FS["каталог проекта"]
+    direction TB
+    CFSRC@{ shape: doc, label: "src/cf<br/>конфигурация" }
+    EXTSRC@{ shape: doc, label: "src/ext<br/>расширение" }
+    PKG@{ shape: doc, label: "пакет<br/>.cf · .cfe" }
+  end
+  subgraph IB["информационная база"]
+    direction TB
+    MAIN["основная<br/>конфигурация"]
+    DB["конфигурация<br/>базы данных"]
+    EMAIN["конфигурация<br/>расширения"]
+    EDB["база данных<br/>расширения"]
+    VEN["конфигурации<br/>поставщиков"]
+  end
+  CFSRC -->|"push main"| MAIN
+  MAIN -->|"pull main"| CFSRC
+  MAIN -->|"apply"| DB
+  EXTSRC -->|"push my-ext"| EMAIN
+  EMAIN -->|"pull my-ext"| EXTSRC
+  EMAIN -->|"apply my-ext"| EDB
+  CFSRC -->|"make"| PKG
+  PKG -->|"load"| MAIN
+  MAIN -->|"infobase save"| PKG
+  MAIN -.->|"diff --against vendor:имя"| VEN
+  class CFSRC,EXTSRC,PKG art
+  class MAIN,EMAIN sw
+  class DB,EDB run
+  class VEN off
+  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
+  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
+  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
+  classDef off fill:#eeeef0,stroke:#a8a8b0,color:#33333a;
+</pre>
+
+<p>Шесть направлений между тремя видами одного предмета, и у каждого своя команда:</p>
+
+<div class="tablewrap"><table>
+<thead><tr><th>откуда → куда</th><th>команда</th><th>нужна ли база</th></tr></thead>
+<tbody>
+<tr><td class="k">исходники → база</td><td><code>push</code></td><td>да</td></tr>
+<tr><td class="k">база → исходники</td><td><code>pull</code></td><td>да</td></tr>
+<tr><td class="k">пакет → база</td><td><code>load</code></td><td>да</td></tr>
+<tr><td class="k">база → пакет</td><td><code>infobase save</code></td><td>да</td></tr>
+<tr><td class="k">исходники → пакет</td><td><code>make</code></td><td>нет для конфигурации и внешних <span class="ref">(<a href="platform.html#t29">29</a>)</span></td></tr>
+<tr><td class="k">пакет → исходники</td><td><code>convert</code></td><td>нет <span class="ref">(<a href="platform.html#t29">29</a>)</span></td></tr>
+</tbody>
+</table></div>
+
+<p>Расширение ходит по тем же стрелкам с указанием ссылки. Отдельных команд обмена для расширений нет: те же <code>push</code> и <code>pull</code> с именем. Свойства установленного экземпляра правит <code>extensions</code>.</p>
+
+<h2 id="states">Состояния и переходы</h2>
+<p>Исходники и основная конфигурация меняются независимо: файлы правят в редакторе, конфигурацию — в Конфигураторе. Отсюда четыре состояния снаружи базы и два способа вернуться к согласию.</p>
+
+<pre class="mermaid">
+stateDiagram-v2
+  direction LR
+  state "совпадают" as S
+  state "исходники впереди" as L
+  state "база впереди" as B
+  state "разошлись" as D
+  S --> L: правка в файлах
+  L --> S: push
+  S --> B: правка в Конфигураторе
+  B --> S: pull
+  L --> D: правка в Конфигураторе
+  B --> D: правка в файлах
+  D --> L: pull
+  D --> D: push отклоняется
+</pre>
+
+<p>Петля у «разошлись» — отказ по несовпадению предка. Раннер не выбирает, чья правка важнее: он возвращает к <code>pull</code>, а сводит расхождение система контроля версий.</p>
+
+<p>До первого обмена состояния нет: раннер ещё не знает, как относятся друг к другу каталог и база. <code>status</code> так и говорит. Из этого положения <code>pull</code> идёт всегда, <code>push</code> — только в пустую базу; в непустую без памяти он отказывает и предлагает <code>pull</code> или <code>push --force</code>.</p>
+
+<p>Внутри базы у каждой пары свои состояния. Сохранить изменение в основную конфигурацию и применить его к базе данных — два разных события <span class="ref">(<a href="platform.html#t3">3</a>, <a href="platform.html#t5">5</a>)</span>.</p>
+
+<pre class="mermaid">
+stateDiagram-v2
+  direction LR
+  state "совпадают" as S2
+  state "есть непринятое" as P
+  state "обновлено динамически" as Y
+  S2 --> P: push --no-apply
+  S2 --> P: правка в Конфигураторе
+  S2 --> P: load
+  P --> S2: apply
+  P --> Y: apply, когда сеансы не закрыть
+  Y --> S2: перезапуск сеансов
+</pre>
+
+<p>«Есть непринятое» — штатное состояние: ради него разведены <code>push --no-apply</code> и <code>apply</code>, чтобы реструктуризацию можно было отложить до окна обслуживания. «Обновлено динамически» означает, что новые сеансы получат новую конфигурацию, а работающие останутся на прежней до перезапуска.</p>
+
+<p>Кроме содержимого у ссылки есть собственное состояние: существует ли она с обеих сторон.</p>
+
+<div class="tablewrap"><table>
+<thead><tr><th>состояние ссылки</th><th>что это значит</th><th>чем переходят</th></tr></thead>
+<tbody>
+<tr><td class="k">есть с обеих сторон</td><td>обычная работа</td><td><code>push</code>, <code>pull</code></td></tr>
+<tr><td class="k">есть в проекте, нет в базе</td><td>расширение ещё не заведено</td><td><code>push my-ext</code> заводит его сам <span class="ref">(<a href="platform.html#t37">37</a>)</span></td></tr>
+<tr><td class="k">есть в базе, нет в проекте</td><td>поставил кто-то другой или пришло с обновлением</td><td><code>pull my-ext</code> после объявления набора исходников</td></tr>
+<tr><td class="k">выключено</td><td>установлено, но не действует</td><td><code>extensions set my-ext --active no</code></td></tr>
+<tr><td class="k">больше не нужно</td><td>уводит данные, которые добавляло <span class="ref">(<a href="platform.html#t40">40</a>)</span></td><td><code>push --delete my-ext</code></td></tr>
+</tbody>
+</table></div>
+
+<p>Все три состояния называет одна команда. Без ключа она отвечает по памяти и платформу не запускает; с <code>--deep</code> спрашивает поколение и состав расширений, и тогда видно, что база ушла вперёд и что в ней есть непринятое:</p>
+
+<pre class="sh"><code>$ v8-runner status --deep
+infobase: File="/srv/ib/demo"
+
+  main      → ЖивоеИмяКонфигурации   3 файла изменено · есть непринятое
+  my-ext    → РасширениеВБазе        совпадает
+  patch-01  → Patch_01               база ушла вперёд — сперва pull
+  —         → Patch_007              есть в базе, нет в проекте</code></pre>
+
+<h2 id="memory">Три памяти о прошлом разе</h2>
+<p>Целиком выгружать и загружать всегда верно и всегда долго. По изменившемуся — быстро, и для этого нужно знать, что изменилось. Знание складывается из трёх памятей: две ведёт раннер, одну платформа.</p>
+
+<div class="tablewrap"><table>
+<thead><tr><th>память</th><th>отвечает на вопрос</th><th>кто ведёт</th><th>где лежит</th></tr></thead>
+<tbody>
+<tr><td class="k">хеши исходников</td><td>какие файлы я тронул</td><td>раннер считает сам</td><td><code>workPath</code>, по файлу на набор</td></tr>
+<tr><td class="k">поколение базы</td><td>менялась ли база</td><td>платформа отвечает, раннер записывает <span class="ref">(<a href="platform.html#t12">12</a>)</span></td><td><code>workPath</code>, с именем инструмента и операции</td></tr>
+<tr><td class="k">файл версий</td><td>что платформе выгружать заново</td><td>платформа <span class="ref">(<a href="platform.html#t15">15</a>)</span></td><td><code>workPath</code>; в каталог исходников подкладывается на время команды</td></tr>
+</tbody>
+</table></div>
+
+<p>Хеши сравнивают каталог с прошлым разом и дают список файлов для частичной загрузки. Поколение сравнивается только на равенство: совпало — база с прошлого раза не менялась, и выгрузка отвечает «нечего делать» за секунду. Файл версий читает только платформа: по нему она решает, какие объекты перекладывать.</p>
+
+<p>Все три описывают отношение между <strong>одним каталогом и одной базой</strong>. Поэтому под <code>workPath</code> они лежат по базе: у каждой объявленной базы своя память, и отправка в тестовую не сбивает память о рабочей. Место для этого в конфигурации уже есть: местный слой <code>v8project.local.yaml</code> задаёт <code>workPath</code>, базу по умолчанию и именованные базы, а наборы исходников и формат в нём запрещены.</p>
+
+<pre class="sh"><code>build/                       # workPath
+  infobases/
+    default/                 # база по умолчанию
+      generation.json        # поколение, чем получено, после какой операции
+      hashes/                # хеши исходников по наборам
+      ConfigDumpInfo.xml     # файл версий этой пары
+    test/
+      …</code></pre>
+
+<h2 id="runner">Что делает раннер</h2>
+<p>Раннер берёт на себя ровно то, чего платформе знать неоткуда: какая база с каким каталогом связана и что в каталоге ваше.</p>
+
+<h3>Свой файл версий на пару</h3>
+<p>Файл версий хранится у раннера и подкладывается в каталог на время команды. Файл в каталоге становится расходным: он принадлежит последней команде, и в системе контроля версий ему места нет. Перед работой по изменившемуся раннер сверяет отпечаток файла в каталоге со своим.</p>
+
+<div class="tablewrap"><table>
+<thead><tr><th>файл версий</th><th>каталог</th><th>что делает раннер</th></tr></thead>
+<tbody>
+<tr><td class="k">наш</td><td>наш</td><td>работает по изменившемуся</td></tr>
+<tr><td class="k">чужой</td><td>наш</td><td>подкладывает свою копию и работает по изменившемуся</td></tr>
+<tr><td class="k">наш</td><td>разошёлся</td><td>точка отсчёта устарела — выгрузка полная</td></tr>
+<tr><td class="k">чужой</td><td>разошёлся</td><td>выгрузка полная</td></tr>
+</tbody>
+</table></div>
+
+<p>Выгрузить один файл версий, не трогая остального, платформа умеет <span class="ref">(<a href="platform.html#t20">20</a>)</span>, и раннер этого не делает: новый файл опишет базу такой, какая она сейчас, и заявит, что все её объекты уже лежат в каталоге. Следующая работа по изменившемуся пропустит настоящие изменения.</p>
+
+<h3>Проверка до выбора режима</h3>
+<p>Наличие файла версий и версия формата в нём читаются до запуска платформы. Файла нет — выгрузка полная, она же его создаст. Версия чужая — тоже полная. Для загрузки та же проверка работает в обратную сторону: формат новее платформы — отказ до запуска с обеими версиями <span class="ref">(<a href="platform.html#t21">21</a>)</span>.</p>
+
+<h3>Ответ описывает случившееся</h3>
+<p>Платформа может перейти на полную выгрузку сама, и узнать об этом заранее нельзя <span class="ref">(<a href="platform.html#t17">17</a>)</span>. Поэтому раннер не обещает быстро: ответ называет запрошенный режим и рядом — что вышло на самом деле, с причиной.</p>
+
+<h3>Токен хранится с именем инструмента</h3>
+<p>Рядом с поколением лежит то, чем оно получено. Сравниваются только значения от одного инструмента, чужое считается отсутствием ответа. Сорок нулей пустой базы тоже хранятся как отсутствие ответа, поэтому после работы с пустой базой выгрузка не пропускается.</p>
+
+<h3>Слить или заменить</h3>
+<p>Выгрузка из базы, где правили мимо исходников, должна встретиться с тем, что вы успели наработать. Выбор явный:</p>
+
+<div class="tablewrap"><table>
+<thead><tr><th></th><th>слить · <code>pull</code></th><th>заменить · <code>pull --force</code></th></tr></thead>
+<tbody>
+<tr><td class="k">что происходит</td><td>выгрузка ложится поверх; чего в базе нет, остаётся на месте</td><td>каталог приводится ровно к базе, лишнее исчезает</td></tr>
+<tr><td class="k">когда нужно</td><td>базу правили мимо исходников, расхождение надо увидеть в системе контроля версий</td><td>каталог считается производным от базы и должен ей соответствовать</td></tr>
+<tr><td class="k">формат EDT</td><td colspan="2">слияния нет ни в одном режиме: EDT сводит изменения интерактивно <span class="ref">(<a href="platform.html#t77">77</a>)</span>, поэтому выгрузка либо заменяет проект, либо отказывается</td></tr>
+</tbody>
+</table></div>
+
+<p>Слияние раннер выполняет чужими руками, и это выбор: выгрузка ложится в рабочий каталог обычным изменением, а сводит его система контроля версий, у которой есть история, трёхстороннее слияние и разметка конфликтов. Раннер отвечает за то, чтобы расхождение стало для неё видимым и безопасным.</p>
+
+<h3>Подтверждение разрушения</h3>
+<p>Разрушение — то, чего нельзя вернуть: правки без фиксации в системе контроля версий, файлы вне её учёта, весь каталог, если он под контролем не находится. Изменение зафиксированного файла сюда не относится: оно видно в разнице и откатывается одной командой.</p>
+
+<div class="tablewrap"><table>
+<tbody>
+<tr><td class="k">каталог чистый</td><td>терять нечего, команда идёт</td></tr>
+<tr><td class="k">есть незафиксированное</td><td>команда отказывается и называет, что именно потеряется</td></tr>
+<tr><td class="k">каталог не под контролем версий</td><td>потеряться может всё, отказ на тех же правах</td></tr>
+<tr><td class="k">попросили явно</td><td>идёт и перечисляет уничтоженное в ответе</td></tr>
+</tbody>
+</table></div>
+
+<p><code>--dry-run</code> показывает это заранее: перечисляет поимённо, что будет перезаписано и что удалено, ничего при этом не трогая.</p>
+
+<h3>Поколение до и после</h3>
+<p>Перед операцией с базой раннер спрашивает поколение и спрашивает его снова после. Если между ними базу правили, ответ называет это, а память о прошлом разе не обновляется: следующая команда снова увидит расхождение.</p>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.12.0/mermaid.min.js"></script>
+<script>
+  var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  var palette = {
+    '#cfe4fa': '#1d3550', '#3f7ba6': '#6ea6d2', '#0d2233': '#d9e8f7',
+    '#cde8b9': '#2a4423', '#4f7a3c': '#7fae68', '#12210c': '#dfeed5',
+    '#f6e8c8': '#44371f', '#a4813a': '#b79141', '#241c0c': '#f2e4c4',
+    '#eeeef0': '#26262b', '#a8a8b0': '#5a5a63', '#33333a': '#c7ccd5'
+  };
+  if (dark) {
+    document.querySelectorAll('pre.mermaid').forEach(function (block) {
+      block.innerHTML = block.innerHTML.replace(/#[0-9a-f]{6}/g, function (colour) {
+        return palette[colour] || colour;
+      });
+    });
+  }
+  mermaid.initialize({ startOnLoad: true, theme: dark ? 'dark' : 'neutral', securityLevel: 'loose', fontFamily: 'Golos Text, system-ui, sans-serif' });
+</script>
+<script src="site.js?v=6" defer></script>
+</body>
+</html>
