@@ -1,1 +1,1 @@
-{"vendor-many": 9, "dbcfglist": 44, "repo": 48, "ports": 56, "ibsrv-ports": 57, "agent-one-ssh": 74, "agent-updatedb": 81, "agent-restore": 83, "agent-json": 84, "agent-nopty": 86, "agent-basedir": 87}
+{"vendor-many": 9, "dbcfglist": 44, "repo": 48, "ports": 56, "ibsrv-ports": 57, "checkconfig": 67, "checkext": 68, "agent-one-ssh": 75, "agent-updatedb": 82, "agent-restore": 84, "agent-json": 85, "agent-nopty": 87, "agent-basedir": 88}

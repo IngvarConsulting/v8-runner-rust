@@ -286,8 +286,8 @@ window.RUNNER_DATA = (function () {
       today: function (ctx) { return ctx.format === 'EDT' ? { chain: [P.edt], config: ['tools.edt_cli.*'], note: 'validate; одна общая сессия EDT при interactive-mode=true' } : { chain: ctx.tools.designer ? [P.designer] : [], config: ['infobase.connection'], note: 'вердикт по коду выхода: 0 чисто, 101 есть замечания; журнал переносится как улика' }; },
       target: function (ctx) {
         if (ctx.format === 'EDT') return { chain: [P.edt], config: ['tools.edt_cli.*'], note: 'validate проекта; база не нужна' };
-        if (ctx.target === 'cluster') return { chain: [P.designer], config: ['infobase.connection'], note: '/CheckConfig и /CheckModules' };
-        return { chain: [P.designer, P.ibcmd], config: ['infobase.connection'], note: '/CheckConfig и /CheckModules; ibcmd config check' };
+        if (ctx.target === 'cluster') return { chain: [P.designer], config: ['infobase.connection'], note: '/CheckConfig со всеми режимами' };
+        return { chain: [P.designer, P.ibcmd], config: ['infobase.connection'], note: '/CheckConfig со всеми режимами; ibcmd config check' };
       }
     },
     {

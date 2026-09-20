@@ -109,7 +109,7 @@
 <tr><td class="k"><code>push --full</code></td><td>полная загрузка вместо частичной: память о прошлом разе не используется, каталог отправляется целиком</td><td>меняет</td></tr>
 <tr><td class="k"><code>push --force</code></td><td>отправляет, даже если база ушла вперёд или памяти о ней ещё нет: основная конфигурация на той стороне перезаписывается, её непринятое теряется</td><td>меняет</td></tr>
 <tr><td class="k"><code>push --delete &lt;ссылка&gt;</code></td><td>убирает расширение из базы вместе с его данными</td><td>меняет</td></tr>
-<tr><td class="k"><code>apply</code></td><td>приводит базу данных к основной конфигурации и больше ничего <span class="ref">(<a href="platform.html#t89">89</a>)</span></td><td>меняет</td></tr>
+<tr><td class="k"><code>apply</code></td><td>приводит базу данных к основной конфигурации и больше ничего <span class="ref">(<a href="platform.html#t90">90</a>)</span></td><td>меняет</td></tr>
 <tr><td class="k"><code>apply --sessions disable|force</code></td><td>что делать с чужими сеансами, когда нужен монопольный доступ. По умолчанию их не трогают <span class="ref">(<a href="platform.html#t4">4</a>)</span></td><td>меняет</td></tr>
 <tr><td class="k"><code>load &lt;файл&gt;</code></td><td>загружает пакет <code>.cf</code> или <code>.cfe</code> в основную конфигурацию, целиком заменяя её <span class="ref">(<a href="platform.html#t10">10</a>)</span></td><td>меняет</td></tr>
 <tr><td class="k"><code>load &lt;файл&gt; --mode combine|update</code></td><td>объединяет с пакетом по файлу настроек или обновляет конфигурацию поставщика <span class="ref">(<a href="platform.html#t47">47</a>)</span></td><td>меняет</td></tr>
@@ -173,13 +173,13 @@ v8-runner status --all                           # все объявленные
 <thead><tr><th>команда</th><th>что делает</th><th>база</th></tr></thead>
 <tbody>
 <tr><td class="k"><code>make</code></td><td>собирает пакет из исходников: <code>.cf</code>, <code>.cfe</code>, <code>.epf</code>, <code>.erf</code>. Для конфигурации и внешних обработок платформа делает это без информационной базы <span class="ref">(<a href="platform.html#t29">29</a>)</span></td><td>нет</td></tr>
-<tr><td class="k"><code>check</code></td><td>проверка конфигурации и модулей: целостность, ссылки, синтаксис по режимам <span class="ref">(<a href="platform.html#t67">67</a>)</span>; для формата EDT — проверка проекта</td><td>читает · нет для EDT</td></tr>
-<tr><td class="k"><code>test yaxunit|va</code></td><td>отправляет исходники и прогоняет тесты клиентом <span class="ref">(<a href="platform.html#t68">68</a>, <a href="platform.html#t69">69</a>)</span>; <code>--no-push</code> — только прогон</td><td>меняет, запускает клиент</td></tr>
-<tr><td class="k"><code>convert</code></td><td>переводит исходники между видами: XML платформы, проект EDT, пакет <span class="ref">(<a href="platform.html#t92">92</a>, <a href="platform.html#t29">29</a>)</span></td><td>нет</td></tr>
+<tr><td class="k"><code>check</code></td><td>проверка конфигурации командой <code>/CheckConfig</code>: целостность, ссылки, синтаксис по режимам, обработчики, модальность <span class="ref">(<a href="platform.html#t67">67</a>)</span>; для формата EDT — проверка проекта</td><td>читает · нет для EDT</td></tr>
+<tr><td class="k"><code>test yaxunit|va</code></td><td>отправляет исходники и прогоняет тесты клиентом <span class="ref">(<a href="platform.html#t69">69</a>, <a href="platform.html#t70">70</a>)</span>; <code>--no-push</code> — только прогон</td><td>меняет, запускает клиент</td></tr>
+<tr><td class="k"><code>convert</code></td><td>переводит исходники между видами: XML платформы, проект EDT, пакет <span class="ref">(<a href="platform.html#t93">93</a>, <a href="platform.html#t29">29</a>)</span></td><td>нет</td></tr>
 </tbody>
 </table></div>
 
-<p><code>check</code> назван по тому, что делает платформа: её команды проверяют целостность и ссылки, синтаксис — лишь часть <span class="ref">(<a href="platform.html#t67">67</a>)</span>. Слово «синтаксис» обещало бы меньше, чем приходит в ответе.</p>
+<p><code>check</code> назван по тому, что делает платформа: <code>/CheckConfig</code> проверяет целостность, ссылки и обработчики, синтаксис — лишь часть <span class="ref">(<a href="platform.html#t67">67</a>)</span>. Слово «синтаксис» обещало бы меньше, чем приходит в ответе.</p>
 
 <h3>Окружение</h3>
 
