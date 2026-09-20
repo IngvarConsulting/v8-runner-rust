@@ -520,13 +520,13 @@ impl McpToolServer {
             ));
         }
 
+        // Срок шага — свой у инструмента; остаток бюджета команды только укорачивает его.
+        // Отсутствие бюджета означает «предела сверху нет», а не «времени нет»: миллисекунда
+        // в этой ветке превращала бы каждый вызов без бюджета в мгновенный отказ.
+        let edt_step_timeout = Duration::from_millis(self.config.tools.edt_cli.command_timeout_ms);
         let edt_timeout = remaining_timeout
-            .map(|value| {
-                value.min(Duration::from_millis(
-                    self.config.tools.edt_cli.command_timeout_ms,
-                ))
-            })
-            .unwrap_or_else(|| Duration::from_millis(1));
+            .map(|value| value.min(edt_step_timeout))
+            .unwrap_or(edt_step_timeout);
         let use_case_request = normalize_check_syntax_edt_request(&request);
         let result = edt_syntax::execute(
             self.edt_session.as_ref(),
