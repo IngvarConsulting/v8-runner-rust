@@ -276,9 +276,9 @@ t("Группы команд: help, common (connect-ib, disconnect-ib, shutdown)
 t("Настройки сессии: --output-format text или json, --show-prompt yes или no, --notify-progress (по умолчанию no), --notify-progress-interval (по умолчанию 1 секунда, точность 0,1).",
   "Первая команда сессии переводит её в JSON и убирает приглашение.",
   adm("4.7.5", "TI000000744"))
-t("Группа config повторяет пакетные команды: dump-cfg, dump-config-to-files, load-cfg, load-config-from-files, generation-id, update-db-cfg, manage-cfg-support, sign-cfg, выгрузка и загрузка внешних обработок, команды мобильных приложений.",
-  "Тот же набор операций, что в пакетном режиме, только в одной сессии.",
-  adm("4.7.6", "TI000000745"))
+t("Группа config повторяет часть пакетных команд: dump-cfg, dump-config-to-files, load-cfg, load-config-from-files, generation-id, update-db-cfg, manage-cfg-support, sign-cfg, выгрузка и загрузка внешних обработок, команды мобильных приложений, группа extensions. Проверки конфигурации, пробы применимости расширений и тестирования с исправлением в наборе агента нет.",
+  "Обмен и применение идут в одной сессии. Проверки и тестирование остаются за пакетным Конфигуратором.",
+  adm("4.7.6", "TI000000745"), adm("4.7.7", "TI000000746"), key="agent-config")
 t("У dump-config-to-files параметр --dir обязателен; есть --update, --force, --get-changes, --config-dump-info-for-changes, --list-file, --archive, --ignore-unresolved-refs. Параметр --server игнорируется у автономного сервера и у агента с файловой базой.",
   "Выгрузка по изменившемуся доступна и в сессии. Серверная многопоточность есть только у кластера.",
   adm("4.7.6.3", "TI000000865"))
