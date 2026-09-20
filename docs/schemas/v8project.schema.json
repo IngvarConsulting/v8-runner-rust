@@ -66,6 +66,10 @@
             "null"
           ]
         },
+        "host-fingerprint": {
+          "description": "SHA256 fingerprint the attached agent must present, as `SHA256:<base64>`. Attached mode only.",
+          "type": "string"
+        },
         "host-key": {
           "description": "Private host key file for the runner-launched agent. Absent: the platform generates one (`/AgentSSHHostKeyAuto`).",
           "type": [
@@ -321,6 +325,10 @@
         "gate": {
           "description": "`host:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`, port 1543 by default).",
           "type": "string"
+        },
+        "host-fingerprint": {
+          "description": "SHA256 fingerprint the gate must present, as `SHA256:<base64>`.",
+          "type": "string"
         }
       },
       "required": [
@@ -402,6 +410,13 @@
     "McpHttpSchema": {
       "additionalProperties": false,
       "properties": {
+        "allowed_hosts": {
+          "description": "Host header values the HTTP listener answers besides the loopback.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "bind_address": {
           "description": "Socket address for the MCP HTTP listener.",
           "type": "string"

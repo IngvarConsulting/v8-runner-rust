@@ -1,5 +1,6 @@
 use crate::domain::artifacts::{CFE_RUNNER_ID, CF_RUNNER_ID, EPF_RUNNER_ID, ERF_RUNNER_ID};
 use crate::domain::execution::ExecutionTimeouts;
+use crate::domain::launch::LaunchVia;
 use crate::domain::load::LoadMode;
 use crate::domain::runner::{
     ExecutionPolicy, LaunchClientModeRequest, LaunchOptions, RunnerKind, RunnerOutputFormat,
@@ -664,6 +665,8 @@ pub struct LaunchRequest {
     pub launch: LaunchOptions,
     /// Client-side MCP launch options. Present only for `LaunchTargetRequest::client_mcp*`.
     pub client_mcp: Option<ClientMcpOptionsRequest>,
+    /// Каким адресом открыть базу. `None` — умолчание по виду цели.
+    pub via: Option<LaunchVia>,
     /// Validate and select a provider without launching the client process.
     pub dry_run: bool,
 }

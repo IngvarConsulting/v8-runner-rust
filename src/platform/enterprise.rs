@@ -113,7 +113,7 @@ impl<'a> EnterpriseDsl<'a> {
         launch.internal_out = Some(self.log_file.display().to_string());
         build_launch_args(
             self.client_mode,
-            &self.connection,
+            LaunchAddress::Connection(&self.connection),
             &self.additional_launch_keys,
             &launch,
         )
@@ -131,9 +131,41 @@ impl From<LaunchClientModeRequest> for LaunchClientMode {
     }
 }
 
+/// Чем клиент открывает базу в командной строке.
+///
+/// Административный адрес несёт реквизиты базы рядом с собой; клиентский — не всегда:
+/// у автономной цели `infobase.user`/`password` принадлежат SSH-шлюзу, и клиенту их
+/// отдавать нельзя. Поэтому реквизиты у веб-адреса — отдельное, необязательное поле.
+#[derive(Debug, Clone, Copy)]
+pub enum LaunchAddress<'a> {
+    /// `infobase.connection` вместе с `/N` и `/P`.
+    Connection(&'a V8Connection),
+    /// `infobase.web.url` как ws-соединение; реквизиты прилагаются, только если они
+    /// действительно реквизиты базы.
+    Web {
+        url: &'a str,
+        credentials: Option<&'a V8Connection>,
+    },
+}
+
+impl LaunchAddress<'_> {
+    fn args(&self) -> Vec<String> {
+        match *self {
+            Self::Connection(connection) => connection.args(),
+            Self::Web { url, credentials } => {
+                let mut args = vec!["/WS".to_owned(), url.to_string()];
+                if let Some(connection) = credentials {
+                    args.extend(connection.credential_args());
+                }
+                args
+            }
+        }
+    }
+}
+
 pub fn build_launch_args(
     mode: LaunchClientMode,
-    connection: &V8Connection,
+    address: LaunchAddress<'_>,
     additional_launch_keys: &[String],
     launch: &LaunchOptions,
 ) -> Vec<String> {
@@ -145,7 +177,7 @@ pub fn build_launch_args(
     }
     .to_owned()];
     args.push("/DisableStartupDialogs".to_owned());
-    args.extend(connection.args());
+    args.extend(address.args());
     if matches!(mode, LaunchClientMode::Ordinary) {
         args.push("/RunModeOrdinaryApplication".to_owned());
     }
@@ -173,99 +205,6 @@ pub fn build_launch_args(
         args.push(out.to_owned());
     }
     args
-}
-
-/// Replacement written in place of every credential value exposed by a launch preview.
-pub const MASKED_LAUNCH_VALUE: &str = "***";
-
-/// Rewrite composed launch arguments so no credential value survives into a preview.
-///
-/// Three independent rules apply, because a secret can reach argv three ways: as the
-/// value of the `/P` key the runner itself appends, as a `Pwd=` segment inside a raw
-/// connection string, and as a literal the caller glued to a key the runner does not
-/// recognise. `secrets` carries values known to be confidential, masked wherever they
-/// appear.
-pub fn mask_launch_args(args: &[String], secrets: &[&str]) -> Vec<String> {
-    let mut masked = Vec::with_capacity(args.len());
-    let mut mask_detached_value = false;
-    for arg in args {
-        if mask_detached_value {
-            mask_detached_value = false;
-            masked.push(MASKED_LAUNCH_VALUE.to_owned());
-            continue;
-        }
-        match password_key_value_start(arg) {
-            Some(start) if start == arg.len() => {
-                mask_detached_value = true;
-                masked.push(arg.clone());
-            }
-            Some(start) => masked.push(format!("{}{MASKED_LAUNCH_VALUE}", &arg[..start])),
-            None => masked.push(mask_literal_secrets(
-                &mask_connection_string_password(arg),
-                secrets,
-            )),
-        }
-    }
-    masked
-}
-
-/// Byte offset at which a `/P` key's value starts, or `arg.len()` when the value is detached.
-fn password_key_value_start(arg: &str) -> Option<usize> {
-    let rest = arg.strip_prefix('/').or_else(|| arg.strip_prefix('-'))?;
-    let split_at = rest.char_indices().nth(1).map_or(rest.len(), |(at, _)| at);
-    let (head, tail) = rest.split_at(split_at);
-    if !head.eq_ignore_ascii_case("p") {
-        return None;
-    }
-    if tail.is_empty() {
-        return Some(arg.len());
-    }
-    // A glued `/Psecret` is indistinguishable from an unrelated key such as `/Proxy`,
-    // so only an explicit separator is read as a value here; the literal rule covers
-    // the glued form for secrets whose value is known.
-    let separator = tail.chars().next()?;
-    if matches!(separator, ' ' | '=' | ':' | '"') {
-        return Some(arg.len() - tail.len() + separator.len_utf8());
-    }
-    None
-}
-
-/// Mask the `Pwd=` segment of a 1C connection string, keeping every other segment readable.
-fn mask_connection_string_password(arg: &str) -> String {
-    let lowered = arg.to_ascii_lowercase();
-    let mut masked = String::with_capacity(arg.len());
-    let mut cursor = 0;
-    while let Some(found) = lowered[cursor..].find("pwd=") {
-        let key_start = cursor + found;
-        let value_start = key_start + "pwd=".len();
-        let preceded_by_boundary = key_start == 0
-            || matches!(
-                lowered[..key_start].chars().next_back(),
-                Some(';' | ' ' | '\'' | '"')
-            );
-        if !preceded_by_boundary {
-            masked.push_str(&arg[cursor..value_start]);
-            cursor = value_start;
-            continue;
-        }
-        let value_end = arg[value_start..]
-            .find(';')
-            .map_or(arg.len(), |at| value_start + at);
-        masked.push_str(&arg[cursor..value_start]);
-        masked.push_str(MASKED_LAUNCH_VALUE);
-        cursor = value_end;
-    }
-    masked.push_str(&arg[cursor..]);
-    masked
-}
-
-/// Mask known confidential literals wherever they appear inside one argument.
-fn mask_literal_secrets(arg: &str, secrets: &[&str]) -> String {
-    let mut masked = arg.to_owned();
-    for secret in secrets.iter().filter(|secret| !secret.is_empty()) {
-        masked = masked.replace(secret, MASKED_LAUNCH_VALUE);
-    }
-    masked
 }
 
 pub fn normalize_launch_payload_path(path: &Path) -> String {
@@ -319,7 +258,7 @@ fn reserved_launch_key(arg: &str) -> Option<(bool, bool)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_launch_args, mask_launch_args, normalize_launch_payload_path, EnterpriseDsl,
+        build_launch_args, normalize_launch_payload_path, EnterpriseDsl, LaunchAddress,
         LaunchClientMode,
     };
     use crate::domain::runner::LaunchOptions;
@@ -329,56 +268,6 @@ mod tests {
     use std::time::Duration;
     use tempfile::tempdir;
 
-    fn masked(args: &[&str], secrets: &[&str]) -> Vec<String> {
-        let owned: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
-        mask_launch_args(&owned, secrets)
-    }
-
-    #[test]
-    fn masks_the_detached_password_value_and_keeps_the_user_readable() {
-        let args = masked(
-            &["ENTERPRISE", "/N", "Администратор", "/P", "s3cret"],
-            &["s3cret"],
-        );
-        assert_eq!(args, vec!["ENTERPRISE", "/N", "Администратор", "/P", "***"]);
-    }
-
-    #[test]
-    fn masks_every_attached_password_separator_form() {
-        for arg in ["/P=s3cret", "/P:s3cret", "-p=s3cret", "/P s3cret"] {
-            let args = masked(&[arg], &[]);
-            assert!(
-                !args[0].contains("s3cret") && args[0].ends_with("***"),
-                "{arg} -> {}",
-                args[0]
-            );
-        }
-    }
-
-    #[test]
-    fn keeps_unrelated_keys_that_merely_start_with_p() {
-        let args = masked(&["/Proxy", "/PublishWSOnDemand"], &[]);
-        assert_eq!(args, vec!["/Proxy", "/PublishWSOnDemand"]);
-    }
-
-    #[test]
-    fn masks_only_the_password_segment_of_a_connection_string() {
-        let args = masked(
-            &[
-                "/IBConnectionString",
-                "Srvr=\"srv:1541\";Ref=\"ut\";Usr=Админ;Pwd=s3cret;",
-            ],
-            &[],
-        );
-        assert_eq!(args[1], "Srvr=\"srv:1541\";Ref=\"ut\";Usr=Админ;Pwd=***;");
-    }
-
-    #[test]
-    fn masks_a_known_secret_glued_to_an_unrecognised_key() {
-        let args = masked(&["/Pses3cret"], &["s3cret"]);
-        assert_eq!(args, vec!["/Pse***"]);
-    }
-
     #[test]
     fn c_payload_uses_forward_slashes() {
         let normalized =
@@ -386,11 +275,71 @@ mod tests {
         assert_eq!(normalized, "C:/tmp/path with space/cfg.json");
     }
 
+    /// Форма argv веб-пути: `/WS` с голым адресом вместо строки подключения. Живой
+    /// прогон на платформе — приёмка у владельца, но форма закреплена здесь.
+    #[test]
+    fn builds_a_web_address_launch_without_a_connection_string() {
+        let connection = V8Connection::from_connection_string("File=/tmp/ib");
+        let args = build_launch_args(
+            LaunchClientMode::Thin,
+            LaunchAddress::Web {
+                url: "http://localhost/base",
+                credentials: Some(&connection),
+            },
+            &[],
+            &LaunchOptions::default(),
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "ENTERPRISE".to_owned(),
+                "/DisableStartupDialogs".to_owned(),
+                "/WS".to_owned(),
+                "http://localhost/base".to_owned(),
+            ]
+        );
+    }
+
+    /// У автономной цели `infobase.user` и `infobase.password` — данные SSH-шлюза, а не
+    /// базы, поэтому реквизиты к адресу не прилагаются.
+    #[test]
+    fn a_web_address_without_credentials_carries_no_user_keys() {
+        let mut connection = V8Connection::from_connection_string("File=/tmp/ib");
+        connection.user = Some("gate".to_owned());
+        connection.password = Some("gate-secret".to_owned());
+
+        let with_credentials = build_launch_args(
+            LaunchClientMode::Thin,
+            LaunchAddress::Web {
+                url: "http://localhost/base",
+                credentials: Some(&connection),
+            },
+            &[],
+            &LaunchOptions::default(),
+        );
+        let without = build_launch_args(
+            LaunchClientMode::Thin,
+            LaunchAddress::Web {
+                url: "http://localhost/base",
+                credentials: None,
+            },
+            &[],
+            &LaunchOptions::default(),
+        );
+
+        assert!(with_credentials.contains(&"/N".to_owned()));
+        assert!(with_credentials.contains(&"gate-secret".to_owned()));
+        assert!(!without.contains(&"/N".to_owned()));
+        assert!(!without.contains(&"/P".to_owned()));
+        assert!(!without.iter().any(|arg| arg.contains("gate-secret")));
+    }
+
     #[test]
     fn builds_expected_run_unit_tests_arguments() {
         let args = build_launch_args(
             LaunchClientMode::Thin,
-            &V8Connection::from_connection_string("File=/tmp/ib"),
+            LaunchAddress::Connection(&V8Connection::from_connection_string("File=/tmp/ib")),
             &["/TESTMANAGER".to_owned()],
             &LaunchOptions {
                 c: Some("RunUnitTests=/tmp/path with space/тест config.json".to_owned()),
@@ -417,7 +366,7 @@ mod tests {
     fn builds_expected_vanessa_arguments() {
         let args = build_launch_args(
             LaunchClientMode::Thin,
-            &V8Connection::from_connection_string("File=/tmp/ib"),
+            LaunchAddress::Connection(&V8Connection::from_connection_string("File=/tmp/ib")),
             &["/TESTMANAGER".to_owned()],
             &LaunchOptions {
                 execute: Some("/tmp/va/vanessa automation.epf".to_owned()),
@@ -447,7 +396,7 @@ mod tests {
     fn ordinary_mode_adds_run_mode_and_filters_reserved_raw_keys() {
         let args = build_launch_args(
             LaunchClientMode::Ordinary,
-            &V8Connection::from_connection_string("File=/tmp/ib"),
+            LaunchAddress::Connection(&V8Connection::from_connection_string("File=/tmp/ib")),
             &[
                 "/TESTMANAGER".to_owned(),
                 "/DisableStartupDialogs".to_owned(),
@@ -494,7 +443,7 @@ mod tests {
     fn internal_out_has_priority_over_user_out() {
         let args = build_launch_args(
             LaunchClientMode::Thin,
-            &V8Connection::from_connection_string("File=/tmp/ib"),
+            LaunchAddress::Connection(&V8Connection::from_connection_string("File=/tmp/ib")),
             &[],
             &LaunchOptions {
                 out: Some("user.log".to_owned()),

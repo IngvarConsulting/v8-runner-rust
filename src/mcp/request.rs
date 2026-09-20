@@ -99,6 +99,11 @@ pub struct McpLaunchAppRequest {
         description = "Wait until the client MCP endpoint responds to initialize and tools/list."
     )]
     pub wait_ready: Option<bool>,
+    /// Which address opens the base: web or connection. Thin client only.
+    #[schemars(
+        description = "Which address opens the base: web for infobase.web.url, connection for infobase.connection. Thin client only; the default follows the target kind."
+    )]
+    pub via: Option<String>,
 }
 
 /// MCP request for `check_syntax_edt`.

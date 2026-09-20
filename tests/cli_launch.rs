@@ -47,16 +47,12 @@ fn write_bounded_logging_script(path: &Path, args_log: &Path) {
 }
 
 fn read_args_log(path: &Path) -> String {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if let Ok(args) = fs::read_to_string(path) {
-            if !args.is_empty() {
-                return args;
-            }
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-    panic!("timed out waiting for args log '{}'", path.display())
+    let mut args = String::new();
+    wait_until(&format!("args log '{}'", path.display()), || {
+        args = fs::read_to_string(path).unwrap_or_default();
+        !args.is_empty()
+    });
+    args
 }
 
 fn wait_for_file(path: &Path, timeout: Duration) -> bool {
@@ -68,6 +64,57 @@ fn wait_for_file(path: &Path, timeout: Duration) -> bool {
         thread::sleep(Duration::from_millis(20));
     }
     path.exists()
+}
+
+/// Готовность фикстуры — наблюдаемый признак, а не отмеренный срок. Отмеренный срок
+/// на загруженной машине истекает раньше, чем фикстуру успевают запланировать, и тогда
+/// падает ожидание, а не проверяемое поведение.
+const CONDITION_DEADLINE: Duration = Duration::from_secs(45);
+const CONDITION_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + CONDITION_DEADLINE;
+    while Instant::now() < deadline {
+        if ready() {
+            return;
+        }
+        thread::sleep(CONDITION_POLL_INTERVAL);
+    }
+    assert!(ready(), "timed out waiting for {what}");
+}
+
+/// Срок, которому истекать не положено: он ограничивает зависание, а не расписывает,
+/// за сколько загруженная машина обязана дойти до фикстуры. Берётся с запасом, которого
+/// ей не перебить.
+const IDLE_WAIT_TIMEOUT_MS: u64 = 60_000;
+
+/// Ожидание, которому положено сработать: его длительность тест платит целиком,
+/// поэтому запас меньше. Загруженная машина (несколько десятков счётных процессов,
+/// параллельный прогон и `nice -n 20`) публиковала признак готовности до девяти
+/// секунд — срок взят с тройным запасом к измеренному худшему случаю.
+const EXPIRING_WAIT_TIMEOUT_MS: u64 = 30_000;
+
+/// Клиент обязан пережить этот бюджет с запасом: завершись фикстура сама, ожидание
+/// вернуло бы штатный выход, и тест перестал бы проверять таймаут. Кратность названа
+/// здесь, чтобы поднятый бюджет не разошёлся с временем жизни клиента молча.
+const CLIENT_OUTLIVES_WAIT_SECS: u64 = 4 * EXPIRING_WAIT_TIMEOUT_MS / 1_000;
+
+/// Файл признака создаётся перенаправлением до того, как в него что-то записано,
+/// поэтому готовностью считается прочитанное значение, а не существование файла.
+fn published_pid(path: &Path) -> Option<String> {
+    let pid = fs::read_to_string(path).ok()?;
+    let pid = pid.trim().to_owned();
+    (!pid.is_empty()).then_some(pid)
+}
+
+fn process_alive(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("probe descendant")
+        .success()
 }
 
 struct FakeHttpRequest {
@@ -94,7 +141,7 @@ fn start_fake_mcp_server(tools: &[&str]) -> (u16, JoinHandle<()>) {
         loop {
             let Ok((mut stream, _)) = listener.accept() else {
                 assert!(
-                    started.elapsed() <= Duration::from_secs(30),
+                    started.elapsed() <= Duration::from_millis(IDLE_WAIT_TIMEOUT_MS),
                     "fake MCP server timed out waiting for requests"
                 );
                 thread::sleep(Duration::from_millis(10));
@@ -256,7 +303,7 @@ impl Drop for UnresponsiveEndpoint {
 
 fn read_http_json_request(stream: &mut TcpStream) -> FakeHttpRequest {
     stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
+        .set_read_timeout(Some(Duration::from_millis(IDLE_WAIT_TIMEOUT_MS)))
         .expect("read timeout");
     let mut bytes = Vec::new();
     let mut buffer = [0; 1024];
@@ -352,6 +399,69 @@ fn write_config(
     }
 
     fs::write(path, config).expect("config");
+}
+
+/// Конфиг с объявленным клиентским адресом: файловая цель, у которой есть оба адреса.
+fn write_config_with_web_url(
+    path: &Path,
+    work_path: &Path,
+    platform_path: &Path,
+    url: &str,
+    extra: &str,
+) {
+    fs::write(
+        path,
+        format!(
+            "workPath: '{work}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\n  web:\n    url: '{url}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    path: '{platform}'\n{extra}",
+            work = work_path.display(),
+            platform = platform_path.display(),
+        ),
+    )
+    .expect("config");
+}
+
+/// Рабочее место с тонким клиентом и объявленным клиентским адресом.
+fn setup_web_project(url: &str, extra: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let dir = temp_workspace();
+    let work_path = dir.path().join("work");
+    let install_dir = dir.path().join("platform");
+    let config_path = dir.path().join("v8project.yaml");
+
+    fs::create_dir_all(dir.path().join("project")).expect("base");
+    fs::create_dir_all(&work_path).expect("work");
+    write_script(&install_dir.join("bin").join("1cv8"));
+    write_script(&install_dir.join("bin").join("1cv8c"));
+    write_config_with_web_url(&config_path, &work_path, &install_dir, url, extra);
+
+    (dir, config_path, install_dir)
+}
+
+fn launch_json(config_path: &Path, arguments: &[&str]) -> Value {
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+        ])
+        .args(arguments)
+        .output()
+        .expect("run command");
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "no json envelope: {error}\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
+fn planned_args(payload: &Value) -> Vec<String> {
+    payload["data"]["plan"]["args"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no planned args: {payload}"))
+        .iter()
+        .map(|arg| arg.as_str().unwrap_or_default().to_owned())
+        .collect()
 }
 
 fn setup_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
@@ -767,6 +877,64 @@ fn launch_json_exposes_platform_resolution_metadata() {
             .expect("installation root"),
         canonical_version_dir.to_string_lossy()
     );
+}
+
+/// Превью маскировало пароль внутри строки соединения, а отказ настоящего запуска
+/// печатал его целиком — в stderr и в журнал действий, который живёт дольше запуска.
+/// Читаемым остаётся всё, что не секрет: по отказу должно быть видно, куда шли.
+#[test]
+fn launch_failure_never_echoes_the_password_inside_the_connection_string() {
+    let dir = temp_workspace();
+    let base_path = dir.path().join("project");
+    let work_path = dir.path().join("work");
+    let install_dir = dir.path().join("platform");
+    let config_path = dir.path().join("v8project.yaml");
+    let action_log = dir.path().join("actions.log");
+
+    fs::create_dir_all(&base_path).expect("base");
+    fs::create_dir_all(&work_path).expect("work");
+    write_script(&install_dir.join("bin").join("1cv8"));
+    write_false_executable(&install_dir.join("bin").join("1cv8c"));
+    write_config(&config_path, &base_path, &work_path, &install_dir, None);
+    let config = fs::read_to_string(&config_path).expect("config");
+    fs::write(
+        &config_path,
+        config.replace(
+            "connection: 'File=/tmp/ib'",
+            "connection: 'Srvr=\"srv:1541\";Ref=ut;Usr=Admin;Pwd=s3cret'",
+        ),
+    )
+    .expect("config with credentials in the connection string");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--no-color",
+            "--log-level",
+            "debug",
+            "launch",
+            "thin",
+        ])
+        .env("V8TR_ACTION_LOG_FILE", &action_log)
+        .output()
+        .expect("run command");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("exited before startup completed"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("s3cret"), "{stderr}");
+    assert!(stderr.contains("Pwd=***"), "{stderr}");
+    assert!(stderr.contains("Ref=ut"), "{stderr}");
+
+    let log = fs::read_to_string(&action_log).expect("action log");
+    assert!(!log.contains("s3cret"), "{log}");
+    // Без положительного якоря проверка журнала прошла бы и тогда, когда показ
+    // команды перестал бы в него попадать вовсе.
+    assert!(log.contains("Pwd=***"), "{log}");
 }
 
 #[test]
@@ -1213,8 +1381,14 @@ fn launch_mcp_wait_ready_terminates_process_on_readiness_failure() {
         terminated.display()
     );
     let (_dir, config_path, _install_dir, _work_path) = setup_project_with_thin_script(&script);
-    prepend_config(&config_path, "execution_timeout: 15000\n");
-    insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 5000\n");
+    prepend_config(
+        &config_path,
+        &format!("execution_timeout: {IDLE_WAIT_TIMEOUT_MS}\n"),
+    );
+    insert_client_mcp_config(
+        &config_path,
+        &format!("    wait_ready_timeout_ms: {EXPIRING_WAIT_TIMEOUT_MS}\n"),
+    );
     let endpoint = UnresponsiveEndpoint::start();
     let port = endpoint.port();
 
@@ -1238,20 +1412,22 @@ fn launch_mcp_wait_ready_terminates_process_on_readiness_failure() {
         .as_str()
         .expect("error message")
         .contains("MCP endpoint did not become ready"));
-    assert!(
-        wait_for_file(&started, Duration::from_secs(10)),
-        "launch process should have started before the readiness timeout"
-    );
-    assert!(
-        wait_for_file(&terminated, Duration::from_secs(10)),
-        "wait-ready failure should terminate the launched client process"
+    wait_until("the launch process to start", || started.exists());
+    wait_until(
+        "the wait-ready failure to terminate the launched client process",
+        || terminated.exists(),
     );
 }
 
 #[test]
 fn launch_mcp_wait_ready_uses_configured_wait_timeout() {
     let (_dir, config_path, _install_dir, _work_path) = setup_project();
-    prepend_config(&config_path, "execution_timeout: 15000\n");
+    // Настроенный срок и общий бюджет разведены так, что взявшая не тот срок регрессия
+    // выходит за границу, а загруженной машине этой границы не перебить.
+    prepend_config(
+        &config_path,
+        &format!("execution_timeout: {IDLE_WAIT_TIMEOUT_MS}\n"),
+    );
     insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 500\n");
     let endpoint = UnresponsiveEndpoint::start();
     let port = endpoint.port();
@@ -1278,8 +1454,9 @@ fn launch_mcp_wait_ready_uses_configured_wait_timeout() {
         .expect("error message")
         .contains("MCP endpoint did not become ready"));
     assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "wait-ready should use tools.client_mcp.wait_ready_timeout_ms instead of the global execution_timeout"
+        started.elapsed() < Duration::from_millis(IDLE_WAIT_TIMEOUT_MS) / 2,
+        "wait-ready should use tools.client_mcp.wait_ready_timeout_ms instead of the global execution_timeout; elapsed={:?}",
+        started.elapsed()
     );
 }
 
@@ -1307,7 +1484,7 @@ fn thin_external_epf_wait_returns_structured_exit_and_artifacts() {
             &stderr.display().to_string(),
             "--wait-for-exit",
             "--wait-timeout-ms",
-            "5000",
+            &IDLE_WAIT_TIMEOUT_MS.to_string(),
         ])
         .output()
         .expect("run command");
@@ -1338,7 +1515,7 @@ fn thin_external_epf_wait_timeout_terminates_client_group() {
     let marker = temp_workspace();
     let descendant_pid = marker.path().join("descendant.pid");
     let script = format!(
-        "sleep 30 &\nprintf '%s' $! > '{}'\nwait",
+        "sleep {CLIENT_OUTLIVES_WAIT_SECS} &\nprintf '%s' $! > '{}'\nwait",
         descendant_pid.display()
     );
     let (_dir, config_path, _install_dir, work_path) = setup_project_with_thin_script(&script);
@@ -1347,7 +1524,7 @@ fn thin_external_epf_wait_timeout_terminates_client_group() {
     let stderr = work_path.join("runtime.stderr");
     fs::write(&epf, "epf").expect("epf");
 
-    let command_output = v8_runner_command()
+    let command = v8_runner_command()
         .args([
             "--config",
             &config_path.display().to_string(),
@@ -1362,30 +1539,32 @@ fn thin_external_epf_wait_timeout_terminates_client_group() {
             &stderr.display().to_string(),
             "--wait-for-exit",
             "--wait-timeout-ms",
-            "5000",
+            &EXPIRING_WAIT_TIMEOUT_MS.to_string(),
         ])
-        .output()
-        .expect("run command");
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn command");
+
+    // Потомка называет сама фикстура, и после срабатывания таймаута её уже убили:
+    // признак читается, пока клиент жив, и ожиданием, а не отмеренным сроком.
+    wait_until("client fixture to publish its descendant pid", || {
+        published_pid(&descendant_pid).is_some()
+    });
+    let pid = published_pid(&descendant_pid).expect("descendant pid");
+
+    let command_output = command.wait_with_output().expect("run command");
 
     assert!(!command_output.status.success());
     let payload: Value = serde_json::from_slice(&command_output.stdout).expect("json");
     assert_eq!(payload["ok"], false);
     assert_eq!(payload["error"]["kind"], "runtime");
     assert_eq!(payload["data"]["external_epf_wait"]["timed_out"], true);
-    assert!(
-        wait_for_file(&descendant_pid, Duration::from_secs(10)),
-        "client fixture did not publish its descendant pid before the wait timeout"
-    );
-    let pid = fs::read_to_string(descendant_pid).expect("descendant pid");
-    assert!(
-        !std::process::Command::new("kill")
-            .args(["-0", pid.trim()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .expect("probe descendant")
-            .success(),
-        "timeout must terminate the entire client process group"
+    // Группу убивают, а снимают её записи асинхронно, поэтому исчезновение потомка —
+    // тоже условие, а не мгновенный снимок.
+    wait_until(
+        "the whole client process group to be terminated by the wait timeout",
+        || !process_alive(&pid),
     );
 }
 
@@ -1856,5 +2035,266 @@ fn launch_web_dry_run_names_the_opener_and_the_address() {
     assert_eq!(
         args.last().and_then(Value::as_str),
         Some("http://localhost/demo")
+    );
+}
+
+/// У цели два адреса, и тонкий клиент открывается любым. `--via web` берёт клиентский и
+/// передаёт его как ws-соединение.
+#[test]
+fn a_thin_client_goes_through_the_web_address_when_asked() {
+    let (_dir, config_path, install_dir) = setup_web_project("http://localhost/base", "");
+
+    let payload = launch_json(
+        &config_path,
+        &["launch", "thin", "--via", "web", "--dry-run"],
+    );
+
+    assert_eq!(payload["ok"], true, "{payload}");
+    assert_eq!(payload["data"]["via"], "web", "{payload}");
+    assert_eq!(payload["data"]["url"], "http://localhost/base", "{payload}");
+    assert_eq!(
+        payload["data"]["plan"]["program"]
+            .as_str()
+            .expect("program"),
+        canonical_path_string(&install_dir.join("bin").join("1cv8c"))
+    );
+    let args = planned_args(&payload);
+    let at = args
+        .iter()
+        .position(|arg| arg == "/WS")
+        .unwrap_or_else(|| panic!("no /WS in {args:?}"));
+    assert_eq!(args[at + 1], "http://localhost/base", "{args:?}");
+    assert!(
+        !args.iter().any(|arg| arg == "/IBConnectionString"),
+        "клиентский адрес заменяет административный, а не дополняет: {args:?}"
+    );
+}
+
+/// Умолчание у файловой цели — административный адрес, и объявленный `web.url` его не
+/// подменяет: путь выбирает вид цели, а не наличие публикации.
+#[test]
+fn a_thin_client_keeps_the_connection_address_by_default() {
+    let (_dir, config_path, _install) = setup_web_project("http://localhost/base", "");
+
+    let payload = launch_json(&config_path, &["launch", "thin", "--dry-run"]);
+
+    assert_eq!(payload["data"]["via"], "connection", "{payload}");
+    assert!(payload["data"]["url"].is_null(), "{payload}");
+    let args = planned_args(&payload);
+    assert!(
+        args.iter().any(|arg| arg == "/IBConnectionString"),
+        "{args:?}"
+    );
+    assert!(!args.iter().any(|arg| arg == "/WS"), "{args:?}");
+}
+
+/// Развилка есть только у тонкого клиента: у остальных режимов адрес один, и ключ,
+/// которому нечего выбирать, отвергается, а не игнорируется молча.
+#[test]
+fn via_is_refused_where_there_is_no_choice() {
+    let (_dir, config_path, _install) = setup_web_project("http://localhost/base", "");
+
+    for mode in ["designer", "thick", "ordinary", "web"] {
+        let payload = launch_json(&config_path, &["launch", mode, "--via", "web", "--dry-run"]);
+
+        assert_eq!(payload["ok"], false, "{mode}: {payload}");
+        assert_eq!(payload["error"]["kind"], "validation", "{mode}: {payload}");
+    }
+}
+
+/// Адреса нет — отказывает и `launch web`, и тонкий клиент по вебу, одним и тем же текстом:
+/// не хватает им одного и того же.
+#[test]
+fn a_web_launch_without_an_address_is_refused_the_same_way_for_both_paths() {
+    let dir = temp_workspace();
+    let work_path = dir.path().join("work");
+    let install_dir = dir.path().join("platform");
+    let config_path = dir.path().join("v8project.yaml");
+    fs::create_dir_all(dir.path().join("project")).expect("base");
+    fs::create_dir_all(&work_path).expect("work");
+    write_script(&install_dir.join("bin").join("1cv8c"));
+    write_config(&config_path, dir.path(), &work_path, &install_dir, None);
+
+    for arguments in [
+        vec!["launch", "thin", "--via", "web", "--dry-run"],
+        vec!["launch", "web", "--dry-run"],
+    ] {
+        let payload = launch_json(&config_path, &arguments);
+
+        assert_eq!(payload["ok"], false, "{arguments:?}: {payload}");
+        assert_eq!(
+            payload["error"]["kind"], "validation",
+            "{arguments:?}: {payload}"
+        );
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("infobase.web.url"),
+            "{arguments:?}: {payload}"
+        );
+    }
+}
+
+/// Поле `via` есть у каждого режима, а не только там, где был выбор: иначе его
+/// отсутствие пришлось бы толковать.
+#[test]
+fn every_launch_names_the_address_it_used() {
+    let (_dir, config_path, _install) = setup_web_project("http://localhost/base", "");
+
+    for (arguments, expected) in [
+        (vec!["launch", "designer", "--dry-run"], "connection"),
+        (vec!["launch", "thick", "--dry-run"], "connection"),
+        (vec!["launch", "web", "--dry-run"], "web"),
+        (vec!["launch", "thin", "--via", "web", "--dry-run"], "web"),
+    ] {
+        let payload = launch_json(&config_path, &arguments);
+
+        assert_eq!(payload["ok"], true, "{arguments:?}: {payload}");
+        assert_eq!(payload["data"]["via"], expected, "{arguments:?}: {payload}");
+    }
+}
+
+/// Пароль из userinfo не показывается нигде, где раннер показывает адрес: ни в плане,
+/// ни в поле `url`, ни в сообщении. Имя пользователя остаётся — по нему адрес узнаётся.
+#[test]
+fn a_client_address_is_reported_without_its_userinfo_password() {
+    let (_dir, config_path, _install) = setup_web_project("http://alice:s3cret@localhost/base", "");
+
+    for arguments in [
+        vec!["launch", "thin", "--via", "web", "--dry-run"],
+        vec!["launch", "web", "--dry-run"],
+    ] {
+        let payload = launch_json(&config_path, &arguments);
+        let rendered = payload.to_string();
+
+        assert!(
+            !rendered.contains("s3cret"),
+            "{arguments:?} показал пароль: {payload}"
+        );
+        assert!(
+            rendered.contains("alice"),
+            "{arguments:?} потерял имя пользователя: {payload}"
+        );
+        assert_eq!(
+            payload["data"]["url"], "http://alice:***@localhost/base",
+            "{arguments:?}: {payload}"
+        );
+    }
+}
+
+/// Пользовательские ключи запуска дописываются после наших и своего адреса не отменяют:
+/// раннер не теряет `/WS` и не падает, даже когда рядом положили второй адрес.
+#[test]
+fn additional_launch_keys_do_not_displace_the_web_address() {
+    let (_dir, config_path, _install) = setup_web_project(
+        "http://localhost/base",
+        "  enterprise:\n    additional-launch-keys: ['/IBConnectionString', 'File=/tmp/other']\n",
+    );
+
+    let payload = launch_json(
+        &config_path,
+        &["launch", "thin", "--via", "web", "--dry-run"],
+    );
+
+    assert_eq!(payload["ok"], true, "{payload}");
+    let args = planned_args(&payload);
+    let ws = args
+        .iter()
+        .position(|arg| arg == "/WS")
+        .unwrap_or_else(|| panic!("no /WS in {args:?}"));
+    let theirs = args
+        .iter()
+        .position(|arg| arg == "/IBConnectionString")
+        .unwrap_or_else(|| panic!("user key dropped: {args:?}"));
+    assert!(ws < theirs, "наш адрес идёт первым: {args:?}");
+}
+
+/// У автономной цели `infobase.user` и `infobase.password` — учётные данные SSH-шлюза, а
+/// не базы. Тонкий клиент к ней идёт по вебу без всякого ключа и **без** `/N` и `/P`:
+/// иначе раннер отдал бы пароль шлюза в командную строку клиента.
+#[test]
+fn a_standalone_thin_client_carries_the_address_without_the_gate_credentials() {
+    let dir = temp_workspace();
+    let work_path = dir.path().join("work");
+    let install_dir = dir.path().join("platform");
+    let exchange = dir.path().join("exchange");
+    let config_path = dir.path().join("v8project.yaml");
+    fs::create_dir_all(dir.path().join("project")).expect("base");
+    fs::create_dir_all(&work_path).expect("work");
+    fs::create_dir_all(&exchange).expect("exchange");
+    write_script(&install_dir.join("bin").join("1cv8c"));
+    fs::write(
+        &config_path,
+        format!(
+            "workPath: '{work}'\nformat: DESIGNER\ninfobase:\n  user: gate-user\n  password: gate-secret\n  web:\n    url: 'http://localhost/standalone'\n  standalone:\n    gate: 127.0.0.1:1543\n    exchange:\n      dir: '{exchange}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    path: '{platform}'\n",
+            work = work_path.display(),
+            exchange = exchange.display(),
+            platform = install_dir.display(),
+        ),
+    )
+    .expect("config");
+
+    let payload = launch_json(&config_path, &["launch", "thin", "--dry-run"]);
+
+    assert_eq!(payload["ok"], true, "{payload}");
+    assert_eq!(
+        payload["data"]["via"], "web",
+        "умолчание автономной цели — веб: {payload}"
+    );
+    let args = planned_args(&payload);
+    let at = args
+        .iter()
+        .position(|arg| arg == "/WS")
+        .unwrap_or_else(|| panic!("no /WS in {args:?}"));
+    assert_eq!(args[at + 1], "http://localhost/standalone", "{args:?}");
+    assert!(
+        !args.iter().any(|arg| arg == "/N" || arg == "/P"),
+        "реквизиты шлюза клиенту не принадлежат: {args:?}"
+    );
+    assert!(
+        !args.iter().any(|arg| arg.contains("gate-secret")),
+        "пароль шлюза не должен попадать в командную строку: {args:?}"
+    );
+}
+
+/// Маскируется отчёт, а не запуск: в процесс уходит настоящий адрес, иначе клиент никуда
+/// не подключится. Проверяется на живом запуске, а не на превью.
+#[test]
+fn a_real_web_launch_passes_the_unmasked_address_to_the_client() {
+    let dir = temp_workspace();
+    let work_path = dir.path().join("work");
+    let install_dir = dir.path().join("platform");
+    let config_path = dir.path().join("v8project.yaml");
+    let args_log = dir.path().join("thin.args.log");
+    fs::create_dir_all(dir.path().join("project")).expect("base");
+    fs::create_dir_all(&work_path).expect("work");
+    write_logging_script(&install_dir.join("bin").join("1cv8c"), &args_log);
+    write_config_with_web_url(
+        &config_path,
+        &work_path,
+        &install_dir,
+        "http://alice:s3cret@localhost/base",
+        "",
+    );
+
+    let payload = launch_json(&config_path, &["launch", "thin", "--via", "web"]);
+
+    assert_eq!(payload["ok"], true, "{payload}");
+    assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
+    assert_eq!(payload["data"]["via"], "web", "{payload}");
+    assert_eq!(
+        payload["data"]["url"], "http://alice:***@localhost/base",
+        "отчёт несёт замаскированный адрес: {payload}"
+    );
+    assert!(
+        !payload.to_string().contains("s3cret"),
+        "отчёт не должен нести пароль: {payload}"
+    );
+
+    let dispatched = read_args_log(&args_log);
+    assert!(
+        dispatched.contains("http://alice:s3cret@localhost/base"),
+        "в процесс обязан уйти настоящий адрес, иначе клиент не подключится: {dispatched:?}"
     );
 }

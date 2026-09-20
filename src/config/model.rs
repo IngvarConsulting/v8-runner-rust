@@ -103,6 +103,10 @@ pub struct StandaloneConfig {
     /// `host:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`, port 1543 by default).
     pub gate: String,
 
+    /// `SHA256:…` fingerprint the gate must present. Absent: the key is accepted and named.
+    #[serde(default)]
+    pub host_fingerprint: Option<String>,
+
     /// How files travel between the runner and the gate user's directory: `sftp` through
     /// the gate itself, or `{ dir: … }` — that directory as the runner sees it.
     #[serde(default)]
@@ -473,21 +477,13 @@ pub struct ToolsConfig {
 /// MCP transport-neutral runtime configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "snake_case")]
+#[derive(Default)]
 pub struct McpConfig {
     /// HTTP transport settings for the future MCP server.
     pub http: McpHttpConfig,
 
     /// Shared execution limits for MCP calls.
     pub execution: McpExecutionConfig,
-}
-
-impl Default for McpConfig {
-    fn default() -> Self {
-        Self {
-            http: McpHttpConfig::default(),
-            execution: McpExecutionConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -653,6 +649,9 @@ pub struct McpHttpConfig {
 
     /// Idle session eviction timeout in seconds.
     pub idle_ttl_secs: u64,
+
+    /// Hosts the HTTP listener answers besides the loopback, as `Host` header values.
+    pub allowed_hosts: Vec<String>,
 }
 
 impl Default for McpHttpConfig {
@@ -663,6 +662,7 @@ impl Default for McpHttpConfig {
             stateful_sessions: default_mcp_http_stateful_sessions(),
             max_sessions: default_mcp_http_max_sessions(),
             idle_ttl_secs: default_mcp_http_idle_ttl_secs(),
+            allowed_hosts: Vec::new(),
         }
     }
 }
@@ -847,6 +847,10 @@ pub struct DesignerAgentConfig {
     /// Private host key for the managed agent. Absent: `/AgentSSHHostKeyAuto`.
     pub host_key: Option<PathBuf>,
 
+    /// `SHA256:…` fingerprint the attached agent must present. Attached mode only:
+    /// the managed agent's key is the one the runner hands it in `host-key`.
+    pub host_fingerprint: Option<String>,
+
     /// Time limit for the managed agent to accept the first authenticated session.
     #[serde(
         default = "default_designer_agent_startup_timeout_ms",
@@ -862,6 +866,7 @@ impl Default for DesignerAgentConfig {
             base_dir: None,
             port: None,
             host_key: None,
+            host_fingerprint: None,
             startup_timeout_ms: default_designer_agent_startup_timeout_ms(),
         }
     }
@@ -897,6 +902,9 @@ impl DesignerAgentConfig {
         let mut keys = Vec::new();
         if self.base_dir.is_some() {
             keys.push("base-dir");
+        }
+        if self.host_fingerprint.is_some() {
+            keys.push("host-fingerprint");
         }
         keys
     }

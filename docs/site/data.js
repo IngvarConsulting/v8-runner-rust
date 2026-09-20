@@ -65,10 +65,12 @@ window.RUNNER_DATA = (function () {
       ? { kind: 'subject', why: 'внешние обработки в базу не грузятся', fix: 'для них — make и convert' }
       : null;
   }
-  function noStandaloneToday(ctx) {
-    return ctx.target === 'standalone' && ctx.mode === 'today'
-      ? { kind: 'soon', why: 'раннер пока не подключается к автономному серверу', fix: 'решено DEC.2026-09-14.AGENT-ENDPOINT-IS-MANAGED-OR-ATTACHED: пойдёт через SSH-шлюз ibsrv — смотрите целевой режим' }
-      : null;
+  // Автономный сервер отвечает только через свой SSH-шлюз, и набор операций у него
+  // закрыт решением, а не недоделкой: в матрице (src/domain/capability.rs) строки есть
+  // только у build, dump, make, extensions и infobase configuration export. Остальное
+  // отказывает типизированно, и «когда-нибудь появится» тут сказать нельзя.
+  function standaloneRefuses(ctx, why) {
+    return ctx.target === 'standalone' ? { kind: 'target', why: why, fix: '' } : null;
   }
   function builderChoice(ctx, designerOk, ibcmdOk) {
     // сегодня: цепочка умолчаний из матрицы; показываем оба варианта, если оба возможны
@@ -113,7 +115,7 @@ window.RUNNER_DATA = (function () {
       id: 'init', verb: 'init', title: 'Подготовить базу',
       what: 'Создаёт базу, если её нет.',
       cmd: function (ctx) { return 'v8-runner init'; },
-      applies: function (ctx) { return noStandaloneToday(ctx) || needEdt(ctx); },
+      applies: function (ctx) { return standaloneRefuses(ctx, 'у автономного сервера базу не создают снаружи: раннер к нему подключается, ничего не запуская') || needEdt(ctx); },
       today: function (ctx) {
         var chain = builderChoice(ctx, ctx.target === 'file', true);
         var cfg = ['infobase.connection'];
@@ -131,7 +133,7 @@ window.RUNNER_DATA = (function () {
       id: 'build', verb: 'build', title: 'Загрузить изменения в базу',
       what: 'Грузит изменённые исходники в базу.',
       cmd: function (ctx) { return 'v8-runner build'; },
-      applies: function (ctx) { return notExternal(ctx, 'build') || noStandaloneToday(ctx) || needEdt(ctx); },
+      applies: function (ctx) { return notExternal(ctx, 'build') || needEdt(ctx); },
       today: function (ctx) {
         var chain = builderChoice(ctx, true, true);
         var cfg = ['infobase.connection', 'source-set[]', 'build.partialLoadThreshold (необязательно)'];
@@ -147,7 +149,7 @@ window.RUNNER_DATA = (function () {
       id: 'test', verb: 'test', title: 'Прогнать тесты',
       what: 'Запускает YAxUnit или Vanessa.',
       cmd: function (ctx) { return 'v8-runner test yaxunit all'; },
-      applies: function (ctx) { return notExternal(ctx, 'test') || noStandaloneToday(ctx) || needEdt(ctx); },
+      applies: function (ctx) { return notExternal(ctx, 'test') || standaloneRefuses(ctx, 'тест запускает клиента по строке подключения, которой у этой цели нет') || needEdt(ctx); },
       today: function (ctx) { return { chain: [P.client], config: ['tests.yaxunit.* или tests.va.*', 'tools.va.epf_path — для Vanessa'], note: 'провайдер сборки — как у build; test --no-build пропускает сборку' }; },
       target: function (ctx) { return this.today(ctx); }
     },
@@ -155,7 +157,7 @@ window.RUNNER_DATA = (function () {
       id: 'dump', verb: 'dump', title: 'Выгрузить базу в исходники',
       what: 'Выгружает конфигурацию базы в исходники.',
       cmd: function (ctx) { return 'v8-runner dump --mode full'; },
-      applies: function (ctx) { return notExternal(ctx, 'dump') || noStandaloneToday(ctx) || needEdt(ctx); },
+      applies: function (ctx) { return notExternal(ctx, 'dump') || needEdt(ctx); },
       today: function (ctx) {
         var chain = builderChoice(ctx, true, true);
         return { chain: chain, config: ['infobase.connection', 'source-set[]'], note: 'у ibcmd режим partial деградирует в incremental с предупреждением; публикация через staging и backup' };
@@ -169,7 +171,7 @@ window.RUNNER_DATA = (function () {
       id: 'load', verb: 'load', title: 'Загрузить .cf / .cfe в базу',
       what: 'Грузит готовый .cf или .cfe в базу.',
       cmd: function (ctx) { return (ctx.type === 'EXTENSION' ? 'v8-runner load --path ext.cfe --extension ИмяРасширения' : 'v8-runner load --path main.cf'); },
-      applies: function (ctx) { return notExternal(ctx, 'load') || noStandaloneToday(ctx); },
+      applies: function (ctx) { return notExternal(ctx, 'load') || standaloneRefuses(ctx, 'у шлюза нет compare-cfg, поэтому загрузку артефакта он не исполняет'); },
       today: function (ctx) { return { chain: ctx.tools.designer ? [P.designer] : [], config: ['infobase.connection'], note: 'только Конфигуратор; состояния совместимости supported / absent / not_established / not_probed' }; },
       target: function (ctx) {
         if (ctx.target === 'standalone') return { kind: 'subject', why: 'у шлюза нет compare-cfg', fix: 'проба совместимости перед загрузкой обязательна; загружайте через build из исходников' };
@@ -180,7 +182,7 @@ window.RUNNER_DATA = (function () {
       id: 'make', verb: 'make / artifacts', title: 'Собрать артефакты',
       what: 'Собирает .cf, .cfe, .epf, .erf.',
       cmd: function (ctx) { return (ctx.type === 'EXTERNAL' ? 'v8-runner make --output build/epf' : ctx.type === 'EXTENSION' ? 'v8-runner make --output build/ext.cfe --extension ИмяРасширения' : 'v8-runner make --output build/main.cf'); },
-      applies: function (ctx) { return ctx.type !== 'EXTERNAL' ? noStandaloneToday(ctx) : null; },
+      applies: function (ctx) { return null; },
       today: function (ctx) {
         if (ctx.type === 'EXTERNAL') return { chain: ctx.tools.designer ? [P.designer] : [], config: ['source-set[] с type EXTERNAL_*'], note: 'внешние собираются Конфигуратором из XML; базы не касается' };
         return { chain: ctx.tools.designer ? [P.designer] : [], config: ['infobase.connection'], note: 'только Конфигуратор' };
@@ -195,7 +197,7 @@ window.RUNNER_DATA = (function () {
       id: 'ib-export', verb: 'infobase configuration export', title: 'Сохранить конфигурацию базы в .cf / .cfe',
       what: 'Сохраняет конфигурацию базы в файл.',
       cmd: function (ctx) { return (ctx.type === 'EXTENSION' ? 'v8-runner infobase configuration export --state working --extension ИмяРасширения --output ext.cfe' : 'v8-runner infobase configuration export --state working --output main.cf'); },
-      applies: function (ctx) { return notExternal(ctx, 'экспорт конфигурации') || noStandaloneToday(ctx); },
+      applies: function (ctx) { return notExternal(ctx, 'экспорт конфигурации'); },
       today: function (ctx) {
         var chain = builderChoice(ctx, true, ctx.target === 'file' || ctx.target === 'cluster');
         return { chain: chain, config: ['infobase.connection'].concat(ctx.target === 'cluster' ? ['infobase.dbms.* — для ibcmd'] : []), note: 'раннер берёт первого готового из цепочки; квитанция называет пропущенных' };
@@ -209,7 +211,7 @@ window.RUNNER_DATA = (function () {
       id: 'ib-dump', verb: 'infobase dump / restore', title: 'Снять и вернуть всю базу (.dt)',
       what: 'Снимает базу в .dt и возвращает обратно.',
       cmd: function (ctx) { return 'v8-runner infobase dump --output ib.dt'; },
-      applies: function (ctx) { return notExternal(ctx, 'снимок базы') || noStandaloneToday(ctx); },
+      applies: function (ctx) { return notExternal(ctx, 'снимок базы') || standaloneRefuses(ctx, 'через шлюз снимок не снимают намеренно: dump-ib роняет ibsrv 8.3.27, а restore-ib завершает сеанс сервера — снимок снимают средствами самого сервера'); },
       today: function (ctx) { return { chain: ctx.tools.designer ? [P.designer] : [], config: ['infobase.connection'], note: 'ibcmd для .dt остаётся экспериментом, пока нет проверки эксклюзивного доступа' }; },
       target: function (ctx) {
         if (ctx.target === 'standalone') return { kind: 'subject', why: 'dump-ib через шлюз роняет ibsrv 8.3.27', fix: 'снимок автономного сервера снимают его средствами' };
@@ -220,7 +222,7 @@ window.RUNNER_DATA = (function () {
       id: 'extensions', verb: 'extensions', title: 'Расширения: свойства и состав',
       what: 'Свойства расширений и их состав в базе.',
       cmd: function (ctx) { return 'v8-runner extensions list'; },
-      applies: function (ctx) { return ctx.type === 'CONFIGURATION' ? { kind: 'subject', why: 'в проекте нет расширений', fix: '' } : notExternal(ctx, 'extensions') || noStandaloneToday(ctx); },
+      applies: function (ctx) { return ctx.type === 'CONFIGURATION' ? { kind: 'subject', why: 'в проекте нет расширений', fix: '' } : notExternal(ctx, 'extensions'); },
       today: function (ctx) { return { chain: ctx.tools.ibcmd ? [P.ibcmd] : [], config: ['infobase.connection'].concat(ctx.target === 'cluster' ? ['infobase.dbms.*'] : []), note: 'состав базы умеет только ibcmd: у Конфигуратора нет пакетного списка' }; },
       target: function (ctx) {
         if (ctx.target === 'standalone') return { chain: [P.agent], config: ['infobase.standalone.*'], note: 'состав и свойства расширений группой config extensions по шлюзу' };
@@ -231,8 +233,8 @@ window.RUNNER_DATA = (function () {
       id: 'syntax', verb: 'syntax', title: 'Проверить синтаксис',
       what: 'Проверяет синтаксис.',
       cmd: function (ctx) { return (ctx.format === 'EDT' ? 'v8-runner syntax edt' : 'v8-runner syntax designer-config'); },
-      applies: function (ctx) { return ctx.format === 'EDT' ? needEdt(ctx) : (ctx.type === 'EXTERNAL' ? { kind: 'subject', why: 'для внешних наборов не описана', fix: '' } : noStandaloneToday(ctx)); },
-      today: function (ctx) { return ctx.format === 'EDT' ? { chain: [P.edt], config: ['tools.edt_cli.*'], note: 'validate; одна общая сессия EDT при interactive-mode=true' } : { chain: ctx.tools.designer ? [P.designer] : [], config: ['infobase.connection'], note: 'вердикт по коду выхода: 0 чисто, 101 есть замечания' }; },
+      applies: function (ctx) { return ctx.format === 'EDT' ? needEdt(ctx) : (ctx.type === 'EXTERNAL' ? { kind: 'subject', why: 'для внешних наборов не описана', fix: '' } : standaloneRefuses(ctx, 'проверка синтаксиса идёт Конфигуратором по строке подключения, которой у этой цели нет')); },
+      today: function (ctx) { return ctx.format === 'EDT' ? { chain: [P.edt], config: ['tools.edt_cli.*'], note: 'validate; одна общая сессия EDT при interactive-mode=true' } : { chain: ctx.tools.designer ? [P.designer] : [], config: ['infobase.connection'], note: 'вердикт по коду выхода: 0 чисто, 101 есть замечания; нечитаемый журнал делает вердикт неизвестным' }; },
       target: function (ctx) { return this.today(ctx); }
     },
     {
@@ -253,9 +255,18 @@ window.RUNNER_DATA = (function () {
       id: 'launch', verb: 'launch', title: 'Запустить клиент или Конфигуратор',
       what: 'Запускает клиент или Конфигуратор.',
       cmd: function (ctx) { return 'v8-runner launch thin'; },
-      applies: function (ctx) { return noStandaloneToday(ctx); },
-      today: function (ctx) { return { chain: [P.client], config: ['infobase.connection', 'tools.enterprise.additional-launch-keys (необязательно)'], note: '' }; },
-      target: function (ctx) { return this.today(ctx); }
+      applies: function (ctx) { return null; },
+      today: function (ctx) { return this.target(ctx); },
+      target: function (ctx) {
+        // У цели два адреса, и тонкий клиент открывается любым; умолчание задаёт вид цели.
+        // Клиент запускается локально в любом случае — платформа нужна и для веб-пути.
+        if (ctx.target === 'standalone') {
+          return { chain: [P.client], config: ['infobase.web.url', 'tools.enterprise.additional-launch-keys (необязательно)'],
+                   note: 'адрес один — клиентский, поэтому тонкий клиент идёт по нему без ключа; Конфигуратор, толстый и обычный отказывают. infobase.user и infobase.password здесь принадлежат шлюзу и клиенту не передаются' };
+        }
+        return { chain: [P.client], config: ['infobase.connection', 'infobase.web.url — для --via web', 'tools.enterprise.additional-launch-keys (необязательно)'],
+                 note: 'умолчание — строка подключения; --via web открывает ту же базу по опубликованному адресу ws-соединением' };
+      }
     },
     {
       id: 'launch-web', verb: 'launch web', title: 'Открыть опубликованную базу в браузере',

@@ -11,7 +11,6 @@ v8-runner bootstrap --connection "File=/path/to/ib" --platform-version 8.3.27
 v8-runner config init
 v8-runner config init --connection "File=build/ib"
 v8-runner config init --format edt
-v8-runner config init --builder IBCMD
 v8-runner init
 ```
 

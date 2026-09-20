@@ -35,115 +35,6 @@ pub(super) fn make_test_result(
     TestRunResult::from_outcome(outcome, target, mode, warnings, steps, duration_ms)
 }
 
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::enterprise_error_kind;
-    use crate::domain::execution::ExecutionStatus;
-    use crate::domain::test::TestErrorKind;
-    use crate::platform::enterprise::EnterpriseError;
-    use crate::platform::process::ProcessError;
-    use crate::support::error::AppError;
-
-    fn assert_process_mapping(
-        process_error: ProcessError,
-        expected_kind: TestErrorKind,
-        assert_typed_error: impl FnOnce(AppError),
-    ) {
-        let (kind, app_error, interruption, status) =
-            enterprise_error_kind(EnterpriseError::Spawn(process_error));
-
-        assert_eq!(kind, Some(expected_kind));
-        assert_typed_error(app_error);
-        assert!(interruption.is_none());
-        assert_eq!(status, ExecutionStatus::Failed);
-    }
-
-    #[test]
-    fn enterprise_process_errors_keep_distinct_test_error_kinds() {
-        assert_process_mapping(
-            ProcessError::SpawnFailed {
-                cmd: "1cv8c ENTERPRISE".to_owned(),
-                source: std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
-            },
-            TestErrorKind::EnterpriseSpawnFailed,
-            |error| {
-                assert!(matches!(
-                    error,
-                    AppError::PlatformProcess(ProcessError::SpawnFailed { .. })
-                ));
-            },
-        );
-        assert_process_mapping(
-            ProcessError::StartupCheckFailed {
-                cmd: "1cv8c ENTERPRISE".to_owned(),
-                source: std::io::Error::other("probe failed"),
-            },
-            TestErrorKind::EnterpriseStartupCheckFailed,
-            |error| {
-                assert!(matches!(
-                    error,
-                    AppError::PlatformProcess(ProcessError::StartupCheckFailed { .. })
-                ));
-            },
-        );
-        assert_process_mapping(
-            ProcessError::ExitedEarly {
-                cmd: "1cv8c ENTERPRISE".to_owned(),
-                exit_code: 17,
-            },
-            TestErrorKind::EnterpriseExitedEarly,
-            |error| {
-                assert!(matches!(
-                    error,
-                    AppError::PlatformProcess(ProcessError::ExitedEarly { .. })
-                ));
-            },
-        );
-        assert_process_mapping(
-            ProcessError::StdoutLogIo {
-                path: PathBuf::from("stdout.log"),
-                source: std::io::Error::other("stdout write"),
-            },
-            TestErrorKind::EnterpriseStdoutLogIo,
-            |error| {
-                assert!(matches!(
-                    error,
-                    AppError::PlatformProcess(ProcessError::StdoutLogIo { .. })
-                ));
-            },
-        );
-        assert_process_mapping(
-            ProcessError::StderrLogIo {
-                path: PathBuf::from("stderr.log"),
-                source: std::io::Error::other("stderr write"),
-            },
-            TestErrorKind::EnterpriseStderrLogIo,
-            |error| {
-                assert!(matches!(
-                    error,
-                    AppError::PlatformProcess(ProcessError::StderrLogIo { .. })
-                ));
-            },
-        );
-    }
-
-    #[test]
-    fn enterprise_timeout_keeps_interruption_contract() {
-        let (kind, app_error, interruption, status) =
-            enterprise_error_kind(EnterpriseError::Spawn(ProcessError::TimedOut {
-                cmd: "1cv8c ENTERPRISE".to_owned(),
-                timeout_ms: 500,
-            }));
-
-        assert_eq!(kind, None);
-        assert!(matches!(app_error, AppError::Runtime(_)));
-        assert!(interruption.is_some());
-        assert_eq!(status, ExecutionStatus::TimedOut);
-    }
-}
-
 pub(super) fn succeeded_step(
     name: &str,
     kind: ExecutionStepKind,
@@ -512,5 +403,114 @@ pub(super) fn enterprise_error_kind(
             None,
             ExecutionStatus::Failed,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::enterprise_error_kind;
+    use crate::domain::execution::ExecutionStatus;
+    use crate::domain::test::TestErrorKind;
+    use crate::platform::enterprise::EnterpriseError;
+    use crate::platform::process::ProcessError;
+    use crate::support::error::AppError;
+
+    fn assert_process_mapping(
+        process_error: ProcessError,
+        expected_kind: TestErrorKind,
+        assert_typed_error: impl FnOnce(AppError),
+    ) {
+        let (kind, app_error, interruption, status) =
+            enterprise_error_kind(EnterpriseError::Spawn(process_error));
+
+        assert_eq!(kind, Some(expected_kind));
+        assert_typed_error(app_error);
+        assert!(interruption.is_none());
+        assert_eq!(status, ExecutionStatus::Failed);
+    }
+
+    #[test]
+    fn enterprise_process_errors_keep_distinct_test_error_kinds() {
+        assert_process_mapping(
+            ProcessError::SpawnFailed {
+                cmd: "1cv8c ENTERPRISE".to_owned(),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
+            },
+            TestErrorKind::EnterpriseSpawnFailed,
+            |error| {
+                assert!(matches!(
+                    error,
+                    AppError::PlatformProcess(ProcessError::SpawnFailed { .. })
+                ));
+            },
+        );
+        assert_process_mapping(
+            ProcessError::StartupCheckFailed {
+                cmd: "1cv8c ENTERPRISE".to_owned(),
+                source: std::io::Error::other("probe failed"),
+            },
+            TestErrorKind::EnterpriseStartupCheckFailed,
+            |error| {
+                assert!(matches!(
+                    error,
+                    AppError::PlatformProcess(ProcessError::StartupCheckFailed { .. })
+                ));
+            },
+        );
+        assert_process_mapping(
+            ProcessError::ExitedEarly {
+                cmd: "1cv8c ENTERPRISE".to_owned(),
+                exit_code: 17,
+            },
+            TestErrorKind::EnterpriseExitedEarly,
+            |error| {
+                assert!(matches!(
+                    error,
+                    AppError::PlatformProcess(ProcessError::ExitedEarly { .. })
+                ));
+            },
+        );
+        assert_process_mapping(
+            ProcessError::StdoutLogIo {
+                path: PathBuf::from("stdout.log"),
+                source: std::io::Error::other("stdout write"),
+            },
+            TestErrorKind::EnterpriseStdoutLogIo,
+            |error| {
+                assert!(matches!(
+                    error,
+                    AppError::PlatformProcess(ProcessError::StdoutLogIo { .. })
+                ));
+            },
+        );
+        assert_process_mapping(
+            ProcessError::StderrLogIo {
+                path: PathBuf::from("stderr.log"),
+                source: std::io::Error::other("stderr write"),
+            },
+            TestErrorKind::EnterpriseStderrLogIo,
+            |error| {
+                assert!(matches!(
+                    error,
+                    AppError::PlatformProcess(ProcessError::StderrLogIo { .. })
+                ));
+            },
+        );
+    }
+
+    #[test]
+    fn enterprise_timeout_keeps_interruption_contract() {
+        let (kind, app_error, interruption, status) =
+            enterprise_error_kind(EnterpriseError::Spawn(ProcessError::TimedOut {
+                cmd: "1cv8c ENTERPRISE".to_owned(),
+                timeout_ms: 500,
+            }));
+
+        assert_eq!(kind, None);
+        assert!(matches!(app_error, AppError::Runtime(_)));
+        assert!(interruption.is_some());
+        assert_eq!(status, ExecutionStatus::TimedOut);
     }
 }

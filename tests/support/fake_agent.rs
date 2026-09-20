@@ -894,8 +894,49 @@ impl russh_sftp::server::Handler for FakeSftp {
     }
 }
 
+/// Ключ хоста двойника: случайный на каждый запуск.
+pub fn random_host_key() -> russh::keys::PrivateKey {
+    let seed: [u8; 32] = rand::random();
+    russh::keys::PrivateKey::new(
+        russh::keys::ssh_key::private::KeypairData::Ed25519(
+            russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&seed),
+        ),
+        "fake-agent",
+    )
+    .expect("host key")
+}
+
+/// Отпечаток ключа в том виде, в каком его называют в конфигурации.
+pub fn fingerprint_of(key: &russh::keys::PrivateKey) -> String {
+    fingerprint_with(key, russh::keys::ssh_key::HashAlg::Sha256)
+}
+
+/// Кладёт закрытый ключ на диск в том виде, в каком его читает платформа.
+pub fn write_host_key_file(path: &Path, key: &russh::keys::PrivateKey) {
+    std::fs::write(
+        path,
+        key.to_openssh(russh::keys::ssh_key::LineEnding::LF)
+            .expect("encode host key")
+            .as_bytes(),
+    )
+    .expect("write host key");
+}
+
+/// Отпечаток выбранным алгоритмом: сверка обязана считать тем же, каким записано.
+pub fn fingerprint_with(
+    key: &russh::keys::PrivateKey,
+    algorithm: russh::keys::ssh_key::HashAlg,
+) -> String {
+    key.public_key().fingerprint(algorithm).to_string()
+}
+
 /// Поднимает двойника на свободном порту в отдельном потоке; живёт до конца теста.
 pub fn start_fake_agent(agent: FakeAgent) -> u16 {
+    start_fake_agent_with_host_key(agent, random_host_key())
+}
+
+/// То же, но ключ хоста называет вызывающий: тесты закрепления сверяют именно его.
+pub fn start_fake_agent_with_host_key(agent: FakeAgent, key: russh::keys::PrivateKey) -> u16 {
     let (port_tx, port_rx) = std::sync::mpsc::channel::<u16>();
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -909,14 +950,6 @@ pub fn start_fake_agent(agent: FakeAgent) -> u16 {
             port_tx
                 .send(listener.local_addr().expect("addr").port())
                 .expect("port");
-            let seed: [u8; 32] = rand::random();
-            let key = russh::keys::PrivateKey::new(
-                russh::keys::ssh_key::private::KeypairData::Ed25519(
-                    russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&seed),
-                ),
-                "fake-agent",
-            )
-            .expect("host key");
             let config = Arc::new(server::Config {
                 auth_rejection_time: Duration::from_millis(50),
                 auth_rejection_time_initial: Some(Duration::ZERO),

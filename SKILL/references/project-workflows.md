@@ -1,6 +1,6 @@
 # Project Workflows
 
-Use these flows by user intent. Do not split the workflow only because source files are Designer or EDT; many commands share the same lifecycle and differ only by `format`, `builder`, or tool availability.
+Use these flows by user intent. Do not split the workflow only because source files are Designer or EDT; many commands share the same lifecycle and differ only by `format`, the executor chosen per operation, or tool availability.
 
 For exact support rules, read `config-and-backends.md` together with this file.
 
@@ -20,7 +20,6 @@ Choose a narrower init command only when the project shape is known:
 ```bash
 v8-runner config init --connection "File=build/ib"
 v8-runner config init --format edt
-v8-runner config init --builder IBCMD
 ```
 
 Create a new project from an existing infobase when the infobase is the current source of truth:
@@ -82,7 +81,7 @@ v8-runner build
 v8-runner syntax edt
 ```
 
-If a syntax command is unavailable for the current `format` or `builder`, report the config limitation instead of inventing raw platform commands.
+If a syntax command is unavailable for the current `format`, report the config limitation instead of inventing raw platform commands.
 
 ## Dump
 

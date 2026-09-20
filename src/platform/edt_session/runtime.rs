@@ -66,6 +66,12 @@ pub(super) trait SessionFactory: Send + Sync {
 
     #[cfg(test)]
     fn post_mark_running(&self, _request: &EdtSessionRequest) {}
+
+    /// Тестовый шов: воркер вот-вот встанет на условную переменную, всё ещё держа
+    /// `queue`. Позволяет воспроизвести окно, в котором потерянный сигнал от
+    /// `begin_shutdown` усыплял воркера навсегда.
+    #[cfg(test)]
+    fn pre_queue_park(&self) {}
 }
 
 #[derive(Clone)]
@@ -133,7 +139,7 @@ pub(super) fn run_worker(
             }
         }
     }
-    while let Some(queued) = inner.next_request() {
+    while let Some(queued) = inner.next_request(factory.as_ref()) {
         if inner.shutdown_token.is_cancelled() {
             queued.state.release_queued();
             queued.reply(Err(EdtSessionError::DrainedByRestartOrShutdown {
@@ -313,11 +319,9 @@ pub(super) fn shutdown_session(
     active_pid: &AtomicU32,
 ) {
     if let Some(mut session) = session.take() {
-        if session.shutdown(timeout).is_err() {
-            if session.kill().is_err() {
-                let pid = active_pid.load(Ordering::SeqCst);
-                let _ = super::kill_process_group_by_pid(pid);
-            }
+        if session.shutdown(timeout).is_err() && session.kill().is_err() {
+            let pid = active_pid.load(Ordering::SeqCst);
+            let _ = super::kill_process_group_by_pid(pid);
         }
     } else {
         let pid = active_pid.load(Ordering::SeqCst);

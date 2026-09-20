@@ -154,9 +154,7 @@ pub async fn execute(
                 if let Some(completion) = execution.completion {
                     completion.wait().await;
                 }
-                let message = format!(
-                    "execution cancelled for command 'syntax' while shared EDT command was running; terminal state was observed before returning the result"
-                );
+                let message = "execution cancelled for command 'syntax' while shared EDT command was running; terminal state was observed before returning the result".to_string();
                 return Ok(Err(SyntaxExecutionFailure::with_payload(
                     AppError::Runtime(message.clone()),
                     failed_result(
@@ -175,9 +173,7 @@ pub async fn execute(
                 if let Some(completion) = execution.completion {
                     completion.wait().await;
                 }
-                let message = format!(
-                    "execution timeout expired for command 'syntax' while shared EDT command was running; terminal state was observed before returning the result"
-                );
+                let message = "execution timeout expired for command 'syntax' while shared EDT command was running; terminal state was observed before returning the result".to_string();
                 return Ok(Err(SyntaxExecutionFailure::with_payload(
                     AppError::Runtime(message.clone()),
                     failed_result(
@@ -229,16 +225,17 @@ pub async fn execute(
             ));
         }
 
-        let (platform_log, log_read_warning) = match std::fs::read_to_string(&log_path) {
-            Ok(contents) => (Some(contents), None),
-            Err(error) => (
-                None,
-                Some(format!(
-                    "failed to read edt --file log '{}': {error}",
-                    log_path.display()
-                )),
-            ),
-        };
+        let (platform_log, log_read_warning) =
+            match crate::support::fs::read_platform_log(&log_path) {
+                Ok(contents) => (Some(contents), None),
+                Err(error) => (
+                    None,
+                    Some(format!(
+                        "failed to read edt --file log '{}': {error}",
+                        log_path.display()
+                    )),
+                ),
+            };
         if let Some(log_warning) = &log_read_warning {
             log_warnings.push(format!("{}: {log_warning}", source_set.name));
         }
@@ -251,6 +248,7 @@ pub async fn execute(
             response.stdout.trim(),
             response.stderr.trim(),
             &project_issues,
+            log_read_warning.is_some(),
         );
         status = combine_status(status, project_status);
         let project_exit_code = actor_exit_code(project_status);
@@ -355,12 +353,21 @@ fn unique_log_path(dir: &Path, check_name: &str) -> PathBuf {
     ))
 }
 
-fn actor_status_from_result(stdout: &str, stderr: &str, issues: &[Issue]) -> SyntaxCheckStatus {
+fn actor_status_from_result(
+    stdout: &str,
+    stderr: &str,
+    issues: &[Issue],
+    log_unreadable: bool,
+) -> SyntaxCheckStatus {
     if !stderr.is_empty() {
         SyntaxCheckStatus::ToolFailed
     } else if !issues.is_empty() {
         SyntaxCheckStatus::IssuesFound
     } else if !stdout.is_empty() {
+        SyntaxCheckStatus::ToolFailed
+    } else if log_unreadable {
+        // На этом пути страховки кодом возврата нет вовсе: тихий EDT с непрочитанным
+        // журналом без этой ветки читался бы как «чисто».
         SyntaxCheckStatus::ToolFailed
     } else {
         SyntaxCheckStatus::Clean

@@ -13,7 +13,8 @@ case "$CI_SCOPE" in
     case "$TARGET_OS_LABEL" in
       Windows|MINGW*|MSYS*|CYGWIN*)
         echo "Windows contract scope runs compile/check smoke, native infobase export CLI smoke, and selected OS regressions; full cargo test remains Linux-owned until the Windows test suite is hardened."
-        cargo check --locked --all-targets
+        # Сборочная проверка сюда не входит: шаг Lint в ci.yml уже прогнал
+        # `cargo clippy --locked --all-targets`, который её включает.
         cargo test --locked --test cli_infobase_cross_platform
         cargo test --locked --bin v8-runner 'support::fs::tests::'
         windows_contract_tests=(

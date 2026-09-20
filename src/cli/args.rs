@@ -649,6 +649,11 @@ pub struct LaunchArgs {
     #[command(flatten)]
     pub launch: DirectLaunchOptionsArgs,
 
+    /// Which address opens the base: `web` for infobase.web.url, `connection` for
+    /// infobase.connection. Thin client only; the default follows the target kind
+    #[arg(long = "via", value_parser = ["web", "connection"])]
+    pub via: Option<String>,
+
     /// Validate and select a provider without launching the client process
     #[arg(long)]
     pub dry_run: bool,
@@ -991,7 +996,7 @@ mod tests {
                 mode,
                 settings,
                 extension,
-                vendor_name,
+                vendor_name: _,
             }) => {
                 assert_eq!(path, "dist/ext.cfe");
                 assert!(!dry_run);
@@ -1125,6 +1130,7 @@ mod tests {
                 mcp_config,
                 mcp_port,
                 wait_ready,
+                via: _,
                 dry_run,
             }) => {
                 assert_eq!(target, "ordinary");
@@ -1178,6 +1184,7 @@ mod tests {
                 mcp_config,
                 mcp_port,
                 wait_ready,
+                via: _,
                 dry_run,
             }) => {
                 assert_eq!(target, "designer");
@@ -1233,6 +1240,7 @@ mod tests {
                 mcp_config,
                 mcp_port,
                 wait_ready,
+                via: _,
                 dry_run,
             }) => {
                 assert_eq!(target, "mcp");

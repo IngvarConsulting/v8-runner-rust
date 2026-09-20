@@ -1,7 +1,11 @@
 [package]
 name = "v8-runner"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
+# Тот же компилятор, которым собираются выпуск и CI. Издание 2021 и Cargo.lock версии 4
+# требуют куда меньшего, так что это не техническое ограничение, а обещание: ниже этой
+# версии проект не проверяется никем.
+rust-version = "1.95"
 license = "AGPL-3.0-only"
 repository = "https://github.com/IngvarConsulting/v8-runner-rust"
 
@@ -30,6 +34,7 @@ chrono = { version = "0.4", features = ["serde"] }
 libc = "0.2"
 regex = "1"
 uuid = { version = "1", features = ["v4"] }
+url = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 rmcp = { version = "1.2.0", default-features = false, features = ["client", "macros", "server", "transport-child-process", "transport-io", "transport-streamable-http-server"] }
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }

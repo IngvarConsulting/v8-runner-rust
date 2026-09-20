@@ -123,7 +123,7 @@ fn prepare_source_extension(
 
     let outcome = match analyzer::analyze_context(&source_context, &config.work_path).outcome {
         Ok(outcome) => outcome,
-        Err(error) if storage_needs_recovery(&source_context, &config.work_path) => {
+        Err(_error) if storage_needs_recovery(&source_context, &config.work_path) => {
             prepare_source_extension_full(context, config, extension, source, utilities)?;
             commit_tool_extension_full_rescan(&source_context, &config.work_path, true)?;
             return Ok(successful_build_step(

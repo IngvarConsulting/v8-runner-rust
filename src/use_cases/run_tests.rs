@@ -412,28 +412,26 @@ fn sanitize_text(text: &str, config: &AppConfig) -> String {
     limit_excerpt(&sanitize_text_full(text, config))
 }
 
+/// Чистит чужую прозу — вывод инструмента, а не argv раннера.
+///
+/// Словарь флагов и известные значения секретов приходят от единственного владельца
+/// маскирования (`platform::secrets`): свой набор флагов здесь отставал — знал `/P` и
+/// `/N` и не знал `/WSP`, `/UC`, `/AccessToken` и ещё шесть ключей. Главное же не
+/// словарь: пароль из конфигурации передаётся литералом, поэтому прячется всюду, где
+/// встретится, включая склеенные с незнакомым ключом формы, которых никакой словарь
+/// не покрывает.
+///
+/// Порядок важен: маскирование идёт до редактирования путей. Иначе `redact_unix_paths`
+/// успевал превратить «/WSP secret» в «<path> secret» — стереть флаг и оставить значение.
 fn sanitize_text_full(text: &str, config: &AppConfig) -> String {
-    let mut value = text.to_owned();
-    value = Regex::new(r#"(?i)(/P\s+)("[^"]*"|\S+)"#)
-        .expect("regex")
-        .replace_all(&value, "$1***")
-        .into_owned();
-    value = Regex::new(r#"(?i)(/N\s+)("[^"]*"|\S+)"#)
-        .expect("regex")
-        .replace_all(&value, "$1***")
-        .into_owned();
-    value = Regex::new(r#"(?i)(password=)("[^"]*"|[^;\s]+)"#)
-        .expect("regex")
-        .replace_all(&value, "$1***")
-        .into_owned();
-    value = Regex::new(r#"(?i)(pwd=)("[^"]*"|[^;\s]+)"#)
-        .expect("regex")
-        .replace_all(&value, "$1***")
-        .into_owned();
-    value = Regex::new(r"(?i)(://[^:/\s]+:)([^@/\s]+)(@)")
-        .expect("regex")
-        .replace_all(&value, "$1***$3")
-        .into_owned();
+    let connection = config.v8_connection();
+    let mut known_secrets: Vec<&str> = Vec::new();
+    if let Some(password) = connection.password.as_deref() {
+        if !password.is_empty() {
+            known_secrets.push(password);
+        }
+    }
+    let mut value = crate::platform::secrets::mask_text(text, &known_secrets);
     if let Some(work_path) = config.work_path.to_str() {
         value = value.replace(work_path, "<workPath>");
     }
@@ -497,6 +495,10 @@ fn set_dir_permissions(path: &Path) -> std::io::Result<()> {
         permissions.set_mode(0o700);
         fs::set_permissions(path, permissions)?;
     }
+    // На Windows прав доступа в этом смысле нет: блок выше пуст, и параметр остаётся
+    // неиспользованным — это не упущение, а форма самой функции.
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -508,6 +510,10 @@ fn set_file_permissions(path: &Path) -> std::io::Result<()> {
         permissions.set_mode(0o600);
         fs::set_permissions(path, permissions)?;
     }
+    // На Windows прав доступа в этом смысле нет: блок выше пуст, и параметр остаётся
+    // неиспользованным — это не упущение, а форма самой функции.
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -602,6 +608,31 @@ mod tests {
         assert!(!sanitized.contains("C:\\Secrets\\ib"));
         assert!(!sanitized.contains("C:\\Program Files\\1cv8\\conf"));
         assert!(sanitized.contains("<path>"));
+    }
+
+    /// Словарь флагов теперь общий с владельцем маскирования, а известный пароль едет
+    /// литералом — поэтому прячется и там, где приклеен к ключу, которого в словаре нет.
+    ///
+    /// Раньше собственный набор здесь знал только /P и /N, а `redact_unix_paths` успевал
+    /// превратить «/WSP secret» в «<path> secret»: стереть флаг и оставить значение.
+    #[test]
+    fn sanitizer_masks_flags_the_owner_knows_and_the_password_it_was_told() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = config(dir.path());
+        config.infobase.password = Some("s3cret-pass".to_owned());
+
+        let sanitized = sanitize_text(
+            "cmd /WSP webpass /UC unlockcode /AccessToken tok123 /Ps3cret-pass tail",
+            &config,
+        );
+
+        assert!(!sanitized.contains("webpass"), "{sanitized}");
+        assert!(!sanitized.contains("unlockcode"), "{sanitized}");
+        assert!(!sanitized.contains("tok123"), "{sanitized}");
+        assert!(
+            !sanitized.contains("s3cret-pass"),
+            "a known password must be hidden even glued to a flag: {sanitized}"
+        );
     }
 
     #[test]
@@ -738,7 +769,7 @@ mod tests {
         let context = ExecutionContext::cli(CommandName::Test);
         let result = super::run_tests(&context, &config, &args);
         assert!(result.is_err());
-        let error = result.err().expect("error");
+        let error = result.expect_err("error");
         assert!(error.error.to_string().contains("unsafe path characters"));
     }
 

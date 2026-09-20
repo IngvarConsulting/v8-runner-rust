@@ -96,6 +96,9 @@ mcp:
     stateful_sessions: true
     max_sessions: 64
     idle_ttl_secs: 900
+    # Слушатель отвечает петле всегда; здесь называют остальные имена, под
+    # которыми к нему обращаются. Пустой список — только петля.
+    allowed_hosts: []
   execution:
     max_concurrent_calls: 1
     shutdown_grace_period_secs: 30

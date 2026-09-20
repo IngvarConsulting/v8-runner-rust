@@ -1491,10 +1491,10 @@ fn run_snapshot_provider(
     match provider {
         // Исполнитель без адаптера: отказ, а не паника — строка матрицы опередила код.
         other @ (ExportProvider::IbcmdRs | ExportProvider::Webinst) => {
-            return Err(crate::use_cases::unimplemented_provider(
+            Err(crate::use_cases::unimplemented_provider(
                 crate::domain::capability::Operation::InfobaseDump,
                 other,
-            ));
+            ))
         }
         ExportProvider::Agent => agent::export_snapshot(context, config, executable, staging_path),
         ExportProvider::Designer => {

@@ -652,7 +652,11 @@ fn run_edt_syntax(
             .as_deref()
             .map(edt_validation::parse)
             .unwrap_or_default();
-        let project_status = edt_status_from_result(result.process.exit_code, &project_issues);
+        let project_status = edt_status_from_result(
+            result.process.exit_code,
+            &project_issues,
+            result.platform_log_read_error.is_some(),
+        );
         status = combine_status(status, project_status);
 
         if result.process.exit_code != 0
@@ -780,7 +784,14 @@ fn resolve_edt_source_sets<'a>(
     Ok(selected)
 }
 
-fn edt_status_from_result(exit_code: i32, issues: &[Issue]) -> SyntaxCheckStatus {
+fn edt_status_from_result(
+    exit_code: i32,
+    issues: &[Issue],
+    log_unreadable: bool,
+) -> SyntaxCheckStatus {
+    if log_unreadable && exit_code == 0 && issues.is_empty() {
+        return SyntaxCheckStatus::ToolFailed;
+    }
     if exit_code == 0 && issues.is_empty() {
         SyntaxCheckStatus::Clean
     } else if !issues.is_empty() {
@@ -835,9 +846,9 @@ fn build_result(
         .map(designer_validation::parse)
         .unwrap_or_default();
     let log_read_warning = platform_log_read_error;
-    let status = status_from_exit_code(exit_code);
+    let status = verdict(exit_code, log_read_warning.is_some());
 
-    if exit_code != 0 && issues.is_empty() {
+    if status != SyntaxCheckStatus::Clean && issues.is_empty() {
         issues.push(fallback_issue(
             exit_code,
             stderr.as_deref(),
@@ -882,6 +893,22 @@ fn failed_result(
         stderr,
         log_read_warning,
     }
+}
+
+/// Вердикт проверки: код выхода инструмента и то, удалось ли прочитать его журнал.
+///
+/// Журнал, которого ждали и не прочитали, оставляет вердикт неизвестным, а неизвестность
+/// называется отдельным значением, а не сводится к чистоте: проверка, чьи замечания никто
+/// не прочитал, чистой не является, и зелёный CI на ней — худший из возможных ответов.
+fn verdict(exit_code: i32, log_unreadable: bool) -> SyntaxCheckStatus {
+    let status = status_from_exit_code(exit_code);
+    // Помета только ужесточает: непрочитанный журнал превращает чистоту в сбой, но уже
+    // известный вердикт не переписывает — про найденные замечания инструмент сказал
+    // кодом выхода, и это знание не пропадает оттого, что подробностей не видно.
+    if log_unreadable && status == SyntaxCheckStatus::Clean {
+        return SyntaxCheckStatus::ToolFailed;
+    }
+    status
 }
 
 fn status_from_exit_code(exit_code: i32) -> SyntaxCheckStatus {
@@ -1035,22 +1062,22 @@ mod tests {
             severity: IssueSeverity::Error,
         })];
         assert_eq!(
-            edt_status_from_result(0, &[]),
+            edt_status_from_result(0, &[], false),
             SyntaxCheckStatus::Clean,
             "nothing recognised and the tool is happy: the exit code decides"
         );
         assert_eq!(
-            edt_status_from_result(0, &finding),
+            edt_status_from_result(0, &finding, false),
             SyntaxCheckStatus::IssuesFound,
             "a recognised finding may only tighten the verdict"
         );
         assert_eq!(
-            edt_status_from_result(7, &[]),
+            edt_status_from_result(7, &[], false),
             SyntaxCheckStatus::ToolFailed,
             "nothing recognised and the tool failed: still a failure, never a pass"
         );
         assert_eq!(
-            edt_status_from_result(7, &finding),
+            edt_status_from_result(7, &finding, false),
             SyntaxCheckStatus::IssuesFound
         );
     }
@@ -1345,7 +1372,9 @@ mod tests {
         let binary = utility_path(&dir.path().join("platform").join("bin"), "1cv8");
         fs::create_dir_all(&base).expect("base");
         fs::create_dir_all(&work).expect("work");
-        write_designer_script(&binary, None, None, 0);
+        // Чистый прогон Конфигуратора журнал всё-таки пишет — пустым. Фейк без журнала
+        // изображал бы не чистоту, а потерю вердикта, и с 2026-09-17 это сбой, а не успех.
+        write_designer_script(&binary, Some(""), None, 0);
         let config = sample_config(&base, &work, &dir.path().join("platform"));
         let args = SyntaxArgs {
             target: SyntaxTarget::DesignerConfig(default_config_args()),
@@ -1355,6 +1384,39 @@ mod tests {
 
         assert_eq!(result.status, SyntaxCheckStatus::Clean);
         assert_eq!(result.exit_code, 0);
+        assert!(result.log_read_warning.is_none());
+    }
+
+    /// Инструмент вышел нулём, но журнал, в который он пишет замечания, прочитать не
+    /// удалось. Вердикта нет — и чистотой он не становится: иначе CI зеленел бы на
+    /// проверке, чьих замечаний никто не видел.
+    #[cfg(unix)]
+    #[test]
+    fn a_clean_exit_with_an_unreadable_log_is_not_clean() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let binary = utility_path(&dir.path().join("platform").join("bin"), "1cv8");
+        fs::create_dir_all(&base).expect("base");
+        fs::create_dir_all(&work).expect("work");
+        write_designer_script(&binary, None, None, 0);
+        let config = sample_config(&base, &work, &dir.path().join("platform"));
+        let args = SyntaxArgs {
+            target: SyntaxTarget::DesignerConfig(default_config_args()),
+        };
+
+        let failure = run_syntax(&config, &args).expect_err("an unread verdict is not a success");
+        let result = failure
+            .payload
+            .expect("syntax failures should preserve a structured payload");
+
+        assert_eq!(result.status, SyntaxCheckStatus::ToolFailed);
+        assert!(result.log_read_warning.is_some());
+        assert_eq!(
+            result.issues.len(),
+            1,
+            "the refusal must name why the verdict is unknown"
+        );
     }
 
     #[cfg(unix)]

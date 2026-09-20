@@ -264,3 +264,265 @@ fn a_renderer_never_spells_the_outcome_word_itself() {
         );
     }
 }
+
+/// Показ команды маскирует один владелец — `platform::secrets`. Пока его писала каждая
+/// поверхность сама, превью запуска печатало `Pwd=***`, а отказ настоящего запуска той
+/// же базы — `Pwd=s3cret`, и в stderr, и в журнал действий: правило, у которого четыре
+/// исполнителя, — это четыре разных правила. Признак повтора — модуль, который строит
+/// показ запрошенного процесса сам, не позвав владельца.
+#[test]
+fn a_process_command_is_shown_only_through_the_secrets_owner() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let owner = repo_path("src/platform/secrets.rs");
+
+    for file in collect_rust_files(&repo_path("src")) {
+        if file == owner {
+            continue;
+        }
+        let production = production_tokens(&file);
+        // `cmd:` — это поле показа у `ProcessError`; вместе с типом запроса оно и
+        // означает, что модуль показывает argv запрошенного процесса. Поле `command`
+        // журнала само по себе не признак: им называют и имя команды CLI.
+        let requests_a_process = production.contains("ProcessRequest")
+            || production.contains("InteractiveProcessRequest");
+        if !(requests_a_process && production.contains("cmd:")) {
+            continue;
+        }
+
+        assert!(
+            production.contains("render_masked_command"),
+            "{} shows a process command and must take the string from platform::secrets",
+            file.strip_prefix(repo_root)
+                .expect("relative path")
+                .display()
+        );
+    }
+}
+
+/// Ключ `builder` снят решением `DEC.2026-09-14.BUILDER-KEY-IS-REMOVED`: конфиг с ним
+/// не проходит валидацию. `tests/provider_matrix.rs` держит отказ со стороны рантайма,
+/// а здесь — со стороны поставляемого навыка: `SKILL/` читают в чужих проектах, и
+/// вернувшееся туда упоминание снова научило бы агентов писать конфиг, который раннер
+/// отвергает. Единственный владелец выбора исполнителя — `providers.<операция>`.
+#[test]
+fn the_shipped_skill_never_names_the_removed_builder_key() {
+    let skill_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("SKILL");
+    let mut offenders = Vec::new();
+    let mut stack = vec![skill_root.clone()];
+
+    while let Some(path) = stack.pop() {
+        for entry in fs::read_dir(&path).expect("read SKILL directory") {
+            let entry = entry.expect("SKILL directory entry");
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                stack.push(entry_path);
+                continue;
+            }
+            // Расширение не фильтруется: ключ может вернуться и в yaml рядом с навыком,
+            // а «то же самое под другим именем» — это ровно то, что ловит эта проверка.
+            if entry_path.extension().is_none() {
+                continue;
+            }
+            let text = fs::read_to_string(&entry_path).expect("read SKILL file");
+            for (index, line) in text.lines().enumerate() {
+                if line.contains("builder") {
+                    offenders.push(format!(
+                        "{}:{}: {}",
+                        entry_path
+                            .strip_prefix(&skill_root)
+                            .unwrap_or(&entry_path)
+                            .display(),
+                        index + 1,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "SKILL/ must not name the removed `builder` key; use `providers.<operation>` instead:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// Маскирование секретов имеет одного владельца, и второй набор правил рядом с ним —
+/// то, как эта дыра появилась в прошлый раз.
+///
+/// `run_tests` вёл собственный словарь флагов: знал `/P` и `/N` и не знал `/WSP`, `/UC`,
+/// `/AccessToken`. Предыдущий guard его не видел, потому что смотрел только на модули,
+/// показывающие argv процесса, а этот чистил чужую прозу. Здесь признак другой: файл,
+/// который сам пишет регулярное выражение по секретному ключу, обязан звать владельца.
+#[test]
+fn secret_masking_rules_live_with_their_owner() {
+    let owner = repo_path("src/platform/secrets.rs");
+    // Ключи взяты из словаря владельца: их появление в регулярном выражении и означает
+    // «здесь маскируют секрет».
+    const SECRET_KEY_MARKERS: &[&str] = &["/P", "pwd=", "password=", "/WSP", "/UC"];
+    let mut offenders = Vec::new();
+
+    for file in collect_rust_files(&repo_path("src")) {
+        if file == owner {
+            continue;
+        }
+        // `production_tokens` убирает пробелы целиком, поэтому `Regex :: new` из текста
+        // токенов снова читается как `Regex::new`. Искомые ключи пробелов не содержат.
+        let production = production_tokens(&file);
+        let writes_a_secret_regex = production.contains("Regex::new")
+            && SECRET_KEY_MARKERS
+                .iter()
+                .any(|marker| production.contains(marker));
+        if !writes_a_secret_regex {
+            continue;
+        }
+        // Нужен вызов, а не упоминание: `platform::secrets` встречается и в прозе
+        // комментария, поэтому признаком делегирования служит путь к элементу.
+        if !production.contains("platform::secrets::") {
+            offenders.push(file.display().to_string());
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these modules mask secrets with their own rules instead of calling \
+         platform::secrets, which is the single owner:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn the_loopback_question_is_answered_in_one_place() {
+    // Корень проблемы: «петлевой ли адрес» решали сравнением подстрок, и `127.evil.com`
+    // с `127.0.0.1@evil.com` проходили проверку. Владелец ответа один — `support::authority`,
+    // потому что только разбор адреса знает про userinfo, скобки IPv6 и запись байтов.
+    let owner = repo_path("src/support/authority.rs");
+    // Первыми идут формы, которыми ошибка и была написана: сравнение по подстроке
+    // и по префиксу. Без них защита стерегла бы только аккуратные написания — те,
+    // которые и так безобидны, — и молчала бы ровно про тот дефект, чьё имя носит.
+    const LOOPBACK_DECISION_MARKERS: &[&str] = &[
+        "starts_with(\"127",
+        "starts_with(\"::1",
+        "contains(\"127",
+        "contains(\"localhost",
+        "ends_with(\"localhost",
+        // Целиком закрытые литералы: `"127.0.0.1:3000"` из значения по умолчанию
+        // ни под один из них не подходит, а плечо `match` и `Some("127")` — да.
+        "\"127.\"",
+        "\"127\"",
+        "\"localhost\"",
+        "\"::1\"",
+        ".is_loopback()",
+    ];
+    let mut offenders = Vec::new();
+
+    for file in collect_rust_files(&repo_path("src")) {
+        if file == owner {
+            continue;
+        }
+        let production = production_tokens(&file);
+        let decides_about_loopback = LOOPBACK_DECISION_MARKERS
+            .iter()
+            .any(|marker| production.contains(marker));
+        if !decides_about_loopback {
+            continue;
+        }
+        if !production.contains("support::authority::") {
+            offenders.push(file.display().to_string());
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these modules decide what a loopback address is on their own instead of calling \
+         support::authority, which is the single owner:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn the_http_listener_never_hands_out_a_cross_origin_permission() {
+    // Проверка `Origin` у слушателя MCP мягкая нарочно: она пускает любой петлевой
+    // порт и все имена из `mcp.http.allowed_hosts`. Держится это на том, что
+    // межисточниковый запрос браузер гасит сам, не получив разрешения. Стоит выдать
+    // его — и мягкость превратится в дыру: каждое имя из списка станет читаемым из
+    // чужого источника. Поэтому разрешения нет нигде.
+    //
+    // Приметы сравниваются в нижнем регистре: `HeaderName` приводит имя к нему сам,
+    // поэтому написание в исходнике роли не играет, а точное совпадение по регистру
+    // пропустило бы рабочую выдачу.
+    const CROSS_ORIGIN_GRANTS: &[&str] = &[
+        "access-control-allow-origin",
+        "access_control_allow_origin",
+        "corslayer",
+        "tower_http::cors",
+    ];
+    let mut offenders = Vec::new();
+
+    for file in collect_rust_files(&repo_path("src")) {
+        // Документация про правило — не нарушение правила: `///` попадает в токены
+        // как `#[doc="..."]`, и без этого описать запрет рядом с кодом было бы нельзя.
+        let production = without_doc_attributes(&production_tokens(&file)).to_ascii_lowercase();
+        if CROSS_ORIGIN_GRANTS
+            .iter()
+            .any(|grant| production.contains(grant))
+        {
+            offenders.push(file.display().to_string());
+        }
+    }
+
+    let manifest = read("Cargo.toml").to_ascii_lowercase();
+    assert!(
+        !manifest.contains("\"cors\"") && !manifest.contains("'cors'"),
+        "Cargo.toml enables a CORS layer; the MCP Origin rule assumes none is ever built"
+    );
+    assert!(
+        offenders.is_empty(),
+        "these modules hand out a cross-origin permission, which turns the deliberately \
+         lenient MCP Origin rule into a readable cross-origin surface:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// Убирает из токенов содержимое `#[doc="..."]`, оставляя сам код.
+fn without_doc_attributes(tokens: &str) -> String {
+    const OPENING: &str = "#[doc=";
+    let mut kept = String::with_capacity(tokens.len());
+    let mut rest = tokens;
+
+    while let Some(at) = rest.find(OPENING) {
+        kept.push_str(&rest[..at]);
+        let after = &rest[at + OPENING.len()..];
+        match after.find(']') {
+            Some(close) => rest = &after[close + 1..],
+            None => return kept,
+        }
+    }
+    kept.push_str(rest);
+    kept
+}
+
+#[test]
+fn the_http_listener_is_never_served_without_its_host_check() {
+    // Проверка имени хоста — слой поверх маршрутизатора, и снять её можно одной
+    // строкой: сборка останется зелёной везде, кроме `tests/mcp_http.rs`, а тот
+    // объявлен `#![cfg(unix)]` и до Windows не доезжает. Поэтому саму проводку
+    // держит примета: тот, кто поднимает слушатель, обязан навесить слой.
+    let window = free_function_tokens(repo_path("src/mcp/server.rs").as_path(), "serve_http");
+
+    assert!(
+        !window.is_empty(),
+        "serve_http is gone from src/mcp/server.rs; this guard names the wrong function"
+    );
+    for required in [
+        "axum::serve",
+        "from_fn_with_state",
+        "refuse_a_request_that_names_another_host",
+    ] {
+        assert!(
+            window.contains(required),
+            "serve_http no longer wires the host check ({required} is missing): a listener \
+             built without it answers any name, which is the DNS-rebinding hole itself"
+        );
+    }
+}

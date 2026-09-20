@@ -1,3 +1,18 @@
 README.md text eol=lf
 LICENSE text eol=lf
 FORK_NOTICE.md text eol=lf
+
+# Индекс реестра порождается и коммитится, поэтому две ветки, заведшие по записи,
+# расходятся в нём всегда. Слияние правится не руками: драйвер регистрируется
+# командой `python3 scripts/arch/registry.py --install-merge-driver`. Без неё git
+# берёт обычное текстовое слияние — то есть ровно то, что было до драйвера.
+#
+# Перевод строки в реестре не проверяет ни один гейт. Индекс пишет
+# `registry.py --write-index` через `Path.write_text` — на Windows это `\r\n`, — а
+# `--check` сравнивает после обратного перевода при чтении: правка выходит молча и во
+# весь файл. Записи читают двое, и нормализует только Python: `arch_registry.rs` ищет
+# `"---\n"` в байтах и на CRLF блока полей уже не видит. Строку держит поэтому git.
+spec/arch/index.md text eol=lf merge=arch-index
+spec/arch/decisions/*.md text eol=lf
+spec/arch/invariants/*.md text eol=lf
+spec/arch/contracts/*.md text eol=lf
