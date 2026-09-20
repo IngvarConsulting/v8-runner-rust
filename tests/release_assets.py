@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
+import hashlib
 import importlib.util
 import io
 import json
+import os
 import struct
 import tarfile
 import tempfile
 import unittest
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,8 +55,6 @@ class ReleaseAssetsTest(unittest.TestCase):
             target: self.binary_for(target)
             for target in module.ARCHIVE_ASSETS
         }
-        for target, name in module.DIRECT_ASSETS.items():
-            (dist / name).write_bytes(binaries[target])
         (dist / "license-v8-runner-AGPL-3.0-only.txt").write_bytes(b"license\n")
         (dist / "notice-v8-runner-fork.txt").write_bytes(b"notice\n")
 
@@ -83,14 +84,11 @@ class ReleaseAssetsTest(unittest.TestCase):
 
         module.write_manifest(dist, "v0.7.0", "a" * 40)
 
-    def test_public_release_has_exactly_ten_consolidated_assets(self) -> None:
+    def test_public_release_has_exactly_seven_consolidated_assets(self) -> None:
         module = load_module()
         self.assertEqual(
             module.expected_release_files(),
             {
-                "v8-runner-darwin-arm64",
-                "v8-runner-linux-x64",
-                "v8-runner-win-x64.exe",
                 "v8-runner-linux-x86_64-musl.tar.gz",
                 "v8-runner-macos-aarch64.tar.gz",
                 "v8-runner-macos-x86_64.tar.gz",
@@ -105,16 +103,20 @@ class ReleaseAssetsTest(unittest.TestCase):
             sorted(module.payload_asset_names() | {"v8-runner-assets.json"}),
         )
 
-    def test_canonical_direct_asset_mapping_is_exact(self) -> None:
+    def test_every_target_is_published_as_exactly_one_archive(self) -> None:
         module = load_module()
         self.assertEqual(
-            module.DIRECT_ASSETS,
+            {target: descriptor["name"] for target, descriptor in module.ARCHIVE_ASSETS.items()},
             {
-                "aarch64-apple-darwin": "v8-runner-darwin-arm64",
-                "x86_64-pc-windows-msvc": "v8-runner-win-x64.exe",
-                "x86_64-unknown-linux-musl": "v8-runner-linux-x64",
+                "aarch64-apple-darwin": "v8-runner-macos-aarch64.tar.gz",
+                "x86_64-apple-darwin": "v8-runner-macos-x86_64.tar.gz",
+                "x86_64-pc-windows-msvc": "v8-runner-windows-x86_64.zip",
+                "x86_64-unknown-linux-musl": "v8-runner-linux-x86_64-musl.tar.gz",
             },
         )
+        names = [descriptor["name"] for descriptor in module.ARCHIVE_ASSETS.values()]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertFalse(hasattr(module, "DIRECT_ASSETS"))
 
     def test_linux_musl_rejects_dynamic_interpreter(self) -> None:
         module = load_module()
@@ -172,7 +174,8 @@ class ReleaseAssetsTest(unittest.TestCase):
             self.assertTrue(manifest_bytes.endswith(b"\n"))
             self.assertNotIn(b"\r\n", manifest_bytes)
             self.assertEqual(manifest["schemaVersion"], 2)
-            self.assertEqual(len(manifest["assets"]), 9)
+            # 4 архива + манифест + 2 юридических файла, минус сам манифест.
+            self.assertEqual(len(manifest["assets"]), 6)
             self.assertEqual(
                 {entry["name"] for entry in manifest["assets"]},
                 module.expected_release_files() - {"v8-runner-assets.json"},
@@ -195,23 +198,50 @@ class ReleaseAssetsTest(unittest.TestCase):
             self.assertEqual(linux_archive["format"], "tar.gz")
             self.assertEqual(
                 linux_archive["binary"]["sha256"],
-                module.digest(dist / "v8-runner-linux-x64"),
+                hashlib.sha256(
+                    self.binary_for("x86_64-unknown-linux-musl")
+                ).hexdigest(),
             )
             self.assertTrue(linux_archive["buildAttestationRequired"])
 
             module.verify_assets(dist, "v0.7.0", "a" * 40)
 
-    def test_verify_assets_rejects_archive_whose_binary_differs_from_direct_asset(self) -> None:
+    def test_extract_binary_yields_exactly_the_archived_binary(self) -> None:
+        """Аудит запускает то, что лежит в архиве, а не свою копию.
+
+        Раньше нативный аудит запускал отдельный бинарник, а совпадение с архивом
+        держала перекрёстная сверка сумм. Отдельного бинарника больше нет, и его
+        роль играет извлечение: проверять нечего, если запускается тот же файл.
+        """
         module = load_module()
         with tempfile.TemporaryDirectory() as temp_dir:
             dist = Path(temp_dir)
             self.populate_release(module, dist)
-            (dist / "v8-runner-linux-x64").write_bytes(
-                self.binary_for("x86_64-unknown-linux-musl") + b"different"
-            )
+            output_dir = dist / "native"
 
-            with self.assertRaisesRegex(ValueError, "differs from direct asset"):
-                module.verify_assets(dist, "v0.7.0", "a" * 40)
+            for target, descriptor in module.ARCHIVE_ASSETS.items():
+                module.extract_binary(
+                    argparse.Namespace(
+                        dist=str(dist), target=target, output_dir=str(output_dir)
+                    )
+                )
+                # Имя выбирает описание архива, а не вызывающий: на Windows оно `.exe`.
+                expected_name = PurePosixPath(descriptor["binaryPath"]).name
+                extracted = output_dir / expected_name
+                self.assertEqual(extracted.read_bytes(), self.binary_for(target))
+                if os.name != "nt":
+                    self.assertTrue(
+                        os.access(extracted, os.X_OK),
+                        f"{expected_name} is extracted runnable",
+                    )
+
+            with self.assertRaisesRegex(ValueError, "no archive is published"):
+                module.extract_binary(
+                    argparse.Namespace(
+                        dist=str(dist), target="powerpc-unknown-linux-gnu",
+                        output_dir=str(output_dir),
+                    )
+                )
 
     def test_windows_archive_accepts_equivalent_crlf_legal_documents(self) -> None:
         module = load_module()

@@ -60,12 +60,13 @@ class ReleaseGovernanceTest(unittest.TestCase):
         self.assertIn("SECONDS >= verify_deadline", freeze)
         self.assertIn("sleep 5", freeze)
 
-    def test_release_publishes_attested_direct_unica_assets(self) -> None:
+    def test_release_publishes_one_attested_archive_per_platform(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         for asset in (
-            "v8-runner-darwin-arm64",
-            "v8-runner-linux-x64",
-            "v8-runner-win-x64.exe",
+            "v8-runner-linux-x86_64-musl",
+            "v8-runner-macos-aarch64",
+            "v8-runner-macos-x86_64",
+            "v8-runner-windows-x86_64",
         ):
             self.assertIn(asset, workflow)
         self.assertIn("actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be", workflow)
@@ -77,7 +78,83 @@ class ReleaseGovernanceTest(unittest.TestCase):
         self.assertIn("notice-v8-runner-fork.txt", workflow)
         self.assertIn("gh attestation verify", workflow)
         self.assertIn("--deny-self-hosted-runners", workflow)
-        self.assertIn('chmod +x "dist/${{ matrix.asset }}"', workflow)
+
+    @staticmethod
+    def _release_jobs() -> dict[str, str]:
+        """Работы рабочего процесса и их тела, без сторонних библиотек.
+
+        Питон здесь живёт на стандартной библиотеке: `pip install` в CI нет ни
+        одного, и разбор YAML пришлось бы туда завозить ради одной проверки.
+        Структура читается по отступам — так же, как реестр читает своё
+        front matter.
+        """
+        text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        body = text.split("\njobs:\n", 1)[1]
+        jobs: dict[str, list[str]] = {}
+        current: str | None = None
+        for line in body.splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            header = re.fullmatch(r"  ([A-Za-z0-9_-]+):", line)
+            if header:
+                current = header.group(1)
+                jobs[current] = []
+                continue
+            if not line.startswith("  "):
+                break
+            if current is not None:
+                jobs[current].append(line)
+        return {name: "\n".join(lines) for name, lines in jobs.items()}
+
+    def test_only_the_publish_job_publishes(self) -> None:
+        """Шаги публикации живут в своей работе и никуда не съезжают.
+
+        Разрешимость `needs` по всем файлам держит
+        `test_every_workflow_job_graph_resolves`; здесь — то, чего она не видит.
+        Однажды удаление шага унесло заголовок работы `publish`, и её пять шагов
+        оказались внутри матричной сборки: у той нет прав на запись в релиз, а
+        выполнялись бы они по разу на платформу, затирая друг другу `dist`.
+        """
+        jobs = self._release_jobs()
+        self.assertEqual(
+            set(jobs),
+            {"preflight", "build", "publish", "audit-native", "audit-draft", "freeze"},
+        )
+        self.assertIn("      contents: write", jobs["publish"])
+        self.assertIn("      contents: read", jobs["build"])
+        for step in ("softprops/action-gh-release", "write-manifest", "download-artifact"):
+            self.assertNotIn(step, jobs["build"], f"{step} drifted into the matrix job")
+            self.assertIn(step, jobs["publish"], f"{step} left the publish job")
+
+    def test_a_platform_is_published_in_one_form_only(self) -> None:
+        """Одна платформа — один ассет.
+
+        До v0.11.0 та же сборка выкладывалась дважды: архивом и голым бинарником
+        под другим именем, и «что из этого что» приходилось объяснять словами.
+        Примета держит то, что убрано: имена вернувшихся бинарников, отдельную
+        роль в манифесте и таблицу, из которой их собирали.
+        """
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        script = (ROOT / "scripts/release/release_assets.py").read_text(encoding="utf-8")
+        body = workflow.split("body: |", 1)[1].split("files: |", 1)[0]
+
+        for gone in ("v8-runner-darwin-arm64", "v8-runner-linux-x64", "v8-runner-win-x64.exe"):
+            # В теле релиза они названы нарочно: чтобы искавший их узнал, что их нет.
+            self.assertNotIn(gone, workflow.replace(body, ""), f"{gone} is published again")
+            self.assertNotIn(gone, script, f"{gone} is built again")
+        self.assertNotIn("DIRECT_ASSETS", script)
+        self.assertNotIn("direct-binary", script)
+        self.assertNotIn("unica_asset_name", workflow)
+
+        # Каждая платформа названа в аудите ровно один раз.
+        audit = workflow.split("  audit-native:\n", 1)[1].split("  audit-draft:\n", 1)[0]
+        for target in (
+            "x86_64-unknown-linux-musl",
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+            "x86_64-pc-windows-msvc",
+        ):
+            self.assertEqual(audit.count(f"target: {target}"), 1, f"{target} is audited once")
 
     def test_release_publishes_one_manifest_instead_of_per_asset_sidecars(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
@@ -93,7 +170,6 @@ class ReleaseGovernanceTest(unittest.TestCase):
     def test_all_payload_assets_and_manifest_have_build_attestations(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         self.assertIn("Attest portable archive", workflow)
-        self.assertIn("Attest direct Unica asset", workflow)
         self.assertIn("Attest consolidated release manifest", workflow)
         self.assertIn("for asset in $(python3 scripts/release/release_assets.py attested-assets)", workflow)
 
@@ -242,7 +318,9 @@ class ReleaseGovernanceTest(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("gh release verify-asset v0.7.0 ./v8-runner-assets.json", readme)
         self.assertIn('source_commit="$(python3', readme)
-        self.assertIn("for asset in v8-runner-assets.json v8-runner-linux-x64", readme)
+        self.assertIn(
+            "for asset in v8-runner-assets.json v8-runner-linux-x86_64-musl.tar.gz", readme
+        )
         self.assertIn('--source-digest "$source_commit"', readme)
 
     def test_pr_ci_runs_release_asset_contract_tests(self) -> None:
