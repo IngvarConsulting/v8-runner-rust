@@ -19,6 +19,7 @@ use crate::platform::process::ProcessRunner;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
+use crate::support::path::normalize_windows_verbatim_path;
 use crate::support::temp::platform_logs_dir;
 use crate::use_cases::context::{ExecutionContext, ExecutionInterruption, InterruptionSafetyClass};
 use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
@@ -909,12 +910,14 @@ fn resolve_existing_file(
             candidate.display()
         )));
     }
-    std::fs::canonicalize(&candidate).map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to canonicalize '{}': {error}",
-            candidate.display()
-        ))
-    })
+    std::fs::canonicalize(&candidate)
+        .map(|canonical| normalize_windows_verbatim_path(&canonical))
+        .map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to canonicalize '{}': {error}",
+                candidate.display()
+            ))
+        })
 }
 
 fn infer_artifact_type(raw_path: &str) -> Option<ArtifactBuildMode> {
@@ -1637,6 +1640,40 @@ mod tests {
         assert!(missing_extension
             .to_string()
             .contains("require --extension"));
+    }
+
+    /// `std::fs::canonicalize` returns a `\\?\`-prefixed extended-length path on Windows.
+    /// Passed straight to `1cv8.exe /LoadCfg`, that prefix makes the platform build a
+    /// malformed `file://\\?\C:\...` URI and report "Файл не обнаружен" for a file that is
+    /// physically present. `resolve_existing_file` must strip the prefix, the way every
+    /// other canonicalize call site in this codebase already does.
+    #[cfg(windows)]
+    #[test]
+    fn resolve_request_strips_windows_verbatim_prefix_from_the_artifact_path() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(root.join("main.cf"), "cf").expect("write");
+        let config = sample_config(root, &root.join("1cv8.exe"));
+
+        let resolved = resolve_request(
+            &config,
+            &LoadRequest {
+                vendor_name: None,
+                dry_run: false,
+                mode: LoadMode::Load,
+                artifact_path: "main.cf".to_owned(),
+                settings_path: None,
+                extension: None,
+            },
+        )
+        .expect("load of an existing .cf must resolve");
+
+        let resolved_path = resolved.artifact_path.display().to_string();
+        assert!(
+            !resolved_path.starts_with(r"\\?\"),
+            "the resolved artifact path must not carry the Windows verbatim prefix, \
+             or the platform builds a malformed file:// URI from it: {resolved_path}"
+        );
     }
 
     #[cfg(unix)]
