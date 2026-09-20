@@ -90,7 +90,6 @@ jobs:
             target: x86_64-unknown-linux-musl
             make_task: build-release-linux-musl
             artifact_name: v8-runner-linux-x86_64-musl
-            unica_asset_name: v8-runner-linux-x64
             bin_suffix: ""
             archive_ext: tar.gz
             linux_deps: musl-tools
@@ -99,7 +98,6 @@ jobs:
             target: x86_64-pc-windows-msvc
             make_task: build-release-windows-64
             artifact_name: v8-runner-windows-x86_64
-            unica_asset_name: v8-runner-win-x64.exe
             bin_suffix: ".exe"
             archive_ext: zip
             linux_deps: ""
@@ -108,7 +106,6 @@ jobs:
             target: x86_64-apple-darwin
             make_task: build-release-macos-x64
             artifact_name: v8-runner-macos-x86_64
-            unica_asset_name: ""
             bin_suffix: ""
             archive_ext: tar.gz
             linux_deps: ""
@@ -117,7 +114,6 @@ jobs:
             target: aarch64-apple-darwin
             make_task: build-release-macos-arm64
             artifact_name: v8-runner-macos-aarch64
-            unica_asset_name: v8-runner-darwin-arm64
             bin_suffix: ""
             archive_ext: tar.gz
             linux_deps: ""
@@ -183,36 +179,11 @@ jobs:
         with:
           subject-path: dist/${{ matrix.artifact_name }}.${{ matrix.archive_ext }}
 
-      - name: Prepare direct Unica asset
-        if: ${{ matrix.unica_asset_name != '' }}
-        shell: bash
-        run: |
-          python3 scripts/release/release_assets.py prepare-direct \
-            --binary "target/${{ matrix.target }}/release/${BIN_NAME}${{ matrix.bin_suffix }}" \
-            --output "dist/${{ matrix.unica_asset_name }}" \
-            --target "${{ matrix.target }}" \
-            --asset-name "${{ matrix.unica_asset_name }}" \
-            --version "${RELEASE_TAG#v}"
-
-      - name: Attest direct Unica asset
-        if: ${{ matrix.unica_asset_name != '' }}
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
-        with:
-          subject-path: dist/${{ matrix.unica_asset_name }}
-
       - name: Upload portable workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.artifact_name }}
           path: dist/${{ matrix.artifact_name }}.${{ matrix.archive_ext }}
-          if-no-files-found: error
-
-      - name: Upload direct Unica workflow artifact
-        if: ${{ matrix.unica_asset_name != '' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: direct-${{ matrix.unica_asset_name }}
-          path: dist/${{ matrix.unica_asset_name }}
           if-no-files-found: error
 
   publish:
@@ -259,10 +230,26 @@ jobs:
           body: |
             Maintained fork: https://github.com/IngvarConsulting/v8-runner-rust
             Corresponding source and build scripts: ${{ github.server_url }}/${{ github.repository }}/tree/${{ inputs.tag }}
-            Portable archives and direct Unica binaries are built from the same protected source commit.
-            v8-runner-assets.json binds the source tag and commit to SHA-256 metadata for every other release asset.
-            All portable archives, direct binaries, and the manifest have GitHub build attestations.
+
+            One archive per platform. Each holds the `v8-runner` binary (`v8-runner.exe` on Windows),
+            this README, the licence, the fork notice and the `examples/` directory.
+
+            | Archive | Operating system | CPU |
+            | --- | --- | --- |
+            | `v8-runner-linux-x86_64-musl.tar.gz` | Linux, any distribution (static musl build) | Intel/AMD 64-bit |
+            | `v8-runner-macos-aarch64.tar.gz` | macOS | Apple Silicon (M1 and newer) |
+            | `v8-runner-macos-x86_64.tar.gz` | macOS | Intel |
+            | `v8-runner-windows-x86_64.zip` | Windows | Intel/AMD 64-bit |
+
+            Run `uname -m` to tell an Apple Silicon Mac (`arm64`) from an Intel one (`x86_64`).
+
+            Every archive is built from the same protected source commit.
+            v8-runner-assets.json binds the source tag and commit to SHA-256 metadata for every other release asset,
+            and for each archive also to the path and SHA-256 of the binary inside it.
+            All archives and the manifest have GitHub build attestations.
             Starting with v0.7.0, the consolidated manifest replaces per-asset .sha256 and .provenance.json sidecars.
+            Up to v0.11.0 the release also carried uncompressed binaries named v8-runner-darwin-arm64,
+            v8-runner-linux-x64 and v8-runner-win-x64.exe; they were byte-for-byte the archived binary and are gone.
           files: |
             dist/*
 
@@ -279,13 +266,16 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            asset: v8-runner-linux-x64
+            asset: v8-runner-linux-x86_64-musl.tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            asset: v8-runner-win-x64.exe
+            asset: v8-runner-windows-x86_64.zip
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            asset: v8-runner-macos-x86_64.tar.gz
           - os: macos-latest
             target: aarch64-apple-darwin
-            asset: v8-runner-darwin-arm64
+            asset: v8-runner-macos-aarch64.tar.gz
     steps:
       - name: Checkout exact release tag
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -302,8 +292,12 @@ jobs:
         shell: bash
         run: |
           python3 scripts/release/release_assets.py verify-assets --dist dist --tag "${RELEASE_TAG}" --commit "${GITHUB_SHA}"
-          if [[ "${{ runner.os }}" != "Windows" ]]; then chmod +x "dist/${{ matrix.asset }}"; fi
-          python3 scripts/release/release_assets.py verify-binary --binary "dist/${{ matrix.asset }}" --target "${{ matrix.target }}" --version "${RELEASE_TAG#v}"
+          # `verify-assets` выше уже сверил архив и вложенный бинарник с манифестом,
+          # поэтому извлечение тем же кодом даёт ровно тот файл, чью сумму несёт
+          # манифест. Имя файла называет сам скрипт — на Windows оно другое.
+          binary="$(python3 scripts/release/release_assets.py extract-binary \
+            --dist dist --target "${{ matrix.target }}" --output-dir native)"
+          python3 scripts/release/release_assets.py verify-binary --binary "${binary}" --target "${{ matrix.target }}" --version "${RELEASE_TAG#v}"
 
   audit-draft:
     name: Audit draft release
