@@ -49,7 +49,8 @@ matrix, and `providers.<operation>` names one explicitly.
   extensions, and tests.
 - `ibcmd` as the executor for `build` covers file infobases and server infobases with `infobase.dbms`;
   for an EDT project it runs after the EDT export to Designer files and requires a file infobase.
-- `extensions` supports Designer and EDT projects, but only extension `source-set` entries are actionable.
+- `extensions` supports Designer and EDT projects: `--name` selects an extension `source-set`,
+  `--installed-name` selects an installed platform name without a matching source-set.
 - `syntax designer-config` and `syntax designer-modules` require `format=DESIGNER`; `syntax edt` requires `format=EDT`.
 - IBCMD dump uses project-local standalone-server data under `workPath/ibcmd-data`.
 - `dump --mode partial` with IBCMD degrades to incremental dump and must be called out in user-facing summaries.
