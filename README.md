@@ -262,6 +262,16 @@ v8-runner mcp serve stdio
 - AI-assisted development (разработка с AI-агентами), где агент должен строить, проверять и
   диагностировать проект через узкую управляемую поверхность.
 
+Настроить безопасность отдельно установленного CFE, например YaXUnit:
+
+```bash
+v8-runner extensions --installed-name YAXUNIT --dry-run
+v8-runner extensions --installed-name YAXUNIT
+```
+
+Применение отключает безопасный режим и защиту от опасных действий. Имя не требует
+соответствующего `source-set`; для совместного выбора добавьте `--name TESTS`.
+
 ## Карта документации
 
 - [docs/CAPABILITIES.md](docs/CAPABILITIES.md): полный каталог команд, матрица поддержки,

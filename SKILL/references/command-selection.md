@@ -110,6 +110,17 @@ Update selected extension source-sets:
 v8-runner extensions --name <SOURCE_SET>
 ```
 
+Configure an independently installed CFE, or combine it with a configured extension:
+
+```bash
+v8-runner extensions --installed-name YAXUNIT --dry-run
+v8-runner extensions --name TESTS --installed-name YAXUNIT
+```
+
+Apply disables safe mode and unsafe action protection. Selectors are repeatable; only
+explicit targets run when either is supplied. Unknown `--name` remains an error.
+Preview does not establish whether the extension is installed; apply reports platform failures.
+
 ## Dump, Convert, Load, And Artifacts
 
 Bring infobase changes back into Git-visible files:

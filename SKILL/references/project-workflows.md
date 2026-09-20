@@ -116,6 +116,8 @@ Do not replace extension-specific synchronization with a full rebuild unless the
 ```bash
 v8-runner extensions
 v8-runner extensions --name <SOURCE_SET>
+v8-runner extensions --installed-name YAXUNIT --dry-run
+v8-runner extensions --installed-name YAXUNIT
 ```
 
 ## Launch
