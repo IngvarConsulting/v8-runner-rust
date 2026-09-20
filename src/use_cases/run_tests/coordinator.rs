@@ -281,7 +281,7 @@ pub(super) fn run_tests(
         args.execution
             .client_mode
             .unwrap_or(LaunchClientModeRequest::Thin),
-        capped_timeout_ms(args.execution.timeouts.total_ms, context),
+        args.execution.timeouts.total_ms,
     ) {
         Ok(dsl) => dsl,
         Err(error) => {

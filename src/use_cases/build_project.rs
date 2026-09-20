@@ -976,7 +976,6 @@ mod tests {
         AppConfig {
             base_path: base_path.to_path_buf(),
             work_path: work_path.to_path_buf(),
-            execution_timeout: 300_000,
             format,
             providers,
             provider_origins: Default::default(),
@@ -1018,7 +1017,6 @@ mod tests {
         AppConfig {
             base_path: base_path.to_path_buf(),
             work_path: work_path.to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
             providers: Default::default(),
             provider_origins: Default::default(),

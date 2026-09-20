@@ -20,7 +20,7 @@ use crate::support::error::AppError;
 use crate::support::temp::platform_logs_dir;
 #[cfg(test)]
 use crate::use_cases::context::CommandName;
-use crate::use_cases::context::{ExecutionContext, ExecutionInterruption, InterruptionSafetyClass};
+use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::{
     DesignerClientScope, DesignerConfigCheck,
@@ -718,11 +718,8 @@ fn interrupted_syntax_failure(
     platform_log_path: Option<PathBuf>,
 ) -> Option<SyntaxExecutionFailure> {
     let interruption = context.interruption()?;
-    let message = format!(
-        "{} for command '{}'",
-        interruption_message(interruption),
-        context.command().as_str()
-    );
+    let message =
+        crate::use_cases::interruption::command_interruption_message(context, interruption);
     Some(SyntaxExecutionFailure::with_payload(
         AppError::Runtime(message.clone()),
         failed_result(
@@ -736,17 +733,6 @@ fn interrupted_syntax_failure(
             platform_log_path,
         ),
     ))
-}
-
-fn interruption_message(interruption: ExecutionInterruption) -> &'static str {
-    match interruption {
-        ExecutionInterruption::Cancelled => {
-            "execution cancelled before reaching a safe completion point"
-        }
-        ExecutionInterruption::TimedOut => {
-            "execution timeout expired before reaching a safe completion point"
-        }
-    }
 }
 
 fn resolve_edt_source_sets<'a>(
@@ -1039,7 +1025,7 @@ mod tests {
     use crate::use_cases::result::UseCaseErrorKind;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     use tempfile::tempdir;
 
     /// DEC.2026-09-12.A-LABEL-MAY-ONLY-MAKE-A-VERDICT-STRICTER admits prose as a *label* on a finding, never as a verdict, and that admission
@@ -1230,7 +1216,6 @@ mod tests {
         AppConfig {
             base_path: base_path.to_path_buf(),
             work_path: work_path.to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -1260,7 +1245,6 @@ mod tests {
         AppConfig {
             base_path: base_path.to_path_buf(),
             work_path: work_path.to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -1643,7 +1627,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn syntax_edt_recomputes_remaining_budget_for_each_project_in_one_shot_mode() {
+    fn syntax_edt_bounds_each_one_shot_project_by_the_edt_step_cap() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
@@ -1658,8 +1642,10 @@ mod tests {
         let args = SyntaxArgs {
             target: SyntaxTarget::Edt { projects: vec![] },
         };
+        // Запас нарочно большой: предел шага здесь свой у каждого проекта и ни от чего
+        // не убывает, поэтому 20 мс против sleep 0.06 срабатывают детерминированно.
         let context = ExecutionContext::mcp_stdio(CommandName::Syntax)
-            .with_deadline(Some(Instant::now() + Duration::from_millis(80)));
+            .with_edt_timeout(Some(Duration::from_millis(20)));
 
         let failure =
             run_syntax_with_context(&context, &config, &args).expect_err("expected timeout");

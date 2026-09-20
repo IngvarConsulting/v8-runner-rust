@@ -1228,18 +1228,6 @@ exit 0"#,
     }
 
     impl ProcessRunner for TestProcessRunner {
-        fn run(&self, request: &ProcessRequest) -> Result<ProcessResult, ProcessError> {
-            self.run_request(request)
-        }
-
-        fn run_with_timeout(
-            &self,
-            request: &ProcessRequest,
-            _timeout: Duration,
-        ) -> Result<ProcessResult, ProcessError> {
-            self.run_request(request)
-        }
-
         fn run_with_policy(
             &self,
             request: &ProcessRequest,
@@ -1269,7 +1257,6 @@ exit 0"#,
         AppConfig {
             base_path: base_path.to_path_buf(),
             work_path: work_path.to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers,
             provider_origins: Default::default(),

@@ -1411,7 +1411,6 @@ mod tests {
         AppConfig {
             base_path: root.to_path_buf(),
             work_path: root.join("work"),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),

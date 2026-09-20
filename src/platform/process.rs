@@ -262,27 +262,18 @@ pub enum ProcessError {
 
 /// Boundary for synchronous and detached process execution.
 pub trait ProcessRunner {
-    /// Execute a process and wait for completion, capturing stdout/stderr.
-    fn run(&self, request: &ProcessRequest) -> Result<ProcessResult, ProcessError>;
-
-    /// Execute a process with a hard timeout, terminating the process group if needed.
-    fn run_with_timeout(
-        &self,
-        request: &ProcessRequest,
-        timeout: Duration,
-    ) -> Result<ProcessResult, ProcessError>;
-
-    /// Execute a process using the shared command-boundary execution policy.
+    /// Execute a process under the caller's execution policy.
+    ///
+    /// No default: an implementation must answer for the whole policy, not just its
+    /// timeout. Since a command carries no deadline
+    /// (DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE), `policy.timeout` is `None` at most call
+    /// sites, and a default that fell through to `run` would silently drop the operator's
+    /// interrupt and the interruption safety class — the one thing that still ends a run.
     fn run_with_policy(
         &self,
         request: &ProcessRequest,
         policy: &ProcessExecutionPolicy,
-    ) -> Result<ProcessResult, ProcessError> {
-        match policy.timeout {
-            Some(timeout) => self.run_with_timeout(request, timeout),
-            None => self.run(request),
-        }
-    }
+    ) -> Result<ProcessResult, ProcessError>;
 
     /// Start a process in fire-and-forget mode without waiting for completion.
     fn spawn(&self, request: &ProcessRequest) -> Result<SpawnResult, ProcessError>;
@@ -304,25 +295,6 @@ pub trait ProcessRunner {
 pub struct ProcessExecutor;
 
 impl ProcessRunner for ProcessExecutor {
-    fn run(&self, request: &ProcessRequest) -> Result<ProcessResult, ProcessError> {
-        self.run_internal(request, &ProcessExecutionPolicy::default())
-    }
-
-    fn run_with_timeout(
-        &self,
-        request: &ProcessRequest,
-        timeout: Duration,
-    ) -> Result<ProcessResult, ProcessError> {
-        self.run_internal(
-            request,
-            &ProcessExecutionPolicy::new(
-                Some(timeout),
-                CancellationToken::new(),
-                ProcessInterruptionSafety::Interruptible,
-            ),
-        )
-    }
-
     fn run_with_policy(
         &self,
         request: &ProcessRequest,
@@ -1053,14 +1025,17 @@ mod tests {
 
         let runner = ProcessExecutor;
         let result = runner
-            .run(&ProcessRequest {
-                program: script,
-                args: vec![],
-                workdir: None,
-                stdout_log_path: Some(stdout_log.clone()),
-                stderr_log_path: Some(stderr_log.clone()),
-                startup_probe: None,
-            })
+            .run_with_policy(
+                &ProcessRequest {
+                    program: script,
+                    args: vec![],
+                    workdir: None,
+                    stdout_log_path: Some(stdout_log.clone()),
+                    stderr_log_path: Some(stderr_log.clone()),
+                    startup_probe: None,
+                },
+                &ProcessExecutionPolicy::default(),
+            )
             .expect("run");
 
         assert_eq!(result.exit_code, 3);
@@ -1505,14 +1480,17 @@ mod tests {
 
         let runner = ProcessExecutor;
         let err = runner
-            .run(&ProcessRequest {
-                program: script,
-                args: vec![],
-                workdir: None,
-                stdout_log_path: Some(dir.path().join("missing").join("stdout.log")),
-                stderr_log_path: None,
-                startup_probe: None,
-            })
+            .run_with_policy(
+                &ProcessRequest {
+                    program: script,
+                    args: vec![],
+                    workdir: None,
+                    stdout_log_path: Some(dir.path().join("missing").join("stdout.log")),
+                    stderr_log_path: None,
+                    startup_probe: None,
+                },
+                &ProcessExecutionPolicy::default(),
+            )
             .expect_err("expected log write failure");
 
         assert!(matches!(err, ProcessError::StdoutLogIo { .. }));
@@ -1527,7 +1505,7 @@ mod tests {
 
         let runner = ProcessExecutor;
         let err = runner
-            .run_with_timeout(
+            .run_with_policy(
                 &ProcessRequest {
                     program: script,
                     args: vec![],
@@ -1536,7 +1514,11 @@ mod tests {
                     stderr_log_path: None,
                     startup_probe: None,
                 },
-                Duration::from_millis(100),
+                &ProcessExecutionPolicy::new(
+                    Some(Duration::from_millis(100)),
+                    CancellationToken::new(),
+                    ProcessInterruptionSafety::Interruptible,
+                ),
             )
             .expect_err("expected timeout");
 
@@ -1626,14 +1608,17 @@ mod tests {
 
         let runner = ProcessExecutor;
         let result = runner
-            .run(&ProcessRequest {
-                program: script,
-                args: vec![],
-                workdir: None,
-                stdout_log_path: None,
-                stderr_log_path: None,
-                startup_probe: None,
-            })
+            .run_with_policy(
+                &ProcessRequest {
+                    program: script,
+                    args: vec![],
+                    workdir: None,
+                    stdout_log_path: None,
+                    stderr_log_path: None,
+                    startup_probe: None,
+                },
+                &ProcessExecutionPolicy::default(),
+            )
             .expect("run");
 
         assert_eq!(result.exit_code, 0);

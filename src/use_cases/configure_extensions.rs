@@ -445,7 +445,6 @@ mod tests {
         AppConfig {
             base_path: base.to_path_buf(),
             work_path: work.to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
             providers: Default::default(),
             provider_origins: Default::default(),

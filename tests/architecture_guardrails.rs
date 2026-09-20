@@ -93,7 +93,7 @@ fn mcp_surface_snapshot_stays_explicit_and_documented() {
     let source_section = extract_between(
         &source,
         "const fn as_str(self) -> &'static str {",
-        "fn execution_policy",
+        "fn admission_timeout",
     );
     let source_tools = Regex::new(r#""([a-z_]+)""#)
         .expect("regex")
@@ -525,4 +525,40 @@ fn the_http_listener_is_never_served_without_its_host_check() {
              built without it answers any name, which is the DNS-rebinding hole itself"
         );
     }
+}
+
+#[test]
+fn a_command_carries_no_deadline_anywhere_it_could_be_put_back() {
+    // Корень проблемы: общий срок на команду не защищал базу, а ломал её — истёкший срок
+    // означал, что загрузка одного набора исходников уже зафиксирована, а следующий отказан
+    // на безопасной точке, то есть конфигурация обновлена наполовину
+    // (DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE).
+    //
+    // Владелец ответа один — `ExecutionContext`: у него нет поля срока и нет способа его
+    // поставить, поэтому вернуть срок можно только заведя это поле заново. Страж стоит на
+    // самих именах, а не на поведении: тест поведения проходит и без срока, и со сроком,
+    // который никто не выставил, и потому регресс пропустит.
+    const BANNED_IN_CONTEXT: &[&str] = &["deadline", "remaining_budget", "TimedOut"];
+
+    let context =
+        without_doc_attributes(&production_tokens(&repo_path("src/use_cases/context.rs")));
+    let offenders: Vec<&str> = BANNED_IN_CONTEXT
+        .iter()
+        .copied()
+        .filter(|marker| context.contains(marker))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "src/use_cases/context.rs names {offenders:?}: a command budget is back on the execution \
+         context. A bound belongs to the step that declares it, not above it."
+    );
+
+    // Срок уже однажды воскресал под другим именем: остаток допускного бюджета укорачивал
+    // предел шага EDT в MCP. Допускной срок обязан кончаться вместе с допуском.
+    let server = without_doc_attributes(&production_tokens(&repo_path("src/mcp/server.rs")));
+    assert!(
+        !server.contains("remaining_timeout"),
+        "src/mcp/server.rs computes a remainder of the admission budget: an admitted call must \
+         run to its terminal outcome, and a step cap must not be shortened by the queue wait."
+    );
 }

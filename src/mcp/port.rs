@@ -198,7 +198,6 @@ mod tests {
         AppConfig {
             base_path: work_path.join("base"),
             work_path: work_path.to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),

@@ -426,6 +426,11 @@ v8-runner infobase configuration export --state <working|database> --extension <
   финальный файл уже заменён атомарно.
 - Target lock сериализует cooperating запуски runner. Параллельный внешний writer обязан
   использовать тот же lock или быть остановлен: path revalidation не является filesystem CAS.
+- Ожидание чужого target lock ограничено пятью минутами. Это предел шага, а не срок команды
+  (`DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE`): цель держит другой прогон, и дальнейшее
+  ожидание ничего не изменит. По истечении окна отказ приходит как `workspace_busy`
+  (`error.kind: workspace`, `execution.status: failed`, код возврата CLI `3`), а не как
+  `timed_out` — раньше это окно задавал общий срок и отказ назывался таймаутом.
 - После аварийного завершения owner lock может остаться на диске. Для совместимости с уже
   опубликованными версиями runner такой lock обрабатывается fail-closed: удалять его вручную можно
   только при остановленных старых и новых процессах runner.
@@ -586,8 +591,7 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--via <web|connection>
   Vanessa tools: `load_features`, `open_feature_file`, `run_scenario`, `get_test_results`,
   `connect_test_client`.
 - Timeout ожидания задаётся `tools.client_mcp.wait_ready_timeout_ms`; если он не задан,
-  используется общий `execution_timeout`. Фактическое ожидание всё равно ограничено общим
-  command deadline, поэтому для более длинного ожидания нужно увеличить и `execution_timeout`.
+  ожидание длится пять минут. Это единственная его граница: срока у команды нет.
 - Если настроено `tools.client_mcp.extension`, `launch mcp` не устанавливает и не обновляет его;
   подготовка выполняется командой `v8-runner build`.
 - `--mcp-config` не должен содержать `;`, потому что `/C` payload разделяется точкой с запятой.

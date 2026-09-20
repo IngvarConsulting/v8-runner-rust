@@ -82,19 +82,6 @@ enum ErrorReason {
     JoinFailure,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ExecutionPolicy {
-    timeout: Option<Duration>,
-}
-
-impl ExecutionPolicy {
-    const fn bounded(timeout: Duration) -> Self {
-        Self {
-            timeout: Some(timeout),
-        }
-    }
-}
-
 impl McpTool {
     const fn as_str(self) -> &'static str {
         match self {
@@ -109,9 +96,13 @@ impl McpTool {
         }
     }
 
-    fn execution_policy(self, config: &AppConfig) -> ExecutionPolicy {
+    /// How long this tool may wait for a free execution slot.
+    ///
+    /// Admission only. Once a call holds a slot it runs to its terminal outcome, with no
+    /// deadline over it: see DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE.
+    fn admission_timeout(self, config: &AppConfig) -> Duration {
         let _ = self;
-        ExecutionPolicy::bounded(config.execution_timeout_duration())
+        config.mcp_admission_timeout_duration()
     }
 }
 
@@ -312,162 +303,94 @@ impl McpToolServer {
         TRequest: Send + 'static,
         TResponse: serde::Serialize + Send + 'static,
     {
-        let policy = tool.execution_policy(self.config.as_ref());
-        let timeout = policy.timeout;
-        let deadline = timeout.map(|value| Instant::now() + value);
+        let admission_timeout = tool.admission_timeout(self.config.as_ref());
         let permit = self
-            .acquire_execution_slot(tool, cancellation.clone(), deadline, timeout)
+            .acquire_execution_slot(tool, cancellation.clone(), admission_timeout)
             .await?;
-        let remaining_timeout = remaining_timeout(deadline);
         if cancellation.is_cancelled() {
             return Err(execution_error(
                 ErrorReason::Cancelled,
                 ExecutionStage::Queued,
-                timeout,
+                Some(admission_timeout),
             ));
         }
-        if timeout.is_some() && remaining_timeout.is_some_and(|value| value.is_zero()) {
-            return Err(execution_error(
-                ErrorReason::Timeout,
-                ExecutionStage::Queued,
-                timeout,
-            ));
-        }
+        let edt_timeout = Duration::from_millis(self.config.tools.edt_cli.command_timeout_ms);
 
         let config = self.config.clone();
         let port = self.port.clone();
         let call_context = self
             .call_context
             .clone()
-            .with_deadline(deadline.map(Instant::into_std))
             .with_cancellation(cancellation.clone())
-            .with_edt_timeout(remaining_timeout);
+            .with_edt_timeout(Some(edt_timeout));
         let mut handle =
             tokio::task::spawn_blocking(move || method(config, port, call_context, request));
         let _permit = permit;
-        let mut interrupted = None;
+        // Защёлка обязательна: без неё `cancelled()` разрешался бы на каждом витке и
+        // цикл крутился бы вхолостую. Отменённый вызов не обрывается — мы дожидаемся
+        // терминального исхода работы, которая уже идёт.
+        let mut interrupt_seen = false;
         loop {
             tokio::select! {
                 biased;
                 result = &mut handle => {
                     let result = result
-                        .map_err(|_| execution_error(ErrorReason::JoinFailure, ExecutionStage::Running, timeout))?;
+                        .map_err(|_| execution_error(ErrorReason::JoinFailure, ExecutionStage::Running, None))?;
                     return map_tool_result(result);
                 }
-                _ = cancellation.cancelled(), if interrupted.is_none() => {
-                    interrupted = Some(ErrorReason::Cancelled);
-                }
-                _ = wait_for_deadline(deadline), if deadline.is_some() && interrupted.is_none() => {
-                    cancellation.cancel();
-                    interrupted = Some(ErrorReason::Timeout);
+                _ = cancellation.cancelled(), if !interrupt_seen => {
+                    interrupt_seen = true;
                 }
             }
         }
     }
 
+    /// Ждёт свободный слот исполнения не дольше допускного срока.
+    ///
+    /// Это единственный срок, оставшийся у MCP: у клиента протокола нет Ctrl+C, и занятый
+    /// слот иначе держал бы очередь молча. Получивший слот вызов идёт до терминального
+    /// исхода — см. DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE.
     async fn acquire_execution_slot(
         &self,
         tool: McpTool,
         cancellation: CancellationToken,
-        deadline: Option<Instant>,
-        timeout: Option<Duration>,
+        timeout: Duration,
     ) -> Result<OwnedSemaphorePermit, ErrorData> {
         let wait_started = Instant::now();
-        let bounded = timeout.is_some();
         let acquire = self.concurrency_limit.clone().acquire_owned();
         tokio::pin!(acquire);
 
-        match deadline {
-            Some(deadline) => {
-                tokio::select! {
-                    biased;
-                    _ = cancellation.cancelled() => {
-                        self.telemetry.execution().record_semaphore_wait(
-                            self.call_context.transport(),
-                            tool.as_str(),
-                            SemaphoreWaitOutcome::Cancelled,
-                            bounded,
-                            timeout,
-                            wait_started.elapsed(),
-                            None,
-                        );
-                        Err(execution_error(ErrorReason::Cancelled, ExecutionStage::Queued, timeout))
-                    }
-                    _ = tokio::time::sleep_until(deadline) => {
-                        self.telemetry.execution().record_semaphore_wait(
-                            self.call_context.transport(),
-                            tool.as_str(),
-                            SemaphoreWaitOutcome::Timeout,
-                            bounded,
-                            timeout,
-                            wait_started.elapsed(),
-                            None,
-                        );
-                        Err(execution_error(ErrorReason::Timeout, ExecutionStage::Queued, timeout))
-                    }
-                    permit = &mut acquire => permit.map_err(|error| {
-                        self.telemetry.execution().record_semaphore_wait(
-                            self.call_context.transport(),
-                            tool.as_str(),
-                            SemaphoreWaitOutcome::InternalError,
-                            bounded,
-                            timeout,
-                            wait_started.elapsed(),
-                            Some(SemaphoreWaitErrorKind::SemaphoreClosed),
-                        );
-                        ErrorData::internal_error(error.to_string(), None)
-                    }).inspect(|_permit| {
-                        self.telemetry.execution().record_semaphore_wait(
-                            self.call_context.transport(),
-                            tool.as_str(),
-                            SemaphoreWaitOutcome::Acquired,
-                            bounded,
-                            timeout,
-                            wait_started.elapsed(),
-                            None,
-                        );
-                    }),
-                }
+        let record = |outcome, error_kind| {
+            self.telemetry.execution().record_semaphore_wait(
+                self.call_context.transport(),
+                tool.as_str(),
+                outcome,
+                true,
+                Some(timeout),
+                wait_started.elapsed(),
+                error_kind,
+            );
+        };
+
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                record(SemaphoreWaitOutcome::Cancelled, None);
+                Err(execution_error(ErrorReason::Cancelled, ExecutionStage::Queued, Some(timeout)))
             }
-            None => {
-                tokio::select! {
-                    biased;
-                    _ = cancellation.cancelled() => {
-                        self.telemetry.execution().record_semaphore_wait(
-                            self.call_context.transport(),
-                            tool.as_str(),
-                            SemaphoreWaitOutcome::Cancelled,
-                            bounded,
-                            timeout,
-                            wait_started.elapsed(),
-                            None,
-                        );
-                        Err(execution_error(ErrorReason::Cancelled, ExecutionStage::Queued, timeout))
-                    }
-                    permit = &mut acquire => permit.map_err(|error| {
-                        self.telemetry.execution().record_semaphore_wait(
-                            self.call_context.transport(),
-                            tool.as_str(),
-                            SemaphoreWaitOutcome::InternalError,
-                            bounded,
-                            timeout,
-                            wait_started.elapsed(),
-                            Some(SemaphoreWaitErrorKind::SemaphoreClosed),
-                        );
-                        ErrorData::internal_error(error.to_string(), None)
-                    }).inspect(|_permit| {
-                        self.telemetry.execution().record_semaphore_wait(
-                            self.call_context.transport(),
-                            tool.as_str(),
-                            SemaphoreWaitOutcome::Acquired,
-                            bounded,
-                            timeout,
-                            wait_started.elapsed(),
-                            None,
-                        );
-                    }),
-                }
+            _ = tokio::time::sleep_until(Instant::now() + timeout) => {
+                record(SemaphoreWaitOutcome::Timeout, None);
+                Err(execution_error(ErrorReason::Timeout, ExecutionStage::Queued, Some(timeout)))
             }
+            permit = &mut acquire => permit
+                .map_err(|error| {
+                    record(
+                        SemaphoreWaitOutcome::InternalError,
+                        Some(SemaphoreWaitErrorKind::SemaphoreClosed),
+                    );
+                    ErrorData::internal_error(error.to_string(), None)
+                })
+                .inspect(|_permit| record(SemaphoreWaitOutcome::Acquired, None)),
         }
     }
 
@@ -490,16 +413,12 @@ impl McpToolServer {
                 .await;
         }
 
-        let timeout = McpTool::CheckSyntaxEdt
-            .execution_policy(self.config.as_ref())
-            .timeout;
-        let deadline = timeout.map(|value| Instant::now() + value);
+        let admission_timeout = McpTool::CheckSyntaxEdt.admission_timeout(self.config.as_ref());
         let mut permit = Some(
             self.acquire_execution_slot(
                 McpTool::CheckSyntaxEdt,
                 cancellation.clone(),
-                deadline,
-                timeout,
+                admission_timeout,
             )
             .await?,
         );
@@ -507,26 +426,14 @@ impl McpToolServer {
             return Err(execution_error(
                 ErrorReason::Cancelled,
                 ExecutionStage::Queued,
-                timeout,
+                Some(admission_timeout),
             ));
         }
 
-        let remaining_timeout = remaining_timeout(deadline);
-        if remaining_timeout.is_some_and(|value| value.is_zero()) {
-            return Err(execution_error(
-                ErrorReason::Timeout,
-                ExecutionStage::Queued,
-                timeout,
-            ));
-        }
-
-        // Срок шага — свой у инструмента; остаток бюджета команды только укорачивает его.
-        // Отсутствие бюджета означает «предела сверху нет», а не «времени нет»: миллисекунда
-        // в этой ветке превращала бы каждый вызов без бюджета в мгновенный отказ.
-        let edt_step_timeout = Duration::from_millis(self.config.tools.edt_cli.command_timeout_ms);
-        let edt_timeout = remaining_timeout
-            .map(|value| value.min(edt_step_timeout))
-            .unwrap_or(edt_step_timeout);
+        // Шаг ограничен только собственным пределом: ожидание в очереди его не укорачивает.
+        // Допускной срок кончается вместе с допуском, иначе это тот же срок команды под
+        // другим именем — см. DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE.
+        let edt_timeout = Duration::from_millis(self.config.tools.edt_cli.command_timeout_ms);
         let use_case_request = normalize_check_syntax_edt_request(&request);
         let result = edt_syntax::execute(
             self.edt_session.as_ref(),
@@ -547,7 +454,7 @@ impl McpToolServer {
                 Err(execution_error(
                     ErrorReason::Cancelled,
                     ExecutionStage::Queued,
-                    timeout,
+                    Some(edt_timeout),
                 ))
             }
             Err(edt_syntax::EdtSyntaxTransportError::QueuedTimeout) => {
@@ -555,7 +462,7 @@ impl McpToolServer {
                 Err(execution_error(
                     ErrorReason::Timeout,
                     ExecutionStage::Queued,
-                    timeout,
+                    Some(edt_timeout),
                 ))
             }
         }
@@ -934,7 +841,12 @@ fn execution_error(
         (ErrorReason::Timeout, ExecutionStage::Queued) => {
             "MCP call timed out while waiting for execution slot"
         }
-        (ErrorReason::Timeout, ExecutionStage::Running) => "MCP call timed out during execution",
+        // Недостижимо и обязано таким остаться: допущенный вызов идёт до терминального
+        // исхода (DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE). Плечо нужно `match`, а текст
+        // назовёт это дефектом, а не сделает вид, что у выполнения есть срок.
+        (ErrorReason::Timeout, ExecutionStage::Running) => {
+            "MCP call reported a timeout while running, which no bound can produce"
+        }
         (ErrorReason::JoinFailure, ExecutionStage::Queued) => "MCP queue task failed unexpectedly",
         (ErrorReason::JoinFailure, ExecutionStage::Running) => {
             "MCP execution task failed unexpectedly"
@@ -953,10 +865,6 @@ fn execution_error(
         "timeoutMs": timeout.map(duration_to_millis),
     });
     ErrorData::internal_error(message, Some(data))
-}
-
-fn remaining_timeout(deadline: Option<Instant>) -> Option<Duration> {
-    deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()))
 }
 
 fn duration_to_millis(duration: Duration) -> u64 {
@@ -1220,12 +1128,6 @@ fn valid_streamable_post_headers(headers: &axum::http::HeaderMap) -> bool {
     accepts_both && content_type_is_json
 }
 
-async fn wait_for_deadline(deadline: Option<Instant>) {
-    if let Some(deadline) = deadline {
-        tokio::time::sleep_until(deadline).await;
-    }
-}
-
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
@@ -1377,7 +1279,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn queued_timeout_returns_transport_error() {
+    async fn an_admission_timeout_returns_a_transport_error() {
         let server = McpToolServer::with_port(
             Arc::new(test_config_with_edt_timeout(1, 9, 20)),
             Arc::new(DefaultMcpUseCasePort),
@@ -1423,7 +1325,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn bounded_queued_cancellation_wins_before_deadline() {
+    async fn bounded_queued_cancellation_wins_before_the_admission_timeout() {
         let server = McpToolServer::with_port(
             Arc::new(test_config_with_edt_timeout(1, 9, 80)),
             Arc::new(DefaultMcpUseCasePort),
@@ -1874,7 +1776,6 @@ mod tests {
         AppConfig {
             base_path: PathBuf::from("/tmp/project"),
             work_path: PathBuf::from("/tmp/work"),
-            execution_timeout: edt_timeout_ms,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -1899,6 +1800,7 @@ mod tests {
                 execution: McpExecutionConfig {
                     max_concurrent_calls,
                     shutdown_grace_period_secs,
+                    admission_timeout_ms: edt_timeout_ms,
                 },
             },
             tests: TestsConfig::default(),

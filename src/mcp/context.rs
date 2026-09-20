@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
@@ -9,7 +9,6 @@ use crate::use_cases::context::ExecutionTransport;
 pub struct McpCallContext {
     transport: ExecutionTransport,
     edt_timeout: Option<Duration>,
-    deadline: Option<Instant>,
     cancellation: CancellationToken,
 }
 
@@ -19,7 +18,6 @@ impl McpCallContext {
         Self {
             transport,
             edt_timeout: None,
-            deadline: None,
             cancellation: CancellationToken::new(),
         }
     }
@@ -48,17 +46,6 @@ impl McpCallContext {
     /// Returns the EDT subprocess timeout budget for this call, if any.
     pub const fn edt_timeout(&self) -> Option<Duration> {
         self.edt_timeout
-    }
-
-    /// Attaches an absolute execution deadline to this call.
-    pub fn with_deadline(mut self, deadline: Option<Instant>) -> Self {
-        self.deadline = deadline;
-        self
-    }
-
-    /// Returns the absolute execution deadline for the call, if any.
-    pub const fn deadline(&self) -> Option<Instant> {
-        self.deadline
     }
 
     /// Attaches a shared cancellation token to the call.

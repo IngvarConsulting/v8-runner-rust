@@ -15,7 +15,7 @@
 - Repo-aware `convert` и reverse sync из ИБ в файлы — разные сценарии; `dump format=EDT` реализован как отдельный flow поверх internal Designer snapshot и EDT import, а не как alias или скрытый sub-step `convert`.
 - MCP concurrency имеет два независимых контура: execution admission для tool calls и HTTP session capacity для stateful transport lifecycle.
 - Target publication safety не обеспечивается workspace lock: full replacement outputs требуют staging/backup contract рядом с target.
-- `DEC.2026-04-20.EVERY-COMMAND-HAS-A-DEADLINE` и `DEC.2026-04-21.A-COMMAND-IS-A-PIPELINE-OF-TYPED-BLOCKS` описывают целевую архитектуру с известными migration gaps. Новые команды должны следовать этим контрактам, даже если часть старых сценариев ещё находится в переходном состоянии.
+- `DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE` и `DEC.2026-04-21.A-COMMAND-IS-A-PIPELINE-OF-TYPED-BLOCKS` описывают целевую архитектуру с известными migration gaps. Новые команды должны следовать этим контрактам, даже если часть старых сценариев ещё находится в переходном состоянии.
 
 ### Правила актуализации
 

@@ -727,7 +727,6 @@ fn execution_context(
         transport @ (ExecutionTransport::McpStdio | ExecutionTransport::McpHttp) => {
             Ok(ExecutionContext::new(command, transport)
                 .with_edt_timeout(call_context.edt_timeout())
-                .with_deadline(call_context.deadline())
                 .with_cancellation(call_context.cancellation()))
         }
         ExecutionTransport::Cli => Err(McpInternalError::new(format!(
@@ -2631,7 +2630,6 @@ mod tests {
         AppConfig {
             base_path: PathBuf::from("/tmp/project"),
             work_path: PathBuf::from("/tmp/work"),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),

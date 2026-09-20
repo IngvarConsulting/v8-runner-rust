@@ -335,6 +335,10 @@ fn reject_legacy_config_keys(root: &serde_yaml::Value) -> Result<(), ConfigValid
         return Err(ConfigValidationError::BuilderKeyRemoved);
     }
 
+    if mapping_contains_key(mapping, "execution_timeout") {
+        return Err(ConfigValidationError::ExecutionTimeoutKeyRemoved);
+    }
+
     if let Some(mcp) = mapping
         .get(serde_yaml::Value::String("mcp".to_owned()))
         .and_then(serde_yaml::Value::as_mapping)
@@ -681,7 +685,7 @@ mod tests {
 
     #[test]
     fn load_config_rejects_unsupported_top_level_keys_in_local_overlay() {
-        for key in ["basePath", "build", "execution_timeout", "unknown"] {
+        for key in ["basePath", "build", "unknown"] {
             let dir = tempdir().expect("tempdir");
             let config_dir = dir.path().join("project");
             let config_path =
@@ -899,8 +903,32 @@ mod tests {
         assert_eq!(config.tests.execution_timeout_seconds, 17);
     }
 
+    /// Наложение проходит тот же именной отказ, и раньше общего «ключ не поддержан»:
+    /// автор локального файла должен узнать, куда переехал предел, а не что ключ лишний.
     #[test]
-    fn load_config_reads_global_execution_timeout_from_public_yaml_key() {
+    fn local_overlay_refuses_the_retired_execution_timeout_key_by_name_too() {
+        let dir = tempdir().expect("tempdir");
+        let config_dir = dir.path().join("project");
+        let config_path =
+            write_minimal_project_config(&config_dir, &minimal_config_without_base_path(""));
+        std::fs::write(
+            config_dir.join(LOCAL_CONFIG_FILE_NAME),
+            "execution_timeout: 300000\n",
+        )
+        .expect("local overlay");
+
+        let error = load_config(config_path.to_str(), None)
+            .expect_err("a retired key must be refused in the overlay as well");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("a command has no deadline"),
+            "the overlay must get the named refusal, not the generic one: {message}"
+        );
+    }
+
+    #[test]
+    fn load_config_refuses_the_retired_execution_timeout_key_by_name() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
@@ -916,9 +944,22 @@ mod tests {
         )
         .expect("write config");
 
-        let config = load_config(config_path.to_str(), None).expect("load config");
+        let error = load_config(config_path.to_str(), None)
+            .expect_err("a retired key must be refused, not silently ignored");
 
-        assert_eq!(config.execution_timeout, 4321);
+        let message = error.to_string();
+        assert!(
+            message.contains("execution_timeout"),
+            "the refusal must name the key the author wrote: {message}"
+        );
+        assert!(
+            message.contains("a command has no deadline"),
+            "the refusal must say why the key is gone: {message}"
+        );
+        assert!(
+            message.contains("mcp.execution.admission_timeout_ms"),
+            "the refusal must name where a bound still belongs: {message}"
+        );
     }
 
     #[test]

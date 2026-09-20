@@ -14,7 +14,7 @@ use crate::platform::process::{ProcessError, ProcessInterruptionReason};
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::support::path::is_safe_path_segment;
-use crate::use_cases::context::{ExecutionContext, ExecutionInterruption, InterruptionSafetyClass};
+use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::interruption::{
     command_interruption_details, command_interruption_message, command_interruption_status,
     process_interruption_details,
@@ -96,7 +96,7 @@ pub(super) fn interrupted_test_failure(
     started: Instant,
 ) -> Option<super::TestExecutionFailure> {
     let interruption = context.interruption()?;
-    let message = interruption_message(context, interruption);
+    let message = command_interruption_message(context, interruption);
     let outcome = ExecutionOutcome::new(command_interruption_status(interruption))
         .with_diagnostics(vec![message.clone()])
         .with_interruptions(vec![command_interruption_details(
@@ -116,30 +116,6 @@ pub(super) fn interrupted_test_failure(
         AppError::Runtime(message),
         result,
     ))
-}
-
-pub(super) fn capped_timeout_ms(
-    timeout_override_ms: Option<u64>,
-    context: &ExecutionContext,
-) -> Option<u64> {
-    let remaining_budget_ms = context.remaining_budget().map(|duration| {
-        u64::try_from(duration.as_millis())
-            .unwrap_or(u64::MAX)
-            .max(1)
-    });
-    match (timeout_override_ms, remaining_budget_ms) {
-        (Some(timeout_ms), Some(remaining_ms)) => Some(timeout_ms.min(remaining_ms)),
-        (Some(timeout_ms), None) => Some(timeout_ms),
-        (None, Some(remaining_ms)) => Some(remaining_ms),
-        (None, None) => None,
-    }
-}
-
-pub(super) fn interruption_message(
-    context: &ExecutionContext,
-    interruption: ExecutionInterruption,
-) -> String {
-    command_interruption_message(context, interruption)
 }
 
 pub(super) fn validate_runner_profile_id(profile_id: &str) -> Result<&str, AppError> {

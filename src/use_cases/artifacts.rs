@@ -1238,7 +1238,6 @@ mod tests {
     use crate::use_cases::request::{ArtifactsModeRequest, ArtifactsRequest};
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::time::Duration;
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
 
@@ -1309,18 +1308,6 @@ mod tests {
     }
 
     impl ProcessRunner for CancelAfterDumpRunner {
-        fn run(&self, request: &ProcessRequest) -> Result<ProcessResult, ProcessError> {
-            Self::write_success(request)
-        }
-
-        fn run_with_timeout(
-            &self,
-            request: &ProcessRequest,
-            _timeout: Duration,
-        ) -> Result<ProcessResult, ProcessError> {
-            Self::write_success(request)
-        }
-
         fn run_with_policy(
             &self,
             request: &ProcessRequest,
@@ -1347,7 +1334,6 @@ mod tests {
         AppConfig {
             base_path: base.to_path_buf(),
             work_path: work.to_path_buf(),
-            execution_timeout: 300_000,
             format,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -1624,14 +1610,14 @@ mod tests {
     }
 
     #[test]
-    fn publication_warning_reports_timed_out_context() {
+    fn publication_warning_reports_an_interrupted_context() {
         let warning = publication_warning(
             CommandName::Artifacts,
-            Some(crate::use_cases::context::ExecutionInterruption::TimedOut),
+            Some(crate::use_cases::context::ExecutionInterruption::Cancelled),
         )
         .expect("warning");
 
-        assert!(warning.contains("timeout"));
+        assert!(warning.contains("cancel"));
         assert!(warning.contains("critical phase"));
     }
 

@@ -15,7 +15,7 @@
 - MCP execution admission и HTTP session capacity являются разными лимитами и не заменяют workspace lock.
 - Публичная поверхность MCP намеренно уже, чем CLI: например, `init` и `extensions` не публикуются как MCP tools.
 - Full replacement `dump` и `artifacts` должны публиковаться через staging/backup рядом с target; incremental/partial dump остаются non-atomic update modes.
-- Единая timeout/cancellation policy для CLI и MCP является целевым контрактом. Текущие implementation gaps фиксируются в `DEC.2026-04-20.EVERY-COMMAND-HAS-A-DEADLINE` и не должны становиться новой нормой.
+- Единая политика прерывания для CLI и MCP является целевым контрактом: у команды нет срока, её досрочно заканчивает только оператор (`DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE`). Предел бывает у шага и только если шаг объявил его сам.
 
 ### 2.2 Организационные и продуктовые ограничения
 

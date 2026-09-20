@@ -10,7 +10,6 @@ use super::context::{CommandName, ExecutionContext, ExecutionInterruption};
 pub(crate) fn command_interruption_status(interruption: ExecutionInterruption) -> ExecutionStatus {
     match interruption {
         ExecutionInterruption::Cancelled => ExecutionStatus::Cancelled,
-        ExecutionInterruption::TimedOut => ExecutionStatus::TimedOut,
     }
 }
 
@@ -159,7 +158,6 @@ fn command_interruption_details_with_deferred(
 fn command_interruption_kind(interruption: ExecutionInterruption) -> ExecutionInterruptionKind {
     match interruption {
         ExecutionInterruption::Cancelled => ExecutionInterruptionKind::Cancelled,
-        ExecutionInterruption::TimedOut => ExecutionInterruptionKind::TimedOut,
     }
 }
 
@@ -173,7 +171,6 @@ fn process_interruption_kind(interruption: ProcessInterruptionReason) -> Executi
 fn command_interruption_reason(interruption: ExecutionInterruption) -> &'static str {
     match interruption {
         ExecutionInterruption::Cancelled => "cancellation request",
-        ExecutionInterruption::TimedOut => "timeout",
     }
 }
 
@@ -227,10 +224,6 @@ mod tests {
             command_interruption_status(ExecutionInterruption::Cancelled),
             crate::domain::execution::ExecutionStatus::Cancelled
         );
-        assert_eq!(
-            command_interruption_status(ExecutionInterruption::TimedOut),
-            crate::domain::execution::ExecutionStatus::TimedOut
-        );
     }
 
     #[test]
@@ -238,9 +231,9 @@ mod tests {
         assert_eq!(
             deferred_interruption_warning(
                 "operation completed successfully",
-                ExecutionInterruption::TimedOut,
+                ExecutionInterruption::Cancelled,
             ),
-            "operation completed successfully after timeout during critical phase; unsafe interruption was not performed"
+            "operation completed successfully after cancellation request during critical phase; unsafe interruption was not performed"
         );
         assert_eq!(
             deferred_interruption_warning_for_command(

@@ -13,8 +13,6 @@ use std::time::Duration;
 use support::command_data::assert_data_matches_a_declared_form;
 use support::{temp_workspace, v8_runner_command};
 
-const SLEEPING_RESPONSE_DELAY: Duration = Duration::from_secs(5);
-
 /// Прежний глобальный `builder` в тестовых конфигах: `DESIGNER` — умолчания матрицы,
 /// `IBCMD` — `ibcmd` всюду, где у операции есть развилка.
 fn providers_yaml(builder: &str) -> &'static str {
@@ -58,14 +56,6 @@ fn write_config_with_pending_va(root: &Path) -> PathBuf {
     config_path
 }
 
-fn write_config_with_execution_timeout(root: &Path, timeout_ms: u64) -> PathBuf {
-    let config_path = write_minimal_config(root);
-    let mut config = fs::read_to_string(&config_path).expect("config");
-    config.push_str(&format!("execution_timeout: {timeout_ms}\n"));
-    fs::write(&config_path, config).expect("timeout config");
-    config_path
-}
-
 struct FixtureServer {
     address: std::net::SocketAddr,
     shutdown: Arc<AtomicBool>,
@@ -75,10 +65,6 @@ struct FixtureServer {
 impl FixtureServer {
     fn start(root: &Path) -> (Self, u16) {
         Self::start_with_mode(Some(root.to_path_buf()), Duration::ZERO)
-    }
-
-    fn start_sleeping() -> (Self, u16) {
-        Self::start_with_mode(None, SLEEPING_RESPONSE_DELAY)
     }
 
     fn start_with_mode(root: Option<PathBuf>, response_delay: Duration) -> (Self, u16) {
@@ -701,7 +687,7 @@ fn tools_download_artifacts_keeps_yaxunit_out_of_source_sets() {
 #[test]
 fn tools_download_artifacts_handles_large_assets_without_pipe_deadlock() {
     let dir = temp_workspace();
-    let config_path = write_config_with_execution_timeout(dir.path(), 15_000);
+    let config_path = write_minimal_config(dir.path());
     let server_root = dir.path().join("server");
     let (_server, port) = FixtureServer::start(&server_root);
     write_http_fixture(&server_root, port);
@@ -852,11 +838,19 @@ fn tools_download_force_refuses_to_replace_unmanaged_tool_file() {
     );
 }
 
+/// DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE, at the command boundary.
+///
+/// Раньше `execution_timeout: 200` обрывал эту загрузку на 200-й миллисекунде. Теперь
+/// медленное зеркало дожидаются: обрывает загрузку только тишина в сокете, а отвечающий
+/// с задержкой сервер тишиной не является. Провал приходит по содержимому ответа, а не
+/// по часам.
 #[test]
-fn tools_download_respects_execution_timeout_during_http_download() {
+fn a_slow_mirror_is_waited_for_instead_of_being_cut_off_by_a_command_budget() {
+    const RESPONSE_DELAY: Duration = Duration::from_secs(2);
+
     let dir = temp_workspace();
-    let config_path = write_config_with_execution_timeout(dir.path(), 200);
-    let (_server, port) = FixtureServer::start_sleeping();
+    let config_path = write_minimal_config(dir.path());
+    let (_server, port) = FixtureServer::start_with_mode(None, RESPONSE_DELAY);
 
     let started = std::time::Instant::now();
     let output = v8_runner_command()
@@ -874,19 +868,21 @@ fn tools_download_respects_execution_timeout_during_http_download() {
         .output()
         .expect("run command");
     let elapsed = started.elapsed();
-    assert!(
-        !output.status.success(),
-        "stdout={}\nstderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(elapsed < SLEEPING_RESPONSE_DELAY, "elapsed={elapsed:?}");
+
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(combined.contains("timed out"));
+    assert!(
+        elapsed >= RESPONSE_DELAY,
+        "the slow response must be waited for, not cut short; elapsed={elapsed:?}"
+    );
+    assert!(!output.status.success(), "{combined}");
+    assert!(
+        !combined.contains("timed out"),
+        "the failure must come from the response, not from a clock: {combined}"
+    );
 }
 
 #[test]

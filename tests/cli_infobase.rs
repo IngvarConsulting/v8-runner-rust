@@ -1562,17 +1562,19 @@ fn missing_provider_artifact_has_invalid_output_terminal_status() {
     assert_eq!(envelope["data"]["target_state"], "unchanged");
 }
 
+/// DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE, проверка на настоящей команде.
+///
+/// Раньше `execution_timeout: 50` убивал этот шаг на 50-й миллисекунде и выдавал
+/// `timed_out`. Теперь у команды срока нет: медленный исполнитель доводится до конца, и
+/// провал приходит по результату его работы, а не по часам. Сам `timed_out` остаётся
+/// живым значением провода — его выдаёт шаг со своим объявленным пределом, см.
+/// `tests/cli_test.rs`.
 #[test]
-fn provider_timeout_has_timed_out_terminal_status_and_is_not_retryable() {
+fn a_slow_provider_runs_to_its_end_instead_of_being_timed_out() {
     let (dir, config, base, _calls) = setup("DESIGNER");
-    let yaml = fs::read_to_string(&config).expect("config");
-    fs::write(
-        &config,
-        yaml.replacen("workPath:", "execution_timeout: 50\nworkPath:", 1),
-    )
-    .expect("short timeout config");
     write_shell_script(&dir.path().join("1cv8"), "sleep 1");
     let output = base.join("dist/main.cf");
+    let started = std::time::Instant::now();
     let command = v8_runner_command()
         .args([
             "--config",
@@ -1587,21 +1589,22 @@ fn provider_timeout_has_timed_out_terminal_status_and_is_not_retryable() {
             &output.display().to_string(),
         ])
         .output()
-        .expect("run timed out provider");
+        .expect("run slow provider");
+    let elapsed = started.elapsed();
 
     assert!(!command.status.success());
-    let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
-    assert_eq!(envelope["data"]["execution"]["status"], "timed_out");
-    assert_eq!(
-        envelope["data"]["execution"]["errors"][0]["code"],
-        "timed_out"
+    assert!(
+        elapsed >= std::time::Duration::from_secs(1),
+        "the slow provider must be waited for, not cut short; elapsed={elapsed:?}"
     );
-    assert!(envelope["data"]["execution"]["errors"][0]["retryable"].is_null());
-    assert_eq!(envelope["steps"][0]["status"], "failed");
+    let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+    assert_ne!(
+        envelope["data"]["execution"]["status"], "timed_out",
+        "a command carries no deadline, so nothing here may report a timeout: {envelope}"
+    );
+    assert_ne!(envelope["error"]["kind"], "interruption");
     assert_eq!(envelope["data"]["published"], false);
     assert_eq!(envelope["data"]["target_state"], "unchanged");
-    assert_eq!(envelope["error"]["code"], "timed_out");
-    assert_eq!(envelope["error"]["kind"], "interruption");
 }
 
 #[test]

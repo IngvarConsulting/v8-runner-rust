@@ -81,10 +81,15 @@ pub fn execute_configuration_export(
         configuration_failure(context, error, result.clone(), ExportPhase::ResolveTarget)
     })?;
     result.output = output.target.clone();
-    let _target_lock = acquire_target_lock(context, &output.lock_path, CONFIGURATION_COMMAND)
-        .map_err(|error| {
-            configuration_failure(context, error, result.clone(), ExportPhase::TargetLock)
-        })?;
+    let _target_lock = acquire_target_lock(
+        context,
+        &output.lock_path,
+        CONFIGURATION_COMMAND,
+        TARGET_LOCK_WAIT,
+    )
+    .map_err(|error| {
+        configuration_failure(context, error, result.clone(), ExportPhase::TargetLock)
+    })?;
     let output_observation = observe_locked_output(&output).map_err(|error| {
         configuration_failure(context, error, result.clone(), ExportPhase::ResolveTarget)
     })?;
@@ -238,10 +243,13 @@ pub fn execute_infobase_snapshot(
         snapshot_failure(context, error, result.clone(), ExportPhase::ResolveTarget)
     })?;
     result.output = output.target.clone();
-    let _target_lock =
-        acquire_target_lock(context, &output.lock_path, SNAPSHOT_COMMAND).map_err(|error| {
-            snapshot_failure(context, error, result.clone(), ExportPhase::TargetLock)
-        })?;
+    let _target_lock = acquire_target_lock(
+        context,
+        &output.lock_path,
+        SNAPSHOT_COMMAND,
+        TARGET_LOCK_WAIT,
+    )
+    .map_err(|error| snapshot_failure(context, error, result.clone(), ExportPhase::TargetLock))?;
     let output_observation = observe_locked_output(&output).map_err(|error| {
         snapshot_failure(context, error, result.clone(), ExportPhase::ResolveTarget)
     })?;
@@ -832,9 +840,6 @@ fn select_provider(
                 crate::use_cases::context::ExecutionInterruption::Cancelled => {
                     AppError::Cancelled(reason)
                 }
-                crate::use_cases::context::ExecutionInterruption::TimedOut => {
-                    AppError::TimedOut(reason)
-                }
             };
             return Err((error, receipt));
         }
@@ -1138,10 +1143,14 @@ fn record_execution_failure(
                 ));
                 (ExecutionStatus::Cancelled, "cancelled")
             }
+            // Сюда `timed_out` приходит только от шага — например от завершения
+            // агентской сессии, у которого предел свой. Срок команды его дать не может,
+            // поэтому улика записывается как процессная, а не командная.
             AppError::TimedOut(_) => {
-                interruption_details = Some(command_interruption_details(
-                    crate::use_cases::context::ExecutionInterruption::TimedOut,
+                interruption_details = Some(process_interruption_details(
+                    ProcessInterruptionReason::TimedOut,
                     phase.as_str(),
+                    false,
                     &message,
                 ));
                 (ExecutionStatus::TimedOut, "timed_out")
@@ -1361,11 +1370,23 @@ fn cleanup_export_orphans(
     )
 }
 
+/// How long an export waits for another run to release the same output target.
+///
+/// This is a step bound, not a command deadline: the lock guards a file we own, and a
+/// conflict that has not cleared in this window is a second run writing the same target,
+/// not a slow platform operation. Waiting is a courtesy for back-to-back commands that
+/// briefly overlap; past it the honest answer is that the target is busy.
+const TARGET_LOCK_WAIT: Duration = Duration::from_secs(300);
+
+const TARGET_LOCK_POLL: Duration = Duration::from_millis(25);
+
 fn acquire_target_lock(
     context: &ExecutionContext,
     lock_path: &Path,
     command: &str,
+    wait: Duration,
 ) -> Result<crate::support::fs::AdvisoryLockGuard, AppError> {
+    let waiting_since = Instant::now();
     loop {
         match try_acquire_advisory_lock(lock_path) {
             Ok(guard) => return Ok(guard),
@@ -1380,19 +1401,16 @@ fn acquire_target_lock(
                         crate::use_cases::context::ExecutionInterruption::Cancelled => {
                             AppError::Cancelled(message)
                         }
-                        crate::use_cases::context::ExecutionInterruption::TimedOut => {
-                            AppError::TimedOut(message)
-                        }
                     });
                 }
-                let delay = context
-                    .remaining_budget()
-                    .map(|remaining| remaining.min(Duration::from_millis(25)))
-                    .unwrap_or(Duration::from_millis(25));
-                if delay.is_zero() {
-                    continue;
+                if waiting_since.elapsed() >= wait {
+                    return Err(AppError::WorkspaceBusy(format!(
+                        "another run still holds the {command} output lock '{}' after {}ms; finish or stop it, or send this run to a different output",
+                        lock_path.display(),
+                        wait.as_millis()
+                    )));
                 }
-                thread::sleep(delay);
+                thread::sleep(TARGET_LOCK_POLL);
             }
             Err(error) => {
                 return Err(AppError::Runtime(format!(
@@ -1599,14 +1617,13 @@ mod tests {
         acquire_target_lock, capability, cleanup_export_orphans, observe_locked_output,
         record_execution_failure, resolve_output, revalidate_before_publish,
         revalidate_output_observation, validate_configuration_output, validate_snapshot_output,
-        ExportIntent, ExportPhase, SNAPSHOT_COMMAND,
+        ExportIntent, ExportPhase, SNAPSHOT_COMMAND, TARGET_LOCK_WAIT,
     };
 
     fn config(base: &Path, work: &Path) -> AppConfig {
         AppConfig {
             base_path: base.to_path_buf(),
             work_path: work.to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -1725,20 +1742,36 @@ mod tests {
         }
     }
 
+    /// Ожидание чужой блокировки — шаг со своим пределом, а не остаток срока команды.
+    ///
+    /// Срока у команды нет (DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE), и без этого предела
+    /// цикл крутился бы до Ctrl+C. Отказ обязан называться занятостью, а не таймаутом:
+    /// держит цель другой прогон, и ждать дальше бессмысленно.
     #[test]
-    fn target_lock_wait_observes_the_command_deadline() {
+    fn target_lock_wait_gives_up_and_names_the_run_that_holds_the_target() {
         let dir = tempfile::tempdir().expect("tempdir");
         let lock_path = dir.path().join("target.lock");
         let _guard = crate::support::fs::acquire_advisory_lock(&lock_path).expect("held lock");
-        let context = ExecutionContext::cli(crate::use_cases::context::CommandName::InfobaseDump)
-            .with_deadline(Some(Instant::now() + Duration::from_millis(30)));
+        let context = ExecutionContext::cli(crate::use_cases::context::CommandName::InfobaseDump);
         let started = Instant::now();
 
-        let error = acquire_target_lock(&context, &lock_path, SNAPSHOT_COMMAND)
-            .expect_err("deadline must stop lock wait");
+        let error = acquire_target_lock(
+            &context,
+            &lock_path,
+            SNAPSHOT_COMMAND,
+            Duration::from_millis(40),
+        )
+        .expect_err("the wait window must end the lock wait");
 
-        assert!(matches!(error, AppError::TimedOut(_)));
-        assert!(started.elapsed() < Duration::from_millis(250));
+        assert!(
+            matches!(error, AppError::WorkspaceBusy(_)),
+            "a held target is busy, not timed out: {error:?}"
+        );
+        assert!(
+            error.to_string().contains(&lock_path.display().to_string()),
+            "the refusal must name the lock it waited on: {error}"
+        );
+        assert!(started.elapsed() < Duration::from_millis(400));
     }
 
     #[test]
@@ -1751,14 +1784,15 @@ mod tests {
         let context = ExecutionContext::cli(crate::use_cases::context::CommandName::InfobaseDump)
             .with_cancellation(cancellation);
 
-        let error = acquire_target_lock(&context, &lock_path, SNAPSHOT_COMMAND)
+        // Окно ожидания нарочно полное: пройти этот тест можно только через прерывание.
+        let error = acquire_target_lock(&context, &lock_path, SNAPSHOT_COMMAND, TARGET_LOCK_WAIT)
             .expect_err("cancellation must stop lock wait");
 
         assert!(matches!(error, AppError::Cancelled(_)));
     }
 
     #[test]
-    fn provider_selection_observes_the_shared_command_deadline() {
+    fn provider_selection_observes_the_operators_interrupt() {
         let dir = tempfile::tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
@@ -1767,16 +1801,18 @@ mod tests {
         let request = crate::domain::infobase_export::ExportInfobaseSnapshotRequest {
             output: base.join("base.dt"),
         };
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
         let context = ExecutionContext::cli(crate::use_cases::context::CommandName::InfobaseDump)
-            .with_deadline(Some(Instant::now() - Duration::from_millis(1)));
+            .with_cancellation(cancellation);
 
         let failure = super::prepare_infobase_snapshot(&context, &config, &request)
-            .expect_err("expired deadline");
+            .expect_err("an interrupted run must not pick a provider");
 
-        assert_eq!(failure.error.kind(), UseCaseErrorKind::TimedOut);
+        assert_eq!(failure.error.kind(), UseCaseErrorKind::Cancelled);
         let result = failure.payload.expect("typed payload");
-        assert_eq!(result.execution.status, ExecutionStatus::TimedOut);
-        assert_eq!(result.execution.errors[0].code, "timed_out");
+        assert_eq!(result.execution.status, ExecutionStatus::Cancelled);
+        assert_eq!(result.execution.errors[0].code, "cancelled");
     }
 
     #[test]
@@ -1842,11 +1878,13 @@ mod tests {
     }
 
     #[test]
-    fn unrelated_failure_is_not_reclassified_by_an_expired_deadline() {
+    fn unrelated_failure_is_not_reclassified_by_an_interrupted_context() {
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
         let context = ExecutionContext::cli(
             crate::use_cases::context::CommandName::InfobaseConfigurationExport,
         )
-        .with_deadline(Some(Instant::now() - Duration::from_millis(1)));
+        .with_cancellation(cancellation);
         let mut execution = ExecutionOutcome::new(ExecutionStatus::Failed);
         let error = AppError::Runtime("publication failed".to_owned());
 

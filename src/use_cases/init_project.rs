@@ -912,7 +912,6 @@ mod tests {
         AppConfig {
             base_path: PathBuf::from("/tmp/base"),
             work_path: PathBuf::from("/tmp/work"),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
             providers: Default::default(),
             provider_origins: Default::default(),
