@@ -262,17 +262,13 @@ pub struct TestCase {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[derive(Default)]
 pub enum TestStatus {
+    #[default]
     Passed,
     Failed,
     Skipped,
     Error,
-}
-
-impl Default for TestStatus {
-    fn default() -> Self {
-        Self::Passed
-    }
 }
 
 pub fn test_execution_error(kind: TestErrorKind, message: impl Into<String>) -> ExecutionError {

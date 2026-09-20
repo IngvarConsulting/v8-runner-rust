@@ -383,16 +383,20 @@ fn run_artifacts_selected(
     }
 }
 
+/// Исход публикации артефактов: и успех, и отказ несут уже разложенный набор, чтобы
+/// вызывающий мог убрать за собой и назвать, что успело лечь на диск.
+type PublicationAttempt = Result<
+    (PlatformCommandResult, ArtifactSet, PublicationOutcome),
+    (AppError, ArtifactSet, Option<PathBuf>),
+>;
+
 fn run_designer_export(
     context: &ExecutionContext,
     config: &AppConfig,
     resolved: &ResolvedArtifactsTarget,
     binary: &Path,
     runner: &dyn ProcessRunner,
-) -> Result<
-    (PlatformCommandResult, ArtifactSet, PublicationOutcome),
-    (AppError, ArtifactSet, Option<PathBuf>),
-> {
+) -> PublicationAttempt {
     if matches!(
         resolved.mode,
         ArtifactBuildMode::ExternalDataProcessorEpf | ArtifactBuildMode::ExternalReportErf
@@ -531,10 +535,7 @@ fn run_external_designer_export(
     resolved: &ResolvedArtifactsTarget,
     binary: &Path,
     runner: &dyn ProcessRunner,
-) -> Result<
-    (PlatformCommandResult, ArtifactSet, PublicationOutcome),
-    (AppError, ArtifactSet, Option<PathBuf>),
-> {
+) -> PublicationAttempt {
     if let Some(error) = interruption_before_safe_point(
         context,
         format!(
@@ -769,10 +770,7 @@ fn resolve_target(
                 let candidates = inventory
                     .source_sets_with_purpose(SourceSetPurpose::Extension)
                     .into_iter()
-                    .filter_map(|source_set| {
-                        let resolved_name = platform_extension_name(source_set);
-                        (resolved_name == requested_extension).then_some(source_set)
-                    })
+                    .filter(|source_set| platform_extension_name(source_set) == requested_extension)
                     .collect::<Vec<_>>();
                 if candidates.is_empty() {
                     let available = inventory

@@ -567,6 +567,30 @@ mod tests {
     }
 
     #[test]
+    fn a_local_overlay_replaces_the_allowed_hosts_it_does_not_extend_them() {
+        // Решено осознанно: `mcp.http` и так настраивается локальным слоем, а сам
+        // слой машинный — кто его пишет, тот перепишет и проектный файл, так что
+        // прав это никому не добавляет. Замена списка целиком — общее правило
+        // слияния для последовательностей; здесь оно закреплено, потому что для
+        // списка про доступ разница между «заменить» и «дополнить» существенна.
+        let dir = tempdir().expect("tempdir");
+        let config_dir = dir.path().join("project");
+        let config_path = write_minimal_project_config(
+            &config_dir,
+            "workPath: work\nformat: DESIGNER\ninfobase:\n  connection: \"File=build/ib\"\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\nmcp:\n  http:\n    allowed_hosts:\n      - from-project\n      - also-project\n",
+        );
+        std::fs::write(
+            config_dir.join(LOCAL_CONFIG_FILE_NAME),
+            "mcp:\n  http:\n    allowed_hosts:\n      - from-local\n",
+        )
+        .expect("write local overlay");
+
+        let config = load_config(config_path.to_str(), None).expect("load config");
+
+        assert_eq!(config.mcp.http.allowed_hosts, vec!["from-local".to_owned()]);
+    }
+
+    #[test]
     fn load_config_discovers_local_overlay_next_to_explicit_config() {
         let dir = tempdir().expect("tempdir");
         let config_dir = dir.path().join("subproject");
@@ -719,6 +743,34 @@ mod tests {
         let config = load_config(config_path.to_str(), None).expect("load config");
 
         assert_eq!(config.infobase.user, None);
+    }
+
+    #[test]
+    fn a_local_overlay_cannot_unpin_a_declared_host_key() {
+        // `null` в локальном слое — общий способ сбросить значение проекта. Для
+        // отпечатка ключа это значило бы «снять сверку», причём молча и из файла,
+        // которого нет в репозитории. Схема такое запрещает, и загрузчик тоже.
+        let dir = tempdir().expect("tempdir");
+        let config_dir = dir.path().join("project");
+        let config_path = write_minimal_project_config(
+            &config_dir,
+            "workPath: work\nformat: DESIGNER\ninfobase:\n  connection: \"File=build/ib\"\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\ntools:\n  designer_agent:\n    attach: 127.0.0.1:1543\n    base-dir: /tmp/agent\n    host-fingerprint: 'SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU'\n",
+        );
+        std::fs::write(
+            config_dir.join(LOCAL_CONFIG_FILE_NAME),
+            "tools:\n  designer_agent:\n    host-fingerprint: null\n",
+        )
+        .expect("local overlay");
+
+        let error = load_config(config_path.to_str(), None)
+            .expect_err("a declared fingerprint cannot be reset to null");
+
+        assert!(
+            error
+                .to_string()
+                .contains("local config overlay contains unsupported key or value"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1116,7 +1168,7 @@ mod tests {
         std::fs::write(
             &config_path,
             format!(
-                "workPath: {}\nformat: DESIGNER\ninfobase:\n  connection: \"File=/tmp/ib\"\nmcp:\n  http:\n    bind_address: 127.0.0.1:4000\n    path: /custom-mcp\n    stateful_sessions: false\n    max_sessions: 12\n    idle_ttl_secs: 45\n  execution:\n    max_concurrent_calls: 3\n    shutdown_grace_period_secs: 9\ntools:\n  client_mcp:\n    port: 9874\n    wait_ready_timeout_ms: 4321\n    extension:\n      name: client_mcp\n      source:\n        path: exts/client-mcp\n        format: DESIGNER\n  enterprise:\n    additional-launch-keys:\n      - /TESTMANAGER\n  edt_cli:\n    interactive-mode: true\n    startup_timeout_ms: 1234\n    command_timeout_ms: 5678\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: base/src\n",
+                "workPath: {}\nformat: DESIGNER\ninfobase:\n  connection: \"File=/tmp/ib\"\nmcp:\n  http:\n    bind_address: 127.0.0.1:4000\n    path: /custom-mcp\n    stateful_sessions: false\n    max_sessions: 12\n    idle_ttl_secs: 45\n    allowed_hosts:\n      - runner\n      - 10.0.0.5\n  execution:\n    max_concurrent_calls: 3\n    shutdown_grace_period_secs: 9\ntools:\n  client_mcp:\n    port: 9874\n    wait_ready_timeout_ms: 4321\n    extension:\n      name: client_mcp\n      source:\n        path: exts/client-mcp\n        format: DESIGNER\n  enterprise:\n    additional-launch-keys:\n      - /TESTMANAGER\n  edt_cli:\n    interactive-mode: true\n    startup_timeout_ms: 1234\n    command_timeout_ms: 5678\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: base/src\n",
                 work.display()
             ),
         )
@@ -1129,6 +1181,10 @@ mod tests {
         assert!(!config.mcp.http.stateful_sessions);
         assert_eq!(config.mcp.http.max_sessions, 12);
         assert_eq!(config.mcp.http.idle_ttl_secs, 45);
+        assert_eq!(
+            config.mcp.http.allowed_hosts,
+            vec!["runner".to_owned(), "10.0.0.5".to_owned()]
+        );
         assert_eq!(config.mcp.execution.max_concurrent_calls, 3);
         assert_eq!(config.mcp.execution.shutdown_grace_period_secs, 9);
         assert_eq!(config.tools.client_mcp.port, Some(9874));
@@ -1289,6 +1345,7 @@ mod tests {
         assert!(config.mcp.http.stateful_sessions);
         assert_eq!(config.mcp.http.max_sessions, 64);
         assert_eq!(config.mcp.http.idle_ttl_secs, 900);
+        assert!(config.mcp.http.allowed_hosts.is_empty());
         assert_eq!(config.mcp.execution.max_concurrent_calls, 1);
         assert_eq!(config.mcp.execution.shutdown_grace_period_secs, 30);
         assert_eq!(config.tools.edt_cli.startup_timeout_ms, 300_000);

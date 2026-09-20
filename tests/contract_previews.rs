@@ -72,7 +72,7 @@ fn run(config_path: &Path, arguments: &[&str]) -> (i32, Value) {
     (output.status.code().unwrap_or(-1), payload)
 }
 
-fn previews<'a>(artifact: &'a str) -> Vec<Vec<&'a str>> {
+fn previews(artifact: &str) -> Vec<Vec<&str>> {
     vec![
         vec!["build", "--dry-run"],
         vec!["dump", "--mode", "full", "--dry-run"],

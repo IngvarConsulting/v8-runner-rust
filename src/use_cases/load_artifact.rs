@@ -1064,6 +1064,10 @@ fn empty_result_from_resolved(
     )
 }
 
+// Принятый waiver: пустой результат перечисляет поля отчёта поимённо, потому что
+// собирается до того, как появилась хоть одна его часть. Структура-аргумент здесь
+// была бы копией самого результата.
+#[allow(clippy::too_many_arguments)]
 fn empty_result(
     provider_dispatched: bool,
     mode: LoadMode,
@@ -1664,7 +1668,7 @@ mod tests {
             load_payload(&result).compatibility_state,
             CompatibilityState::NotProbed
         );
-        assert_eq!(load_payload(&result).update_db_cfg_ran, true);
+        assert!(load_payload(&result).update_db_cfg_ran);
         let calls_text = fs::read_to_string(calls).expect("calls");
         assert!(
             !calls_text.contains("/CompareCfg"),

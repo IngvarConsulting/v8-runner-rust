@@ -8,11 +8,11 @@ use crate::domain::launch::{
 };
 use crate::domain::runner::{launch_key_alias_matches, LaunchOptions};
 use crate::platform::enterprise::{
-    build_launch_args, mask_launch_args, mask_url_userinfo, normalize_launch_payload_path,
-    LaunchAddress, LaunchClientMode,
+    build_launch_args, normalize_launch_payload_path, LaunchAddress, LaunchClientMode,
 };
 use crate::platform::locator::{ResolutionSource, UtilityLocation, UtilityType, UtilityVersion};
 use crate::platform::process::{ManagedSpawnMode, ProcessRequest};
+use crate::platform::secrets::{mask_preview_args, mask_url_userinfo};
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::client_mcp_readiness;
@@ -103,12 +103,11 @@ pub fn execute(
     // отчёт — замаскированный.
     let reported_url = web_url.as_deref().map(mask_url_userinfo);
 
-    let launch = effective_launch_options(config, args)
-        .map_err(|error| UseCaseFailure::without_payload(error))?;
+    let launch = effective_launch_options(config, args).map_err(UseCaseFailure::without_payload)?;
     let external_epf_wait =
         external_epf_wait_plan(config, args, &launch).map_err(UseCaseFailure::without_payload)?;
-    let readiness_url = client_mcp_readiness_url(config, args)
-        .map_err(|error| UseCaseFailure::without_payload(error))?;
+    let readiness_url =
+        client_mcp_readiness_url(config, args).map_err(UseCaseFailure::without_payload)?;
     if args.dry_run {
         // Both options report an outcome observed from a running client, which a preview
         // never starts; answering them with a plan would be a fabricated observation.
@@ -161,7 +160,7 @@ pub fn execute(
     if args.dry_run {
         let connection = config.v8_connection();
         let secrets: Vec<&str> = connection.password.as_deref().into_iter().collect();
-        let masked = mask_launch_args(&process_request.args, &secrets);
+        let masked = mask_preview_args(&process_request.args, &secrets);
         log_live_stage(
             "launch: preview",
             "[Launch] preview only, client process not dispatched",

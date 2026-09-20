@@ -13,6 +13,7 @@
 
 use crate::command_envelope::Envelope;
 use serde::Serialize;
+#[cfg(test)]
 use serde_json::{json, Value};
 
 /// Знак узла. Меняется вместе с версией формы, а не вместе с настроением.
@@ -36,11 +37,17 @@ pub fn progress_mark(status: &str) -> (&'static str, &'static str) {
     }
 }
 
-const PIPE: &str = "│";
 const DETAIL_INDENT: &str = "   ";
-const ERROR_PREFIX: &str = "ERROR: ";
 
-/// Путь артефакта, закрепляющего форму.
+/// Словарь формы и путь её артефакта существуют ради проверки
+/// `generated_text_output_grammar_is_current`, которую называет `check:` у активного
+/// контракта `CTR.CLI.TEXT-OUTPUT`. В рантайме их никто не зовёт, поэтому они собираются
+/// только под тестами — удалить их нельзя, это владелец `docs/schemas/text-output.json`.
+#[cfg(test)]
+const PIPE: &str = "│";
+#[cfg(test)]
+const ERROR_PREFIX: &str = "ERROR: ";
+#[cfg(test)]
 pub const TEXT_OUTPUT_GRAMMAR_PATH: &str = "docs/schemas/text-output.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,7 +146,9 @@ fn is_fact(line: &str) -> bool {
 /// Форма, порождённая из словаря выше.
 ///
 /// Артефакт не пишется руками: пока он совпадает с этим словарём, описание формы и
-/// её исполнение — одно и то же.
+/// её исполнение — одно и то же. Собирается только под тестами: единственный вызывающий —
+/// контрактная проверка `generated_text_output_grammar_is_current`.
+#[cfg(test)]
 pub fn text_output_grammar() -> Value {
     json!({
         "_comment": "Порождается UPDATE_TEXT_OUTPUT_GRAMMAR=1 cargo test generated_text_output_grammar_is_current; руками не правится.",

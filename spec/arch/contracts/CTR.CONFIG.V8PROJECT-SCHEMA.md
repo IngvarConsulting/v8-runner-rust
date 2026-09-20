@@ -2,8 +2,8 @@
 id: CTR.CONFIG.V8PROJECT-SCHEMA
 status: active
 governs: product
-version: 3
-decision: DEC.2026-09-14.TARGET-HAS-TWO-ADDRESSES
+version: 5
+decision: DEC.2026-09-17.A-HOST-KEY-IS-CHECKED-AGAINST-WHAT-WAS-DECLARED
 artifact: docs/schemas/v8project.schema.json
 producer: src/config/schema.rs
 consumers: [docs, cli]

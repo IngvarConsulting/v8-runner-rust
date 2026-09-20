@@ -3189,7 +3189,7 @@ impl<'a> ArtifactsJsonData<'a> {
     }
 }
 
-fn build_artifacts_envelope<'a>(result: &ArtifactsResult) -> Envelope<ArtifactsJsonData<'_>> {
+fn build_artifacts_envelope(result: &ArtifactsResult) -> Envelope<ArtifactsJsonData<'_>> {
     Envelope {
         ok: result.execution.is_ok(),
         command: CommandName::Artifacts.as_str().to_owned(),
@@ -3855,8 +3855,9 @@ fn render_convert_scope(scope: ConvertScope, source_set: Option<&str>) -> String
 fn render_syntax_text(result: &SyntaxCheckResult, presenter: &Presenter) {
     let succeeded = matches!(result.status, SyntaxCheckStatus::Clean);
     // «Найдены замечания» — не стандартный исход, у него своя подпись. У остальных
-    // слово выбирает presenter: непрочитанный журнал лежит среди подробностей
-    // предупреждением, и подпись следует за знаком сама.
+    // слово выбирает presenter. Непрочитанный журнал больше не остаётся одним
+    // предупреждением среди подробностей: он делает вердикт неизвестным, то есть
+    // `tool_failed`, и подпись следует за знаком сама.
     let subject = format!("Syntax check {}", result.check_name);
     let issues_label = matches!(result.status, SyntaxCheckStatus::IssuesFound)
         .then(|| format!("{subject} found issues"));

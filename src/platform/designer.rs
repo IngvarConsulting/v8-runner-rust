@@ -383,7 +383,7 @@ impl<'a> DesignerDsl<'a> {
 
         let (platform_log_path, platform_log, platform_log_read_error) =
             if let Some(path) = &self.log_file {
-                match std::fs::read_to_string(path) {
+                match crate::support::fs::read_platform_log(path) {
                     Ok(contents) => (Some(path.clone()), Some(contents), None),
                     Err(error) => (
                         Some(path.clone()),

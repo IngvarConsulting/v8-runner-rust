@@ -184,7 +184,7 @@ fn process_interruption_reason(interruption: ProcessInterruptionReason) -> &'sta
     }
 }
 
-fn deferred_process_interruption_message(
+pub(crate) fn deferred_process_interruption_message(
     completed_action: &str,
     interruption: ProcessInterruptionReason,
 ) -> String {

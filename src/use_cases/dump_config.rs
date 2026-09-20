@@ -516,19 +516,23 @@ fn run_partial_dump_edt_ibcmd(
     )
 }
 
+/// Полная выгрузка, переданная как значение: обратная синхронизация EDT сеет снимок
+/// Конфигуратора тем же кодом, которым идёт обычная выгрузка.
+type FullDumpRunner = fn(
+    &ExecutionContext,
+    &AppConfig,
+    &ResolvedDumpTarget,
+    &Path,
+    &dyn ProcessRunner,
+) -> Result<(PlatformCommandResult, Option<String>), AppError>;
+
 fn ensure_edt_platform_target_seeded(
     context: &ExecutionContext,
     config: &AppConfig,
     resolved: &ResolvedDumpTarget,
     binary: &Path,
     runner: &dyn ProcessRunner,
-    full_dump_runner: fn(
-        &ExecutionContext,
-        &AppConfig,
-        &ResolvedDumpTarget,
-        &Path,
-        &dyn ProcessRunner,
-    ) -> Result<(PlatformCommandResult, Option<String>), AppError>,
+    full_dump_runner: FullDumpRunner,
 ) -> Result<Option<String>, AppError> {
     if designer_snapshot_is_ready(&resolved.platform_target_path)? {
         return Ok(None);
@@ -1170,11 +1174,15 @@ exit 0"#,
         write_script(path, &body);
     }
 
+    /// Наблюдатель за каждым запросом к процессу: тест подсматривает аргументы,
+    /// не подменяя самого исполнителя.
+    type RunObserver = Arc<dyn Fn(&ProcessRequest) + Send + Sync>;
+
     #[derive(Clone, Default)]
     struct TestProcessRunner {
         calls: Arc<Mutex<Vec<Vec<String>>>>,
         cancel_after_call: Option<(usize, CancellationToken)>,
-        on_run: Option<Arc<dyn Fn(&ProcessRequest) + Send + Sync>>,
+        on_run: Option<RunObserver>,
     }
 
     impl TestProcessRunner {

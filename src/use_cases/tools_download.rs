@@ -38,7 +38,7 @@ pub fn execute(
     config: &AppConfig,
     request: &ToolsDownloadRequest,
 ) -> UseCaseResult<ToolsDownloadResult> {
-    tools_download(context, config, request).map_err(|error| UseCaseFailure::without_payload(error))
+    tools_download(context, config, request).map_err(UseCaseFailure::without_payload)
 }
 
 fn tools_download(
@@ -270,6 +270,14 @@ fn download_asset_file(
             asset.name
         ))
     })?;
+    if verify_asset_digest(&asset.name, asset.digest.as_deref(), &bytes)?
+        == DigestVerdict::NotPublished
+    {
+        tracing::warn!(
+            asset = %asset.name,
+            "release publishes no checksum for this asset; integrity is unverified"
+        );
+    }
     publish_file_bytes_with_marker(context, &bytes, target_path)
 }
 
@@ -302,6 +310,14 @@ fn download_single_file_from_zip(
             asset.name
         ))
     })?;
+    if verify_asset_digest(&asset.name, asset.digest.as_deref(), &bytes)?
+        == DigestVerdict::NotPublished
+    {
+        tracing::warn!(
+            asset = %asset.name,
+            "release publishes no checksum for this asset; integrity is unverified"
+        );
+    }
     let file = find_file_in_zip(&bytes, file_name)?;
     publish_file_bytes_with_marker(context, &file, target_path)
 }
@@ -558,7 +574,7 @@ fn write_source_download_marker(target_path: &Path, marker_path: &Path) -> Resul
     })?;
     ensure_dir(parent).map_err(io_error("failed to create download marker parent"))?;
     fs::write(
-        &marker_path,
+        marker_path,
         format!(
             "{{\n  \"tool\": \"v8-runner\",\n  \"target\": \"{}\"\n}}\n",
             target_path.display()
@@ -1010,10 +1026,111 @@ impl GitHubRelease {
 struct GitHubAsset {
     name: String,
     browser_download_url: String,
+    /// Контрольная сумма ассета, как её публикует GitHub: `sha256:<hex>`. Поля может не
+    /// быть у старого выпуска — тогда сверять нечего, и об этом говорят прямо, а не
+    /// выдают отсутствие проверки за успешную.
+    #[serde(default)]
+    digest: Option<String>,
+}
+
+/// Итог сверки скачанного с опубликованной суммой.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DigestVerdict {
+    /// Сумма опубликована и совпала.
+    Matched,
+    /// Суммы у выпуска нет: неизвестность названа отдельно, а не сведена к совпадению.
+    NotPublished,
+}
+
+/// Сверяет скачанное с суммой, опубликованной рядом с ассетом.
+///
+/// Расширение `.cfe` после загрузки попадает в информационную базу как исполняемый код
+/// 1С, поэтому подмена содержимого по пути — не абстракция. Формат суммы задаёт GitHub:
+/// `sha256:<hex>`; незнакомый алгоритм — отказ, а не пропуск.
+fn verify_asset_digest(
+    name: &str,
+    digest: Option<&str>,
+    bytes: &[u8],
+) -> Result<DigestVerdict, AppError> {
+    let Some(digest) = digest else {
+        return Ok(DigestVerdict::NotPublished);
+    };
+    let algorithm_len = "sha256:".len();
+    let expected = digest
+        .get(..algorithm_len)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("sha256:"))
+        .map(|_| &digest[algorithm_len..]);
+    let Some(expected) = expected else {
+        return Err(AppError::Runtime(format!(
+            "asset '{name}' carries a digest in an unsupported form: {digest}"
+        )));
+    };
+    let actual = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        format!("{:x}", hasher.finalize())
+    };
+    if actual.eq_ignore_ascii_case(expected.trim()) {
+        Ok(DigestVerdict::Matched)
+    } else {
+        Err(AppError::Runtime(format!(
+            "asset '{name}' does not match its published sha256: expected {expected}, got {actual}"
+        )))
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{verify_asset_digest, DigestVerdict};
+
+    /// Расширение после загрузки попадает в информационную базу как исполняемый код 1С,
+    /// поэтому сумма, опубликованная рядом с ассетом, сверяется. Её отсутствие названо
+    /// отдельным значением, а не сведено к совпадению.
+    #[test]
+    fn a_published_checksum_is_verified_and_its_absence_is_named() {
+        // sha256("v8-runner") — посчитан этим же кодом и закреплён здесь.
+        let payload = b"v8-runner";
+        let matched =
+            verify_asset_digest("x.cfe", None, payload).expect("no digest is not a failure");
+        assert_eq!(matched, DigestVerdict::NotPublished);
+
+        let actual = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(payload);
+            format!("{:x}", hasher.finalize())
+        };
+        assert_eq!(
+            verify_asset_digest("x.cfe", Some(&format!("sha256:{actual}")), payload)
+                .expect("matching digest"),
+            DigestVerdict::Matched
+        );
+        assert_eq!(
+            verify_asset_digest(
+                "x.cfe",
+                Some(&format!("SHA256:{}", actual.to_uppercase())),
+                payload
+            )
+            .expect("case does not matter"),
+            DigestVerdict::Matched
+        );
+
+        let mismatch = verify_asset_digest("x.cfe", Some("sha256:00"), payload)
+            .expect_err("a mismatched asset must be refused");
+        assert!(
+            mismatch.to_string().contains("does not match"),
+            "{mismatch}"
+        );
+
+        let unknown = verify_asset_digest("x.cfe", Some("md5:00"), payload)
+            .expect_err("an unknown algorithm is a refusal, not a skip");
+        assert!(
+            unknown.to_string().contains("unsupported form"),
+            "{unknown}"
+        );
+    }
+
     use super::*;
 
     #[test]

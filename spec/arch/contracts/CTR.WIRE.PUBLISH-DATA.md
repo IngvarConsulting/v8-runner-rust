@@ -2,12 +2,12 @@
 id: CTR.WIRE.PUBLISH-DATA
 status: active
 governs: product
-version: 2
-decision: DEC.2026-09-14.RECEIPT-EXPLAINS-PROVIDER-CHOICE
+version: 3
+decision: DEC.2026-09-16.A-RENDERED-COMMAND-MASKS-SECRETS-AT-ONE-PLACE
 artifact: docs/schemas/command-data/publish.schema.json
 producer: src/domain/publish.rs
 consumers: [cli, unica]
-check: [src/command_data.rs::generated_command_data_schemas_are_current, tests/cli_publish.rs::publish_composes_webinst_from_the_declared_web_section]
+check: [src/command_data.rs::generated_command_data_schemas_are_current, tests/cli_publish.rs::publish_composes_webinst_from_the_declared_web_section, tests/cli_publish.rs::publish_preview_never_echoes_the_password_of_the_connection_string]
 scope: [wire, cli]
 ---
 
@@ -17,7 +17,9 @@ scope: [wire, cli]
 этого сделано: сервер, виртуальный и физический каталоги, клиентский адрес, если он
 объявлен, и `action` — `publish` или `delete`. Превью несёт `plan` с программой и
 аргументами `webinst`: параметры публикации берутся из файла, и превью показывает их
-целиком, потому что публикация замещает `default.vrd` без остатка.
+целиком, потому что публикация замещает `default.vrd` без остатка. Целиком — значит без
+пропущенных параметров, а не без маскирования: `-connstr` несёт строку соединения, и
+пароль в ней закрыт как везде.
 
 ## Пример
 

@@ -72,7 +72,7 @@ The supported `source-set[].type` contract and validation boundary are governed 
 
 The typed config model now splits MCP knobs into active HTTP/session settings and shared execution guardrails:
 
-- `mcp.http` defines the live HTTP listener and session behavior (`bind_address`, `path`, `stateful_sessions`, `max_sessions`, `idle_ttl_secs`).
+- `mcp.http` defines the live HTTP listener and session behavior (`bind_address`, `path`, `stateful_sessions`, `max_sessions`, `idle_ttl_secs`, `allowed_hosts`).
 - `mcp.execution` defines shared admission/shutdown limits (`max_concurrent_calls`, `shutdown_grace_period_secs`) reused by both stdio and HTTP.
 - `tools.edt_cli` now also carries `startup_timeout_ms` and `command_timeout_ms`; the shared MCP EDT actor reuses these knobs for startup and bounded syntax execution.
 - `tools.client_mcp.wait_ready_timeout_ms` is the per-readiness wait budget for client MCP launch probing; when unset it falls back to the global `execution_timeout`, and the effective wait remains capped by the command deadline.
@@ -121,7 +121,9 @@ Important staging note:
   клиентом (`russh`), без псевдотерминала, ответы — JSON-массивы с закрытым `error-type`. Точку входа
   либо поднимает раннер (`1cv8 DESIGNER … /AgentMode`, `AgentBaseDir` в `workPath`),
   либо называет `tools.designer_agent.attach`; готовность доказывает
-  аутентификация. Одна сессия на команду (`use_cases::agent_session`): `dump`,
+  аутентификация. Ключ хоста сверяется с объявленным: у управляемого — с открытой
+  частью `host-key`, у чужой точки входа — с отпечатком `host-fingerprint`;
+  сверять не с чем — ключ принимается, а отпечаток называется вслух. Одна сессия на команду (`use_cases::agent_session`): `dump`,
   `build`, `make`, экспортное семейство `infobase …` и `extensions` ходят через
   неё. Каталоги проекта выставляются агенту ссылкой в его `AgentBaseDir` (`--dir=`),
   а файловые параметры (`--file=`, `--ext-file=`) агент через ссылку не разрешает —

@@ -45,7 +45,7 @@ bash scripts/test/ci-rust.sh
 
 Поведение:
 
-- `V8_RUNNER_CI_SCOPE=contract` запускает `cargo test --locked` на Linux и macOS, а на Windows — `cargo check --locked --all-targets`, native CLI/lock smoke и точечные OS-регрессии, пока Windows test suite не hardened
+- `V8_RUNNER_CI_SCOPE=contract` запускает `cargo test --locked` на Linux и macOS, а на Windows — native CLI/lock smoke и точечные OS-регрессии, пока Windows test suite не hardened. Отдельной сборочной проверки в скрипте больше нет: её покрывают шаг `Lint` (`cargo clippy --locked --all-targets`) и `cargo test --locked -- --list`, который собирает все цели
 - `V8_RUNNER_CI_SCOPE=full` всегда запускает `cargo test --locked`
 - `V8_RUNNER_CI_SCOPE=runtime-locks` запускает только lock-focused regression subset
 - `V8_RUNNER_CI_SCOPE=happy-path` запускает Rust/non-live цепочку `build -> cargo check`, затем `live-cli-fixture`; `cargo test` пропускается только при явном `V8TR_CI_SKIP_DUPLICATE_RUST_TESTS=1`, когда этот же workflow полагается на отдельный contract job с объявленным для данной ОС уровнем Rust coverage
@@ -208,11 +208,35 @@ Windows runner contract for this helper layer is explicit:
 
 | Контур | Linux | Windows | macOS | Blocking | Build | Syntax/check | Test | Package | Deploy-ready artifacts |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `ci-rust contract` | yes | yes | yes | yes | Rust | Rust | Linux/macOS full tests; Windows compile/check + native CLI/lock smoke | no | no |
+| `ci-rust contract` | yes | yes | yes | yes (кроме macOS: не входит в обязательные проверки ветки) | Rust | Rust | Linux/macOS full tests; Windows compile/lint + native CLI/lock smoke | no | no |
 | `ci-rust happy-path` | yes | yes | no | yes for Rust/non-live checks; live smoke is blocking when OS bundle secrets exist | Rust + real 1C when available | real when available | Rust test repeats unless `V8TR_CI_SKIP_DUPLICATE_RUST_TESTS=1`; real 1C opt-in | real when available | real when available |
 | `live-mcp-http` | optional | optional | optional | no | real via MCP | real via MCP | real via MCP | n/a | n/a |
 | `live-cli-ibcmd` | optional | optional | optional | no | real (`IBCMD`) | n/a | n/a | diagnostic dump/export only | n/a |
 | `live-cli-designer` | optional | optional | optional | no | real (`DESIGNER`) | real | real opt-in | real | real |
+
+## Гейты качества
+
+Джоба `contract` несёт блокирующие проверки качества шагами, а не отдельной джобой:
+список обязательных проверок ветки `master` привязан к именам джоб, поэтому новая
+джоба оставалась бы неблокирующей до правки защиты ветки. По той же причине джобы
+`Contract (…)` и `Happy Path (…)` нельзя переименовывать.
+
+| Шаг | Где | Блокирует | Почему так |
+| --- | --- | --- | --- |
+| `cargo fmt --all --check` | ubuntu | да | форматирование от площадки не зависит |
+| `cargo clippy --locked --all-targets -- -D warnings` | ubuntu | да | `-D warnings` идёт аргументом: через `RUSTFLAGS` правило дошло бы до зависимостей и обнулило общий кэш |
+| `cargo clippy --locked --bins -- -D warnings` | windows | да | код под `cfg(windows)` на Linux не компилируется вовсе, поэтому одной площадки мало. Цель боевая, а не все: тестовая на Windows полна мёртвого кода из-за `#![cfg(unix)]` на самих тестах — первый прогон насчитал 112 таких мест против четырёх в боевом коде. Снимется вместе с расгейчиванием Windows-тестов |
+| `cargo deny check licenses sources` | ubuntu | да | обе проверки герметичны: считаются по `Cargo.lock`, в сеть не ходят |
+| `cargo deny check advisories bans` | ubuntu | нет | база RustSec тянется в рантайме, и блокирующая проверка краснела бы без правок кода |
+
+`Contract (macos-latest)` в обязательные проверки не входит, поэтому ни один гейт на
+неё не опирается; линтер там не запускается. Следствие: ветка
+`#[cfg(all(not(windows), not(target_os = "linux")))]` (`src/platform/locator.rs`) линтером
+не покрыта нигде — это осознанный остаток.
+
+Компилятор зафиксирован `1.95.0` в обеих джобах и совпадает с релизным; равенство пинов
+проверяет `tests/release_governance.py::test_ci_and_release_pin_the_same_toolchain`.
+Записанные исключения линтера живут в `clippy.toml`, зависимостей — в `deny.toml`.
 
 ## Ограничения и TODO hooks
 

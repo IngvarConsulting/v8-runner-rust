@@ -16,9 +16,15 @@ pub fn opener() -> (PathBuf, Vec<String>) {
     }
     #[cfg(target_os = "windows")]
     {
+        // Не `cmd /C start`: интерпретатор разбирает `&`, `|`, `^`, `<`, `>` сам, а
+        // стандартное экранирование Rust делается под `CommandLineToArgvW`, которым
+        // `cmd.exe` не пользуется. Адрес приходит из `infobase.web.url`, где `&`
+        // совершенно законен (`?N=user&W=1`) и пробелов не содержит, поэтому дошёл бы
+        // до `cmd` без кавычек и разделил бы команду. `FileProtocolHandler` открывает
+        // ссылку тем же обработчиком, но ничего не переразбирает.
         (
-            PathBuf::from("cmd"),
-            vec!["/C".to_owned(), "start".to_owned(), String::new()],
+            PathBuf::from("rundll32.exe"),
+            vec!["url.dll,FileProtocolHandler".to_owned()],
         )
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -27,8 +33,26 @@ pub fn opener() -> (PathBuf, Vec<String>) {
     }
 }
 
+/// Адрес, пригодный для передачи системному обработчику ссылок.
+///
+/// Управляющие символы и кавычки отвергаются до запуска: они не встречаются в законном
+/// адресе и существуют в нём только затем, чтобы что-нибудь разделить.
+fn ensure_openable(url: &str) -> Result<(), ProcessError> {
+    if url.is_empty() || url.chars().any(|ch| ch.is_control() || ch == '"') {
+        return Err(ProcessError::SpawnFailed {
+            cmd: "open url".to_owned(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("address is not openable: {url:?}"),
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Просит систему открыть адрес и не ждёт браузера.
 pub fn open_url(program: &Path, leading_args: &[String], url: &str) -> Result<u32, ProcessError> {
+    ensure_openable(url)?;
     let child = Command::new(program)
         .args(leading_args)
         .arg(url)
@@ -41,4 +65,38 @@ pub fn open_url(program: &Path, leading_args: &[String], url: &str) -> Result<u3
             source,
         })?;
     Ok(child.id())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Адрес идёт системному обработчику ссылок как аргумент, и управляющие символы в
+    /// нём не нужны никому, кроме того, кто хочет разделить команду.
+    #[test]
+    fn an_address_with_control_characters_is_refused_before_launch() {
+        ensure_openable("http://host/base/?N=user&W=1").expect("an ordinary web address");
+        ensure_openable("http://host/base/").expect("a plain address");
+
+        for hostile in [
+            "http://host/\r\nnet user",
+            "http://host/\0",
+            "http://host/\"x",
+            "",
+        ] {
+            ensure_openable(hostile).expect_err(&format!("must refuse {hostile:?}"));
+        }
+    }
+
+    /// На Windows ссылку открывает обработчик протокола, а не интерпретатор команд:
+    /// `cmd` переразобрал бы `&` в адресе и разделил бы команду.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_opens_links_without_a_command_interpreter() {
+        let (program, _) = opener();
+        assert!(
+            !program.to_string_lossy().eq_ignore_ascii_case("cmd"),
+            "the command interpreter re-parses metacharacters in the address"
+        );
+    }
 }

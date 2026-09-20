@@ -545,6 +545,14 @@ struct InfobaseSchema {
 struct InfobaseStandaloneSchema {
     /// `host:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`, port 1543 by default).
     gate: String,
+    /// SHA256 fingerprint the gate must present, as `SHA256:<base64>`.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "String")]
+    host_fingerprint: Option<String>,
     /// How files travel between the runner and the gate user's directory: `sftp` through
     /// the gate, or `{ dir: … }` — that directory as the runner sees it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -888,6 +896,14 @@ struct DesignerAgentSchema {
     /// Private host key file for the runner-launched agent. Absent: the platform generates one (`/AgentSSHHostKeyAuto`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     host_key: Option<PathBuf>,
+    /// SHA256 fingerprint the attached agent must present, as `SHA256:<base64>`. Attached mode only.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "String")]
+    host_fingerprint: Option<String>,
     /// Time limit for the runner-launched agent to accept the first authenticated session, in milliseconds.
     #[serde(
         rename = "startup_timeout_ms",
@@ -1089,6 +1105,14 @@ struct McpHttpSchema {
     )]
     #[schemars(with = "u64")]
     idle_ttl_secs: Option<u64>,
+    /// Host header values the HTTP listener answers besides the loopback.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "Vec<String>")]
+    allowed_hosts: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -1328,6 +1352,24 @@ mod tests {
             &["McpHttpSchema"],
             "bind_address",
             "Socket address",
+        );
+        assert_property_description_contains(
+            &main_schema,
+            &["McpHttpSchema"],
+            "allowed_hosts",
+            "Host header values",
+        );
+        assert_property_description_contains(
+            &main_schema,
+            &["DesignerAgentSchema"],
+            "host-fingerprint",
+            "SHA256 fingerprint",
+        );
+        assert_property_description_contains(
+            &main_schema,
+            &["InfobaseStandaloneSchema"],
+            "host-fingerprint",
+            "SHA256 fingerprint",
         );
         assert_property_description_contains(
             &main_schema,
@@ -1733,13 +1775,13 @@ mod tests {
     #[test]
     fn schemas_and_loader_accept_supported_runtime_sections() {
         let config = format!(
-            "{}execution_timeout: 300000\nbuild:\n  partialLoadThreshold: 20\ntools:\n  client_mcp:\n    port: 9874\n    wait_ready_timeout_ms: 300000\n  edt_cli:\n    startup_timeout_ms: 300000\n    command_timeout_ms: 300000\nmcp:\n  http:\n    bind_address: '127.0.0.1:3000'\n    path: /mcp\n    stateful_sessions: true\n    max_sessions: 64\n    idle_ttl_secs: 900\n  execution:\n    max_concurrent_calls: 1\n    shutdown_grace_period_secs: 30\ntests:\n  execution_timeout_seconds: 300\n  yaxunit:\n    timeouts:\n      startup_ms: 300000\n      run_ms: 300000\n      total_ms: 300000\n  va:\n    fail_fast: false\n    timeouts:\n      startup_ms: 300000\n      run_ms: 300000\n      total_ms: 300000\n",
+            "{}execution_timeout: 300000\nbuild:\n  partialLoadThreshold: 20\ntools:\n  client_mcp:\n    port: 9874\n    wait_ready_timeout_ms: 300000\n  edt_cli:\n    startup_timeout_ms: 300000\n    command_timeout_ms: 300000\nmcp:\n  http:\n    bind_address: '127.0.0.1:3000'\n    path: /mcp\n    stateful_sessions: true\n    max_sessions: 64\n    idle_ttl_secs: 900\n    allowed_hosts:\n      - runner\n  execution:\n    max_concurrent_calls: 1\n    shutdown_grace_period_secs: 30\ntests:\n  execution_timeout_seconds: 300\n  yaxunit:\n    timeouts:\n      startup_ms: 300000\n      run_ms: 300000\n      total_ms: 300000\n  va:\n    fail_fast: false\n    timeouts:\n      startup_ms: 300000\n      run_ms: 300000\n      total_ms: 300000\n",
             minimal_project_config_without_base_path()
         );
         assert_schema_valid(&main_config_schema_json(), &config);
         assert_config_loader_ok(&config);
 
-        let overlay = "workPath: local-work\ninfobase:\n  user: Admin\n  password: secret\ntools:\n  client_mcp:\n    port: 9874\n    wait_ready_timeout_ms: 300000\nmcp:\n  http:\n    max_sessions: 64\n  execution:\n    max_concurrent_calls: 1\ntests:\n  execution_timeout_seconds: 300\n";
+        let overlay = "workPath: local-work\ninfobase:\n  user: Admin\n  password: secret\ntools:\n  client_mcp:\n    port: 9874\n    wait_ready_timeout_ms: 300000\nmcp:\n  http:\n    max_sessions: 64\n    allowed_hosts:\n      - runner.local\n  execution:\n    max_concurrent_calls: 1\ntests:\n  execution_timeout_seconds: 300\n";
         assert_schema_valid(&local_config_schema_json(), overlay);
         assert_overlay_loader_ok(overlay);
     }

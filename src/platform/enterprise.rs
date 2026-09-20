@@ -207,153 +207,6 @@ pub fn build_launch_args(
     args
 }
 
-/// Replacement written in place of every credential value exposed by a launch preview.
-pub const MASKED_LAUNCH_VALUE: &str = "***";
-
-/// Rewrite composed launch arguments so no credential value survives into a preview.
-///
-/// Four independent rules apply, because a secret can reach argv four ways: as the
-/// value of the `/P` key the runner itself appends, as a `Pwd=` segment inside a raw
-/// connection string, as a literal the caller glued to a key the runner does not
-/// recognise, and as userinfo inside the client address after `/WS`. `secrets` carries
-/// values known to be confidential, masked wherever they appear.
-///
-/// Userinfo прячется только у значения `/WS`, а не у каждого аргумента подряд: без схемы
-/// на адрес похож и путь вида `C:\dir@host`, и сплошная маскировка портила бы аргументы,
-/// никаких секретов не содержащие.
-pub fn mask_launch_args(args: &[String], secrets: &[&str]) -> Vec<String> {
-    let mut masked = Vec::with_capacity(args.len());
-    let mut mask_detached_value = false;
-    let mut mask_next_address = false;
-    for arg in args {
-        if mask_detached_value {
-            mask_detached_value = false;
-            masked.push(MASKED_LAUNCH_VALUE.to_owned());
-            continue;
-        }
-        if mask_next_address {
-            mask_next_address = false;
-            masked.push(mask_url_userinfo(arg));
-            continue;
-        }
-        if is_client_address_key(arg) {
-            mask_next_address = true;
-            masked.push(arg.clone());
-            continue;
-        }
-        match password_key_value_start(arg) {
-            Some(start) if start == arg.len() => {
-                mask_detached_value = true;
-                masked.push(arg.clone());
-            }
-            Some(start) => masked.push(format!("{}{MASKED_LAUNCH_VALUE}", &arg[..start])),
-            None => masked.push(mask_literal_secrets(
-                &mask_connection_string_password(arg),
-                secrets,
-            )),
-        }
-    }
-    masked
-}
-
-/// Прячет пароль из userinfo адреса: `http://alice:pass@host/base` → `http://alice:***@host/base`.
-///
-/// Маскируется только то, что после `:`. Голое имя пользователя секретом не является, а
-/// спрятать его целиком значит сделать адрес неузнаваемым — а он нужен человеку, чтобы
-/// понять, куда именно раннер собрался.
-pub fn mask_url_userinfo(value: &str) -> String {
-    // Адрес приходит из `infobase.web.url`, а это поле не валидируется вовсе, поэтому
-    // схемы может не быть. Начало authority ищем во всех трёх видах: со схемой,
-    // схемо-относительный и голый.
-    let authority_start = match value.find("://") {
-        Some(scheme_end) => scheme_end + "://".len(),
-        None if value.starts_with("//") => "//".len(),
-        None => 0,
-    };
-    let authority_end = value[authority_start..]
-        .find(['/', '?', '#'])
-        .map_or(value.len(), |at| authority_start + at);
-    let authority = &value[authority_start..authority_end];
-    let Some(at) = authority.rfind('@') else {
-        return value.to_owned();
-    };
-    let Some(colon) = authority[..at].find(':') else {
-        return value.to_owned();
-    };
-    format!(
-        "{}{}:{MASKED_LAUNCH_VALUE}{}",
-        &value[..authority_start],
-        &authority[..colon],
-        &value[authority_start + at..]
-    )
-}
-
-/// Ключ, за которым идёт клиентский адрес: его значение маскируется как адрес, а не целиком.
-fn is_client_address_key(arg: &str) -> bool {
-    arg.strip_prefix('/')
-        .or_else(|| arg.strip_prefix('-'))
-        .is_some_and(|rest| rest.eq_ignore_ascii_case("ws"))
-}
-
-/// Byte offset at which a `/P` key's value starts, or `arg.len()` when the value is detached.
-fn password_key_value_start(arg: &str) -> Option<usize> {
-    let rest = arg.strip_prefix('/').or_else(|| arg.strip_prefix('-'))?;
-    let split_at = rest.char_indices().nth(1).map_or(rest.len(), |(at, _)| at);
-    let (head, tail) = rest.split_at(split_at);
-    if !head.eq_ignore_ascii_case("p") {
-        return None;
-    }
-    if tail.is_empty() {
-        return Some(arg.len());
-    }
-    // A glued `/Psecret` is indistinguishable from an unrelated key such as `/Proxy`,
-    // so only an explicit separator is read as a value here; the literal rule covers
-    // the glued form for secrets whose value is known.
-    let separator = tail.chars().next()?;
-    if matches!(separator, ' ' | '=' | ':' | '"') {
-        return Some(arg.len() - tail.len() + separator.len_utf8());
-    }
-    None
-}
-
-/// Mask the `Pwd=` segment of a 1C connection string, keeping every other segment readable.
-fn mask_connection_string_password(arg: &str) -> String {
-    let lowered = arg.to_ascii_lowercase();
-    let mut masked = String::with_capacity(arg.len());
-    let mut cursor = 0;
-    while let Some(found) = lowered[cursor..].find("pwd=") {
-        let key_start = cursor + found;
-        let value_start = key_start + "pwd=".len();
-        let preceded_by_boundary = key_start == 0
-            || matches!(
-                lowered[..key_start].chars().next_back(),
-                Some(';' | ' ' | '\'' | '"')
-            );
-        if !preceded_by_boundary {
-            masked.push_str(&arg[cursor..value_start]);
-            cursor = value_start;
-            continue;
-        }
-        let value_end = arg[value_start..]
-            .find(';')
-            .map_or(arg.len(), |at| value_start + at);
-        masked.push_str(&arg[cursor..value_start]);
-        masked.push_str(MASKED_LAUNCH_VALUE);
-        cursor = value_end;
-    }
-    masked.push_str(&arg[cursor..]);
-    masked
-}
-
-/// Mask known confidential literals wherever they appear inside one argument.
-fn mask_literal_secrets(arg: &str, secrets: &[&str]) -> String {
-    let mut masked = arg.to_owned();
-    for secret in secrets.iter().filter(|secret| !secret.is_empty()) {
-        masked = masked.replace(secret, MASKED_LAUNCH_VALUE);
-    }
-    masked
-}
-
 pub fn normalize_launch_payload_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
@@ -405,8 +258,8 @@ fn reserved_launch_key(arg: &str) -> Option<(bool, bool)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_launch_args, mask_launch_args, mask_url_userinfo, normalize_launch_payload_path,
-        EnterpriseDsl, LaunchAddress, LaunchClientMode,
+        build_launch_args, normalize_launch_payload_path, EnterpriseDsl, LaunchAddress,
+        LaunchClientMode,
     };
     use crate::domain::runner::LaunchOptions;
     use crate::platform::connection::V8Connection;
@@ -414,56 +267,6 @@ mod tests {
     use std::path::Path;
     use std::time::Duration;
     use tempfile::tempdir;
-
-    fn masked(args: &[&str], secrets: &[&str]) -> Vec<String> {
-        let owned: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
-        mask_launch_args(&owned, secrets)
-    }
-
-    #[test]
-    fn masks_the_detached_password_value_and_keeps_the_user_readable() {
-        let args = masked(
-            &["ENTERPRISE", "/N", "Администратор", "/P", "s3cret"],
-            &["s3cret"],
-        );
-        assert_eq!(args, vec!["ENTERPRISE", "/N", "Администратор", "/P", "***"]);
-    }
-
-    #[test]
-    fn masks_every_attached_password_separator_form() {
-        for arg in ["/P=s3cret", "/P:s3cret", "-p=s3cret", "/P s3cret"] {
-            let args = masked(&[arg], &[]);
-            assert!(
-                !args[0].contains("s3cret") && args[0].ends_with("***"),
-                "{arg} -> {}",
-                args[0]
-            );
-        }
-    }
-
-    #[test]
-    fn keeps_unrelated_keys_that_merely_start_with_p() {
-        let args = masked(&["/Proxy", "/PublishWSOnDemand"], &[]);
-        assert_eq!(args, vec!["/Proxy", "/PublishWSOnDemand"]);
-    }
-
-    #[test]
-    fn masks_only_the_password_segment_of_a_connection_string() {
-        let args = masked(
-            &[
-                "/IBConnectionString",
-                "Srvr=\"srv:1541\";Ref=\"ut\";Usr=Админ;Pwd=s3cret;",
-            ],
-            &[],
-        );
-        assert_eq!(args[1], "Srvr=\"srv:1541\";Ref=\"ut\";Usr=Админ;Pwd=***;");
-    }
-
-    #[test]
-    fn masks_a_known_secret_glued_to_an_unrecognised_key() {
-        let args = masked(&["/Pses3cret"], &["s3cret"]);
-        assert_eq!(args, vec!["/Pse***"]);
-    }
 
     #[test]
     fn c_payload_uses_forward_slashes() {
@@ -530,68 +333,6 @@ mod tests {
         assert!(!without.contains(&"/N".to_owned()));
         assert!(!without.contains(&"/P".to_owned()));
         assert!(!without.iter().any(|arg| arg.contains("gate-secret")));
-    }
-
-    /// Разбор адреса написан руками, поэтому таблица форм: со схемой и без неё, IPv6,
-    /// `@` в пути и запросе, пустой пароль, голое имя пользователя, повторное применение.
-    #[test]
-    fn mask_url_userinfo_hides_the_password_in_every_shape_of_address() {
-        for (value, expected) in [
-            (
-                "http://alice:s3cret@host/base",
-                "http://alice:***@host/base",
-            ),
-            (
-                "https://alice:s3cret@host:443/b?x=1#f",
-                "https://alice:***@host:443/b?x=1#f",
-            ),
-            // Схемы может не быть вовсе: поле не валидируется.
-            ("//alice:s3cret@host/base", "//alice:***@host/base"),
-            ("alice:s3cret@host/base", "alice:***@host/base"),
-            // Пароль с разделителями внутри: маскируется от первого `:` до последней `@`.
-            ("http://alice:p@ss:word@host/b", "http://alice:***@host/b"),
-            (
-                "http://alice:s3cret@[2001:db8::1]:8080/b",
-                "http://alice:***@[2001:db8::1]:8080/b",
-            ),
-            // Прятать нечего.
-            ("http://alice@host/base", "http://alice@host/base"),
-            ("http://host/base", "http://host/base"),
-            (
-                "http://[2001:db8::1]:8080/base",
-                "http://[2001:db8::1]:8080/base",
-            ),
-            ("http://host/path@with-at", "http://host/path@with-at"),
-            ("http://host/base?q=a@b", "http://host/base?q=a@b"),
-            // Уже замаскированное второй раз не портится.
-            ("http://alice:***@host/base", "http://alice:***@host/base"),
-        ] {
-            assert_eq!(mask_url_userinfo(value), expected, "вход: {value}");
-        }
-    }
-
-    /// Маскируется значение `/WS`, а не всё, что похоже на адрес: путь с `@` и строка
-    /// подключения остаются читаемыми.
-    #[test]
-    fn only_the_client_address_is_masked_as_an_address() {
-        let masked = mask_launch_args(
-            &[
-                "/WS".to_owned(),
-                "http://alice:s3cret@host/base".to_owned(),
-                "/C".to_owned(),
-                "C:\\dir@host".to_owned(),
-                "/IBConnectionString".to_owned(),
-                "Srvr=host;Ref=base".to_owned(),
-            ],
-            &[],
-        );
-
-        assert_eq!(masked[1], "http://alice:***@host/base");
-        assert_eq!(
-            masked[3], "C:\\dir@host",
-            "путь не адрес и портиться не должен"
-        );
-        assert_eq!(masked[5], "Srvr=host;Ref=base");
     }
 
     #[test]

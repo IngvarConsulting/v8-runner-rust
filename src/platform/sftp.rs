@@ -11,6 +11,15 @@ use std::fmt;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use crate::support::path::is_safe_path_segment;
+
+/// Потолок одного пакета протокола. Длину объявляет чужая сторона, и без потолка
+/// `vec![0u8; length]` аллоцировал бы до 4 ГиБ по одному числу из канала. Предел взят
+/// заведомо щедрым: он на три порядка выше `CHUNK` (полезной части чтения и записи) и
+/// поэтому не режет ни полное чтение, ни ответ `FXP_NAME` на большой каталог выгрузки,
+/// где размер выбирает точка входа и он растёт с числом записей.
+const MAX_PACKET: usize = 64 * 1024 * 1024;
+
 const FXP_INIT: u8 = 1;
 const FXP_VERSION: u8 = 2;
 const FXP_OPEN: u8 = 3;
@@ -51,6 +60,9 @@ pub enum SftpError {
     Status { code: u32, message: String },
     /// Канал оборвался или ответ не разобрать.
     Io(String),
+    /// Имя записи каталога непригодно как компонент локального пути: выход за
+    /// каталог, абсолютный путь или байты, не читающиеся как UTF-8.
+    UnsafeName { name: String },
 }
 
 impl fmt::Display for SftpError {
@@ -61,6 +73,10 @@ impl fmt::Display for SftpError {
             }
             Self::Status { code, message } => write!(f, "sftp status {code}: {message}"),
             Self::Io(detail) => write!(f, "sftp channel: {detail}"),
+            Self::UnsafeName { name } => write!(
+                f,
+                "sftp directory entry is not usable as a single path component: '{name}'"
+            ),
         }
     }
 }
@@ -246,8 +262,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SftpClient<S> {
                     let (_longname, next) = read_string(&data, next)?;
                     let (is_dir, next) = read_attrs_is_dir(&data, next)?;
                     offset = next;
-                    let name = String::from_utf8_lossy(&name).into_owned();
-                    if name != "." && name != ".." {
+                    if let Some(name) = entry_name(name)? {
                         entries.push(DirEntry { name, is_dir });
                     }
                 }
@@ -283,6 +298,11 @@ async fn recv<S: AsyncRead + Unpin>(stream: &mut S) -> Result<(u8, Vec<u8>), Sft
     if length == 0 {
         return Err(SftpError::Io("empty packet".to_owned()));
     }
+    if length > MAX_PACKET {
+        return Err(SftpError::Io(format!(
+            "packet of {length} bytes exceeds the {MAX_PACKET}-byte limit"
+        )));
+    }
     let mut body = vec![0u8; length];
     stream
         .read_exact(&mut body)
@@ -291,6 +311,29 @@ async fn recv<S: AsyncRead + Unpin>(stream: &mut S) -> Result<(u8, Vec<u8>), Sft
     let kind = body[0];
     body.remove(0);
     Ok((kind, body))
+}
+
+/// Имя записи каталога, пригодное как компонент локального пути у вызывающего.
+///
+/// Три исхода: `.` и `..` пропускаются, обычное имя возвращается, всё остальное —
+/// отказ. Имя приходит с чужой стороны и у вызывающего становится компонентом пути
+/// (`Path::join`), поэтому выход вверх и абсолютный путь здесь недопустимы: первый
+/// уводит запись из каталога обмена, второй заменяет его целиком. Байты, не читающиеся
+/// как UTF-8, отвергаются до преобразования: `from_utf8_lossy` превратил бы их в
+/// U+FFFD, и такое имя прошло бы проверку уже испорченным.
+fn entry_name(raw: Vec<u8>) -> Result<Option<String>, SftpError> {
+    let Ok(name) = String::from_utf8(raw) else {
+        return Err(SftpError::UnsafeName {
+            name: "<не UTF-8>".to_owned(),
+        });
+    };
+    if name == "." || name == ".." {
+        return Ok(None);
+    }
+    if !is_safe_path_segment(&name) {
+        return Err(SftpError::UnsafeName { name });
+    }
+    Ok(Some(name))
 }
 
 fn string(bytes: &[u8]) -> Vec<u8> {
@@ -384,6 +427,60 @@ mod tests {
         let (is_dir, next) = read_attrs_is_dir(&data, 0).expect("attrs");
         assert!(is_dir);
         assert_eq!(next, data.len());
+    }
+
+    /// Имя записи каталога становится компонентом локального пути, поэтому один
+    /// обычный компонент — единственная допустимая форма. Точки пропускаются, выход
+    /// вверх, абсолютный путь и не-UTF-8 отвергаются.
+    #[test]
+    fn a_directory_entry_name_must_be_one_safe_component() {
+        assert_eq!(
+            entry_name(b"build".to_vec()).expect("plain name"),
+            Some("build".to_owned())
+        );
+        assert_eq!(
+            entry_name("Номенклатура.xml".as_bytes().to_vec()).expect("cyrillic name"),
+            Some("Номенклатура.xml".to_owned())
+        );
+        assert_eq!(entry_name(b".".to_vec()).expect("dot"), None);
+        assert_eq!(entry_name(b"..".to_vec()).expect("dotdot"), None);
+
+        for hostile in [
+            &b"../escape"[..],
+            &b"/etc/cron.d/payload"[..],
+            &b"nested/child"[..],
+            &b"back\\slash"[..],
+        ] {
+            let error = entry_name(hostile.to_vec())
+                .expect_err("a traversal or multi-component name must be refused");
+            assert!(
+                matches!(error, SftpError::UnsafeName { .. }),
+                "unexpected refusal for {:?}: {error}",
+                String::from_utf8_lossy(hostile)
+            );
+        }
+
+        let error = entry_name(vec![0xff, 0xfe, 0x00])
+            .expect_err("bytes that are not UTF-8 must be refused, not lossily converted");
+        assert!(matches!(error, SftpError::UnsafeName { .. }));
+    }
+
+    /// Длину пакета объявляет чужая сторона; без потолка одно число из канала
+    /// заказывало бы аллокацию до 4 ГиБ.
+    #[tokio::test]
+    async fn an_oversized_packet_is_refused_before_it_is_allocated() {
+        let (mut ours, mut theirs) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            let _ = theirs.write_all(&u32::MAX.to_be_bytes()).await;
+        });
+
+        let error = recv(&mut ours).await.expect_err("oversized packet");
+
+        assert!(
+            error.to_string().contains("exceeds"),
+            "unexpected error: {error}"
+        );
+        assert!(error.is_channel_loss());
     }
 
     /// Код состояния вне третьей версии протокола (9 у шлюза `ibsrv`) — отказ с кодом,

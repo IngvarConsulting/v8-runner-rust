@@ -12,11 +12,15 @@
 use std::collections::VecDeque;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::platform::process::{ProcessInterruptionReason, ProcessInterruptionSafety};
+
 use russh::client;
+use russh::keys::ssh_key::{Fingerprint, HashAlg};
 use russh::ChannelMsg;
 use serde::Deserialize;
 use thiserror::Error;
@@ -42,6 +46,9 @@ pub const BASE_DIR_MAP_FILE: &str = "agentbasedir.json";
 const RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 const WAIT_SLICE: Duration = Duration::from_millis(200);
+
+/// Интервал keepalive: даёт каналу трафик, на котором TCP способен заметить мёртвый шлюз.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Тип сообщения агента по документации (Приложение 4, 4.7.8) плюс два, которых в ней
 /// нет (живые ответы 8.3.27 от 15.09.2026): `extension-properties` — ответ агента на
@@ -143,9 +150,12 @@ pub struct AgentMessage {
 }
 
 /// Ответ агента на одну команду: массив сообщений и итог, выведенный из него.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AgentReply {
     pub messages: Vec<AgentMessage>,
+    /// Прерывание, пришедшее в критической фазе и отложенное до её исхода: команда
+    /// доведена, но вызывающий обязан сказать об этом в результате.
+    pub deferred_interruption: Option<ProcessInterruptionReason>,
 }
 
 impl AgentMessage {
@@ -234,6 +244,15 @@ pub enum AgentError {
     #[error("agent at {endpoint} rejected the credentials of user '{user}'")]
     AuthenticationRejected { endpoint: String, user: String },
 
+    #[error(
+        "agent at {endpoint} presented {presented} as its host key, but {expected} was expected"
+    )]
+    HostKeyRejected {
+        endpoint: String,
+        expected: String,
+        presented: String,
+    },
+
     #[error("agent at {endpoint} did not open a shell channel: {source}")]
     Channel {
         endpoint: String,
@@ -287,6 +306,12 @@ pub enum AgentError {
     #[error("sftp exchange with the agent failed at '{path}': {detail}")]
     Exchange { path: String, detail: String },
 
+    /// Точка входа назвала запись каталога именем, непригодным как компонент пути.
+    /// Отдельный вид, а не текст внутри `Exchange`: по нему решают, и решать по прозе
+    /// нельзя (`DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES`).
+    #[error("entry point returned an unusable directory entry name at '{path}': {detail}")]
+    UnsafeEntryName { path: String, detail: String },
+
     #[error("managed agent could not be launched: {0}")]
     Launch(#[source] crate::platform::process::ProcessError),
 
@@ -322,27 +347,141 @@ pub struct AgentSessionRequest {
     pub user: String,
     pub password: String,
     pub transcript_log: Option<PathBuf>,
+
+    /// Чей ключ считать своим на том конце.
+    pub host_key: HostKeyExpectation,
 }
 
-/// Ожидание ответа: срок и отмена, переданные с границы команды.
+/// Ожидание ответа: срок, отмена и класс безопасности, переданные с границы команды.
+///
+/// Срок — абсолютный, а не длительность: одна команда агента читает канал столько раз,
+/// сколько батчей пришлёт агент (`progress`, `progress`, …, `success`), и длительность,
+/// отсчитываемая заново на каждом чтении, ограничивала бы батч, а не команду. Тот же
+/// абсолютный срок переживает и несколько команд одной сессии, поэтому вложенная работа
+/// получает остаток бюджета, а не свежую его копию.
 #[derive(Debug, Clone)]
 pub struct WaitPolicy {
-    pub timeout: Option<Duration>,
+    pub deadline: Option<Instant>,
     pub cancellation: CancellationToken,
+    pub safety: ProcessInterruptionSafety,
+}
+
+impl WaitPolicy {
+    /// Та же политика, урезанная до срока очистки. Очистка входит в срок команды
+    /// (`DEC.2026-04-20.EVERY-COMMAND-HAS-A-DEADLINE`), поэтому берётся меньшее из
+    /// остатка бюджета и запаса на завершение: неограниченного ожидания здесь быть
+    /// не должно, а растянуть срок команды эта политика не может.
+    pub fn cleanup(&self) -> Self {
+        let grace = Instant::now() + SHUTDOWN_GRACE;
+        Self {
+            deadline: Some(self.deadline.map_or(grace, |deadline| deadline.min(grace))),
+            // Очистка не наследует критический класс: иначе она перестала бы слушать
+            // собственный срок и завершение могло бы не закончиться никогда.
+            safety: ProcessInterruptionSafety::Interruptible,
+            ..self.clone()
+        }
+    }
+
+    /// Та же политика со сроком и отменой, но фаза объявлена критической: команда,
+    /// меняющая информационную базу, доводится до исхода, а прерывание записывается
+    /// и отдаётся вызывающему отложенным предупреждением.
+    pub fn critical(&self) -> Self {
+        Self {
+            safety: ProcessInterruptionSafety::CriticalNonAbortable,
+            ..self.clone()
+        }
+    }
 }
 
 impl Default for WaitPolicy {
     fn default() -> Self {
         Self {
-            timeout: None,
+            deadline: None,
             cancellation: CancellationToken::new(),
+            safety: ProcessInterruptionSafety::Interruptible,
         }
     }
 }
 
-/// Обработчик событий SSH-клиента. Ключ хоста принимается: у управляемого агента его
-/// создала платформа на этой же машине, у чужого — назвал пользователь в `attach`.
-struct ClientEvents;
+/// Настройка SSH-клиента.
+///
+/// Keepalive включён, но обрыв по неотвеченным keepalive выключен (`keepalive_max: 0`), и
+/// это не половинчатость, а единственная работающая комбинация.
+///
+/// Обрыв по счётчику уже пробовали и сняли: агент однопоточен и, занятый долгой командой,
+/// не шлёт по каналу ничего — три неотвеченных keepalive рвали сессию на 46-й секунде
+/// выгрузки УТ (замер 15.09.2026, `DEC.2026-09-14.AGENT-ENDPOINT-IS-MANAGED-OR-ATTACHED`).
+/// Клиент `russh` сбрасывает счётчик на любых данных от сервера, так что порог означал бы
+/// «сколько агенту позволено молчать»; измерение даёт этой тишине нижнюю границу и не даёт
+/// верхней, а выбирать порог по догадке — значит снова рвать живую работу.
+///
+/// Сами пакеты при этом нужны: без них по каналу в тишине не идёт ничего, и полуоткрытое
+/// соединение с мёртвым шлюзом не замечает никто — ни TCP, которому нечем ошибиться, ни
+/// раннер, ждущий терминального сообщения в критической фазе. С keepalive запись рано или
+/// поздно упирается в таймаут TCP, канал закрывается, и ожидание получает конец.
+fn ssh_client_config() -> client::Config {
+    client::Config {
+        inactivity_timeout: None,
+        keepalive_interval: Some(KEEPALIVE_INTERVAL),
+        keepalive_max: 0,
+        ..client::Config::default()
+    }
+}
+
+/// Чего раннер ждёт от ключа хоста на том конце.
+#[derive(Debug, Clone, Default)]
+pub enum HostKeyExpectation {
+    /// Ожидания нет: ключ принимается и называется, чтобы владелец мог его закрепить.
+    #[default]
+    Unpinned,
+
+    /// Ключ объявлен: принимается только он.
+    Pinned(Fingerprint),
+}
+
+impl HostKeyExpectation {
+    /// Ожидание из отпечатка, объявленного в конфигурации.
+    pub fn declared(fingerprint: &str) -> Result<Self, String> {
+        Fingerprint::from_str(fingerprint)
+            .map(HostKeyExpectation::Pinned)
+            .map_err(|_| format!("not an SSH key fingerprint: {fingerprint}"))
+    }
+
+    /// Ожидание из того самого файла, который раннер отдал платформе.
+    ///
+    /// Агент публикует ключ из переданного файла как есть: на 8.3.27.1859 замерен
+    /// явный ED25519 (`references/1c/designer-agent/request-surface.md`). Поэтому
+    /// открытая часть этого файла и есть то, что предъявит агент.
+    ///
+    /// Нечитаемый файл ожидания не даёт: ключ мог быть под паролем, которого у раннера
+    /// нет, а платформа его спросит. Отказывать здесь значило бы ломать работающий
+    /// запуск ради проверки, поэтому такой случай проходит как `Unpinned` — вслух.
+    pub fn of_host_key_file(path: &Path) -> Self {
+        match russh::keys::load_secret_key(path, None) {
+            Ok(key) => HostKeyExpectation::Pinned(key.public_key().fingerprint(HashAlg::Sha256)),
+            Err(error) => {
+                warn!(
+                    path = %path.display(),
+                    %error,
+                    "the managed agent host key cannot be read, so its identity is not checked"
+                );
+                HostKeyExpectation::Unpinned
+            }
+        }
+    }
+}
+
+/// Обработчик событий SSH-клиента.
+///
+/// Ключ хоста сверяется здесь и больше нигде: это единственное место, где библиотека
+/// спрашивает раннер, тот ли сервер ответил.
+struct ClientEvents {
+    expectation: HostKeyExpectation,
+
+    /// Куда лечь увиденному ключу. Обработчик уезжает в `connect` по значению, а
+    /// разбираться с отказом приходится снаружи — иначе причина осталась бы внутри.
+    presented: Arc<Mutex<Option<String>>>,
+}
 
 impl client::Handler for ClientEvents {
     type Error = russh::Error;
@@ -351,8 +490,40 @@ impl client::Handler for ClientEvents {
         &mut self,
         server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        debug!(key = ?server_public_key, "agent host key accepted");
-        Ok(true)
+        let key = match server_public_key {
+            russh::keys::PublicKeyOrCertificate::PublicKey { key, .. } => key,
+            // Сертификат не проверяется, а отвергается. Библиотека спрашивает про него
+            // *вместо* ключа, поэтому принять сертификат, внутри которого лежит нужный
+            // ключ, значило бы обойти закрепление: за сертификатом стоят удостоверяющий
+            // центр, срок и principals, которых раннер не смотрит. Агент сертификатов
+            // и не предъявляет.
+            russh::keys::PublicKeyOrCertificate::Certificate(_) => {
+                *self.presented.lock().expect("host key slot") =
+                    Some("a host certificate".to_owned());
+                return Ok(false);
+            }
+        };
+
+        match &self.expectation {
+            HostKeyExpectation::Unpinned => {
+                let presented = key.fingerprint(HashAlg::Sha256);
+                *self.presented.lock().expect("host key slot") = Some(presented.to_string());
+                warn!(
+                    fingerprint = %presented,
+                    "the agent host key is not checked because none was declared; \
+                     declare this fingerprint to pin it"
+                );
+                Ok(true)
+            }
+            HostKeyExpectation::Pinned(expected) => {
+                // Считается тем же алгоритмом, каким записано ожидание: отпечатки разных
+                // алгоритмов не равны никогда, и `SHA512:` сверялся бы с `SHA256:` вечно
+                // не сходясь — то есть объявленный ключ читался бы как подменённый.
+                let presented = key.fingerprint(expected.algorithm());
+                *self.presented.lock().expect("host key slot") = Some(presented.to_string());
+                Ok(*expected == presented)
+            }
+        }
     }
 }
 
@@ -368,6 +539,9 @@ pub struct AgentSession {
     endpoint: AgentEndpoint,
     transcript: Option<std::fs::File>,
     ended: bool,
+    /// Прерывание, защёлкнутое в критической фазе за время сессии; первое побеждает.
+    /// Сессия помнит его, потому что результат платформы собирают после её закрытия.
+    deferred_interruption: Option<ProcessInterruptionReason>,
 }
 
 impl AgentSession {
@@ -385,26 +559,39 @@ impl AgentSession {
         let named = endpoint.to_string();
         debug!(endpoint = %named, user = request.user.as_str(), "opening agent session");
 
+        let expectation = request.host_key.clone();
+        let presented: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let (connection, channel) =
             runtime.block_on(async {
-                // Без keepalive: агент однопоточен и, занятый долгой командой, не отвечает
-                // на глобальные запросы — три неотвеченных keepalive рвали сессию на 46-й
-                // секунде выгрузки УТ (замер 15.09.2026). Зависание ловит срок команды.
-                let config = Arc::new(client::Config {
-                    inactivity_timeout: None,
-                    keepalive_interval: None,
-                    ..client::Config::default()
-                });
+                let config = Arc::new(ssh_client_config());
                 let mut connection = client::connect(
                     config,
                     (endpoint.host.as_str(), endpoint.port),
-                    ClientEvents,
+                    ClientEvents {
+                        expectation: expectation.clone(),
+                        presented: presented.clone(),
+                    },
                 )
                 .await
                 .map_err(|error| match error {
                     russh::Error::IO(source) => AgentError::Unreachable {
                         endpoint: named.clone(),
                         source,
+                    },
+                    // Отказ по ключу — не сбой рукопожатия: сервер ответил исправно,
+                    // просто это не тот сервер. Причина едет отдельно, потому что через
+                    // `Result<bool, _>` обработчика она пройти не может.
+                    russh::Error::UnknownKey => AgentError::HostKeyRejected {
+                        endpoint: named.clone(),
+                        expected: match &expectation {
+                            HostKeyExpectation::Pinned(fingerprint) => fingerprint.to_string(),
+                            HostKeyExpectation::Unpinned => "any public key".to_owned(),
+                        },
+                        presented: presented
+                            .lock()
+                            .expect("host key slot")
+                            .clone()
+                            .unwrap_or_else(|| "nothing".to_owned()),
                     },
                     source => AgentError::Handshake {
                         endpoint: named.clone(),
@@ -465,6 +652,7 @@ impl AgentSession {
             endpoint,
             transcript,
             ended: false,
+            deferred_interruption: None,
         };
         session.run(JSON_MODE_COMMAND, policy)?.outcome()?;
         session.run(CONNECT_COMMAND, policy)?.outcome()?;
@@ -477,8 +665,9 @@ impl AgentSession {
     pub fn run(&mut self, command: &str, policy: &WaitPolicy) -> Result<AgentReply, AgentError> {
         self.send(command)?;
         let mut messages = Vec::new();
+        let mut deferred_interruption = None;
         loop {
-            let raw = self.read_reply(command, policy)?;
+            let raw = self.read_reply(command, policy, &mut deferred_interruption)?;
             let batch: Vec<AgentMessage> =
                 serde_json::from_slice(&raw).map_err(|error| AgentError::InvalidReply {
                     detail: error.to_string(),
@@ -490,7 +679,13 @@ impl AgentSession {
                 break;
             }
         }
-        let reply = AgentReply { messages };
+        if let Some(reason) = deferred_interruption {
+            self.deferred_interruption.get_or_insert(reason);
+        }
+        let reply = AgentReply {
+            messages,
+            deferred_interruption,
+        };
         debug!(command, messages = reply.messages.len(), "agent replied");
         Ok(reply)
     }
@@ -549,6 +744,12 @@ impl AgentSession {
                     debug!(%error, "sftp channel is gone; reopening the subsystem");
                     self.drop_sftp();
                     reopened = true;
+                }
+                Err(error @ SftpError::UnsafeName { .. }) => {
+                    return Err(AgentError::UnsafeEntryName {
+                        path: path.to_owned(),
+                        detail: error.to_string(),
+                    })
                 }
                 Err(error) => {
                     return Err(AgentError::Exchange {
@@ -721,6 +922,10 @@ impl AgentSession {
     pub fn sftp_remove_all(&mut self, remote: &str) -> Result<(), AgentError> {
         let path = Self::sftp_path(remote);
         match self.sftp_list(remote) {
+            // Отказ по имени — не «это файл, а не каталог»: рекурсию останавливают,
+            // иначе непригодное имя тихо превратилось бы в попытку удалить путь как
+            // файл и настоящая причина осталась бы только в debug-журнале.
+            Err(error @ AgentError::UnsafeEntryName { .. }) => Err(error),
             Ok(entries) => {
                 for (name, _) in entries {
                     self.sftp_remove_all(&format!("{remote}/{name}"))?;
@@ -773,14 +978,7 @@ impl AgentSession {
     pub fn shutdown(mut self, policy: &WaitPolicy) -> Option<AgentReply> {
         // Ответ на shutdown может и не прийти — сессию закрывает сам агент; ждать его
         // дольше короткого срока незачем, даже если бюджет команды не ограничен.
-        let capped = WaitPolicy {
-            timeout: Some(
-                policy
-                    .timeout
-                    .map_or(SHUTDOWN_GRACE, |timeout| timeout.min(SHUTDOWN_GRACE)),
-            ),
-            cancellation: policy.cancellation.clone(),
-        };
+        let capped = policy.cleanup();
         // Агент может закрыть соединение, не ответив: EOF здесь — не отказ.
         let reply = self.run(SHUTDOWN_COMMAND, &capped).ok();
         self.disconnect();
@@ -827,10 +1025,29 @@ impl AgentSession {
             })
     }
 
+    /// Прерывание, защёлкнутое в критической фазе за время сессии.
+    pub fn deferred_interruption(&self) -> Option<ProcessInterruptionReason> {
+        self.deferred_interruption
+    }
+
     /// Читает канал до первого полного JSON-массива. Всё до открывающей скобки — не
     /// ответ (баннер или приглашение до JSON-режима) и записывается только в журнал.
-    fn read_reply(&mut self, command: &str, policy: &WaitPolicy) -> Result<Vec<u8>, AgentError> {
+    fn read_reply(
+        &mut self,
+        command: &str,
+        policy: &WaitPolicy,
+        deferred: &mut Option<ProcessInterruptionReason>,
+    ) -> Result<Vec<u8>, AgentError> {
         let started = Instant::now();
+        // Критическая фаза меняет базу, и бросать её на полпути дороже, чем ждать
+        // (`DEC.2026-04-20.A-MUTATING-CRITICAL-PHASE-IS-NOT-HARD-KILLED`): отмена и
+        // истёкший срок записываются, а команда ждёт исхода. Ожидание ограничивает
+        // смерть канала — ровно так же, как на пути Конфигуратора его ограничивает
+        // выход процесса.
+        let critical = matches!(
+            policy.safety,
+            ProcessInterruptionSafety::CriticalNonAbortable
+        );
         loop {
             if let Some(reply) = self.take_complete_array()? {
                 if let Some(log) = self.transcript.as_mut() {
@@ -846,20 +1063,29 @@ impl AgentSession {
                 });
             }
             if policy.cancellation.is_cancelled() {
-                return Err(AgentError::Cancelled {
-                    command: command.to_owned(),
-                });
+                if !critical {
+                    return Err(AgentError::Cancelled {
+                        command: command.to_owned(),
+                    });
+                }
+                deferred.get_or_insert(ProcessInterruptionReason::Cancelled);
             }
-            let wait = match policy.timeout {
-                Some(timeout) => {
-                    let elapsed = started.elapsed();
-                    if elapsed >= timeout {
-                        return Err(AgentError::TimedOut {
-                            command: command.to_owned(),
-                            timeout_ms: timeout.as_millis() as u64,
-                        });
+            let wait = match policy.deadline {
+                Some(deadline) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    match (remaining.is_zero(), critical) {
+                        (true, false) => {
+                            return Err(AgentError::TimedOut {
+                                command: command.to_owned(),
+                                timeout_ms: started.elapsed().as_millis() as u64,
+                            })
+                        }
+                        (true, true) => {
+                            deferred.get_or_insert(ProcessInterruptionReason::TimedOut);
+                            WAIT_SLICE
+                        }
+                        (false, _) => remaining.min(WAIT_SLICE),
                     }
-                    (timeout - elapsed).min(WAIT_SLICE)
                 }
                 None => WAIT_SLICE,
             };
@@ -1127,20 +1353,111 @@ pub fn user_dir(base_dir: &Path, user: &str) -> Result<PathBuf, AgentError> {
 mod tests {
     use super::*;
 
+    /// Критический класс объявляет только фазу: срок и отмена остаются теми же, иначе
+    /// меняющая команда получила бы собственный бюджет вместо остатка общего.
+    #[test]
+    fn a_critical_policy_keeps_the_deadline_and_the_cancellation() {
+        let cancellation = CancellationToken::new();
+        let deadline = Instant::now() + Duration::from_secs(7);
+        let base = WaitPolicy {
+            deadline: Some(deadline),
+            cancellation: cancellation.clone(),
+            safety: ProcessInterruptionSafety::GracefulThenKill,
+        };
+
+        let critical = base.critical();
+
+        assert_eq!(critical.deadline, Some(deadline));
+        assert!(matches!(
+            critical.safety,
+            ProcessInterruptionSafety::CriticalNonAbortable
+        ));
+        assert!(!critical.cancellation.is_cancelled());
+        cancellation.cancel();
+        assert!(
+            critical.cancellation.is_cancelled(),
+            "critical policy must observe the same cancellation token, not a fresh one"
+        );
+    }
+
+    /// Keepalive идёт, а обрыв по его счётчику — нет. Порог означал бы «сколько агенту
+    /// позволено молчать», а занятый агент молчит: три неотвеченных keepalive уже рвали
+    /// сессию на 46-й секунде выгрузки УТ (замер 15.09.2026). Измерение даёт этой тишине
+    /// нижнюю границу и не даёт верхней, поэтому любой порог здесь — догадка, которая
+    /// снова оборвёт живую работу.
+    #[test]
+    fn keepalive_runs_without_a_teardown_threshold() {
+        let config = ssh_client_config();
+
+        assert_eq!(
+            config.keepalive_interval,
+            Some(KEEPALIVE_INTERVAL),
+            "without keepalive traffic a half-open channel to a dead gate is noticed by nobody"
+        );
+        assert_eq!(
+            config.keepalive_max, 0,
+            "a non-zero threshold tears the session down while the agent is merely busy"
+        );
+        assert_eq!(
+            config.inactivity_timeout, None,
+            "the command deadline owns how long an operation may take, not the transport"
+        );
+    }
+
+    /// Очистка входит в срок команды и не заводит собственного: она берёт меньшее из
+    /// остатка бюджета и запаса на завершение.
+    #[test]
+    fn a_cleanup_policy_never_outlives_the_command_budget() {
+        let soon = Instant::now() + Duration::from_millis(50);
+        let capped = WaitPolicy {
+            deadline: Some(soon),
+            cancellation: CancellationToken::new(),
+            safety: ProcessInterruptionSafety::GracefulThenKill,
+        }
+        .cleanup();
+        assert_eq!(
+            capped.deadline,
+            Some(soon),
+            "a remaining budget shorter than the grace must win"
+        );
+
+        let far = Instant::now() + Duration::from_secs(3_600);
+        let bounded = WaitPolicy {
+            deadline: Some(far),
+            cancellation: CancellationToken::new(),
+            safety: ProcessInterruptionSafety::GracefulThenKill,
+        }
+        .cleanup();
+        let bounded = bounded.deadline.expect("cleanup always has a deadline");
+        assert!(bounded < far, "cleanup must not inherit the whole budget");
+
+        let unbounded = WaitPolicy::default().cleanup();
+        assert!(
+            unbounded.deadline.is_some(),
+            "cleanup must be bounded even when the command has no deadline"
+        );
+    }
+
     #[test]
     fn reply_outcome_is_decided_by_type_and_error_type_not_by_prose() {
         let reply: Vec<AgentMessage> = serde_json::from_str(
             r#"[{"type":"log","message":"Ошибка: всё плохо"},{"type":"success","message":""}]"#,
         )
         .expect("parse");
-        let reply = AgentReply { messages: reply };
+        let reply = AgentReply {
+            messages: reply,
+            deferred_interruption: None,
+        };
         assert!(reply.outcome().is_ok());
 
         let reply: Vec<AgentMessage> = serde_json::from_str(
             r#"[{"type":"error","error-type":"InfoBaseNotFound","message":"Успешно"}]"#,
         )
         .expect("parse");
-        let reply = AgentReply { messages: reply };
+        let reply = AgentReply {
+            messages: reply,
+            deferred_interruption: None,
+        };
         match reply.outcome() {
             Err(AgentError::Command { error_type, .. }) => {
                 assert_eq!(error_type, AgentErrorType::InfoBaseNotFound)
@@ -1166,10 +1483,12 @@ mod tests {
             user: std::env::var("V8_GATE_USER").unwrap_or_default(),
             password: std::env::var("V8_GATE_PASSWORD").unwrap_or_default(),
             transcript_log: None,
+            host_key: HostKeyExpectation::Unpinned,
         };
         let wait = WaitPolicy {
-            timeout: Some(Duration::from_secs(60)),
+            deadline: Some(Instant::now() + Duration::from_secs(60)),
             cancellation: CancellationToken::new(),
+            safety: ProcessInterruptionSafety::Interruptible,
         };
         let mut session = AgentSession::open(&request, &wait).expect("open");
         eprintln!(
@@ -1217,6 +1536,7 @@ mod tests {
         .expect("message");
         assert!(!notice.is_terminal());
         let reply = AgentReply {
+            deferred_interruption: None,
             messages: serde_json::from_str(
                 r#"[{"message":"Принятие изменений...","type":"log"},{"body":"9d88","type":"generation-id"},{"message":"Обновление конфигурации базы данных успешно завершено","type":"log"},{"type":"success"}]"#,
             )
@@ -1229,6 +1549,7 @@ mod tests {
     #[test]
     fn an_extension_properties_message_alone_ends_the_reply() {
         let reply = AgentReply {
+            deferred_interruption: None,
             messages: serde_json::from_str(
                 r#"[{"type":"extension-properties","body":{"name":"Зонд"}}]"#,
             )
@@ -1296,6 +1617,7 @@ mod tests {
             user: String::new(),
             password: String::new(),
             transcript_log: None,
+            host_key: HostKeyExpectation::Unpinned,
         };
         assert!(matches!(
             AgentSession::open(&request, &WaitPolicy::default()),
