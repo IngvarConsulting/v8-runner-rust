@@ -287,7 +287,7 @@ window.RUNNER_DATA = (function () {
       target: function (ctx) {
         if (ctx.format === 'EDT') return { chain: [P.edt], config: ['tools.edt_cli.*'], note: 'validate проекта; база не нужна' };
         if (ctx.target === 'cluster') return { chain: [P.designer], config: ['infobase.connection'], note: '/CheckConfig со всеми режимами' };
-        return { chain: [P.designer, P.ibcmd], config: ['infobase.connection'], note: '/CheckConfig со всеми режимами; ibcmd config check' };
+        return { chain: [P.designer], config: ['infobase.connection'], note: '/CheckConfig со всеми режимами; у ibcmd состав проверки не описан' };
       }
     },
     {
