@@ -80,8 +80,8 @@
 <div class="tablewrap"><table>
 <thead><tr><th>Режим (операция)</th><th>Экспериментальный исполнитель</th><th>Включить</th><th>Что даёт</th></tr></thead>
 <tbody>
-<tr><td class="k">build</td><td><span class="pill agent">agent</span></td><td><code>providers.build: agent</code></td><td>загрузка и <code>update-db-cfg</code> одной сессией, поколение записывается</td></tr>
-<tr><td class="k">dump</td><td><span class="pill agent">agent</span></td><td><code>providers.dump: agent</code></td><td>пропуск выгрузки по поколению; режимы <code>incremental</code> и <code>partial</code> — на месте</td></tr>
+<tr><td class="k">push</td><td><span class="pill agent">agent</span></td><td><code>providers.push: agent</code></td><td>загрузка и <code>update-db-cfg</code> одной сессией, поколение записывается</td></tr>
+<tr><td class="k">pull</td><td><span class="pill agent">agent</span></td><td><code>providers.pull: agent</code></td><td>пропуск выгрузки по поколению; слияние идёт на месте</td></tr>
 <tr><td class="k">make</td><td><span class="pill agent">agent</span></td><td><code>providers.make: agent</code></td><td>cf/cfe через <code>dump-cfg</code>, epf/erf через загрузку из файлов</td></tr>
 <tr><td class="k">extensions</td><td><span class="pill agent">agent</span></td><td><code>providers.extensions: agent</code></td><td>состав и свойства расширений группой <code>config extensions</code></td></tr>
 <tr><td class="k">infobase.configuration.export</td><td><span class="pill agent">agent</span></td><td><code>providers.infobase.configuration.export: agent</code></td><td>только рабочая конфигурация</td></tr>

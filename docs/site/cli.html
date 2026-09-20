@@ -142,6 +142,29 @@
 </tbody>
 </table></div>
 
+<h2 id="keys">Ключи конфигурации названы по командам</h2>
+
+<p>Выбор исполнителя объявляется в конфигурации, и ключ называется именем команды, которой он управляет. Иначе у одного действия оказалось бы два имени: одно в терминале, другое в файле — и держать их в голове пришлось бы одновременно.</p>
+
+<div class="tablewrap"><table>
+<thead><tr><th>ключ</th><th>чем управляет</th></tr></thead>
+<tbody>
+<tr><td class="k"><code>providers.push</code></td><td>отправкой исходников в базу</td></tr>
+<tr><td class="k"><code>providers.pull</code></td><td>забором изменений из базы</td></tr>
+<tr><td class="k"><code>providers.load</code></td><td>применением готового артефакта</td></tr>
+<tr><td class="k"><code>providers.make</code></td><td>сборкой артефакта</td></tr>
+<tr><td class="k"><code>providers.syntax</code></td><td>синтаксической проверкой</td></tr>
+<tr><td class="k"><code>providers.publish</code></td><td>публикацией на веб-сервере</td></tr>
+<tr><td class="k"><code>providers.extensions</code></td><td>работой со свойствами расширений</td></tr>
+<tr><td class="k"><code>providers.infobase.create</code></td><td>созданием информационной базы</td></tr>
+<tr><td class="k"><code>providers.infobase.dump</code><br><code>providers.infobase.restore</code><br><code>providers.infobase.configuration.export</code></td><td>действиями с базой целиком</td></tr>
+</tbody>
+</table></div>
+
+<p>Создание базы стоит под <code>infobase</code>, а не отдельным ключом: команда, которая её создаёт, тоже живёт там. Ключ следует за командой, а не за историей.</p>
+
+<p>Так же именованы и настройки команды: порог, по которому отправка выбирает между частичной и полной загрузкой, — это <code>push.partialLoadThreshold</code>.</p>
+
 <h2 id="ext">Расширения — ссылки на той стороне</h2>
 
 <p>У конфигурации и у каждого расширения своя пара «основная ↔ база данных». Это свойство платформы: у сравнения конфигураций есть отдельные типы для конфигурации расширения и для конфигурации базы данных расширения. Значит база держит не одну ссылку, а несколько независимых, и указание ссылки — обычный довод команды.</p>

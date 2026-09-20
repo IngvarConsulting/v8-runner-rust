@@ -144,7 +144,7 @@ window.RUNNER_DATA = (function () {
       applies: function (ctx) { return notExternal(ctx, 'push') || needEdt(ctx); },
       today: function (ctx) {
         var chain = builderChoice(ctx, true, true);
-        var cfg = ['infobase.connection', 'source-set[]', 'build.partialLoadThreshold (необязательно)'];
+        var cfg = ['infobase.connection', 'source-set[]', 'push.partialLoadThreshold (необязательно)'];
         
         return { chain: chain, config: cfg, note: ctx.format === 'EDT' ? 'шаг экспорта EDT → платформа, затем загрузка сгенерированного' : 'partial или full решает обнаружение изменений' };
       },
