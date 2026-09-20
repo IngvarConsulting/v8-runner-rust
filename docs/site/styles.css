@@ -99,6 +99,7 @@ a:focus-visible, button:focus-visible, textarea:focus-visible { outline: 2px sol
 h1 { font-size: clamp(1.8rem, 3.2vw, 2.6rem); line-height: 1.15; margin: 0 0 12px; text-wrap: balance; letter-spacing: -0.01em; }
 h2 { font-size: 1.45rem; margin: 56px 0 12px; letter-spacing: -0.005em; text-wrap: balance; }
 h3 { font-size: 1.1rem; margin: 28px 0 8px; }
+h4 { font-size: 0.98rem; margin: 22px 0 6px; color: var(--ink); }
 p, li { max-width: 78ch; }
 .eyebrow { text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.72rem; color: var(--ink-3); font-weight: 700; }
 .note {
@@ -107,6 +108,13 @@ p, li { max-width: 78ch; }
   padding: 10px 16px; border-radius: 0 8px 8px 0; margin: 16px 0; max-width: 78ch;
 }
 .note.muted { border-left-color: var(--ink-3); background: var(--code-bg); }
+.note.bad {
+  border: 1px solid var(--no);
+  border-left: 3px solid var(--no);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--no) 10%, transparent);
+}
+.note.bad strong { color: var(--no); }
 
 .tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--paper); box-shadow: var(--shadow); margin: 16px 0; }
 table { border-collapse: collapse; width: 100%; font-size: 0.93rem; }

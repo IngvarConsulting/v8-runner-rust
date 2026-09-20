@@ -32,7 +32,7 @@ window.RUNNER_DATA = (function () {
     type: [
       { id: 'CONFIGURATION', label: 'конфигурация', hint: 'основная конфигурация базы' },
       { id: 'EXTENSION',     label: 'расширение', hint: 'в проекте нужна хотя бы одна конфигурация' },
-      { id: 'EXTERNAL',      label: 'внешние', hint: 'обработки и отчёты: в базу не грузятся, собираются в .epf и .erf' }
+      { id: 'EXTERNAL',      label: 'внешние', hint: 'обработки и отчёты: в базу не загружаются, собираются в .epf и .erf' }
     ],
     target: [
       { id: 'file',       label: 'файловая',  hint: 'File=…; раннер может создать её сам. Агента для неё поднимает раннер — нужна платформа' },
@@ -62,7 +62,7 @@ window.RUNNER_DATA = (function () {
   }
   function notExternal(ctx, verb) {
     return ctx.type === 'EXTERNAL'
-      ? { kind: 'subject', why: 'внешние обработки в базу не грузятся', fix: 'для них — make и convert' }
+      ? { kind: 'subject', why: 'внешние обработки в базу не загружаются', fix: 'для них — make и convert' }
       : null;
   }
   // Автономный сервер отвечает только через свой SSH-шлюз, и набор операций у него
@@ -104,17 +104,25 @@ window.RUNNER_DATA = (function () {
 
   var SCENARIOS = [
     {
-      id: 'config-init', verb: 'config init', title: 'Создать конфигурационный файл',
+      id: 'status', verb: 'status', title: 'Понять, что происходит',
+      what: 'Называет, к какой базе привязан каталог, что разошлось и что потеряется при замене.',
+      cmd: function (ctx) { return 'v8-runner status'; },
+      applies: function () { return null; },
+      today: function (ctx) { return { chain: [], config: [], note: 'платформу не запускает и базу не трогает: это первая команда, когда непонятно' }; },
+      target: function (ctx) { return this.today(ctx); }
+    },
+    {
+      id: 'init', verb: 'init', title: 'Завести проект здесь',
       what: 'Пишет v8project.yaml по найденным исходникам.',
-      cmd: function (ctx) { return 'v8-runner config init'; },
+      cmd: function (ctx) { return 'v8-runner init'; },
       applies: function () { return null; },
       today: function (ctx) { return { chain: [], config: [], note: 'платформа не нужна; тип каждого набора определяется по содержимому файлов, не по именам каталогов' }; },
       target: function (ctx) { return this.today(ctx); }
     },
     {
-      id: 'init', verb: 'init', title: 'Подготовить базу',
+      id: 'infobase-create', verb: 'infobase create', title: 'Создать базу',
       what: 'Создаёт базу, если её нет.',
-      cmd: function (ctx) { return 'v8-runner init'; },
+      cmd: function (ctx) { return 'v8-runner infobase create'; },
       applies: function (ctx) { return standaloneRefuses(ctx, 'у автономного сервера базу не создают снаружи: раннер к нему подключается, ничего не запуская') || needEdt(ctx); },
       today: function (ctx) {
         var chain = builderChoice(ctx, ctx.target === 'file', true);
@@ -130,10 +138,10 @@ window.RUNNER_DATA = (function () {
       }
     },
     {
-      id: 'build', verb: 'build', title: 'Загрузить изменения в базу',
-      what: 'Грузит изменённые исходники в базу.',
-      cmd: function (ctx) { return 'v8-runner build'; },
-      applies: function (ctx) { return notExternal(ctx, 'build') || needEdt(ctx); },
+      id: 'push', verb: 'push', title: 'Отправить исходники в базу',
+      what: 'Отправляет изменённые исходники в основную конфигурацию и приводит к ней базу данных.',
+      cmd: function (ctx) { return 'v8-runner push'; },
+      applies: function (ctx) { return notExternal(ctx, 'push') || needEdt(ctx); },
       today: function (ctx) {
         var chain = builderChoice(ctx, true, true);
         var cfg = ['infobase.connection', 'source-set[]', 'build.partialLoadThreshold (необязательно)'];
@@ -154,10 +162,10 @@ window.RUNNER_DATA = (function () {
       target: function (ctx) { return this.today(ctx); }
     },
     {
-      id: 'dump', verb: 'dump', title: 'Выгрузить базу в исходники',
+      id: 'pull', verb: 'pull', title: 'Забрать изменения из базы',
       what: 'Выгружает конфигурацию базы в исходники.',
-      cmd: function (ctx) { return 'v8-runner dump --mode full'; },
-      applies: function (ctx) { return notExternal(ctx, 'dump') || needEdt(ctx); },
+      cmd: function (ctx) { return 'v8-runner pull'; },
+      applies: function (ctx) { return notExternal(ctx, 'pull') || needEdt(ctx); },
       today: function (ctx) {
         var chain = builderChoice(ctx, true, true);
         return { chain: chain, config: ['infobase.connection', 'source-set[]'], note: 'у ibcmd режим partial деградирует в incremental с предупреждением; публикация через staging и backup' };
@@ -168,8 +176,8 @@ window.RUNNER_DATA = (function () {
       }
     },
     {
-      id: 'load', verb: 'load', title: 'Загрузить .cf / .cfe в базу',
-      what: 'Грузит готовый .cf или .cfe в базу.',
+      id: 'load', verb: 'load', title: 'Применить .cf / .cfe к базе',
+      what: 'Применяет готовый .cf или .cfe к базе.',
       cmd: function (ctx) { return (ctx.type === 'EXTENSION' ? 'v8-runner load --path ext.cfe --extension ИмяРасширения' : 'v8-runner load --path main.cf'); },
       applies: function (ctx) { return notExternal(ctx, 'load') || standaloneRefuses(ctx, 'у шлюза нет compare-cfg, поэтому загрузку артефакта он не исполняет'); },
       today: function (ctx) { return { chain: ctx.tools.designer ? [P.designer] : [], config: ['infobase.connection'], note: 'только Конфигуратор; состояния совместимости supported / absent / not_established / not_probed' }; },
@@ -327,8 +335,8 @@ window.RUNNER_DATA = (function () {
   // Порядок первого запуска зависит от предмета: у внешних обработок нет базы,
   // поэтому и шагов с базой в их порядке быть не должно.
   function FIRST_RUN(ctx) {
-    if (ctx.type === 'EXTERNAL') return ['config-init', 'make', 'convert'];
-    return ['config-init', 'init', 'build', 'test', 'dump'];
+    if (ctx.type === 'EXTERNAL') return ['init', 'make', 'convert'];
+    return ['init', 'infobase-create', 'push', 'test', 'pull'];
   }
 
   return { AXES: AXES, SCENARIOS: SCENARIOS, PROVIDERS: P, compute: compute, FIRST_RUN: FIRST_RUN };
