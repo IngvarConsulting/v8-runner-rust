@@ -69,6 +69,113 @@
 
 <p>Отсюда следует то, что знает каждый, кто отправлял в неголый репозиторий: <strong>отправка обновляет ветку, но не обновляет рабочее дерево на той стороне</strong>. Поэтому приведение базы данных к основной конфигурации — отдельный шаг, а не часть отправки. Не по нашему решению: так устроена платформа, и словарь это отражает, а не выдумывает.</p>
 
+<h2 id="mapping">Что чему соответствует</h2>
+
+<p>Каталог проекта держит наборы исходников: конфигурацию и расширения. База держит для каждого из них <strong>свою пару</strong> — то, что правят, и то, с чем работают пользователи. Команды ходят по этим стрелкам и ни по каким другим.</p>
+
+<pre class="mermaid">
+flowchart LR
+  subgraph FS["каталог проекта"]
+    direction TB
+    CFSRC@{ shape: doc, label: "src/cf<br/>конфигурация" }
+    EXTSRC@{ shape: doc, label: "src/ext<br/>расширение" }
+  end
+  subgraph IB["информационная база"]
+    direction TB
+    MAIN["основная<br/>конфигурация"]
+    DB["конфигурация<br/>базы данных"]
+    EMAIN["конфигурация<br/>расширения"]
+    EDB["база данных<br/>расширения"]
+    VEN["конфигурация<br/>поставщика"]
+  end
+  CFSRC -->|"push main"| MAIN
+  MAIN -->|"pull main"| CFSRC
+  MAIN -->|"apply"| DB
+  EXTSRC -->|"push my-ext"| EMAIN
+  EMAIN -->|"pull my-ext"| EXTSRC
+  EMAIN -->|"apply my-ext"| EDB
+  MAIN -.->|"diff --against vendor"| VEN
+  class CFSRC,EXTSRC art
+  class MAIN,EMAIN sw
+  class DB,EDB run
+  class VEN off
+  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
+  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
+  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
+  classDef off fill:#eeeef0,stroke:#a8a8b0,color:#33333a;
+</pre>
+
+<p>Читается это так: <strong>выгрузка и отправка работают с основной конфигурацией, а не с базой данных</strong>. До пользователей изменение доходит только после приведения. Конфигурация поставщика доступна только на чтение — с ней сравнивают, в неё не пишут.</p>
+
+<p>У расширения та же пара и те же команды, отличается только указанная ссылка. Поэтому отдельных «команд для расширений» нет: есть те же команды с именем ссылки.</p>
+
+<h2 id="states-out">Состояния связи с базой</h2>
+
+<p>Исходники и основная конфигурация меняются независимо: файлы правят в редакторе, конфигурацию — в Конфигураторе. Отсюда четыре состояния и ровно два способа вернуться к согласию.</p>
+
+<pre class="mermaid">
+stateDiagram-v2
+  direction LR
+  state "совпадают" as S
+  state "исходники впереди" as L
+  state "база впереди" as B
+  state "разошлись" as D
+  S --> L: правка в файлах
+  L --> S: push
+  S --> B: правка в Конфигураторе
+  B --> S: pull
+  L --> D: правка в Конфигураторе
+  B --> D: правка в файлах
+  D --> L: pull
+  D --> D: push отклоняется
+</pre>
+
+<p>Петля у «разошлись» — это тот самый отказ по несовпадению предка. Раннер не выбирает за вас, чья правка важнее: он возвращает вас к <code>pull</code>, где слияние делает система контроля версий, у которой есть история и разметка конфликтов.</p>
+
+<h2 id="states-in">Состояния внутри базы</h2>
+
+<p>Сохранить изменение в основную конфигурацию и применить его к базе данных — два разных события. Между ними база живёт в состоянии, которого у файлов не бывает.</p>
+
+<pre class="mermaid">
+stateDiagram-v2
+  direction LR
+  state "совпадают" as S2
+  state "есть непринятое" as P
+  state "обновлено динамически" as Y
+  S2 --> P: push --no-apply
+  S2 --> P: правка в Конфигураторе
+  P --> S2: apply
+  P --> Y: apply, когда сеансы не закрыть
+  Y --> S2: перезапуск сеансов
+</pre>
+
+<p>«Есть непринятое» — штатное состояние, а не поломка: именно ради него разведены <code>push --no-apply</code> и <code>apply</code>, чтобы реструктуризацию можно было отложить до окна обслуживания. «Обновлено динамически» означает, что новые сеансы получат новую конфигурацию, а работающие останутся на прежней до перезапуска.</p>
+
+<h2 id="states-ref">Состояния самой ссылки</h2>
+
+<p>Кроме содержимого у ссылки есть собственное состояние — существует ли она с обеих сторон.</p>
+
+<div class="tablewrap"><table>
+<thead><tr><th>состояние</th><th>что это значит</th><th>чем переходят</th></tr></thead>
+<tbody>
+<tr><td class="k">есть с обеих сторон</td><td>обычная работа</td><td><code>push</code>, <code>pull</code></td></tr>
+<tr><td class="k">есть в проекте, нет в базе</td><td>расширение ещё не заведено</td><td><code>push my-ext</code> заводит его сам</td></tr>
+<tr><td class="k">есть в базе, нет в проекте</td><td>поставил кто-то другой или пришло с обновлением</td><td><code>pull my-ext</code> после объявления набора исходников</td></tr>
+<tr><td class="k">выключено</td><td>установлено, но не действует</td><td><code>extensions enable</code> · <code>disable</code></td></tr>
+<tr><td class="k">больше не нужно</td><td>уводит данные, которые добавляло</td><td><code>push --delete my-ext</code></td></tr>
+</tbody>
+</table></div>
+
+<p>Все три состояния — содержимого снаружи, содержимого внутри и самой ссылки — называет одна команда:</p>
+
+<pre class="sh"><code>$ v8-runner status
+infobase: File="/srv/ib/demo"
+
+  main      → ЖивоеИмяКонфигурации   3 файла изменено · есть непринятое
+  my-ext    → РасширениеВБазе        совпадает
+  patch-01  → Patch_01               база ушла вперёд — сперва pull
+  —         → Patch_007              есть в базе, нет в проекте</code></pre>
+
 <h2 id="map">Команды</h2>
 
 <h3>Состояние — не меняют ничего</h3>
@@ -250,6 +357,26 @@ infobase: File="/srv/ib/demo"
 <p>Это единственное место, где словарь сознательно расходится с поведением тёзки. Расхождение здесь в сторону осторожности: знакомое имя ускоряет руку, и цена ошибки должна быть возвращена предупреждением.</p>
 </main>
 
-<script src="site.js?v=6"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.12.0/mermaid.min.js"></script>
+<script>
+  var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  // Палитра ArchiMate нарисована для светлой темы; в тёмной те же роли берут тёмные тона.
+  var palette = {
+    '#cfe4fa': '#1d3550', '#3f7ba6': '#6ea6d2', '#0d2233': '#d9e8f7',
+    '#cde8b9': '#2a4423', '#4f7a3c': '#7fae68', '#12210c': '#dfeed5',
+    '#f6e8c8': '#44371f', '#a4813a': '#b79141', '#241c0c': '#f2e4c4',
+    '#eeeef0': '#26262b', '#a8a8b0': '#5a5a63', '#33333a': '#c7ccd5'
+  };
+  if (dark) {
+    document.querySelectorAll('pre.mermaid').forEach(function (block) {
+      // именно innerHTML: в textContent теряются <br/> внутри подписей
+      block.innerHTML = block.innerHTML.replace(/#[0-9a-f]{6}/g, function (colour) {
+        return palette[colour] || colour;
+      });
+    });
+  }
+  mermaid.initialize({ startOnLoad: true, theme: dark ? 'dark' : 'neutral', securityLevel: 'loose', fontFamily: 'Golos Text, system-ui, sans-serif' });
+</script>
+<script src="site.js?v=6" defer></script>
 </body>
 </html>
