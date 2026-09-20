@@ -34,11 +34,10 @@ mod coordinator;
 mod helpers;
 
 use self::helpers::{
-    build_enterprise_dsl, build_platform_launch, build_summary, capped_timeout_ms,
-    collect_diagnostics, degraded_step, enterprise_error_kind, failed_step,
-    interrupted_test_failure, make_test_result, prepare_runner_artifacts, prepared_run_summary,
-    skipped_step, succeeded_step, validate_runner_profile_id, validate_target,
-    with_retained_artifacts,
+    build_enterprise_dsl, build_platform_launch, build_summary, collect_diagnostics, degraded_step,
+    enterprise_error_kind, failed_step, interrupted_test_failure, make_test_result,
+    prepare_runner_artifacts, prepared_run_summary, skipped_step, succeeded_step,
+    validate_runner_profile_id, validate_target, with_retained_artifacts,
 };
 
 pub fn execute(
@@ -548,7 +547,6 @@ mod tests {
         AppConfig {
             base_path: base.clone(),
             work_path: work_path.to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),

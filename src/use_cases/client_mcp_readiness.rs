@@ -7,7 +7,7 @@ use rmcp::model::ProtocolVersion;
 use serde_json::{json, Value};
 
 use crate::domain::launch::McpReadinessResult;
-use crate::use_cases::context::{ExecutionContext, ExecutionInterruption};
+use crate::use_cases::context::ExecutionContext;
 
 const MCP_READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MCP_READY_REQUEST_TIMEOUT: Duration = Duration::from_millis(300);
@@ -39,12 +39,7 @@ pub(in crate::use_cases) fn wait_for_readiness(
     required_tools: &[&str],
     readiness_timeout: Duration,
 ) -> Result<McpReadinessResult, McpReadinessResult> {
-    let readiness_timeout = readiness_timeout.max(Duration::from_millis(1));
-    let timeout = context
-        .remaining_budget()
-        .filter(|budget| !budget.is_zero())
-        .map(|budget| budget.min(readiness_timeout))
-        .unwrap_or(readiness_timeout);
+    let timeout = readiness_timeout.max(Duration::from_millis(1));
     let deadline = Instant::now() + timeout;
     let client = Client::builder()
         .build()
@@ -62,7 +57,7 @@ pub(in crate::use_cases) fn wait_for_readiness(
         if let Some(interruption) = context.interruption() {
             let message = format!(
                 "{} while waiting for MCP readiness",
-                interruption_message(context, interruption)
+                interruption.message(context.command())
             );
             if let Some(session) = session.take() {
                 delete_mcp_session(
@@ -164,13 +159,6 @@ pub(in crate::use_cases) fn wait_for_readiness(
 
         sleep_until_next_mcp_probe(deadline);
     }
-}
-
-fn interruption_message(
-    context: &ExecutionContext,
-    interruption: ExecutionInterruption,
-) -> &'static str {
-    interruption.message(context.command())
 }
 
 fn sleep_until_next_mcp_probe(deadline: Instant) {
@@ -500,22 +488,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn command_deadline_interrupts_readiness_wait() {
-        let context = ExecutionContext::cli(CommandName::Launch)
-            .with_deadline(Some(Instant::now() - Duration::from_millis(1)));
+    fn the_operators_interrupt_ends_the_readiness_wait() {
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
+        let context = ExecutionContext::cli(CommandName::Launch).with_cancellation(cancellation);
 
         let readiness =
             wait_for_readiness(&context, &endpoint_url(1), &[], Duration::from_millis(500))
-                .expect_err("expected command timeout to interrupt readiness wait");
+                .expect_err("expected the interrupt to end the readiness wait");
 
         assert_eq!(
             readiness.message.as_deref(),
-            Some("execution timeout expired before reaching a safe completion point while waiting for MCP readiness")
+            Some("execution cancelled before reaching a safe completion point while waiting for MCP readiness")
         );
     }
 
     #[test]
-    fn readiness_deadline_caps_stalled_http_probe() {
+    fn the_readiness_timeout_caps_a_stalled_http_probe() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind fake MCP server");
         let port = listener.local_addr().expect("local addr").port();
         let release_connection = Arc::new(AtomicBool::new(false));
@@ -527,8 +516,7 @@ mod tests {
             }
         });
 
-        let context = ExecutionContext::cli(CommandName::Launch)
-            .with_deadline(Some(Instant::now() + Duration::from_secs(5)));
+        let context = ExecutionContext::cli(CommandName::Launch);
         let started = Instant::now();
 
         let readiness = wait_for_readiness(
@@ -537,7 +525,7 @@ mod tests {
             &[],
             Duration::from_millis(50),
         )
-        .expect_err("expected stalled request to respect readiness deadline");
+        .expect_err("expected the stalled request to respect the readiness timeout");
 
         release_connection.store(true, Ordering::SeqCst);
         server.join().expect("fake MCP server exits");
@@ -554,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn deletes_session_when_readiness_deadline_expires_after_session_started() {
+    fn deletes_session_when_the_readiness_timeout_expires_after_session_started() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind fake MCP server");
         let port = listener.local_addr().expect("local addr").port();
         let deleted = Arc::new(AtomicBool::new(false));
@@ -623,8 +611,7 @@ mod tests {
             }
         });
 
-        let context = ExecutionContext::cli(CommandName::Launch)
-            .with_deadline(Some(Instant::now() + Duration::from_secs(5)));
+        let context = ExecutionContext::cli(CommandName::Launch);
 
         let readiness = wait_for_readiness(
             &context,
@@ -702,8 +689,7 @@ mod tests {
             }
         });
 
-        let context = ExecutionContext::cli(CommandName::Launch)
-            .with_deadline(Some(Instant::now() + Duration::from_millis(350)));
+        let context = ExecutionContext::cli(CommandName::Launch);
 
         let readiness = wait_for_readiness(
             &context,
@@ -791,8 +777,7 @@ mod tests {
             assert!(saw_tools, "expected tools/list");
         });
 
-        let context = ExecutionContext::cli(CommandName::Launch)
-            .with_deadline(Some(Instant::now() + Duration::from_millis(500)));
+        let context = ExecutionContext::cli(CommandName::Launch);
 
         let readiness = wait_for_readiness(
             &context,
@@ -806,6 +791,11 @@ mod tests {
     }
 
     fn read_http_request(stream: &mut TcpStream) -> String {
+        // Сокет принят у неблокирующего слушателя и наследует этот режим, а в нём таймаут
+        // чтения не работает: чтение возвращает WouldBlock, не дождавшись запроса.
+        stream
+            .set_nonblocking(false)
+            .expect("read the request in blocking mode");
         stream
             .set_read_timeout(Some(Duration::from_secs(1)))
             .expect("set read timeout");

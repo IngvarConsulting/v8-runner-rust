@@ -16,7 +16,7 @@ use crate::platform::secrets::{mask_preview_args, mask_url_userinfo};
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::client_mcp_readiness;
-use crate::use_cases::context::{ExecutionContext, ExecutionInterruption, InterruptionSafetyClass};
+use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::launch_keys::vanessa_enterprise_launch_keys;
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::{
@@ -79,11 +79,9 @@ pub fn execute(
     }
 
     if let Some(interruption) = context.interruption() {
-        return Err(UseCaseFailure::without_payload(AppError::Runtime(format!(
-            "{} for command '{}'",
-            interruption_message(interruption),
-            context.command().as_str()
-        ))));
+        return Err(UseCaseFailure::without_payload(AppError::Runtime(
+            crate::use_cases::interruption::command_interruption_message(context, interruption),
+        )));
     }
 
     // Путь и адрес разрешаются до поиска утилиты: искать платформу, когда адреса нет,
@@ -487,17 +485,6 @@ fn is_client_mcp_va_launch(args: &LaunchArgs) -> bool {
     })
 }
 
-fn interruption_message(interruption: ExecutionInterruption) -> &'static str {
-    match interruption {
-        ExecutionInterruption::Cancelled => {
-            "execution cancelled before reaching a safe completion point"
-        }
-        ExecutionInterruption::TimedOut => {
-            "execution timeout expired before reaching a safe completion point"
-        }
-    }
-}
-
 fn mode_label(target: LaunchTargetRequest) -> &'static str {
     match target {
         LaunchTargetRequest::Designer => "конфигуратор",
@@ -538,11 +525,9 @@ fn execute_web(
         )));
     }
     if let Some(interruption) = context.interruption() {
-        return Err(UseCaseFailure::without_payload(AppError::Runtime(format!(
-            "{} for command '{}'",
-            interruption_message(interruption),
-            context.command().as_str()
-        ))));
+        return Err(UseCaseFailure::without_payload(AppError::Runtime(
+            crate::use_cases::interruption::command_interruption_message(context, interruption),
+        )));
     }
 
     let (program, leading) = crate::platform::browser::opener();
@@ -791,7 +776,6 @@ mod tests {
         AppConfig {
             base_path: base_path.to_path_buf(),
             work_path: work_path.to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),

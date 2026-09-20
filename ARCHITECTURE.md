@@ -59,10 +59,10 @@ Workspace ownership is governed by [решение 0011 в реестре](spec/
 ## Command Execution Policy
 
 CLI and MCP commands must share the same timeout/cancellation semantics.
-The target contract is that every public command has a deadline, cancellation is routed through a transport-neutral execution context, and a cancelled/timed-out operation is reported only after the underlying operation reaches a terminal state.
+The target contract is that no public command has a deadline: it runs until it reaches a terminal outcome. Cancellation is routed through a transport-neutral execution context, and a cancelled operation is reported only after the underlying operation reaches a terminal state. A bound belongs to a step and only when that step declares one.
 Mutating DB operations must mark critical phases where hard kill is not allowed by default.
 Cancellation representation фиксируется на command boundary: фактическая terminal cancellation использует `ExecutionStatus::Cancelled`, а cancellation/shutdown/timeout внутри successful critical phase возвращается как `Succeeded` с warning, без per-step cancellation state machine.
-This policy is governed by [решение 0014 в реестре](spec/arch/index.md).
+This policy is governed by `DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE` в [реестре](spec/arch/index.md).
 
 Runner-like and pipeline-like commands should be assembled in the use-case layer as transport-neutral pipelines of validation, target resolution, workspace preparation, platform execution, output parsing, publication, cleanup, and diagnostics blocks.
 Those blocks exchange typed context/input/output, leave step entries for skipped/degraded/failure behavior, and report domain execution through `ExecutionOutcome<T>`.
@@ -78,9 +78,9 @@ The supported `source-set[].type` contract and validation boundary are governed 
 The typed config model now splits MCP knobs into active HTTP/session settings and shared execution guardrails:
 
 - `mcp.http` defines the live HTTP listener and session behavior (`bind_address`, `path`, `stateful_sessions`, `max_sessions`, `idle_ttl_secs`, `allowed_hosts`).
-- `mcp.execution` defines shared admission/shutdown limits (`max_concurrent_calls`, `shutdown_grace_period_secs`) reused by both stdio and HTTP.
+- `mcp.execution` defines shared admission/shutdown limits (`max_concurrent_calls`, `shutdown_grace_period_secs`, `admission_timeout_ms`) reused by both stdio and HTTP. `admission_timeout_ms` bounds the wait for a free slot only; an admitted call runs to its terminal outcome.
 - `tools.edt_cli` now also carries `startup_timeout_ms` and `command_timeout_ms`; the shared MCP EDT actor reuses these knobs for startup and bounded syntax execution.
-- `tools.client_mcp.wait_ready_timeout_ms` is the per-readiness wait budget for client MCP launch probing; when unset it falls back to the global `execution_timeout`, and the effective wait remains capped by the command deadline.
+- `tools.client_mcp.wait_ready_timeout_ms` is the per-readiness wait budget for client MCP launch probing; when unset it waits five minutes. Nothing caps it from above: a command carries no deadline.
 
 This keeps the config surface stable while allowing both MCP transports to share the same execution/session infrastructure.
 Новые public config fields, `source-set` types и `infobase` subtrees должны обновлять typed model, validation, `config init`, примеры и архитектурную документацию синхронно по checklist из `spec/architecture/change-checklist.md`.
@@ -99,7 +99,7 @@ The MCP adapter no longer needs to talk to `cli::execute` or to reuse domain ser
 - Изменение MCP tool surface должно оставаться явным архитектурным событием: список опубликованных tools синхронизируется между `src/mcp/server.rs`, `CTR.MCP.PUBLISHED-TOOL-SURFACE`, правилами реестра и checklist-документом.
 - MCP execution admission and HTTP session capacity are separate guardrails governed by [решение 0013 в реестре](spec/arch/index.md).
 - MCP runtime telemetry is intentionally implemented as structured `tracing` events rather than a separate metrics backend: semaphore acquisition emits `mcp_execution_semaphore_wait`, while the shared EDT actor emits `mcp_edt_queue_depth`, `mcp_edt_startup_failure`, `mcp_edt_session_restart`, and `mcp_edt_shutdown_drain`.
-- The stdio adapter still reserves `stdout` for MCP frames and enforces an absolute deadline for bounded EDT syntax calls: queue wait plus actor-side baseline/reset plus the interactive `validate` command all consume the same `tools.edt_cli.command_timeout_ms` budget.
+- The stdio adapter still reserves `stdout` for MCP frames. A bounded EDT syntax call carries `tools.edt_cli.command_timeout_ms` as its own step cap, covering actor-side baseline/reset and the interactive `validate` command; the wait for an execution slot is bounded separately by `mcp.execution.admission_timeout_ms` and does not shorten it.
 - The HTTP adapter is built on `axum` + `rmcp::transport::StreamableHttpService`. A thin wrapper around the rmcp service enforces transport-level overload semantics for new `initialize` requests (`503` when `max_sessions` is exhausted), translates stateful non-`initialize` POSTs without `Mcp-Session-Id` into deterministic `400`, and eagerly releases tracked capacity after `DELETE`.
 - HTTP session capacity is tracked via atomic reservation (`reserve -> delegate initialize -> confirm/release`) plus lazy pruning of expired rmcp sessions, so `max_sessions` remains correct across explicit close, TTL expiry, and failed initializes.
 - Queued MCP cancellation/timeout still return early as transport-level admission errors. Detached one-shot work retains the server-side permit until completion, while live `check_syntax_edt` retains both the server-side permit and the shared actor's internal admission slot until the in-flight interactive command reaches terminal state and the server can return a structured tool result.

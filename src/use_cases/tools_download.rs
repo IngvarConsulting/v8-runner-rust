@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, Cursor};
 use std::path::{Component, Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use tracing::debug;
@@ -222,15 +222,22 @@ fn download_client_mcp(
     }
 }
 
+/// A transfer carries no overall budget: what bounds it is silence on the socket.
+///
+/// Bytes on a network stream are a real liveness signal, unlike a 1C platform process that
+/// legitimately says nothing for minutes, so the download client ends a stalled transfer on
+/// its own read-idle timeout. A wall-clock budget here would only cut healthy transfers of
+/// large archives short. See DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE.
+const TRANSFER_IS_BOUNDED_BY_SILENCE: Option<Duration> = None;
+
 fn fetch_latest_release(context: &ExecutionContext, repo: &str) -> Result<GitHubRelease, AppError> {
     let base = release_base_url();
     let url = format!("{base}/repos/{repo}/releases/latest");
     debug!(repo, url = %url, "fetching latest tool release");
     let cancellation = context.cancellation();
-    let text =
-        download::get_text(&url, context.remaining_budget(), &cancellation).map_err(|error| {
-            AppError::Runtime(format!("failed to fetch latest release {repo}: {error}"))
-        })?;
+    let text = download::get_text(&url, TRANSFER_IS_BOUNDED_BY_SILENCE, &cancellation).map_err(
+        |error| AppError::Runtime(format!("failed to fetch latest release {repo}: {error}")),
+    )?;
     serde_json::from_str::<GitHubRelease>(&text).map_err(|error| {
         AppError::Runtime(format!("failed to parse latest release {repo}: {error}"))
     })
@@ -261,7 +268,7 @@ fn download_asset_file(
     let cancellation = context.cancellation();
     let bytes = download::get_bytes(
         &asset.browser_download_url,
-        context.remaining_budget(),
+        TRANSFER_IS_BOUNDED_BY_SILENCE,
         &cancellation,
     )
     .map_err(|error| {
@@ -301,7 +308,7 @@ fn download_single_file_from_zip(
     let cancellation = context.cancellation();
     let bytes = download::get_bytes(
         &asset.browser_download_url,
-        context.remaining_budget(),
+        TRANSFER_IS_BOUNDED_BY_SILENCE,
         &cancellation,
     )
     .map_err(|error| {
@@ -342,7 +349,7 @@ fn download_source_subdir(
         "downloading tool source archive"
     );
     let cancellation = context.cancellation();
-    let bytes = download::get_bytes(&archive_url, context.remaining_budget(), &cancellation)
+    let bytes = download::get_bytes(&archive_url, TRANSFER_IS_BOUNDED_BY_SILENCE, &cancellation)
         .map_err(|error| {
             AppError::Runtime(format!(
                 "failed to download source archive '{}': {error}",

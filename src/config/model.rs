@@ -19,10 +19,6 @@ pub struct AppConfig {
     /// Working directory for temp files and hash storages
     pub work_path: PathBuf,
 
-    /// Global execution budget for public CLI and MCP commands in milliseconds.
-    #[serde(rename = "execution_timeout", default = "default_execution_timeout_ms")]
-    pub execution_timeout: u64,
-
     /// Source format: DESIGNER or EDT
     #[serde(default = "default_format")]
     pub format: SourceFormat,
@@ -374,20 +370,20 @@ impl AppConfig {
         })
     }
 
-    /// Returns the global execution timeout as a duration.
-    pub fn execution_timeout_duration(&self) -> Duration {
-        Duration::from_millis(self.execution_timeout.max(1))
-    }
-
     /// Returns the client MCP wait-ready timeout as a duration.
     pub fn client_mcp_wait_ready_timeout_duration(&self) -> Duration {
         Duration::from_millis(
             self.tools
                 .client_mcp
                 .wait_ready_timeout_ms
-                .unwrap_or(self.execution_timeout)
+                .unwrap_or_else(default_client_mcp_wait_ready_timeout_ms)
                 .max(1),
         )
+    }
+
+    /// Returns how long an MCP call may wait for a free execution slot.
+    pub fn mcp_admission_timeout_duration(&self) -> Duration {
+        Duration::from_millis(self.mcp.execution.admission_timeout_ms.max(1))
     }
 }
 
@@ -395,7 +391,11 @@ fn default_format() -> SourceFormat {
     SourceFormat::Designer
 }
 
-fn default_execution_timeout_ms() -> u64 {
+fn default_client_mcp_wait_ready_timeout_ms() -> u64 {
+    300_000
+}
+
+fn default_mcp_execution_admission_timeout_ms() -> u64 {
     300_000
 }
 
@@ -492,7 +492,7 @@ pub struct ClientMcpToolConfig {
     /// Default port passed to onec-client-mcp-devkit via `/C ...;mcpPort=<PORT>`.
     pub port: Option<u16>,
 
-    /// Optional wait-ready timeout in milliseconds. Defaults to `execution_timeout` when unset.
+    /// Optional wait-ready timeout in milliseconds. Defaults to five minutes when unset.
     pub wait_ready_timeout_ms: Option<u64>,
 
     /// Optional tool extension prepared by `build` for client MCP launches.
@@ -676,6 +676,13 @@ pub struct McpExecutionConfig {
 
     /// Grace period for shutdown drain in seconds.
     pub shutdown_grace_period_secs: u64,
+
+    /// How long an MCP call may wait for a free execution slot, in milliseconds.
+    ///
+    /// Bounds admission only. Work that has been admitted runs to its terminal outcome:
+    /// see DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE.
+    #[serde(default = "default_mcp_execution_admission_timeout_ms")]
+    pub admission_timeout_ms: u64,
 }
 
 impl Default for McpExecutionConfig {
@@ -683,6 +690,7 @@ impl Default for McpExecutionConfig {
         Self {
             max_concurrent_calls: default_mcp_execution_max_concurrent_calls(),
             shutdown_grace_period_secs: default_mcp_execution_shutdown_grace_period_secs(),
+            admission_timeout_ms: default_mcp_execution_admission_timeout_ms(),
         }
     }
 }

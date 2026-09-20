@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
@@ -61,19 +61,19 @@ pub enum ExecutionTransport {
 }
 
 /// Command-boundary interruption signal observed at safe points.
+///
+/// A command carries no deadline (DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE), so the only
+/// thing that interrupts one at a safe point is the operator. A step that overruns its own
+/// cap is a different signal and arrives as `ProcessInterruptionReason::TimedOut`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionInterruption {
     Cancelled,
-    TimedOut,
 }
 
 impl ExecutionInterruption {
     pub const fn message(self, command: CommandName) -> &'static str {
         match (self, command) {
             (Self::Cancelled, _) => "execution cancelled before reaching a safe completion point",
-            (Self::TimedOut, _) => {
-                "execution timeout expired before reaching a safe completion point"
-            }
         }
     }
 }
@@ -114,7 +114,6 @@ pub struct ExecutionContext {
     command: CommandName,
     transport: ExecutionTransport,
     edt_timeout: Option<Duration>,
-    deadline: Option<Instant>,
     cancellation: CancellationToken,
 }
 
@@ -125,7 +124,6 @@ impl ExecutionContext {
             command,
             transport,
             edt_timeout: None,
-            deadline: None,
             cancellation: CancellationToken::new(),
         }
     }
@@ -163,12 +161,6 @@ impl ExecutionContext {
         self
     }
 
-    /// Attaches an absolute execution deadline to the context.
-    pub fn with_deadline(mut self, deadline: Option<Instant>) -> Self {
-        self.deadline = deadline;
-        self
-    }
-
     /// Attaches a cancellation token shared with the caller transport.
     pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
         self.cancellation = cancellation;
@@ -180,45 +172,31 @@ impl ExecutionContext {
         self.edt_timeout
     }
 
-    /// Returns the remaining command budget from the current moment.
-    pub fn remaining_budget(&self) -> Option<Duration> {
-        self.deadline
-            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
-    }
-
     /// Returns the shared cancellation token for this execution.
     pub fn cancellation(&self) -> CancellationToken {
         self.cancellation.clone()
     }
 
-    /// Builds a process policy capped by the remaining command budget.
+    /// Builds a process policy bounded by the step's own cap, if the step declares one.
+    ///
+    /// There is no command budget to cap it against: see
+    /// DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE. A step that passes `None` runs until it
+    /// reaches a terminal outcome.
     pub fn process_policy(
         &self,
         safety: InterruptionSafetyClass,
         timeout_cap: Option<Duration>,
     ) -> ProcessExecutionPolicy {
-        let timeout = match (timeout_cap, self.remaining_budget()) {
-            (Some(cap), Some(remaining)) => Some(cap.min(remaining)),
-            (Some(cap), None) => Some(cap),
-            (None, Some(remaining)) => Some(remaining),
-            (None, None) => None,
-        };
-
-        ProcessExecutionPolicy::new(timeout, self.cancellation(), safety.process_safety())
+        ProcessExecutionPolicy::new(timeout_cap, self.cancellation(), safety.process_safety())
     }
 
     /// Returns the pending command-boundary interruption, if any.
+    ///
+    /// The operator's interrupt is the only thing that ends a command early.
     pub fn interruption(&self) -> Option<ExecutionInterruption> {
-        if self
-            .deadline
-            .is_some_and(|deadline| deadline <= Instant::now())
-        {
-            Some(ExecutionInterruption::TimedOut)
-        } else if self.cancellation.is_cancelled() {
-            Some(ExecutionInterruption::Cancelled)
-        } else {
-            None
-        }
+        self.cancellation
+            .is_cancelled()
+            .then_some(ExecutionInterruption::Cancelled)
     }
 
     /// Runs a non-process critical phase and reports whether interruption was deferred until
@@ -237,7 +215,7 @@ impl ExecutionContext {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use tokio_util::sync::CancellationToken;
 
@@ -267,32 +245,43 @@ mod tests {
         assert_eq!(stdio.interruption(), Some(ExecutionInterruption::Cancelled));
     }
 
+    /// DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE, and the guard against bringing one back.
+    ///
+    /// `ExecutionContext` has no deadline to set, so a step's policy can only ever carry the
+    /// cap that step itself declared. A step that declares none runs until it reaches a
+    /// terminal outcome. Should anyone reintroduce a command budget, they have to add a way
+    /// to put it here first, and this assertion is what it collides with.
     #[test]
-    fn deadline_wins_over_cancellation_when_both_are_present() {
-        let cancellation = CancellationToken::new();
-        cancellation.cancel();
-        let context = ExecutionContext::cli(CommandName::Test)
-            .with_cancellation(cancellation)
-            .with_deadline(Some(Instant::now() - Duration::from_millis(1)));
+    fn a_step_policy_carries_the_steps_own_cap_and_nothing_above_it() {
+        let context = ExecutionContext::cli(CommandName::Build);
 
+        let declared = context.process_policy(
+            InterruptionSafetyClass::GracefulThenKill,
+            Some(Duration::from_millis(100)),
+        );
+        assert_eq!(declared.timeout, Some(Duration::from_millis(100)));
+        assert_eq!(declared.safety, ProcessInterruptionSafety::GracefulThenKill);
+
+        let undeclared =
+            context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None);
         assert_eq!(
-            context.interruption(),
-            Some(ExecutionInterruption::TimedOut)
+            undeclared.timeout, None,
+            "a step that declares no cap must not inherit one from the command"
         );
     }
 
     #[test]
-    fn process_policy_caps_timeout_by_remaining_budget() {
-        let context = ExecutionContext::cli(CommandName::Build)
-            .with_deadline(Some(Instant::now() + Duration::from_millis(25)));
+    fn the_operators_interrupt_is_the_only_command_boundary_interruption() {
+        let cancellation = CancellationToken::new();
+        let context =
+            ExecutionContext::cli(CommandName::Test).with_cancellation(cancellation.clone());
 
-        let policy = context.process_policy(
-            InterruptionSafetyClass::GracefulThenKill,
-            Some(Duration::from_millis(100)),
+        assert_eq!(context.interruption(), None);
+        cancellation.cancel();
+        assert_eq!(
+            context.interruption(),
+            Some(ExecutionInterruption::Cancelled)
         );
-
-        assert!(policy.timeout.expect("timeout") <= Duration::from_millis(25));
-        assert_eq!(policy.safety, ProcessInterruptionSafety::GracefulThenKill);
     }
 
     #[test]

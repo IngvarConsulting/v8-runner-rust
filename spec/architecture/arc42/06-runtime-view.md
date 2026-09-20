@@ -145,6 +145,6 @@ sequenceDiagram
 - CLI и MCP используют разные public surfaces, но сходятся в transport-neutral use case boundary.
 - MCP tool call сначала проходит execution admission; HTTP session capacity проверяется отдельно на transport lifecycle.
 - После admission команда, работающая с `workPath`, должна получить workspace lock до запуска use case.
-- Timeout budget должен покрывать очередь/admission, подготовку, platform work, сбор логов, cleanup и mapping результата.
-- Nested orchestration наследует оставшийся deadline outer command.
+- Общего бюджета на команду нет: ожидание слота ограничивает `mcp.execution.admission_timeout_ms`, а подготовку, platform work, сбор логов, cleanup и mapping результата не ограничивает ничто, кроме собственных пределов шагов.
+- Nested orchestration не получает предела сверху: шаг ограничен только тем, что объявил сам.
 - Mutating DB operations после входа в critical phase не должны получать default hard kill; cancellation/timeout записывается как requested и команда ждёт terminal outcome.

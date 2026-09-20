@@ -392,6 +392,13 @@
     "McpExecutionSchema": {
       "additionalProperties": false,
       "properties": {
+        "admission_timeout_ms": {
+          "description": "How long an MCP call may wait for a free execution slot, in milliseconds.\n\nBounds admission only: a call that already holds a slot runs to its terminal outcome.",
+          "format": "uint64",
+          "maximum": 86400000,
+          "minimum": 1,
+          "type": "integer"
+        },
         "max_concurrent_calls": {
           "description": "Maximum number of MCP calls allowed to execute concurrently.",
           "format": "uint",
@@ -943,13 +950,6 @@
     "build": {
       "$ref": "#/$defs/BuildSchema",
       "description": "Build pipeline settings."
-    },
-    "execution_timeout": {
-      "description": "Global execution budget for public CLI and MCP commands in milliseconds.",
-      "format": "uint64",
-      "maximum": 86400000,
-      "minimum": 1,
-      "type": "integer"
     },
     "format": {
       "$ref": "#/$defs/SourceFormatSchema",

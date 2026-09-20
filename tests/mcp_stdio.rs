@@ -21,7 +21,7 @@ use support::{
 
 const V8_CONFIGURATION_NATURE: &str = "com._1c.g5.v8.dt.core.V8ConfigurationNature";
 const EDT_RUNTIME_VERSION: &str = "8.3.27";
-const MCP_EXECUTION_TIMEOUT_MS: u64 = 300_000;
+const MCP_ADMISSION_TIMEOUT_MS: u64 = 300_000;
 const EDT_COMMAND_TIMEOUT_MS: u64 = 5_000;
 const EDT_TIMEOUT_TEST_MS: u64 = 5_000;
 
@@ -111,7 +111,7 @@ fn run_cli_json_with_status(config_path: &Path, args: &[&str]) -> (bool, Value) 
 
 fn write_config(path: &Path, _base_path: &Path, work_path: &Path, platform_path: &Path) {
     let config = format!(
-        "workPath: '{}'\nexecution_timeout: 300000\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         platform_path.display(),
     );
@@ -123,15 +123,15 @@ fn write_edt_config_with_options(
     _base_path: &Path,
     work_path: &Path,
     edt_path: &Path,
-    execution_timeout_ms: u64,
+    admission_timeout_ms: u64,
     command_timeout_ms: u64,
     max_concurrent_calls: usize,
 ) {
     let config = format!(
-        "workPath: '{}'\nexecution_timeout: {}\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main-edt\nmcp:\n  execution:\n    max_concurrent_calls: {}\ntools:\n  edt_cli:\n    path: '{}'\n    interactive-mode: true\n    command_timeout_ms: {}\n",
+        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main-edt\nmcp:\n  execution:\n    max_concurrent_calls: {}\n    admission_timeout_ms: {}\ntools:\n  edt_cli:\n    path: '{}'\n    interactive-mode: true\n    command_timeout_ms: {}\n",
         work_path.display(),
-        execution_timeout_ms,
         max_concurrent_calls,
+        admission_timeout_ms,
         edt_path.display(),
         command_timeout_ms,
     );
@@ -147,7 +147,7 @@ fn write_designer_config_with_options(
     max_concurrent_calls: usize,
 ) {
     let config = format!(
-        "workPath: '{}'\nexecution_timeout: 300000\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\nmcp:\n  execution:\n    max_concurrent_calls: {}\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    command_timeout_ms: {}\n",
+        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\nmcp:\n  execution:\n    max_concurrent_calls: {}\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    command_timeout_ms: {}\n",
         work_path.display(),
         max_concurrent_calls,
         platform_path.display(),
@@ -209,7 +209,7 @@ fn setup_project() -> (tempfile::TempDir, PathBuf) {
 fn setup_edt_project() -> (tempfile::TempDir, PathBuf) {
     setup_edt_project_with_options(
         "if [ \"$validate_count\" -eq 1 ]; then\n  if [ -n \"$out\" ]; then : > \"$out\"; fi\n  prompt\nelse\n  sleep 8\n  prompt\nfi",
-        MCP_EXECUTION_TIMEOUT_MS,
+        MCP_ADMISSION_TIMEOUT_MS,
         EDT_TIMEOUT_TEST_MS,
         1,
     )
@@ -217,7 +217,7 @@ fn setup_edt_project() -> (tempfile::TempDir, PathBuf) {
 
 fn setup_edt_project_with_options(
     validate_handler: &str,
-    execution_timeout_ms: u64,
+    admission_timeout_ms: u64,
     command_timeout_ms: u64,
     max_concurrent_calls: usize,
 ) -> (tempfile::TempDir, PathBuf) {
@@ -242,7 +242,7 @@ fn setup_edt_project_with_options(
         &base_path,
         &work_path,
         &edt_path,
-        execution_timeout_ms,
+        admission_timeout_ms,
         command_timeout_ms,
         max_concurrent_calls,
     );
@@ -593,7 +593,7 @@ fn mcp_top_level_execution_timeout_seconds_reports_error_on_stderr() {
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("top-level key 'execution_timeout_seconds'"));
-    assert!(stderr.contains("execution_timeout in milliseconds"));
+    assert!(stderr.contains("tests.execution_timeout_seconds"));
 }
 
 #[test]
@@ -1492,7 +1492,7 @@ async fn mcp_stdio_edt_syntax_resets_interactive_state_before_each_call() {
     let validate_handler = "if [ \"$cwd\" != \"$workspace\" ]; then\n  printf 'cwd mismatch:%s\\n' \"$cwd\"\nelif [ \"$dirty\" -ne 0 ]; then\n  printf 'state leaked\\n'\nelse\n  if [ -n \"$out\" ]; then : > \"$out\"; fi\n  dirty=1\nfi\nprompt";
     let (dir, config_path) = setup_edt_project_with_options(
         validate_handler,
-        MCP_EXECUTION_TIMEOUT_MS,
+        MCP_ADMISSION_TIMEOUT_MS,
         EDT_COMMAND_TIMEOUT_MS,
         1,
     );
@@ -1547,7 +1547,7 @@ async fn mcp_stdio_cancels_running_edt_tool_and_retains_capacity_until_detached_
     );
     let (_project, config_path) = setup_edt_project_with_options(
         &validate_handler,
-        MCP_EXECUTION_TIMEOUT_MS,
+        MCP_ADMISSION_TIMEOUT_MS,
         EDT_COMMAND_TIMEOUT_MS,
         1,
     );
@@ -1626,7 +1626,7 @@ async fn mcp_stdio_edt_syntax_preserves_issues_found_when_stdout_is_non_empty() 
     let validate_handler = "printf 'informational stdout\\n'\nif [ -n \"$out\" ]; then printf 'ERROR\\tCatalogs.Items\\t1\\t2\\tUnusedVariables\\tunused variable\\n' > \"$out\"; fi\nprompt";
     let (_dir, config_path) = setup_edt_project_with_options(
         validate_handler,
-        MCP_EXECUTION_TIMEOUT_MS,
+        MCP_ADMISSION_TIMEOUT_MS,
         EDT_COMMAND_TIMEOUT_MS,
         1,
     );
@@ -1667,7 +1667,7 @@ async fn mcp_stdio_edt_syntax_treats_stdout_without_issues_as_tool_failure() {
         "printf 'unexpected stdout\\n'\nif [ -n \"$out\" ]; then : > \"$out\"; fi\nprompt";
     let (_dir, config_path) = setup_edt_project_with_options(
         validate_handler,
-        MCP_EXECUTION_TIMEOUT_MS,
+        MCP_ADMISSION_TIMEOUT_MS,
         EDT_COMMAND_TIMEOUT_MS,
         1,
     );

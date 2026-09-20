@@ -2,8 +2,8 @@
 id: CTR.CONFIG.V8PROJECT-SCHEMA
 status: active
 governs: product
-version: 5
-decision: DEC.2026-09-17.A-HOST-KEY-IS-CHECKED-AGAINST-WHAT-WAS-DECLARED
+version: 6
+decision: DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE
 artifact: docs/schemas/v8project.schema.json
 producer: src/config/schema.rs
 consumers: [docs, cli]

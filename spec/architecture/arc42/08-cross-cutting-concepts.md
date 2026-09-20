@@ -63,9 +63,9 @@
 - Lock sidecar является diagnostic-only metadata; ошибка sidecar не разрешает конкурентное выполнение.
 - MCP admission limits не заменяют workspace lock: они ограничивают общую нагрузку, а не ownership конкретного рабочего каталога.
 - HTTP MCP session capacity является отдельным transport guardrail и не равна execution admission.
-- Timeout/cancellation являются общим CLI/MCP целевым command contract; result должен возвращаться только после terminal state underlying operation.
+- Прерывание является общим CLI/MCP целевым command contract; result должен возвращаться только после terminal state underlying operation.
 - Mutating DB operations должны иметь critical phase, где hard kill запрещён по умолчанию.
-- Timeout budget покрывает очередь/admission, подготовку, platform process, log collection, cleanup и result mapping.
+- Общего бюджета на команду нет: ограничен только допуск (`mcp.execution.admission_timeout_ms`) и те шаги, которые объявили свой предел сами.
 - Queued cancellation может завершиться до запуска work; running cancellation должна идти через controlled interruption flow.
 - Cancellation policy применяется на command boundary и safe points, без отдельной cancellation state machine на каждом pipeline step.
 - HTTP MCP-сессии ограничены по ёмкости и управляются через TTL.
@@ -73,4 +73,4 @@
 - Серверные отмены и shutdown строятся вокруг cooperative cancellation и bounded drain, а не вокруг мгновенного прерывания любой внешней работы.
 - Workspace lock contract описан в `DEC.2026-04-20.A-COMMAND-OWNS-THE-WORKPATH-EXCLUSIVELY`.
 - MCP admission/session capacity описаны в `DEC.2026-04-20.MCP-LIMITS-EXECUTION-AND-SESSIONS-SEPARATELY`.
-- Общая timeout/cancellation policy описана в `DEC.2026-04-20.EVERY-COMMAND-HAS-A-DEADLINE`.
+- Общая политика прерывания описана в `DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE`.

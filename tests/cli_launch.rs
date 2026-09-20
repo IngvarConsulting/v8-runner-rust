@@ -354,11 +354,6 @@ fn http_body_bounds(bytes: &[u8]) -> Option<(String, Option<String>, usize, usiz
     Some((method, session_id, header_end + 4, content_length))
 }
 
-fn prepend_config(path: &Path, prefix: &str) {
-    let config = fs::read_to_string(path).expect("config");
-    fs::write(path, format!("{prefix}{config}")).expect("config");
-}
-
 fn insert_client_mcp_config(path: &Path, body: &str) {
     let config = fs::read_to_string(path).expect("config");
     let updated = if config.contains("tools:\n  client_mcp:\n") {
@@ -1159,7 +1154,6 @@ fn launch_mcp_va_builds_payload_from_configured_port_and_ordinary_mode() {
 #[test]
 fn launch_mcp_va_wait_ready_returns_registered_vanessa_tools() {
     let (_dir, config_path, install_dir, args_log) = setup_mcp_va_project();
-    prepend_config(&config_path, "execution_timeout: 10000\n");
     let (port, server) = start_fake_mcp_server(&[
         "infobase_info",
         "load_features",
@@ -1214,7 +1208,6 @@ fn launch_mcp_va_wait_ready_returns_registered_vanessa_tools() {
 #[test]
 fn launch_mcp_va_wait_ready_fails_when_vanessa_tools_are_missing() {
     let (_dir, config_path, install_dir, args_log) = setup_mcp_va_project();
-    prepend_config(&config_path, "execution_timeout: 15000\n");
     insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 5000\n");
     let (port, server) = start_fake_mcp_server(&["infobase_info"]);
     write_bounded_logging_script(&install_dir.join("bin").join("1cv8"), &args_log);
@@ -1256,7 +1249,6 @@ fn launch_mcp_va_wait_ready_fails_when_vanessa_tools_are_missing() {
 #[test]
 fn launch_mcp_wait_ready_returns_client_mcp_tools_without_vanessa_requirements() {
     let (_dir, config_path, _install_dir, _work_path) = setup_project();
-    prepend_config(&config_path, "execution_timeout: 10000\n");
     let (port, server) = start_fake_mcp_server(&["infobase_info", "query_info"]);
 
     let output = v8_runner_command()
@@ -1305,7 +1297,6 @@ fn launch_mcp_wait_ready_returns_client_mcp_tools_without_vanessa_requirements()
 #[test]
 fn launch_mcp_wait_ready_fails_when_endpoint_never_starts() {
     let (_dir, config_path, _install_dir, _work_path) = setup_project();
-    prepend_config(&config_path, "execution_timeout: 5000\n");
     insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 500\n");
     let endpoint = UnresponsiveEndpoint::start();
     let port = endpoint.port();
@@ -1343,7 +1334,6 @@ fn launch_mcp_wait_ready_fails_when_endpoint_never_starts() {
 #[test]
 fn launch_mcp_wait_ready_text_failure_is_not_rendered_as_success() {
     let (_dir, config_path, _install_dir, _work_path) = setup_project();
-    prepend_config(&config_path, "execution_timeout: 5000\n");
     insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 500\n");
     let endpoint = UnresponsiveEndpoint::start();
     let port = endpoint.port();
@@ -1381,10 +1371,6 @@ fn launch_mcp_wait_ready_terminates_process_on_readiness_failure() {
         terminated.display()
     );
     let (_dir, config_path, _install_dir, _work_path) = setup_project_with_thin_script(&script);
-    prepend_config(
-        &config_path,
-        &format!("execution_timeout: {IDLE_WAIT_TIMEOUT_MS}\n"),
-    );
     insert_client_mcp_config(
         &config_path,
         &format!("    wait_ready_timeout_ms: {EXPIRING_WAIT_TIMEOUT_MS}\n"),
@@ -1422,12 +1408,8 @@ fn launch_mcp_wait_ready_terminates_process_on_readiness_failure() {
 #[test]
 fn launch_mcp_wait_ready_uses_configured_wait_timeout() {
     let (_dir, config_path, _install_dir, _work_path) = setup_project();
-    // Настроенный срок и общий бюджет разведены так, что взявшая не тот срок регрессия
-    // выходит за границу, а загруженной машине этой границы не перебить.
-    prepend_config(
-        &config_path,
-        &format!("execution_timeout: {IDLE_WAIT_TIMEOUT_MS}\n"),
-    );
+    // Настроенный срок мал, а границей проверки служит пятиминутное умолчание: взявшая
+    // умолчание регрессия выходит за границу, а загруженной машине этой границы не перебить.
     insert_client_mcp_config(&config_path, "    wait_ready_timeout_ms: 500\n");
     let endpoint = UnresponsiveEndpoint::start();
     let port = endpoint.port();
@@ -1455,7 +1437,7 @@ fn launch_mcp_wait_ready_uses_configured_wait_timeout() {
         .contains("MCP endpoint did not become ready"));
     assert!(
         started.elapsed() < Duration::from_millis(IDLE_WAIT_TIMEOUT_MS) / 2,
-        "wait-ready should use tools.client_mcp.wait_ready_timeout_ms instead of the global execution_timeout; elapsed={:?}",
+        "wait-ready must use tools.client_mcp.wait_ready_timeout_ms, not the five-minute default; elapsed={:?}",
         started.elapsed()
     );
 }
@@ -1569,9 +1551,8 @@ fn thin_external_epf_wait_timeout_terminates_client_group() {
 }
 
 #[test]
-fn thin_external_epf_wait_timeout_overrides_execution_timeout() {
+fn thin_external_epf_wait_runs_on_its_own_declared_timeout() {
     let (_dir, config_path, _install_dir, work_path) = setup_project_with_thin_script("sleep 5");
-    prepend_config(&config_path, "execution_timeout: 100\n");
     let epf = work_path.join("runtime-check.epf");
     let output = work_path.join("runtime.out");
     let stderr = work_path.join("runtime.stderr");
@@ -1601,7 +1582,7 @@ fn thin_external_epf_wait_timeout_overrides_execution_timeout() {
     assert!(!command_output.status.success());
     assert!(
         started.elapsed() >= Duration::from_millis(650),
-        "wait timeout must not be shortened by execution_timeout; elapsed={:?}",
+        "the external EPF wait is bounded by its own timeout and by nothing above it; elapsed={:?}",
         started.elapsed()
     );
     let payload: Value = serde_json::from_slice(&command_output.stdout).expect("json");

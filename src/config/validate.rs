@@ -99,7 +99,7 @@ pub enum ConfigValidationError {
     LegacyVanessaEpfPath,
 
     #[error(
-        "top-level key 'execution_timeout_seconds' is not supported; use execution_timeout in milliseconds or tests.execution_timeout_seconds for test runs"
+        "top-level key 'execution_timeout_seconds' is not supported; use tests.execution_timeout_seconds for test runs"
     )]
     LegacyTopLevelExecutionTimeoutSeconds,
 
@@ -186,8 +186,13 @@ pub enum ConfigValidationError {
     #[error("build.partialLoadThreshold must be greater than or equal to 1")]
     InvalidPartialLoadThreshold,
 
-    #[error("execution_timeout must be between 1 and 86400000 milliseconds")]
-    InvalidExecutionTimeout,
+    #[error("mcp.execution.admission_timeout_ms must be between 1 and 86400000 milliseconds")]
+    InvalidMcpAdmissionTimeout,
+
+    #[error(
+        "top-level key 'execution_timeout' is not supported: a command has no deadline, it runs until it reaches a terminal outcome. Bound a step instead — tools.edt_cli.command_timeout_ms, tests.execution_timeout_seconds, tools.client_mcp.wait_ready_timeout_ms — or bound how long an MCP call waits for a free slot with mcp.execution.admission_timeout_ms"
+    )]
+    ExecutionTimeoutKeyRemoved,
 
     #[error("tests.execution_timeout_seconds must be between 1 and 86400 seconds")]
     InvalidTestExecutionTimeout,
@@ -318,7 +323,7 @@ fn validate_project_checks(config: &AppConfig) -> Result<(), ConfigValidationErr
     validate_web_publication(config)?;
     validate_platform_version(config)?;
     validate_build_config(config)?;
-    validate_execution_timeout(config)?;
+    validate_mcp_admission_timeout(config)?;
     validate_test_config(config)?;
     validate_mcp_config(config)?;
     validate_client_mcp_tool_extension(config)?;
@@ -338,7 +343,7 @@ pub fn validate_tools_download_bootstrap(config: &AppConfig) -> Result<(), Confi
     validate_connection_contract(config)?;
     validate_platform_version(config)?;
     validate_build_config(config)?;
-    validate_execution_timeout(config)?;
+    validate_mcp_admission_timeout(config)?;
     validate_mcp_config(config)?;
     validate_edt_cli_config(config)?;
     Ok(())
@@ -353,7 +358,7 @@ pub fn validate_prepared_test(config: &AppConfig) -> Result<(), ConfigValidation
     validate_work_path(&config.work_path)?;
     validate_connection_contract(config)?;
     validate_platform_version(config)?;
-    validate_execution_timeout(config)?;
+    validate_mcp_admission_timeout(config)?;
     validate_test_config(config)?;
     Ok(())
 }
@@ -368,7 +373,7 @@ pub fn validate_infobase_export(config: &AppConfig) -> Result<(), ConfigValidati
     // created only when the selected command acquires its workspace lock.
     validate_connection_contract(config)?;
     validate_platform_version(config)?;
-    validate_execution_timeout(config)?;
+    validate_mcp_admission_timeout(config)?;
     Ok(())
 }
 
@@ -954,9 +959,9 @@ fn validate_build_config(config: &AppConfig) -> Result<(), ConfigValidationError
     Ok(())
 }
 
-fn validate_execution_timeout(config: &AppConfig) -> Result<(), ConfigValidationError> {
-    if !(1..=86_400_000).contains(&config.execution_timeout) {
-        return Err(ConfigValidationError::InvalidExecutionTimeout);
+fn validate_mcp_admission_timeout(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    if !(1..=86_400_000).contains(&config.mcp.execution.admission_timeout_ms) {
+        return Err(ConfigValidationError::InvalidMcpAdmissionTimeout);
     }
 
     Ok(())
@@ -1350,7 +1355,6 @@ mod tests {
         AppConfig {
             base_path: base.to_path_buf(),
             work_path: work.to_path_buf(),
-            execution_timeout: 300_000,
             format,
             providers,
             provider_origins: Default::default(),
@@ -1454,7 +1458,6 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -1493,7 +1496,6 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -1532,7 +1534,6 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -1575,7 +1576,6 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -1611,7 +1611,6 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -1647,7 +1646,6 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -1679,7 +1677,6 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -1717,7 +1714,6 @@ mod tests {
         let mut config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -1745,7 +1741,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_zero_global_execution_timeout() {
+    fn rejects_zero_mcp_admission_timeout() {
         let base = tempdir().expect("base");
         let work = tempdir().expect("work");
         let source_dir = base.path().join("src");
@@ -1754,7 +1750,6 @@ mod tests {
         let mut config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -1772,12 +1767,12 @@ mod tests {
             mcp: Default::default(),
             tests: TestsConfig::default(),
         };
-        config.execution_timeout = 0;
+        config.mcp.execution.admission_timeout_ms = 0;
 
         let err = validate(&config).expect_err("expected invalid execution timeout");
         assert!(matches!(
             err,
-            ConfigValidationError::InvalidExecutionTimeout
+            ConfigValidationError::InvalidMcpAdmissionTimeout
         ));
     }
 
@@ -2006,7 +2001,6 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -2275,7 +2269,6 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
             providers: crate::domain::capability::ibcmd_for_every_choice(),
             provider_origins: Default::default(),
@@ -2306,7 +2299,6 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -2338,7 +2330,6 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: crate::domain::capability::ibcmd_for_every_choice(),
             provider_origins: Default::default(),
@@ -2369,7 +2360,6 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -2404,7 +2394,6 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -2434,7 +2423,6 @@ mod tests {
         let config = AppConfig {
             base_path: shared.path().to_path_buf(),
             work_path: shared.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -2471,7 +2459,6 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -2514,7 +2501,6 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
             providers: crate::domain::capability::ibcmd_for_every_choice(),
             provider_origins: Default::default(),
@@ -2560,7 +2546,6 @@ mod tests {
         let mut config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -2610,7 +2595,6 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: crate::domain::capability::ibcmd_for_every_choice(),
             provider_origins: Default::default(),
@@ -2649,7 +2633,6 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -2683,7 +2666,6 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
             providers: crate::domain::capability::ibcmd_for_every_choice(),
             provider_origins: Default::default(),
@@ -2716,7 +2698,6 @@ mod tests {
         let mut config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -2753,7 +2734,6 @@ mod tests {
         let config = |allowed: &str| AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -2802,7 +2782,6 @@ mod tests {
         let config = |fingerprint: &str| AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -2857,7 +2836,6 @@ mod tests {
         let mut config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -3179,7 +3157,6 @@ mod tests {
         let mut config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -3228,7 +3205,6 @@ mod tests {
         let mut config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -3273,7 +3249,6 @@ mod tests {
         let mut config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -3325,7 +3300,6 @@ mod tests {
         let mut config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),

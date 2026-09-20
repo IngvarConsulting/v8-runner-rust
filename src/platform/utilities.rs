@@ -124,7 +124,6 @@ mod tests {
         AppConfig {
             base_path: PathBuf::from("/tmp/project"),
             work_path: PathBuf::from("/tmp/project/.work"),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),

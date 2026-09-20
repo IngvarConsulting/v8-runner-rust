@@ -836,7 +836,6 @@ mod tests {
         AppConfig {
             base_path: base_path.to_path_buf(),
             work_path: work_path.to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -1070,22 +1069,25 @@ mod tests {
     }
 
     impl ProcessRunner for RecordingRunner {
-        fn run(&self, _request: &ProcessRequest) -> Result<ProcessResult, ProcessError> {
+        fn run_with_policy(
+            &self,
+            request: &ProcessRequest,
+            policy: &ProcessExecutionPolicy,
+        ) -> Result<ProcessResult, ProcessError> {
+            // Двойник записывает предел, но отмену обязан слушать по-настоящему: иначе
+            // тест на EDT прошёл бы и в мире, где Ctrl+C до процесса не доходит.
+            if policy.cancellation.is_cancelled() {
+                return Err(ProcessError::Cancelled {
+                    cmd: request.program.display().to_string(),
+                });
+            }
+            *self.timeout.lock().expect("timeout lock") = policy.timeout;
             Ok(ProcessResult {
                 exit_code: 0,
                 stdout: String::new(),
                 stderr: String::new(),
                 interruption: None,
             })
-        }
-
-        fn run_with_timeout(
-            &self,
-            request: &ProcessRequest,
-            timeout: Duration,
-        ) -> Result<ProcessResult, ProcessError> {
-            *self.timeout.lock().expect("timeout lock") = Some(timeout);
-            self.run(request)
         }
 
         fn spawn(&self, _request: &ProcessRequest) -> Result<SpawnResult, ProcessError> {

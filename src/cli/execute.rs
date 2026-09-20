@@ -88,8 +88,6 @@ use crate::use_cases::run_tests;
 use crate::use_cases::tools_download;
 use crate::use_cases::transport::{dispatch_with_workspace_lock_policy, WorkspaceBusyPolicy};
 
-const EXTERNAL_EPF_WAIT_CLEANUP_MARGIN: Duration = Duration::from_millis(500);
-
 /// Executes a parsed CLI command by mapping it into transport-neutral requests and
 /// rendering the resulting command output.
 pub fn execute_command(
@@ -219,9 +217,7 @@ fn execute_publish(
         },
         dry_run: args.dry_run,
     };
-    let context = ExecutionContext::cli(CommandName::Publish)
-        .with_deadline(Some(Instant::now() + config.execution_timeout_duration()))
-        .with_cancellation(cancellation);
+    let context = cli_context(config, CommandName::Publish, cancellation);
     with_cli_workspace_lock(
         config,
         presenter,
@@ -2221,7 +2217,7 @@ fn execute_launch(
 ) -> Result<(), UseCaseError> {
     let request = map_launch_request(args)
         .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Launch, error))?;
-    let context = launch_cli_context(config, &request, cancellation);
+    let context = cli_context(config, CommandName::Launch, cancellation);
     let started = Instant::now();
     with_cli_workspace_lock(
         config,
@@ -2642,34 +2638,25 @@ fn validate_test_launch_options(args: &TestLaunchOptionsArgs) -> Result<(), UseC
     Ok(())
 }
 
+/// Builds the execution context for a CLI command.
+///
+/// A public command carries no deadline: see DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE.
+/// What bounds a step is the step's own cap, and what ends a run early is the operator's
+/// interrupt, which reaches the context as cancellation.
+///
+/// The EDT step cap is one such declared cap, and it is read here so that both transports
+/// bound an EDT subprocess by the same configured key. Before this it reached use cases
+/// from MCP only, and a one-shot `1cedtcli` started from the CLI was bounded by nothing but
+/// the command deadline that no longer exists.
 fn cli_context(
     config: &AppConfig,
     command: CommandName,
     cancellation: CancellationToken,
 ) -> ExecutionContext {
     ExecutionContext::cli(command)
-        .with_deadline(Some(Instant::now() + config.execution_timeout_duration()))
-        .with_cancellation(cancellation)
-}
-
-fn launch_cli_context(
-    config: &AppConfig,
-    request: &LaunchRequest,
-    cancellation: CancellationToken,
-) -> ExecutionContext {
-    let timeout = request
-        .launch
-        .external_epf_wait
-        .as_ref()
-        .map(|wait| {
-            config.execution_timeout_duration().max(
-                Duration::from_millis(wait.timeout_ms)
-                    .saturating_add(EXTERNAL_EPF_WAIT_CLEANUP_MARGIN),
-            )
-        })
-        .unwrap_or_else(|| config.execution_timeout_duration());
-    ExecutionContext::cli(CommandName::Launch)
-        .with_deadline(Some(Instant::now() + timeout))
+        .with_edt_timeout(Some(Duration::from_millis(
+            config.tools.edt_cli.command_timeout_ms,
+        )))
         .with_cancellation(cancellation)
 }
 
@@ -4686,7 +4673,6 @@ mod tests {
         AppConfig {
             base_path: work_path.join("base"),
             work_path: work_path.to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),

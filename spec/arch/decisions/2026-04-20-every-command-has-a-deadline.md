@@ -1,10 +1,10 @@
 ---
 id: DEC.2026-04-20.EVERY-COMMAND-HAS-A-DEADLINE
-status: active
+status: superseded
 governs: product
-realized: tests/cli_launch.rs::launch_json_exposes_platform_resolution_metadata
+realized: null
 supersedes: []
-superseded-by: null
+superseded-by: DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE
 establishes: [INV.USE-CASES.NESTED-WORK-INHERITS-THE-REMAINING-BUDGET]
 ---
 

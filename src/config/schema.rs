@@ -206,7 +206,13 @@ fn allow_null_property(schema: &mut Value, def_path: &[&str], property: &str) {
 }
 
 fn add_numeric_runtime_bounds(schema: &mut Value) {
-    set_numeric_bounds(schema, &[], "execution_timeout", Some(1), Some(86_400_000));
+    set_numeric_bounds(
+        schema,
+        &["McpExecutionSchema"],
+        "admission_timeout_ms",
+        Some(1),
+        Some(86_400_000),
+    );
     set_numeric_bounds(
         schema,
         &["BuildSchema"],
@@ -327,15 +333,6 @@ where
 struct MainConfigSchema {
     /// Working directory for generated state, logs, temporary files, and hash storages.
     work_path: PathBuf,
-    /// Global execution budget for public CLI and MCP commands in milliseconds.
-    #[serde(
-        rename = "execution_timeout",
-        default,
-        deserialize_with = "deserialize_non_null_optional",
-        skip_serializing_if = "Option::is_none"
-    )]
-    #[schemars(with = "u64")]
-    execution_timeout: Option<u64>,
     /// Source format used by project source sets when a nested source does not override it.
     #[serde(
         default,
@@ -1134,6 +1131,16 @@ struct McpExecutionSchema {
     )]
     #[schemars(with = "u64")]
     shutdown_grace_period_secs: Option<u64>,
+    /// How long an MCP call may wait for a free execution slot, in milliseconds.
+    ///
+    /// Bounds admission only: a call that already holds a slot runs to its terminal outcome.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "u64")]
+    admission_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -1495,7 +1502,7 @@ mod tests {
     #[test]
     fn main_schema_and_loader_accept_canonical_mixed_config_keys() {
         let config = format!(
-            "{}execution_timeout: 300000\ntools:\n  enterprise:\n    additional-launch-keys:\n      - /TESTMANAGER\n  edt_cli:\n    startup_timeout_ms: 300000\n    command_timeout_ms: 300000\n",
+            "{}tools:\n  enterprise:\n    additional-launch-keys:\n      - /TESTMANAGER\n  edt_cli:\n    startup_timeout_ms: 300000\n    command_timeout_ms: 300000\n",
             minimal_project_config_without_base_path()
         );
 
@@ -1691,11 +1698,11 @@ mod tests {
     fn schemas_and_loader_reject_invalid_runtime_numeric_boundaries() {
         for config in [
             format!(
-                "{}execution_timeout: 0\n",
+                "{}mcp:\n  execution:\n    admission_timeout_ms: 0\n",
                 minimal_project_config_without_base_path()
             ),
             format!(
-                "{}execution_timeout: 86400001\n",
+                "{}mcp:\n  execution:\n    admission_timeout_ms: 86400001\n",
                 minimal_project_config_without_base_path()
             ),
             format!(
@@ -1775,7 +1782,7 @@ mod tests {
     #[test]
     fn schemas_and_loader_accept_supported_runtime_sections() {
         let config = format!(
-            "{}execution_timeout: 300000\nbuild:\n  partialLoadThreshold: 20\ntools:\n  client_mcp:\n    port: 9874\n    wait_ready_timeout_ms: 300000\n  edt_cli:\n    startup_timeout_ms: 300000\n    command_timeout_ms: 300000\nmcp:\n  http:\n    bind_address: '127.0.0.1:3000'\n    path: /mcp\n    stateful_sessions: true\n    max_sessions: 64\n    idle_ttl_secs: 900\n    allowed_hosts:\n      - runner\n  execution:\n    max_concurrent_calls: 1\n    shutdown_grace_period_secs: 30\ntests:\n  execution_timeout_seconds: 300\n  yaxunit:\n    timeouts:\n      startup_ms: 300000\n      run_ms: 300000\n      total_ms: 300000\n  va:\n    fail_fast: false\n    timeouts:\n      startup_ms: 300000\n      run_ms: 300000\n      total_ms: 300000\n",
+            "{}build:\n  partialLoadThreshold: 20\ntools:\n  client_mcp:\n    port: 9874\n    wait_ready_timeout_ms: 300000\n  edt_cli:\n    startup_timeout_ms: 300000\n    command_timeout_ms: 300000\nmcp:\n  http:\n    bind_address: '127.0.0.1:3000'\n    path: /mcp\n    stateful_sessions: true\n    max_sessions: 64\n    idle_ttl_secs: 900\n    allowed_hosts:\n      - runner\n  execution:\n    max_concurrent_calls: 1\n    shutdown_grace_period_secs: 30\ntests:\n  execution_timeout_seconds: 300\n  yaxunit:\n    timeouts:\n      startup_ms: 300000\n      run_ms: 300000\n      total_ms: 300000\n  va:\n    fail_fast: false\n    timeouts:\n      startup_ms: 300000\n      run_ms: 300000\n      total_ms: 300000\n",
             minimal_project_config_without_base_path()
         );
         assert_schema_valid(&main_config_schema_json(), &config);

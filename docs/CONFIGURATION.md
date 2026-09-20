@@ -102,7 +102,7 @@ artifact без привязки к release tag.
 `v8project.yaml` использует не один стиль на весь документ. Это текущий loader contract, и docs
 ниже повторяют именно literal YAML keys.
 
-- top-level app keys: `workPath`, `execution_timeout`, `format`, `providers`, `infobase`,
+- top-level app keys: `workPath`, `format`, `providers`, `infobase`,
   `source-set`, `build`, `tools`, `mcp`, `tests`;
 - `build` использует `partialLoadThreshold`;
 - `mcp.*` и `tests.*` используют `snake_case`;
@@ -121,7 +121,6 @@ artifact без привязки к release tag.
 
 ```yaml
 workPath: build
-execution_timeout: 300000
 format: EDT
 
 infobase:
@@ -178,6 +177,7 @@ mcp:
   execution:
     max_concurrent_calls: 1
     shutdown_grace_period_secs: 30
+    admission_timeout_ms: 300000
 
 tests:
   execution_timeout_seconds: 300
@@ -276,16 +276,14 @@ command-specific validation, а не ослабление `build`, source `dump`
 Если каталога нет, он создаётся автоматически при захвате workspace lock. Pure provider
 selection для infobase export не создаёт `workPath` и runtime-файлы.
 
-### `execution_timeout`
+### `execution_timeout` — изъят
 
-- Тип: integer
-- Обязателен: нет
-- По умолчанию: `300000`
-- Диапазон: `1..=86400000`
-- Единица: миллисекунды
-
-Общий public budget для CLI и MCP команд. Не заменяет EDT-specific timeout для interactive
-команд, а ограничивает весь command budget.
+Ключ больше не поддерживается: у команды нет срока, она идёт до терминального исхода
+(`DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE`). Конфигурация с этим ключом отклоняется
+именным отказом. Предел задаётся шагу, которому он нужен:
+`tools.edt_cli.command_timeout_ms`, `tests.execution_timeout_seconds`, блоки
+`tests.*.timeouts`, `tools.client_mcp.wait_ready_timeout_ms`. Ожидание свободного слота
+у MCP-вызова ограничивает `mcp.execution.admission_timeout_ms`.
 
 ### `format`
 
@@ -593,6 +591,10 @@ YaXUnit.
 
 - `max_concurrent_calls`, по умолчанию `1`
 - `shutdown_grace_period_secs`, по умолчанию `30`
+- `admission_timeout_ms`, по умолчанию `300000`, диапазон `1..=86400000`. Ограничивает
+  только ожидание свободного слота: у клиента протокола нет Ctrl+C, и занятый слот иначе
+  держал бы очередь молча. Допущенный вызов идёт до терминального исхода, сроку не
+  подчиняясь (`DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE`).
 
 ### `tools.client_mcp`
 
@@ -600,9 +602,9 @@ YaXUnit.
 
 - `port`, опциональный порт клиентского MCP-сервера onec-client-mcp-devkit.
 - `wait_ready_timeout_ms`, опциональный timeout для `launch mcp --wait-ready` и MCP
-  `launch_app.waitReady` в миллисекундах; если не задан, используется `execution_timeout`.
-  Эффективное ожидание дополнительно ограничено общим command deadline, поэтому значение больше
-  `execution_timeout` требует увеличить и глобальный `execution_timeout`.
+  `launch_app.waitReady` в миллисекундах; если не задан, ожидание длится пять минут.
+  Других границ у него нет: срока у команды нет, и уменьшать это значение под общий
+  бюджет больше не требуется.
 - `extension`, опциональное tool extension для клиентского MCP-сервера.
 
 `launch mcp` передаёт это значение как `mcpPort` внутри payload аргумента `/C runMcp...`
@@ -610,8 +612,7 @@ YaXUnit.
 `launch mcp --wait-ready` и MCP `launch_app` с `waitReady=true` используют этот порт для
 проверки `http://127.0.0.1:<port>/mcp`, если порт не передан явно.
 Ожидание готовности ограничивается `tools.client_mcp.wait_ready_timeout_ms`; без этой настройки
-используется общий `execution_timeout`. Общий command deadline остаётся верхней границей для
-readiness probing.
+оно длится пять минут и ничем сверху не обрезается.
 Для Vanessa Automation MCP используйте `launch mcp va --wait-ready` или MCP `launch_app` с
 `utilityType=mcp`, `mcpScenario=va` и `waitReady=true`; bare `launch mcp` проверяет только client
 MCP endpoint и не гарантирует наличие Vanessa tools.

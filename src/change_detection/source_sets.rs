@@ -104,7 +104,6 @@ mod tests {
         let config = AppConfig {
             base_path: std::path::PathBuf::from("."),
             work_path: std::path::PathBuf::from("target/tmp-work"),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
             providers: Default::default(),
             provider_origins: Default::default(),
@@ -133,7 +132,6 @@ mod tests {
         let config = AppConfig {
             base_path: std::path::PathBuf::from("."),
             work_path: std::path::PathBuf::from("target/tmp-work"),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
             providers: Default::default(),
             provider_origins: Default::default(),

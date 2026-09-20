@@ -826,5 +826,5 @@ fn top_level_execution_timeout_seconds_is_rejected_in_json_mode() {
     assert_eq!(payload["error"]["code"], "invalid_argument");
     let message = payload["data"]["message"].as_str().expect("message");
     assert!(message.contains("top-level key 'execution_timeout_seconds'"));
-    assert!(message.contains("execution_timeout in milliseconds"));
+    assert!(message.contains("tests.execution_timeout_seconds"));
 }
