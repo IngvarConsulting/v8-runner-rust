@@ -47,9 +47,9 @@
 <div class="tablewrap"><table>
 <thead><tr><th>предмет</th><th>XML платформы</th><th>проект EDT</th><th>пакет</th></tr></thead>
 <tbody>
-<tr><td class="k">конфигурация</td><td>каталог с <code>Configuration.xml</code> <span class="ref">(<a href="platform.html#t15">15</a>)</span></td><td>проект конфигурации <span class="ref">(<a href="platform.html#t106">106</a>)</span></td><td><code>.cf</code></td></tr>
-<tr><td class="k">расширение</td><td>тот же формат, объявлено расширением <span class="ref">(<a href="platform.html#t32">32</a>)</span></td><td>проект расширения, связан с проектом конфигурации <span class="ref">(<a href="platform.html#t107">107</a>)</span></td><td><code>.cfe</code></td></tr>
-<tr><td class="k">внешние обработки и отчёты</td><td>каталог с несколькими обработками</td><td>проект внешних отчётов и обработок <span class="ref">(<a href="platform.html#t107">107</a>)</span></td><td><code>.epf</code>, <code>.erf</code></td></tr>
+<tr><td class="k">конфигурация</td><td>каталог с <code>Configuration.xml</code> <span class="ref">(<a href="platform.html#t15">15</a>)</span></td><td>проект конфигурации <span class="ref">(<a href="platform.html#t108">108</a>)</span></td><td><code>.cf</code></td></tr>
+<tr><td class="k">расширение</td><td>тот же формат, объявлено расширением <span class="ref">(<a href="platform.html#t32">32</a>)</span></td><td>проект расширения, связан с проектом конфигурации <span class="ref">(<a href="platform.html#t109">109</a>)</span></td><td><code>.cfe</code></td></tr>
+<tr><td class="k">внешние обработки и отчёты</td><td>каталог с несколькими обработками</td><td>проект внешних отчётов и обработок <span class="ref">(<a href="platform.html#t109">109</a>)</span></td><td><code>.epf</code>, <code>.erf</code></td></tr>
 </tbody>
 </table></div>
 
@@ -69,7 +69,7 @@ source-set:
     type: external
     path: src/epf</code></pre>
 
-<p>У формата EDT две ступени. Проект правят в EDT, а с базой платформа обменивается только XML-выгрузкой <span class="ref">(<a href="platform.html#t105">105</a>)</span>. Экспорт проекта в XML раннер держит у себя как кеш: он не лежит под контролем версий и пересчитывается по изменившемуся.</p>
+<p>У формата EDT две ступени. Проект правят в EDT, а с базой платформа обменивается только XML-выгрузкой <span class="ref">(<a href="platform.html#t107">107</a>)</span>. Экспорт проекта в XML раннер держит у себя как кеш: он не лежит под контролем версий и пересчитывается по изменившемуся.</p>
 
 <h2 id="inside">Что лежит в базе</h2>
 <p>Информационная база держит несколько конфигураций сразу <span class="ref">(<a href="platform.html#t1">1</a>)</span>. Для каждого набора исходников в ней есть <strong>своя пара</strong>: то, что правят, и то, с чем работают пользователи <span class="ref">(<a href="platform.html#t8">8</a>)</span>.</p>
@@ -264,7 +264,7 @@ infobase: File="/srv/ib/demo"
 <tbody>
 <tr><td class="k">что происходит</td><td>выгрузка ложится поверх; чего в базе нет, остаётся на месте</td><td>каталог приводится ровно к базе, лишнее исчезает</td></tr>
 <tr><td class="k">когда нужно</td><td>базу правили мимо исходников, расхождение надо увидеть в системе контроля версий</td><td>каталог считается производным от базы и должен ей соответствовать</td></tr>
-<tr><td class="k">формат EDT</td><td colspan="2">слияния нет ни в одном режиме: EDT сводит изменения интерактивно <span class="ref">(<a href="platform.html#t106">106</a>)</span>, поэтому выгрузка либо заменяет проект, либо отказывается</td></tr>
+<tr><td class="k">формат EDT</td><td colspan="2">слияния нет ни в одном режиме: EDT сводит изменения интерактивно <span class="ref">(<a href="platform.html#t108">108</a>)</span>, поэтому выгрузка либо заменяет проект, либо отказывается</td></tr>
 </tbody>
 </table></div>
 
