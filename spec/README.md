@@ -5,7 +5,7 @@ acceptance.
 
 ## Active Entry Points
 
-- `IMPLEMENTATION_TODO.md`: open implementation tasks only.
+- Открытые задачи ведутся в GitHub issues репозитория; сводный план по целевой модели сайта и связи задач — issue #233.
 - `arch/`: атомарный реестр решений, инвариантов и контрактов; читать с `arch/index.md`.
 - `archive/FATE.md`: судьба записей замороженного прежнего слоя.
 - `architecture/change-checklist.md`: required sync/checklist for contract and boundary changes.
