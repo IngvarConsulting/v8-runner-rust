@@ -74,7 +74,7 @@
 <p>Раннер запускает утилиты у себя и достаёт цель тремя способами: файлом, сетевым протоколом платформы и SSH. Автономный сервер достижим двумя из них: Конфигуратор идёт в его прямой шлюз тем же протоколом, что в кластер <span class="ref">(<a href="platform.html#t65">65</a>)</span>, а SSH ведёт в агентский шлюз <span class="ref">(<a href="platform.html#t61">61</a>)</span>. Прямого подключения к СУБД у него нет: базу в кластере создаёт Конфигуратор, а реквизиты СУБД уходят кластеру в строке создания <span class="ref">(<a href="platform.html#t73">73</a>)</span>. К базе, которой кластер управляет, инструменты автономного сервера применять нельзя <span class="ref">(<a href="platform.html#t60">60</a>)</span>. Консоль кластера остаётся вне раннера; к серверу администрирования он ходит только за сеансами своей базы. Здесь показан только канал администрирования; чем и откуда базу открывает человек, видно в каждом варианте отдельно.</p>
 <!-- diagram:map -->
 <div class="diagram" role="img" aria-label="Кто с кем говорит: раннер запускает утилиты у себя и достаёт цель файлом, протоколом платформы и SSH">
-<svg viewBox="2.0 -92.0 1312.0 744.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1312px">
+<svg viewBox="2.0 -92.0 1392.0 744.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1392px">
 <defs><marker id="arr-map" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
 <g class="fr fr-host"><rect x="12.0" y="-6.0" width="536.0" height="556.0" rx="12"/><text x="26.0" y="12.0">машина раннера</text></g>
 <path marker-end="url(#arr-map)" class="e" d="M170.0,273.9 C269.9,273.9 292.1,60.0 392.0,60.0"/>
@@ -116,7 +116,7 @@
 <g class="lbl"><rect x="210.5" y="348.1" width="141" height="24" rx="4"/><text><tspan x="281.0" y="360.1">процесс на операцию</tspan></text></g>
 <g class="lbl"><rect x="210.5" y="406.6" width="141" height="24" rx="4"/><text><tspan x="281.0" y="418.6">процесс на операцию</tspan></text></g>
 <g class="lbl"><rect x="519.5" y="-82.0" width="81" height="24" rx="4"/><text><tspan x="560.0" y="-70.0">SSH · SFTP</tspan></text></g>
-<g class="lbl"><rect x="602.5" y="618.0" width="275" height="24" rx="4"/><text><tspan x="740.0" y="630.0">поднимает, если cluster.ras не объявлен</tspan></text></g>
+<g class="lbl"><rect x="962.5" y="618.0" width="275" height="24" rx="4"/><text><tspan x="1100.0" y="630.0">поднимает, если cluster.ras не объявлен</tspan></text></g>
 <g class="lbl"><rect x="565.0" y="164.9" width="40" height="24" rx="4"/><text><tspan x="585.0" y="176.9">файл</tspan></text></g>
 <g class="lbl"><rect x="690.2" y="108.4" width="67" height="24" rx="4"/><text><tspan x="723.8" y="120.4">TCP 1541</tspan></text></g>
 <g class="lbl"><rect x="608.0" y="-13.1" width="121" height="24" rx="4"/><text><tspan x="668.5" y="-1.1">TCP: прямой шлюз</tspan></text></g>

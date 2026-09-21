@@ -46,6 +46,25 @@ class Diagram:
         raise ValueError(spec)
 
     @staticmethod
+    def path_points(path):
+        """точки пути с шагом по кривым — чтобы рамка картинки учитывала линии, а не только узлы"""
+        pts, cur = [], None
+        for cmd, args in re.findall(r'([MLCQ])\s*([^MLCQ]*)', path):
+            v = [float(x) for x in re.findall(r'-?[\d.]+', args)]
+            if cmd in ('M', 'L'):
+                for i in range(0, len(v), 2): cur = (v[i], v[i + 1]); pts.append(cur)
+            elif cmd == 'C':
+                for i in range(0, len(v), 6):
+                    p = [cur, (v[i], v[i + 1]), (v[i + 2], v[i + 3]), (v[i + 4], v[i + 5])]
+                    pts += [Diagram.bezier(*p, k / 10) for k in range(11)]; cur = p[3]
+            elif cmd == 'Q':
+                for i in range(0, len(v), 4):
+                    c, e = (v[i], v[i + 1]), (v[i + 2], v[i + 3])
+                    pts += [((1 - t) ** 2 * cur[0] + 2 * (1 - t) * t * c[0] + t * t * e[0], (1 - t) ** 2 * cur[1] + 2 * (1 - t) * t * c[1] + t * t * e[1]) for t in [k / 10 for k in range(11)]]
+                    cur = e
+        return pts
+
+    @staticmethod
     def bezier(p0, p1, p2, p3, t):
         u = 1 - t
         return (u*u*u*p0[0] + 3*u*u*t*p1[0] + 3*u*t*t*p2[0] + t*t*t*p3[0],
@@ -109,6 +128,7 @@ class Diagram:
             path, (lx, ly) = self.edge_geometry(e)
             cls = 'e' + (' dash' if e['dashed'] else '') + ('' if e['arrow'] else ' noarr')
             out.append('<path class="%s" d="%s"/>' % (cls, path))
+            for (px, py) in self.path_points(path): grow(px - 4, py - 4, px + 4, py + 4)
             if e['label']:
                 labels.append((lx + e['dx'], ly + e['dy'], e['label']))
         # узлы
@@ -183,7 +203,7 @@ def general_map(id):
     host_fan(d, [('EDT', 'одна живая сессия', 'r:0.05', 0), ('V8', 'процесс на операцию', 'r:0.22', 0, 'l:0.18'), ('V8', 'поднимает, потом SSH', 'r:0.5', 0, 'l:0.85'),
                  ('IBC', 'процесс на операцию', 'r:0.68', 0), ('RAC', 'процесс на операцию', 'r:0.85', 0), ('WEB', 'процесс на операцию', 'r:0.97', 0)])
     d.edge('R', 'GATE', 'SSH · SFTP', dashed=True, path='M150,271 L150,-40 Q150,-70 180,-70 L1010,-70 Q1040,-70 1040,-40 L1040,31', lx=560, ly=-70)
-    d.edge('R', 'RAS', 'поднимает, если cluster.ras не объявлен', path='M100,329 L100,600 Q100,630 130,630 L1350,630 Q1380,630 1380,600 L1380,208 Q1380,178 1350,178 L1304,178', lx=740, ly=630)
+    d.edge('R', 'RAS', 'поднимает, если cluster.ras не объявлен', path='M100,329 L100,600 Q100,630 130,630 L1350,630 Q1380,630 1380,600 L1380,208 Q1380,178 1350,178 L1304,178', lx=1100, ly=630)
     d.edge('EDT', 'SRC', fb='l:0.4')
     d.edge('V8', 'SRC', fa='r:0.15', fb='l:0.75')
     d.edge('V8', 'FDB', 'файл', fa='r:0.6', fb='l:0.5', t=0.5)
