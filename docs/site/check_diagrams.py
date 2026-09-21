@@ -46,7 +46,7 @@ def check():
     problems = []
     for id, d in diagrams.DIAGRAMS.items():
         labels, nodes, frames = boxes(d)
-        for L in labels:
+        for i, L in enumerate(labels):
             for (fr, fid, members, title) in frames:
                 v = border_depth(L, fr)
                 if v > THRESHOLD: problems.append((id, 'подпись на границе рамки', L[4], fid, v))
@@ -55,10 +55,9 @@ def check():
             for N in nodes:
                 v = depth(L, N)
                 if v > THRESHOLD: problems.append((id, 'подпись на узле', L[4], N[4], v))
-            for M in labels:
-                if M is not L and M[4] < L[4]:
-                    v = depth(L, M)
-                    if v > THRESHOLD: problems.append((id, 'подписи друг на друге', L[4], M[4], v))
+            for M in labels[:i]:  # каждая пара один раз, одинаковый текст не повод пропускать
+                v = depth(L, M)
+                if v > THRESHOLD: problems.append((id, 'подписи друг на друге', L[4], M[4], v))
         for N in nodes:
             for (fr, fid, members, title) in frames:
                 if N[4] in members: continue
