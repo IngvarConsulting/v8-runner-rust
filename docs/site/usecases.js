@@ -84,7 +84,7 @@ window.RUNNER_USECASES = [
     who: 'сопровождающий типовую конфигурацию',
     pre: 'есть пакет .cf новой версии',
     steps: [
-      { id: 'load', cmd: 'v8-runner load new.cf --mode update', in: ['cf'], out: ['ib'], note: 'обновление конфигурации поставщика по правилам поддержки' },
+      { id: 'upload', cmd: 'v8-runner upload new.cf --mode update', in: ['cf'], out: ['ib'], note: 'обновление конфигурации поставщика по правилам поддержки' },
       { id: 'apply', in: ['ib'], out: ['ib'], note: 'реструктуризация' },
       { id: 'pull', in: ['ib'], out: ['repo'], note: 'новое состояние базы попадает в исходники' }
     ] },

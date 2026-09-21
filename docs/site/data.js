@@ -228,10 +228,10 @@ window.RUNNER_DATA = (function () {
       }
     },
     {
-      id: 'load', verb: 'load', title: 'Загрузить .cf / .cfe в базу',
+      id: 'upload', verb: 'upload', title: 'Загрузить .cf / .cfe в базу',
       what: 'Применяет пакет к основной конфигурации, целиком заменяя её; --mode combine или update — по правилам платформы.',
-      cmd: function (ctx) { return (ctx.type === 'EXTENSION' ? 'v8-runner load ext.cfe --ref my-ext' : 'v8-runner load main.cf'); },
-      applies: function (ctx) { return notExternal(ctx, 'load'); },
+      cmd: function (ctx) { return (ctx.type === 'EXTENSION' ? 'v8-runner upload ext.cfe --ref my-ext' : 'v8-runner upload main.cf'); },
+      applies: function (ctx) { return notExternal(ctx, 'upload'); },
       today: function (ctx) { return { chain: ctx.tools.designer ? [P.designer] : [], config: ['connection'], note: 'только Конфигуратор; состояния совместимости supported / absent / not_established / not_probed' }; },
       target: function (ctx) {
         if (ctx.target === 'standalone') return { chain: [P.designer], config: ['connection'], note: 'по прямому шлюзу; через SSH-шлюз нет: в его наборе нет сравнения, а проба совместимости перед загрузкой обязательна' };

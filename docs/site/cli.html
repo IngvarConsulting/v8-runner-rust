@@ -111,13 +111,13 @@
 <tr><td class="k"><code>push --delete &lt;ссылка&gt;</code></td><td>убирает расширение из базы вместе с его данными</td><td>меняет</td></tr>
 <tr><td class="k"><code>apply</code></td><td>приводит базу данных к основной конфигурации и больше ничего <span class="ref">(<a href="platform.html#t103">103</a>)</span></td><td>меняет</td></tr>
 <tr><td class="k"><code>apply --sessions disable|force</code></td><td>что делать с чужими сеансами, когда нужен монопольный доступ. По умолчанию их не трогают <span class="ref">(<a href="platform.html#t4">4</a>)</span>; полное окно обслуживания собирают команды <code>sessions</code></td><td>меняет</td></tr>
-<tr><td class="k"><code>load &lt;файл&gt;</code></td><td>загружает пакет <code>.cf</code> или <code>.cfe</code> в основную конфигурацию, целиком заменяя её <span class="ref">(<a href="platform.html#t11">11</a>)</span></td><td>меняет</td></tr>
-<tr><td class="k"><code>load &lt;файл&gt; --mode combine|update</code></td><td>объединяет с пакетом по файлу настроек или обновляет конфигурацию поставщика <span class="ref">(<a href="platform.html#t49">49</a>)</span></td><td>меняет</td></tr>
+<tr><td class="k"><code>upload &lt;файл&gt;</code></td><td>загружает пакет <code>.cf</code> или <code>.cfe</code> в основную конфигурацию, целиком заменяя её <span class="ref">(<a href="platform.html#t11">11</a>)</span></td><td>меняет</td></tr>
+<tr><td class="k"><code>upload &lt;файл&gt; --mode combine|update</code></td><td>объединяет с пакетом по файлу настроек или обновляет конфигурацию поставщика <span class="ref">(<a href="platform.html#t49">49</a>)</span></td><td>меняет</td></tr>
 <tr><td class="k"><code>download</code></td><td>забирает конфигурацию базы в пакет <code>.cf</code> или <code>.cfe</code>: основную или, с <code>--state db</code>, конфигурацию базы данных <span class="ref">(<a href="platform.html#t12">12</a>)</span></td><td>читает</td></tr>
 </tbody>
 </table></div>
 
-<p><code>load</code> и <code>download</code> носят конфигурацию одним файлом, <code>push</code> и <code>pull</code> — исходниками по частям; предмет у четырёх команд один. <code>download</code> назван по направлению: пакет забирают у базы, как <code>tools download</code> забирает дистрибутив. Слово платформы <code>save</code> читалось бы как запись внутрь базы, а <code>export</code> у платформы занят выгрузкой в XML <span class="ref">(<a href="platform.html#t12">12</a>)</span>. От сборки <code>download</code> отличается источником: пакет отражает базу, и в нём есть всё, что успели наделать в Конфигураторе. <code>load</code> — слово платформы, и он не часть <code>push</code> намеренно: у него свои режимы платформы, «объединение» там означает операцию по файлу настроек, слияния версий в нём нет. Поэтому режим называется <code>combine</code>: слово <code>merge</code> обещало бы трёхстороннее слияние.</p>
+<p><code>upload</code> и <code>download</code> носят конфигурацию одним файлом, <code>push</code> и <code>pull</code> — исходниками по частям; предмет у четырёх команд один. Пара названа по направлению: пакет отдают базе и забирают у неё, как <code>tools download</code> забирает дистрибутив. Слово платформы <code>load</code> осталось скрытым синонимом: пары у него нет, <code>save</code> читалось бы как запись внутрь базы, а <code>export</code> у платформы занят выгрузкой в XML <span class="ref">(<a href="platform.html#t12">12</a>)</span>. От сборки <code>download</code> отличается источником: пакет отражает базу, и в нём есть всё, что успели наделать в Конфигураторе. <code>upload</code> не часть <code>push</code> намеренно: у него свои режимы платформы, «объединение» там означает операцию по файлу настроек, слияния версий в нём нет. Поэтому режим называется <code>combine</code>: слово <code>merge</code> обещало бы трёхстороннее слияние.</p>
 
 <h3>Сеансы</h3>
 
@@ -195,7 +195,7 @@ v8-runner status --all                           # все объявленные
 </tbody>
 </table></div>
 
-<p>Под <code>infobase</code> собраны команды, чей предмет сама база: создать её, снять образ <code>.dt</code>, вернуть его. Конфигурацию пакетом носят <code>load</code> и <code>download</code> рядом с <code>push</code> и <code>pull</code>: их предмет конфигурация или расширение по имени набора, как у обмена исходниками. Поэтому <code>infobase dump</code> и <code>download</code> не путаются: первый выгружает базу, и в образе всё, от данных до пользователей; второй забирает конфигурацию, и в пакете только она. Команда отказывает по расширению файла и называет соседку: <code>infobase dump --output main.cf</code> отсылает к <code>download</code>, <code>load ib.dt</code> — к <code>infobase restore</code> <span class="ref">(<a href="platform.html#t70">70</a>)</span>.</p>
+<p>Под <code>infobase</code> собраны команды, чей предмет сама база: создать её, снять образ <code>.dt</code>, вернуть его. Конфигурацию пакетом носят <code>upload</code> и <code>download</code> рядом с <code>push</code> и <code>pull</code>: их предмет конфигурация или расширение по имени набора, как у обмена исходниками. Поэтому <code>infobase dump</code> и <code>download</code> не путаются: первый выгружает базу, и в образе всё, от данных до пользователей; второй забирает конфигурацию, и в пакете только она. Команда отказывает по расширению файла и называет соседку: <code>infobase dump --output main.cf</code> отсылает к <code>download</code>, <code>upload ib.dt</code> — к <code>infobase restore</code> <span class="ref">(<a href="platform.html#t70">70</a>)</span>.</p>
 
 <h3>Сборка и проверки</h3>
 
@@ -239,7 +239,7 @@ v8-runner status --all                           # все объявленные
 <tr><td class="k"><code>providers.push</code></td><td>отправкой исходников в базу</td></tr>
 <tr><td class="k"><code>providers.pull</code></td><td>выгрузкой из базы</td></tr>
 <tr><td class="k"><code>providers.apply</code></td><td>применением к базе данных</td></tr>
-<tr><td class="k"><code>providers.load</code></td><td>загрузкой пакета</td></tr>
+<tr><td class="k"><code>providers.upload</code></td><td>пакетом в базу</td></tr>
 <tr><td class="k"><code>providers.download</code></td><td>пакетом из базы</td></tr>
 <tr><td class="k"><code>providers.diff</code></td><td>сравнением</td></tr>
 <tr><td class="k"><code>providers.make</code></td><td>сборкой пакета</td></tr>
@@ -311,7 +311,7 @@ v8-runner pull --all              и расширения, которых в п�
 <div class="tablewrap"><table>
 <thead><tr><th>имя</th><th>почему не взято</th></tr></thead>
 <tbody>
-<tr><td class="k"><code>checkout</code> для <code>load</code></td><td>в гите это местное действие, а загрузка пакета меняет базу. Обманывает в опасную сторону</td></tr>
+<tr><td class="k"><code>checkout</code> для <code>upload</code></td><td>в гите это местное действие, а загрузка пакета меняет базу. Обманывает в опасную сторону</td></tr>
 <tr><td class="k"><code>merge</code> для объединения конфигураций</td><td>объединение по файлу настроек совпадает с трёхсторонним слиянием только в букве; режим назван <code>combine</code></td></tr>
 <tr><td class="k"><code>push --force</code> для полной пересборки</td><td>в гите значит «перезапиши ту сторону», и ровно это он здесь и значит. Полная пересборка — «посчитай заново здесь», у неё другое имя: <code>push --full</code></td></tr>
 <tr><td class="k"><code>remote</code> отдельной командой</td><td>вышло бы два слова для одной вещи. Базы объявляются в местном слое, адреса видны в <code>status --all</code>, действия с базой собраны под <code>infobase</code></td></tr>
@@ -338,8 +338,9 @@ v8-runner pull --all              и расширения, которых в п�
 <tr><td class="k"><code>dump</code></td><td><code>pull</code></td></tr>
 <tr><td class="k"><code>infobase configuration export</code></td><td><code>download</code></td></tr>
 <tr><td class="k"><code>syntax</code></td><td><code>check</code></td></tr>
-<tr><td class="k"><code>load --mode merge</code></td><td><code>load --mode combine</code></td></tr>
-<tr><td class="k"><code>providers.build</code>, <code>providers.dump</code>, <code>providers.init</code>, <code>providers.infobase.configuration.export</code></td><td><code>providers.push</code>, <code>providers.pull</code>, <code>providers.infobase.create</code>, <code>providers.download</code></td></tr>
+<tr><td class="k"><code>load</code></td><td><code>upload</code></td></tr>
+<tr><td class="k"><code>load --mode merge</code></td><td><code>upload --mode combine</code></td></tr>
+<tr><td class="k"><code>providers.build</code>, <code>providers.dump</code>, <code>providers.init</code>, <code>providers.load</code>, <code>providers.infobase.configuration.export</code></td><td><code>providers.push</code>, <code>providers.pull</code>, <code>providers.infobase.create</code>, <code>providers.upload</code>, <code>providers.download</code></td></tr>
 </tbody>
 </table></div>
 </main>
