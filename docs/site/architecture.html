@@ -81,10 +81,12 @@ flowchart LR
     IBC["ibcmd"]
     WEB["webinst"]
     AGT(["1cv8 /AgentMode<br/>127.0.0.1:1543"])
+    RAC["rac"]
   end
   SRC@{ shape: doc, label: "исходники<br/>XML, проект EDT" }
   FDB@{ shape: doc, label: "файловая база<br/>каталог с 1Cv8.1CD" }
   CLU["кластер 1С<br/>ragent · rmngr · rphost"]
+  RAS(["RAS 1545"])
   DBMS@{ shape: cyl, label: "СУБД" }
   GATE(["автономный сервер ibsrv<br/>прямой шлюз · SSH-шлюз 1543"])
   WS(["Apache · IIS"])
@@ -92,6 +94,9 @@ flowchart LR
   R -->|"процесс на операцию"| DES
   R -->|"процесс на операцию"| IBC
   R -->|"процесс на операцию"| WEB
+  R -->|"процесс на операцию"| RAC
+  RAC -.->|"TCP 1545: сеансы своей базы"| RAS
+  RAS --> CLU
   R -->|"поднимает"| AGT
   R -->|"SSH 127.0.0.1:1543"| AGT
   R -.->|"SSH · SFTP"| GATE
@@ -107,8 +112,8 @@ flowchart LR
   WEB -->|"публикация"| WS
   CLU --> DBMS
   class R run
-  class DES,IBC,WEB,EDT,CLU sw
-  class AGT,GATE,WS svc
+  class DES,IBC,WEB,EDT,CLU,RAC sw
+  class AGT,GATE,WS,RAS svc
   class SRC,FDB,DBMS art
   classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
   classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
