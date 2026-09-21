@@ -53,7 +53,7 @@
       "additionalProperties": false,
       "properties": {
         "attach": {
-          "description": "`host:port` of a Designer agent started outside the runner (attached mode). Excludes `port` and `host-key`.",
+          "description": "`host:port` or `[v6]:port` of a Designer agent started outside the runner (attached\nmode); the port is required. Excludes `port` and `host-key`.",
           "type": [
             "string",
             "null"
@@ -401,7 +401,7 @@
           "description": "How files travel between the runner and the gate user's directory: `sftp` through\nthe gate, or `{ dir: … }` — that directory as the runner sees it."
         },
         "gate": {
-          "description": "`host:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`, port 1543 by default).",
+          "description": "`host:port` or `[v6]:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`); the\nport is required — `ibsrv` listens on 1543 unless told otherwise.",
           "type": "string"
         },
         "host-fingerprint": {

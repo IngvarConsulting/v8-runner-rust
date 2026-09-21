@@ -576,7 +576,8 @@ struct InfobaseSchema {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct InfobaseStandaloneSchema {
-    /// `host:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`, port 1543 by default).
+    /// `host:port` or `[v6]:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`); the
+    /// port is required — `ibsrv` listens on 1543 unless told otherwise.
     gate: String,
     /// SHA256 fingerprint the gate must present, as `SHA256:<base64>`.
     #[serde(
@@ -922,7 +923,8 @@ struct EdtCliSchema {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct DesignerAgentSchema {
-    /// `host:port` of a Designer agent started outside the runner (attached mode). Excludes `port` and `host-key`.
+    /// `host:port` or `[v6]:port` of a Designer agent started outside the runner (attached
+    /// mode); the port is required. Excludes `port` and `host-key`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     attach: Option<String>,
     /// `AgentBaseDir` of the attached agent: where its commands read and write files. Needs `attach`.

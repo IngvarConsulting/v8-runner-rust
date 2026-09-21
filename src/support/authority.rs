@@ -50,6 +50,18 @@ impl Host {
     }
 }
 
+/// Хост в том виде, в каком его принимает соединение: адрес — как `IpAddr`, без скобок
+/// (кортеж `(host, port)` для `ToSocketAddrs` читает голый `::1`, а `[::1]` понёс бы в DNS),
+/// имя — как есть. Со скобками адрес пишет тот, кто печатает `host:port` целиком.
+impl std::fmt::Display for Host {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Host::Address(address) => std::fmt::Display::fmt(address, f),
+            Host::Name(name) => f.pad(name),
+        }
+    }
+}
+
 /// Хост из разобранного адреса.
 pub fn host_of_url(url: &Url) -> Option<Host> {
     match url.host()? {
@@ -274,6 +286,22 @@ mod tests {
                 "{authority:?} is refused"
             );
         }
+    }
+
+    #[test]
+    fn a_host_prints_the_way_a_connection_takes_it() {
+        assert_eq!(
+            host_of_authority("[::1]:1543").expect("v6").to_string(),
+            "::1"
+        );
+        assert_eq!(
+            host_of_authority("0177.0.0.1").expect("v4").to_string(),
+            "127.0.0.1"
+        );
+        assert_eq!(
+            host_of_authority("SRV.example.").expect("name").to_string(),
+            "srv.example"
+        );
     }
 
     #[test]

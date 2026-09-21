@@ -169,7 +169,7 @@ tools:
     startup_timeout_ms: 300000
     command_timeout_ms: 300000
   designer_agent:
-    port: 1543               # управляемый агент; либо attach: host:port
+    port: 1543               # управляемый агент; либо attach: host:port ([v6]:port)
     startup_timeout_ms: 120000
 
 mcp:
@@ -395,7 +395,8 @@ infobases:
 флагами: как поднят сервер — дело пользователя. Раннер подключается к SSH-шлюзу
 сервера (`ibsrv --enable-ssh-gate`, порт 1543 по умолчанию) и выполняет через него те же
 команды, что через агент Конфигуратора; `infobase.user`/`infobase.password` — пользователь
-базы, как для шлюза требует платформа.
+базы, как для шлюза требует платформа. В `gate` порт указывается всегда (`host:port`, IPv6 —
+в скобках): к шлюзу идёт собственный SSH-клиент раннера, умолчания платформы у него нет.
 
 ```yaml
 infobases:
@@ -403,7 +404,7 @@ infobases:
     user: Admin
     password: secret
     standalone:
-      gate: srv.example:1543      # host:port SSH-шлюза
+      gate: srv.example:1543      # host:port SSH-шлюза; IPv6 — в скобках: '[::1]:1543'
       host-fingerprint: 'SHA256:…'  # чей ключ считать своим; не объявлен — принимается любой
       exchange: sftp              # файлы — по SFTP того же шлюза
     web:
@@ -915,10 +916,13 @@ SSH-клиент встроен в раннер: внешний `ssh` не ну�
 
 ### `tools.designer_agent.attach`
 
-- Тип: строка `host:port`
+- Тип: строка `host:port` (IPv6 — в скобках: `[::1]:1543`)
 - Обязателен: нет
 
-Агент, поднятый вне раннера. Исключает `port` и `host-key`.
+Агент, поднятый вне раннера. Исключает `port` и `host-key`. Порт обязателен, как и у
+`infobase.standalone.gate`: к этой точке идёт собственный SSH-клиент раннера, умолчания
+платформы у него нет. Имя приводится к строчным, не-ASCII — к punycode, адрес IPv4 — к
+каноническому виду; пробелы в записи — отказ.
 
 ### `tools.designer_agent.base-dir`
 
