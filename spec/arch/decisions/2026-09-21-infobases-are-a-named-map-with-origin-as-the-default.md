@@ -5,7 +5,7 @@ governs: product
 realized: null
 supersedes: []
 superseded-by: null
-establishes: [INV.CLI.A-COMMAND-WITHOUT-ORIGIN-NAMES-THE-MISSING-STEP, INV.CONFIG.TOP-LEVEL-CONNECTION-IS-NOT-ACCEPTED, INV.CONFIG.DBMS-IS-REJECTED-FOR-A-FILE-BASE]
+establishes: [INV.CLI.A-COMMAND-WITHOUT-ORIGIN-NAMES-THE-MISSING-STEP, INV.CONFIG.TOP-LEVEL-CONNECTION-IS-NOT-ACCEPTED, INV.CONFIG.DBMS-IS-REJECTED-FOR-A-FILE-BASE, INV.CONFIG.AN-INFOBASE-NAME-IS-A-PLAIN-IDENTIFIER]
 changes: [CTR.CONFIG.V8PROJECT-SCHEMA, INV.CONFIG.OVERLAY-KEEPS-ITS-SCOPE]
 ---
 
@@ -22,7 +22,10 @@ changes: [CTR.CONFIG.V8PROJECT-SCHEMA, INV.CONFIG.OVERLAY-KEEPS-ITS-SCOPE]
 `origin`. Если `origin` не объявлен, команда не гадает, а отказывает и называет шаг:
 `init --infobase …` или `--infobase <имя>`. Отдельной команды `remote` нет: базы
 объявляют в местном слое, адреса видны в `status --all`, действия с базой лежат под
-`infobase`.
+`infobase`. Сверх сайта: имя базы — идентификатор из латинских букв, цифр, `-` и `_`,
+первый знак — буква или цифра, не длиннее 64 знаков; оно же сегмент пути под `workPath`,
+и другого имени схема не принимает. База, названная строкой соединения, не объявлена:
+памяти у неё нет (`DEC.2026-09-21.MEMORY-IS-KEPT-PER-INFOBASE`).
 
 **Почему.** Одна секция `infobase` заставляла держать по конфигу на базу и не давала
 одной командой отправить в `test`, не задев `prod`. Имя базы заодно становится ключом

@@ -9,7 +9,7 @@ scope: [config]
 
 # Ключ выбора исполнителя назван именем команды
 
-Опубликованная схема знает ровно двенадцать ключей `providers.*`, и каждый совпадает с
+Опубликованная схема знает ровно тринадцать ключей `providers.*`, и каждый совпадает с
 именем команды словаря: `push`, `pull`, `apply`, `reset`, `upload`, `download`, `diff`,
-`make`, `extensions`, `infobase.create`, `infobase.dump`, `infobase.restore`;
+`make`, `convert`, `extensions`, `infobase.create`, `infobase.dump`, `infobase.restore`;
 `providers.publish`, `providers.check` и `providers.sessions` отклоняются.
