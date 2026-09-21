@@ -6,7 +6,7 @@
 <title>v8-runner · Компоненты</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="styles.css?v=15">
+<link rel="stylesheet" href="styles.css?v=16">
 <style>
   .ref { font-size: 0.9em; color: var(--muted, #7a7f87); }
   td.k { white-space: nowrap; }
@@ -72,56 +72,66 @@
 <p>Как раннер устроен по осям: формат и тип исходников → операция → вид цели → исполнитель по матрице умолчаний. Первые три называет вызывающий, четвёртое решает раннер.</p>
 <h3 id="d-map">Кто с кем говорит</h3>
 <p>Раннер запускает утилиты у себя и достаёт цель тремя способами: файлом, сетевым протоколом платформы и SSH. Автономный сервер достижим двумя из них: Конфигуратор идёт в его прямой шлюз тем же протоколом, что в кластер <span class="ref">(<a href="platform.html#t65">65</a>)</span>, а SSH ведёт в агентский шлюз <span class="ref">(<a href="platform.html#t61">61</a>)</span>. Прямого подключения к СУБД у него нет: базу в кластере создаёт Конфигуратор, а реквизиты СУБД уходят кластеру в строке создания <span class="ref">(<a href="platform.html#t73">73</a>)</span>. К базе, которой кластер управляет, инструменты автономного сервера применять нельзя <span class="ref">(<a href="platform.html#t60">60</a>)</span>. Консоль кластера остаётся вне раннера; к серверу администрирования он ходит только за сеансами своей базы. Здесь показан только канал администрирования; чем и откуда базу открывает человек, видно в каждом варианте отдельно.</p>
-<pre class="mermaid">
-flowchart LR
-  subgraph HOST["машина раннера"]
-    R["v8-runner<br/>CLI · MCP"]
-    EDT["1cedtcli"]
-    DES["1cv8 DESIGNER"]
-    IBC["ibcmd"]
-    WEB["webinst"]
-    AGT(["1cv8 /AgentMode<br/>127.0.0.1:1543"])
-    RAC["rac"]
-  end
-  SRC@{ shape: doc, label: "исходники<br/>XML, проект EDT" }
-  FDB@{ shape: doc, label: "файловая база<br/>каталог с 1Cv8.1CD" }
-  CLU["кластер 1С<br/>ragent · rmngr · rphost"]
-  RAS(["RAS 1545"])
-  DBMS@{ shape: cyl, label: "СУБД" }
-  GATE(["автономный сервер ibsrv<br/>прямой шлюз · SSH-шлюз 1543"])
-  WS(["Apache · IIS"])
-  R -->|"одна живая сессия"| EDT
-  R -->|"процесс на операцию"| DES
-  R -->|"процесс на операцию"| IBC
-  R -->|"процесс на операцию"| WEB
-  R -->|"процесс на операцию"| RAC
-  RAC -.->|"TCP 1545: сеансы своей базы"| RAS
-  RAS --> CLU
-  R -->|"поднимает, если cluster.ras не объявлен"| RAS
-  R -->|"поднимает"| AGT
-  R -->|"SSH 127.0.0.1:1543"| AGT
-  R -.->|"SSH · SFTP"| GATE
-  EDT --> SRC
-  DES --> SRC
-  DES -->|"файл"| FDB
-  DES -.->|"TCP 1541"| CLU
-  DES -.->|"TCP: прямой шлюз"| GATE
-  IBC -->|"--db-path"| FDB
-  IBC -.->|"--dbms: прямо в СУБД"| DBMS
-  AGT -->|"файл"| FDB
-  AGT -.->|"TCP 1541"| CLU
-  WEB -->|"публикация"| WS
-  CLU --> DBMS
-  class R run
-  class DES,IBC,WEB,EDT,CLU,RAC sw
-  class AGT,GATE,WS,RAS svc
-  class SRC,FDB,DBMS art
-  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
-  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
-  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
-  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
-  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
-</pre>
+<!-- diagram:map -->
+<div class="diagram" role="img" aria-label="Кто с кем говорит: раннер запускает утилиты у себя и достаёт цель файлом, протоколом платформы и SSH">
+<svg viewBox="2.0 -16.0 1303.0 678.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1303px">
+<defs><marker id="arr-map" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-host"><rect x="12.0" y="-6.0" width="507.0" height="588.0" rx="12"/><text x="26.0" y="12.0">машина раннера</text></g>
+<path marker-end="url(#arr-map)" class="e" d="M170.0,276.8 C267.6,276.8 274.4,60.0 372.0,60.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M170.0,288.4 C254.2,288.4 272.9,160.0 357.0,160.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M170.0,300.0 C246.1,300.0 262.9,262.0 339.0,262.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M170.0,311.6 C260.9,311.6 281.1,362.0 372.0,362.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M170.0,320.3 C260.9,320.3 281.1,452.0 372.0,452.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M170.0,326.1 C267.2,326.1 274.8,542.0 372.0,542.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M100,330 L100,610 Q100,640 130,640 L1185,640 Q1215,640 1215,610 L1215,330 Q1215,300 1185,300 L1112,300"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M170,318 C300,318 480,300 600,330 C720,360 800,420 898,420"/>
+<path marker-end="url(#arr-map)" class="e" d="M468.0,60.0 C558.5,60.0 578.5,54.2 669.0,54.2"/>
+<path marker-end="url(#arr-map)" class="e" d="M483.0,151.2 C566.7,151.2 585.3,77.4 669.0,77.4"/>
+<path marker-end="url(#arr-map)" class="e" d="M483.0,165.3 C553.6,165.3 569.4,166.4 640.0,166.4"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M484,150 C600,100 760,100 938,166"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M484,176 C600,240 760,330 898,410"/>
+<path marker-end="url(#arr-map)" class="e" d="M501.0,250.4 C563.5,250.4 577.5,189.6 640.0,189.6"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M520,270 C680,262 800,210 938,198"/>
+<path marker-end="url(#arr-map)" class="e" d="M468,352 C560,352 600,215 620,206"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M468,368 C700,368 1150,380 1250,206"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M468,452 C640,452 780,300 968,300"/>
+<path marker-end="url(#arr-map)" class="e" d="M1040.0,278.0 C1040.0,238.0 1040.0,247.0 1040.0,207.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M1140.0,178.0 C1180.0,178.0 1165.0,178.0 1205.0,178.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M468.0,542.0 C559.1,542.0 579.4,542.0 670.5,542.0"/>
+<g class="n n-run"><rect x="30.0" y="271.0" width="140.0" height="58.0" rx="8"/><text><tspan x="100.0" y="291.0">v8-runner</tspan><tspan x="100.0" y="309.0">CLI · MCP</tspan></text></g>
+<g class="n n-sw"><rect x="372.0" y="38.0" width="96.0" height="44.0" rx="8"/><text><tspan x="420.0" y="60.0">1cedtcli</tspan></text></g>
+<g class="n n-sw"><rect x="357.0" y="138.0" width="126.0" height="44.0" rx="8"/><text><tspan x="420.0" y="160.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-svc"><rect x="339.0" y="233.0" width="162.0" height="58.0" rx="29.0"/><text><tspan x="420.0" y="253.0">1cv8 /AgentMode</tspan><tspan x="420.0" y="271.0">127.0.0.1:1543</tspan></text></g>
+<g class="n n-sw"><rect x="372.0" y="340.0" width="96.0" height="44.0" rx="8"/><text><tspan x="420.0" y="362.0">ibcmd</tspan></text></g>
+<g class="n n-sw"><rect x="372.0" y="430.0" width="96.0" height="44.0" rx="8"/><text><tspan x="420.0" y="452.0">rac</tspan></text></g>
+<g class="n n-sw"><rect x="372.0" y="520.0" width="96.0" height="44.0" rx="8"/><text><tspan x="420.0" y="542.0">webinst</tspan></text></g>
+<g class="n n-doc"><path d="M669.0,31.0 h142.0 v50.0 q-35.5,12.0 -71.0,0 q-35.5,-12.0 -71.0,0 z"/><text><tspan x="740.0" y="51.0">исходники</tspan><tspan x="740.0" y="69.0">XML, проект EDT</tspan></text></g>
+<g class="n n-doc"><path d="M640.0,149.0 h200.0 v50.0 q-50.0,12.0 -100.0,0 q-50.0,-12.0 -100.0,0 z"/><text><tspan x="740.0" y="169.0">файловая база</tspan><tspan x="740.0" y="187.0">каталог с 1Cv8.1CD</tspan></text></g>
+<g class="n n-sw"><rect x="940.0" y="149.0" width="200.0" height="58.0" rx="8"/><text><tspan x="1040.0" y="169.0">кластер 1С</tspan><tspan x="1040.0" y="187.0">ragent · rmngr · rphost</tspan></text></g>
+<g class="n n-cyl"><path d="M1205.0,158.0 v40.0 a45.0,7.0 0 0 0 90.0,0 v-40.0"/><ellipse cx="1250.0" cy="158.0" rx="45.0" ry="7.0"/><text><tspan x="1250.0" y="178.0">СУБД</tspan></text></g>
+<g class="n n-svc"><rect x="986.0" y="278.0" width="108.0" height="44.0" rx="22.0"/><text><tspan x="1040.0" y="300.0">RAS 1545</tspan></text></g>
+<g class="n n-svc"><rect x="900.0" y="391.0" width="280.0" height="58.0" rx="29.0"/><text><tspan x="1040.0" y="411.0">автономный сервер ibsrv</tspan><tspan x="1040.0" y="429.0">прямой шлюз · SSH-шлюз 1543</tspan></text></g>
+<g class="n n-svc"><rect x="670.5" y="520.0" width="139.0" height="44.0" rx="22.0"/><text><tspan x="740.0" y="542.0">Apache · IIS</tspan></text></g>
+<g class="lbl"><rect x="243.9" y="89.5" width="127" height="24" rx="4"/><text><tspan x="307.4" y="101.5">одна живая сессия</tspan></text></g>
+<g class="lbl"><rect x="228.3" y="172.6" width="141" height="24" rx="4"/><text><tspan x="298.8" y="184.6">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="180.5" y="269.0" width="148" height="24" rx="4"/><text><tspan x="254.5" y="281.0">поднимает, потом SSH</tspan></text></g>
+<g class="lbl"><rect x="238.7" y="340.4" width="141" height="24" rx="4"/><text><tspan x="309.2" y="352.4">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="238.7" y="414.8" width="141" height="24" rx="4"/><text><tspan x="309.2" y="426.8">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="240.7" y="493.8" width="141" height="24" rx="4"/><text><tspan x="311.2" y="505.8">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="502.5" y="628.0" width="275" height="24" rx="4"/><text><tspan x="640.0" y="640.0">поднимает, если cluster.ras не объявлен</tspan></text></g>
+<g class="lbl"><rect x="599.5" y="332.0" width="81" height="24" rx="4"/><text><tspan x="640.0" y="344.0">SSH · SFTP</tspan></text></g>
+<g class="lbl"><rect x="541.5" y="153.8" width="40" height="24" rx="4"/><text><tspan x="561.5" y="165.8">файл</tspan></text></g>
+<g class="lbl"><rect x="666.5" y="98.0" width="67" height="24" rx="4"/><text><tspan x="700.0" y="110.0">TCP 1541</tspan></text></g>
+<g class="lbl"><rect x="579.5" y="284.0" width="121" height="24" rx="4"/><text><tspan x="640.0" y="296.0">TCP: прямой шлюз</tspan></text></g>
+<g class="lbl"><rect x="550.5" y="208.0" width="40" height="24" rx="4"/><text><tspan x="570.5" y="220.0">файл</tspan></text></g>
+<g class="lbl"><rect x="666.5" y="240.0" width="67" height="24" rx="4"/><text><tspan x="700.0" y="252.0">TCP 1541</tspan></text></g>
+<g class="lbl"><rect x="503.0" y="328.0" width="74" height="24" rx="4"/><text><tspan x="540.0" y="340.0">--db-path</tspan></text></g>
+<g class="lbl"><rect x="686.0" y="364.0" width="148" height="24" rx="4"/><text><tspan x="760.0" y="376.0">--dbms: прямо в СУБД</tspan></text></g>
+<g class="lbl"><rect x="503.0" y="428.0" width="194" height="24" rx="4"/><text><tspan x="600.0" y="440.0">TCP 1545: сеансы своей базы</tspan></text></g>
+<g class="lbl"><rect x="528.8" y="530.0" width="81" height="24" rx="4"/><text><tspan x="569.2" y="542.0">публикация</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:map -->
 <p class="hint">Утилиты EDT к базе не подключаются: <code>1cedtcli</code> работает только с исходниками, поэтому во всех четырнадцати расстановках он одинаков.</p>
 
 <p class="hint">Четырнадцать способов расставить это по машинам — на странице <a href="deployments.html">Расстановки</a>.</p>
@@ -237,30 +247,32 @@ flowchart LR
 <h2 id="layers">Внутри раннера</h2>
 <p>Слои раннера и процессы, которые он запускает.</p>
 <h3>Слои</h3>
-<pre class="mermaid">
-flowchart TB
-  subgraph adapters["Адаптеры транспорта"]
-    CLI["cli<br/>аргументы, текст и JSON"]
-    MCP["mcp<br/>8 инструментов, stdio и HTTP"]
-  end
-  UC["use_cases — оркестрация<br/>замок, пайплайн"]
-  subgraph shared["Общее"]
-    CFG["config"]
-    DOM["domain"]
-    CD["change_detection"]
-    PARS["parsers"]
-  end
-  PLAT["platform — вызов утилит"]
-  SUP["support — файлы, staging, журналы"]
-  CLI --> UC
-  MCP --> UC
-  UC --> CFG
-  UC --> DOM
-  UC --> CD
-  UC --> PARS
-  UC --> PLAT
-  PLAT --> SUP
-</pre>
+<!-- diagram:layers -->
+<div class="diagram" role="img" aria-label="Слои раннера: адаптеры транспорта, оркестрация, общие слои и платформа">
+<svg viewBox="14.0 -23.0 915.0 393.0" xmlns="http://www.w3.org/2000/svg" style="max-width:915px">
+<defs><marker id="arr-layers" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-host"><rect x="24.0" y="254.0" width="612.0" height="106.0" rx="12"/><text x="38.0" y="272.0">Общее</text></g>
+<g class="fr fr-host"><rect x="31.0" y="-13.0" width="537.0" height="120.0" rx="12"/><text x="45.0" y="5.0">Адаптеры транспорта</text></g>
+<path marker-end="url(#arr-layers)" class="e" d="M150.0,89.0 C150.0,133.8 249.6,116.2 249.6,161.0"/>
+<path marker-end="url(#arr-layers)" class="e" d="M430.0,89.0 C430.0,133.8 330.4,116.2 330.4,161.0"/>
+<path marker-end="url(#arr-layers)" class="e" d="M219.3,219.0 C219.3,277.2 90.0,239.8 90.0,298.0"/>
+<path marker-end="url(#arr-layers)" class="e" d="M269.8,219.0 C269.8,259.0 230.0,258.0 230.0,298.0"/>
+<path marker-end="url(#arr-layers)" class="e" d="M320.3,219.0 C320.3,259.0 400.0,258.0 400.0,298.0"/>
+<path marker-end="url(#arr-layers)" class="e" d="M370.8,219.0 C370.8,308.6 570.0,208.4 570.0,298.0"/>
+<path marker-end="url(#arr-layers)" class="e" d="M391.0,190.0 C520.6,190.0 549.4,190.0 679.0,190.0"/>
+<path marker-end="url(#arr-layers)" class="e" d="M780.0,212.0 C780.0,252.0 780.0,258.0 780.0,298.0"/>
+<g class="n n-sw"><rect x="49.0" y="31.0" width="202.0" height="58.0" rx="8"/><text><tspan x="150.0" y="51.0">cli</tspan><tspan x="150.0" y="69.0">аргументы, текст и JSON</tspan></text></g>
+<g class="n n-sw"><rect x="310.0" y="31.0" width="240.0" height="58.0" rx="8"/><text><tspan x="430.0" y="51.0">mcp</tspan><tspan x="430.0" y="69.0">8 инструментов, stdio и HTTP</tspan></text></g>
+<g class="n n-run"><rect x="189.0" y="161.0" width="202.0" height="58.0" rx="8"/><text><tspan x="290.0" y="181.0">use_cases — оркестрация</tspan><tspan x="290.0" y="199.0">замок, пайплайн</tspan></text></g>
+<g class="n n-sw"><rect x="42.0" y="298.0" width="96.0" height="44.0" rx="8"/><text><tspan x="90.0" y="320.0">config</tspan></text></g>
+<g class="n n-sw"><rect x="182.0" y="298.0" width="96.0" height="44.0" rx="8"/><text><tspan x="230.0" y="320.0">domain</tspan></text></g>
+<g class="n n-sw"><rect x="325.5" y="298.0" width="149.0" height="44.0" rx="8"/><text><tspan x="400.0" y="320.0">change_detection</tspan></text></g>
+<g class="n n-sw"><rect x="522.0" y="298.0" width="96.0" height="44.0" rx="8"/><text><tspan x="570.0" y="320.0">parsers</tspan></text></g>
+<g class="n n-sw"><rect x="679.0" y="168.0" width="202.0" height="44.0" rx="8"/><text><tspan x="780.0" y="190.0">platform — вызов утилит</tspan></text></g>
+<g class="n n-sw"><rect x="641.0" y="298.0" width="278.0" height="44.0" rx="8"/><text><tspan x="780.0" y="320.0">support — файлы, staging, журналы</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:layers -->
 
 <div class="tablewrap"><table>
 <thead><tr><th>Слой</th><th>Отвечает за</th><th>Не знает про</th></tr></thead>
@@ -276,16 +288,32 @@ flowchart TB
 </tbody></table></div>
 
 <h3>Процессы</h3>
-<pre class="mermaid">
-flowchart LR
-  R["раннер<br/>CLI или MCP-сервер"]
-  R -->|"процесс на операцию"| D["1cv8 DESIGNER"]
-  R -->|"процесс на операцию"| I["ibcmd"]
-  R -->|"сессия SSH"| A["агент: 1cv8 /AgentMode<br/>или шлюз ibsrv"]
-  R -->|"одна живая сессия"| E["1cedtcli"]
-  R -->|"процесс на запуск"| C["клиент 1С"]
-  R -->|"процесс на операцию"| W["webinst"]
-</pre>
+<!-- diagram:processes -->
+<div class="diagram" role="img" aria-label="Процессы, которые запускает раннер">
+<svg viewBox="25.0 8.0 562.5 414.0" xmlns="http://www.w3.org/2000/svg" style="max-width:562px">
+<defs><marker id="arr-processes" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<path marker-end="url(#arr-processes)" class="e" d="M185.0,176.8 C284.9,176.8 307.1,40.0 407.0,40.0"/>
+<path marker-end="url(#arr-processes)" class="e" d="M185.0,185.5 C291.6,185.5 315.4,105.0 422.0,105.0"/>
+<path marker-end="url(#arr-processes)" class="e" d="M185.0,195.4 C264.9,195.4 282.6,180.0 362.5,180.0"/>
+<path marker-end="url(#arr-processes)" class="e" d="M185.0,204.6 C291.6,204.6 315.4,260.0 422.0,260.0"/>
+<path marker-end="url(#arr-processes)" class="e" d="M185.0,214.5 C291.6,214.5 315.4,325.0 422.0,325.0"/>
+<path marker-end="url(#arr-processes)" class="e" d="M185.0,223.2 C291.6,223.2 315.4,390.0 422.0,390.0"/>
+<g class="n n-run"><rect x="35.0" y="171.0" width="150.0" height="58.0" rx="8"/><text><tspan x="110.0" y="191.0">раннер</tspan><tspan x="110.0" y="209.0">CLI или MCP-сервер</tspan></text></g>
+<g class="n n-sw"><rect x="407.0" y="18.0" width="126.0" height="44.0" rx="8"/><text><tspan x="470.0" y="40.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-sw"><rect x="422.0" y="83.0" width="96.0" height="44.0" rx="8"/><text><tspan x="470.0" y="105.0">ibcmd</tspan></text></g>
+<g class="n n-svc"><rect x="362.5" y="151.0" width="215.0" height="58.0" rx="29.0"/><text><tspan x="470.0" y="171.0">агент: 1cv8 /AgentMode</tspan><tspan x="470.0" y="189.0">или шлюз ibsrv</tspan></text></g>
+<g class="n n-sw"><rect x="422.0" y="238.0" width="96.0" height="44.0" rx="8"/><text><tspan x="470.0" y="260.0">1cedtcli</tspan></text></g>
+<g class="n n-sw"><rect x="422.0" y="303.0" width="96.0" height="44.0" rx="8"/><text><tspan x="470.0" y="325.0">клиент 1С</tspan></text></g>
+<g class="n n-sw"><rect x="422.0" y="368.0" width="96.0" height="44.0" rx="8"/><text><tspan x="470.0" y="390.0">webinst</tspan></text></g>
+<g class="lbl"><rect x="225.5" y="96.4" width="141" height="24" rx="4"/><text><tspan x="296.0" y="108.4">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="233.0" y="133.2" width="141" height="24" rx="4"/><text><tspan x="303.5" y="145.2">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="233.2" y="175.7" width="81" height="24" rx="4"/><text><tspan x="273.8" y="187.7">сессия SSH</tspan></text></g>
+<g class="lbl"><rect x="240.0" y="220.3" width="127" height="24" rx="4"/><text><tspan x="303.5" y="232.3">одна живая сессия</tspan></text></g>
+<g class="lbl"><rect x="240.0" y="257.8" width="127" height="24" rx="4"/><text><tspan x="303.5" y="269.8">процесс на запуск</tspan></text></g>
+<g class="lbl"><rect x="233.0" y="294.6" width="141" height="24" rx="4"/><text><tspan x="303.5" y="306.6">процесс на операцию</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:processes -->
 
 <h2 id="life">Сколько живёт</h2>
 <div class="tablewrap"><table>
@@ -315,32 +343,6 @@ flowchart LR
 
 </main>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.12.0/mermaid.min.js"></script>
-<script>
-  var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-  // Схемы развёртывания нарисованы палитрой ArchiMate для светлой темы; в тёмной те же
-  // роли берут тёмные тона. Замена идёт до отрисовки и трогает только эти цвета.
-  var palette = {
-    '#cfe4fa': '#1d3550', '#3f7ba6': '#6ea6d2', '#0d2233': '#d9e8f7',
-    '#cde8b9': '#2a4423', '#4f7a3c': '#7fae68', '#12210c': '#dfeed5',
-    '#e7f3dc': '#22381e',
-    '#f6e8c8': '#44371f', '#a4813a': '#b79141', '#241c0c': '#f2e4c4',
-    '#e4e4e7': '#2c3037', '#9a9aa2': '#787f8a', '#33333a': '#c7ccd5',
-    '#eef5fb': '#16222e', '#8fb4cf': '#3f6a8c',
-    '#f1f8ea': '#18261a', '#8aad76': '#4c7340',
-    '#fbfbfc': '#1b2027', '#c3c9d0': '#3b434d', '#4b5560': '#97a2af',
-    '#eeeef0': '#26262b', '#a8a8b0': '#5a5a63'
-  };
-  if (dark) {
-    document.querySelectorAll('pre.mermaid').forEach(function (block) {
-      // именно innerHTML: в textContent теряются <br/> внутри подписей
-      block.innerHTML = block.innerHTML.replace(/#[0-9a-f]{6}/g, function (colour) {
-        return palette[colour] || colour;
-      });
-    });
-  }
-  mermaid.initialize({ startOnLoad: true, theme: dark ? 'dark' : 'neutral', securityLevel: 'loose', fontFamily: 'Golos Text, system-ui, sans-serif' });
-</script>
-<script src="site.js?v=6" defer></script>
+<script src="site.js?v=7" defer></script>
 </body>
 </html>

@@ -20,6 +20,16 @@
   --no: #b91c1c;
   --code-bg: #eef1f4;
   --shadow: 0 1px 2px rgba(20, 30, 40, 0.06), 0 8px 24px -16px rgba(20, 30, 40, 0.25);
+  --d-run: #cfe4fa; --d-run-line: #3f7ba6;
+  --d-sw: #cde8b9; --d-sw-line: #4f7a3c;
+  --d-svc: #e7f3dc; --d-svc-line: #4f7a3c;
+  --d-art: #f6e8c8; --d-art-line: #a4813a;
+  --d-off: #e4e4e7; --d-off-line: #9a9aa2;
+  --d-cmd: #fdf1e2; --d-cmd-line: #b45309;
+  --d-frame: #eef5fb; --d-frame-line: #8fb4cf;
+  --d-frame2: #f1f8ea; --d-frame2-line: #8aad76;
+  --d-frame3: #eeeef0; --d-frame3-line: #a8a8b0;
+  --d-box: #fbfbfc; --d-box-line: #c3c9d0;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -42,6 +52,16 @@
     --ok: #4ade80;
     --warn: #fbbf24;
     --no: #f87171;
+    --d-run: #1e3350; --d-run-line: #6fa3d6;
+    --d-sw: #1f3a25; --d-sw-line: #7fb56a;
+    --d-svc: #1a2f21; --d-svc-line: #6fa35f;
+    --d-art: #3a2f1a; --d-art-line: #c9a35a;
+    --d-off: #26262b; --d-off-line: #7c7c86;
+    --d-cmd: #3a2812; --d-cmd-line: #e59a2b;
+    --d-frame: #161f29; --d-frame-line: #3b5670;
+    --d-frame2: #172019; --d-frame2-line: #3d5a3a;
+    --d-frame3: #1e1e23; --d-frame3-line: #46464e;
+    --d-box: #13171c; --d-box-line: #2c353f;
     --code-bg: #232a32;
     --shadow: 0 1px 2px rgba(0,0,0,0.4), 0 8px 24px -16px rgba(0,0,0,0.7);
   }
@@ -51,6 +71,16 @@
   --line: #2c353f; --accent: #f59e0b; --accent-soft: #2f2412; --agent: #2dd4bf; --agent-soft: #10302d;
   --batch: #a5b4fc; --batch-soft: #22233f; --ibcmd: #f472b6; --ibcmd-soft: #3a1a2a; --rs: #a1a1aa; --rs-soft: #26262b;
   --ok: #4ade80; --warn: #fbbf24; --no: #f87171; --code-bg: #232a32;
+  --d-run: #1e3350; --d-run-line: #6fa3d6;
+  --d-sw: #1f3a25; --d-sw-line: #7fb56a;
+  --d-svc: #1a2f21; --d-svc-line: #6fa35f;
+  --d-art: #3a2f1a; --d-art-line: #c9a35a;
+  --d-off: #26262b; --d-off-line: #7c7c86;
+  --d-cmd: #3a2812; --d-cmd-line: #e59a2b;
+  --d-frame: #161f29; --d-frame-line: #3b5670;
+  --d-frame2: #172019; --d-frame2-line: #3d5a3a;
+  --d-frame3: #1e1e23; --d-frame3-line: #46464e;
+  --d-box: #13171c; --d-box-line: #2c353f;
   --shadow: 0 1px 2px rgba(0,0,0,0.4), 0 8px 24px -16px rgba(0,0,0,0.7);
 }
 
@@ -142,10 +172,35 @@ td.c { text-align: center; }
 .card p { margin: 6px 0; color: var(--ink-2); font-size: 0.95rem; }
 .card .meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
 
-.mermaid { background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin: 16px 0; overflow-x: auto; }
+
+/* схемы: встроенный SVG, цвета из токенов */
+.diagram { background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin: 16px 0; overflow-x: auto; }
+.diagram svg { display: block; width: 100%; height: auto; margin: 0 auto; font-family: 'Golos Text', system-ui, sans-serif; }
+.diagram text { dominant-baseline: middle; }
+.diagram .n text { fill: var(--ink); font-size: 14px; text-anchor: middle; }
+.diagram .n rect, .diagram .n path, .diagram .n ellipse { stroke-width: 1.2; }
+.diagram .n-run rect { fill: var(--d-run); stroke: var(--d-run-line); }
+.diagram .n-sw rect { fill: var(--d-sw); stroke: var(--d-sw-line); }
+.diagram .n-svc rect { fill: var(--d-svc); stroke: var(--d-svc-line); }
+.diagram .n-cmd rect { fill: var(--d-cmd); stroke: var(--d-cmd-line); }
+.diagram .n-off rect { fill: var(--d-off); stroke: var(--d-off-line); }
+.diagram .n-doc path, .diagram .n-cyl path, .diagram .n-cyl ellipse { fill: var(--d-art); stroke: var(--d-art-line); }
+.diagram .n-docoff path { fill: var(--d-off); stroke: var(--d-off-line); }
+.diagram .n-manual rect { fill: var(--d-off); stroke: var(--d-off-line); stroke-dasharray: 4 3; }
+.diagram .fr rect { fill: var(--d-frame); stroke: var(--d-frame-line); stroke-width: 1; }
+.diagram .fr-srv rect { fill: var(--d-frame2); stroke: var(--d-frame2-line); }
+.diagram .fr-neutral rect { fill: var(--d-frame3); stroke: var(--d-frame3-line); }
+.diagram .fr-box rect { fill: var(--d-box); stroke: var(--d-box-line); }
+.diagram .fr text { fill: var(--ink-2); font-size: 13px; font-weight: 600; }
+.diagram .e { fill: none; stroke: var(--ink-3); stroke-width: 1.4; }
+.diagram .e.dash { stroke-dasharray: 5 4; }
+.diagram marker path { fill: var(--ink-3); }
+.diagram .lbl rect { fill: var(--code-bg); }
+.diagram .lbl text { fill: var(--ink-2); font-size: 12.5px; text-anchor: middle; }
+.diagram .note { fill: var(--ink-3); font-size: 12.5px; }
 
 /* прокрутка вбок видна: тень у края появляется, только пока в ту сторону есть что листать */
-.mermaid.scrollx, .tablewrap.scrollx, .axes.scrollx {
+.diagram.scrollx, .tablewrap.scrollx, .axes.scrollx {
   background-image:
     linear-gradient(to right, var(--paper) 40%, transparent),
     linear-gradient(to left, var(--paper) 40%, transparent),
@@ -270,6 +325,6 @@ ul.opts.cmds code { margin-right: 6px; }
   table.stack td:not(:first-child):empty { display: none; }
   .tablewrap { border: 0; background: none; box-shadow: none; }
   .tablewrap table.stack { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); }
-  /* mermaid ужимает схему по ширине экрана до нечитаемого: на телефоне лучше листать */
-  .mermaid svg { max-width: none !important; min-width: 620px; height: auto; }
+  /* схему ужимать по ширине экрана нельзя: на телефоне лучше листать */
+  .diagram svg { max-width: none !important; min-width: 620px; }
 }
