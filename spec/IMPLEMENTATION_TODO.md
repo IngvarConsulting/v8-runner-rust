@@ -62,6 +62,8 @@ This file tracks open implementation work only.
   before implementation.
 - Promote only immediately executable work here; keep broader ADR reconciliation in
   `ADR_DERIVED_BACKLOG.md`.
+- Разрывы между целевой моделью сайта `docs/site` и кодом собраны в
+  `SITE_DERIVED_BACKLOG_2026-09-21.md`; задачи оттуда попадают сюда по мере готовности.
 
 ## Historical Records
 
