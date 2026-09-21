@@ -6,7 +6,7 @@
 <title>v8-runner · Команды</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="styles.css?v=14">
+<link rel="stylesheet" href="styles.css?v=15">
 <style>
   tr.st-subject td, tr.st-soon td { color: var(--ink-3); }
   tr.st-tool td.k, tr.st-soon td.k { color: var(--ink-2); }
@@ -24,16 +24,21 @@
   <a class="brand" href="index.html">v8-runner</a>
   <nav>
     <a href="index.html">Начало</a>
-    <a href="scenarios.html" aria-current="page">Команды</a>
+    <a href="platform.html">Платформа</a>
+    <a href="problems.html">Трудности</a>
+    <a href="architecture.html">Компоненты</a>
+    <a href="sources.html">Исходники</a>
+    <a href="cli.html">Словарь</a>
+    <a href="scenarios.html" aria-current="page">Подбор</a>
     <a href="usecases.html">Сценарии</a>
-    <a href="architecture.html">Архитектура</a>
+    <a href="deployments.html">Расстановки</a>
     <a class="gh" href="https://github.com/IngvarConsulting/v8-runner-rust" aria-label="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span class="gh-stars" hidden></span></a>
   </nav>
 </div></div>
 
 <main class="page">
-<h1>Команды под ваши условия</h1>
-<p class="lede">Отметьте свои условия — увидите команды и чем они исполнятся.</p>
+<h1>Подбор команд</h1>
+<p class="lede">Отметьте свои условия и увидите команды словаря и чем они исполнятся. Имена команд — со страницы <a href="cli.html">Словарь</a>.</p>
 
 <div class="panel" id="panel"></div>
 
@@ -54,7 +59,7 @@
 <p class="hint">Пароли и пути машины — в <code>v8project.local.yaml</code> рядом, он не коммитится.</p>
 </main>
 
-<script src="data.js?v=13"></script>
+<script src="data.js?v=14"></script>
 <script>
 (function () {
   var D = window.RUNNER_DATA;
@@ -150,15 +155,17 @@
 
   function renderYaml() {
     var lines = ['workPath: build', 'format: ' + state.format];
-    lines.push('infobase:');
-    if (state.target === 'file') lines.push('  connection: "File=build/ib"');
-    if (state.target === 'cluster') { lines.push('  connection: "Srvr=srv:1541;Ref=demo"'); lines.push('  user: Admin'); lines.push('  dbms:                    # нужна, чтобы раннер создал базу'); lines.push('    kind: PostgreSQL'); lines.push('    server: localhost'); lines.push('    name: demo'); }
+    lines.push('infobases:');
+    lines.push('  origin:                  # умолчание, как у гита');
+    if (state.target === 'file') lines.push('    connection: "File=build/ib"');
+    if (state.target === 'cluster') { lines.push('    connection: "Srvr=srv:1541;Ref=demo"'); lines.push('    user: Admin'); lines.push('    dbms:                    # нужна, чтобы раннер создал базу'); lines.push('      kind: PostgreSQL'); lines.push('      server: localhost'); lines.push('      name: demo'); }
     if (state.target === 'standalone') {
-      lines.push('  user: Admin');
-      lines.push('  standalone:');
-      lines.push('    gate: 127.0.0.1:1543   # админим по SSH; либо launch: {…}, чтобы раннер поднял свой');
-      lines.push('  web:');
-      lines.push('    url: http://127.0.0.1:8314/demo   # открываем клиентом');
+      lines.push('    connection: "Srvr=127.0.0.1;Ref=demo"   # прямой шлюз: Конфигуратор и тонкий клиент');
+      lines.push('    user: Admin');
+      lines.push('    standalone:              # объявляет вид цели');
+      lines.push('      gate: 127.0.0.1:1543   # SSH-шлюз: агентский набор, платформа у раннера не нужна');
+      lines.push('    web:');
+      lines.push('      url: http://127.0.0.1:8314/   # HTTP самого сервера: launch web, --via web');
     }
     lines.push('source-set:');
     if (state.type === 'CONFIGURATION') lines.push('  - { name: main, type: CONFIGURATION, path: ' + (state.format === 'EDT' ? 'src/main' : 'src/cf') + ' }');
@@ -166,11 +173,11 @@
     if (state.type === 'EXTERNAL') lines.push('  - { name: tools, type: EXTERNAL_DATA_PROCESSORS, path: src/epf }');
     if (state.tools.web && state.target !== 'standalone') {
       lines.splice(lines.indexOf('source-set:'), 0,
-        '  web:                     # публикация для веб-клиента',
-        '    server: apache24       # apache2 | apache22 | apache24 | iis',
-        '    wsdir: demo',
-        '    dir: /var/www/demo',
-        '    url: http://localhost/demo   # адрес после публикации');
+        '    web:                     # публикация для веб-клиента',
+        '      server: apache24       # apache2 | apache22 | apache24 | iis',
+        '      wsdir: demo',
+        '      dir: /var/www/demo',
+        '      url: http://localhost/demo   # адрес после публикации');
     }
     if (state.format === 'EDT') { lines.push('tools:'); lines.push('  edt_cli:'); lines.push('    path: 2025.2.3          # версия или каталог EDT'); }
     document.getElementById('yaml').textContent = lines.join('\n');
@@ -187,6 +194,6 @@
   renderPanel(); renderTable();
 })();
 </script>
-<script src="site.js?v=3" defer></script>
+<script src="site.js?v=6" defer></script>
 </body>
 </html>

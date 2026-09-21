@@ -8,7 +8,7 @@ Do not sync public docs, ADR checklists, or implementation work against archive 
 
 Current active entry points:
 
-- `../IMPLEMENTATION_TODO.md`
+- GitHub issues репозитория (сводный план: #233)
 - `../ADR_DERIVED_BACKLOG.md`
 - `../acceptance/real-environment-validation.md`
 - `../../docs/README.md`
