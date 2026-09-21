@@ -169,7 +169,7 @@ tools:
     startup_timeout_ms: 300000
     command_timeout_ms: 300000
   designer_agent:
-    port: 1543               # управляемый агент; либо attach: host:port
+    port: 1543               # управляемый агент; либо attach: host:port ([v6]:port)
     startup_timeout_ms: 120000
 
 mcp:
@@ -403,7 +403,7 @@ infobases:
     user: Admin
     password: secret
     standalone:
-      gate: srv.example:1543      # host:port SSH-шлюза
+      gate: srv.example:1543      # host:port SSH-шлюза; IPv6 — в скобках: '[::1]:1543'
       host-fingerprint: 'SHA256:…'  # чей ключ считать своим; не объявлен — принимается любой
       exchange: sftp              # файлы — по SFTP того же шлюза
     web:
@@ -915,10 +915,13 @@ SSH-клиент встроен в раннер: внешний `ssh` не ну�
 
 ### `tools.designer_agent.attach`
 
-- Тип: строка `host:port`
+- Тип: строка `host:port` (IPv6 — в скобках: `[::1]:1543`)
 - Обязателен: нет
 
-Агент, поднятый вне раннера. Исключает `port` и `host-key`.
+Агент, поднятый вне раннера. Исключает `port` и `host-key`. Порт обязателен, как и у
+`infobase.standalone.gate`: к этой точке идёт собственный SSH-клиент раннера, умолчания
+платформы у него нет. Обе записи читает один читатель адреса: имя приводится к строчным
+(не-ASCII — в punycode), адрес IPv4 — к каноническому виду, пробелы в записи — отказ.
 
 ### `tools.designer_agent.base-dir`
 

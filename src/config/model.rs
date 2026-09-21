@@ -9,6 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::domain::capability::{self, Operation, Provider, ProviderPlan, TargetKind};
 use crate::domain::execution::ExecutionTimeouts;
 use crate::platform::connection::V8Connection;
+use crate::support::authority::{host_and_port_of_authority, Host};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -200,7 +201,8 @@ pub struct InfobaseClusterAgentConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub struct StandaloneConfig {
-    /// `host:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`, port 1543 by default).
+    /// `host:port` or `[v6]:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`); the
+    /// port is required — `ibsrv` listens on 1543 unless told otherwise.
     pub gate: String,
 
     /// `SHA256:…` fingerprint the gate must present. Absent: the key is accepted and named.
@@ -233,8 +235,8 @@ pub enum StandaloneExchangeChannel {
 
 impl StandaloneConfig {
     /// The gate as `(host, port)`.
-    pub fn gate_endpoint(&self) -> Result<(String, u16), String> {
-        parse_host_port(&self.gate)
+    pub fn gate_endpoint(&self) -> Result<(Host, u16), String> {
+        ssh_endpoint(&self.gate)
     }
 
     /// The declared directory channel, if that is the channel.
@@ -256,21 +258,21 @@ impl StandaloneConfig {
     }
 }
 
-/// `host:port` with a non-zero port.
-pub fn parse_host_port(value: &str) -> Result<(String, u16), String> {
-    let (host, port) = value
-        .rsplit_once(':')
-        .ok_or_else(|| format!("'{value}' is not host:port"))?;
-    let port = port
-        .parse::<u16>()
-        .ok()
-        .filter(|port| *port != 0)
-        .ok_or_else(|| format!("'{value}' has no valid port"))?;
-    let host = host.trim();
-    if host.is_empty() {
-        return Err(format!("'{value}' has no host"));
+/// Точка входа собственного SSH-клиента раннера — шлюз автономного сервера или чужой
+/// агент Конфигуратора. Запись `host:port` читает один на весь раннер читатель адреса,
+/// `support::authority` (IPv6 в скобках, имя строчными, IPv4 канонический, пробелы и
+/// управляющие символы — отказ); поверх него — своё правило: порт обязателен, потому что
+/// к этой точке идёт клиент раннера, а не утилита платформы со своим умолчанием.
+pub fn ssh_endpoint(value: &str) -> Result<(Host, u16), String> {
+    match host_and_port_of_authority(value) {
+        Some((host, Some(port))) => Ok((host, port)),
+        Some((_, None)) => Err(format!(
+            "'{value}' has no port: the runner's own client connects there, so host:port or [v6]:port is required"
+        )),
+        None => Err(format!(
+            "'{value}' must be a host with a port 1–65535 — host:port or [v6]:port"
+        )),
     }
-    Ok((host.to_owned(), port))
 }
 
 /// Web server a publication is written to.
@@ -948,7 +950,8 @@ impl Default for EdtCliConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct DesignerAgentConfig {
-    /// `host:port` of an agent started outside the runner. Attached mode.
+    /// `host:port` or `[v6]:port` of an agent started outside the runner; the port is
+    /// required. Attached mode.
     pub attach: Option<String>,
 
     /// `AgentBaseDir` of the attached agent, where its commands read and write files.
@@ -995,7 +998,7 @@ pub enum DesignerAgentMode {
     /// The runner launches `1cv8 DESIGNER … /AgentMode` and owns its lifetime.
     Managed { port: u16 },
     /// The runner connects to an agent it did not start and never restarts it.
-    Attached { host: String, port: u16 },
+    Attached { host: Host, port: u16 },
 }
 
 impl DesignerAgentConfig {
@@ -1030,7 +1033,7 @@ impl DesignerAgentConfig {
                 port: self.port.unwrap_or(DEFAULT_DESIGNER_AGENT_PORT),
             }),
             Some(attach) => {
-                let (host, port) = parse_host_port(attach)?;
+                let (host, port) = ssh_endpoint(attach)?;
                 Ok(DesignerAgentMode::Attached { host, port })
             }
         }
@@ -1079,7 +1082,10 @@ const fn default_edt_cli_command_timeout_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::PlatformToolConfig;
+    use super::{
+        ssh_endpoint, DesignerAgentConfig, DesignerAgentMode, Host, PlatformToolConfig,
+        StandaloneConfig,
+    };
 
     #[test]
     fn platform_strict_defaults_to_false_and_deserializes_true() {
@@ -1089,5 +1095,52 @@ mod tests {
         let configured: PlatformToolConfig =
             serde_yaml::from_str("strict: true\n").expect("deserialize strict platform config");
         assert!(configured.strict);
+    }
+
+    /// Шлюз и `attach` читаются одним читателем адреса: скобки IPv6 снимаются, имя —
+    /// строчными и в punycode, IPv4 — канонический; порт обязателен; пробелы — не адрес.
+    #[test]
+    fn the_gate_and_the_attach_endpoint_are_read_by_the_authority_reader() {
+        let address = |value: &str| Host::Address(value.parse().expect("literal address"));
+        let name = |value: &str| Host::Name(value.to_owned());
+        for (record, host, port) in [
+            ("[::1]:1543", address("::1"), 1543),
+            ("127.0.0.1:1543", address("127.0.0.1"), 1543),
+            ("0177.0.0.1:1543", address("127.0.0.1"), 1543),
+            ("SRV.example.:1543", name("srv.example"), 1543),
+            ("сервер:1543", name("xn--b1afb6bcb"), 1543),
+        ] {
+            let standalone: StandaloneConfig =
+                serde_yaml::from_str(&format!("gate: '{record}'\n")).expect("standalone");
+            assert_eq!(
+                standalone.gate_endpoint(),
+                Ok((host.clone(), port)),
+                "{record}"
+            );
+            let agent: DesignerAgentConfig =
+                serde_yaml::from_str(&format!("attach: '{record}'\n")).expect("agent");
+            assert_eq!(
+                agent.mode(),
+                Ok(DesignerAgentMode::Attached { host, port }),
+                "{record}"
+            );
+        }
+        for (record, reason) in [
+            ("srv", "has no port"),
+            ("[::1]", "has no port"),
+            ("srv:", "must be a host with a port"),
+            ("srv:0", "must be a host with a port"),
+            ("srv:x", "must be a host with a port"),
+            ("::1:1543", "must be a host with a port"),
+            ("", "must be a host with a port"),
+            (" srv:1543", "must be a host with a port"),
+            ("srv:1543 ", "must be a host with a port"),
+        ] {
+            let error = ssh_endpoint(record).expect_err(record);
+            assert!(
+                error.contains(reason) && error.contains(&format!("'{record}'")),
+                "{record}: {error}"
+            );
+        }
     }
 }

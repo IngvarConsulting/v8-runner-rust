@@ -29,6 +29,7 @@ use tracing::{debug, warn};
 
 use crate::platform::process::{ManagedSpawnMode, ProcessRequest, ProcessRunner};
 use crate::platform::sftp::{self, SftpClient, SftpError};
+use crate::support::authority::Host;
 
 /// Первая команда любой сессии: без неё ответы — проза с приглашением.
 pub const JSON_MODE_COMMAND: &str = "options set --show-prompt=no --output-format=json";
@@ -40,7 +41,7 @@ pub const CONNECT_COMMAND: &str = "common connect-ib";
 pub const DISCONNECT_COMMAND: &str = "common disconnect-ib";
 pub const SHUTDOWN_COMMAND: &str = "common shutdown";
 /// Адрес, который слушает управляемый агент: он живёт на машине раннера.
-pub const MANAGED_LISTEN_ADDRESS: &str = "127.0.0.1";
+pub const MANAGED_LISTEN_HOST: std::net::Ipv4Addr = std::net::Ipv4Addr::LOCALHOST;
 /// Файл карты пользовательских каталогов в `AgentBaseDir`.
 pub const BASE_DIR_MAP_FILE: &str = "agentbasedir.json";
 const RETRY_INTERVAL: Duration = Duration::from_millis(500);
@@ -326,16 +327,23 @@ pub enum AgentError {
     },
 }
 
-/// Точка входа: где слушает агент.
+/// Точка входа: где слушает агент. Хост типизирован — читает его `support::authority`,
+/// и вопрос «это адрес IPv6?» здесь не задаётся заново.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentEndpoint {
-    pub host: String,
+    pub host: Host,
     pub port: u16,
 }
 
+/// `host:port` для журнала и отказа; адрес IPv6 — в скобках, как его и объявляют.
 impl std::fmt::Display for AgentEndpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.host, self.port)
+        match &self.host {
+            Host::Address(std::net::IpAddr::V6(address)) => {
+                write!(f, "[{address}]:{}", self.port)
+            }
+            host => write!(f, "{host}:{}", self.port),
+        }
     }
 }
 
@@ -558,6 +566,7 @@ impl AgentSession {
             })?;
         let endpoint = request.endpoint.clone();
         let named = endpoint.to_string();
+        let host = endpoint.host.to_string();
         debug!(endpoint = %named, user = request.user.as_str(), "opening agent session");
 
         let expectation = request.host_key.clone();
@@ -567,7 +576,7 @@ impl AgentSession {
                 let config = Arc::new(ssh_client_config());
                 let mut connection = client::connect(
                     config,
-                    (endpoint.host.as_str(), endpoint.port),
+                    (host.as_str(), endpoint.port),
                     ClientEvents {
                         expectation: expectation.clone(),
                         presented: presented.clone(),
@@ -1170,7 +1179,7 @@ impl AgentLaunch {
         args.push("/AgentPort".to_owned());
         args.push(self.port.to_string());
         args.push("/AgentListenAddress".to_owned());
-        args.push(MANAGED_LISTEN_ADDRESS.to_owned());
+        args.push(MANAGED_LISTEN_HOST.to_string());
         match self.host_key.as_ref() {
             Some(key) => {
                 args.push("/AgentSSHHostKey".to_owned());
@@ -1185,7 +1194,7 @@ impl AgentLaunch {
 
     pub fn endpoint(&self) -> AgentEndpoint {
         AgentEndpoint {
-            host: MANAGED_LISTEN_ADDRESS.to_owned(),
+            host: Host::Address(std::net::IpAddr::V4(MANAGED_LISTEN_HOST)),
             port: self.port,
         }
     }
@@ -1476,12 +1485,9 @@ mod tests {
         let Ok(endpoint) = std::env::var("V8_GATE_PROBE") else {
             return;
         };
-        let (host, port) = endpoint.rsplit_once(':').expect("host:port");
+        let (host, port) = crate::config::model::ssh_endpoint(&endpoint).expect("host:port");
         let request = AgentSessionRequest {
-            endpoint: AgentEndpoint {
-                host: host.to_owned(),
-                port: port.parse().expect("port"),
-            },
+            endpoint: AgentEndpoint { host, port },
             user: std::env::var("V8_GATE_USER").unwrap_or_default(),
             password: std::env::var("V8_GATE_PASSWORD").unwrap_or_default(),
             transcript_log: None,
@@ -1606,6 +1612,28 @@ mod tests {
         );
     }
 
+    /// Журнал и отказ печатают точку входа так, как её объявляют: адрес IPv6 — в
+    /// скобках; соединению при этом уходит голый адрес.
+    #[test]
+    fn an_endpoint_prints_a_v6_address_in_brackets() {
+        let v6 = AgentEndpoint {
+            host: Host::Address("::1".parse().expect("v6")),
+            port: 1543,
+        };
+        assert_eq!(v6.to_string(), "[::1]:1543");
+        assert_eq!(v6.host.to_string(), "::1");
+        let v4 = AgentEndpoint {
+            host: Host::Address(std::net::IpAddr::V4(MANAGED_LISTEN_HOST)),
+            port: 1543,
+        };
+        assert_eq!(v4.to_string(), "127.0.0.1:1543");
+        let name = AgentEndpoint {
+            host: Host::Name("srv.example".to_owned()),
+            port: 1543,
+        };
+        assert_eq!(name.to_string(), "srv.example:1543");
+    }
+
     #[test]
     fn a_dead_endpoint_is_unreachable_not_a_handshake_failure() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -1613,7 +1641,7 @@ mod tests {
         drop(listener);
         let request = AgentSessionRequest {
             endpoint: AgentEndpoint {
-                host: "127.0.0.1".to_owned(),
+                host: Host::Address(std::net::IpAddr::V4(MANAGED_LISTEN_HOST)),
                 port,
             },
             user: String::new(),

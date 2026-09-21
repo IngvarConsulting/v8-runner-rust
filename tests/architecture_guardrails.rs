@@ -5,7 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use guardrail_support::{
-    collect_rust_files, free_function_tokens, production_tokens, trait_impl_method_tokens,
+    collect_rust_files, free_function_tokens, production_source, production_tokens,
+    trait_impl_method_tokens,
 };
 
 const EXPECTED_MCP_TOOLS: &[&str] = &[
@@ -438,6 +439,97 @@ fn the_loopback_question_is_answered_in_one_place() {
          support::authority, which is the single owner:\n{}",
         offenders.join("\n")
     );
+}
+
+#[test]
+fn a_host_port_record_is_read_in_one_place() {
+    // Корень проблемы: запись `host:port` резали по последнему двоеточию в двух местах —
+    // у SSH-шлюза автономного сервера и у `attach` агента, — и скобки IPv6 оставались в
+    // хосте, который затем не разрешался. Владелец чтения один — `support::authority`:
+    // только разбор адреса знает про скобки, порт, IDNA и запрещённые символы. Свои
+    // правила поверх (порт обязателен) модули добавляют к его ответу, а не к строке.
+    let owner = repo_path("src/support/authority.rs");
+    // Маркеры порождаются разбором сниппетов: так они совпадают с тем, как `syn` печатает
+    // токены, и не зависят от пробелов. Первые — формы, которыми дефект был написан.
+    let markers: Vec<(String, &str)> = [
+        "rsplit_once(':')",
+        "rsplit_once(\":\")",
+        "rsplitn(2, ':')",
+        "rsplitn(2, \":\")",
+        "rfind(':')",
+        "rfind(\":\")",
+        "split_once(':')",
+        "split_once(\":\")",
+    ]
+    .into_iter()
+    .map(|call| (cut_marker(call), call))
+    .collect();
+    // Строки `ключ: значение` режут по первому двоеточию законно: это не адреса. Список
+    // может только сокращаться.
+    const KEY_VALUE_LINE_READERS: &[&str] = &[
+        "src/platform/extension_inventory.rs",
+        "src/support/edt_project.rs",
+        "src/use_cases/client_mcp_readiness.rs",
+    ];
+    let mut offenders = Vec::new();
+
+    for file in collect_rust_files(&repo_path("src")) {
+        if file == owner {
+            continue;
+        }
+        let relative = file
+            .strip_prefix(repo_path(""))
+            .expect("inside the repository")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let source = without_doc_comments(&production_source(&file));
+        for (marker, call) in &markers {
+            if !source.contains(marker.as_str()) {
+                continue;
+            }
+            if call.starts_with("split_once") && KEY_VALUE_LINE_READERS.contains(&relative.as_str())
+            {
+                continue;
+            }
+            offenders.push(format!("{relative}: {call}"));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these modules cut a host:port record by a colon on their own instead of calling \
+         support::authority::host_and_port_of_authority, which is the single owner:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// Токены вызова `.<call>` в том виде, в каком их печатает `syn`, без приёмника.
+fn cut_marker(call: &str) -> String {
+    let expression: syn::Expr =
+        syn::parse_str(&format!("v.{call}")).unwrap_or_else(|_| panic!("parse {call}"));
+    let rendered = quote::ToTokens::to_token_stream(&expression).to_string();
+    rendered
+        .strip_prefix("v . ")
+        .unwrap_or_else(|| panic!("receiver in {rendered}"))
+        .to_owned()
+}
+
+/// Убирает `# [doc = "..."]` из исходного вида токенов, оставляя сам код.
+fn without_doc_comments(source: &str) -> String {
+    const OPENING: &str = "# [doc = ";
+    let mut kept = String::with_capacity(source.len());
+    let mut rest = source;
+
+    while let Some(at) = rest.find(OPENING) {
+        kept.push_str(&rest[..at]);
+        let after = &rest[at + OPENING.len()..];
+        match after.find(']') {
+            Some(close) => rest = &after[close + 1..],
+            None => return kept,
+        }
+    }
+    kept.push_str(rest);
+    kept
 }
 
 #[test]
