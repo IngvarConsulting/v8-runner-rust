@@ -628,10 +628,13 @@ fn a_direct_gate_address_next_to_the_standalone_section_is_accepted_but_not_used
         "the gate served the command: {payload}"
     );
     assert!(
-        commands
-            .iter()
-            .all(|command| !command.contains("Srvr=") && !command.contains("Ref=")),
-        "the direct gate address never reaches the gate: {commands:?}"
+        commands.iter().all(|command| {
+            !command.contains("Srvr=")
+                && !command.contains("Ref=")
+                && !command.contains("1541\\demo")
+                && !command.contains("/S ")
+        }),
+        "the direct gate address never reaches the gate in any form: {commands:?}"
     );
     let warnings = payload["warnings"]
         .as_array()

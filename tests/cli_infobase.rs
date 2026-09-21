@@ -1061,6 +1061,64 @@ fn a_server_connection_without_dbms_still_exports_through_the_designer() {
     let argv = fs::read_to_string(calls).expect("calls");
     assert!(argv.contains("/DumpCfg"));
     assert!(!argv.contains("config save"));
+    assert!(argv.contains("/S localhost\\demo"), "{argv}");
+    assert!(!argv.contains("/IBConnectionString"), "{argv}");
+}
+
+/// Реквизиты серверной базы доходят до Конфигуратора рядом с адресом в его форме:
+/// `/S host\name /N user /P pwd`. Рядом с `/IBConnectionString` платформа 8.3.27.1936
+/// на Windows их не принимала — «Пользователь ИБ не идентифицирован» (#55).
+#[test]
+fn a_declared_server_address_reaches_the_designer_as_s_with_separate_credentials() {
+    let dir = temp_workspace();
+    let base = dir.path().join("project");
+    let work = dir.path().join("work");
+    let config = dir.path().join("v8project.yaml");
+    let platform = dir.path().join("platform");
+    fs::create_dir_all(&base).expect("base");
+    fs::create_dir_all(&work).expect("work");
+    fs::create_dir_all(&platform).expect("platform");
+    let calls = dir.path().join("calls.log");
+    write_designer(&platform.join("1cv8"), &calls);
+    fs::write(
+        &config,
+        format!(
+            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'Srvr=\"srv:1541\";Ref=\"demo\";'\n  user: Admin\n  password: secret\nsource-set: []\ntools:\n  platform:\n    path: '{}'\n",
+            work.display(),
+            platform.display(),
+        ),
+    )
+    .expect("config");
+    let output = base.join("dist/main.cf");
+
+    let command = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "infobase",
+            "configuration",
+            "export",
+            "--state",
+            "working",
+            "--output",
+            &output.display().to_string(),
+        ])
+        .output()
+        .expect("run export");
+
+    assert!(
+        command.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&command.stdout),
+        String::from_utf8_lossy(&command.stderr)
+    );
+    let argv = fs::read_to_string(calls).expect("calls");
+    assert!(
+        argv.contains("/S srv:1541\\demo /N Admin /P secret"),
+        "{argv}"
+    );
+    assert!(!argv.contains("/IBConnectionString"), "{argv}");
 }
 
 #[test]

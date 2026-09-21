@@ -15,6 +15,13 @@ impl V8Connection {
         let trimmed = raw.trim();
         let connection_args = if trimmed.starts_with('/') || trimmed.starts_with('-') {
             split_arg_string(trimmed)
+        } else if let Some(address) =
+            declared_server_address(trimmed).and_then(|address| address.sole_s_argument())
+        {
+            // Объявленный серверный адрес уходит платформе её же ключом `/S host\name`:
+            // рядом с `/IBConnectionString` реквизиты `/N`/`/P` она не принимала
+            // (Windows, 8.3.27.1936, #55), рядом с `/S` — принимает.
+            vec!["/S".to_owned(), address]
         } else {
             vec!["/IBConnectionString".to_owned(), trimmed.to_owned()]
         };
@@ -73,6 +80,8 @@ impl V8Connection {
     }
 
     /// Returns whether the raw value has a supported file or server connection shape.
+    /// The declared form is answered by [`declared_server_address`], the same predicate
+    /// that decides how the address reaches the platform.
     pub fn has_supported_shape(&self) -> bool {
         if let Some(path) = self.file_path() {
             return !path.trim().is_empty();
@@ -90,30 +99,7 @@ impl V8Connection {
             return false;
         }
 
-        // Платформа принимает завершающую `;` и значения в кавычках: `Srvr="srv";Ref="ut";`
-        // — такая же серверная строка, как без них.
-        let Some(parameters) = declared_parameters(&self.raw) else {
-            return false;
-        };
-        let mut server = None;
-        let mut reference = None;
-        for (key, value) in parameters {
-            let value = unquote_connection_value(value);
-            if ['"', '\'']
-                .iter()
-                .any(|quote| value.starts_with(*quote) || value.ends_with(*quote))
-            {
-                // Непарная кавычка: платформа такую строку не примет.
-                return false;
-            }
-            match key.as_str() {
-                "srvr" => server = Some(value),
-                "ref" => reference = Some(value),
-                _ => {}
-            }
-        }
-        server.is_some_and(|value| !value.trim().is_empty())
-            && reference.is_some_and(|value| !value.trim().is_empty())
+        declared_server_address(&self.raw).is_some()
     }
 
     /// Returns a stable file-based infobase connection string when available.
@@ -121,6 +107,61 @@ impl V8Connection {
         self.file_path()
             .map(|path| format!("File='{}'", path.replace('\'', "''")))
     }
+}
+
+/// Серверный адрес объявленной строки: `Srvr` и `Ref` без кавычек и число частей строки.
+#[derive(Debug)]
+struct DeclaredServerAddress {
+    server: String,
+    reference: String,
+    /// Сколько частей `ключ=значение` в строке.
+    parts: usize,
+}
+
+impl DeclaredServerAddress {
+    /// Значение ключа `/S` — `host[:port]\name`, — когда строку можно им заменить без
+    /// потерь и без догадок. Условий два, и держит их сам адрес, а не тот, кто спрашивает:
+    /// в строке ровно две части (дополнительные — `Locale=`, `Usr=`, иное — ключ `/S` не
+    /// несёт, и терять их нельзя), и хост не перечисляет резервные серверы через запятую
+    /// (справка платформы знает у `/S` одну машину, а замера списка нет — #55).
+    fn sole_s_argument(&self) -> Option<String> {
+        if self.parts != 2 || self.server.contains(',') {
+            return None;
+        }
+        Some(format!("{}\\{}", self.server, self.reference))
+    }
+}
+
+/// Один предикат серверной формы на все вопросы к объявленной строке — валидации и
+/// сборке argv: `Srvr` и `Ref` с непустыми значениями, регистр и порядок ключей свободны,
+/// завершающая `;` и парные кавычки допустимы (`Srvr="srv";Ref="ut";`). `None` — строку
+/// платформа серверным адресом не считает: части нет, значение пусто или кавычка непарная.
+fn declared_server_address(raw: &str) -> Option<DeclaredServerAddress> {
+    let parameters = declared_parameters(raw)?;
+    let mut server = None;
+    let mut reference = None;
+    for (key, value) in &parameters {
+        let value = unquote_connection_value(value);
+        if ['"', '\'']
+            .iter()
+            .any(|quote| value.starts_with(*quote) || value.ends_with(*quote))
+        {
+            // Непарная кавычка: платформа такую строку не примет.
+            return None;
+        }
+        match key.as_str() {
+            "srvr" => server = Some(value.trim()),
+            "ref" => reference = Some(value.trim()),
+            _ => {}
+        }
+    }
+    let server = server.filter(|value| !value.is_empty())?;
+    let reference = reference.filter(|value| !value.is_empty())?;
+    Some(DeclaredServerAddress {
+        server: server.to_owned(),
+        reference: reference.to_owned(),
+        parts: parameters.len(),
+    })
 }
 
 /// Параметры объявленной формы строки подключения — `ключ=значение` через `;`: ключ
@@ -276,6 +317,58 @@ mod tests {
         ] {
             assert!(
                 !V8Connection::from_connection_string(raw).has_supported_shape(),
+                "{raw}"
+            );
+        }
+    }
+
+    /// Объявленный серверный адрес уходит платформе её ключом `/S host\name`, реквизиты —
+    /// отдельными `/N`/`/P`: рядом с `/IBConnectionString` платформа 8.3.27.1936 на Windows
+    /// отвечала «Пользователь ИБ не идентифицирован», рядом с `/S` — подключалась (#55).
+    #[test]
+    fn a_declared_server_address_is_passed_as_s_with_separate_credentials() {
+        let mut connection = V8Connection::from_connection_string("Srvr=\"srv\";Ref=\"ut\";");
+        connection.user = Some("alice".to_owned());
+        connection.password = Some("secret".to_owned());
+        assert_eq!(
+            connection.args(),
+            vec!["/S", "srv\\ut", "/N", "alice", "/P", "secret"]
+        );
+        assert_eq!(connection.infobase_args(), vec!["/S", "srv\\ut"]);
+        assert!(connection.has_supported_shape());
+
+        for (raw, expected) in [
+            ("Srvr=srv:1541;Ref=demo", "srv:1541\\demo"),
+            (" Ref = demo ; SRVR = srv ", "srv\\demo"),
+            ("Srvr=srv;Ref=demo;", "srv\\demo"),
+        ] {
+            assert_eq!(
+                V8Connection::from_connection_string(raw).args(),
+                vec!["/S", expected],
+                "{raw}"
+            );
+        }
+    }
+
+    /// Строка с дополнительными частями, список резервных серверов, файловая строка и
+    /// строка, которую платформа серверной не считает, отдаются целиком: частей терять
+    /// нельзя, а форму `/S` раннер берёт только там, где она замерена — одна машина и
+    /// ничего кроме адреса. Список серверов рядом с `/S` не замерен (#55), поэтому такая
+    /// строка остаётся прежней формой и продолжает работать как работала.
+    #[test]
+    fn other_declared_strings_stay_whole_in_ibconnectionstring() {
+        for raw in [
+            "Srvr=host;Ref=name;Usr=a;Pwd=b",
+            "Srvr=srv;Ref=demo;Locale=ru",
+            "Srvr='srv1,srv2:1641';Ref=demo",
+            "File=/tmp/ib;Locale=ru",
+            "File=/tmp/ib",
+            "Srvr=\"host;Ref=x",
+            "Srvr=host",
+        ] {
+            assert_eq!(
+                V8Connection::from_connection_string(raw).args(),
+                vec!["/IBConnectionString", raw],
                 "{raw}"
             );
         }

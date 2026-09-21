@@ -2069,6 +2069,46 @@ fn a_thin_client_keeps_the_connection_address_by_default() {
     assert!(!args.iter().any(|arg| arg == "/WS"), "{args:?}");
 }
 
+/// План тонкого клиента у серверной базы: адрес в форме платформы `/S host:port\name`,
+/// реквизиты отдельными `/N`/`/P`, пароль скрыт (#55).
+#[test]
+fn a_thin_client_plan_shows_a_declared_server_address_as_s_with_masked_credentials() {
+    let (_dir, config_path, install_dir, work_path) = setup_project();
+    fs::write(
+        &config_path,
+        format!(
+            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'Srvr=srv:1541;Ref=demo'\n  user: Admin\n  password: s3cret\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    path: '{}'\n",
+            work_path.display(),
+            install_dir.display(),
+        ),
+    )
+    .expect("config");
+
+    let payload = launch_json(&config_path, &["launch", "thin", "--dry-run"]);
+
+    assert_eq!(payload["ok"], true, "{payload}");
+    let args = planned_args(&payload);
+    let at = args
+        .iter()
+        .position(|arg| arg == "/S")
+        .unwrap_or_else(|| panic!("no /S in {args:?}"));
+    let window: Vec<&str> = args
+        .get(at..at + 6)
+        .unwrap_or_else(|| panic!("/S is not followed by an address and credentials: {args:?}"))
+        .iter()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        window,
+        ["/S", "srv:1541\\demo", "/N", "Admin", "/P", "***"],
+        "{args:?}"
+    );
+    assert!(
+        !args.iter().any(|arg| arg == "/IBConnectionString"),
+        "{args:?}"
+    );
+}
+
 /// Развилка есть только у тонкого клиента: у остальных режимов адрес один, и ключ,
 /// которому нечего выбирать, отвергается, а не игнорируется молча.
 #[test]

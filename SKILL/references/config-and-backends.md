@@ -10,6 +10,10 @@ settings before CLI overrides.
 - `format`: `DESIGNER` or `EDT`.
 - `providers.<operation>`: optional per-operation executor override. Omit it to use the defaults below.
 - `infobases.origin.connection` in `v8project.local.yaml`: the default infobase, often `File=build/ib`;
+  a declared two-part `Srvr=…;Ref=…` with a single machine reaches the platform as
+  `/S host[:port]\ref` with `/N`/`/P` taken from `user`/`password` — keep credentials out of the
+  string itself; a string with extra parts (`Usr=`, `Locale=`, a comma-separated server list) is
+  passed whole and keeps the old form;
   other declared names are picked with `--infobase <name>`. `infobase:` is a one-cycle synonym for
   `infobases.origin`.
 - `source-set`: ordered configuration and extension sources.
