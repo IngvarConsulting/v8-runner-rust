@@ -387,9 +387,10 @@ fn connection_string_carries_credentials(connection: &str) -> bool {
                 .is_some_and(|key| key.eq_ignore_ascii_case("/n") || key.eq_ignore_ascii_case("/p"))
         });
     }
-    trimmed.split(';').any(|part| {
-        let part = part.trim_start().to_ascii_lowercase();
-        part.starts_with("usr=") || part.starts_with("pwd=")
+    crate::platform::connection::declared_parameters(trimmed).is_some_and(|parameters| {
+        parameters
+            .iter()
+            .any(|(key, _)| key == "usr" || key == "pwd")
     })
 }
 

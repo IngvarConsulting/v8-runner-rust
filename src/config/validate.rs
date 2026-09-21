@@ -2732,7 +2732,12 @@ mod tests {
 
     #[test]
     fn a_file_or_shapeless_address_next_to_the_standalone_section_is_refused_by_the_form_check() {
-        for connection in ["File=/srv/ib", "not a connection", "/S srv"] {
+        for connection in [
+            "File=/srv/ib",
+            "File = /srv/ib",
+            "not a connection",
+            "/S srv",
+        ] {
             let section = infobase(&format!(
                 "connection: '{connection}'\nstandalone:\n  gate: srv:1543\n  exchange: sftp\n"
             ));

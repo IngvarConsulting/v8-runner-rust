@@ -213,6 +213,7 @@ fn an_ad_hoc_connection_string_must_not_carry_credentials() {
         "/S srv\\erp /N Admin /P secret",
         "/F /tmp/ib /NAdmin /Psecret",
         "/F /tmp/ib /nadmin",
+        "Srvr=srv;Ref=erp; Usr = Admin ; PWD = secret;",
     ] {
         let output = project.run_json(&["--infobase", connection], LAUNCH_PREVIEW);
 

@@ -66,15 +66,10 @@ impl V8Connection {
             return file_path_from_args(&self.connection_args);
         }
 
-        self.raw.split(';').find_map(|part| {
-            let part = part.trim();
-            let lower = part.to_lowercase();
-            if lower.starts_with("file=") {
-                Some(&part[5..])
-            } else {
-                None
-            }
-        })
+        declared_parameters(&self.raw)?
+            .into_iter()
+            .find(|(key, _)| key == "file")
+            .map(|(_, value)| value)
     }
 
     /// Returns whether the raw value has a supported file or server connection shape.
@@ -97,18 +92,13 @@ impl V8Connection {
 
         // Платформа принимает завершающую `;` и значения в кавычках: `Srvr="srv";Ref="ut";`
         // — такая же серверная строка, как без них.
+        let Some(parameters) = declared_parameters(&self.raw) else {
+            return false;
+        };
         let mut server = None;
         let mut reference = None;
-        for part in self
-            .raw
-            .split(';')
-            .map(str::trim)
-            .filter(|part| !part.is_empty())
-        {
-            let Some((key, value)) = part.split_once('=') else {
-                return false;
-            };
-            let value = unquote_connection_value(value.trim());
+        for (key, value) in parameters {
+            let value = unquote_connection_value(value);
             if ['"', '\'']
                 .iter()
                 .any(|quote| value.starts_with(*quote) || value.ends_with(*quote))
@@ -116,7 +106,7 @@ impl V8Connection {
                 // Непарная кавычка: платформа такую строку не примет.
                 return false;
             }
-            match key.trim().to_ascii_lowercase().as_str() {
+            match key.as_str() {
                 "srvr" => server = Some(value),
                 "ref" => reference = Some(value),
                 _ => {}
@@ -131,6 +121,22 @@ impl V8Connection {
         self.file_path()
             .map(|path| format!("File='{}'", path.replace('\'', "''")))
     }
+}
+
+/// Параметры объявленной формы строки подключения — `ключ=значение` через `;`: ключ
+/// строчными и без пробелов вокруг, значение без пробелов по краям, пустые части
+/// (завершающая `;`) пропущены. `None` — часть без `=`: такую строку платформа не разберёт.
+/// Один разбор на все вопросы к строке, чтобы `File = …` не читался одним местом как
+/// файловый адрес, а другим — как серверный.
+pub fn declared_parameters(raw: &str) -> Option<Vec<(String, &str)>> {
+    raw.split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            part.split_once('=')
+                .map(|(key, value)| (key.trim().to_ascii_lowercase(), value.trim()))
+        })
+        .collect()
 }
 
 /// Значение параметра строки подключения без обрамляющих кавычек: платформа принимает
@@ -226,6 +232,22 @@ mod tests {
         assert!(!V8Connection::from_connection_string("not a connection").has_supported_shape());
         assert!(!V8Connection::from_connection_string("Srvr=cluster;Ref=").has_supported_shape());
         assert!(!V8Connection::from_connection_string("File=").has_supported_shape());
+    }
+
+    /// Ключ `File` с пробелами вокруг `=` читается тем же разбором, что и `Srvr`/`Ref`:
+    /// иначе одна строка была бы файловой для одного вопроса и серверной для другого.
+    #[test]
+    fn a_spaced_file_key_is_still_a_file_address() {
+        for raw in ["File = /srv/ib", "file=/srv/ib", " FILE =/srv/ib ;"] {
+            let connection = V8Connection::from_connection_string(raw);
+            assert_eq!(connection.file_path(), Some("/srv/ib"), "{raw}");
+            assert!(connection.has_supported_shape(), "{raw}");
+        }
+        assert_eq!(
+            V8Connection::from_connection_string("File = /srv/ib;Srvr=srv;Ref=db").file_path(),
+            Some("/srv/ib"),
+            "a file address wins over server parts in the same string"
+        );
     }
 
     /// Канонические формы платформы: завершающая `;`, кавычки, пробелы вокруг `=` и `;`,
