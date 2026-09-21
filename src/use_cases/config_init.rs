@@ -53,11 +53,22 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
         ))
     })?;
     let overwritten = output_path.exists();
-    if overwritten && !request.force {
-        return Err(AppError::Validation(format!(
-            "config file already exists: {} (use --force to overwrite)",
-            output_path.display()
-        )));
+    if overwritten {
+        // `init` — единственное имя словаря, сменившее предмет: раньше под ним создавали
+        // базу. Набравший его по старой памяти получает отказ с именем нужной команды,
+        // а не совет перезаписать свой конфиг ключом `--force`.
+        if let Some(declared) = declared_infobase_name(&output_path) {
+            return Err(AppError::Validation(format!(
+                "{} already declares the infobase {declared}: `init` prepares the project, and the infobase is created by `infobase create`",
+                output_path.display()
+            )));
+        }
+        if !request.force {
+            return Err(AppError::Validation(format!(
+                "config file already exists: {} (use --force to overwrite)",
+                output_path.display()
+            )));
+        }
     }
 
     let output_dir = output_path.parent().unwrap_or(project_dir.as_path());
@@ -111,6 +122,26 @@ const DEFAULT_ORIGIN_CONNECTION: &str = "File=build/ib";
 /// Местный слой объявляет `origin`: к какой базе подключён каталог, знает эта машина.
 /// Существующий слой не переписывается — `origin` дописывается, если не объявлен, а
 /// объявленный с другим адресом, чем просили, — отказ, чтобы адрес не потерялся молча.
+/// Имя базы, объявленной в существующем конфиге, если она там есть. Читается тем же
+/// разбором YAML, что и остальной файл: отказ должен называть базу, а не догадываться.
+fn declared_infobase_name(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let root: serde_yaml::Value = serde_yaml::from_str(&text).ok()?;
+    let mapping = root.as_mapping()?;
+    if let Some(name) = mapping
+        .get(serde_yaml::Value::String("infobases".to_owned()))
+        .and_then(serde_yaml::Value::as_mapping)
+        .and_then(|infobases| infobases.keys().next())
+        .and_then(serde_yaml::Value::as_str)
+    {
+        return Some(name.to_owned());
+    }
+    mapping
+        .get(serde_yaml::Value::String("infobase".to_owned()))
+        .is_some()
+        .then(|| crate::config::model::DEFAULT_INFOBASE_NAME.to_owned())
+}
+
 fn ensure_local_config(path: &Path, connection: Option<&str>) -> Result<(), AppError> {
     let content = if path.exists() {
         let existing = std::fs::read_to_string(path).map_err(|error| {
@@ -1018,7 +1049,7 @@ fn render_config(
         yaml.push_str("#     # How long to wait for the client MCP endpoint to come up.\n");
         yaml.push_str("#     wait_ready_timeout_ms: 300000\n");
     }
-    yaml.push_str("build:\n");
+    yaml.push_str("push:\n");
     yaml.push_str("  partialLoadThreshold: 20\n");
     yaml
 }

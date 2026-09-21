@@ -29,7 +29,7 @@ scope: [wire, cli]
 ```json
 {
   "ok": true,
-  "command": "infobase.configuration.export",
+  "command": "download",
   "duration_ms": 8,
   "data": {},
   "warnings": [],

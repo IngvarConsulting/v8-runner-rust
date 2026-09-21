@@ -329,12 +329,20 @@
       "type": "object"
     },
     "LoadMode": {
-      "enum": [
-        "load",
-        "merge",
-        "update"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "load",
+            "update"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "combine",
+          "description": "Объединение по файлу настроек. Прежнее имя режима — `merge`, оно принимается\nещё один цикл выпуска, а ответ называет режим новым именем.",
+          "type": "string"
+        }
+      ]
     },
     "LoadTargetKind": {
       "enum": [

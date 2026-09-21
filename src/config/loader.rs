@@ -145,6 +145,7 @@ fn load_config_with_mode(
     reject_legacy_config_keys(&root)?;
     reject_infobases_in_project_file(&root)?;
     let mut warnings = Vec::new();
+    reject_mixed_provider_keys(&root, ConfigFile::Project(&path))?;
     warnings.extend(fold_push_synonym(&mut root, ConfigFile::Project(&path))?);
     warnings.extend(fold_infobase_synonym(
         &mut root,
@@ -166,6 +167,7 @@ fn load_config_with_mode(
         reject_local_overlay_keys(&overlay)?;
         validate_local_overlay_schema_boundary(overlay.clone())
             .map_err(|error| ConfigLoadError::LocalOverlayUnsupportedShape(error.to_string()))?;
+        reject_mixed_provider_keys(&overlay, ConfigFile::Local)?;
         warnings.extend(fold_push_synonym(&mut overlay, ConfigFile::Local)?);
         warnings.extend(fold_infobase_synonym(&mut overlay, ConfigFile::Local)?);
         provider_origins.extend(provider_override_keys(&overlay, LOCAL_CONFIG_FILE_NAME));
@@ -307,6 +309,38 @@ fn fold_infobase_synonym(
         ),
     };
     Ok(Some(warning))
+}
+
+/// Ключ `providers.*` назван именем команды, прежнее имя принимается один цикл выпуска.
+/// Оба написания одного ключа в одном файле — отказ: `serde` собирает карту вставками и
+/// второе написание молча перебило бы первое, а слияние слоёв перебило бы проектный выбор
+/// местным. Проверяется до разбора, пока оба ключа ещё различимы.
+fn reject_mixed_provider_keys(
+    root: &serde_yaml::Value,
+    file: ConfigFile<'_>,
+) -> Result<(), ConfigValidationError> {
+    let Some(providers) = root
+        .as_mapping()
+        .and_then(|mapping| mapping.get(yaml_key("providers")))
+        .and_then(serde_yaml::Value::as_mapping)
+    else {
+        return Ok(());
+    };
+    for operation in crate::domain::capability::Operation::ALL {
+        let Some(previous) = operation.previous_key() else {
+            continue;
+        };
+        if providers.contains_key(yaml_key(previous))
+            && providers.contains_key(yaml_key(operation.as_str()))
+        {
+            return Err(ConfigValidationError::ProviderKeysMixed {
+                file: file.name(),
+                canonical: operation.as_str(),
+                previous,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Секция настроек отправки названа именем команды. Прежнее имя принимается один цикл
@@ -1044,6 +1078,25 @@ mod tests {
         let error = load(&config_path, &InfobaseSelector::Default).expect_err("null map");
 
         assert!(error.to_string().contains("null is not allowed"), "{error}");
+    }
+
+    /// Два написания одного ключа исполнителя в файле — отказ: в карте `serde` второе
+    /// молча перебило бы первое, а через слияние слоёв местный слой так же молча перебил
+    /// бы проектный выбор.
+    #[test]
+    fn both_spellings_of_one_provider_key_in_one_file_are_refused() {
+        let dir = tempdir().expect("tempdir");
+        let config_dir = dir.path().join("project");
+        let config_path = write_minimal_project_config(
+            &config_dir,
+            &minimal_config_without_base_path("providers:\n  build: ibcmd\n  push: designer\n"),
+        );
+
+        let error = load(&config_path, &InfobaseSelector::Default).expect_err("two spellings");
+
+        let message = error.to_string();
+        assert!(message.contains("providers.build"), "{message}");
+        assert!(message.contains("providers.push"), "{message}");
     }
 
     /// Три уровня учётных данных лежат в местном слое порознь: пользователь базы — в

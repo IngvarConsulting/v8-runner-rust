@@ -2686,7 +2686,7 @@ fn map_load_request(args: &LoadArgs) -> Result<LoadRequest, UseCaseError> {
         dry_run: args.dry_run,
         mode: match args.mode.as_str() {
             "load" => LoadMode::Load,
-            "merge" => LoadMode::Merge,
+            "combine" | "merge" => LoadMode::Merge,
             "update" => LoadMode::Update,
             other => {
                 return Err(UseCaseError::new(
@@ -3129,7 +3129,7 @@ fn load_message(result: &LoadResult) -> Option<String> {
     let metadata = load_metadata(result)?;
     let mode = match result.mode {
         LoadMode::Load => "load",
-        LoadMode::Merge => "merge",
+        LoadMode::Merge => "combine",
         LoadMode::Update => "update",
     };
     // A preview applied nothing, so it must not claim a successful apply; its own
@@ -3596,7 +3596,7 @@ fn render_artifact_mode(mode: ArtifactBuildMode) -> &'static str {
 fn render_load_text(result: &LoadResult, presenter: &Presenter, succeeded: bool) {
     let mode = match result.mode {
         LoadMode::Load => "load",
-        LoadMode::Merge => "merge",
+        LoadMode::Merge => "combine",
         LoadMode::Update => "update",
     };
     let metadata = load_metadata(result);

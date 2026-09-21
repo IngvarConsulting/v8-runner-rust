@@ -145,7 +145,7 @@ pub enum ConfigValidationError {
     WebPublicationDirMissing(String),
 
     #[error(
-        "top-level key 'builder' is not supported: the executor is chosen per operation; name one with providers.<operation> (for example providers.build: ibcmd) or remove the key to use the defaults"
+        "top-level key 'builder' is not supported: the executor is chosen per operation; name one with providers.<operation> (for example providers.push: ibcmd) or remove the key to use the defaults"
     )]
     BuilderKeyRemoved,
 
@@ -312,6 +312,15 @@ pub enum ConfigValidationError {
     PushSectionKeysMixed { file: String },
 
     #[error(
+        "{file} names the executor of one command twice: `providers.{previous}` is a one-cycle synonym for `providers.{canonical}`, keep one"
+    )]
+    ProviderKeysMixed {
+        file: String,
+        canonical: &'static str,
+        previous: &'static str,
+    },
+
+    #[error(
         "infobases.{name}: an infobase name is a plain identifier matching {pattern} — it names a directory under workPath"
     )]
     InfobaseNameInvalid { name: String, pattern: &'static str },
@@ -322,7 +331,7 @@ pub enum ConfigValidationError {
     InfobaseNotDeclared { name: String, declared: String },
 
     #[error(
-        "no infobase is selected: `origin` is not declared in v8project.local.yaml (declared: {declared}); pass --infobase <name|connection string> or declare infobases.origin.connection there (a new project starts with `config init`)"
+        "no infobase is selected: `origin` is not declared in v8project.local.yaml (declared: {declared}); pass --infobase <name|connection string> or declare infobases.origin.connection there (a new project starts with `init`)"
     )]
     OriginNotDeclared { declared: String },
 

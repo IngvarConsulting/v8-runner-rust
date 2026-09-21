@@ -9,6 +9,9 @@ use crate::domain::execution::ExecutionOutcome;
 #[serde(rename_all = "snake_case")]
 pub enum LoadMode {
     Load,
+    /// Объединение по файлу настроек. Прежнее имя режима — `merge`, оно принимается
+    /// ещё один цикл выпуска, а ответ называет режим новым именем.
+    #[serde(rename = "combine", alias = "merge")]
     Merge,
     Update,
 }

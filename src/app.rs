@@ -336,7 +336,7 @@ fn run_config_command(args: &crate::cli::args::ConfigArgs, presenter: &Presenter
 fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 {
     if config_flag_was_explicitly_set() {
         let message =
-            "global --config flag is not supported for `bootstrap`; use `bootstrap --project-dir <DIR>` to choose where the generated project is written";
+            "global --config flag is not supported for `clone`; use `clone --project-dir <DIR>` to choose where the generated project is written";
         let error = UseCaseError::new(UseCaseErrorKind::Validation, message);
         print_command_error(presenter, BOOTSTRAP_COMMAND, &error, message);
         return error.exit_code();
@@ -438,7 +438,7 @@ fn resolve_bootstrap_project_dir(
 fn run_config_init(args: &ConfigInitArgs, presenter: &Presenter) -> i32 {
     if config_flag_was_explicitly_set() {
         let message =
-            "global --config flag is not supported for `config init`; use `config init --output <FILE>` to choose where the generated config is written";
+            "global --config flag is not supported for `init`; use `init --output <FILE>` to choose where the generated config is written";
         let error = UseCaseError::new(UseCaseErrorKind::Validation, message);
         print_command_error(presenter, CONFIG_INIT_COMMAND, &error, message);
         return error.exit_code();
@@ -550,9 +550,9 @@ fn render_bootstrap_text(
     }
 
     let label = if succeeded {
-        "Project bootstrapped successfully"
+        "Project cloned successfully"
     } else {
-        "Project bootstrap failed"
+        "Project clone failed"
     };
     let timeline = vec![
         TimelineItem::new(
@@ -561,7 +561,7 @@ fn render_bootstrap_text(
             } else {
                 TimelineStatus::Failed
             },
-            "bootstrap:",
+            "clone:",
         )
         .with_detail(details.join("\n")),
         TimelineItem::new(

@@ -543,7 +543,8 @@ impl InfobaseArgs {
 pub enum InfobaseCommand {
     /// Create the infobase and the EDT workspace declared by the project
     Create(InitArgs),
-    /// Export working/database configuration state to CF or CFE
+    /// Previous spelling of `download`; hidden for one release cycle
+    #[command(hide = true)]
     Configuration(InfobaseConfigurationArgs),
     /// Export the complete infobase to a DT transfer file (not a backup)
     Dump(InfobaseDumpArgs),

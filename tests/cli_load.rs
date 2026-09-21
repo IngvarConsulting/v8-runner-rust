@@ -462,3 +462,44 @@ fn load_rejects_external_artifact_type_with_unknown_target_kind_payload_metadata
         .expect("message")
         .contains("only .cf and .cfe"));
 }
+
+/// Режим назван именем словаря: `upload --mode combine` доходит до платформы, ответ
+/// называет режим новым именем, а прежнее `merge` принимается ещё один цикл выпуска.
+#[test]
+fn upload_mode_combine_reaches_the_platform_and_answers_under_the_new_name() {
+    for mode in ["combine", "merge"] {
+        let (_dir, config_path, _binary_path, base_path, calls_log) = setup_project();
+        fs::write(base_path.join("release.cfe"), "cfe").expect("artifact");
+        fs::write(base_path.join("merge.xml"), "<settings/>").expect("settings");
+
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "upload",
+                "--path",
+                "release.cfe",
+                "--mode",
+                mode,
+                "--settings",
+                "merge.xml",
+                "--extension",
+                "ExistingExt",
+            ])
+            .output()
+            .expect("run command");
+
+        assert!(
+            output.status.success(),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+        assert_eq!(payload["ok"], true, "{mode}: {payload}");
+        assert_eq!(payload["command"], "upload", "{mode}: {payload}");
+        assert_eq!(payload["data"]["mode"], "combine", "{mode}: {payload}");
+        let calls = fs::read_to_string(&calls_log).expect("calls");
+        assert!(calls.contains("/MergeCfg"), "{mode}: {calls}");
+    }
+}

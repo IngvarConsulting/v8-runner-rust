@@ -16,6 +16,13 @@ fn root_help_splits_commands_and_global_options() {
     assert!(stdout.contains("Print application version"));
     assert!(stdout.contains("Send configured source-sets to the infobase"));
     assert!(stdout.contains("--json-message"));
+    // Прежние имена принимаются, но словарь в справке один.
+    for previous in ["bootstrap", "build", "dump", "load", "syntax", "config"] {
+        let listed = stdout
+            .lines()
+            .any(|line| line.trim_start().starts_with(&format!("{previous} ")));
+        assert!(!listed, "{previous} is listed in help:\n{stdout}");
+    }
 }
 
 #[test]

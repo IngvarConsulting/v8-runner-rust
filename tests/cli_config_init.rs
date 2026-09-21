@@ -207,9 +207,8 @@ fn config_init_rejects_global_config_shortcut_in_text_mode() {
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains(
-        "global --config flag is not supported for `config init`; use `config init --output <FILE>`"
-    ));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("global --config flag is not supported for `init`; use `init --output <FILE>`"));
 }
 
 #[test]
@@ -239,7 +238,7 @@ fn config_init_rejects_global_config_shortcut_in_json_mode() {
     assert!(payload["data"]["message"]
         .as_str()
         .expect("message")
-        .contains("use `config init --output <FILE>`"));
+        .contains("use `init --output <FILE>`"));
 }
 
 #[test]
@@ -513,4 +512,55 @@ fn config_init_ignores_non_edt_root_project_marker_when_nested_project_exists() 
     let config = fs::read_to_string(dir.path().join("v8project.yaml")).expect("config");
     assert!(config.contains("path: 'workspace/configuration'"));
     assert!(config.contains("type: CONFIGURATION"));
+}
+
+/// `init` сменил предмет: раньше под этим именем создавали базу. Набравший его по старой
+/// памяти в проекте с объявленной базой получает отказ с именем нужной команды, а не
+/// совет перезаписать свой конфиг ключом `--force`.
+#[test]
+fn init_over_a_config_that_declares_an_infobase_names_infobase_create() {
+    let dir = temp_workspace();
+    let config_path = dir.path().join("v8project.yaml");
+    fs::write(
+        &config_path,
+        "workPath: build\nformat: DESIGNER\ninfobases:\n  origin:\n    connection: 'File=build/ib'\nsource-set: []\n",
+    )
+    .expect("config");
+
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .args(["--json-message", "init"])
+        .output()
+        .expect("run init");
+
+    assert_eq!(output.status.code(), Some(2));
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json envelope");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("infobase create"), "{message}");
+    assert!(message.contains("origin"), "{message}");
+    assert!(!message.contains("--force"), "{message}");
+    assert_eq!(payload["command"], "init", "{payload}");
+}
+
+/// Порождённый конфиг назван словарём команд: иначе первая же следующая команда
+/// предупреждает о синониме, который выписал сам раннер.
+#[test]
+fn a_generated_config_names_the_push_section_by_its_command() {
+    let dir = temp_workspace();
+    fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
+
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .args(["init"])
+        .output()
+        .expect("run init");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let generated = fs::read_to_string(dir.path().join("v8project.yaml")).expect("generated");
+    assert!(generated.contains("push:"), "{generated}");
+    assert!(!generated.contains("build:"), "{generated}");
 }

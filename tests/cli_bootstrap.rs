@@ -358,7 +358,7 @@ fn bootstrap_rejects_global_config_flag_in_text_mode() {
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("not supported for `bootstrap`"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not supported for `clone`"));
     assert!(!project_dir.join("v8project.yaml").exists());
 }
 
@@ -394,7 +394,7 @@ fn bootstrap_rejects_global_config_flag_in_json_mode() {
     assert!(payload["data"]["message"]
         .as_str()
         .expect("message")
-        .contains("not supported for `bootstrap`"));
+        .contains("not supported for `clone`"));
     assert!(!project_dir.join("v8project.yaml").exists());
 }
 
