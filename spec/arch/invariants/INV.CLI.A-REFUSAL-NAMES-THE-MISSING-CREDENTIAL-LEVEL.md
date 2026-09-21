@@ -4,7 +4,7 @@ status: planned
 governs: product
 decision: DEC.2026-09-21.THE-CLUSTER-SECTION-HOLDS-RAS-AND-TWO-ADMIN-LEVELS
 check: null
-scope: [cli]
+scope: [cli, config]
 ---
 
 # Отказ называет недостающий уровень учётных данных

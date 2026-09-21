@@ -655,7 +655,8 @@ struct InfobaseClusterSchema {
     /// brackets. It goes to `rac` as is, so the port default (1545) stays with the platform.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ras: Option<String>,
-    /// Cluster administrator name; `sessions` and `infobase create` in a cluster ask for it.
+    /// Cluster administrator name; `sessions` (#212) and `infobase create` in a cluster (#204)
+    /// will ask for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     user: Option<String>,
     /// Cluster administrator password.

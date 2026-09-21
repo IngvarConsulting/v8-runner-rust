@@ -175,12 +175,12 @@ pub struct InfobaseClusterConfig {
 
     /// The central server agent and its administrator.
     #[serde(default)]
-    pub agent: Option<ClusterAgentConfig>,
+    pub agent: Option<InfobaseClusterAgentConfig>,
 }
 
 /// The central server agent (`ragent`) of the cluster and its administrator.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub struct ClusterAgentConfig {
+pub struct InfobaseClusterAgentConfig {
     /// Agent address as `host[:port]` when it differs from the host of `Srvr=` with the
     /// platform default port (1540).
     #[serde(default)]

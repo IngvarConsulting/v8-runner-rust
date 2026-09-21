@@ -9,7 +9,7 @@ use crate::config::model::{
 };
 use crate::platform::connection::V8Connection;
 use crate::platform::locator::PlatformVersionRequirement;
-use crate::support::authority::host_of_authority;
+use crate::support::authority::{host_and_port_of_authority, host_of_authority};
 use crate::support::edt_project::{self, EdtProjectKind};
 use crate::support::path::is_safe_path_segment;
 use crate::support::source_descriptor::{self, SourceDescriptorPurpose, SourceSetRootScanError};
@@ -123,7 +123,7 @@ pub enum ConfigValidationError {
     ClusterNotAllowedForStandalone,
 
     #[error(
-        "{key} must be a host with an optional port — `host`, `host:port` or `[v6]:port`: '{value}'"
+        "{key} must be a host with an optional port 1–65535 — `host`, `host:port` or `[v6]:port`: '{value}'"
     )]
     ClusterAddressInvalid { key: &'static str, value: String },
 
@@ -881,7 +881,7 @@ fn validate_cluster_address(
     let Some(value) = value else {
         return Ok(());
     };
-    if crate::support::authority::host_and_port_of_authority(value.trim()).is_none() {
+    if host_and_port_of_authority(value.trim()).is_none() {
         return Err(ConfigValidationError::ClusterAddressInvalid {
             key,
             value: value.to_owned(),

@@ -90,7 +90,8 @@ pub fn host_and_port_of_authority(authority: &str) -> Option<(Host, Option<u16>)
     let port = url.port().or_else(|| {
         authority
             .rsplit_once(':')
-            .and_then(|(_, port)| (port == "80").then_some(80))
+            .and_then(|(_, port)| port.parse::<u16>().ok())
+            .filter(|port| *port == 80)
     });
     if port == Some(0) {
         return None;
@@ -250,6 +251,7 @@ mod tests {
             ("[::1]:1540", (address("::1"), Some(1540))),
             ("[::1]", (address("::1"), None)),
             ("srv:80", (name("srv"), Some(80))),
+            ("srv:080", (name("srv"), Some(80))),
         ] {
             assert_eq!(
                 host_and_port_of_authority(authority),

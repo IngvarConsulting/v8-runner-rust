@@ -237,7 +237,7 @@
           ]
         },
         "user": {
-          "description": "Cluster administrator name; `sessions` and `infobase create` in a cluster ask for it.",
+          "description": "Cluster administrator name; `sessions` (#212) and `infobase create` in a cluster (#204)\nwill ask for it.",
           "type": [
             "string",
             "null"
