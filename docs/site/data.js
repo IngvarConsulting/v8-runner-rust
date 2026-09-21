@@ -128,7 +128,8 @@ window.RUNNER_DATA = (function () {
       today: function (ctx) { return { chain: builderChoice(ctx, true, true), config: [], note: 'сейчас это bootstrap' }; },
       target: function (ctx) {
         if (ctx.target === 'standalone') return { chain: [P.designer, P.agent], config: ['connection или standalone.gate'], note: 'пишет v8project.yaml, местный слой и делает pull' };
-        return { chain: [P.agent, P.designer], config: [], note: 'пишет v8project.yaml, местный слой и делает pull' };
+        if (ctx.target === 'cluster') return { chain: [P.agent, P.designer], config: [], note: 'пишет v8project.yaml, местный слой и делает pull' };
+        return { chain: [P.agent, P.designer, P.ibcmd], config: [], note: 'пишет v8project.yaml, местный слой и делает pull — цепочка та же, что у pull' };
       }
     },
     {
@@ -144,7 +145,7 @@ window.RUNNER_DATA = (function () {
         return { chain: chain, config: cfg, note: note };
       },
       target: function (ctx) {
-        if (ctx.target === 'standalone') return { kind: 'subject', why: 'базу автономного сервера создают до его запуска, на его машине', fix: 'ibcmd server config init, затем ibcmd infobase create --load|--import|--restore; раннер подключается к уже работающему шлюзу' };
+        if (ctx.target === 'standalone') return { kind: 'target', why: 'базу автономного сервера создают до его запуска, на его машине', fix: 'ibcmd server config init, затем ibcmd infobase create --load|--import|--restore; раннер подключается к уже работающему шлюзу' };
         if (ctx.target === 'cluster') return { chain: [P.designer, P.rac], config: ['connection', 'dbms.*', 'cluster.user — если в кластере заведены администраторы'], note: 'CREATEINFOBASE с клиент-серверной строкой: регистрация в кластере и CrSQLDB=Y одной командой; rac — запасной путь' };
         return { chain: [P.ibcmd, P.designer], config: ['connection'], note: 'ibcmd создаёт файловую базу сразу с конфигурацией из исходников (--import); память о базе записывается сразу, первый push идёт как обычный' };
       }
@@ -261,7 +262,7 @@ window.RUNNER_DATA = (function () {
       },
       target: function (ctx) {
         // Пакет собирается из исходников без базы: ibcmd config import --out. Конфигуратор — запасной путь через временную базу.
-        return { chain: [P.ibcmd, P.designer], config: ['source-set[]'], note: 'база не нужна: ibcmd собирает пакет из XML; Конфигуратор — через временную базу' };
+        return { chain: [P.ibcmd, P.rs, P.designer], config: ['source-set[]'], note: 'база не нужна: ibcmd собирает пакет из XML, ibcmd-rs — без платформы; Конфигуратор — через временную базу' };
       }
     },
     {
@@ -299,7 +300,7 @@ window.RUNNER_DATA = (function () {
       target: function (ctx) {
         if (ctx.target === 'standalone') return { chain: [P.agent, P.designer], config: ['standalone.gate', 'connection — для имён'], note: 'свойства — группой config extensions по SSH-шлюзу; имена — /DumpDBCfgList по прямому шлюзу' };
         if (ctx.target === 'cluster') return { chain: [P.agent, P.designer], config: ['connection'], note: 'Конфигуратор перечислит имена (/DumpDBCfgList), свойства — только агент; ibcmd к базе под кластером не применяется' };
-        return { chain: [P.agent, P.ibcmd], config: ['connection'], note: '' };
+        return { chain: [P.ibcmd, P.agent], config: ['connection'], note: 'состав и свойства — ibcmd; агент — по ключу' };
       }
     },
     {
