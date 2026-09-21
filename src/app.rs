@@ -39,7 +39,7 @@ pub fn run() -> i32 {
     }
 
     let color_mode = color_mode(cli.no_color);
-    let presenter = Presenter::new(output_format.to_owned(), color_mode);
+    let mut presenter = Presenter::new(output_format.to_owned(), color_mode);
 
     if let Command::Config(args) = &cli.command {
         return run_config_command(args, &presenter);

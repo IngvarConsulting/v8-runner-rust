@@ -144,12 +144,11 @@ fn load_config_with_mode(
     let mut root = read_yaml_file(&path)?;
     reject_legacy_config_keys(&root)?;
     reject_infobases_in_project_file(&root)?;
-    // Форма каждого файла проверяется до свёртки синонима и до слияния: у проектной
-    // схемы нет карты `infobases`, а у слитого документа она есть всегда.
-    validate_main_config_schema_boundary(root.clone())
-        .map_err(|error| ConfigLoadError::UnsupportedShape(error.to_string()))?;
     let mut warnings = Vec::new();
-    warnings.extend(fold_infobase_synonym(&mut root, DEFAULT_CONFIG_FILE_NAME)?);
+    warnings.extend(fold_infobase_synonym(
+        &mut root,
+        ConfigFile::Project(&path),
+    )?);
 
     // Переопределение провайдера попадает в квитанцию вместе с именем файла, который
     // его поставил: отличать проектный выбор от машинно-локального эксперимента нужно
@@ -166,12 +165,17 @@ fn load_config_with_mode(
         reject_local_overlay_keys(&overlay)?;
         validate_local_overlay_schema_boundary(overlay.clone())
             .map_err(|error| ConfigLoadError::LocalOverlayUnsupportedShape(error.to_string()))?;
-        warnings.extend(fold_infobase_synonym(&mut overlay, LOCAL_CONFIG_FILE_NAME)?);
+        warnings.extend(fold_infobase_synonym(&mut overlay, ConfigFile::Local)?);
         provider_origins.extend(provider_override_keys(&overlay, LOCAL_CONFIG_FILE_NAME));
         merge_yaml_values(&mut root, overlay);
     }
 
     reject_legacy_config_keys(&root)?;
+    // Форма слитого документа: `workPath` из местного слоя дополняет проектный файл, а
+    // карту `infobases` главная граница читает, не публикуя, — в проектном файле её
+    // отвергли выше, до границы.
+    validate_main_config_schema_boundary(root.clone())
+        .map_err(|error| ConfigLoadError::UnsupportedShape(error.to_string()))?;
     select_infobase(&mut root, selector)?;
     default_base_path_to_config_dir(&mut root, config_dir)?;
 
@@ -227,6 +231,26 @@ fn reject_infobases_in_project_file(root: &serde_yaml::Value) -> Result<(), Conf
     Ok(())
 }
 
+/// Который из двух файлов свёртывается: от этого зависят имя в отказе и текст
+/// предупреждения.
+enum ConfigFile<'a> {
+    Project(&'a Path),
+    Local,
+}
+
+impl ConfigFile<'_> {
+    fn name(&self) -> String {
+        match self {
+            Self::Project(path) => path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(DEFAULT_CONFIG_FILE_NAME)
+                .to_owned(),
+            Self::Local => LOCAL_CONFIG_FILE_NAME.to_owned(),
+        }
+    }
+}
+
 /// Прежний ключ `infobase:` один цикл выпуска читается как `infobases.origin` — в
 /// каждом файле отдельно, чтобы проектный файл с прежним ключом и местный слой с
 /// новым сливались по полям, как сливались до переименования. Оба ключа в одном
@@ -235,33 +259,28 @@ fn reject_infobases_in_project_file(root: &serde_yaml::Value) -> Result<(), Conf
 /// Возвращает предупреждение, которое вызывающий покажет пользователю.
 fn fold_infobase_synonym(
     root: &mut serde_yaml::Value,
-    file: &str,
+    file: ConfigFile<'_>,
 ) -> Result<Option<String>, ConfigValidationError> {
     let mapping = root_mapping_mut(root)?;
     let has_old = mapping.contains_key(yaml_key("infobase"));
     let has_new = mapping.contains_key(yaml_key("infobases"));
     if has_old && has_new {
-        return Err(ConfigValidationError::InfobaseKeysMixed {
-            file: file.to_owned(),
-        });
+        return Err(ConfigValidationError::InfobaseKeysMixed { file: file.name() });
     }
-    if !has_old {
+    let Some(section) = mapping.remove(yaml_key("infobase")) else {
         return Ok(None);
-    }
-    let section = mapping
-        .remove(yaml_key("infobase"))
-        .expect("the key was just seen");
+    };
     let mut origin = serde_yaml::Mapping::new();
     origin.insert(yaml_key(DEFAULT_INFOBASE_NAME), section);
     mapping.insert(yaml_key("infobases"), serde_yaml::Value::Mapping(origin));
-    let warning = if file == LOCAL_CONFIG_FILE_NAME {
-        format!(
-            "`infobase:` in {file} is a one-cycle synonym for `infobases.{DEFAULT_INFOBASE_NAME}`; rename the key"
-        )
-    } else {
-        format!(
-            "`infobase:` in {file} is a one-cycle synonym for `infobases.{DEFAULT_INFOBASE_NAME}`; the section moves to {LOCAL_CONFIG_FILE_NAME}: which infobase a checkout is attached to is known to this machine, not to the project"
-        )
+    let name = file.name();
+    let warning = match file {
+        ConfigFile::Local => format!(
+            "`infobase:` in {name} is a one-cycle synonym for `infobases.{DEFAULT_INFOBASE_NAME}`; rename the key"
+        ),
+        ConfigFile::Project(_) => format!(
+            "`infobase:` in {name} is a one-cycle synonym for `infobases.{DEFAULT_INFOBASE_NAME}`; the section moves to {LOCAL_CONFIG_FILE_NAME}: which infobase a checkout is attached to is known to this machine, not to the project"
+        ),
     };
     Ok(Some(warning))
 }
@@ -273,56 +292,62 @@ fn select_infobase(
     selector: &InfobaseSelector,
 ) -> Result<(), ConfigValidationError> {
     let mapping = root_mapping_mut(root)?;
-    let declared = mapping
-        .get(yaml_key("infobases"))
-        .and_then(serde_yaml::Value::as_mapping)
-        .cloned()
-        .unwrap_or_default();
-    let mut names = Vec::with_capacity(declared.len());
-    for key in declared.keys() {
-        let name = key.as_str().unwrap_or_default();
-        if !is_infobase_name(name) {
-            return Err(ConfigValidationError::InfobaseNameInvalid {
-                name: name.to_owned(),
-                pattern: INFOBASE_NAME_PATTERN,
-            });
+    // Карта читается на месте: копируется только выбранная секция, не все секции с
+    // их паролями.
+    let (name, section) = {
+        let declared = mapping
+            .get(yaml_key("infobases"))
+            .and_then(serde_yaml::Value::as_mapping);
+        let mut names = Vec::new();
+        for key in declared
+            .map(serde_yaml::Mapping::keys)
+            .into_iter()
+            .flatten()
+        {
+            let name = key.as_str().unwrap_or_default();
+            if !is_infobase_name(name) {
+                return Err(ConfigValidationError::InfobaseNameInvalid {
+                    name: name.to_owned(),
+                    pattern: INFOBASE_NAME_PATTERN,
+                });
+            }
+            names.push(name.to_owned());
         }
-        names.push(name.to_owned());
-    }
-    let declared_list = if names.is_empty() {
-        "none".to_owned()
-    } else {
-        names.join(", ")
-    };
-
-    let (name, section) = match selector {
-        InfobaseSelector::Default => match declared.get(yaml_key(DEFAULT_INFOBASE_NAME)) {
-            Some(section) => (Some(DEFAULT_INFOBASE_NAME.to_owned()), section.clone()),
-            None => {
-                return Err(ConfigValidationError::OriginNotDeclared {
-                    declared: declared_list,
-                })
+        let declared_list = if names.is_empty() {
+            "none".to_owned()
+        } else {
+            names.join(", ")
+        };
+        let lookup = |name: &str| declared.and_then(|declared| declared.get(yaml_key(name)));
+        match selector {
+            InfobaseSelector::Default => match lookup(DEFAULT_INFOBASE_NAME) {
+                Some(section) => (Some(DEFAULT_INFOBASE_NAME.to_owned()), section.clone()),
+                None => {
+                    return Err(ConfigValidationError::OriginNotDeclared {
+                        declared: declared_list,
+                    })
+                }
+            },
+            InfobaseSelector::Name(name) => match lookup(name) {
+                Some(section) => (Some(name.clone()), section.clone()),
+                None => {
+                    return Err(ConfigValidationError::InfobaseNotDeclared {
+                        name: name.clone(),
+                        declared: declared_list,
+                    })
+                }
+            },
+            InfobaseSelector::Connection(connection) => {
+                if connection_string_carries_credentials(connection) {
+                    return Err(ConfigValidationError::AdHocConnectionCarriesCredentials);
+                }
+                let mut section = serde_yaml::Mapping::new();
+                section.insert(
+                    yaml_key("connection"),
+                    serde_yaml::Value::String(connection.clone()),
+                );
+                (None, serde_yaml::Value::Mapping(section))
             }
-        },
-        InfobaseSelector::Name(name) => match declared.get(yaml_key(name)) {
-            Some(section) => (Some(name.clone()), section.clone()),
-            None => {
-                return Err(ConfigValidationError::InfobaseNotDeclared {
-                    name: name.clone(),
-                    declared: declared_list,
-                })
-            }
-        },
-        InfobaseSelector::Connection(connection) => {
-            if connection_string_carries_credentials(connection) {
-                return Err(ConfigValidationError::AdHocConnectionCarriesCredentials);
-            }
-            let mut section = serde_yaml::Mapping::new();
-            section.insert(
-                yaml_key("connection"),
-                serde_yaml::Value::String(connection.clone()),
-            );
-            (None, serde_yaml::Value::Mapping(section))
         }
     };
     mapping.insert(yaml_key("infobase"), section);
@@ -333,14 +358,17 @@ fn select_infobase(
     Ok(())
 }
 
-/// Реквизиты в строке соединения: `Usr=`/`Pwd=` в объявленной форме, `/N`/`/P` в сырой.
-/// База, названная строкой, учётных данных не несёт — они принадлежат объявленной секции.
+/// Реквизиты в строке соединения: `Usr=`/`Pwd=` в объявленной форме, `/N`/`/P` в сырой —
+/// и слитно с значением (`/NAdmin /Psecret`), как платформа их принимает. База, названная
+/// строкой, учётных данных не несёт — они принадлежат объявленной секции.
 fn connection_string_carries_credentials(connection: &str) -> bool {
     let trimmed = connection.trim();
     if trimmed.starts_with('/') || trimmed.starts_with('-') {
-        return trimmed
-            .split_whitespace()
-            .any(|token| token.eq_ignore_ascii_case("/N") || token.eq_ignore_ascii_case("/P"));
+        return trimmed.split_whitespace().any(|token| {
+            token
+                .get(..2)
+                .is_some_and(|key| key.eq_ignore_ascii_case("/n") || key.eq_ignore_ascii_case("/p"))
+        });
     }
     trimmed.split(';').any(|part| {
         let part = part.trim_start().to_ascii_lowercase();

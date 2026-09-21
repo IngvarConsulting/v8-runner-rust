@@ -362,6 +362,11 @@ struct MainConfigSchema {
     )]
     #[schemars(with = "InfobaseSchema")]
     infobase: Option<InfobaseSchema>,
+    /// Карта баз слитого документа. В проектном файле её нет — отказ до границы, — и в
+    /// опубликованную схему она не входит; поле есть только ради проверки слитого корня.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    infobases: Option<BTreeMap<String, InfobaseSchema>>,
     /// Project source sets to build, test, dump, or materialize.
     #[serde(rename = "source-set", default)]
     source_sets: Vec<SourceSetSchema>,

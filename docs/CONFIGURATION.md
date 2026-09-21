@@ -36,9 +36,12 @@ v8-runner config init
   ветке `master`;
 - создаёт рядом `v8project.local.yaml` с modeline на
   `https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.local.schema.json`
-  и объявляет в нём базу `origin`: адрес из `--connection`, по умолчанию `File=build/ib`;
-  существующий местный слой не переписывается — `origin` дописывается, если не объявлен, а
-  объявленный с другим адресом, чем в `--connection`, — отказ;
+  и объявляет в нём базу `origin`: адрес из `--connection`, по умолчанию `File=build/ib`.
+  Существующий местный слой сохраняется: `origin` дописывается, если не объявлен; секция
+  без адреса (прежний `infobase:` только с учётными данными) получает адрес и переезжает в
+  `infobases.origin`; объявленный адрес, отличный от `--connection`, — отказ. Файл с картой
+  `infobases` или потоковой записью при дописывании перезаписывается целиком, комментарии
+  в нём теряются;
 - добавляет `v8project.local.yaml` в `.gitignore`, если подходящий pattern еще не указан;
 - заполняет `source-set` по найденным исходникам;
 - не перезаписывает существующий файл без `--force`;

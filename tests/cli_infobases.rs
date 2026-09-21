@@ -18,6 +18,8 @@ use tempfile::TempDir;
 struct Project {
     dir: TempDir,
     config_path: PathBuf,
+    /// Журнал вызовов поддельного `1cv8`: отсутствует, пока платформу никто не звал.
+    platform_calls: PathBuf,
 }
 
 impl Project {
@@ -59,11 +61,22 @@ fn project() -> Project {
     let platform = dir.path().join("platform");
     fs::create_dir_all(dir.path().join("project")).expect("sources");
     fs::create_dir_all(&work_path).expect("work");
-    write_shell_script(&platform.join("bin").join("1cv8"), "exit 0");
+    let platform_calls = dir.path().join("1cv8.calls.log");
+    write_shell_script(
+        &platform.join("bin").join("1cv8"),
+        &format!(
+            "printf '%s\\n' \"$*\" >> \"{}\"\nexit 0",
+            platform_calls.display()
+        ),
+    );
     write_shell_script(&platform.join("bin").join("1cv8c"), "exit 0");
     let config_path = dir.path().join("v8project.yaml");
     fs::write(&config_path, project_file(&work_path, &platform)).expect("config");
-    Project { dir, config_path }
+    Project {
+        dir,
+        config_path,
+        platform_calls,
+    }
 }
 
 fn project_file(work_path: &Path, platform: &Path) -> String {
@@ -198,6 +211,8 @@ fn an_ad_hoc_connection_string_must_not_carry_credentials() {
     for connection in [
         "Srvr=srv;Ref=erp;Usr=Admin;Pwd=secret",
         "/S srv\\erp /N Admin /P secret",
+        "/F /tmp/ib /NAdmin /Psecret",
+        "/F /tmp/ib /nadmin",
     ] {
         let output = project.run_json(&["--infobase", connection], LAUNCH_PREVIEW);
 
@@ -235,13 +250,17 @@ fn a_command_without_origin_names_the_missing_step() {
     let project = project();
     project.write_local("infobases:\n  test:\n    connection: 'File=/tmp/test-ib'\n");
 
-    let output = project.run_json(&[], LAUNCH_PREVIEW);
+    let output = project.run_json(&[], &["build"]);
 
     let message = refusal_message(&output);
     assert!(message.contains("`origin` is not declared"), "{message}");
     assert!(message.contains("--infobase"), "{message}");
     assert!(message.contains("infobases.origin.connection"), "{message}");
     assert!(message.contains("declared: test"), "{message}");
+    assert!(
+        !project.platform_calls.exists(),
+        "the refusal comes before any platform utility starts"
+    );
 }
 
 /// `INV.CONFIG.AN-INFOBASE-NAME-IS-A-PLAIN-IDENTIFIER`: имя, которое не годится в
@@ -273,6 +292,22 @@ fn the_map_is_refused_in_the_project_file() {
     assert!(
         message.contains("declared only in v8project.local.yaml"),
         "{message}"
+    );
+}
+
+#[test]
+fn both_keys_in_the_project_file_are_refused() {
+    let project = project();
+    let mut config = fs::read_to_string(&project.config_path).expect("config");
+    config.push_str("infobase:\n  connection: 'File=/tmp/old-ib'\ninfobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n");
+    fs::write(&project.config_path, config).expect("config");
+
+    let output = project.run_json(&[], LAUNCH_PREVIEW);
+
+    let message = refusal_message(&output);
+    assert!(
+        message.contains("declared only in v8project.local.yaml"),
+        "the map is refused in the project file before anything else: {message}"
     );
 }
 

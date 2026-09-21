@@ -415,15 +415,6 @@ impl JsonPresenter {
             Err(e) => eprintln!("JSON serialization error: {e}"),
         }
     }
-
-    /// Конверт, уже собранный как значение: так печатается ответ, к которому presenter
-    /// дописал предупреждения загрузки.
-    pub fn print_value(&self, envelope: &serde_json::Value) {
-        match serde_json::to_string_pretty(envelope) {
-            Ok(s) => println!("{s}"),
-            Err(e) => eprintln!("JSON serialization error: {e}"),
-        }
-    }
 }
 
 #[cfg(test)]
