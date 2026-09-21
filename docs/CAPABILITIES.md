@@ -29,7 +29,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `build` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.build: agent` при `format=DESIGNER`; у автономного сервера (`infobase.standalone`) — только `agent` через SSH-шлюз сервера, платформа на машине раннера не нужна | Incremental/full загрузка в ИБ; при `format=EDT` сначала экспортирует изменённые EDT `source-set`; у `agent` загрузка и `update-db-cfg` — одна сессия на команду, исходники выставляются агенту ссылкой в `AgentBaseDir`, после загрузки записывается поколение конфигурации |
 | `test` | Та же матрица, что и у `build` | По умолчанию запускает `build` |
 | `test --no-build` | Подготовленная file/server ИБ; source-set и build tooling не требуются | Запускает выбранный test engine без build |
-| `dump` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.dump: agent` при `format=DESIGNER` | Полная, инкрементальная или object-scoped partial выгрузка; у `ibcmd` `partial` деградирует в incremental с warning; у `agent` `incremental` и `partial` обновляют цель на месте через ссылку в `AgentBaseDir`, `full` публикуется через staging; перед `full` и `incremental` агента спрашивают поколение конфигурации, и равное записанному после последней сборки или выгрузки через агента означает «выгружать нечего»; при `format=EDT` — reverse sync через internal Designer snapshot и EDT import |
+| `dump` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.dump: agent` при `format=DESIGNER` | Полная, инкрементальная или object-scoped partial выгрузка; у `ibcmd` `partial` деградирует в incremental с warning; у `agent` `incremental` и `partial` обновляют цель на месте через ссылку в `AgentBaseDir`, `full` публикуется через staging; перед `full` и `incremental` агента спрашивают поколение конфигурации, и равное записанному после последней сборки или выгрузки через агента означает «выгружать нечего»; при `format=EDT` — reverse sync через internal Designer snapshot и EDT import; перед заменой каталога цели раннер спрашивает git, что в нём не восстановить, и найдя незафиксированное, файл вне учёта или в игноре, отказывает с выходом 2 и называет потери, а `--discard-uncommitted` уничтожает их без копии; там, где git не отвечает, поведение прежнее и защиты нет |
 | `infobase configuration export` | цепочка `designer` → `ibcmd`; `agent` только по `providers.infobase.configuration.export: agent` | Выгружает working/database configuration в `.cf` или named extension в `.cfe`; раннер берёт первого готового до spawn, квитанция называет пропущенных; у `agent` только `working` (`config dump-cfg`, команды для конфигурации базы данных у агента нет — `database` отказывает до сессии), файл пишется в каталог агента и переносится в staging |
 | `infobase dump` | провайдер `designer`; `ibcmd` только по `providers.infobase.dump`; `agent` только по `providers.infobase.dump: agent` | Выгружает полную ИБ в переносимый `.dt`; это не backup; `ibcmd` остаётся experimental до exclusive-access preflight; у `agent` — `infobase-tools dump-ib` в каталог агента и перенос в staging |
 | `convert` | CLI-only repo-aware конвертация текущих `source-set` | Строки в матрице провайдеров не имеет и не требует ИБ |
@@ -379,10 +379,15 @@ v8-runner syntax edt [--project <PROJECT>...]
 ### `dump`
 
 ```bash
-v8-runner dump --mode <full|incremental|partial> [--source-set <NAME>] [--extension <EXTENSION>] [--object <TYPE:NAME>...] [--dry-run]
+v8-runner dump --mode <full|incremental|partial> [--source-set <NAME>] [--extension <EXTENSION>] [--object <TYPE:NAME>...] [--dry-run] [--discard-uncommitted]
 ```
 
 - `partial` требует хотя бы один `--object`.
+- Перед заменой каталога исходников команда спрашивает git, что нельзя вернуть:
+  неотслеживаемые и игнорируемые файлы, правки рабочего дерева, неразрешённые маркеры
+  слияния. Найдя такое, она отказывает с кодом выхода 2 и называет файлы;
+  `--discard-uncommitted` заменяет каталог всё равно. Там, где git не отвечает,
+  поведение прежнее и защиты нет.
 - Канонический ввод селектора — `TYPE:NAME` (например, `Catalog:Items`); для
   совместимости принимается и `TYPE.NAME`. Переданный селектор сохраняется в JSON как
   `data.selectors[*].requested`, а в списке Designer и как
@@ -399,10 +404,15 @@ v8-runner dump --mode <full|incremental|partial> [--source-set <NAME>] [--extens
 ### `convert`
 
 ```bash
-v8-runner convert [--source-set <NAME>] [--output <DIR>] [--dry-run]
+v8-runner convert [--source-set <NAME>] [--output <DIR>] [--dry-run] [--discard-uncommitted]
 ```
 
 - CLI-only; не публикуется как MCP tool.
+- Перед заменой целевого каталога команда спрашивает git, что нельзя вернуть:
+  неотслеживаемые и игнорируемые файлы, правки рабочего дерева, неразрешённые маркеры
+  слияния. Найдя такое, она отказывает с кодом выхода 2 и называет файлы;
+  `--discard-uncommitted` заменяет каталог всё равно. Там, где git не отвечает,
+  поведение прежнее и защиты нет.
 - Работает от текущего `v8project.yaml`, а не по arbitrary source/target paths.
 - Направление определяется только из `format`.
 - Без `--output` публикует результат под `workPath/convert/out/<sourceSetName>/<designer|edt>/`.

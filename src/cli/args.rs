@@ -482,6 +482,10 @@ pub struct DumpArgs {
     /// Resolve the target and locate the platform without dumping anything
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Replace the target directory even when it holds work version control cannot give back
+    #[arg(long)]
+    pub discard_uncommitted: bool,
 }
 
 #[derive(Args, Debug)]
@@ -590,6 +594,10 @@ pub struct ConvertArgs {
     /// Target root for converted source-set layout. Defaults to workPath/convert/out
     #[arg(long)]
     pub output: Option<String>,
+
+    /// Replace the target directory even when it holds work version control cannot give back
+    #[arg(long)]
+    pub discard_uncommitted: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1348,7 +1356,9 @@ mod tests {
                 source_set,
                 output,
                 dry_run,
+                discard_uncommitted,
             }) => {
+                assert!(!discard_uncommitted);
                 assert!(!dry_run);
                 assert!(source_set.is_none());
                 assert!(output.is_none());
@@ -1367,7 +1377,9 @@ mod tests {
                 source_set,
                 output,
                 dry_run,
+                discard_uncommitted,
             }) => {
+                assert!(!discard_uncommitted);
                 assert!(!dry_run);
                 assert_eq!(source_set.as_deref(), Some("ext-sales"));
                 assert!(output.is_none());
@@ -1386,7 +1398,9 @@ mod tests {
                 source_set,
                 output,
                 dry_run,
+                discard_uncommitted,
             }) => {
+                assert!(!discard_uncommitted);
                 assert!(!dry_run);
                 assert!(source_set.is_none());
                 assert_eq!(output.as_deref(), Some("tests/fixtures/edt"));

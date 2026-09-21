@@ -2688,6 +2688,7 @@ fn map_dump_request(args: &DumpArgs) -> Result<DumpRequest, UseCaseError> {
         source_set: args.source_set.clone(),
         extension: args.extension.clone(),
         objects: args.objects.clone(),
+        discard_uncommitted: args.discard_uncommitted,
     })
 }
 
@@ -2701,6 +2702,7 @@ fn map_convert_request(args: &ConvertArgs) -> ConvertRequest {
         },
         output_root: args.output.clone(),
         dry_run: args.dry_run,
+        discard_uncommitted: args.discard_uncommitted,
     }
 }
 
@@ -4333,6 +4335,7 @@ mod tests {
         assert_eq!(
             map_dump_request(&DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: "incremental".to_owned(),
                 source_set: Some("main".to_owned()),
                 extension: Some("Ext".to_owned()),
@@ -4345,6 +4348,7 @@ mod tests {
         assert_eq!(
             map_dump_request(&DumpArgs {
                 dry_run: false,
+                discard_uncommitted: false,
                 mode: "incremental".to_owned(),
                 source_set: Some("main".to_owned()),
                 extension: Some("Ext".to_owned()),
@@ -4509,6 +4513,7 @@ mod tests {
     fn rejects_invalid_mode_mapping() {
         let dump_error = map_dump_request(&DumpArgs {
             dry_run: false,
+            discard_uncommitted: false,
             mode: "garbage".to_owned(),
             source_set: None,
             extension: None,

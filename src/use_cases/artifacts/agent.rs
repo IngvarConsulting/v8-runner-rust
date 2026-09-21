@@ -348,6 +348,8 @@ fn run_external_agent_export(
             context,
             ARTIFACTS_BACKUP_PREFIX,
             "failed to publish staged external directory",
+            // Путь вывода — место для порождённого, а не для чьей-то работы.
+            crate::use_cases::destruction_guard::DestructionConsent::RunnerOwned,
         )
         .map_err(|error| (error, artifacts.clone(), Some(log.clone())))?;
 

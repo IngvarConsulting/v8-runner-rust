@@ -192,6 +192,9 @@ where
             source_set: None,
             extension: normalize_optional_string(request.extension.as_deref()),
             objects: request.objects.clone(),
+            // У MCP согласия взять неоткуда: инструмент работает без человека
+            // у экрана, а уничтожение незафиксированной работы требует его решения.
+            discard_uncommitted: false,
         };
 
         match self

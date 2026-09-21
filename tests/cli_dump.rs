@@ -744,3 +744,180 @@ fn dump_ibcmd_full_server_connection_passes_dbms_and_infobase_credentials() {
     assert!(calls.contains("--database-user postgres --database-password pg-secret"));
     assert_ibcmd_data_path(&calls, &work_path);
 }
+
+fn git(dir: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run git");
+    assert!(status.success(), "git {args:?} failed");
+}
+
+/// Готовит проект, чей каталог исходников лежит в репозитории с одним
+/// зафиксированным файлом.
+fn setup_project_in_a_repository() -> (
+    tempfile::TempDir,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+) {
+    let parts = setup_project();
+    let base_path = parts.4.clone();
+    git(&base_path, &["init", "-q", "-b", "main", "."]);
+    git(&base_path, &["config", "user.email", "test@example.com"]);
+    git(&base_path, &["config", "user.name", "Test"]);
+    git(&base_path, &["add", "-A"]);
+    git(&base_path, &["commit", "-qm", "committed sources"]);
+    parts
+}
+
+/// Полная выгрузка заменяет каталог исходников целиком, а прежнее содержимое
+/// раннер до сих пор удалял последним шагом. Файл вне учёта не вернуть ничем,
+/// поэтому команда обязана остановиться и назвать его.
+#[test]
+fn a_dump_refuses_to_destroy_work_version_control_cannot_give_back() {
+    let (_dir, config_path, _binary, _work, base_path, _calls) = setup_project_in_a_repository();
+    fs::write(
+        base_path.join("main").join("hand-written.xml"),
+        "written by hand\n",
+    )
+    .expect("hand-written");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "dump",
+            "--mode",
+            "full",
+            "--source-set",
+            "main",
+        ])
+        .output()
+        .expect("run dump");
+
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a refusal is a validation error, not a runtime one: {rendered}"
+    );
+    assert!(
+        rendered.contains("hand-written.xml"),
+        "the refusal must name what would be lost: {rendered}"
+    );
+    assert!(
+        rendered.contains("--discard-uncommitted"),
+        "the refusal must say how to proceed anyway: {rendered}"
+    );
+    assert!(
+        base_path.join("main").join("hand-written.xml").is_file(),
+        "the refusal must happen before anything is replaced"
+    );
+}
+
+/// Попросили явно — уничтожаем, как и обещает имя ключа. Резервная копия, о
+/// которой не просили и про которую молчат, была бы мусором в чужом каталоге.
+#[test]
+fn an_explicit_request_replaces_the_directory_and_keeps_nothing() {
+    let (_dir, config_path, _binary, _work, base_path, _calls) = setup_project_in_a_repository();
+    fs::write(
+        base_path.join("main").join("hand-written.xml"),
+        "written by hand\n",
+    )
+    .expect("hand-written");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "dump",
+            "--mode",
+            "full",
+            "--source-set",
+            "main",
+            "--discard-uncommitted",
+        ])
+        .output()
+        .expect("run dump");
+
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "dump must proceed: {rendered}");
+    assert!(
+        !base_path.join("main").join("hand-written.xml").exists(),
+        "the directory was replaced, so the hand-written file is gone"
+    );
+    assert!(
+        kept_backups(&base_path).is_empty(),
+        "nothing was asked to be kept: {:?}",
+        kept_backups(&base_path)
+    );
+}
+
+fn kept_backups(base_path: &Path) -> Vec<PathBuf> {
+    fs::read_dir(base_path)
+        .expect("read base")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_dir()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(".dump-backup"))
+        })
+        .collect()
+}
+
+/// Каталог вне системы контроля версий: ответа нет. Сторож не отказывает и не
+/// притворяется, что защитил, — работа идёт ровно как до него.
+#[test]
+fn without_version_control_the_dump_proceeds_untouched() {
+    let (_dir, config_path, _binary, _work, base_path, _calls) = setup_project();
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "dump",
+            "--mode",
+            "full",
+            "--source-set",
+            "main",
+        ])
+        .output()
+        .expect("run dump");
+
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success(),
+        "a missing answer must not stop the work: {rendered}"
+    );
+    assert!(
+        rendered.contains("Dump completed successfully"),
+        "and must not turn an ordinary dump into a warning: {rendered}"
+    );
+    assert!(
+        kept_backups(&base_path).is_empty(),
+        "nothing is kept behind: {:?}",
+        kept_backups(&base_path)
+    );
+}

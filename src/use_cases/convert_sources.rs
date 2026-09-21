@@ -21,6 +21,7 @@ use crate::support::path::{
     is_filesystem_root, nearest_existing_canonical_path, stable_path_identity,
 };
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::destruction_guard::{guard_replacement, DestructionConsent};
 use crate::use_cases::external_artifacts::{
     discover_designer_external_artifacts, parse_external_descriptor, ExternalArtifactKind,
 };
@@ -68,6 +69,8 @@ struct ResolvedConvertRequest {
     source_set: Option<String>,
     workspace_path: PathBuf,
     items: Vec<ResolvedConvertItem>,
+    /// Разрешено ли уничтожить незафиксированную работу в каталоге цели.
+    consent: DestructionConsent,
 }
 
 pub fn execute(
@@ -473,6 +476,23 @@ fn execute_with_dsl(
             ));
         }
 
+        // Преобразование заменяет каталог исходников так же, как выгрузка.
+        guard_replacement(&item.target_path, resolved.consent).map_err(|error| {
+            let message = error.to_string();
+            ConvertExecutionFailure::with_payload(
+                error,
+                result_snapshot(
+                    false,
+                    resolved.direction,
+                    resolved.scope,
+                    resolved.source_set.clone(),
+                    resolved.workspace_path.clone(),
+                    outputs.clone(),
+                    started,
+                    Some(message),
+                ),
+            )
+        })?;
         let publish_phase = context
             .run_no_process_critical_phase(|| {
                 replace_dir_atomically(
@@ -615,6 +635,11 @@ fn resolve_request(
         source_set,
         workspace_path: convert_workspace_path(config),
         items,
+        consent: if request.discard_uncommitted {
+            DestructionConsent::Granted
+        } else {
+            DestructionConsent::AskFirst
+        },
     })
 }
 

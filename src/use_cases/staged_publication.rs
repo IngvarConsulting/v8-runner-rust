@@ -10,6 +10,7 @@ use crate::support::fs::{
     write_temp_dir_metadata, ReplaceFileFailureState, TempDirKind, TempDirMetadata,
 };
 use crate::use_cases::context::{ExecutionContext, ExecutionInterruption};
+use crate::use_cases::destruction_guard::{guard_replacement, DestructionConsent};
 use crate::use_cases::interruption;
 
 const ORPHAN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -128,7 +129,10 @@ impl StagedPublication {
         context: &ExecutionContext,
         backup_prefix: &str,
         error_prefix: &str,
+        consent: DestructionConsent,
     ) -> Result<StagedPublicationOutcome, AppError> {
+        // Сторож спрашивает до подмены: после неё прежнего содержимого уже нет.
+        guard_replacement(&self.target_path, consent)?;
         if let Some(error) = interruption_before_publish(context, "staged directory publication") {
             return Err(error);
         }
@@ -375,6 +379,7 @@ fn make_run_id() -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::use_cases::destruction_guard::DestructionConsent;
     use std::fs;
 
     use tempfile::tempdir;
@@ -416,6 +421,7 @@ mod tests {
                 &ExecutionContext::cli(CommandName::Dump),
                 ".backup",
                 "failed to publish staged test dir",
+                DestructionConsent::RunnerOwned,
             )
             .expect("publish");
 
@@ -594,7 +600,12 @@ mod tests {
         let context = ExecutionContext::cli(CommandName::Dump).with_cancellation(cancellation);
 
         let error = publication
-            .publish_dir(&context, ".backup", "failed to publish staged test dir")
+            .publish_dir(
+                &context,
+                ".backup",
+                "failed to publish staged test dir",
+                DestructionConsent::RunnerOwned,
+            )
             .expect_err("cancelled publication");
 
         assert!(error

@@ -20,6 +20,8 @@ pub mod configure_extensions;
 pub mod context;
 /// Source-format conversion use case.
 pub mod convert_sources;
+/// Refuses a directory replacement that would destroy unrecoverable work.
+mod destruction_guard;
 /// Dump orchestration use case.
 pub mod dump_config;
 /// Shared extension identity helpers.

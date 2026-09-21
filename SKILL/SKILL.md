@@ -119,6 +119,14 @@ v8-runner init
   not match the observed target is refused before the platform starts; neither provider asks, and
   there is no staging step that could undo a load. Append `--dry-run` first to see the selected
   provider and the planned input without touching the infobase.
+- `dump` and `convert` replace the target source directory as a whole, so they first ask git what
+  inside it exists nowhere else — untracked files, ignored files, a worktree edit on top of the
+  index, unresolved merge markers. Finding any, the command refuses before touching anything with
+  exit 2 and names them. Commit or stash them, or pass `--discard-uncommitted` to replace the
+  directory anyway; the flag destroys them and keeps no copy. Staged content is not a loss: it is
+  recoverable from the index. Where git cannot answer — no git, outside a worktree, a git error, a
+  directory git could not read — the command proceeds exactly as it did before this check existed,
+  and the guard claims no protection there.
 - Before any command that starts the platform or touches the infobase, append `--dry-run` to see
   what it would do: `init`, `build`, `load`, `dump`, `convert`, `artifacts`, `launch`,
   `infobase restore` and both `infobase` exports accept it. A preview locates the platform first,
