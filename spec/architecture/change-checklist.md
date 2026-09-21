@@ -36,6 +36,7 @@
 3. Обновить `config init`, round-trip fixtures и публичные примеры (`README.md`, `examples/*`), если поле входит в supported contract.
 4. Синхронизировать `spec/arch/README.md`, `ARCHITECTURE.md` и соответствующий ADR, если поле меняет публичный контракт.
 5. Добавить regression tests на parse/validation/round-trip и на целевое поведение для новых `source-set`/`infobase` веток.
+6. Адрес в поле (`host[:port]`, значение заголовка `Host`, URL) читает только `support::authority`; своё правило поля (например, обязательный порт) добавляется к его ответу, а не к строке. Страж — `tests/architecture_guardrails.rs::a_host_port_record_is_read_in_one_place`.
 
 ## Изменение формы ответа команды
 

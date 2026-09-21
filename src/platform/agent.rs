@@ -41,7 +41,8 @@ pub const CONNECT_COMMAND: &str = "common connect-ib";
 pub const DISCONNECT_COMMAND: &str = "common disconnect-ib";
 pub const SHUTDOWN_COMMAND: &str = "common shutdown";
 /// Адрес, который слушает управляемый агент: он живёт на машине раннера.
-pub const MANAGED_LISTEN_HOST: std::net::Ipv4Addr = std::net::Ipv4Addr::LOCALHOST;
+pub const MANAGED_LISTEN_HOST: std::net::IpAddr =
+    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
 /// Файл карты пользовательских каталогов в `AgentBaseDir`.
 pub const BASE_DIR_MAP_FILE: &str = "agentbasedir.json";
 const RETRY_INTERVAL: Duration = Duration::from_millis(500);
@@ -335,14 +336,15 @@ pub struct AgentEndpoint {
     pub port: u16,
 }
 
-/// `host:port` для журнала и отказа; адрес IPv6 — в скобках, как его и объявляют.
+/// `host:port` для журнала и отказа; числовой адрес печатает `SocketAddr`, и скобки у
+/// IPv6 ставит он — как их и объявляют.
 impl std::fmt::Display for AgentEndpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.host {
-            Host::Address(std::net::IpAddr::V6(address)) => {
-                write!(f, "[{address}]:{}", self.port)
+            Host::Address(address) => {
+                std::fmt::Display::fmt(&std::net::SocketAddr::new(*address, self.port), f)
             }
-            host => write!(f, "{host}:{}", self.port),
+            Host::Name(name) => write!(f, "{name}:{}", self.port),
         }
     }
 }
@@ -1194,7 +1196,7 @@ impl AgentLaunch {
 
     pub fn endpoint(&self) -> AgentEndpoint {
         AgentEndpoint {
-            host: Host::Address(std::net::IpAddr::V4(MANAGED_LISTEN_HOST)),
+            host: Host::Address(MANAGED_LISTEN_HOST),
             port: self.port,
         }
     }
@@ -1485,9 +1487,13 @@ mod tests {
         let Ok(endpoint) = std::env::var("V8_GATE_PROBE") else {
             return;
         };
-        let (host, port) = crate::config::model::ssh_endpoint(&endpoint).expect("host:port");
+        let (host, port) =
+            crate::support::authority::host_and_port_of_authority(&endpoint).expect("host:port");
         let request = AgentSessionRequest {
-            endpoint: AgentEndpoint { host, port },
+            endpoint: AgentEndpoint {
+                host,
+                port: port.expect("port"),
+            },
             user: std::env::var("V8_GATE_USER").unwrap_or_default(),
             password: std::env::var("V8_GATE_PASSWORD").unwrap_or_default(),
             transcript_log: None,
@@ -1623,7 +1629,7 @@ mod tests {
         assert_eq!(v6.to_string(), "[::1]:1543");
         assert_eq!(v6.host.to_string(), "::1");
         let v4 = AgentEndpoint {
-            host: Host::Address(std::net::IpAddr::V4(MANAGED_LISTEN_HOST)),
+            host: Host::Address(MANAGED_LISTEN_HOST),
             port: 1543,
         };
         assert_eq!(v4.to_string(), "127.0.0.1:1543");
@@ -1641,7 +1647,7 @@ mod tests {
         drop(listener);
         let request = AgentSessionRequest {
             endpoint: AgentEndpoint {
-                host: Host::Address(std::net::IpAddr::V4(MANAGED_LISTEN_HOST)),
+                host: Host::Address(MANAGED_LISTEN_HOST),
                 port,
             },
             user: String::new(),

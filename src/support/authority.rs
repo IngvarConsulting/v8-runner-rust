@@ -56,8 +56,8 @@ impl Host {
 impl std::fmt::Display for Host {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Host::Address(address) => write!(f, "{address}"),
-            Host::Name(name) => f.write_str(name),
+            Host::Address(address) => std::fmt::Display::fmt(address, f),
+            Host::Name(name) => f.pad(name),
         }
     }
 }

@@ -258,12 +258,13 @@ impl StandaloneConfig {
     }
 }
 
-/// Точка входа собственного SSH-клиента раннера — шлюз автономного сервера или чужой
-/// агент Конфигуратора. Запись `host:port` читает один на весь раннер читатель адреса,
-/// `support::authority` (IPv6 в скобках, имя строчными, IPv4 канонический, пробелы и
-/// управляющие символы — отказ); поверх него — своё правило: порт обязателен, потому что
-/// к этой точке идёт клиент раннера, а не утилита платформы со своим умолчанием.
-pub fn ssh_endpoint(value: &str) -> Result<(Host, u16), String> {
+/// The endpoint of the runner's own SSH client: the gate of a standalone server or a
+/// Designer agent started elsewhere. The `host:port` record is read by the one address
+/// reader of the runner, `support::authority` (IPv6 in brackets, names lowercased, IPv4
+/// canonical, whitespace and control characters refused); on top of it comes the
+/// endpoint's own rule: the port is required, because the runner's client connects there
+/// and no platform default applies.
+fn ssh_endpoint(value: &str) -> Result<(Host, u16), String> {
     match host_and_port_of_authority(value) {
         Some((host, Some(port))) => Ok((host, port)),
         Some((_, None)) => Err(format!(

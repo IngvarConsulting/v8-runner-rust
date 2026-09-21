@@ -451,6 +451,9 @@ fn a_host_port_record_is_read_in_one_place() {
     let owner = repo_path("src/support/authority.rs");
     // Маркеры порождаются разбором сниппетов: так они совпадают с тем, как `syn` печатает
     // токены, и не зависят от пробелов. Первые — формы, которыми дефект был написан.
+    // Известная дыра: `parse::<SocketAddr>()` — тоже читатель адреса, но у него есть
+    // законные места (`mcp.http.bind_address` — числовой адрес привязки), и маркером он
+    // станет вместе со своим allowlist.
     let markers: Vec<(String, &str)> = [
         "rsplit_once(':')",
         "rsplit_once(\":\")",
@@ -469,7 +472,6 @@ fn a_host_port_record_is_read_in_one_place() {
     const KEY_VALUE_LINE_READERS: &[&str] = &[
         "src/platform/extension_inventory.rs",
         "src/support/edt_project.rs",
-        "src/use_cases/client_mcp_readiness.rs",
     ];
     let mut offenders = Vec::new();
 
@@ -501,6 +503,30 @@ fn a_host_port_record_is_read_in_one_place() {
          support::authority::host_and_port_of_authority, which is the single owner:\n{}",
         offenders.join("\n")
     );
+
+    // Запись allowlist, за которой больше нет `split_once` по двоеточию, устарела: список
+    // может только сокращаться, и стареть молча ему нельзя.
+    let split_once_markers: Vec<&String> = markers
+        .iter()
+        .filter(|(_, call)| call.starts_with("split_once"))
+        .map(|(marker, _)| marker)
+        .collect();
+    let stale: Vec<&str> = KEY_VALUE_LINE_READERS
+        .iter()
+        .copied()
+        .filter(|relative| {
+            let source = without_doc_comments(&production_source(&repo_path(relative)));
+            !split_once_markers
+                .iter()
+                .any(|marker| source.contains(marker.as_str()))
+        })
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "stale KEY_VALUE_LINE_READERS entries — the files no longer split a line by a colon, \
+         remove them from the allowlist:\n{}",
+        stale.join("\n")
+    );
 }
 
 /// Токены вызова `.<call>` в том виде, в каком их печатает `syn`, без приёмника.
@@ -514,7 +540,9 @@ fn cut_marker(call: &str) -> String {
         .to_owned()
 }
 
-/// Убирает `# [doc = "..."]` из исходного вида токенов, оставляя сам код.
+/// Убирает `# [doc = "..."]` из исходного вида токенов, оставляя сам код. Литерал
+/// документации читается до неэкранированной закрывающей кавычки: `]` внутри прозы
+/// (`[v6]:port`) — не конец атрибута.
 fn without_doc_comments(source: &str) -> String {
     const OPENING: &str = "# [doc = ";
     let mut kept = String::with_capacity(source.len());
@@ -523,13 +551,33 @@ fn without_doc_comments(source: &str) -> String {
     while let Some(at) = rest.find(OPENING) {
         kept.push_str(&rest[..at]);
         let after = &rest[at + OPENING.len()..];
-        match after.find(']') {
-            Some(close) => rest = &after[close + 1..],
+        let Some(literal) = string_literal_len(after) else {
+            return kept;
+        };
+        match after[literal..].find(']') {
+            Some(close) => rest = &after[literal + close + 1..],
             None => return kept,
         }
     }
     kept.push_str(rest);
     kept
+}
+
+/// Длина строкового литерала в начале `text`, с кавычками, если он там стоит.
+fn string_literal_len(text: &str) -> Option<usize> {
+    let mut chars = text.char_indices();
+    let Some((_, '"')) = chars.next() else {
+        return None;
+    };
+    let mut escaped = false;
+    for (index, ch) in chars {
+        match ch {
+            '\\' if !escaped => escaped = true,
+            '"' if !escaped => return Some(index + 1),
+            _ => escaped = false,
+        }
+    }
+    None
 }
 
 #[test]
