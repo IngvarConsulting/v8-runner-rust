@@ -12,6 +12,10 @@ infobases:
     password: secret
   test:
     connection: "Srvr=srv;Ref=erp_test"
+    cluster:                    # the cluster around a server infobase
+      ras: srv:1545             # administration server, host[:port]
+      user: cluster-admin       # cluster administrator
+      password: cluster-secret
 
 tools:
   platform:

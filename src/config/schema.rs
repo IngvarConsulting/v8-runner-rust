@@ -564,6 +564,12 @@ struct InfobaseSchema {
     /// Standalone server reached through its SSH gate; declares the target kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     standalone: Option<InfobaseStandaloneSchema>,
+    /// The cluster around a server infobase: the administration server (`ras`) address and
+    /// the two administrator levels above the infobase user — cluster and central server.
+    /// Each operation asks only for the level it needs; a file infobase and a standalone
+    /// server have no cluster and refuse the section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cluster: Option<InfobaseClusterSchema>,
 }
 
 /// A standalone server (`ibsrv`) as the target.
@@ -638,6 +644,42 @@ struct InfobaseWebSchema {
     /// Address a client or a browser opens the infobase at; `launch web` uses it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     url: Option<String>,
+}
+
+/// The cluster section of a server infobase: three credential levels lie side by side in
+/// the local layer, the infobase user in the infobase section itself.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct InfobaseClusterSchema {
+    /// Administration server (`ras`) address as `host[:port]` — an IPv6 address in
+    /// brackets. It goes to `rac` as is, so the port default (1545) stays with the platform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ras: Option<String>,
+    /// Cluster administrator name; `sessions` and `infobase create` in a cluster ask for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user: Option<String>,
+    /// Cluster administrator password.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    password: Option<String>,
+    /// The central server agent (`ragent`) and its administrator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent: Option<InfobaseClusterAgentSchema>,
+}
+
+/// The central server agent of the cluster and its administrator.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct InfobaseClusterAgentSchema {
+    /// Agent address as `host[:port]` when it differs from the host of `Srvr=` with the
+    /// platform default port (1540); the runner's own `ras` connects to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    address: Option<String>,
+    /// Central server administrator name; no runner operation asks for it by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user: Option<String>,
+    /// Central server administrator password.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    password: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -1434,6 +1476,24 @@ mod tests {
         );
         assert_property_description_contains(
             &main_schema,
+            &["InfobaseSchema"],
+            "cluster",
+            "two administrator levels",
+        );
+        assert_property_description_contains(
+            &main_schema,
+            &["InfobaseClusterSchema"],
+            "ras",
+            "Administration server",
+        );
+        assert_property_description_contains(
+            &main_schema,
+            &["InfobaseClusterAgentSchema"],
+            "address",
+            "Agent address",
+        );
+        assert_property_description_contains(
+            &main_schema,
             &["TestsSchema"],
             "va",
             "Vanessa Automation",
@@ -1521,6 +1581,25 @@ mod tests {
             .expect("load config");
         assert_eq!(config.infobase.user.as_deref(), Some("Admin"));
         assert_eq!(config.infobase.password.as_deref(), Some("secret"));
+    }
+
+    /// Секция `cluster` — часть секции базы в обеих схемах: местный слой объявляет её
+    /// картой, проектный файл на этот цикл — синонимом `infobase:`; неизвестный ключ
+    /// внутри неё отказывают и схема, и загрузчик.
+    #[test]
+    fn both_schemas_accept_the_cluster_section_and_refuse_a_stranger_inside_it() {
+        let overlay = "infobases:\n  origin:\n    connection: 'Srvr=srv:1541;Ref=demo'\n    cluster:\n      ras: srv:1545\n      user: cluster-admin\n      password: cluster-secret\n      agent:\n        address: srv:1540\n        user: agent-admin\n        password: agent-secret\n";
+        assert_schema_valid(&local_config_schema_json(), overlay);
+        assert_overlay_loader_ok(overlay);
+        let project = "workPath: work\nformat: DESIGNER\ninfobase:\n  connection: 'Srvr=srv:1541;Ref=demo'\n  cluster:\n    ras: srv:1545\n    user: cluster-admin\n    password: cluster-secret\n    agent:\n      address: srv:1540\n      user: agent-admin\n      password: agent-secret\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n";
+        assert_schema_valid(&main_config_schema_json(), project);
+
+        let stranger = "infobases:\n  origin:\n    connection: 'Srvr=srv:1541;Ref=demo'\n    cluster:\n      ras: srv:1545\n      port: 1545\n";
+        assert_schema_invalid(&local_config_schema_json(), stranger);
+        assert_overlay_loader_error(stranger);
+        let agent_stranger = "infobases:\n  origin:\n    connection: 'Srvr=srv:1541;Ref=demo'\n    cluster:\n      agent:\n        host: srv\n";
+        assert_schema_invalid(&local_config_schema_json(), agent_stranger);
+        assert_overlay_loader_error(agent_stranger);
     }
 
     #[test]

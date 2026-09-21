@@ -113,6 +113,21 @@ pub enum ConfigValidationError {
     DbmsNotAllowedForFileConnection,
 
     #[error(
+        "infobase.cluster is not allowed for a file infobase: a file base has no cluster and no administration server"
+    )]
+    ClusterNotAllowedForFileConnection,
+
+    #[error(
+        "infobase.cluster does not apply to a standalone server: ibsrv is one process instead of a cluster, and ras does not manage it"
+    )]
+    ClusterNotAllowedForStandalone,
+
+    #[error(
+        "{key} must be a host with an optional port — `host`, `host:port` or `[v6]:port`: '{value}'"
+    )]
+    ClusterAddressInvalid { key: &'static str, value: String },
+
+    #[error(
         "infobase.connection 'ws=…' is a web-client address, not an administrative channel: put it into infobase.web.url and declare the target with File=… or Srvr=…;Ref=…"
     )]
     WebConnectionIsNotAnAdministrativeChannel,
@@ -826,10 +841,52 @@ fn validate_infobase_form(
     if !parsed.has_supported_shape() {
         return Err(ConfigValidationError::ConnectionShapeUnsupported);
     }
-    if parsed.file_path().is_some() && infobase.dbms.is_some() {
-        return Err(ConfigValidationError::DbmsNotAllowedForFileConnection);
+    if parsed.file_path().is_some() {
+        if infobase.dbms.is_some() {
+            return Err(ConfigValidationError::DbmsNotAllowedForFileConnection);
+        }
+        if infobase.cluster.is_some() {
+            return Err(ConfigValidationError::ClusterNotAllowedForFileConnection);
+        }
+        return Ok(());
+    }
+    if let Some(cluster) = infobase.cluster.as_ref() {
+        validate_cluster_section(cluster)?;
     }
 
+    Ok(())
+}
+
+/// Секция `cluster` держит то, что есть только у кластера
+/// (`DEC.2026-09-21.THE-CLUSTER-SECTION-HOLDS-RAS-AND-TWO-ADMIN-LEVELS`): адреса —
+/// `host[:port]`, как их примут `rac` и `ras`; учётные данные здесь не проверяются —
+/// какого уровня не хватает, скажет операция, которой он нужен.
+fn validate_cluster_section(
+    cluster: &crate::config::model::InfobaseClusterConfig,
+) -> Result<(), ConfigValidationError> {
+    validate_cluster_address("infobase.cluster.ras", cluster.ras.as_deref())?;
+    validate_cluster_address(
+        "infobase.cluster.agent.address",
+        cluster
+            .agent
+            .as_ref()
+            .and_then(|agent| agent.address.as_deref()),
+    )
+}
+
+fn validate_cluster_address(
+    key: &'static str,
+    value: Option<&str>,
+) -> Result<(), ConfigValidationError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if crate::support::authority::host_and_port_of_authority(value.trim()).is_none() {
+        return Err(ConfigValidationError::ClusterAddressInvalid {
+            key,
+            value: value.to_owned(),
+        });
+    }
     Ok(())
 }
 
@@ -884,6 +941,9 @@ fn validate_standalone_target_form(
     }
     if infobase.dbms.is_some() {
         return Err(ConfigValidationError::DbmsNotAllowedForStandalone);
+    }
+    if infobase.cluster.is_some() {
+        return Err(ConfigValidationError::ClusterNotAllowedForStandalone);
     }
     standalone
         .gate_endpoint()
@@ -2629,6 +2689,7 @@ mod tests {
                 dbms: None,
                 web: None,
                 standalone: None,
+                cluster: None,
             },
             infobases: Default::default(),
             infobase_name: None,
@@ -2709,6 +2770,75 @@ mod tests {
 
     fn infobase(yaml: &str) -> crate::config::model::InfobaseConfig {
         serde_yaml::from_str(yaml).expect("infobase section")
+    }
+
+    /// Секция `cluster` держит то, что есть только у кластера: у файловой базы и у
+    /// автономного сервера она отклоняется
+    /// (`INV.CONFIG.A-CLUSTER-SECTION-IS-REJECTED-OUTSIDE-A-CLUSTER-BASE`).
+    #[test]
+    fn the_cluster_section_is_rejected_for_a_file_base_and_a_standalone_server() {
+        let file = infobase("connection: 'File=/srv/ib'\ncluster:\n  ras: srv:1545\n");
+        assert!(matches!(
+            super::validate_infobase_form(&file),
+            Err(ConfigValidationError::ClusterNotAllowedForFileConnection)
+        ));
+
+        let standalone = infobase(
+            "standalone:\n  gate: srv:1543\n  exchange: sftp\ncluster:\n  user: cluster-admin\n",
+        );
+        assert!(matches!(
+            super::validate_infobase_form(&standalone),
+            Err(ConfigValidationError::ClusterNotAllowedForStandalone)
+        ));
+
+        let cluster = infobase(
+            "connection: 'Srvr=srv:1541;Ref=demo'\ncluster:\n  ras: srv:1545\n  user: cluster-admin\n  password: cluster-secret\n  agent:\n    address: srv:1540\n    user: agent-admin\n    password: agent-secret\n",
+        );
+        super::validate_infobase_form(&cluster)
+            .expect("a cluster base carries its cluster section");
+    }
+
+    /// Адреса секции — `host[:port]`, как их примут `rac` и `ras`: IPv6 в скобках, порт
+    /// не обязателен и не равен нулю; отказ называет ключ.
+    #[test]
+    fn a_cluster_address_is_a_host_with_an_optional_port() {
+        for address in ["srv", "srv:1545", "10.0.0.5:1540", "[::1]:1545"] {
+            let section = infobase(&format!(
+                "connection: 'Srvr=srv:1541;Ref=demo'\ncluster:\n  ras: '{address}'\n  agent:\n    address: '{address}'\n"
+            ));
+            assert!(super::validate_infobase_form(&section).is_ok(), "{address}");
+        }
+        for address in ["", ":1545", "srv:0", "srv:x", "::1"] {
+            let section = infobase(&format!(
+                "connection: 'Srvr=srv:1541;Ref=demo'\ncluster:\n  ras: '{address}'\n"
+            ));
+            let error = super::validate_infobase_form(&section).expect_err(address);
+            assert!(
+                matches!(
+                    &error,
+                    ConfigValidationError::ClusterAddressInvalid {
+                        key: "infobase.cluster.ras",
+                        ..
+                    }
+                ),
+                "{address}: {error}"
+            );
+
+            let section = infobase(&format!(
+                "connection: 'Srvr=srv:1541;Ref=demo'\ncluster:\n  agent:\n    address: '{address}'\n"
+            ));
+            let error = super::validate_infobase_form(&section).expect_err(address);
+            assert!(
+                matches!(
+                    &error,
+                    ConfigValidationError::ClusterAddressInvalid {
+                        key: "infobase.cluster.agent.address",
+                        ..
+                    }
+                ),
+                "{address}: {error}"
+            );
+        }
     }
 
     /// Три вопроса по порядку: секция первична, строка рядом с ней — серверный адрес.

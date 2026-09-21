@@ -57,10 +57,14 @@ fn write_project(dir: &Path, yaml_tail: &str) -> Project {
 #[test]
 fn an_unsupported_combination_is_refused_before_any_utility_runs() {
     let ib = "File=/tmp/ib";
-    let cases: [(&str, String); 3] = [
+    let cases: [(&str, String); 4] = [
         (
             "dbms on a file infobase",
             format!("format: DESIGNER\ninfobase:\n  connection: '{ib}'\n  dbms:\n    kind: PostgreSQL\n    server: db\n    name: demo\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\n"),
+        ),
+        (
+            "a cluster section on a file infobase",
+            format!("format: DESIGNER\ninfobase:\n  connection: '{ib}'\n  cluster:\n    ras: srv:1545\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\n"),
         ),
         (
             "EDT format over a Designer-layout source set",

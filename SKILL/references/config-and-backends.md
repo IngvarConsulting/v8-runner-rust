@@ -51,6 +51,10 @@ matrix, and `providers.<operation>` names one explicitly.
   extensions, and tests.
 - `ibcmd` as the executor for `build` covers file infobases and server infobases with `infobase.dbms`;
   for an EDT project it runs after the EDT export to Designer files and requires a file infobase.
+- `infobase.cluster` (`ras`, `user`/`password`, `agent.address`/`user`/`password`) declares the
+  administration server and the two administrator levels above the infobase user; it is refused
+  next to `File=` or `standalone`, and no command reads it yet (`sessions`, the runner's own `ras`
+  and `infobase create` in a cluster arrive later).
 - `extensions` supports Designer and EDT projects: `--name` selects an extension `source-set`,
   `--installed-name` selects an installed platform name without a matching source-set.
 - `syntax designer-config` and `syntax designer-modules` require `format=DESIGNER`; `syntax edt` requires `format=EDT`.
