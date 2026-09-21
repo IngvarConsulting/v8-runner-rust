@@ -286,6 +286,13 @@ impl TextPresenter {
         println!("{line}");
     }
 
+    /// Узел, предваряющий ленту команды: печатается со связкой после себя, чтобы лента
+    /// команды продолжила его, а не прижалась к нему.
+    pub fn print_leading_node(&self, item: &TimelineItem) {
+        self.print_timeline(std::slice::from_ref(item));
+        println!("{}", self.timeline_pipe());
+    }
+
     fn timeline_node(&self, mark: NodeMark) -> String {
         let glyph = mark.glyph();
         if self.no_color {
@@ -403,6 +410,15 @@ pub struct JsonPresenter;
 
 impl JsonPresenter {
     pub fn print<T: Serialize>(&self, envelope: &Envelope<T>) {
+        match serde_json::to_string_pretty(envelope) {
+            Ok(s) => println!("{s}"),
+            Err(e) => eprintln!("JSON serialization error: {e}"),
+        }
+    }
+
+    /// Конверт, уже собранный как значение: так печатается ответ, к которому presenter
+    /// дописал предупреждения загрузки.
+    pub fn print_value(&self, envelope: &serde_json::Value) {
         match serde_json::to_string_pretty(envelope) {
             Ok(s) => println!("{s}"),
             Err(e) => eprintln!("JSON serialization error: {e}"),

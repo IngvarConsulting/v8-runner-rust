@@ -1,9 +1,9 @@
 ---
 id: INV.CLI.A-COMMAND-WITHOUT-ORIGIN-NAMES-THE-MISSING-STEP
-status: planned
+status: active
 governs: product
 decision: DEC.2026-09-21.INFOBASES-ARE-A-NAMED-MAP-WITH-ORIGIN-AS-THE-DEFAULT
-check: null
+check: tests/cli_infobases.rs::a_command_without_origin_names_the_missing_step
 scope: [cli, config]
 ---
 

@@ -1,10 +1,10 @@
 ---
 id: DEC.2026-04-21.INFOBASE-SECTION-OWNS-CONNECTION-AND-CREDENTIALS
-status: active
+status: superseded
 governs: product
 realized: tests/cli_bootstrap.rs::bootstrap_json_success_keeps_credentials_in_local_overlay_only
 supersedes: []
-superseded-by: null
+superseded-by: DEC.2026-09-21.INFOBASES-ARE-A-NAMED-MAP-WITH-ORIGIN-AS-THE-DEFAULT
 establishes: [INV.CONFIG.DBMS-IS-REJECTED-FOR-A-FILE-BASE, INV.CONFIG.TOP-LEVEL-CONNECTION-IS-NOT-ACCEPTED]
 ---
 

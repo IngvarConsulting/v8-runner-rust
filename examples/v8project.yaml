@@ -9,9 +9,8 @@ format: DESIGNER
 
 # Executor overrides are optional: providers.<operation>: designer | ibcmd
 
-# 1C infobase connection string
-infobase:
-  connection: "File=build/ib"
+# Infobases are declared in v8project.local.yaml (map `infobases`, default `origin`):
+# which infobase a checkout is attached to is known to the machine, not to the project.
 
 # Source sets: list of configurations and extensions
 source-set:

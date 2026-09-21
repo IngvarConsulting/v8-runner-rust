@@ -8,6 +8,8 @@ use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::config::model::INFOBASE_NAME_PATTERN;
+
 pub const MAIN_CONFIG_SCHEMA_PATH: &str = "docs/schemas/v8project.schema.json";
 pub const LOCAL_CONFIG_SCHEMA_PATH: &str = "docs/schemas/v8project.local.schema.json";
 
@@ -350,8 +352,16 @@ struct MainConfigSchema {
     )]
     #[schemars(with = "ProvidersSchema")]
     providers: Option<ProvidersSchema>,
-    /// Target infobase connection, credentials, and optional DBMS settings.
-    infobase: InfobaseSchema,
+    /// One-cycle synonym for `infobases.origin` of v8project.local.yaml: which infobase a
+    /// checkout is attached to is known to the machine, not to the project.
+    #[deprecated = "declare the infobase as infobases.origin in v8project.local.yaml"]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "InfobaseSchema")]
+    infobase: Option<InfobaseSchema>,
     /// Project source sets to build, test, dump, or materialize.
     #[serde(rename = "source-set", default)]
     source_sets: Vec<SourceSetSchema>,
@@ -401,14 +411,28 @@ struct LocalOverlayConfigSchema {
     )]
     #[schemars(with = "PathBuf")]
     work_path: Option<PathBuf>,
-    /// Machine-local infobase credentials and connection overrides.
+    /// Infobases of this checkout by name, like remotes of a repository; commands work
+    /// with `origin` unless `--infobase` names another one. A name is a plain identifier:
+    /// it becomes a directory under workPath.
     #[serde(
         default,
         deserialize_with = "deserialize_non_null_optional",
         skip_serializing_if = "Option::is_none"
     )]
-    #[schemars(with = "PartialInfobaseSchema")]
-    infobase: Option<PartialInfobaseSchema>,
+    #[schemars(
+        with = "BTreeMap<String, InfobaseSchema>",
+        extend("propertyNames" = json!({ "pattern": INFOBASE_NAME_PATTERN }))
+    )]
+    infobases: Option<BTreeMap<String, InfobaseSchema>>,
+    /// One-cycle synonym for `infobases.origin`.
+    #[deprecated = "declare the infobase as infobases.origin"]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "InfobaseSchema")]
+    infobase: Option<InfobaseSchema>,
     /// Machine-local tool discovery and launch overrides.
     #[serde(
         default,
@@ -612,31 +636,6 @@ struct InfobaseWebSchema {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct PartialInfobaseSchema {
-    /// Optional local override for the 1C infobase connection string.
-    #[serde(
-        default,
-        deserialize_with = "deserialize_non_null_optional",
-        skip_serializing_if = "Option::is_none"
-    )]
-    #[schemars(with = "String")]
-    connection: Option<String>,
-    /// Optional local infobase user name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    user: Option<String>,
-    /// Optional local infobase password.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    password: Option<String>,
-    /// Optional local DBMS settings override.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    dbms: Option<PartialInfobaseDbmsSchema>,
-    /// Optional local publication and client-address override.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    web: Option<InfobaseWebSchema>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 struct InfobaseDbmsSchema {
     /// DBMS kind passed to `ibcmd --dbms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -654,8 +653,6 @@ struct InfobaseDbmsSchema {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     password: Option<String>,
 }
-
-type PartialInfobaseDbmsSchema = InfobaseDbmsSchema;
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1279,6 +1276,7 @@ struct ExecutionTimeoutsSchema {
 #[cfg(test)]
 mod tests {
     use crate::config::loader::load_config;
+    use crate::config::model::InfobaseSelector;
 
     use super::{
         local_config_schema_json, main_config_schema_json, schema_json_pretty,
@@ -1314,6 +1312,50 @@ mod tests {
         }
     }
 
+    /// Синоним помечен в обеих схемах, а карта принимает только имена-идентификаторы
+    /// (`INV.CONFIG.A-KEY-SYNONYM-IS-MARKED-DEPRECATED-IN-THE-SCHEMA`,
+    /// `INV.CONFIG.AN-INFOBASE-NAME-IS-A-PLAIN-IDENTIFIER`).
+    #[test]
+    fn the_infobase_synonym_is_deprecated_and_the_map_keys_are_identifiers() {
+        let main_schema = main_config_schema_json();
+        assert_eq!(
+            main_schema["properties"]["infobase"]["deprecated"],
+            serde_json::Value::Bool(true)
+        );
+        assert!(
+            !main_schema["required"]
+                .as_array()
+                .expect("required")
+                .iter()
+                .any(|key| key == "infobase"),
+            "the project file no longer requires a base section"
+        );
+        assert!(
+            main_schema["properties"].get("infobases").is_none(),
+            "the map lives in the local layer only"
+        );
+
+        let local_schema = local_config_schema_json();
+        assert_eq!(
+            local_schema["properties"]["infobase"]["deprecated"],
+            serde_json::Value::Bool(true)
+        );
+        let map = &local_schema["properties"]["infobases"];
+        assert_eq!(
+            map["propertyNames"]["pattern"],
+            serde_json::Value::String(super::INFOBASE_NAME_PATTERN.to_owned())
+        );
+        assert_eq!(
+            map["additionalProperties"]["$ref"],
+            "#/$defs/InfobaseSchema"
+        );
+        let section = &local_schema["$defs"]["InfobaseSchema"]["properties"];
+        assert!(
+            section.get("standalone").is_some(),
+            "the local layer declares whole sections, a standalone server included"
+        );
+    }
+
     #[test]
     fn generated_schemas_include_user_facing_field_descriptions() {
         let main_schema = main_config_schema_json();
@@ -1329,6 +1371,12 @@ mod tests {
             &["InfobaseSchema"],
             "connection",
             "infobase connection string",
+        );
+        assert_property_description_contains(
+            &local_config_schema_json(),
+            &[],
+            "infobases",
+            "Infobases of this checkout by name",
         );
         assert_property_description_contains(
             &main_schema,
@@ -1442,7 +1490,9 @@ mod tests {
             &minimal_project_config_without_base_path(),
         );
 
-        let config = load_config(config_path.to_str(), None).expect("load config");
+        let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect("load config");
         assert_eq!(
             config.base_path,
             std::fs::canonicalize(dir.path()).expect("canonical config dir")
@@ -1460,7 +1510,9 @@ mod tests {
 
         assert_schema_valid(&local_config_schema_json(), overlay);
 
-        let config = load_config(config_path.to_str(), None).expect("load config");
+        let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect("load config");
         assert_eq!(config.infobase.user.as_deref(), Some("Admin"));
         assert_eq!(config.infobase.password.as_deref(), Some("secret"));
     }
@@ -1548,7 +1600,9 @@ mod tests {
 
         assert_schema_valid(&local_config_schema_json(), overlay);
 
-        let config = load_config(config_path.to_str(), None).expect("load merged config");
+        let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect("load merged config");
         assert!(config.tools.platform.strict);
         assert_eq!(
             config.tools.platform.path.as_deref(),
@@ -1577,7 +1631,9 @@ mod tests {
         assert_schema_valid(&main_config_schema_json(), &primary);
         assert_schema_valid(&local_config_schema_json(), overlay);
 
-        let config = load_config(config_path.to_str(), None).expect("load merged config");
+        let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect("load merged config");
         assert!(config.tools.platform.strict);
         assert_eq!(
             config.tools.platform.path.as_deref(),
@@ -1617,7 +1673,9 @@ mod tests {
 
         assert_schema_valid(&local_config_schema_json(), overlay);
 
-        let config = load_config(config_path.to_str(), None).expect("load config");
+        let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect("load config");
         assert!(config.tools.client_mcp.extension.is_none());
     }
 
@@ -1640,7 +1698,9 @@ mod tests {
 
         assert_schema_valid(&local_config_schema_json(), overlay);
 
-        let config = load_config(config_path.to_str(), None).expect("load config");
+        let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect("load config");
         let mut extension = config.tools.client_mcp.extension.expect("extension");
         assert!(extension.source().is_none());
         assert!(extension.artifact_mut().is_some());
@@ -1892,7 +1952,9 @@ mod tests {
         std::fs::write(&config_path, minimal_project_config_without_base_path()).expect("config");
         std::fs::write(dir.path().join("v8project.local.yaml"), overlay).expect("overlay");
 
-        load_config(config_path.to_str(), None).expect_err("overlay must be rejected");
+        load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect_err("overlay must be rejected");
     }
 
     fn assert_overlay_loader_ok(overlay: &str) {
@@ -1902,7 +1964,9 @@ mod tests {
         std::fs::write(&config_path, minimal_project_config_without_base_path()).expect("config");
         std::fs::write(dir.path().join("v8project.local.yaml"), overlay).expect("overlay");
 
-        load_config(config_path.to_str(), None).expect("overlay must be accepted");
+        load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect("overlay must be accepted");
     }
 
     fn assert_config_loader_ok(config: &str) {
@@ -1911,7 +1975,9 @@ mod tests {
         let config_path = dir.path().join("v8project.yaml");
         std::fs::write(&config_path, config).expect("config");
 
-        load_config(config_path.to_str(), None).expect("config must be accepted");
+        load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect("config must be accepted");
     }
 
     fn assert_config_loader_error_any(config: &str) {
@@ -1920,7 +1986,9 @@ mod tests {
         let config_path = dir.path().join("v8project.yaml");
         std::fs::write(&config_path, config).expect("config");
 
-        load_config(config_path.to_str(), None).expect_err("config must be rejected");
+        load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect_err("config must be rejected");
     }
 
     fn assert_config_loader_error(config: &str, expected: &str) {
@@ -1929,7 +1997,9 @@ mod tests {
         let config_path = dir.path().join("v8project.yaml");
         std::fs::write(&config_path, config).expect("config");
 
-        let error = load_config(config_path.to_str(), None).expect_err("config must be rejected");
+        let error = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect_err("config must be rejected");
         assert!(
             error.to_string().contains(expected),
             "expected error to contain {expected:?}, got {error}"

@@ -1628,6 +1628,8 @@ mod tests {
             providers: Default::default(),
             provider_origins: Default::default(),
             infobase: InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: Vec::new(),
             build: BuildConfig::default(),
             tools: ToolsConfig::default(),

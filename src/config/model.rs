@@ -35,8 +35,20 @@ pub struct AppConfig {
     #[serde(skip)]
     pub provider_origins: BTreeMap<Operation, String>,
 
-    /// Infobase connection and credentials contract.
+    /// Declared infobases by name: the `infobases` map of the local overlay after the
+    /// one-cycle `infobase:` synonym is folded into `origin`. Only the loader and a
+    /// listing command read the map; every use case works with the selected `infobase`.
+    #[serde(default)]
+    pub infobases: BTreeMap<String, InfobaseConfig>,
+
+    /// The infobase this run works with: the entry `infobases[infobase_name]`, or an ad
+    /// hoc base built from `--infobase <connection string>`. The loader selects it before
+    /// the config is deserialized, so a loaded config always has one.
     pub infobase: InfobaseConfig,
+
+    /// Name of the selected infobase; `None` when it came as an ad hoc connection string.
+    #[serde(default)]
+    pub infobase_name: Option<String>,
 
     /// Source sets (configuration + extensions)
     #[serde(rename = "source-set", default)]
@@ -57,6 +69,51 @@ pub struct AppConfig {
     /// Test pipeline configuration
     #[serde(default)]
     pub tests: TestsConfig,
+}
+
+/// Name of the infobase every command falls back to when `--infobase` is not given.
+pub const DEFAULT_INFOBASE_NAME: &str = "origin";
+
+/// Form of an infobase name: a plain identifier, because the name becomes a directory
+/// under `workPath/infobases/` and a key of the `infobases` map. One source for the
+/// validator and for the published schema (`INV.CONFIG.AN-INFOBASE-NAME-IS-A-PLAIN-IDENTIFIER`).
+pub const INFOBASE_NAME_PATTERN: &str = "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$";
+
+/// Whether `name` has the form of an infobase name.
+pub fn is_infobase_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    name.len() <= 64
+        && first.is_ascii_alphanumeric()
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// What `--infobase` asked for: the default, a declared name, or a connection string.
+///
+/// A value in the form of a name is looked up in the `infobases` map; anything else is
+/// taken as a connection string of an undeclared, ad hoc base.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum InfobaseSelector {
+    /// No flag: `origin`.
+    #[default]
+    Default,
+    /// `--infobase <name>`: a declared infobase.
+    Name(String),
+    /// `--infobase <connection string>`: an ad hoc base without a name or credentials.
+    Connection(String),
+}
+
+impl InfobaseSelector {
+    /// Reads the `--infobase` flag; `None` means the default infobase.
+    pub fn from_flag(value: Option<&str>) -> Self {
+        match value.map(str::trim) {
+            None | Some("") => Self::Default,
+            Some(value) if is_infobase_name(value) => Self::Name(value.to_owned()),
+            Some(value) => Self::Connection(value.to_owned()),
+        }
+    }
 }
 
 /// Connection and credentials for the target infobase.

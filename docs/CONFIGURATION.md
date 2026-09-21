@@ -34,8 +34,11 @@ v8-runner config init
 - создаёт `v8project.yaml` в текущем каталоге или по `--output <FILE>`;
 - добавляет modeline `yaml-language-server` со ссылкой на опубликованный schema artifact в
   ветке `master`;
-- создаёт рядом пустой `v8project.local.yaml` с modeline на
-  `https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.local.schema.json`;
+- создаёт рядом `v8project.local.yaml` с modeline на
+  `https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.local.schema.json`
+  и объявляет в нём базу `origin`: адрес из `--connection`, по умолчанию `File=build/ib`;
+  существующий местный слой не переписывается — `origin` дописывается, если не объявлен, а
+  объявленный с другим адресом, чем в `--connection`, — отказ;
 - добавляет `v8project.local.yaml` в `.gitignore`, если подходящий pattern еще не указан;
 - заполняет `source-set` по найденным исходникам;
 - не перезаписывает существующий файл без `--force`;
@@ -55,8 +58,9 @@ v8-runner config init
 `v8project.yaml`.
 
 Если рядом с основным конфигом есть `v8project.local.yaml`, он применяется автоматически после
-`v8project.yaml` и до CLI overrides. Локальный файл предназначен для machine-local путей,
-credentials и runtime настроек; его следует держать вне Git.
+`v8project.yaml` и до CLI overrides. Локальный файл объявляет базы проекта (карта
+[`infobases`](#infobases)) и держит machine-local пути, credentials и runtime настройки; его
+следует держать вне Git.
 
 ## YAML Schema и VS Code
 
@@ -102,8 +106,8 @@ artifact без привязки к release tag.
 `v8project.yaml` использует не один стиль на весь документ. Это текущий loader contract, и docs
 ниже повторяют именно literal YAML keys.
 
-- top-level app keys: `workPath`, `format`, `providers`, `infobase`,
-  `source-set`, `build`, `tools`, `mcp`, `tests`;
+- top-level app keys: `workPath`, `format`, `providers`, `source-set`, `build`, `tools`,
+  `mcp`, `tests`; базы объявляет местный слой ключом `infobases`;
 - `build` использует `partialLoadThreshold`;
 - `mcp.*` и `tests.*` используют `snake_case`;
 - canonical key для EDT tool section: `tools.edt_cli`;
@@ -119,14 +123,12 @@ artifact без привязки к release tag.
 
 ## Канонический пример
 
+Проектный файл базы не называет: к какой базе подключён каталог, знает эта машина, и базы
+объявляет [локальный overlay](#локальный-overlay).
+
 ```yaml
 workPath: build
 format: EDT
-
-infobase:
-  connection: "File=build/ib"
-  user: Admin
-  password: secret
 
 source-set:
   - name: main
@@ -219,7 +221,9 @@ Merge rules:
 Local overlay может задавать machine-local секции:
 
 - `workPath`;
-- `infobase.*`, включая `user`/`password`;
+- `infobases.<имя>.*` — секции баз целиком: `connection`, `user`/`password`, `dbms`,
+  `web`, `standalone`; `origin` — умолчание;
+- `infobase` — синоним `infobases.origin` на один цикл выпуска;
 - `tools.*`;
 - `tests.*`;
 - `mcp.*`.
@@ -236,10 +240,13 @@ Local overlay не может менять project identity:
 ```yaml
 workPath: build-local
 
-infobase:
-  connection: "File=local/ib"
-  user: Admin
-  password: secret
+infobases:
+  origin:
+    connection: "File=local/ib"
+    user: Admin
+    password: secret
+  test:
+    connection: "Srvr=srv;Ref=erp_test"
 
 tools:
   platform:
@@ -327,9 +334,38 @@ providers:
 
 Ключ `builder` снят: конфиг с ним не проходит валидацию, а ошибка называет замену.
 
-### `infobase`
+### `infobases`
 
-Секция обязательна целиком.
+Базы проекта объявляются в `v8project.local.yaml` картой по именам, как `remote` у
+репозитория; проектный файл базы не называет. Умолчание — `origin`: команды идут в неё без
+ключа. `--infobase <имя>` выбирает другую объявленную базу; `--infobase <строка соединения>`
+— базу ad hoc: без имени, без учётных данных (`Usr=`/`Pwd=` или `/N`/`/P` в строке — отказ),
+и это не автономный сервер — его объявляют секцией `standalone`. Без `origin` и без ключа
+команда отказывает до запуска платформы и называет шаг. Ключ действует и на `mcp serve`.
+
+Имя базы — идентификатор `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`: оно же становится каталогом под
+`workPath`, поэтому другого имени схема не принимает.
+
+```yaml
+# v8project.local.yaml
+infobases:
+  origin:
+    connection: "File=build/ib"
+  test:
+    connection: "Srvr=srv;Ref=erp_test"
+    user: tester
+    password: secret
+```
+
+**Синоним на один цикл выпуска.** Прежний ключ `infobase:` читается как `infobases.origin`
+— в проектном файле и в местном слое, в каждом с предупреждением (в тексте — узел
+`▲ config:` перед лентой команды, в JSON — `warnings` конверта); схема помечает его как
+`deprecated`. Карта `infobases` в проектном файле не принимается. Оба ключа в одном файле
+— отказ. Проектный `infobase:` и местный `infobases.origin` — одна база, слитая по полям:
+так `connection` из проектного файла и `user`/`password` из местного продолжают работать
+вместе до переезда секции. В следующем цикле выпуска синоним снимается.
+
+Ниже `infobase.<поле>` — поле секции базы, объявленной под любым именем.
 
 #### `infobase.connection`
 
@@ -355,15 +391,16 @@ providers:
 базы, как для шлюза требует платформа.
 
 ```yaml
-infobase:
-  user: Admin
-  password: secret
-  standalone:
-    gate: srv.example:1543      # host:port SSH-шлюза
-    host-fingerprint: 'SHA256:…'  # чей ключ считать своим; не объявлен — принимается любой
-    exchange: sftp              # файлы — по SFTP того же шлюза
-  web:
-    url: http://srv.example:8314/demo   # адрес для launch web
+infobases:
+  origin:
+    user: Admin
+    password: secret
+    standalone:
+      gate: srv.example:1543      # host:port SSH-шлюза
+      host-fingerprint: 'SHA256:…'  # чей ключ считать своим; не объявлен — принимается любой
+      exchange: sftp              # файлы — по SFTP того же шлюза
+    web:
+      url: http://srv.example:8314/demo   # адрес для launch web
 ```
 
 `host-fingerprint` — отпечаток ключа хоста шлюза в виде `SHA256:<base64>`, то, что
@@ -428,20 +465,21 @@ Credentials самой информационной базы.
 администрировать базу, из неё не следует.
 
 ```yaml
-infobase:
-  connection: "Srvr=srv:1541;Ref=demo"
-  web:
-    server: apache24            # iis | apache2 | apache22 | apache24
-    wsdir: demo                 # виртуальный каталог
-    dir: /var/www/demo          # физический каталог, должен существовать
-    conf: /etc/httpd/httpd.conf # обязателен для apache2 и apache22
-    os-auth: false              # только для iis
-    url: http://localhost/demo  # адрес для launch web
+infobases:
+  origin:
+    connection: "Srvr=srv:1541;Ref=demo"
+    web:
+      server: apache24            # iis | apache2 | apache22 | apache24
+      wsdir: demo                 # виртуальный каталог
+      dir: /var/www/demo          # физический каталог, должен существовать
+      conf: /etc/httpd/httpd.conf # обязателен для apache2 и apache22
+      os-auth: false              # только для iis
+      url: http://localhost/demo  # адрес для launch web
 ```
 
 `server`, `wsdir` и `dir` нужны команде `publish`; `url` — команде `launch web`. У
 файловой и кластерной базы адрес появляется после публикации, у автономного сервера
-известен сразу. Секция разрешена и в `v8project.local.yaml`.
+известен сразу. Секция лежит в местном слое вместе с остальной секцией базы.
 
 #### `infobase.dbms`
 

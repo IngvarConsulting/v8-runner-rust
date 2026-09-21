@@ -90,8 +90,10 @@ fn config_init_creates_yaml_with_detected_designer_sources() {
     assert!(config.contains("format: DESIGNER"));
     assert!(!config.contains("basePath:"));
     assert!(config.contains("workPath: 'build'"));
-    assert!(config.contains("infobase:"));
-    assert!(config.contains("  connection: 'File=build/ib'"));
+    assert!(
+        !config.contains("infobase"),
+        "the project file names no base:\n{config}"
+    );
     assert!(config.contains("#     wait_ready_timeout_ms: 300000"));
     assert!(config.contains("path: 'src/configuration'"));
     assert!(config.contains("name: 'SalesAddon'"));
@@ -100,6 +102,10 @@ fn config_init_creates_yaml_with_detected_designer_sources() {
     let local_config =
         fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("local config");
     assert!(local_config.starts_with(LOCAL_CONFIG_SCHEMA_MODEL_LINE));
+    assert!(
+        local_config.contains("infobases:\n  origin:\n    connection: 'File=build/ib'\n"),
+        "the local layer declares origin:\n{local_config}"
+    );
     serde_yaml::from_str::<serde_yaml::Value>(&local_config)
         .expect("generated local config remains YAML");
     let gitignore = fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
@@ -149,9 +155,18 @@ fn config_init_uses_json_envelope_and_output_override() {
     assert_eq!(payload["data"]["source_sets"][0]["path"], ".");
     assert_eq!(payload["data"]["source_sets"][0]["type"], "CONFIGURATION");
     let config = fs::read_to_string(config_path).expect("config");
-    assert!(config.contains("infobase:"));
-    assert!(config.contains("  connection: 'File=/tmp/test-ib'"));
+    assert!(!config.contains("infobase"), "{config}");
     assert!(!config.contains("basePath:"));
+    let local_config = fs::read_to_string(
+        payload["data"]["local_path"]
+            .as_str()
+            .expect("local path in the payload"),
+    )
+    .expect("local config");
+    assert!(
+        local_config.contains("infobases:\n  origin:\n    connection: 'File=/tmp/test-ib'\n"),
+        "{local_config}"
+    );
 }
 
 #[test]

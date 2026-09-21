@@ -38,6 +38,15 @@ pub struct Cli {
     #[arg(long, global = true, help_heading = "Global options")]
     pub workdir: Option<String>,
 
+    /// Infobase to work with: a name declared in v8project.local.yaml or a connection string; defaults to `origin`
+    #[arg(
+        long,
+        global = true,
+        value_name = "NAME|CONNECTION",
+        help_heading = "Global options"
+    )]
+    pub infobase: Option<String>,
+
     #[command(subcommand)]
     pub command: Command,
 }
