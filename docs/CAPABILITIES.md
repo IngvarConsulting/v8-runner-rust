@@ -379,10 +379,15 @@ v8-runner syntax edt [--project <PROJECT>...]
 ### `dump`
 
 ```bash
-v8-runner dump --mode <full|incremental|partial> [--source-set <NAME>] [--extension <EXTENSION>] [--object <TYPE:NAME>...] [--dry-run]
+v8-runner dump --mode <full|incremental|partial> [--source-set <NAME>] [--extension <EXTENSION>] [--object <TYPE:NAME>...] [--dry-run] [--discard-uncommitted]
 ```
 
 - `partial` требует хотя бы один `--object`.
+- Перед заменой каталога исходников команда спрашивает git, что нельзя вернуть:
+  неотслеживаемые и игнорируемые файлы, правки рабочего дерева, неразрешённые маркеры
+  слияния. Найдя такое, она отказывает с кодом выхода 2 и называет файлы;
+  `--discard-uncommitted` заменяет каталог всё равно. Если git ответить не может,
+  поведение прежнее.
 - Канонический ввод селектора — `TYPE:NAME` (например, `Catalog:Items`); для
   совместимости принимается и `TYPE.NAME`. Переданный селектор сохраняется в JSON как
   `data.selectors[*].requested`, а в списке Designer и как
@@ -399,10 +404,15 @@ v8-runner dump --mode <full|incremental|partial> [--source-set <NAME>] [--extens
 ### `convert`
 
 ```bash
-v8-runner convert [--source-set <NAME>] [--output <DIR>] [--dry-run]
+v8-runner convert [--source-set <NAME>] [--output <DIR>] [--dry-run] [--discard-uncommitted]
 ```
 
 - CLI-only; не публикуется как MCP tool.
+- Перед заменой целевого каталога команда спрашивает git, что нельзя вернуть:
+  неотслеживаемые и игнорируемые файлы, правки рабочего дерева, неразрешённые маркеры
+  слияния. Найдя такое, она отказывает с кодом выхода 2 и называет файлы;
+  `--discard-uncommitted` заменяет каталог всё равно. Если git ответить не может,
+  поведение прежнее.
 - Работает от текущего `v8project.yaml`, а не по arbitrary source/target paths.
 - Направление определяется только из `format`.
 - Без `--output` публикует результат под `workPath/convert/out/<sourceSetName>/<designer|edt>/`.
