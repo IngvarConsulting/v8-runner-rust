@@ -881,7 +881,8 @@ fn validate_cluster_address(
     let Some(value) = value else {
         return Ok(());
     };
-    if host_and_port_of_authority(value.trim()).is_none() {
+    // Проверяется ровно та запись, что уйдёт утилите: пробелы по краям — не адрес.
+    if host_and_port_of_authority(value).is_none() {
         return Err(ConfigValidationError::ClusterAddressInvalid {
             key,
             value: value.to_owned(),
@@ -2799,7 +2800,7 @@ mod tests {
     }
 
     /// Адреса секции — `host[:port]`, как их примут `rac` и `ras`: IPv6 в скобках, порт
-    /// не обязателен и не равен нулю; отказ называет ключ.
+    /// не обязателен и не равен нулю, пробелы по краям — не адрес; отказ называет ключ.
     #[test]
     fn a_cluster_address_is_a_host_with_an_optional_port() {
         for address in ["srv", "srv:1545", "10.0.0.5:1540", "[::1]:1545"] {
@@ -2808,7 +2809,15 @@ mod tests {
             ));
             assert!(super::validate_infobase_form(&section).is_ok(), "{address}");
         }
-        for address in ["", ":1545", "srv:0", "srv:x", "::1"] {
+        for address in [
+            "",
+            ":1545",
+            "srv:0",
+            "srv:x",
+            "::1",
+            " srv:1545",
+            "srv:1545 ",
+        ] {
             let section = infobase(&format!(
                 "connection: 'Srvr=srv:1541;Ref=demo'\ncluster:\n  ras: '{address}'\n"
             ));
