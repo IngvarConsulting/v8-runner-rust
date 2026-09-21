@@ -145,7 +145,7 @@ window.RUNNER_DATA = (function () {
         return { chain: chain, config: cfg, note: note };
       },
       target: function (ctx) {
-        if (ctx.target === 'standalone') return { kind: 'subject', why: 'базу автономного сервера создают до его запуска, на его машине', fix: 'ibcmd server config init, затем ibcmd infobase create --load|--import|--restore; раннер подключается к уже работающему шлюзу' };
+        if (ctx.target === 'standalone') return { kind: 'target', why: 'базу автономного сервера создают до его запуска, на его машине', fix: 'ibcmd server config init, затем ibcmd infobase create --load|--import|--restore; раннер подключается к уже работающему шлюзу' };
         if (ctx.target === 'cluster') return { chain: [P.designer, P.rac], config: ['connection', 'dbms.*', 'cluster.user — если в кластере заведены администраторы'], note: 'CREATEINFOBASE с клиент-серверной строкой: регистрация в кластере и CrSQLDB=Y одной командой; rac — запасной путь' };
         return { chain: [P.ibcmd, P.designer], config: ['connection'], note: 'ibcmd создаёт файловую базу сразу с конфигурацией из исходников (--import); память о базе записывается сразу, первый push идёт как обычный' };
       }

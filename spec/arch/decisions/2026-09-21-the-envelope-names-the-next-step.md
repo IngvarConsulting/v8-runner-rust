@@ -14,10 +14,22 @@ changes: [CTR.WIRE.COMMAND-ENVELOPE]
 **Решение.** Машинный отказ несёт `error.next` — следующий шаг структурой: `command`,
 при нужде `source_set` и ключи, — а не подсказкой в тексте. Отказ `non_fast_forward`
 целиком: `kind`, `code`, `message`, `base_generation`, `local_generation`, `next`;
-пример: `{"ok": false, "error": {"kind": "non_fast_forward", "base_generation": "…",
-"local_generation": "…", "next": {"command": "pull", "source_set": "main"}}}`. Состав
-полей `error` остаётся закрытым и растёт вместе с версией конверта. Текстовая строка
-остаётся человеку.
+пример с сайта, без `code` и `message`:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "kind": "non_fast_forward",
+    "base_generation": "…",
+    "local_generation": "…",
+    "next": {"command": "pull", "source_set": "main"}
+  }
+}
+```
+
+Состав полей `error` остаётся закрытым и растёт вместе с версией конверта. Текстовая
+строка остаётся человеку.
 
 **Почему.** Сценарий сборки и Unica читают отказ машиной: следующий шаг, спрятанный в
 прозе, приходится разбирать регулярным выражением.

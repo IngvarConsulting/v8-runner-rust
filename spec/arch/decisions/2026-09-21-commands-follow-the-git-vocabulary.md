@@ -13,15 +13,16 @@ changes: [CTR.WIRE.BUILD-DATA, CTR.WIRE.DUMP-DATA, CTR.WIRE.LOAD-DATA, CTR.WIRE.
 
 **Решение.** Имя команды берётся из словаря гита только там, где знающий гит человек
 получит ожидаемое поведение: незнакомое поведение под знакомым именем опаснее
-незнакомого имени. Поверхность командной строки: `status`, `init`, `clone`, `infobase
-create`, `push`, `apply`, `reset`, `pull`, `upload`, `download`, `make`, `check`,
-`test`, `infobase dump`, `infobase restore`, `sessions`, `extensions`, `publish`,
-`launch`, `convert`, `tools download`, `mcp serve`, `version`. Ключ выбора исполнителя
-называется именем команды (`providers.push`, `providers.infobase.create`); у `publish`,
-`check` и `sessions` ключа нет. Позиционный аргумент никогда не называет базу и не
-разбирается как строка соединения; у команд, принимающих набор исходников, позиционный —
-набор (`push my-ext`, `make my-ext --output …`), базу называет только `--infobase`.
-Имена инструментов MCP — отдельный контракт и за командной строкой не следуют.
+незнакомого имени. Поверхность командной строки: `status`, `init`, `clone`,
+`infobase create`, `push`, `apply`, `reset`, `pull`, `upload`, `download`, `make`,
+`check`, `test`, `infobase dump`, `infobase restore`, `sessions`, `extensions`,
+`publish`, `launch`, `convert`, `tools download`, `mcp serve`, `version`. Ключ выбора
+исполнителя называется именем команды (`providers.push`, `providers.infobase.create`); у
+`publish`, `check` и `sessions` ключа нет. Позиционный аргумент никогда не называет базу
+и не разбирается как строка соединения; у команд, принимающих набор исходников,
+позиционный — набор (`push my-ext`, `make my-ext --output …`), базу называет только
+`--infobase`. Имена инструментов MCP — отдельный контракт и за командной строкой не
+следуют.
 
 **Почему.** У командной строки три потребителя — сценарии сборки, человек и Unica, — и
 всем троим нужно понимать, что делает команда, до чтения справки; словарь гита они уже

@@ -14,24 +14,25 @@ changes: [CTR.CONFIG.V8PROJECT-SCHEMA]
 **Решение.** Прежние имена принимаются ровно один цикл выпуска как скрытые синонимы: в
 справке их нет, ответ называет новое имя — поле `command` конверта и квитанция прежнего
 не знают, — команда выполняется под новым именем. Команды: `config init` → `init`,
-`bootstrap` → `clone`, `build` → `push`, `dump` → `pull`, `infobase configuration
-export` → `download`, `syntax` → `check`, `load` → `upload`, `load --mode merge` →
-`upload --mode combine`. Ключи команд: `test --no-build` → `--no-push`, `build
---full-rebuild` → `push --full`, `--discard-uncommitted` → `--force`. Ключи
-конфигурации: `infobase:` → `infobases.origin`; `providers.build`, `providers.dump`,
-`providers.init`, `providers.load`, `providers.infobase.configuration.export` →
-`providers.push`, `providers.pull`, `providers.infobase.create`, `providers.upload`,
-`providers.download`; `build.partialLoadThreshold` → `push.partialLoadThreshold`.
-Прежний `infobase:` принимается и в проектном файле — с предупреждением о переезде в
-местный слой; прежний и новый ключ в одном конфиге — отказ валидации. Ключи, у которых
-пары нет: `--source-set <имя>` — синоним позиционного набора; `--state working` — без
-ключа, `--state database` → `--state db`; `--mode incremental|partial` — без ключа,
-режим решает память; `--mode full` — отказ с именем `pull --force`, потому что
-молчаливое отображение обошло бы сторожа. Сверх сайта: прежний ключ остаётся в
-опубликованной схеме с пометкой `deprecated` — схема обязана совпадать с моделью и
-молчать о принимаемом ключе не вправе. Единственное имя без синонима — `init`: под ним
-живёт другая команда, и вызов прежнего `init` в проекте с базой в конфиге отказывает и
-называет `infobase create`. Через цикл синонимы снимаются отдельной задачей с датой.
+`bootstrap` → `clone`, `build` → `push`, `dump` → `pull`,
+`infobase configuration export` → `download`, `syntax` → `check`, `load` → `upload`,
+`load --mode merge` → `upload --mode combine`. Ключи конфигурации: `infobase:` →
+`infobases.origin`; `providers.build`, `providers.dump`, `providers.init`,
+`providers.load`, `providers.infobase.configuration.export` → `providers.push`,
+`providers.pull`, `providers.infobase.create`, `providers.upload`, `providers.download`.
+Сверх сайта, тем же правилом: `build.partialLoadThreshold` →
+`push.partialLoadThreshold`; ключи команд `test --no-build` → `--no-push`,
+`build --full-rebuild` → `push --full`, `--discard-uncommitted` → `--force`; прежний
+`infobase:` принимается и в проектном файле — с предупреждением о переезде в местный
+слой, а прежний и новый ключ в одном конфиге — отказ валидации; ключи, у которых пары
+нет: `--source-set <имя>` — синоним позиционного набора, `--state working` — без ключа,
+`--state database` → `--state db`, `--mode incremental|partial` — без ключа, режим
+решает память, `--mode full` — отказ с именем `pull --force`, потому что молчаливое
+отображение обошло бы сторожа; прежний ключ остаётся в опубликованной схеме с пометкой
+`deprecated` — схема обязана совпадать с моделью и молчать о принимаемом ключе не
+вправе. Единственное имя без синонима — `init`: под ним живёт другая команда, и вызов
+прежнего `init` в проекте с базой в конфиге отказывает и называет `infobase create`.
+Через цикл синонимы снимаются отдельной задачей с датой.
 
 **Почему.** Сценарии сборки и чужие конфигурации переживают выпуск: ломать их одним днём
 нельзя, а держать два имени вечно — значит держать два словаря.

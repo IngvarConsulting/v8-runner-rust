@@ -18,8 +18,8 @@ changes: [CTR.WIRE.LOAD-DATA, CTR.WIRE.INFOBASE-CONFIGURATION-EXPORT-DATA, INV.C
 назван `combine`, а не `merge`: слияния версий здесь нет, `merge` обещало бы
 трёхстороннее слияние. `download` забирает основную конфигурацию, `download --state db`
 — конфигурацию базы данных. Команда отказывает по расширению файла и называет соседку:
-`infobase dump --output main.cf` — это `download`, `upload ib.dt` — это `infobase
-restore`.
+`infobase dump --output main.cf` — это `download`, `upload ib.dt` — это
+`infobase restore`.
 
 **Почему.** Слово платформы `load` пары не имеет; `save` читалось бы как запись внутрь
 базы; `export` у платформы занят выгрузкой в XML; `checkout` в гите — местное действие,
