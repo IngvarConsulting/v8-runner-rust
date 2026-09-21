@@ -23,7 +23,7 @@
     <a href="problems.html">Трудности</a>
     <a href="architecture.html">Компоненты</a>
     <a href="sources.html" aria-current="page">Исходники</a>
-    <a href="cli.html">Словарь</a>
+    <a href="cli.html">CLI</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -102,7 +102,8 @@ source-set:
 <path marker-end="url(#arr-mapping)" class="e" d="M740.5,91.6 C668.0,91.6 652.0,91.6 579.5,91.6"/>
 <path marker-end="url(#arr-mapping)" class="e" d="M172.0,348.4 C301.8,348.4 330.7,348.4 460.5,348.4"/>
 <path marker-end="url(#arr-mapping)" class="e" d="M460.5,371.6 C330.7,371.6 301.8,371.6 172.0,371.6"/>
-<path marker-end="url(#arr-mapping)" class="e" d="M579.5,360.0 C653.8,360.0 670.2,360.0 744.5,360.0"/>
+<path marker-end="url(#arr-mapping)" class="e" d="M579.5,348.4 C653.8,348.4 670.2,348.4 744.5,348.4"/>
+<path marker-end="url(#arr-mapping)" class="e" d="M744.5,371.6 C670.2,371.6 653.8,371.6 579.5,371.6"/>
 <path marker-end="url(#arr-mapping)" class="e" d="M120.0,109.0 C120.0,149.0 120.0,151.0 120.0,191.0"/>
 <path marker-end="url(#arr-mapping)" class="e" d="M172.0,208.4 C317.9,208.4 496.2,254.9 496.2,109.0"/>
 <path marker-end="url(#arr-mapping)" class="e" d="M543.8,109.0 C543.8,276.3 339.3,234.5 172.0,234.5"/>
@@ -121,7 +122,8 @@ source-set:
 <g class="lbl"><rect x="636.5" y="79.6" width="47" height="24" rx="4"/><text><tspan x="660.0" y="91.6">reset</tspan></text></g>
 <g class="lbl"><rect x="272.8" y="336.4" width="87" height="24" rx="4"/><text><tspan x="316.2" y="348.4">push my-ext</tspan></text></g>
 <g class="lbl"><rect x="272.8" y="359.6" width="87" height="24" rx="4"/><text><tspan x="316.2" y="371.6">pull my-ext</tspan></text></g>
-<g class="lbl"><rect x="615.0" y="348.0" width="94" height="24" rx="4"/><text><tspan x="662.0" y="360.0">apply my-ext</tspan></text></g>
+<g class="lbl"><rect x="615.0" y="336.4" width="94" height="24" rx="4"/><text><tspan x="662.0" y="348.4">apply my-ext</tspan></text></g>
+<g class="lbl"><rect x="615.0" y="359.6" width="94" height="24" rx="4"/><text><tspan x="662.0" y="371.6">reset my-ext</tspan></text></g>
 <g class="lbl"><rect x="100.0" y="138.0" width="40" height="24" rx="4"/><text><tspan x="120.0" y="150.0">make</tspan></text></g>
 <g class="lbl"><rect x="342.4" y="202.9" width="54" height="24" rx="4"/><text><tspan x="369.4" y="214.9">upload</tspan></text></g>
 <g class="lbl"><rect x="364.9" y="225.0" width="67" height="24" rx="4"/><text><tspan x="398.4" y="237.0">download</tspan></text></g>
@@ -186,25 +188,25 @@ source-set:
 
 <!-- diagram:states-inside -->
 <div class="diagram" role="img" aria-label="Состояния основной конфигурации и конфигурации базы данных внутри базы">
-<svg viewBox="20.0 23.0 895.0 259.5" xmlns="http://www.w3.org/2000/svg" style="max-width:895px">
+<svg viewBox="20.0 23.0 525.0 279.0" xmlns="http://www.w3.org/2000/svg" style="max-width:525px">
 <defs><marker id="arr-states-inside" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
 <path marker-end="url(#arr-states-inside)" class="e" d="M150,102 C230,26 310,26 350,102"/>
 <path marker-end="url(#arr-states-inside)" class="e" d="M150,112 C230,72 320,72 350,112"/>
 <path marker-end="url(#arr-states-inside)" class="e" d="M150.0,125.3 C240.0,125.3 260.0,125.3 350.0,125.3"/>
 <path marker-end="url(#arr-states-inside)" class="e" d="M350,136 C300,180 200,180 150,136"/>
 <path marker-end="url(#arr-states-inside)" class="e" d="M350,141 C300,236 200,236 150,141"/>
-<path marker-end="url(#arr-states-inside)" class="e" d="M510.0,115.6 C593.2,115.6 611.8,115.6 695.0,115.6"/>
-<path marker-end="url(#arr-states-inside)" class="e" d="M760,142 C650,300 250,300 150,142"/>
+<path marker-end="url(#arr-states-inside)" class="e" d="M430.0,142.0 C430.0,189.7 430.0,200.3 430.0,248.0"/>
+<path marker-end="url(#arr-states-inside)" class="e" d="M325,270 C200,270 90,250 90,142"/>
 <g class="n n-sw"><rect x="30.0" y="98.0" width="120.0" height="44.0" rx="8"/><text><tspan x="90.0" y="120.0">совпадают</tspan></text></g>
 <g class="n n-sw"><rect x="350.0" y="98.0" width="160.0" height="44.0" rx="8"/><text><tspan x="430.0" y="120.0">есть непринятое</tspan></text></g>
-<g class="n n-sw"><rect x="695.0" y="98.0" width="210.0" height="44.0" rx="8"/><text><tspan x="800.0" y="120.0">обновлено динамически</tspan></text></g>
+<g class="n n-sw"><rect x="325.0" y="248.0" width="210.0" height="44.0" rx="8"/><text><tspan x="430.0" y="270.0">обновлено динамически</tspan></text></g>
 <g class="lbl"><rect x="208.0" y="33.0" width="114" height="24" rx="4"/><text><tspan x="265.0" y="45.0">push --no-apply</tspan></text></g>
 <g class="lbl"><rect x="188.2" y="70.0" width="161" height="24" rx="4"/><text><tspan x="268.8" y="82.0">правка в Конфигураторе</tspan></text></g>
 <g class="lbl"><rect x="223.0" y="113.3" width="54" height="24" rx="4"/><text><tspan x="250.0" y="125.3">upload</tspan></text></g>
 <g class="lbl"><rect x="226.5" y="157.0" width="47" height="24" rx="4"/><text><tspan x="250.0" y="169.0">apply</tspan></text></g>
 <g class="lbl"><rect x="226.5" y="200.2" width="47" height="24" rx="4"/><text><tspan x="250.0" y="212.2">reset</tspan></text></g>
-<g class="lbl"><rect x="495.0" y="103.6" width="215" height="24" rx="4"/><text><tspan x="602.5" y="115.6">apply, когда сеансы не закрыть</tspan></text></g>
-<g class="lbl"><rect x="384.2" y="248.5" width="134" height="24" rx="4"/><text><tspan x="451.2" y="260.5">перезапуск сеансов</tspan></text></g>
+<g class="lbl"><rect x="346.0" y="175.0" width="168" height="40" rx="4"/><text><tspan x="430.0" y="187.0">apply,</tspan><tspan x="430.0" y="203.0">когда сеансы не закрыть</tspan></text></g>
+<g class="lbl"><rect x="152.1" y="250.8" width="134" height="24" rx="4"/><text><tspan x="219.1" y="262.8">перезапуск сеансов</tspan></text></g>
 </svg>
 </div>
 <!-- /diagram:states-inside -->

@@ -385,7 +385,7 @@ NAV = '''<div class="topbar"><div class="in">
     <a href="problems.html">Трудности</a>
     <a href="architecture.html">Компоненты</a>
     <a href="sources.html">Исходники</a>
-    <a href="cli.html">Словарь</a>
+    <a href="cli.html">CLI</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -420,7 +420,7 @@ out.append('''
 <h1>Платформа</h1>
 <p class="lede">Всё, на чём стоит раннер, платформа описала сама. Здесь собраны её утверждения, по одному на строку, и рядом — что из каждого следует для нас. Каждая строка ведёт в раздел документации на ИТС.</p>
 
-<p>Читать подряд не обязательно. Страницы <a href="problems.html">Трудности</a>, <a href="sources.html">Исходники</a> и <a href="cli.html">Словарь</a> ссылаются сюда по номеру тезиса.</p>
+<p>Читать подряд не обязательно. Страницы <a href="problems.html">Трудности</a>, <a href="sources.html">Исходники</a> и <a href="cli.html">CLI</a> ссылаются сюда по номеру тезиса.</p>
 
 <div class="legend">
   <span><strong>РР</strong> — Руководство разработчика 8.3.27</span>
