@@ -60,10 +60,9 @@
   var ctx = { format: 'DESIGNER', type: 'CONFIGURATION', target: 'file', tools: {} };
   function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
   function flowSvg(u, idx) {
-    var arts = [], artIndex = {};
-    function art(k) { if (artIndex[k] === undefined) { artIndex[k] = arts.length; arts.push(k); } }
-    u.steps.forEach(function (st) { (st.in || []).forEach(art); (st.out || []).forEach(art); });
-    var AX = 130, AGAP = 215, CX = 160, CGAP = 265, AY = 56, CY = 200;
+    // Цепочка слева направо: входы шага стоят перед командой, выходы — после неё.
+    // Артефакт, который один шаг отдаёт, а следующий берёт, рисуется один раз между ними.
+    var GAP = 46, ROW = 70;
     function textW(s) { return s.length * 7.6; }
     function wrap(label) {
       if (label.length <= 20) return [label];
@@ -71,31 +70,70 @@
       if (i < 5) i = label.indexOf(' ', 5);
       return i < 0 ? [label] : [label.slice(0, i), label.slice(i + 1)];
     }
-    var nodes = [], edges = [], byN = {};
-    arts.forEach(function (k, i) {
+    function artNode(k) {
       var a = A[k], lines = wrap(a.label);
-      var w = Math.max(110, Math.round(Math.max.apply(null, lines.map(textW)) + 30));
-      var n = { id: 'a' + i, kind: a.kind === 'store' ? 'cyl' : a.kind === 'ext' ? 'off' : 'doc', x: AX + i * AGAP, y: AY, w: w, h: lines.length > 1 ? 58 : 44, lines: lines };
-      nodes.push(n); byN[n.id] = n;
-    });
-    u.steps.forEach(function (st, i) {
+      return { key: k, kind: a.kind === 'store' ? 'cyl' : a.kind === 'ext' ? 'off' : 'doc', lines: lines,
+               w: Math.max(110, Math.round(Math.max.apply(null, lines.map(textW)) + 30)), h: lines.length > 1 ? 58 : 44 };
+    }
+    function cmdNode(st) {
       var s = byId[st.id], lines = wrap(st.manual ? st.title : (s ? s.verb : st.id));
-      var w = Math.max(120, Math.round(Math.max.apply(null, lines.map(textW)) + 48));
-      var n = { id: 'c' + i, kind: st.manual ? 'manual' : 'cmd', x: CX + i * CGAP, y: CY, w: w, h: lines.length > 1 ? 58 : 44, lines: lines };
-      nodes.push(n); byN[n.id] = n;
-      (st.in || []).forEach(function (k) { edges.push(['a' + artIndex[k], n.id]); });
-      (st.out || []).forEach(function (k) { edges.push([n.id, 'a' + artIndex[k]]); });
+      return { kind: st.manual ? 'manual' : 'cmd', lines: lines,
+               w: Math.max(120, Math.round(Math.max.apply(null, lines.map(textW)) + 48)), h: lines.length > 1 ? 58 : 44 };
+    }
+    // ячейки: [артефакты] команда [артефакты] команда … [артефакты]
+    var cells = [], edges = [];
+    cells.push({ arts: true, nodes: (u.steps[0].in || []).map(artNode) });
+    u.steps.forEach(function (st, i) {
+      var c = cmdNode(st); cells.push({ cmd: true, nodes: [c], step: st });
+      var outs = st.out || [], next = u.steps[i + 1] ? (u.steps[i + 1].in || []) : [];
+      var mid = [], seen = {};
+      outs.forEach(function (k) { var n = artNode(k); n.fromCmd = true; mid.push(n); seen[k] = n; });
+      next.forEach(function (k) { if (!seen[k]) { var n = artNode(k); mid.push(n); seen[k] = n; } });
+      cells.push({ arts: true, nodes: mid });
     });
-    var bb = [1e9, 1e9, -1e9, -1e9];
-    nodes.forEach(function (n) { bb[0] = Math.min(bb[0], n.x - n.w / 2); bb[1] = Math.min(bb[1], n.y - n.h / 2); bb[2] = Math.max(bb[2], n.x + n.w / 2); bb[3] = Math.max(bb[3], n.y + n.h / 2); });
+    function cellW(cell) { return cell.nodes.length ? Math.max.apply(null, cell.nodes.map(function (n) { return n.w; })) : 0; }
+    function clone(cell, keys) { return { arts: true, nodes: cell.nodes.filter(function (n) { return keys.indexOf(n.key) >= 0; }).map(function (n) { var m = {}; for (var k in n) m[k] = n[k]; m.fromCmd = false; return m; }) }; }
+    // раскладка по строкам: строка заканчивается артефактами, следующая начинается с них же
+    var MAXW = 1040, rows = [[]], x = 0;
+    for (var ci = 0; ci < cells.length; ci++) {
+      var cell = cells[ci], w = cellW(cell);
+      if (cell.cmd) {
+        var nextW = cellW(cells[ci + 1]);
+        if (rows[rows.length - 1].length > 1 && x + w + GAP + nextW > MAXW) {
+          var carried = clone(cells[ci - 1], cell.step.in || []);
+          // свежие входы этого шага рисуются только в начале новой строки
+          cells[ci - 1].nodes = cells[ci - 1].nodes.filter(function (n) { return n.fromCmd; });
+          carried.x = cellW(carried) / 2; rows.push([carried]); x = cellW(carried) + GAP;
+          cell.prevNodes = carried.nodes;
+        }
+      }
+      if (!cell.prevNodes && cell.cmd) cell.prevNodes = cells[ci - 1].nodes;
+      cell.x = x + w / 2; rows[rows.length - 1].push(cell);
+      if (w) x += w + GAP;
+      if (cell.cmd) {
+        var c = cell.nodes[0];
+        var ins = cell.step.in || [];
+        cell.prevNodes.forEach(function (n) { if (ins.indexOf(n.key) >= 0) edges.push([n, c]); });
+        cells[ci + 1].nodes.forEach(function (n) { if (n.fromCmd) edges.push([c, n]); });
+      }
+    }
+    var y = 0, totalW = 0;
+    rows.forEach(function (row, r) {
+      var stack = Math.max.apply(null, row.map(function (cell) { return cell.nodes.length; }));
+      var half = ((stack - 1) / 2) * ROW + 30;
+      var cy = y + half;
+      row.forEach(function (cell) { cell.nodes.forEach(function (n, k) { n.x = cell.x; n.y = cy + (k - (cell.nodes.length - 1) / 2) * ROW; }); });
+      var last = row[row.length - 1]; totalW = Math.max(totalW, last.x + cellW(last) / 2);
+      y += 2 * half + (r < rows.length - 1 ? 16 : 0);
+    });
+    var columns = [];
+    rows.forEach(function (row) { row.forEach(function (cell) { columns.push(cell); }); });
     var arr = 'arr-uc-' + idx, out = [];
     edges.forEach(function (e) {
-      var a = byN[e[0]], b = byN[e[1]], down = a.y < b.y, dx = down ? -12 : 12;
-      var x1 = a.x + dx, y1 = a.y + (down ? a.h / 2 : -a.h / 2), x2 = b.x + dx, y2 = b.y + (down ? -b.h / 2 : b.h / 2);
-      var k = Math.max(30, Math.abs(y2 - y1) * 0.5) * (down ? 1 : -1);
-      out.push('<path class="e" marker-end="url(#' + arr + ')" d="M' + x1 + ',' + y1 + ' C' + x1 + ',' + (y1 + k) + ' ' + x2 + ',' + (y2 - k) + ' ' + x2 + ',' + y2 + '"/>');
+      var a = e[0], b = e[1], x1 = a.x + a.w / 2, y1 = a.y, x2 = b.x - b.w / 2, y2 = b.y, k = Math.max(20, (x2 - x1) * 0.5);
+      out.push('<path class="e" marker-end="url(#' + arr + ')" d="M' + x1 + ',' + y1 + ' C' + (x1 + k) + ',' + y1 + ' ' + (x2 - k) + ',' + y2 + ' ' + x2 + ',' + y2 + '"/>');
     });
-    nodes.forEach(function (n) {
+    columns.forEach(function (col) { col.nodes.forEach(function (n) {
       var x0 = n.x - n.w / 2, y0 = n.y - n.h / 2, shape;
       if (n.kind === 'doc') shape = '<path d="M' + x0 + ',' + y0 + ' h' + n.w + ' v' + (n.h - 8) + ' q' + (-n.w / 4) + ',12 ' + (-n.w / 2) + ',0 q' + (-n.w / 4) + ',-12 ' + (-n.w / 2) + ',0 z"/>';
       else if (n.kind === 'cyl') shape = '<path d="M' + x0 + ',' + (y0 + 7) + ' v' + (n.h - 14) + ' a' + (n.w / 2) + ',7 0 0 0 ' + n.w + ',0 v' + (-(n.h - 14)) + '"/><ellipse cx="' + n.x + '" cy="' + (y0 + 7) + '" rx="' + (n.w / 2) + '" ry="7"/>';
@@ -104,9 +142,9 @@
       var ty = n.y - (n.lines.length - 1) * 9;
       var text = n.lines.map(function (l, i) { return '<tspan x="' + n.x + '" y="' + (ty + i * 18) + '">' + esc(l) + '</tspan>'; }).join('');
       out.push('<g class="n n-' + n.kind + '">' + shape + '<text>' + text + '</text></g>');
-    });
-    var m = 12, vw = bb[2] - bb[0] + 2 * m, vh = bb[3] - bb[1] + 2 * m;
-    return '<div class="diagram" role="img" aria-label="' + esc('Поток данных: ' + u.title) + '"><svg viewBox="' + (bb[0] - m) + ' ' + (bb[1] - m) + ' ' + vw + ' ' + vh + '" xmlns="http://www.w3.org/2000/svg" style="max-width:' + Math.round(vw) + 'px">' +
+    }); });
+    var m = 12, vw = totalW + 2 * m, vh = y + 2 * m;
+    return '<div class="diagram" role="img" aria-label="' + esc('Поток данных: ' + u.title) + '"><svg viewBox="' + (-m) + ' ' + (-m) + ' ' + vw + ' ' + vh + '" xmlns="http://www.w3.org/2000/svg" style="max-width:' + Math.round(vw) + 'px">' +
            '<defs><marker id="' + arr + '" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>' + out.join('') + '</svg></div>';
   }
 
