@@ -199,7 +199,7 @@ window.RUNNER_DATA = (function () {
       today: function (ctx) { return { chain: [], config: [], note: 'нет' }; },
       target: function (ctx) {
         if (ctx.target === 'standalone') return { chain: [P.ibcmd], config: ['infobase.standalone.*'], note: 'ibcmd session list и terminate; блокировки начала сеансов у автономного сервера нет' };
-        return { chain: [P.rac], config: ['infobase.cluster.ras', 'infobase.cluster.user и password'], note: 'rac session и rac infobase update --sessions-deny; исполнитель один, ключа нет' };
+        return { chain: [P.rac], config: ['infobase.cluster.ras', 'infobase.cluster.user и password — администратор кластера', 'infobase.user и password — для deny и allow'], note: 'rac session и rac infobase update --sessions-deny; исполнитель один, ключа нет' };
       }
     },
     {
