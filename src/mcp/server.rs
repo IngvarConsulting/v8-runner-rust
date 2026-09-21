@@ -1780,6 +1780,8 @@ mod tests {
             providers: Default::default(),
             provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: String::from("main"),
                 purpose: SourceSetPurpose::Configuration,

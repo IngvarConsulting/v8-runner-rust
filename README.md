@@ -101,11 +101,13 @@ v8-runner config init
 ```
 
 Команда анализирует структуру проекта, находит поддержанные `source-set` (наборы исходников),
-создает `v8project.yaml`, пустой `v8project.local.yaml` со schema modeline и добавляет local
-overlay в `.gitignore`, если он еще не указан.
+создает `v8project.yaml`, `v8project.local.yaml` со schema modeline и базой `origin`
+(`--connection`, по умолчанию `File=build/ib`) и добавляет local overlay в `.gitignore`, если
+он еще не указан.
 
-Machine-local пути, credentials и настройки инструментов можно вынести в `v8project.local.yaml`
-рядом с основным конфигом. Этот файл применяется автоматически и должен оставаться вне Git.
+Базы проекта объявляются в `v8project.local.yaml` картой `infobases`: умолчание — `origin`,
+другую выбирает `--infobase <имя|строка соединения>`. Там же живут machine-local пути,
+credentials и настройки инструментов. Файл применяется автоматически и должен оставаться вне Git.
 
 ### Или создайте проект из существующей информационной базы:
 
@@ -116,8 +118,8 @@ v8-runner bootstrap \
 ```
 
 Команда создает `v8project.yaml`, локальный overlay, `.gitignore` и выгружает основную
-конфигурацию в `src/configuration`. Credentials передавайте через `--user` и `--password`; они
-попадают только в `v8project.local.yaml`. Автоматическое обнаружение расширений этим bootstrap
+конфигурацию в `src/configuration`. Адрес базы и credentials (`--user`, `--password`)
+попадают только в `v8project.local.yaml`, в секцию `infobases.origin`. Автоматическое обнаружение расширений этим bootstrap
 slice не выполняется.
 
 ### Загрузите тестовые и MCP-инструменты:

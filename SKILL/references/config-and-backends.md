@@ -9,7 +9,9 @@ settings before CLI overrides.
 - `workPath`: generated state, temp files, and workspace location.
 - `format`: `DESIGNER` or `EDT`.
 - `providers.<operation>`: optional per-operation executor override. Omit it to use the defaults below.
-- `infobase.connection`: often `File=build/ib` for local automation.
+- `infobases.origin.connection` in `v8project.local.yaml`: the default infobase, often `File=build/ib`;
+  other declared names are picked with `--infobase <name>`. `infobase:` is a one-cycle synonym for
+  `infobases.origin`.
 - `source-set`: ordered configuration and extension sources.
 - `tools.platform.path`, `version`, and `strict`: platform discovery hints. `path` is always an
   explicit-only boundary with no default-root or `PATH` fallback. Without `path`, `version` filters

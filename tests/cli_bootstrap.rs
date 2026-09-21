@@ -78,7 +78,13 @@ fn bootstrap_empty_dir_creates_config_and_dumps_main_configuration() {
     let config = fs::read_to_string(project_dir.join("v8project.yaml")).expect("config");
     assert!(config.contains("format: DESIGNER"));
     assert!(!config.contains("builder:"));
-    assert!(config.contains("connection: '/F \"/tmp/source ib\"'"));
+    assert!(
+        !config.contains("infobase"),
+        "the project file names no base:\n{config}"
+    );
+    assert!(fs::read_to_string(project_dir.join("v8project.local.yaml"))
+        .expect("local")
+        .contains("connection: '/F \"/tmp/source ib\"'"));
     assert!(config.contains("path: 'src/configuration'"));
     assert!(config.contains("version: '8.3.27'"));
     assert!(!config.contains("platform_path"));
@@ -123,7 +129,10 @@ fn bootstrap_unquotes_simple_file_connection_path() {
         String::from_utf8_lossy(&output.stderr)
     );
     let config = fs::read_to_string(project_dir.join("v8project.yaml")).expect("config");
-    assert!(config.contains("connection: '/F \"/tmp/source ib\"'"));
+    assert!(!config.contains("infobase"), "{config}");
+    assert!(fs::read_to_string(project_dir.join("v8project.local.yaml"))
+        .expect("local")
+        .contains("connection: '/F \"/tmp/source ib\"'"));
     let calls = fs::read_to_string(calls_log).expect("calls");
     assert!(calls.contains("/F /tmp/source ib"));
     assert!(!calls.contains("\\\"/tmp/source ib\\\""));
@@ -206,7 +215,10 @@ fn bootstrap_preserves_non_secret_connection_attributes() {
         String::from_utf8_lossy(&output.stderr)
     );
     let config = fs::read_to_string(project_dir.join("v8project.yaml")).expect("config");
-    assert!(config.contains("connection: 'File=/tmp/source-ib;Locale=ru'"));
+    assert!(!config.contains("infobase"), "{config}");
+    assert!(fs::read_to_string(project_dir.join("v8project.local.yaml"))
+        .expect("local")
+        .contains("connection: 'File=/tmp/source-ib;Locale=ru'"));
     let calls = fs::read_to_string(calls_log).expect("calls");
     assert!(calls.contains("/IBConnectionString File=/tmp/source-ib;Locale=ru"));
 }

@@ -171,6 +171,122 @@
       },
       "type": "object"
     },
+    "InfobaseSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "connection": {
+          "default": "",
+          "description": "1C infobase connection string without embedded user or password; empty for a\nstandalone server, which `standalone` declares.",
+          "type": "string"
+        },
+        "dbms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InfobaseDbmsSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional DBMS settings for server-based infobases."
+        },
+        "password": {
+          "description": "Optional infobase password passed to platform utilities.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "standalone": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InfobaseStandaloneSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Standalone server reached through its SSH gate; declares the target kind."
+        },
+        "user": {
+          "description": "Optional infobase user name passed to platform utilities.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "web": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InfobaseWebSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Client address and web-server publication settings."
+        }
+      },
+      "type": "object"
+    },
+    "InfobaseStandaloneExchangeChannelSchema": {
+      "description": "Named exchange channels.",
+      "enum": [
+        "sftp"
+      ],
+      "type": "string"
+    },
+    "InfobaseStandaloneExchangeSchema": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/InfobaseStandaloneExchangeChannelSchema",
+          "description": "A named channel: `sftp` — the SFTP subsystem of the gate's SSH connection."
+        },
+        {
+          "description": "The gate user's directory (`<users-data>/<user>` of `ibsrv`) as the runner sees it.",
+          "properties": {
+            "dir": {
+              "description": "The gate user's directory as the runner sees it.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "dir"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "The declared file channel to a standalone server."
+    },
+    "InfobaseStandaloneSchema": {
+      "additionalProperties": false,
+      "description": "A standalone server (`ibsrv`) as the target.",
+      "properties": {
+        "exchange": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InfobaseStandaloneExchangeSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How files travel between the runner and the gate user's directory: `sftp` through\nthe gate, or `{ dir: … }` — that directory as the runner sees it."
+        },
+        "gate": {
+          "description": "`host:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`, port 1543 by default).",
+          "type": "string"
+        },
+        "host-fingerprint": {
+          "description": "SHA256 fingerprint the gate must present, as `SHA256:<base64>`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "gate"
+      ],
+      "type": "object"
+    },
     "InfobaseWebSchema": {
       "additionalProperties": false,
       "description": "Publication and client-address settings for the target infobase.",
@@ -334,52 +450,6 @@
             "integer",
             "null"
           ]
-        }
-      },
-      "type": "object"
-    },
-    "PartialInfobaseSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "connection": {
-          "description": "Optional local override for the 1C infobase connection string.",
-          "type": "string"
-        },
-        "dbms": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/InfobaseDbmsSchema"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Optional local DBMS settings override."
-        },
-        "password": {
-          "description": "Optional local infobase password.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "user": {
-          "description": "Optional local infobase user name.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "web": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/InfobaseWebSchema"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Optional local publication and client-address override."
         }
       },
       "type": "object"
@@ -847,8 +917,19 @@
   "additionalProperties": false,
   "properties": {
     "infobase": {
-      "$ref": "#/$defs/PartialInfobaseSchema",
-      "description": "Machine-local infobase credentials and connection overrides."
+      "$ref": "#/$defs/InfobaseSchema",
+      "deprecated": true,
+      "description": "One-cycle synonym for `infobases.origin`."
+    },
+    "infobases": {
+      "additionalProperties": {
+        "$ref": "#/$defs/InfobaseSchema"
+      },
+      "description": "Infobases of this checkout by name, like remotes of a repository; commands work\nwith `origin` unless `--infobase` names another one. A name is a plain identifier:\nit becomes a directory under workPath.",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+      },
+      "type": "object"
     },
     "mcp": {
       "$ref": "#/$defs/McpSchema",

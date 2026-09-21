@@ -24,7 +24,8 @@ The platform layer is intentionally split so responsibilities do not bleed into 
 
 - `platform::process` defines `ProcessRunner`, `ProcessExecutor`, `ProcessRequest`, `ProcessResult`, and `SpawnResult`.
 - `platform::locator` resolves concrete executables (`1cv8`, `1cv8c`, `ibcmd`, `1cedtcli`) and caches results per `Locator` instance. Platform component discovery by version mask is governed by [решение 0004 в реестре](spec/arch/index.md).
-- `platform::connection` builds reusable V8 connection/auth arguments from `infobase.connection`.
+- `platform::connection` builds reusable V8 connection/auth arguments from the selected infobase's
+  `connection` (`infobases.<name>` of the local layer; `origin` unless `--infobase` names another).
 - `platform::utilities` is the current facade used by use cases. It owns the stateful `Locator` and exposes the standard execution path.
 - `platform::designer` is the low-level batch DSL for `1cv8 DESIGNER`, returning `PlatformCommandResult` so `/Out` logs stay separate from runner-captured stdio.
 - `platform::ibcmd` is the low-level DSL for `ibcmd`, returning `PlatformCommandResult` with stdout/stderr diagnostics (no `/Out` log).

@@ -286,6 +286,13 @@ impl TextPresenter {
         println!("{line}");
     }
 
+    /// Узел, предваряющий ленту команды: печатается со связкой после себя, чтобы лента
+    /// команды продолжила его, а не прижалась к нему.
+    pub fn print_leading_node(&self, item: &TimelineItem) {
+        self.print_timeline(std::slice::from_ref(item));
+        println!("{}", self.timeline_pipe());
+    }
+
     fn timeline_node(&self, mark: NodeMark) -> String {
         let glyph = mark.glyph();
         if self.no_color {

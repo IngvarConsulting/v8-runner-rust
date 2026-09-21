@@ -20,7 +20,7 @@ Keep this file as the decision entrypoint. Load only the reference file that mat
 
 Use the available `v8-runner` binary directly. If it is not on `PATH`, ask for the binary path or use a project-provided wrapper script.
 
-`v8project.yaml` is the default project config name. A sibling `v8project.local.yaml` is loaded automatically for machine-local paths, credentials, tools, tests, and MCP settings. Do not pass `--config v8project.yaml` unless the user explicitly wants a non-default command shape or the active config path differs from the default; never pass `v8project.local.yaml` as `--config`.
+`v8project.yaml` is the default project config name. A sibling `v8project.local.yaml` declares the project's infobases (`infobases` map, `origin` by default) and holds machine-local paths, credentials, tools, tests, and MCP settings. Do not pass `--config v8project.yaml` unless the user explicitly wants a non-default command shape or the active config path differs from the default; never pass `v8project.local.yaml` as `--config`.
 
 Generated `v8project.yaml` files include a `yaml-language-server` modeline that points to the published `master` JSON Schema artifact. `config init` and `bootstrap` also create sibling `v8project.local.yaml` with the local overlay schema modeline and add it to `.gitignore` when needed.
 
@@ -40,6 +40,7 @@ Useful global flags:
 - `--config <CONFIG>` when the active config is not `./v8project.yaml`.
 - `--json-message` for machine-readable CLI envelopes.
 - `--workdir <WORKDIR>` to override `workPath`; it wins over `v8project.local.yaml`.
+- `--infobase <NAME|CONNECTION>` to work with another declared infobase or an ad hoc connection string; defaults to `origin`.
 - `--clean-before-execution` to clear logs before execution.
 - `--log-level <error|warn|info|debug|trace>` for diagnostics.
 - `--no-color` for plain text output.
@@ -49,23 +50,31 @@ Useful global flags:
 1. Check whether `v8project.yaml` exists in the 1C project root.
 2. If it is missing and source files already exist, run the narrowest `v8-runner config init ...` command that fits the project shape.
 3. If it is missing and the only goal is to export CF/CFE/DT from an existing infobase, create a
-   minimal `v8project.yaml` with `workPath`, `format`, `infobase`, platform discovery settings and
-   `source-set: []`; do not bootstrap project sources that the user did not request.
+   minimal `v8project.yaml` with `workPath`, `format`, platform discovery settings and
+   `source-set: []`, plus a sibling `v8project.local.yaml` with `infobases.origin.connection`; do not bootstrap project sources that the user did not request.
 4. If it is missing and the current source of truth is an existing infobase that must become
    project sources, run `v8-runner bootstrap --connection <CONNECTION> --platform-version <VERSION>`.
 5. Inspect generated `v8project.yaml` and keep machine-local overrides in generated `v8project.local.yaml`.
 6. Run `v8-runner init` only when the file infobase or EDT workspace needs to be created.
 7. Run the narrowest validation command that answers the user's goal.
 
-Minimal infobase-only shape:
+Minimal infobase-only shape (two files):
 
 ```yaml
+# v8project.yaml
 workPath: build/v8-runner
 format: DESIGNER
-infobase:
-  connection: "File=/absolute/path/to/ib"
 source-set: []
 ```
+
+```yaml
+# v8project.local.yaml
+infobases:
+  origin:
+    connection: "File=/absolute/path/to/ib"
+```
+
+`infobase:` in either file is a one-cycle synonym for `infobases.origin` and warns.
 
 Useful bootstrap commands:
 

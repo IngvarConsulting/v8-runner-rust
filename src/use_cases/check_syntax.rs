@@ -1220,6 +1220,8 @@ mod tests {
             providers: Default::default(),
             provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -1249,6 +1251,8 @@ mod tests {
             providers: Default::default(),
             provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![
                 SourceSetConfig {
                     name: "main".to_owned(),

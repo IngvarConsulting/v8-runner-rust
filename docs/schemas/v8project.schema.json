@@ -957,7 +957,8 @@
     },
     "infobase": {
       "$ref": "#/$defs/InfobaseSchema",
-      "description": "Target infobase connection, credentials, and optional DBMS settings."
+      "deprecated": true,
+      "description": "One-cycle synonym for `infobases.origin` of v8project.local.yaml: which infobase a\ncheckout is attached to is known to the machine, not to the project."
     },
     "mcp": {
       "$ref": "#/$defs/McpSchema",
@@ -989,8 +990,7 @@
     }
   },
   "required": [
-    "workPath",
-    "infobase"
+    "workPath"
   ],
   "title": "MainConfigSchema",
   "type": "object"

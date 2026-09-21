@@ -39,7 +39,7 @@ pub fn run() -> i32 {
     }
 
     let color_mode = color_mode(cli.no_color);
-    let presenter = Presenter::new(output_format.to_owned(), color_mode);
+    let mut presenter = Presenter::new(output_format.to_owned(), color_mode);
 
     if let Command::Config(args) = &cli.command {
         return run_config_command(args, &presenter);
@@ -71,7 +71,15 @@ pub fn run() -> i32 {
     }
 
     let config = match load_cli_config(&cli) {
-        Ok(c) => c,
+        Ok(loaded) => {
+            presenter.note_load_warnings(
+                cli.config
+                    .as_deref()
+                    .unwrap_or(crate::config::loader::DEFAULT_CONFIG_FILE_NAME),
+                &loaded.warnings,
+            );
+            loaded.config
+        }
         Err(e) => {
             let message = e.to_string();
             let error = UseCaseError::from(AppError::from(e));
@@ -232,23 +240,26 @@ pub fn run() -> i32 {
 
 fn load_cli_config(
     cli: &Cli,
-) -> Result<crate::config::model::AppConfig, crate::config::loader::ConfigLoadError> {
+) -> Result<crate::config::loader::LoadedConfig, crate::config::loader::ConfigLoadError> {
+    let selector = crate::config::model::InfobaseSelector::from_flag(cli.infobase.as_deref());
+    let config_path = cli.config.as_deref();
+    let workdir = cli.workdir.as_deref();
     if matches!(
         &cli.command,
         Command::Tools(crate::cli::args::ToolsArgs {
             command: ToolsCommand::Download(_)
         })
     ) {
-        load_config_for_tools_download(cli.config.as_deref(), cli.workdir.as_deref())
+        load_config_for_tools_download(config_path, workdir, &selector)
     } else if execute::uses_infobase_export_config(&cli.command) {
-        load_config_for_infobase_export(cli.config.as_deref(), cli.workdir.as_deref())
+        load_config_for_infobase_export(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Test(args) if args.no_build) {
-        load_config_for_prepared_test(cli.config.as_deref(), cli.workdir.as_deref())
+        load_config_for_prepared_test(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Extensions(args) if args.command.is_none() && args.dry_run)
     {
-        load_config_for_preview(cli.config.as_deref(), cli.workdir.as_deref())
+        load_config_for_preview(config_path, workdir, &selector)
     } else {
-        load_config(cli.config.as_deref(), cli.workdir.as_deref())
+        load_config(config_path, workdir, &selector)
     }
 }
 
@@ -590,13 +601,15 @@ fn prepare_mcp_runtime(
     cli: &Cli,
     transport: &'static str,
 ) -> Result<crate::config::model::AppConfig, i32> {
-    let config = match load_config(cli.config.as_deref(), cli.workdir.as_deref()) {
-        Ok(config) => config,
+    let selector = crate::config::model::InfobaseSelector::from_flag(cli.infobase.as_deref());
+    let loaded = match load_config(cli.config.as_deref(), cli.workdir.as_deref(), &selector) {
+        Ok(loaded) => loaded,
         Err(error) => {
             eprintln!("{error}");
             return Err(crate::output::exit_codes::VALIDATION_ERROR);
         }
     };
+    let config = loaded.config;
 
     if cli.clean_before_execution {
         eprintln!("--clean-before-execution is not supported for MCP transports");
@@ -609,6 +622,11 @@ fn prepare_mcp_runtime(
     {
         eprintln!("{error}");
         return Err(crate::output::exit_codes::RUNTIME_ERROR);
+    }
+
+    // stdout сервера занят протоколом: предупреждения загрузки уходят в журнал действий.
+    for warning in &loaded.warnings {
+        tracing::warn!(transport, "{warning}");
     }
 
     debug!(

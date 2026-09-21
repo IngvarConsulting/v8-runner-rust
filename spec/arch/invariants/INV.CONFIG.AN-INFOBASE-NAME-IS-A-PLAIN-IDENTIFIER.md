@@ -1,9 +1,9 @@
 ---
 id: INV.CONFIG.AN-INFOBASE-NAME-IS-A-PLAIN-IDENTIFIER
-status: planned
+status: active
 governs: product
 decision: DEC.2026-09-21.INFOBASES-ARE-A-NAMED-MAP-WITH-ORIGIN-AS-THE-DEFAULT
-check: null
+check: [tests/cli_infobases.rs::an_infobase_name_is_a_plain_identifier, src/config/schema.rs::the_infobase_synonym_is_deprecated_and_the_map_keys_are_identifiers]
 scope: [config]
 ---
 

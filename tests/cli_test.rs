@@ -159,13 +159,23 @@ fn write_config(
         )
     };
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\n  password: secret\ntests:\n  execution_timeout_seconds: {}\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  platform:\n    path: '{}'\n{}",
+        "workPath: '{}'\nformat: DESIGNER\ntests:\n  execution_timeout_seconds: {}\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  platform:\n    path: '{}'\n{}",
         work_path.display(),
         timeout_seconds,
         install_dir.display(),
         additional_launch_keys_block,
     );
     fs::write(path, config).expect("config");
+    write_local_origin(path, "File=/tmp/ib", Some("secret"));
+}
+
+/// Адрес базы живёт в местном слое рядом с проектным файлом.
+fn write_local_origin(config_path: &Path, connection: &str, password: Option<&str>) {
+    let mut local = format!("infobases:\n  origin:\n    connection: '{connection}'\n");
+    if let Some(password) = password {
+        local.push_str(&format!("    password: '{password}'\n"));
+    }
+    fs::write(config_path.with_file_name("v8project.local.yaml"), local).expect("local config");
 }
 
 fn setup_project(
@@ -202,21 +212,18 @@ fn configure_file_infobase(config_path: &Path, infobase_path: &Path, state: File
         }
         FileInfobaseState::MissingMarker => {}
     }
-    let config = fs::read_to_string(config_path).expect("config");
-    fs::write(
-        config_path,
-        config.replace("File=/tmp/ib", &format!("File={}", infobase_path.display())),
-    )
-    .expect("updated config");
+    replace_origin_connection(config_path, &format!("File={}", infobase_path.display()));
 }
 
 fn configure_server_infobase(config_path: &Path) {
-    let config = fs::read_to_string(config_path).expect("config");
-    fs::write(
-        config_path,
-        config.replace("File=/tmp/ib", "Srvr=cluster:1541;Ref=prepared"),
-    )
-    .expect("updated config");
+    replace_origin_connection(config_path, "Srvr=cluster:1541;Ref=prepared");
+}
+
+fn replace_origin_connection(config_path: &Path, connection: &str) {
+    let local_path = config_path.with_file_name("v8project.local.yaml");
+    let local = fs::read_to_string(&local_path).expect("local config");
+    fs::write(&local_path, local.replace("File=/tmp/ib", connection))
+        .expect("updated local config");
 }
 
 fn setup_project_with_additional_launch_keys(
@@ -331,7 +338,7 @@ fn setup_va_project_with_work_name(
         )
     };
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\n  password: secret\ntests:\n  execution_timeout_seconds: 5\n  va:\n    params_path: '{}'\n    profile: smoke\n    profiles:\n      smoke:\n        feature_path: '{}'\n        features_to_run:\n          - login\n        filter_tags:\n          - '@smoke'\n        ignore_tags:\n          - '@draft'\n        scenario_filter:\n          - Проверка логина\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  va:\n    epf_path: '{}'\n  platform:\n    path: '{}'\n{}",
+        "workPath: '{}'\nformat: DESIGNER\ntests:\n  execution_timeout_seconds: 5\n  va:\n    params_path: '{}'\n    profile: smoke\n    profiles:\n      smoke:\n        feature_path: '{}'\n        features_to_run:\n          - login\n        filter_tags:\n          - '@smoke'\n        ignore_tags:\n          - '@draft'\n        scenario_filter:\n          - Проверка логина\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  va:\n    epf_path: '{}'\n  platform:\n    path: '{}'\n{}",
         work_path.display(),
         va_params.display(),
         features_dir.display(),
@@ -340,6 +347,7 @@ fn setup_va_project_with_work_name(
         additional_launch_keys_block,
     );
     fs::write(&config_path, config).expect("config");
+    write_local_origin(&config_path, "File=/tmp/ib", Some("secret"));
 
     (dir, config_path, build_calls, test_calls, captured_params)
 }
@@ -1303,12 +1311,13 @@ fn test_module_edt_extension_build_uses_full_load_before_enterprise_launch() {
     write_edt_script(&edt_cli_path, &edt_calls);
 
     let config = format!(
-        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\ntests:\n  execution_timeout_seconds: 5\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: configuration\n  - name: client_mcp\n    type: EXTENSION\n    path: exts/client-mcp\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: EDT\ntests:\n  execution_timeout_seconds: 5\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: configuration\n  - name: client_mcp\n    type: EXTENSION\n    path: exts/client-mcp\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
         work_path.display(),
         install_dir.display(),
         edt_cli_path.display(),
     );
     fs::write(&config_path, config).expect("config");
+    write_local_origin(&config_path, "File=/tmp/ib", None);
 
     let first = v8_runner_command()
         .args(["--config", &config_path.display().to_string(), "build"])
@@ -1393,13 +1402,14 @@ fn repeated_test_skips_unchanged_source_backed_tool_extension_build() {
     write_edt_script(&edt_cli_path, &edt_calls);
 
     let config = format!(
-        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\ntests:\n  execution_timeout_seconds: 5\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: configuration\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: '{}'\n        format: EDT\n",
+        "workPath: '{}'\nformat: EDT\ntests:\n  execution_timeout_seconds: 5\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: configuration\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: '{}'\n        format: EDT\n",
         work_path.display(),
         install_dir.display(),
         edt_cli_path.display(),
         tool_source.display(),
     );
     fs::write(&config_path, config).expect("config");
+    write_local_origin(&config_path, "File=/tmp/ib", None);
 
     let first = v8_runner_command()
         .args([

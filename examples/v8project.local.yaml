@@ -3,10 +3,15 @@
 
 workPath: build-local
 
-infobase:
-  connection: "File=local/ib"
-  user: Admin
-  password: secret
+# Infobases by name, like remotes of a repository; commands use `origin` unless
+# `--infobase <name|connection string>` says otherwise.
+infobases:
+  origin:
+    connection: "File=local/ib"
+    user: Admin
+    password: secret
+  test:
+    connection: "Srvr=srv;Ref=erp_test"
 
 tools:
   platform:
