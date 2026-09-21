@@ -199,7 +199,24 @@ fn load_config_with_mode(
         ConfigValidationMode::PreparedTest => validate_prepared_test(&config)?,
         ConfigValidationMode::ToolsDownload => validate_tools_download_bootstrap(&config)?,
     }
+    warnings.extend(direct_gate_declared_but_not_used_yet(&config));
     Ok(LoadedConfig { config, warnings })
+}
+
+/// Строка прямого шлюза рядом с секцией `standalone` принимается, но до появления
+/// исполнителя по прямому шлюзу (#205) её никто не читает: команды идут через
+/// `standalone.gate`. Молчать об этом нельзя — сайт обещает Конфигуратор по этой строке.
+fn direct_gate_declared_but_not_used_yet(config: &AppConfig) -> Option<String> {
+    if config.infobase.standalone.is_none() || config.infobase.connection.trim().is_empty() {
+        return None;
+    }
+    let name = config
+        .infobase_name
+        .as_deref()
+        .unwrap_or(DEFAULT_INFOBASE_NAME);
+    Some(format!(
+        "infobases.{name}: the direct gate address in `connection` is declared but not used yet — commands go through standalone.gate until the Designer path arrives (#205)"
+    ))
 }
 
 fn yaml_key(key: &str) -> serde_yaml::Value {
@@ -370,9 +387,10 @@ fn connection_string_carries_credentials(connection: &str) -> bool {
                 .is_some_and(|key| key.eq_ignore_ascii_case("/n") || key.eq_ignore_ascii_case("/p"))
         });
     }
-    trimmed.split(';').any(|part| {
-        let part = part.trim_start().to_ascii_lowercase();
-        part.starts_with("usr=") || part.starts_with("pwd=")
+    crate::platform::connection::declared_parameters(trimmed).is_some_and(|parameters| {
+        parameters
+            .iter()
+            .any(|(key, _)| key == "usr" || key == "pwd")
     })
 }
 

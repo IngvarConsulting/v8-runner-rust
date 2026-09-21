@@ -317,8 +317,11 @@ fn missing_file_infobase_is_unavailable_before_designer_dispatch() {
     assert!(!output.exists());
 }
 
+/// Строка без формы отвергается валидацией до выбора исполнителя: третий ответ на
+/// вопрос о виде цели получает только серверная форма
+/// (`DEC.2026-09-21.TARGET-KIND-IS-ANSWERED-BY-THREE-QUESTIONS`).
 #[test]
-fn malformed_server_connection_is_unavailable_before_provider_dispatch() {
+fn malformed_server_connection_is_refused_by_validation_before_provider_dispatch() {
     let (dir, config, base, calls) = setup("DESIGNER");
     let yaml = fs::read_to_string(&config).expect("config");
     fs::write(
@@ -349,10 +352,16 @@ fn malformed_server_connection_is_unavailable_before_provider_dispatch() {
 
     assert!(!command.status.success());
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
-    assert_eq!(envelope["error"]["code"], "environment_unavailable");
-    assert!(envelope["data"]["provider"]["skipped"][0]["reason"]
-        .as_str()
-        .is_some_and(|reason| reason.contains("expected non-empty File=")));
+    assert_eq!(envelope["error"]["kind"], "validation", "{envelope}");
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("neither a file address")),
+        "{envelope}"
+    );
+    // Выбор исполнителя не начинался: квитанции нет, а не «никто не подошёл».
+    assert!(envelope["data"]["provider"].is_null(), "{envelope}");
+    assert_eq!(envelope["steps"][0]["name"], "configuration load");
     assert!(!calls.exists());
     assert!(!output.exists());
     assert!(!dir.path().join("work/logs/mcp/actions.log").exists());

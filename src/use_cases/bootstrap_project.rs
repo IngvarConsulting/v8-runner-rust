@@ -4,6 +4,7 @@ use std::time::Instant;
 use crate::config::loader::load_config;
 use crate::config::schema::{local_config_schema_url, main_config_schema_url};
 use crate::domain::bootstrap::BootstrapResult;
+use crate::platform::connection::unquote_connection_value;
 use crate::platform::connection::V8Connection;
 use crate::support::error::AppError;
 use crate::use_cases::context::ExecutionContext;
@@ -309,19 +310,6 @@ fn simple_file_connection_path(connection: &str) -> Option<&str> {
         .eq_ignore_ascii_case("file")
         .then_some(unquote_connection_value(value.trim()))
         .filter(|value| !value.is_empty())
-}
-
-fn unquote_connection_value(value: &str) -> &str {
-    let Some(inner) = value
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-    else {
-        return value
-            .strip_prefix('\'')
-            .and_then(|value| value.strip_suffix('\''))
-            .unwrap_or(value);
-    };
-    inner
 }
 
 fn reject_embedded_credentials(connection: &str) -> Result<(), AppError> {

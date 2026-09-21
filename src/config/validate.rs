@@ -59,9 +59,14 @@ pub enum ConfigValidationError {
     EmptyConnection,
 
     #[error(
-        "the target is declared once: infobase.standalone names a standalone server, so infobase.connection must be empty"
+        "infobase.standalone names a standalone server: infobase.connection is its direct gate `Srvr=<host[:port]>;Ref=<name>` or empty; a standalone server has no file address"
     )]
-    TargetDeclaredTwice,
+    StandaloneConnectionIsNotADirectGate,
+
+    #[error(
+        "infobase.connection is neither a file address `File=…` nor a server address `Srvr=<host[:port]>;Ref=<name>` (or `/S server\\ref`): the target kind is declared, not guessed"
+    )]
+    ConnectionShapeUnsupported,
 
     #[error("infobase.dbms is not allowed for a standalone server: the server opens its database itself")]
     DbmsNotAllowedForStandalone,
@@ -797,30 +802,31 @@ fn validate_connection_contract(config: &AppConfig) -> Result<(), ConfigValidati
     validate_selected_infobase_environment(config)
 }
 
+/// Вид цели отвечает на три вопроса по порядку: есть секция `standalone` — автономный
+/// сервер; иначе в строке есть `File=` — файловая база; иначе — кластер, и третий ответ
+/// получает только строка серверной формы, которую платформа примет
+/// (`DEC.2026-09-21.TARGET-KIND-IS-ANSWERED-BY-THREE-QUESTIONS`).
 fn validate_infobase_form(
     infobase: &crate::config::model::InfobaseConfig,
 ) -> Result<(), ConfigValidationError> {
+    let connection = infobase.connection.trim();
+    // Вид цели объявляется, а не угадывается: за `ws=` может стоять файловая база,
+    // кластер или автономный сервер, и чем базу администрировать, из адреса не следует.
+    if connection.to_ascii_lowercase().starts_with("ws=") {
+        return Err(ConfigValidationError::WebConnectionIsNotAnAdministrativeChannel);
+    }
     if let Some(standalone) = infobase.standalone.as_ref() {
         return validate_standalone_target_form(infobase, standalone);
     }
-    if infobase.connection.trim().is_empty() {
+    if connection.is_empty() {
         return Err(ConfigValidationError::EmptyConnection);
     }
-    // Вид цели объявляется, а не угадывается: за `ws=` может стоять файловая база,
-    // кластер или автономный сервер, и чем базу администрировать, из адреса не следует.
-    if infobase
-        .connection
-        .trim()
-        .to_ascii_lowercase()
-        .starts_with("ws=")
-    {
-        return Err(ConfigValidationError::WebConnectionIsNotAnAdministrativeChannel);
-    }
 
-    let is_file_connection = V8Connection::from_connection_string(&infobase.connection)
-        .file_path()
-        .is_some();
-    if is_file_connection && infobase.dbms.is_some() {
+    let parsed = V8Connection::from_connection_string(connection);
+    if !parsed.has_supported_shape() {
+        return Err(ConfigValidationError::ConnectionShapeUnsupported);
+    }
+    if parsed.file_path().is_some() && infobase.dbms.is_some() {
         return Err(ConfigValidationError::DbmsNotAllowedForFileConnection);
     }
 
@@ -862,14 +868,19 @@ fn validate_host_fingerprint(
         })
 }
 
-/// Автономный сервер: цель объявлена один раз, шлюз назван, канал обмена объявлен, и
-/// рабочий каталог раннера не лежит на стороне цели.
+/// Автономный сервер: секция первична, строка рядом с ней — адрес прямого шлюза
+/// (серверной формы) или пусто, файлового адреса у сервера нет; шлюз назван, канал
+/// обмена объявлен.
 fn validate_standalone_target_form(
     infobase: &crate::config::model::InfobaseConfig,
     standalone: &crate::config::model::StandaloneConfig,
 ) -> Result<(), ConfigValidationError> {
-    if !infobase.connection.trim().is_empty() {
-        return Err(ConfigValidationError::TargetDeclaredTwice);
+    let connection = infobase.connection.trim();
+    if !connection.is_empty() {
+        let parsed = V8Connection::from_connection_string(connection);
+        if parsed.file_path().is_some() || !parsed.has_supported_shape() {
+            return Err(ConfigValidationError::StandaloneConnectionIsNotADirectGate);
+        }
     }
     if infobase.dbms.is_some() {
         return Err(ConfigValidationError::DbmsNotAllowedForStandalone);
@@ -2694,6 +2705,91 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn infobase(yaml: &str) -> crate::config::model::InfobaseConfig {
+        serde_yaml::from_str(yaml).expect("infobase section")
+    }
+
+    /// Три вопроса по порядку: секция первична, строка рядом с ней — серверный адрес.
+    #[test]
+    fn a_direct_gate_address_next_to_the_standalone_section_passes_the_form_check() {
+        for connection in [
+            "Srvr=srv:1541;Ref=demo",
+            "Srvr=\"srv\";Ref=\"demo\";",
+            "/S srv\\demo",
+            "",
+        ] {
+            let section = infobase(&format!(
+                "connection: '{connection}'\nstandalone:\n  gate: srv:1543\n  exchange: sftp\n"
+            ));
+            assert!(
+                super::validate_infobase_form(&section).is_ok(),
+                "{connection}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_or_shapeless_address_next_to_the_standalone_section_is_refused_by_the_form_check() {
+        for connection in [
+            "File=/srv/ib",
+            "File = /srv/ib",
+            "not a connection",
+            "/S srv",
+        ] {
+            let section = infobase(&format!(
+                "connection: '{connection}'\nstandalone:\n  gate: srv:1543\n  exchange: sftp\n"
+            ));
+            assert!(
+                matches!(
+                    super::validate_infobase_form(&section),
+                    Err(ConfigValidationError::StandaloneConnectionIsNotADirectGate)
+                ),
+                "{connection}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_web_address_is_refused_as_an_administrative_channel_for_every_target_kind() {
+        for yaml in [
+            "connection: 'ws=http://srv/demo'\n",
+            "connection: 'ws=http://srv/demo'\nstandalone:\n  gate: srv:1543\n  exchange: sftp\n",
+        ] {
+            assert!(matches!(
+                super::validate_infobase_form(&infobase(yaml)),
+                Err(ConfigValidationError::WebConnectionIsNotAnAdministrativeChannel)
+            ));
+        }
+    }
+
+    /// Третий ответ — кластер — получает только строка серверной формы; канонические
+    /// формы платформы (завершающая `;`, кавычки) проходят.
+    #[test]
+    fn the_cluster_answer_needs_a_server_shaped_connection() {
+        for connection in [
+            "Srvr=srv;Ref=demo;",
+            "Srvr=\"srv:1541\";Ref=\"demo\";",
+            "/S srv\\demo",
+        ] {
+            assert!(
+                super::validate_infobase_form(&infobase(&format!("connection: '{connection}'\n")))
+                    .is_ok(),
+                "{connection}"
+            );
+        }
+        for connection in ["not a connection", "Srvr=srv", "Srvr=srv;Ref=", "/S srv"] {
+            assert!(
+                matches!(
+                    super::validate_infobase_form(&infobase(&format!(
+                        "connection: '{connection}'\n"
+                    ))),
+                    Err(ConfigValidationError::ConnectionShapeUnsupported)
+                ),
+                "{connection}"
+            );
+        }
     }
 
     #[test]

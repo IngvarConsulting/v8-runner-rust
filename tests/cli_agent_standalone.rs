@@ -607,9 +607,50 @@ fn launch_keys_do_not_apply_to_a_standalone_server() {
     assert!(commands(&harness).is_empty());
 }
 
-/// Цель объявляется один раз: строка подключения рядом с `standalone` — отказ.
+/// Секция `standalone` первична, строка рядом с ней — адрес прямого шлюза: конфиг
+/// принимается, команда идёт через SSH-шлюз, как раньше, а строку никто не читает — об
+/// этом предупреждает загрузчик, пока исполнителя по прямому шлюзу нет (#205).
 #[test]
-fn a_connection_string_next_to_standalone_is_refused() {
+fn a_direct_gate_address_next_to_the_standalone_section_is_accepted_but_not_used_yet() {
+    let harness = harness();
+    let infobase = format!(
+        "  connection: 'Srvr=127.0.0.1:1541;Ref=demo'\n{}",
+        standalone_infobase(&harness)
+    );
+    write_config(&harness, &infobase, "");
+
+    let (code, payload) = run(&harness, &["dump", "--mode", "full"]);
+
+    assert_eq!(code, 0, "{payload}");
+    let commands = commands(&harness);
+    assert!(
+        !commands.is_empty(),
+        "the gate served the command: {payload}"
+    );
+    assert!(
+        commands
+            .iter()
+            .all(|command| !command.contains("Srvr=") && !command.contains("Ref=")),
+        "the direct gate address never reaches the gate: {commands:?}"
+    );
+    let warnings = payload["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("declared but not used yet")),
+        "{warnings:?}"
+    );
+}
+
+/// Файлового адреса у автономного сервера нет: `File=` рядом с `standalone` — отказ до
+/// первого обращения к шлюзу.
+#[test]
+fn a_file_address_next_to_the_standalone_section_is_refused() {
     let harness = harness();
     let infobase = format!(
         "  connection: 'File={}'\n{}",
@@ -621,10 +662,12 @@ fn a_connection_string_next_to_standalone_is_refused() {
     let (code, payload) = run(&harness, &["dump", "--mode", "full"]);
 
     assert_ne!(code, 0, "{payload}");
+    assert_eq!(payload["error"]["kind"], "validation", "{payload}");
     assert!(
-        error_message(&payload).contains("declared once"),
+        error_message(&payload).contains("Srvr=<host[:port]>;Ref=<name>"),
         "{payload}"
     );
+    assert!(commands(&harness).is_empty(), "no gate session was opened");
 }
 
 /// У автономного сервера один исполнитель: ключ `providers.*` — ошибка, а операции без
@@ -689,8 +732,8 @@ fn a_standalone_snapshot_is_refused_before_any_session() {
     assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));
 }
 
-/// У автономного сервера один адрес — клиентский, — и тонкий клиент идёт по нему без
-/// всякого ключа. Не объявлен адрес — отказ называет именно его, а не платформу: платформы
+/// Прямой шлюз автономного сервера раннер пока не использует (#205): тонкий клиент идёт
+/// по клиентскому адресу без всякого ключа. Не объявлен адрес — отказ называет именно его, а не платформу: платформы
 /// на этой машине нет вовсе, и до её поиска дело не доходит.
 #[test]
 fn a_thin_client_against_a_standalone_server_asks_for_the_web_address() {
@@ -707,8 +750,8 @@ fn a_thin_client_against_a_standalone_server_asks_for_the_web_address() {
 }
 
 /// Второй путь открыли только тонкому клиенту. Остальные режимы против автономной цели
-/// отказывают ровно как до его появления: у неё нет административного адреса, а по
-/// клиентскому ходит только тонкий.
+/// отказывают ровно как до его появления: прямой шлюз пока не используется (#205), а по
+/// клиентскому адресу ходит только тонкий.
 #[test]
 fn a_non_thin_mode_against_a_standalone_server_is_still_refused() {
     let harness = harness();
@@ -733,7 +776,7 @@ fn a_non_thin_mode_against_a_standalone_server_is_still_refused() {
     }
 }
 
-/// Административного адреса у автономной цели нет, поэтому просить его — ошибка
+/// Прямой шлюз автономной цели раннер пока не использует, поэтому просить его — ошибка
 /// конфигурации, а не пустой запуск.
 #[test]
 fn via_connection_against_a_standalone_server_is_refused() {
@@ -747,7 +790,7 @@ fn via_connection_against_a_standalone_server_is_refused() {
     assert_ne!(code, 0, "{payload}");
     assert_eq!(payload["error"]["kind"], "validation", "{payload}");
     assert!(
-        error_message(&payload).contains("no administrative connection string"),
+        error_message(&payload).contains("not used by the runner yet"),
         "{payload}"
     );
 }

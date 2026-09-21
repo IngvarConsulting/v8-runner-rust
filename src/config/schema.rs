@@ -544,8 +544,9 @@ struct ProvidersSchema {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct InfobaseSchema {
-    /// 1C infobase connection string without embedded user or password; empty for a
-    /// standalone server, which `standalone` declares.
+    /// 1C infobase connection string without embedded user or password: `File=…` for a file
+    /// infobase, `Srvr=…;Ref=…` for a cluster; next to `standalone` it is the server's direct
+    /// gate address or empty.
     #[serde(default)]
     connection: String,
     /// Optional infobase user name passed to platform utilities.
