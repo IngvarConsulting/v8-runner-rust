@@ -110,8 +110,8 @@ flowchart LR
   EMAIN -->|"pull my-ext"| EXTSRC
   EMAIN -->|"apply my-ext"| EDB
   CFSRC -->|"make"| PKG
-  PKG -->|"infobase load"| MAIN
-  MAIN -->|"infobase download"| PKG
+  PKG -->|"load"| MAIN
+  MAIN -->|"download"| PKG
   MAIN -.->|"diff --against vendor:имя"| VEN
   class CFSRC,EXTSRC,PKG art
   class MAIN,EMAIN sw
@@ -130,8 +130,8 @@ flowchart LR
 <tbody>
 <tr><td class="k">исходники → база</td><td><code>push</code></td><td>да</td></tr>
 <tr><td class="k">база → исходники</td><td><code>pull</code></td><td>да</td></tr>
-<tr><td class="k">пакет → база</td><td><code>infobase load</code></td><td>да</td></tr>
-<tr><td class="k">база → пакет</td><td><code>infobase download</code></td><td>да</td></tr>
+<tr><td class="k">пакет → база</td><td><code>load</code></td><td>да</td></tr>
+<tr><td class="k">база → пакет</td><td><code>download</code></td><td>да</td></tr>
 <tr><td class="k">исходники → пакет</td><td><code>make</code></td><td>нет для конфигурации и внешних <span class="ref">(<a href="platform.html#t30">30</a>)</span></td></tr>
 <tr><td class="k">пакет → исходники</td><td><code>convert</code></td><td>нет <span class="ref">(<a href="platform.html#t30">30</a>)</span></td></tr>
 </tbody>
@@ -173,7 +173,7 @@ stateDiagram-v2
   state "обновлено динамически" as Y
   S2 --> P: push --no-apply
   S2 --> P: правка в Конфигураторе
-  S2 --> P: infobase load
+  S2 --> P: load
   P --> S2: apply
   P --> Y: apply, когда сеансы не закрыть
   Y --> S2: перезапуск сеансов
@@ -197,7 +197,7 @@ stateDiagram-v2
 <p>Все три состояния называет одна команда. Без ключа она отвечает по памяти и платформу не запускает; с <code>--deep</code> спрашивает поколение и состав расширений, и тогда видно, что база ушла вперёд и что в ней есть непринятое:</p>
 
 <pre class="sh"><code>$ v8-runner status --deep
-infobase: File="/srv/ib/demo"
+origin: File="/srv/ib/demo"
 
   main      → ЖивоеИмяКонфигурации   3 файла изменено · есть непринятое
   my-ext    → РасширениеВБазе        совпадает
@@ -218,11 +218,11 @@ infobase: File="/srv/ib/demo"
 
 <p>Хеши сравнивают каталог с прошлым разом и дают список файлов для частичной загрузки. Поколение сравнивается только на равенство: совпало — база с прошлого раза не менялась, и выгрузка отвечает «нечего делать» за секунду. Файл версий читает только платформа: по нему она решает, какие объекты перекладывать.</p>
 
-<p>Все три описывают отношение между <strong>одним каталогом и одной базой</strong>. Поэтому под <code>workPath</code> они лежат по базе: у каждой объявленной базы своя память, и отправка в тестовую не сбивает память о рабочей. Место для этого в конфигурации уже есть: местный слой <code>v8project.local.yaml</code> задаёт <code>workPath</code>, базу по умолчанию и именованные базы, а наборы исходников и формат в нём запрещены.</p>
+<p>Все три описывают отношение между <strong>одним каталогом и одной базой</strong>. Поэтому под <code>workPath</code> они лежат по базе: у каждой объявленной базы своя память, и отправка в тестовую не сбивает память о рабочей. Место для этого в конфигурации уже есть: местный слой <code>v8project.local.yaml</code> задаёт <code>workPath</code> и базы по именам, из которых <code>origin</code> берётся без ключа, а наборы исходников и формат в нём запрещены.</p>
 
 <pre class="sh"><code>build/                       # workPath
   infobases/
-    default/                 # база по умолчанию
+    origin/                  # база по умолчанию
       generation.json        # поколение, чем получено, после какой операции
       hashes/                # хеши исходников по наборам
       ConfigDumpInfo.xml     # файл версий этой пары

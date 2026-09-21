@@ -66,9 +66,9 @@ v8-runner clone --from "File=/srv/ib/demo"   # привязать каталог
 <li><code>infobase create</code> создать базу</li>
 <li><code>push</code> · <code>apply</code> отправить исходники в базу и применить</li>
 <li><code>pull</code> забрать изменения из базы</li>
+<li><code>load</code> · <code>download</code> пакет .cf или .cfe в базу и из базы</li>
 <li><code>make</code> собрать пакет из исходников</li>
 <li><code>check</code> · <code>test</code> проверить и прогнать тесты</li>
-<li><code>infobase download</code> · <code>infobase load</code> пакет .cf или .cfe из базы и в базу</li>
 <li><code>infobase dump</code> · <code>infobase restore</code> база в .dt и обратно</li>
 <li><code>sessions</code> окно обслуживания: запретить, завершить, разрешить</li>
 <li><code>extensions</code> · <code>publish</code> · <code>launch</code> · <code>convert</code></li>
@@ -78,7 +78,7 @@ v8-runner clone --from "File=/srv/ib/demo"   # привязать каталог
 <h2>Словарь</h2>
 <div class="tablewrap"><table>
 <tbody>
-<tr><td class="k">база</td><td>информационная база 1С: конфигурации и данные, с которыми работают пользователи. Бывает файловой, в кластере или за автономным сервером; у проекта одна база по умолчанию и сколько угодно именованных</td></tr>
+<tr><td class="k">база</td><td>информационная база 1С: конфигурации и данные, с которыми работают пользователи. Бывает файловой, в кластере или за автономным сервером; у проекта сколько угодно именованных баз, умолчание зовётся <code>origin</code>, как у гита</td></tr>
 <tr><td class="k">исходники</td><td>та же конфигурация, разложенная в файлы под контролем версий</td></tr>
 <tr><td class="k">набор исходников</td><td>каталог с одним предметом: конфигурация, расширение или группа внешних обработок</td></tr>
 <tr><td class="k">пакет</td><td>один файл с предметом: <code>.cf</code>, <code>.cfe</code>, <code>.epf</code>, <code>.erf</code></td></tr>

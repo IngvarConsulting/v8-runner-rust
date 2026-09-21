@@ -152,16 +152,17 @@
 
   function renderYaml() {
     var lines = ['workPath: build', 'format: ' + state.format];
-    lines.push('infobase:');
-    if (state.target === 'file') lines.push('  connection: "File=build/ib"');
-    if (state.target === 'cluster') { lines.push('  connection: "Srvr=srv:1541;Ref=demo"'); lines.push('  user: Admin'); lines.push('  dbms:                    # нужна, чтобы раннер создал базу'); lines.push('    kind: PostgreSQL'); lines.push('    server: localhost'); lines.push('    name: demo'); }
+    lines.push('infobases:');
+    lines.push('  origin:                  # умолчание, как у гита');
+    if (state.target === 'file') lines.push('    connection: "File=build/ib"');
+    if (state.target === 'cluster') { lines.push('    connection: "Srvr=srv:1541;Ref=demo"'); lines.push('    user: Admin'); lines.push('    dbms:                    # нужна, чтобы раннер создал базу'); lines.push('      kind: PostgreSQL'); lines.push('      server: localhost'); lines.push('      name: demo'); }
     if (state.target === 'standalone') {
-      lines.push('  connection: "Srvr=127.0.0.1;Ref=demo"   # прямой шлюз: Конфигуратор и тонкий клиент');
-      lines.push('  user: Admin');
-      lines.push('  standalone:              # объявляет вид цели');
-      lines.push('    gate: 127.0.0.1:1543   # SSH-шлюз: агентский набор, платформа у раннера не нужна');
-      lines.push('  web:');
-      lines.push('    url: http://127.0.0.1:8314/   # HTTP самого сервера: launch web, --via web');
+      lines.push('    connection: "Srvr=127.0.0.1;Ref=demo"   # прямой шлюз: Конфигуратор и тонкий клиент');
+      lines.push('    user: Admin');
+      lines.push('    standalone:              # объявляет вид цели');
+      lines.push('      gate: 127.0.0.1:1543   # SSH-шлюз: агентский набор, платформа у раннера не нужна');
+      lines.push('    web:');
+      lines.push('      url: http://127.0.0.1:8314/   # HTTP самого сервера: launch web, --via web');
     }
     lines.push('source-set:');
     if (state.type === 'CONFIGURATION') lines.push('  - { name: main, type: CONFIGURATION, path: ' + (state.format === 'EDT' ? 'src/main' : 'src/cf') + ' }');
@@ -169,11 +170,11 @@
     if (state.type === 'EXTERNAL') lines.push('  - { name: tools, type: EXTERNAL_DATA_PROCESSORS, path: src/epf }');
     if (state.tools.web && state.target !== 'standalone') {
       lines.splice(lines.indexOf('source-set:'), 0,
-        '  web:                     # публикация для веб-клиента',
-        '    server: apache24       # apache2 | apache22 | apache24 | iis',
-        '    wsdir: demo',
-        '    dir: /var/www/demo',
-        '    url: http://localhost/demo   # адрес после публикации');
+        '    web:                     # публикация для веб-клиента',
+        '      server: apache24       # apache2 | apache22 | apache24 | iis',
+        '      wsdir: demo',
+        '      dir: /var/www/demo',
+        '      url: http://localhost/demo   # адрес после публикации');
     }
     if (state.format === 'EDT') { lines.push('tools:'); lines.push('  edt_cli:'); lines.push('    path: 2025.2.3          # версия или каталог EDT'); }
     document.getElementById('yaml').textContent = lines.join('\n');

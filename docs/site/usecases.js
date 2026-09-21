@@ -66,7 +66,7 @@ window.RUNNER_USECASES = [
     steps: [
       { id: 'push', in: ['repo'], out: ['ib'], note: 'база приводится к состоянию исходников' },
       { id: 'make', in: ['repo'], out: ['cf', 'epf'], note: 'пакеты собираются из исходников, база не нужна' },
-      { id: 'infobase-download', in: ['ib'], out: ['cf'], note: 'если нужна именно конфигурация базы: основная или та, что в базе данных' }
+      { id: 'download', in: ['ib'], out: ['cf'], note: 'если нужна именно конфигурация базы: основная или та, что в базе данных' }
     ] },
 
   { id: 'deferred', title: 'Отложить реструктуризацию до окна обслуживания',
@@ -84,7 +84,7 @@ window.RUNNER_USECASES = [
     who: 'сопровождающий типовую конфигурацию',
     pre: 'есть пакет .cf новой версии',
     steps: [
-      { id: 'infobase-load', cmd: 'v8-runner infobase load new.cf --mode update', in: ['cf'], out: ['ib'], note: 'обновление конфигурации поставщика по правилам поддержки' },
+      { id: 'load', cmd: 'v8-runner load new.cf --mode update', in: ['cf'], out: ['ib'], note: 'обновление конфигурации поставщика по правилам поддержки' },
       { id: 'apply', in: ['ib'], out: ['ib'], note: 'реструктуризация' },
       { id: 'pull', in: ['ib'], out: ['repo'], note: 'новое состояние базы попадает в исходники' }
     ] },
