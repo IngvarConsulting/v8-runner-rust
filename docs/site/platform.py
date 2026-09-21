@@ -385,7 +385,7 @@ NAV = '''<div class="topbar"><div class="in">
     <a href="problems.html">Трудности</a>
     <a href="architecture.html">Компоненты</a>
     <a href="sources.html">Исходники</a>
-    <a href="cli.html">Словарь</a>
+    <a href="cli.html">CLI</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -402,7 +402,7 @@ out.append('''<!DOCTYPE html>
 <title>v8-runner · Платформа</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="styles.css?v=15">
+<link rel="stylesheet" href="styles.css?v=16">
 <style>
   table.theses:not(.stack) td:nth-child(2) { width: 46%; }
   table.theses:not(.stack) td:nth-child(3) { width: 32%; }
@@ -420,7 +420,7 @@ out.append('''
 <h1>Платформа</h1>
 <p class="lede">Всё, на чём стоит раннер, платформа описала сама. Здесь собраны её утверждения, по одному на строку, и рядом — что из каждого следует для нас. Каждая строка ведёт в раздел документации на ИТС.</p>
 
-<p>Читать подряд не обязательно. Страницы <a href="problems.html">Трудности</a>, <a href="sources.html">Исходники</a> и <a href="cli.html">Словарь</a> ссылаются сюда по номеру тезиса.</p>
+<p>Читать подряд не обязательно. Страницы <a href="problems.html">Трудности</a>, <a href="sources.html">Исходники</a> и <a href="cli.html">CLI</a> ссылаются сюда по номеру тезиса.</p>
 
 <div class="legend">
   <span><strong>РР</strong> — Руководство разработчика 8.3.27</span>
@@ -448,7 +448,7 @@ out.append('''
 <h2 id="measured">Чего документация не говорит</h2>
 <p>Часть поведения платформы известна только из замеров на 8.3.27 и 8.5.1. Такие факты на сайте помечены словом «замер» и живут на странице <a href="problems.html">Трудности</a>. Документация их не подтверждает и не опровергает.</p>
 </main>
-<script src="site.js?v=6" defer></script>
+<script src="site.js?v=7" defer></script>
 </body>
 </html>
 ''')

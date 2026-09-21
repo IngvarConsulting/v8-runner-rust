@@ -6,7 +6,7 @@
 <title>v8-runner · Расстановки</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="styles.css?v=15">
+<link rel="stylesheet" href="styles.css?v=16">
 </head>
 <body>
 <div class="topbar"><div class="in">
@@ -17,7 +17,7 @@
     <a href="problems.html">Трудности</a>
     <a href="architecture.html">Компоненты</a>
     <a href="sources.html">Исходники</a>
-    <a href="cli.html">Словарь</a>
+    <a href="cli.html">CLI</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html" aria-current="page">Расстановки</a>
@@ -65,115 +65,114 @@
 
 <h2 id="d-legend">Как читать схемы</h2>
 <p>Схемы нарисованы в нотации ArchiMate, уровень технологий: рамка — машина (node), прямоугольник — процесс (system software), скруглённый блок — точка входа (technology service), «документ» и цилиндр — данные (artifact), синий блок — сам раннер (application component). Подпись на стрелке называет канал и протокол; пунктир — сеть, сплошная — процесс или файл на той же машине. Серое — то, с чем раннер не разговаривает.</p>
-<pre class="mermaid">
-flowchart TB
-  L1["процесс<br/>утилита платформы"]
-  L2(["точка входа<br/>SSH-шлюз, HTTP"])
-  L3@{ shape: doc, label: "файл или каталог" }
-  L4@{ shape: cyl, label: "база данных СУБД" }
-  L5["v8-runner"]
-  L6["вне раннера"]
-  class L1 sw
-  class L2 svc
-  class L3 art
-  class L4 art
-  class L5 run
-  class L6 off
-  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
-  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
-  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
-  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
-  classDef off fill:#e4e4e7,stroke:#9a9aa2,color:#33333a;
-</pre>
+<!-- diagram:legend -->
+<div class="diagram" role="img" aria-label="Как читать схемы: процесс, точка входа, файл, база данных, раннер, вне раннера">
+<svg viewBox="25.0 11.0 670.0 166.0" xmlns="http://www.w3.org/2000/svg" style="max-width:670px">
+<defs><marker id="arr-legend" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="n n-run"><rect x="35.0" y="28.0" width="150.0" height="44.0" rx="8"/><text><tspan x="110.0" y="50.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="255.0" y="21.0" width="170.0" height="58.0" rx="8"/><text><tspan x="340.0" y="41.0">процесс</tspan><tspan x="340.0" y="59.0">утилита платформы</tspan></text></g>
+<g class="n n-svc"><rect x="495.0" y="21.0" width="190.0" height="58.0" rx="29.0"/><text><tspan x="590.0" y="41.0">точка входа</tspan><tspan x="590.0" y="59.0">SSH-шлюз, HTTP</tspan></text></g>
+<g class="n n-doc"><path d="M35.0,118.0 h150.0 v36.0 q-37.5,12.0 -75.0,0 q-37.5,-12.0 -75.0,0 z"/><text><tspan x="110.0" y="140.0">файл или каталог</tspan></text></g>
+<g class="n n-cyl"><path d="M260.0,120.0 v40.0 a80.0,7.0 0 0 0 160.0,0 v-40.0"/><ellipse cx="340.0" cy="120.0" rx="80.0" ry="7.0"/><text><tspan x="340.0" y="140.0">база данных СУБД</tspan></text></g>
+<g class="n n-off"><rect x="515.0" y="118.0" width="150.0" height="44.0" rx="8"/><text><tspan x="590.0" y="140.0">вне раннера</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:legend -->
 <p class="hint">Сам раннер ничего не исполняет. Утилиту он вызывает запуском процесса — аргументы командной строки, код выхода и журнал; с агентом и шлюзом говорит сессией SSH. Поэтому на стрелке от раннера стоит вид вызова, а не имя команды. Где раннер поднимает процесс сам, у стрелки написано «поднимает»: агент Конфигуратора он запускает и только потом к нему подключается, а шлюз автономного сервера поднимаете вы — туда идёт одна сессия. Сервер администрирования идёт по тому же правилу: объявленный раннер использует, необъявленный поднимает сам.</p>
 
 <h2 id="d-map">Общая карта</h2>
 <p>Раннер запускает утилиты у себя и достаёт цель тремя способами: файлом, сетевым протоколом платформы и SSH. Автономный сервер достижим двумя из них: Конфигуратор идёт в его прямой шлюз тем же протоколом, что в кластер <span class="ref">(<a href="platform.html#t65">65</a>)</span>, а SSH ведёт в агентский шлюз <span class="ref">(<a href="platform.html#t61">61</a>)</span>. Четвёртого нет: консоль кластера остаётся вне раннера, а к серверу администрирования он ходит утилитой <code>rac</code> только за сеансами своей базы <span class="ref">(<a href="platform.html#t56">56</a>, <a href="platform.html#t57">57</a>)</span>. Здесь показан только канал администрирования; чем и откуда базу открывает человек, видно в каждом варианте отдельно.</p>
-<pre class="mermaid">
-flowchart LR
-  subgraph HOST["машина раннера"]
-    R["v8-runner<br/>CLI · MCP"]
-    EDT["1cedtcli"]
-    DES["1cv8 DESIGNER"]
-    IBC["ibcmd"]
-    WEB["webinst"]
-    AGT(["1cv8 /AgentMode<br/>127.0.0.1:1543"])
-    RAC["rac"]
-  end
-  SRC@{ shape: doc, label: "исходники<br/>XML, проект EDT" }
-  FDB@{ shape: doc, label: "файловая база<br/>каталог с 1Cv8.1CD" }
-  CLU["кластер 1С<br/>ragent · rmngr · rphost"]
-  RAS(["RAS 1545"])
-  DBMS@{ shape: cyl, label: "СУБД" }
-  GATE(["автономный сервер ibsrv<br/>прямой шлюз · SSH-шлюз 1543"])
-  WS(["Apache · IIS"])
-  R -->|"одна живая сессия"| EDT
-  R -->|"процесс на операцию"| DES
-  R -->|"процесс на операцию"| IBC
-  R -->|"процесс на операцию"| WEB
-  R -->|"процесс на операцию"| RAC
-  RAC -.->|"TCP 1545: сеансы своей базы"| RAS
-  RAS --> CLU
-  R -->|"поднимает, если cluster.ras не объявлен"| RAS
-  R -->|"поднимает"| AGT
-  R -->|"SSH 127.0.0.1:1543"| AGT
-  R -.->|"SSH · SFTP"| GATE
-  EDT --> SRC
-  DES --> SRC
-  DES -->|"файл"| FDB
-  DES -.->|"TCP 1541"| CLU
-  DES -.->|"TCP: прямой шлюз"| GATE
-  IBC -->|"--db-path"| FDB
-  IBC -.->|"--dbms: прямо в СУБД"| DBMS
-  AGT -->|"файл"| FDB
-  AGT -.->|"TCP 1541"| CLU
-  WEB -->|"публикация"| WS
-  CLU --> DBMS
-  class R run
-  class DES,IBC,WEB,EDT,CLU,RAC sw
-  class AGT,GATE,WS,RAS svc
-  class SRC,FDB,DBMS art
-  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
-  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
-  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
-  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
-  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
-</pre>
+<!-- diagram:map -->
+<div class="diagram" role="img" aria-label="Кто с кем говорит: раннер запускает утилиты у себя и достаёт цель файлом, протоколом платформы и SSH">
+<svg viewBox="2.0 -92.0 1392.0 744.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1392px">
+<defs><marker id="arr-map" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-host"><rect x="12.0" y="-6.0" width="536.0" height="556.0" rx="12"/><text x="26.0" y="12.0">машина раннера</text></g>
+<path marker-end="url(#arr-map)" class="e" d="M170.0,273.9 C269.9,273.9 292.1,60.0 392.0,60.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M170.0,283.8 C251.0,283.8 269.0,151.4 350.0,151.4"/>
+<path marker-end="url(#arr-map)" class="e" d="M170.0,300.0 C251.0,300.0 269.0,190.3 350.0,190.3"/>
+<path marker-end="url(#arr-map)" class="e" d="M170.0,310.4 C269.9,310.4 292.1,290.0 392.0,290.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M170.0,320.3 C269.9,320.3 292.1,400.0 392.0,400.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M170.0,327.3 C269.9,327.3 292.1,510.0 392.0,510.0"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M150,271 L150,-40 Q150,-70 180,-70 L1010,-70 Q1040,-70 1040,-40 L1040,31"/>
+<path marker-end="url(#arr-map)" class="e" d="M100,329 L100,600 Q100,630 130,630 L1350,630 Q1380,630 1380,600 L1380,238 Q1380,208 1350,208 L1304,208"/>
+<path marker-end="url(#arr-map)" class="e" d="M488.0,60.0 C569.5,60.0 587.5,54.2 669.0,54.2"/>
+<path marker-end="url(#arr-map)" class="e" d="M530.0,146.8 C592.5,146.8 606.5,74.5 669.0,74.5"/>
+<path marker-end="url(#arr-map)" class="e" d="M530.0,175.8 C579.5,175.8 590.5,208.0 640.0,208.0"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M530,167 C640,140 800,140 940,196"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M530,158 C620,108 760,108 830,108 C880,108 885,60 900,60"/>
+<path marker-end="url(#arr-map)" class="e" d="M488.0,281.2 C556.4,281.2 571.6,228.3 640.0,228.3"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M488.0,298.8 C716.1,298.8 766.9,330.0 995.0,330.0"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M488,400 C800,400 1250,430 1250,230"/>
+<path marker-end="url(#arr-map)" class="e" d="M1196.0,208.0 C1156.0,208.0 1180.0,208.0 1140.0,208.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M1040.0,237.0 C1040.0,277.0 1040.0,263.0 1040.0,303.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M488.0,510.0 C570.1,510.0 588.4,510.0 670.5,510.0"/>
+<g class="n n-run"><rect x="30.0" y="271.0" width="140.0" height="58.0" rx="8"/><text><tspan x="100.0" y="291.0">v8-runner</tspan><tspan x="100.0" y="309.0">CLI · MCP</tspan></text></g>
+<g class="n n-sw"><rect x="392.0" y="38.0" width="96.0" height="44.0" rx="8"/><text><tspan x="440.0" y="60.0">1cedtcli</tspan></text></g>
+<g class="n n-sw"><rect x="350.0" y="141.0" width="180.0" height="58.0" rx="8"/><text><tspan x="440.0" y="161.0">1cv8 DESIGNER</tspan><tspan x="440.0" y="179.0">1cv8 /AgentMode 1543</tspan></text></g>
+<g class="n n-sw"><rect x="392.0" y="268.0" width="96.0" height="44.0" rx="8"/><text><tspan x="440.0" y="290.0">ibcmd</tspan></text></g>
+<g class="n n-sw"><rect x="392.0" y="378.0" width="96.0" height="44.0" rx="8"/><text><tspan x="440.0" y="400.0">rac</tspan></text></g>
+<g class="n n-sw"><rect x="392.0" y="488.0" width="96.0" height="44.0" rx="8"/><text><tspan x="440.0" y="510.0">webinst</tspan></text></g>
+<g class="n n-doc"><path d="M669.0,31.0 h142.0 v50.0 q-35.5,12.0 -71.0,0 q-35.5,-12.0 -71.0,0 z"/><text><tspan x="740.0" y="51.0">исходники</tspan><tspan x="740.0" y="69.0">XML, проект EDT</tspan></text></g>
+<g class="n n-doc"><path d="M640.0,179.0 h200.0 v50.0 q-50.0,12.0 -100.0,0 q-50.0,-12.0 -100.0,0 z"/><text><tspan x="740.0" y="199.0">файловая база</tspan><tspan x="740.0" y="217.0">каталог с 1Cv8.1CD</tspan></text></g>
+<g class="n n-svc"><rect x="900.0" y="31.0" width="280.0" height="58.0" rx="29.0"/><text><tspan x="1040.0" y="51.0">автономный сервер ibsrv</tspan><tspan x="1040.0" y="69.0">прямой шлюз · SSH-шлюз 1543</tspan></text></g>
+<g class="n n-sw"><rect x="940.0" y="179.0" width="200.0" height="58.0" rx="8"/><text><tspan x="1040.0" y="199.0">кластер 1С</tspan><tspan x="1040.0" y="217.0">ragent · rmngr · rphost</tspan></text></g>
+<g class="n n-cyl"><path d="M995.0,310.0 v40.0 a45.0,7.0 0 0 0 90.0,0 v-40.0"/><ellipse cx="1040.0" cy="310.0" rx="45.0" ry="7.0"/><text><tspan x="1040.0" y="330.0">СУБД</tspan></text></g>
+<g class="n n-svc"><rect x="1196.0" y="186.0" width="108.0" height="44.0" rx="22.0"/><text><tspan x="1250.0" y="208.0">RAS 1545</tspan></text></g>
+<g class="n n-svc"><rect x="670.5" y="488.0" width="139.0" height="44.0" rx="22.0"/><text><tspan x="740.0" y="510.0">Apache · IIS</tspan></text></g>
+<g class="lbl"><rect x="217.5" y="155.0" width="127" height="24" rx="4"/><text><tspan x="281.0" y="167.0">одна живая сессия</tspan></text></g>
+<g class="lbl"><rect x="189.5" y="205.6" width="141" height="24" rx="4"/><text><tspan x="260.0" y="217.6">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="186.0" y="233.2" width="148" height="24" rx="4"/><text><tspan x="260.0" y="245.2">поднимает, потом SSH</tspan></text></g>
+<g class="lbl"><rect x="210.5" y="288.2" width="141" height="24" rx="4"/><text><tspan x="281.0" y="300.2">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="210.5" y="348.1" width="141" height="24" rx="4"/><text><tspan x="281.0" y="360.1">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="210.5" y="406.6" width="141" height="24" rx="4"/><text><tspan x="281.0" y="418.6">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="519.5" y="-82.0" width="81" height="24" rx="4"/><text><tspan x="560.0" y="-70.0">SSH · SFTP</tspan></text></g>
+<g class="lbl"><rect x="962.5" y="618.0" width="275" height="24" rx="4"/><text><tspan x="1100.0" y="630.0">поднимает, если cluster.ras не объявлен</tspan></text></g>
+<g class="lbl"><rect x="565.0" y="179.9" width="40" height="24" rx="4"/><text><tspan x="585.0" y="191.9">файл</tspan></text></g>
+<g class="lbl"><rect x="701.5" y="139.0" width="67" height="24" rx="4"/><text><tspan x="735.0" y="151.0">TCP 1541</tspan></text></g>
+<g class="lbl"><rect x="679.5" y="97.9" width="121" height="24" rx="4"/><text><tspan x="740.0" y="109.9">TCP: прямой шлюз</tspan></text></g>
+<g class="lbl"><rect x="557.0" y="225.8" width="74" height="24" rx="4"/><text><tspan x="594.0" y="237.8">--db-path</tspan></text></g>
+<g class="lbl"><rect x="626.0" y="297.9" width="148" height="24" rx="4"/><text><tspan x="700.0" y="309.9">--dbms: прямо в СУБД</tspan></text></g>
+<g class="lbl"><rect x="603.0" y="389.6" width="194" height="24" rx="4"/><text><tspan x="700.0" y="401.6">TCP 1545: сеансы своей базы</tspan></text></g>
+<g class="lbl"><rect x="568.5" y="498.0" width="81" height="24" rx="4"/><text><tspan x="609.0" y="510.0">публикация</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:map -->
 <p class="hint">Утилиты EDT к базе не подключаются: <code>1cedtcli</code> работает только с исходниками, поэтому во всех четырнадцати расстановках он одинаков.</p>
 
 <h2 id="d-file">1. Файловая база</h2>
 <p>Всё на одной машине: и раннер, и платформа, и каталог базы. Самый частый случай для разработчика и для CI, который поднимает базу с нуля.</p>
-<pre class="mermaid">
-flowchart LR
-  subgraph HOST["машина раннера"]
-    R["v8-runner"]
-    DES["1cv8 DESIGNER"]
-    IBC["ibcmd"]
-    AGT(["1cv8 /AgentMode<br/>127.0.0.1:1543"])
-    CLI["1cv8c · клиент"]
-    IB@{ shape: doc, label: "каталог базы<br/>1Cv8.1CD" }
-    WP@{ shape: doc, label: "workPath<br/>журналы, хеши, .cf, .dt" }
-  end
-  R -->|"процесс на операцию"| DES
-  R -->|"процесс на операцию"| IBC
-  R -->|"поднимает"| AGT
-  R -->|"SSH 127.0.0.1:1543"| AGT
-  R -->|"процесс на запуск"| CLI
-  DES -->|"файл, монопольно"| IB
-  IBC -->|"--db-path"| IB
-  AGT -->|"файл"| IB
-  CLI -->|"файл"| IB
-  DES --> WP
-  class R run
-  class DES,IBC,CLI sw
-  class AGT svc
-  class IB,WP art
-  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
-  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
-  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
-  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
-  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
-</pre>
+<!-- diagram:d-file -->
+<div class="diagram" role="img" aria-label="Файловая база: все утилиты и база на машине раннера">
+<svg viewBox="-13.0 -23.0 866.0 423.0" xmlns="http://www.w3.org/2000/svg" style="max-width:866px">
+<defs><marker id="arr-d-file" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-host"><rect x="-3.0" y="-13.0" width="846.0" height="403.0" rx="12"/><text x="11.0" y="5.0">машина раннера</text></g>
+<path marker-end="url(#arr-d-file)" class="e" d="M145.0,184.6 C222.4,184.6 239.6,60.0 317.0,60.0"/>
+<path marker-end="url(#arr-d-file)" class="e" d="M145.0,195.6 C229.2,195.6 247.8,150.0 332.0,150.0"/>
+<path marker-end="url(#arr-d-file)" class="e" d="M145.0,206.6 C214.3,206.6 229.7,250.0 299.0,250.0"/>
+<path marker-end="url(#arr-d-file)" class="e" d="M145.0,217.6 C220.6,217.6 237.4,350.0 313.0,350.0"/>
+<path marker-end="url(#arr-d-file)" class="e" d="M443.0,71.0 C529.4,71.0 548.6,182.6 635.0,182.6"/>
+<path marker-end="url(#arr-d-file)" class="e" d="M428.0,150.0 C521.1,150.0 541.9,197.1 635.0,197.1"/>
+<path marker-end="url(#arr-d-file)" class="e" d="M461.0,238.4 C539.3,238.4 556.7,214.5 635.0,214.5"/>
+<path marker-end="url(#arr-d-file)" class="e" d="M447.0,350.0 C554.5,350.0 686.0,336.6 686.0,229.0"/>
+<path marker-end="url(#arr-d-file)" class="e" d="M443.0,53.4 C520.4,53.4 537.6,60.0 615.0,60.0"/>
+<g class="n n-run"><rect x="15.0" y="178.0" width="130.0" height="44.0" rx="8"/><text><tspan x="80.0" y="200.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="317.0" y="38.0" width="126.0" height="44.0" rx="8"/><text><tspan x="380.0" y="60.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-sw"><rect x="332.0" y="128.0" width="96.0" height="44.0" rx="8"/><text><tspan x="380.0" y="150.0">ibcmd</tspan></text></g>
+<g class="n n-svc"><rect x="299.0" y="221.0" width="162.0" height="58.0" rx="29.0"/><text><tspan x="380.0" y="241.0">1cv8 /AgentMode</tspan><tspan x="380.0" y="259.0">127.0.0.1:1543</tspan></text></g>
+<g class="n n-sw"><rect x="313.0" y="328.0" width="134.0" height="44.0" rx="8"/><text><tspan x="380.0" y="350.0">1cv8c · клиент</tspan></text></g>
+<g class="n n-doc"><path d="M635.0,171.0 h170.0 v50.0 q-42.5,12.0 -85.0,0 q-42.5,-12.0 -85.0,0 z"/><text><tspan x="720.0" y="191.0">каталог базы</tspan><tspan x="720.0" y="209.0">1Cv8.1CD</tspan></text></g>
+<g class="n n-doc"><path d="M615.0,31.0 h210.0 v50.0 q-52.5,12.0 -105.0,0 q-52.5,-12.0 -105.0,0 z"/><text><tspan x="720.0" y="51.0">workPath</tspan><tspan x="720.0" y="69.0">журналы, хеши, .cf, .dt</tspan></text></g>
+<g class="lbl"><rect x="160.5" y="110.3" width="141" height="24" rx="4"/><text><tspan x="231.0" y="122.3">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="168.0" y="160.8" width="141" height="24" rx="4"/><text><tspan x="238.5" y="172.8">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="148.0" y="216.3" width="148" height="24" rx="4"/><text><tspan x="222.0" y="228.3">поднимает, потом SSH</tspan></text></g>
+<g class="lbl"><rect x="165.5" y="271.8" width="127" height="24" rx="4"/><text><tspan x="229.0" y="283.8">процесс на запуск</tspan></text></g>
+<g class="lbl"><rect x="478.5" y="114.8" width="121" height="24" rx="4"/><text><tspan x="539.0" y="126.8">файл, монопольно</tspan></text></g>
+<g class="lbl"><rect x="494.5" y="161.5" width="74" height="24" rx="4"/><text><tspan x="531.5" y="173.5">--db-path</tspan></text></g>
+<g class="lbl"><rect x="528.0" y="214.4" width="40" height="24" rx="4"/><text><tspan x="548.0" y="226.4">файл</tspan></text></g>
+<g class="lbl"><rect x="586.8" y="317.8" width="40" height="24" rx="4"/><text><tspan x="606.8" y="329.8">файл</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-file -->
 <ul class="opts">
   <li><strong>Администрирование</strong> — <code>connection: "File=…"</code>; каталог базы обязан быть виден раннеру.</li>
   <li><strong>Исполнители</strong> — <code>designer</code> по умолчанию, <code>ibcmd</code> следующим в цепочке там, где матрица его знает, и умолчанием у <code>extensions</code>; <code>agent</code> — по ключу. Точный состав по операциям — в таблице ниже.</li>
@@ -184,38 +183,41 @@ flowchart LR
 
 <h2 id="d-file-web">2. Файловая база и веб-сервер</h2>
 <p>Файловая база и веб-сервер Apache или IIS на одной машине с раннером. У базы два адреса: по файловому пути её администрируют и открывают Конфигуратором, толстым и тонким клиентом, по HTTP — открывают веб-клиентом и тем же тонким клиентом.</p>
-<pre class="mermaid">
-flowchart LR
-  subgraph HOST["машина раннера"]
-    R["v8-runner"]
-    WEBI["webinst"]
-    DES["1cv8 DESIGNER"]
-    CLI["1cv8c · клиент"]
-    WS(["Apache · IIS<br/>модуль wsap · wsisapi"])
-    PUB@{ shape: doc, label: "каталог публикации<br/>default.vrd" }
-    IB@{ shape: doc, label: "каталог базы<br/>1Cv8.1CD" }
-  end
-  BR(["браузер · тонкий клиент"])
-  R -->|"процесс на операцию"| WEBI
-  R -->|"процесс на операцию"| DES
-  R -->|"процесс на запуск"| CLI
-  CLI -->|"File=…, файл"| IB
-  WEBI -->|"-dir, -wsdir, -connstr File=…"| PUB
-  WEBI -->|"-confpath: правка конфига"| WS
-  WS -->|"файл"| IB
-  WS --> PUB
-  DES -->|"файл, монопольно"| IB
-  BR -.->|"HTTP · HTTPS, ws=…"| WS
-  class R run
-  class WEBI,DES,CLI sw
-  class WS,BR svc
-  class PUB,IB art
-  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
-  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
-  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
-  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
-  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
-</pre>
+<!-- diagram:d-file-web -->
+<div class="diagram" role="img" aria-label="Файловая база и веб-сервер на машине раннера">
+<svg viewBox="7.0 -3.0 1264.0 420.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1264px">
+<defs><marker id="arr-d-file-web" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-host"><rect x="17.0" y="7.0" width="856.0" height="400.0" rx="12"/><text x="31.0" y="25.0">машина раннера</text></g>
+<path marker-end="url(#arr-d-file-web)" class="e" d="M165.0,206.8 C240.2,206.8 256.9,80.0 332.0,80.0"/>
+<path marker-end="url(#arr-d-file-web)" class="e" d="M165.0,220.0 C233.4,220.0 248.6,220.0 317.0,220.0"/>
+<path marker-end="url(#arr-d-file-web)" class="e" d="M165.0,233.2 C231.6,233.2 246.4,340.0 313.0,340.0"/>
+<path marker-end="url(#arr-d-file-web)" class="e" d="M447.0,340.0 C531.6,340.0 550.4,380.3 635.0,380.3"/>
+<path marker-end="url(#arr-d-file-web)" class="e" d="M430,92 C520,92 560,208 625,208"/>
+<path marker-end="url(#arr-d-file-web)" class="e" d="M428.0,80.0 C516.6,80.0 536.4,80.0 625.0,80.0"/>
+<path marker-end="url(#arr-d-file-web)" class="e" d="M837,109 C837,220 880,354 805,354"/>
+<path marker-end="url(#arr-d-file-web)" class="e" d="M721.6,109.0 C721.6,149.0 720.0,151.0 720.0,191.0"/>
+<path marker-end="url(#arr-d-file-web)" class="e" d="M443.0,220.0 C529.4,220.0 548.6,365.8 635.0,365.8"/>
+<path marker-end="url(#arr-d-file-web)" class="e dash" d="M1039.0,80.0 C956.2,80.0 937.8,80.0 855.0,80.0"/>
+<g class="n n-run"><rect x="35.0" y="198.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="220.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="332.0" y="58.0" width="96.0" height="44.0" rx="8"/><text><tspan x="380.0" y="80.0">webinst</tspan></text></g>
+<g class="n n-sw"><rect x="317.0" y="198.0" width="126.0" height="44.0" rx="8"/><text><tspan x="380.0" y="220.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-sw"><rect x="313.0" y="318.0" width="134.0" height="44.0" rx="8"/><text><tspan x="380.0" y="340.0">1cv8c · клиент</tspan></text></g>
+<g class="n n-svc"><rect x="625.0" y="51.0" width="230.0" height="58.0" rx="29.0"/><text><tspan x="740.0" y="71.0">Apache · IIS</tspan><tspan x="740.0" y="89.0">модуль wsap · wsisapi</tspan></text></g>
+<g class="n n-doc"><path d="M625.0,191.0 h190.0 v50.0 q-47.5,12.0 -95.0,0 q-47.5,-12.0 -95.0,0 z"/><text><tspan x="720.0" y="211.0">каталог публикации</tspan><tspan x="720.0" y="229.0">default.vrd</tspan></text></g>
+<g class="n n-doc"><path d="M635.0,331.0 h170.0 v50.0 q-42.5,12.0 -85.0,0 q-42.5,-12.0 -85.0,0 z"/><text><tspan x="720.0" y="351.0">каталог базы</tspan><tspan x="720.0" y="369.0">1Cv8.1CD</tspan></text></g>
+<g class="n n-svc"><rect x="1039.0" y="58.0" width="222.0" height="44.0" rx="22.0"/><text><tspan x="1150.0" y="80.0">браузер · тонкий клиент</tspan></text></g>
+<g class="lbl"><rect x="178.0" y="131.4" width="141" height="24" rx="4"/><text><tspan x="248.5" y="143.4">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="170.5" y="208.0" width="141" height="24" rx="4"/><text><tspan x="241.0" y="220.0">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="175.5" y="274.6" width="127" height="24" rx="4"/><text><tspan x="239.0" y="286.6">процесс на запуск</tspan></text></g>
+<g class="lbl"><rect x="494.0" y="348.2" width="94" height="24" rx="4"/><text><tspan x="541.0" y="360.2">File=…, файл</tspan></text></g>
+<g class="lbl"><rect x="456.0" y="160.8" width="208" height="24" rx="4"/><text><tspan x="560.0" y="172.8">-dir, -wsdir, -connstr File=…</tspan></text></g>
+<g class="lbl"><rect x="436.0" y="68.0" width="181" height="24" rx="4"/><text><tspan x="526.5" y="80.0">-confpath: правка конфига</tspan></text></g>
+<g class="lbl"><rect x="829.1" y="261.1" width="40" height="24" rx="4"/><text><tspan x="849.1" y="273.1">файл</tspan></text></g>
+<g class="lbl"><rect x="478.5" y="280.9" width="121" height="24" rx="4"/><text><tspan x="539.0" y="292.9">файл, монопольно</tspan></text></g>
+<g class="lbl"><rect x="889.0" y="68.0" width="134" height="24" rx="4"/><text><tspan x="956.0" y="80.0">HTTP · HTTPS, ws=…</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-file-web -->
 <ul class="opts">
   <li><strong>Администрирование</strong> — <code>connection: "File=…"</code>. Строка <code>ws=…</code> здесь не принимается: она называет веб-адрес, а не строку подключения.</li>
   <li><strong>Публикация</strong> — <code>publish</code> собирает <code>webinst</code> из секции <code>web</code>: <code>server</code>, <code>wsdir</code>, <code>dir</code>, <code>conf</code>, <code>os-auth</code>. <code>default.vrd</code> замещается целиком, поэтому у команды есть превью, а снятие публикации — отдельный <code>publish --delete</code>.</li>
@@ -226,47 +228,44 @@ flowchart LR
 
 <h2 id="d-cluster-local">3. Кластер на своей машине</h2>
 <p>Сервер 1С и раннер стоят на одной машине. Данные базы держит СУБД, а раннер работает с ней через кластер — по строке подключения.</p>
-<pre class="mermaid">
-flowchart LR
-  subgraph BOX["одна машина"]
-    subgraph HOST["раннер и утилиты"]
-      R["v8-runner"]
-      DES["1cv8 DESIGNER"]
-      IBC["ibcmd"]
-      AGT(["1cv8 /AgentMode<br/>127.0.0.1:1543"])
-      CLI["1cv8c · клиент"]
-      WP@{ shape: doc, label: "workPath<br/>.cf, .dt, журналы" }
-    end
-    subgraph SRV["сервер 1С"]
-      RAG["ragent 1540<br/>rmngr 1541"]
-      RPH["rphost 1560–1591"]
-    end
-  end
-  DBMS@{ shape: cyl, label: "СУБД" }
-  R -->|"процесс на операцию"| DES
-  R -->|"процесс на запуск"| CLI
-  R -->|"процесс на операцию"| IBC
-  R -->|"поднимает"| AGT
-  R -->|"SSH 127.0.0.1:1543"| AGT
-  DES -->|"Srvr=…;Ref=…, TCP"| RAG
-  CLI -->|"TCP"| RAG
-  AGT -->|"TCP"| RAG
-  IBC -->|"--dbms, --database-server"| DBMS
-  RAG --> RPH
-  RPH --> DBMS
-  DES --> WP
-  class R run
-  class DES,IBC,CLI,RAG,RPH sw
-  class AGT svc
-  class WP,DBMS art
-  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
-  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
-  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
-  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
-  style BOX fill:#fbfbfc,stroke:#c3c9d0,color:#4b5560
-  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
-  style SRV fill:#f1f8ea,stroke:#8aad76,color:#12210c
-</pre>
+<!-- diagram:d-cluster-local -->
+<div class="diagram" role="img" aria-label="Кластер на машине раннера: раннер, утилиты и сервер 1С на одной машине">
+<svg viewBox="-39.0 -55.0 1234.0 491.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1234px">
+<defs><marker id="arr-d-cluster-local" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-box"><rect x="-29.0" y="-45.0" width="967.5" height="471.0" rx="12"/><text x="-15.0" y="-27.0">одна машина</text></g>
+<g class="fr fr-host"><rect x="-3.0" y="7.0" width="726.0" height="393.0" rx="12"/><text x="11.0" y="25.0">раннер и утилиты</text></g>
+<g class="fr fr-srv"><rect x="727.5" y="97.0" width="185.0" height="233.0" rx="12"/><text x="741.5" y="115.0">сервер 1С</text></g>
+<path marker-end="url(#arr-d-cluster-local)" class="e" d="M145.0,204.6 C222.4,204.6 239.6,80.0 317.0,80.0"/>
+<path marker-end="url(#arr-d-cluster-local)" class="e" d="M145.0,215.6 C214.3,215.6 229.7,175.0 299.0,175.0"/>
+<path marker-end="url(#arr-d-cluster-local)" class="e" d="M145.0,226.6 C220.6,226.6 237.4,275.0 313.0,275.0"/>
+<path marker-end="url(#arr-d-cluster-local)" class="e" d="M145.0,237.6 C229.2,237.6 247.8,360.0 332.0,360.0"/>
+<path marker-end="url(#arr-d-cluster-local)" class="e" d="M443.0,71.2 C484.4,71.2 493.6,80.0 535.0,80.0"/>
+<path marker-end="url(#arr-d-cluster-local)" class="e" d="M445,90 C560,140 690,150 764,160"/>
+<path marker-end="url(#arr-d-cluster-local)" class="e" d="M461.0,169.2 C597.6,169.2 627.9,170.0 764.5,170.0"/>
+<path marker-end="url(#arr-d-cluster-local)" class="e" d="M447.0,275.0 C589.9,275.0 621.6,190.3 764.5,190.3"/>
+<path marker-end="url(#arr-d-cluster-local)" class="e" d="M428,360 C600,360 700,400 840,400 C980,400 1080,380 1140,318"/>
+<path marker-end="url(#arr-d-cluster-local)" class="e" d="M820.0,199.0 C820.0,239.0 820.0,228.0 820.0,268.0"/>
+<path marker-end="url(#arr-d-cluster-local)" class="e" d="M894.5,290.0 C984.7,290.0 1004.8,290.0 1095.0,290.0"/>
+<g class="n n-run"><rect x="15.0" y="198.0" width="130.0" height="44.0" rx="8"/><text><tspan x="80.0" y="220.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="317.0" y="58.0" width="126.0" height="44.0" rx="8"/><text><tspan x="380.0" y="80.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-svc"><rect x="299.0" y="146.0" width="162.0" height="58.0" rx="29.0"/><text><tspan x="380.0" y="166.0">1cv8 /AgentMode</tspan><tspan x="380.0" y="184.0">127.0.0.1:1543</tspan></text></g>
+<g class="n n-sw"><rect x="313.0" y="253.0" width="134.0" height="44.0" rx="8"/><text><tspan x="380.0" y="275.0">1cv8c · клиент</tspan></text></g>
+<g class="n n-sw"><rect x="332.0" y="338.0" width="96.0" height="44.0" rx="8"/><text><tspan x="380.0" y="360.0">ibcmd</tspan></text></g>
+<g class="n n-doc"><path d="M535.0,51.0 h170.0 v50.0 q-42.5,12.0 -85.0,0 q-42.5,-12.0 -85.0,0 z"/><text><tspan x="620.0" y="71.0">workPath</tspan><tspan x="620.0" y="89.0">.cf, .dt, журналы</tspan></text></g>
+<g class="n n-sw"><rect x="764.5" y="141.0" width="111.0" height="58.0" rx="8"/><text><tspan x="820.0" y="161.0">ragent 1540</tspan><tspan x="820.0" y="179.0">rmngr 1541</tspan></text></g>
+<g class="n n-sw"><rect x="745.5" y="268.0" width="149.0" height="44.0" rx="8"/><text><tspan x="820.0" y="290.0">rphost 1560–1591</tspan></text></g>
+<g class="n n-cyl"><path d="M1095.0,270.0 v40.0 a45.0,7.0 0 0 0 90.0,0 v-40.0"/><ellipse cx="1140.0" cy="270.0" rx="45.0" ry="7.0"/><text><tspan x="1140.0" y="290.0">СУБД</tspan></text></g>
+<g class="lbl"><rect x="160.5" y="130.3" width="141" height="24" rx="4"/><text><tspan x="231.0" y="142.3">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="148.0" y="183.3" width="148" height="24" rx="4"/><text><tspan x="222.0" y="195.3">поднимает, потом SSH</tspan></text></g>
+<g class="lbl"><rect x="165.5" y="238.8" width="127" height="24" rx="4"/><text><tspan x="229.0" y="250.8">процесс на запуск</tspan></text></g>
+<g class="lbl"><rect x="168.0" y="286.8" width="141" height="24" rx="4"/><text><tspan x="238.5" y="298.8">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="536.5" y="124.3" width="127" height="24" rx="4"/><text><tspan x="600.0" y="136.3">Srvr=…;Ref=…, TCP</tspan></text></g>
+<g class="lbl"><rect x="621.0" y="157.7" width="34" height="24" rx="4"/><text><tspan x="638.0" y="169.7">TCP</tspan></text></g>
+<g class="lbl"><rect x="615.2" y="208.1" width="34" height="24" rx="4"/><text><tspan x="632.2" y="220.1">TCP</tspan></text></g>
+<g class="lbl"><rect x="749.5" y="388.0" width="181" height="24" rx="4"/><text><tspan x="840.0" y="400.0">--dbms, --database-server</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-cluster-local -->
 <ul class="opts">
   <li><strong>Администрирование</strong> — <code>connection: "Srvr=localhost:1541;Ref=demo"</code>: утилиты раннера подключаются к кластеру обычными клиентами.</li>
   <li><strong>Исполнители</strong> — <code>designer</code> по умолчанию, <code>ibcmd</code> в цепочке и умолчанием у <code>extensions</code>, <code>agent</code> — по ключу. <code>ibcmd</code> в кластер не ходит вовсе: серверную цель он открывает прямо в СУБД по секции <code>dbms</code> — она и нужна там, где раннер идёт в СУБД сам, прежде всего чтобы создать базу.</li>
@@ -277,45 +276,41 @@ flowchart LR
 
 <h2 id="d-cluster-remote">4. Кластер на другой машине, несколько rphost</h2>
 <p>Рабочая или тестовая база на сервере приложений с пулом рабочих процессов. Раннер дотягивается до неё по сети: файловая система сервера и его журналы ему недоступны.</p>
-<pre class="mermaid">
-flowchart LR
-  subgraph HOST["машина раннера"]
-    R["v8-runner"]
-    DES["1cv8 DESIGNER"]
-    CLI["1cv8c · клиент"]
-    WP@{ shape: doc, label: "workPath<br/>.cf, .dt, отчёты тестов" }
-  end
-  subgraph SRV["сервер приложений 1С"]
-    RAG["ragent 1540 · rmngr 1541"]
-    RP1["rphost"]
-    RP2["rphost"]
-    RP3["rphost"]
-    LOG@{ shape: doc, label: "журнал регистрации,<br/>технологический журнал" }
-  end
-  DBMS@{ shape: cyl, label: "СУБД<br/>5432 · 1433" }
-  R -->|"процесс на операцию"| DES
-  R -->|"процесс на запуск"| CLI
-  DES -.->|"TCP 1541, дальше 1560–1591"| RAG
-  CLI -.->|"TCP"| RAG
-  RAG --> RP1
-  RAG --> RP2
-  RAG --> RP3
-  RP1 --> DBMS
-  RP2 --> DBMS
-  RP3 --> DBMS
-  RP1 --> LOG
-  DES --> WP
-  class R run
-  class DES,CLI,RAG,RP1,RP2,RP3 sw
-  class WP,DBMS art
-  class LOG off
-  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
-  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
-  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
-  classDef off fill:#e4e4e7,stroke:#9a9aa2,color:#33333a;
-  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
-  style SRV fill:#f1f8ea,stroke:#8aad76,color:#12210c
-</pre>
+<!-- diagram:d-cluster-remote -->
+<div class="diagram" role="img" aria-label="Кластер на другой машине с несколькими rphost">
+<svg viewBox="7.0 17.0 1378.0 390.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1378px">
+<defs><marker id="arr-d-cluster-remote" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-host"><rect x="17.0" y="27.0" width="726.0" height="233.0" rx="12"/><text x="31.0" y="45.0">машина раннера</text></g>
+<g class="fr fr-srv"><rect x="774.0" y="34.0" width="372.0" height="363.0" rx="12"/><text x="788.0" y="52.0">сервер приложений 1С</text></g>
+<path marker-end="url(#arr-d-cluster-remote)" class="e" d="M165.0,189.0 C233.4,189.0 248.6,100.0 317.0,100.0"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e" d="M165.0,211.0 C231.6,211.0 246.4,220.0 313.0,220.0"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e" d="M443.0,91.2 C483.0,91.2 475.0,100.0 515.0,100.0"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e dash" d="M436,108 C560,160 720,160 850,92"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e dash" d="M447.0,220.0 C628.4,220.0 668.6,113.2 850.0,113.2"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e" d="M894.0,122.0 C894.0,162.0 840.0,158.0 840.0,198.0"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e" d="M960.0,122.0 C960.0,162.0 960.0,158.0 960.0,198.0"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e" d="M1026.0,122.0 C1026.0,162.0 1080.0,158.0 1080.0,198.0"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e" d="M840,242 C840,300 1140,300 1265,238"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e" d="M960,242 C960,285 1150,290 1265,232"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e" d="M1128.0,220.0 C1189.7,220.0 1203.3,208.0 1265.0,208.0"/>
+<path marker-end="url(#arr-d-cluster-remote)" class="e" d="M830.4,242.0 C830.4,282.0 894.0,281.0 894.0,321.0"/>
+<g class="n n-run"><rect x="35.0" y="178.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="200.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="317.0" y="78.0" width="126.0" height="44.0" rx="8"/><text><tspan x="380.0" y="100.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-sw"><rect x="313.0" y="198.0" width="134.0" height="44.0" rx="8"/><text><tspan x="380.0" y="220.0">1cv8c · клиент</tspan></text></g>
+<g class="n n-doc"><path d="M515.0,71.0 h210.0 v50.0 q-52.5,12.0 -105.0,0 q-52.5,-12.0 -105.0,0 z"/><text><tspan x="620.0" y="91.0">workPath</tspan><tspan x="620.0" y="109.0">.cf, .dt, отчёты тестов</tspan></text></g>
+<g class="n n-sw"><rect x="850.0" y="78.0" width="220.0" height="44.0" rx="8"/><text><tspan x="960.0" y="100.0">ragent 1540 · rmngr 1541</tspan></text></g>
+<g class="n n-sw"><rect x="792.0" y="198.0" width="96.0" height="44.0" rx="8"/><text><tspan x="840.0" y="220.0">rphost</tspan></text></g>
+<g class="n n-sw"><rect x="912.0" y="198.0" width="96.0" height="44.0" rx="8"/><text><tspan x="960.0" y="220.0">rphost</tspan></text></g>
+<g class="n n-sw"><rect x="1032.0" y="198.0" width="96.0" height="44.0" rx="8"/><text><tspan x="1080.0" y="220.0">rphost</tspan></text></g>
+<g class="n n-docoff"><path d="M850.0,321.0 h220.0 v50.0 q-55.0,12.0 -110.0,0 q-55.0,-12.0 -110.0,0 z"/><text><tspan x="960.0" y="341.0">журнал регистрации,</tspan><tspan x="960.0" y="359.0">технологический журнал</tspan></text></g>
+<g class="n n-cyl"><path d="M1265.0,197.0 v46.0 a55.0,7.0 0 0 0 110.0,0 v-46.0"/><ellipse cx="1320.0" cy="197.0" rx="55.0" ry="7.0"/><text><tspan x="1320.0" y="211.0">СУБД</tspan><tspan x="1320.0" y="229.0">5432 · 1433</tspan></text></g>
+<g class="lbl"><rect x="170.5" y="132.5" width="141" height="24" rx="4"/><text><tspan x="241.0" y="144.5">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="175.5" y="203.5" width="127" height="24" rx="4"/><text><tspan x="239.0" y="215.5">процесс на запуск</tspan></text></g>
+<g class="lbl"><rect x="546.0" y="148.0" width="188" height="24" rx="4"/><text><tspan x="640.0" y="160.0">TCP 1541, дальше 1560–1591</tspan></text></g>
+<g class="lbl"><rect x="779.0" y="104.6" width="34" height="24" rx="4"/><text><tspan x="796.0" y="116.6">TCP</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-cluster-remote -->
 <ul class="opts">
   <li><strong>Администрирование</strong> — <code>connection: "Srvr=srv:1541;Ref=demo"</code>; раннеру нужен доступ к портам кластера и ничего больше.</li>
   <li><strong>Рабочие процессы</strong> — сеанс отдаёт менеджер кластера одному из <code>rphost</code>; какому — раннер не выбирает и не знает. Соединение продолжается на порт из диапазона рабочих процессов, поэтому открытого наружу 1541 недостаточно.</li>
@@ -327,40 +322,35 @@ flowchart LR
 
 <h2 id="d-ras">5. Кластер, RAS поднят удалённо</h2>
 <p>Сервер администрирования вынесен на отдельную машину. Раннер ходит к нему утилитой <code>rac</code> со своей машины и ходит за одним: за сеансами своей базы. Консоль кластера и её скрипты идут туда же, но это соседний канал.</p>
-<pre class="mermaid">
-flowchart LR
-  subgraph HOST["машина раннера"]
-    R["v8-runner"]
-    DES["1cv8 DESIGNER"]
-    RAC["rac"]
-  end
-  subgraph SRV["сервер 1С"]
-    RAG["ragent 1540 · rmngr 1541"]
-    RPH["rphost"]
-  end
-  subgraph ADMIN["машина с RAS"]
-    RAS(["RAS 1545"])
-    CON["консоль кластера"]
-  end
-  R -->|"процесс на операцию"| DES
-  R -->|"процесс на операцию"| RAC
-  DES -.->|"TCP 1541, Srvr=…;Ref=…"| RAG
-  RAC -.->|"TCP 1545, cluster.ras"| RAS
-  CON --> RAS
-  RAS -.->|"TCP 1540"| RAG
-  RAG --> RPH
-  class R run
-  class DES,RAC,RAG,RPH sw
-  class RAS svc
-  class CON off
-  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
-  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
-  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
-  classDef off fill:#e4e4e7,stroke:#9a9aa2,color:#33333a;
-  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
-  style SRV fill:#f1f8ea,stroke:#8aad76,color:#12210c
-  style ADMIN fill:#eeeef0,stroke:#a8a8b0,color:#33333a
-</pre>
+<!-- diagram:d-ras -->
+<div class="diagram" role="img" aria-label="Кластер, RAS поднят удалённо: раннер ходит к нему утилитой rac за сеансами своей базы">
+<svg viewBox="7.0 4.0 1149.0 306.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1149px">
+<defs><marker id="arr-d-ras" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-host"><rect x="17.0" y="14.0" width="444.0" height="286.0" rx="12"/><text x="31.0" y="32.0">машина раннера</text></g>
+<g class="fr fr-srv"><rect x="672.0" y="14.0" width="474.0" height="106.0" rx="12"/><text x="686.0" y="32.0">сервер 1С</text></g>
+<g class="fr fr-neutral"><rect x="672.0" y="194.0" width="474.0" height="106.0" rx="12"/><text x="686.0" y="212.0">машина с RAS</text></g>
+<path marker-end="url(#arr-d-ras)" class="e" d="M165.0,159.0 C233.4,159.0 248.6,80.0 317.0,80.0"/>
+<path marker-end="url(#arr-d-ras)" class="e" d="M165.0,181.0 C240.2,181.0 256.9,260.0 332.0,260.0"/>
+<path marker-end="url(#arr-d-ras)" class="e dash" d="M443.0,80.0 C554.1,80.0 578.9,80.0 690.0,80.0"/>
+<path marker-end="url(#arr-d-ras)" class="e dash" d="M428.0,260.0 C545.9,260.0 572.1,260.0 690.0,260.0"/>
+<path marker-end="url(#arr-d-ras)" class="e dash" d="M800.0,238.0 C800.0,176.8 800.0,163.2 800.0,102.0"/>
+<path marker-end="url(#arr-d-ras)" class="e" d="M978.0,260.0 C938.0,260.0 950.0,260.0 910.0,260.0"/>
+<path marker-end="url(#arr-d-ras)" class="e" d="M910.0,80.0 C950.0,80.0 938.0,80.0 978.0,80.0"/>
+<g class="n n-run"><rect x="35.0" y="148.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="170.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="317.0" y="58.0" width="126.0" height="44.0" rx="8"/><text><tspan x="380.0" y="80.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-sw"><rect x="332.0" y="238.0" width="96.0" height="44.0" rx="8"/><text><tspan x="380.0" y="260.0">rac</tspan></text></g>
+<g class="n n-sw"><rect x="690.0" y="58.0" width="220.0" height="44.0" rx="8"/><text><tspan x="800.0" y="80.0">ragent 1540 · rmngr 1541</tspan></text></g>
+<g class="n n-sw"><rect x="978.0" y="58.0" width="150.0" height="44.0" rx="8"/><text><tspan x="1053.0" y="80.0">rphost 1560–1591</tspan></text></g>
+<g class="n n-svc"><rect x="690.0" y="238.0" width="220.0" height="44.0" rx="22.0"/><text><tspan x="800.0" y="260.0">RAS 1545</tspan></text></g>
+<g class="n n-off"><rect x="978.0" y="238.0" width="150.0" height="44.0" rx="8"/><text><tspan x="1053.0" y="260.0">консоль кластера</tspan></text></g>
+<g class="lbl"><rect x="170.5" y="107.5" width="141" height="24" rx="4"/><text><tspan x="241.0" y="119.5">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="178.0" y="208.5" width="141" height="24" rx="4"/><text><tspan x="248.5" y="220.5">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="486.0" y="68.0" width="161" height="24" rx="4"/><text><tspan x="566.5" y="80.0">TCP 1541, Srvr=…;Ref=…</tspan></text></g>
+<g class="lbl"><rect x="482.0" y="248.0" width="154" height="24" rx="4"/><text><tspan x="559.0" y="260.0">TCP 1545, cluster.ras</tspan></text></g>
+<g class="lbl"><rect x="766.5" y="146.7" width="67" height="24" rx="4"/><text><tspan x="800.0" y="158.7">TCP 1540</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-ras -->
 <ul class="opts">
   <li><strong>Что раннер делает через RAS</strong> — сеансы своей базы: <code>sessions list</code>, <code>terminate</code>, <code>deny</code>, <code>allow</code> и завершение перед монопольной операцией по <code>apply --sessions force</code> <span class="ref">(<a href="platform.html#t56">56</a>, <a href="platform.html#t57">57</a>)</span>. Запасной путь у <code>infobase create</code>, если Конфигуратор не смог зарегистрировать базу <span class="ref">(<a href="platform.html#t73">73</a>)</span>. Адрес — <code>cluster.ras</code> в секции базы, учётные данные трёх уровней <span class="ref">(<a href="platform.html#t59">59</a>)</span>.</li>
   <li><strong>Что остаётся консоли</strong> — серверы, лицензии, профили безопасности, чужие базы. Состав команд <code>rac</code> берётся из его справки, книга их не описывает <span class="ref">(<a href="platform.html#t58">58</a>)</span>.</li>
@@ -369,34 +359,34 @@ flowchart LR
 
 <h2 id="d-ras-managed">6. Кластер, RAS поднят раннером</h2>
 <p>Сервер администрирования не объявлен: ключа <code>cluster.ras</code> в секции базы нет. Тогда раннер поднимает <code>ras</code> сам, на своей машине, против агента кластера из строки подключения, и гасит его вместе с командой, как управляемого агента Конфигуратора.</p>
-<pre class="mermaid">
-flowchart LR
-  subgraph HOST["машина раннера"]
-    R["v8-runner"]
-    DES["1cv8 DESIGNER"]
-    RAC["rac"]
-    RAS(["ras cluster<br/>127.0.0.1:1545, поднят раннером"])
-  end
-  subgraph SRV["сервер 1С"]
-    RAG["ragent 1540 · rmngr 1541"]
-    RPH["rphost"]
-  end
-  R -->|"процесс на операцию"| DES
-  R -->|"поднимает на время команды"| RAS
-  R -->|"процесс на операцию"| RAC
-  RAC -->|"TCP 1545"| RAS
-  DES -.->|"TCP 1541, Srvr=…;Ref=…"| RAG
-  RAS -.->|"TCP 1540, хост из Srvr="| RAG
-  RAG --> RPH
-  class R run
-  class DES,RAC,RAG,RPH sw
-  class RAS svc
-  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
-  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
-  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
-  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
-  style SRV fill:#f1f8ea,stroke:#8aad76,color:#12210c
-</pre>
+<!-- diagram:d-ras-managed -->
+<div class="diagram" role="img" aria-label="Кластер, RAS поднят раннером на своей машине на время команды">
+<svg viewBox="7.0 4.0 1229.0 383.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1229px">
+<defs><marker id="arr-d-ras-managed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-host"><rect x="17.0" y="14.0" width="516.0" height="363.0" rx="12"/><text x="31.0" y="32.0">машина раннера</text></g>
+<g class="fr fr-srv"><rect x="752.0" y="14.0" width="474.0" height="106.0" rx="12"/><text x="766.0" y="32.0">сервер 1С</text></g>
+<path marker-end="url(#arr-d-ras-managed)" class="e" d="M165.0,186.8 C233.4,186.8 248.6,80.0 317.0,80.0"/>
+<path marker-end="url(#arr-d-ras-managed)" class="e" d="M165.0,200.0 C240.2,200.0 256.9,200.0 332.0,200.0"/>
+<path marker-end="url(#arr-d-ras-managed)" class="e" d="M165.0,215.4 C216.6,215.4 193.4,330.0 245.0,330.0"/>
+<path marker-end="url(#arr-d-ras-managed)" class="e" d="M380.0,222.0 C380.0,262.0 380.0,261.0 380.0,301.0"/>
+<path marker-end="url(#arr-d-ras-managed)" class="e dash" d="M443.0,80.0 C590.1,80.0 622.9,80.0 770.0,80.0"/>
+<path marker-end="url(#arr-d-ras-managed)" class="e dash" d="M515,330 C700,330 836,250 836,102"/>
+<path marker-end="url(#arr-d-ras-managed)" class="e" d="M990.0,80.0 C1030.0,80.0 1018.0,80.0 1058.0,80.0"/>
+<g class="n n-run"><rect x="35.0" y="178.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="200.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="317.0" y="58.0" width="126.0" height="44.0" rx="8"/><text><tspan x="380.0" y="80.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-sw"><rect x="332.0" y="178.0" width="96.0" height="44.0" rx="8"/><text><tspan x="380.0" y="200.0">rac</tspan></text></g>
+<g class="n n-svc"><rect x="245.0" y="301.0" width="270.0" height="58.0" rx="29.0"/><text><tspan x="380.0" y="321.0">ras cluster</tspan><tspan x="380.0" y="339.0">127.0.0.1:1545, поднят раннером</tspan></text></g>
+<g class="n n-sw"><rect x="770.0" y="58.0" width="220.0" height="44.0" rx="8"/><text><tspan x="880.0" y="80.0">ragent 1540 · rmngr 1541</tspan></text></g>
+<g class="n n-sw"><rect x="1058.0" y="58.0" width="150.0" height="44.0" rx="8"/><text><tspan x="1133.0" y="80.0">rphost 1560–1591</tspan></text></g>
+<g class="lbl"><rect x="170.5" y="121.4" width="141" height="24" rx="4"/><text><tspan x="241.0" y="133.4">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="178.0" y="188.0" width="141" height="24" rx="4"/><text><tspan x="248.5" y="200.0">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="111.0" y="260.7" width="188" height="24" rx="4"/><text><tspan x="205.0" y="272.7">поднимает на время команды</tspan></text></g>
+<g class="lbl"><rect x="386.5" y="249.5" width="67" height="24" rx="4"/><text><tspan x="420.0" y="261.5">TCP 1545</tspan></text></g>
+<g class="lbl"><rect x="553.2" y="68.0" width="161" height="24" rx="4"/><text><tspan x="633.7" y="80.0">TCP 1541, Srvr=…;Ref=…</tspan></text></g>
+<g class="lbl"><rect x="559.2" y="303.2" width="168" height="24" rx="4"/><text><tspan x="643.2" y="315.2">TCP 1540, хост из Srvr=</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-ras-managed -->
 <ul class="opts">
   <li><strong>Когда</strong> — <code>cluster.ras</code> не объявлен, а команде нужен сервер администрирования: <code>sessions</code>, <code>apply --sessions force</code>, запасной путь <code>infobase create</code>. Объявленный адрес всегда важнее: с ним раннер ничего не поднимает, это расстановка 5.</li>
   <li><strong>Как</strong> — <code>ras cluster --port=&lt;свободный&gt; &lt;хост&gt;:1540</code>: хост берётся из <code>Srvr=</code> строки подключения, порт агента — умолчание платформы <span class="ref">(<a href="platform.html#t63">63</a>)</span>; другой адрес агента объявляют ключом <code>cluster.agent.address</code>. Процесс живёт, пока команда владеет <code>workPath</code>, и гасится вместе с ней <span class="ref">(<a href="platform.html#t55">55</a>)</span>.</li>
@@ -407,40 +397,39 @@ flowchart LR
 
 <h2 id="d-cluster-web">7. Кластер и веб-сервер</h2>
 <p>Кластерная база, опубликованная на Apache или IIS. Веб-сервер держит подключение к кластеру по сети; файловый доступ к базе ему не нужен.</p>
-<pre class="mermaid">
-flowchart LR
-  subgraph HOST["машина раннера"]
-    R["v8-runner"]
-    WEBI["webinst"]
-    CLI["1cv8c · клиент"]
-    WS(["Apache · IIS<br/>модуль wsap · wsisapi"])
-    PUB@{ shape: doc, label: "каталог публикации<br/>default.vrd" }
-  end
-  subgraph SRV["сервер 1С"]
-    RAG["ragent · rmngr 1541"]
-    RPH["rphost"]
-  end
-  BR(["браузер · тонкий клиент"])
-  R -->|"процесс на операцию"| WEBI
-  R -->|"процесс на запуск"| CLI
-  CLI -.->|"Srvr=…;Ref=…, TCP 1541"| RAG
-  WEBI -->|"-dir, -wsdir, -connstr Srvr=…;Ref=…"| PUB
-  WEBI -->|"-confpath: правка конфига"| WS
-  WS --> PUB
-  WS -.->|"TCP 1541"| RAG
-  BR -.->|"HTTP · HTTPS, ws=…"| WS
-  RAG --> RPH
-  class R run
-  class WEBI,CLI,RAG,RPH sw
-  class WS,BR svc
-  class PUB art
-  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
-  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
-  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
-  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
-  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
-  style SRV fill:#f1f8ea,stroke:#8aad76,color:#12210c
-</pre>
+<!-- diagram:d-cluster-web -->
+<div class="diagram" role="img" aria-label="Кластер и веб-сервер на машине раннера">
+<svg viewBox="7.0 -3.0 1389.0 383.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1389px">
+<defs><marker id="arr-d-cluster-web" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-host"><rect x="17.0" y="7.0" width="856.0" height="363.0" rx="12"/><text x="31.0" y="25.0">машина раннера</text></g>
+<g class="fr fr-srv"><rect x="987.0" y="264.0" width="399.0" height="106.0" rx="12"/><text x="1001.0" y="282.0">сервер 1С</text></g>
+<path marker-end="url(#arr-d-cluster-web)" class="e" d="M165.0,189.0 C240.2,189.0 256.9,80.0 332.0,80.0"/>
+<path marker-end="url(#arr-d-cluster-web)" class="e" d="M165.0,211.0 C231.6,211.0 246.4,330.0 313.0,330.0"/>
+<path marker-end="url(#arr-d-cluster-web)" class="e" d="M428.0,80.0 C525.6,80.0 547.4,80.0 645.0,80.0"/>
+<path marker-end="url(#arr-d-cluster-web)" class="e" d="M428.0,88.8 C516.6,88.8 536.4,210.0 625.0,210.0"/>
+<path marker-end="url(#arr-d-cluster-web)" class="e" d="M740.0,181.0 C740.0,141.0 740.0,149.0 740.0,109.0"/>
+<path marker-end="url(#arr-d-cluster-web)" class="e dash" d="M447.0,330.0 C698.1,330.0 753.9,330.0 1005.0,330.0"/>
+<path marker-end="url(#arr-d-cluster-web)" class="e dash" d="M809,239 C900,239 1140,250 1140,308"/>
+<path marker-end="url(#arr-d-cluster-web)" class="e dash" d="M1059.0,80.0 C967.2,80.0 946.8,204.2 855.0,204.2"/>
+<path marker-end="url(#arr-d-cluster-web)" class="e" d="M1195.0,330.0 C1235.0,330.0 1232.0,330.0 1272.0,330.0"/>
+<g class="n n-run"><rect x="35.0" y="178.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="200.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="332.0" y="58.0" width="96.0" height="44.0" rx="8"/><text><tspan x="380.0" y="80.0">webinst</tspan></text></g>
+<g class="n n-sw"><rect x="313.0" y="308.0" width="134.0" height="44.0" rx="8"/><text><tspan x="380.0" y="330.0">1cv8c · клиент</tspan></text></g>
+<g class="n n-doc"><path d="M645.0,51.0 h190.0 v50.0 q-47.5,12.0 -95.0,0 q-47.5,-12.0 -95.0,0 z"/><text><tspan x="740.0" y="71.0">каталог публикации</tspan><tspan x="740.0" y="89.0">default.vrd</tspan></text></g>
+<g class="n n-svc"><rect x="625.0" y="181.0" width="230.0" height="58.0" rx="29.0"/><text><tspan x="740.0" y="201.0">Apache · IIS</tspan><tspan x="740.0" y="219.0">модуль wsap · wsisapi</tspan></text></g>
+<g class="n n-sw"><rect x="1005.0" y="308.0" width="190.0" height="44.0" rx="8"/><text><tspan x="1100.0" y="330.0">ragent · rmngr 1541</tspan></text></g>
+<g class="n n-sw"><rect x="1272.0" y="308.0" width="96.0" height="44.0" rx="8"/><text><tspan x="1320.0" y="330.0">rphost</tspan></text></g>
+<g class="n n-svc"><rect x="1059.0" y="58.0" width="222.0" height="44.0" rx="22.0"/><text><tspan x="1170.0" y="80.0">браузер · тонкий клиент</tspan></text></g>
+<g class="lbl"><rect x="178.0" y="122.5" width="141" height="24" rx="4"/><text><tspan x="248.5" y="134.5">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="175.5" y="258.5" width="127" height="24" rx="4"/><text><tspan x="239.0" y="270.5">процесс на запуск</tspan></text></g>
+<g class="lbl"><rect x="459.5" y="60.0" width="154" height="40" rx="4"/><text><tspan x="536.5" y="72.0">-dir, -wsdir,</tspan><tspan x="536.5" y="88.0">-connstr Srvr=…;Ref=…</tspan></text></g>
+<g class="lbl"><rect x="436.0" y="137.4" width="181" height="24" rx="4"/><text><tspan x="526.5" y="149.4">-confpath: правка конфига</tspan></text></g>
+<g class="lbl"><rect x="645.5" y="318.0" width="161" height="24" rx="4"/><text><tspan x="726.0" y="330.0">Srvr=…;Ref=…, TCP 1541</tspan></text></g>
+<g class="lbl"><rect x="931.3" y="234.6" width="67" height="24" rx="4"/><text><tspan x="964.8" y="246.6">TCP 1541</tspan></text></g>
+<g class="lbl"><rect x="890.0" y="130.1" width="134" height="24" rx="4"/><text><tspan x="957.0" y="142.1">HTTP · HTTPS, ws=…</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-cluster-web -->
 <ul class="opts">
   <li><strong>Публикация</strong> — <code>publish</code> собирает <code>webinst</code> из секции <code>web</code>; в <code>-connstr</code> уходит <code>connection</code> как есть, то есть <code>Srvr=…;Ref=…</code>.</li>
   <li><strong>Где стоит веб-сервер</strong> — там же, где раннер. Веб-сервер, стоящий рядом с кластером, раннер опубликовать не может: <code>webinst</code> он запускает только у себя, и каталог публикации ищет на своей файловой системе.</li>
@@ -450,47 +439,42 @@ flowchart LR
 
 <h2 id="d-standalone-local">8. Автономный сервер на своей машине</h2>
 <p><code>ibsrv</code> поднимаете вы, раннер его не запускает и не ищет. Разговор идёт с процессом сервера по двум его шлюзам: Конфигуратор — по прямому, как в кластер; сессия SSH — по агентскому.</p>
-<pre class="mermaid">
-flowchart LR
-  subgraph BOX["одна машина"]
-    subgraph HOST["раннер"]
-      R["v8-runner"]
-      WP@{ shape: doc, label: "workPath<br/>всегда локален" }
-      DES["1cv8 DESIGNER"]
-    end
-    subgraph SRV["автономный сервер"]
-      GATE(["SSH-шлюз 1543<br/>ibsrv --enable-ssh-gate"])
-      DGATE(["прямой шлюз<br/>Srvr=localhost;Ref=demo"])
-      IBSRV["ibsrv<br/>поднят вами"]
-      UD@{ shape: doc, label: "каталог пользователя шлюза<br/>users-data и имя пользователя" }
-      HTTPS(["HTTP 8314"])
-      DB@{ shape: cyl, label: "база данных" }
-    end
-  end
-  BR(["браузер · тонкий клиент"])
-  R -->|"SSH: команда строкой, ответ JSON"| GATE
-  R -->|"exchange: dir — ссылки и копии"| UD
-  R -->|"процесс на операцию"| DES
-  DES -->|"TCP"| DGATE
-  DGATE --> IBSRV
-  R -->|"файл"| WP
-  GATE --> IBSRV
-  IBSRV --> UD
-  IBSRV --> DB
-  IBSRV --> HTTPS
-  BR -->|"HTTP"| HTTPS
-  class R run
-  class IBSRV,DES sw
-  class GATE,DGATE,HTTPS,BR svc
-  class WP,UD,DB art
-  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
-  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
-  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
-  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
-  style BOX fill:#fbfbfc,stroke:#c3c9d0,color:#4b5560
-  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
-  style SRV fill:#f1f8ea,stroke:#8aad76,color:#12210c
-</pre>
+<!-- diagram:d-standalone-local -->
+<div class="diagram" role="img" aria-label="Автономный сервер на машине раннера: прямой шлюз для Конфигуратора и SSH-шлюз для агентского набора">
+<svg viewBox="-29.0 -122.0 1463.0 535.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1463px">
+<defs><marker id="arr-d-standalone-local" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-box"><rect x="-19.0" y="-45.0" width="1443.0" height="448.0" rx="12"/><text x="-5.0" y="-27.0">одна машина</text></g>
+<g class="fr fr-srv"><rect x="617.0" y="7.0" width="781.0" height="370.0" rx="12"/><text x="631.0" y="25.0">автономный сервер</text></g>
+<g class="fr fr-host"><rect x="7.0" y="16.0" width="504.0" height="331.0" rx="12"/><text x="21.0" y="34.0">раннер</text></g>
+<path marker-end="url(#arr-d-standalone-local)" class="e" d="M100,138 C100,85 180,80 635,80"/>
+<path marker-end="url(#arr-d-standalone-local)" class="e" d="M165.0,160.0 C255.9,160.0 276.1,160.0 367.0,160.0"/>
+<path marker-end="url(#arr-d-standalone-local)" class="e" d="M165,176 C300,176 500,330 930,330"/>
+<path marker-end="url(#arr-d-standalone-local)" class="e" d="M100.0,182.0 C100.0,222.1 100.0,230.9 100.0,271.0"/>
+<path marker-end="url(#arr-d-standalone-local)" class="e" d="M493.0,160.0 C556.9,160.0 571.1,190.0 635.0,190.0"/>
+<path marker-end="url(#arr-d-standalone-local)" class="e" d="M885.0,190.0 C938.8,190.0 950.7,190.0 1004.5,190.0"/>
+<path marker-end="url(#arr-d-standalone-local)" class="e" d="M885,90 C950,90 990,170 1000,178"/>
+<path marker-end="url(#arr-d-standalone-local)" class="e" d="M1060.0,219.0 C1060.0,259.0 1060.0,261.0 1060.0,301.0"/>
+<path marker-end="url(#arr-d-standalone-local)" class="e" d="M1115.5,190.0 C1180.5,190.0 1195.0,190.0 1260.0,190.0"/>
+<path marker-end="url(#arr-d-standalone-local)" class="e" d="M1060.0,161.0 C1060.0,121.0 1060.0,142.0 1060.0,102.0"/>
+<path marker-end="url(#arr-d-standalone-local)" class="e" d="M1060.0,-68.0 C1060.0,-11.3 1060.0,1.3 1060.0,58.0"/>
+<g class="n n-run"><rect x="35.0" y="138.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="160.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="367.0" y="138.0" width="126.0" height="44.0" rx="8"/><text><tspan x="430.0" y="160.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-doc"><path d="M25.0,271.0 h150.0 v50.0 q-37.5,12.0 -75.0,0 q-37.5,-12.0 -75.0,0 z"/><text><tspan x="100.0" y="291.0">workPath</tspan><tspan x="100.0" y="309.0">всегда локален</tspan></text></g>
+<g class="n n-svc"><rect x="635.0" y="51.0" width="250.0" height="58.0" rx="29.0"/><text><tspan x="760.0" y="71.0">SSH-шлюз 1543</tspan><tspan x="760.0" y="89.0">ibsrv --enable-ssh-gate</tspan></text></g>
+<g class="n n-svc"><rect x="635.0" y="161.0" width="250.0" height="58.0" rx="29.0"/><text><tspan x="760.0" y="181.0">прямой шлюз</tspan><tspan x="760.0" y="199.0">Srvr=localhost;Ref=demo</tspan></text></g>
+<g class="n n-sw"><rect x="1004.5" y="161.0" width="111.0" height="58.0" rx="8"/><text><tspan x="1060.0" y="181.0">ibsrv</tspan><tspan x="1060.0" y="199.0">поднят вами</tspan></text></g>
+<g class="n n-doc"><path d="M930.0,301.0 h260.0 v50.0 q-65.0,12.0 -130.0,0 q-65.0,-12.0 -130.0,0 z"/><text><tspan x="1060.0" y="321.0">каталог пользователя шлюза</tspan><tspan x="1060.0" y="339.0">users-data и имя пользователя</tspan></text></g>
+<g class="n n-svc"><rect x="1002.0" y="58.0" width="116.0" height="44.0" rx="22.0"/><text><tspan x="1060.0" y="80.0">HTTP 8314</tspan></text></g>
+<g class="n n-cyl"><path d="M1260.0,170.0 v40.0 a60.0,7.0 0 0 0 120.0,0 v-40.0"/><ellipse cx="1320.0" cy="170.0" rx="60.0" ry="7.0"/><text><tspan x="1320.0" y="190.0">база данных</tspan></text></g>
+<g class="n n-svc"><rect x="949.0" y="-112.0" width="222.0" height="44.0" rx="22.0"/><text><tspan x="1060.0" y="-90.0">браузер · тонкий клиент</tspan></text></g>
+<g class="lbl"><rect x="204.8" y="70.5" width="228" height="24" rx="4"/><text><tspan x="318.8" y="82.5">SSH: команда строкой, ответ JSON</tspan></text></g>
+<g class="lbl"><rect x="195.5" y="148.0" width="141" height="24" rx="4"/><text><tspan x="266.0" y="160.0">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="348.3" y="221.5" width="107" height="40" rx="4"/><text><tspan x="401.8" y="233.5">exchange: dir</tspan><tspan x="401.8" y="249.5">ссылки и копии</tspan></text></g>
+<g class="lbl"><rect x="80.0" y="214.5" width="40" height="24" rx="4"/><text><tspan x="100.0" y="226.5">файл</tspan></text></g>
+<g class="lbl"><rect x="547.0" y="163.0" width="34" height="24" rx="4"/><text><tspan x="564.0" y="175.0">TCP</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-standalone-local -->
 <ul class="opts">
   <li><strong>Администрирование</strong> — два ключа: <code>connection: "Srvr=localhost;Ref=demo"</code> для Конфигуратора по прямому шлюзу, имя базы равно <code>--name</code> сервера <span class="ref">(<a href="platform.html#t65">65</a>)</span>; <code>standalone.gate: "localhost:1543"</code> для SSH. Вид цели объявляет секция <code>standalone</code>; достаточно любого из двух ключей, второй расширяет набор.</li>
   <li><strong>Как разговаривает</strong> — Конфигуратор: процесс на операцию, файлы на диске раннера, как с кластером. SSH-шлюз: сессия встроенного клиента, без псевдотерминала; первая команда переводит шлюз в машинный режим, дальше идут команды шлюза: <code>config load-config-from-files</code>, <code>config dump-cfg</code>, <code>config update-db-cfg</code> и прочие.</li>
@@ -501,46 +485,44 @@ flowchart LR
 
 <h2 id="d-standalone-remote">9. Автономный сервер на другой машине</h2>
 <p>Автономный сервер на отдельной машине. Доступ к чужому диску раннеру не нужен: с платформой у себя он идёт Конфигуратором в прямой шлюз и держит файлы у себя; без платформы ему хватает SSH до агентского шлюза и объявленного канала файлов.</p>
-<pre class="mermaid">
-flowchart LR
-  subgraph HOST["машина раннера"]
-    R["v8-runner"]
-    WP@{ shape: doc, label: "workPath<br/>остаётся здесь" }
-    SRC@{ shape: doc, label: "исходники и артефакты" }
-    DES["1cv8 DESIGNER"]
-  end
-  subgraph SRV["другая машина"]
-    GATE(["SSH-шлюз 1543"])
-    DGATE(["прямой шлюз"])
-    IBSRV["ibsrv"]
-    UD@{ shape: doc, label: "каталог пользователя шлюза<br/>пути разрешаются здесь" }
-    HTTPS(["HTTP 8314"])
-  end
-  DB@{ shape: cyl, label: "база данных" }
-  BR(["браузер · тонкий клиент"])
-  R -->|"файл"| WP
-  R -->|"файл"| SRC
-  R -.->|"SSH: команда строкой, ответ JSON"| GATE
-  R -->|"процесс на операцию"| DES
-  DES -.->|"TCP"| DGATE
-  DGATE --> IBSRV
-  SRC -.->|"SFTP того же соединения"| UD
-  GATE --> IBSRV
-  IBSRV --> UD
-  IBSRV --> DB
-  IBSRV --> HTTPS
-  BR -.->|"HTTP"| HTTPS
-  class R run
-  class IBSRV,DES sw
-  class GATE,DGATE,HTTPS,BR svc
-  class WP,SRC,UD,DB art
-  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
-  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
-  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
-  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
-  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
-  style SRV fill:#f1f8ea,stroke:#8aad76,color:#12210c
-</pre>
+<!-- diagram:d-standalone-remote -->
+<div class="diagram" role="img" aria-label="Автономный сервер на другой машине: Конфигуратор по прямому шлюзу, SSH и SFTP для агентского пути">
+<svg viewBox="-3.0 4.0 1474.0 413.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1474px">
+<defs><marker id="arr-d-standalone-remote" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-host"><rect x="7.0" y="16.0" width="511.0" height="391.0" rx="12"/><text x="21.0" y="34.0">машина раннера</text></g>
+<g class="fr fr-srv"><rect x="729.0" y="14.0" width="494.0" height="373.0" rx="12"/><text x="743.0" y="32.0">другая машина</text></g>
+<path marker-end="url(#arr-d-standalone-remote)" class="e" d="M100.0,242.0 C100.0,282.1 100.0,290.9 100.0,331.0"/>
+<path marker-end="url(#arr-d-standalone-remote)" class="e" d="M165.0,235.4 C225.8,235.4 239.2,340.0 300.0,340.0"/>
+<path marker-end="url(#arr-d-standalone-remote)" class="e dash" d="M100,198 C100,85 180,80 746,80"/>
+<path marker-end="url(#arr-d-standalone-remote)" class="e" d="M165.0,220.0 C242.4,220.0 259.6,220.0 337.0,220.0"/>
+<path marker-end="url(#arr-d-standalone-remote)" class="e dash" d="M463.0,220.0 C594.2,220.0 623.3,190.0 754.5,190.0"/>
+<path marker-end="url(#arr-d-standalone-remote)" class="e" d="M885.5,190.0 C951.4,190.0 966.1,190.0 1032.0,190.0"/>
+<path marker-end="url(#arr-d-standalone-remote)" class="e dash" d="M500.0,340.0 C704.8,340.0 750.2,340.0 955.0,340.0"/>
+<path marker-end="url(#arr-d-standalone-remote)" class="e" d="M890,90 C960,90 1010,170 1020,178"/>
+<path marker-end="url(#arr-d-standalone-remote)" class="e" d="M1080.0,212.0 C1080.0,256.6 1080.0,266.4 1080.0,311.0"/>
+<path marker-end="url(#arr-d-standalone-remote)" class="e" d="M1128.0,190.0 C1200.9,190.0 1217.1,190.0 1290.0,190.0"/>
+<path marker-end="url(#arr-d-standalone-remote)" class="e" d="M1080.0,168.0 C1080.0,128.0 1080.0,142.0 1080.0,102.0"/>
+<path marker-end="url(#arr-d-standalone-remote)" class="e dash" d="M1239.0,80.0 C1193.5,80.0 1183.5,80.0 1138.0,80.0"/>
+<g class="n n-run"><rect x="35.0" y="198.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="220.0">v8-runner</tspan></text></g>
+<g class="n n-doc"><path d="M25.0,331.0 h150.0 v50.0 q-37.5,12.0 -75.0,0 q-37.5,-12.0 -75.0,0 z"/><text><tspan x="100.0" y="351.0">workPath</tspan><tspan x="100.0" y="369.0">остаётся здесь</tspan></text></g>
+<g class="n n-sw"><rect x="337.0" y="198.0" width="126.0" height="44.0" rx="8"/><text><tspan x="400.0" y="220.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-doc"><path d="M300.0,318.0 h200.0 v36.0 q-50.0,12.0 -100.0,0 q-50.0,-12.0 -100.0,0 z"/><text><tspan x="400.0" y="340.0">исходники и артефакты</tspan></text></g>
+<g class="n n-svc"><rect x="747.0" y="58.0" width="146.0" height="44.0" rx="22.0"/><text><tspan x="820.0" y="80.0">SSH-шлюз 1543</tspan></text></g>
+<g class="n n-svc"><rect x="754.5" y="168.0" width="131.0" height="44.0" rx="22.0"/><text><tspan x="820.0" y="190.0">прямой шлюз</tspan></text></g>
+<g class="n n-sw"><rect x="1032.0" y="168.0" width="96.0" height="44.0" rx="8"/><text><tspan x="1080.0" y="190.0">ibsrv</tspan></text></g>
+<g class="n n-doc"><path d="M955.0,311.0 h250.0 v50.0 q-62.5,12.0 -125.0,0 q-62.5,-12.0 -125.0,0 z"/><text><tspan x="1080.0" y="331.0">каталог пользователя шлюза</tspan><tspan x="1080.0" y="349.0">пути разрешаются здесь</tspan></text></g>
+<g class="n n-svc"><rect x="1022.0" y="58.0" width="116.0" height="44.0" rx="22.0"/><text><tspan x="1080.0" y="80.0">HTTP 8314</tspan></text></g>
+<g class="n n-cyl"><path d="M1290.0,170.0 v40.0 a60.0,7.0 0 0 0 120.0,0 v-40.0"/><ellipse cx="1350.0" cy="170.0" rx="60.0" ry="7.0"/><text><tspan x="1350.0" y="190.0">база данных</tspan></text></g>
+<g class="n n-svc"><rect x="1239.0" y="58.0" width="222.0" height="44.0" rx="22.0"/><text><tspan x="1350.0" y="80.0">браузер · тонкий клиент</tspan></text></g>
+<g class="lbl"><rect x="80.0" y="274.5" width="40" height="24" rx="4"/><text><tspan x="100.0" y="286.5">файл</tspan></text></g>
+<g class="lbl"><rect x="212.5" y="275.7" width="40" height="24" rx="4"/><text><tspan x="232.5" y="287.7">файл</tspan></text></g>
+<g class="lbl"><rect x="242.9" y="72.1" width="228" height="24" rx="4"/><text><tspan x="356.9" y="84.1">SSH: команда строкой, ответ JSON</tspan></text></g>
+<g class="lbl"><rect x="173.4" y="208.0" width="141" height="24" rx="4"/><text><tspan x="243.9" y="220.0">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="591.8" y="193.0" width="34" height="24" rx="4"/><text><tspan x="608.8" y="205.0">TCP</tspan></text></g>
+<g class="lbl"><rect x="539.0" y="328.0" width="168" height="24" rx="4"/><text><tspan x="623.0" y="340.0">SFTP того же соединения</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-standalone-remote -->
 <ul class="opts">
   <li><strong>Администрирование</strong> — <code>connection: "Srvr=srv.example;Ref=demo"</code> для Конфигуратора по прямому шлюзу и <code>gate: "srv.example:1543"</code> для SSH; учётные данные для обоих — <code>user</code> и <code>password</code>: шлюз пускает по пользователю базы.</li>
   <li><strong>Пути</strong> — у Конфигуратора остаются на машине раннера; у SSH-пути разрешаются на стороне сервера, относительно каталога пользователя шлюза. <code>workPath</code> остаётся локальным и внутрь <code>exchange.dir</code> не кладётся — валидация это проверяет.</li>
@@ -552,40 +534,34 @@ flowchart LR
 
 <h2 id="d-console">10. Кластер поднят из консоли, а не службой</h2>
 <p>Обычный приём разработки: сервер 1С запускают руками в окне терминала, чтобы служба не висела постоянно. Канал до него тот же, что у службы, — меняется владелец процесса.</p>
-<pre class="mermaid">
-flowchart LR
-  subgraph BOX["одна машина"]
-    subgraph HOST["раннер и утилиты"]
-      R["v8-runner"]
-      DES["1cv8 DESIGNER"]
-      CLI["1cv8c · клиент"]
-    end
-    subgraph CON["ваша консоль"]
-      RAG["ragent, запущенный руками<br/>1540 · 1541"]
-      RPH["rphost"]
-      LOG@{ shape: doc, label: "журнал сервера<br/>у вас перед глазами" }
-    end
-  end
-  DBMS@{ shape: cyl, label: "СУБД" }
-  R -->|"процесс на операцию"| DES
-  R -->|"процесс на запуск"| CLI
-  DES -->|"Srvr=localhost:1541;Ref=…"| RAG
-  CLI -->|"TCP"| RAG
-  RAG --> RPH
-  RAG --> LOG
-  RPH --> DBMS
-  class R run
-  class DES,CLI,RAG,RPH sw
-  class DBMS art
-  class LOG off
-  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
-  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
-  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
-  classDef off fill:#e4e4e7,stroke:#9a9aa2,color:#33333a;
-  style BOX fill:#fbfbfc,stroke:#c3c9d0,color:#4b5560
-  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
-  style CON fill:#f1f8ea,stroke:#8aad76,color:#12210c
-</pre>
+<!-- diagram:d-console -->
+<div class="diagram" role="img" aria-label="Кластер поднят из консоли, а не службой">
+<svg viewBox="-19.0 -48.0 1394.0 374.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1394px">
+<defs><marker id="arr-d-console" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-box"><rect x="-9.0" y="-38.0" width="1203.0" height="354.0" rx="12"/><text x="5.0" y="-20.0">одна машина</text></g>
+<g class="fr fr-neutral"><rect x="642.0" y="47.0" width="526.0" height="243.0" rx="12"/><text x="656.0" y="65.0">ваша консоль</text></g>
+<g class="fr fr-host"><rect x="17.0" y="14.0" width="448.0" height="266.0" rx="12"/><text x="31.0" y="32.0">раннер и утилиты</text></g>
+<path marker-end="url(#arr-d-console)" class="e" d="M165.0,149.0 C233.4,149.0 248.6,80.0 317.0,80.0"/>
+<path marker-end="url(#arr-d-console)" class="e" d="M165.0,171.0 C231.6,171.0 246.4,240.0 313.0,240.0"/>
+<path marker-end="url(#arr-d-console)" class="e" d="M443.0,80.0 C540.6,80.0 562.4,114.2 660.0,114.2"/>
+<path marker-end="url(#arr-d-console)" class="e" d="M447.0,240.0 C542.9,240.0 564.1,140.3 660.0,140.3"/>
+<path marker-end="url(#arr-d-console)" class="e" d="M780.0,149.0 C780.0,189.0 780.0,188.0 780.0,228.0"/>
+<path marker-end="url(#arr-d-console)" class="e" d="M900.0,120.0 C940.0,120.0 910.0,120.0 950.0,120.0"/>
+<path marker-end="url(#arr-d-console)" class="e" d="M828.0,250.0 C1029.2,250.0 1073.8,250.0 1275.0,250.0"/>
+<g class="n n-run"><rect x="35.0" y="138.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="160.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="317.0" y="58.0" width="126.0" height="44.0" rx="8"/><text><tspan x="380.0" y="80.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-sw"><rect x="313.0" y="218.0" width="134.0" height="44.0" rx="8"/><text><tspan x="380.0" y="240.0">1cv8c · клиент</tspan></text></g>
+<g class="n n-sw"><rect x="660.0" y="91.0" width="240.0" height="58.0" rx="8"/><text><tspan x="780.0" y="111.0">ragent, запущенный руками</tspan><tspan x="780.0" y="129.0">1540 · 1541</tspan></text></g>
+<g class="n n-sw"><rect x="732.0" y="228.0" width="96.0" height="44.0" rx="8"/><text><tspan x="780.0" y="250.0">rphost</tspan></text></g>
+<g class="n n-doc"><path d="M950.0,91.0 h200.0 v50.0 q-50.0,12.0 -100.0,0 q-50.0,-12.0 -100.0,0 z"/><text><tspan x="1050.0" y="111.0">журнал сервера</tspan><tspan x="1050.0" y="129.0">у вас перед глазами</tspan></text></g>
+<g class="n n-cyl"><path d="M1275.0,230.0 v40.0 a45.0,7.0 0 0 0 90.0,0 v-40.0"/><ellipse cx="1320.0" cy="230.0" rx="45.0" ry="7.0"/><text><tspan x="1320.0" y="250.0">СУБД</tspan></text></g>
+<g class="lbl"><rect x="170.5" y="102.5" width="141" height="24" rx="4"/><text><tspan x="241.0" y="114.5">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="175.5" y="193.5" width="127" height="24" rx="4"/><text><tspan x="239.0" y="205.5">процесс на запуск</tspan></text></g>
+<g class="lbl"><rect x="461.0" y="85.1" width="181" height="24" rx="4"/><text><tspan x="551.5" y="97.1">Srvr=localhost:1541;Ref=…</tspan></text></g>
+<g class="lbl"><rect x="554.2" y="163.4" width="34" height="24" rx="4"/><text><tspan x="571.2" y="175.4">TCP</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-console -->
 <ul class="opts">
   <li><strong>Администрирование</strong> — <code>connection: "Srvr=localhost:1541;Ref=demo"</code>. От службы канал не отличается ничем; если <code>ragent</code> поднят на своём порту, он должен стоять в строке подключения.</li>
   <li><strong>Кто владеет процессом</strong> — вы. Раннер кластер не поднимает, не останавливает и не перезапускает. Закрытая посреди команды консоль даёт транспортный сбой, а не отказ сценария, — и это разные коды выхода.</li>
@@ -596,38 +572,34 @@ flowchart LR
 
 <h2 id="d-docker-cluster">11. Кластер 1С в контейнере</h2>
 <p>Сервер 1С и СУБД подняты в контейнерах, раннер работает на хосте. Про Docker раннер не знает ничего: для него это цель на другой машине, к которой ведёт опубликованный порт.</p>
-<pre class="mermaid">
-flowchart LR
-  subgraph HOST["машина раннера"]
-    R["v8-runner"]
-    DES["1cv8 DESIGNER"]
-    CLI["1cv8c · клиент"]
-    WP@{ shape: doc, label: "workPath<br/>.cf, .dt, отчёты" }
-  end
-  subgraph C1["контейнер сервера 1С"]
-    RAG["ragent 1540 · rmngr 1541"]
-    RPH["rphost 1560–1591"]
-  end
-  subgraph C2["контейнер СУБД"]
-    DBMS@{ shape: cyl, label: "база данных" }
-  end
-  R -->|"процесс на операцию"| DES
-  R -->|"процесс на запуск"| CLI
-  DES -.->|"опубликованные порты"| RAG
-  CLI -.->|"TCP"| RAG
-  DES --> WP
-  RAG --> RPH
-  RPH -.-> DBMS
-  class R run
-  class DES,CLI,RAG,RPH sw
-  class WP,DBMS art
-  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
-  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
-  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
-  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
-  style C1 fill:#f1f8ea,stroke:#8aad76,color:#12210c
-  style C2 fill:#f1f8ea,stroke:#8aad76,color:#12210c
-</pre>
+<!-- diagram:d-docker-cluster -->
+<div class="diagram" role="img" aria-label="Кластер 1С в контейнере, СУБД в другом контейнере">
+<svg viewBox="7.0 17.0 1281.0 278.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1281px">
+<defs><marker id="arr-d-docker-cluster" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-host"><rect x="17.0" y="27.0" width="706.0" height="233.0" rx="12"/><text x="31.0" y="45.0">машина раннера</text></g>
+<g class="fr fr-srv"><rect x="772.0" y="54.0" width="256.0" height="226.0" rx="12"/><text x="786.0" y="72.0">контейнер сервера 1С</text></g>
+<g class="fr fr-neutral"><rect x="1122.0" y="169.0" width="156.0" height="116.0" rx="12"/><text x="1136.0" y="187.0">контейнер СУБД</text></g>
+<path marker-end="url(#arr-d-docker-cluster)" class="e" d="M165.0,189.0 C233.4,189.0 248.6,100.0 317.0,100.0"/>
+<path marker-end="url(#arr-d-docker-cluster)" class="e" d="M165.0,211.0 C231.6,211.0 246.4,220.0 313.0,220.0"/>
+<path marker-end="url(#arr-d-docker-cluster)" class="e" d="M443.0,91.2 C484.4,91.2 493.6,100.0 535.0,100.0"/>
+<path marker-end="url(#arr-d-docker-cluster)" class="e dash" d="M436,108 C560,160 700,160 790,112"/>
+<path marker-end="url(#arr-d-docker-cluster)" class="e dash" d="M447.0,220.0 C601.4,220.0 635.6,133.2 790.0,133.2"/>
+<path marker-end="url(#arr-d-docker-cluster)" class="e" d="M900.0,142.0 C900.0,182.0 900.0,178.0 900.0,218.0"/>
+<path marker-end="url(#arr-d-docker-cluster)" class="e dash" d="M974.5,240.0 C1049.0,240.0 1065.5,240.0 1140.0,240.0"/>
+<g class="n n-run"><rect x="35.0" y="178.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="200.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="317.0" y="78.0" width="126.0" height="44.0" rx="8"/><text><tspan x="380.0" y="100.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-sw"><rect x="313.0" y="198.0" width="134.0" height="44.0" rx="8"/><text><tspan x="380.0" y="220.0">1cv8c · клиент</tspan></text></g>
+<g class="n n-doc"><path d="M535.0,71.0 h170.0 v50.0 q-42.5,12.0 -85.0,0 q-42.5,-12.0 -85.0,0 z"/><text><tspan x="620.0" y="91.0">workPath</tspan><tspan x="620.0" y="109.0">.cf, .dt, отчёты</tspan></text></g>
+<g class="n n-sw"><rect x="790.0" y="98.0" width="220.0" height="44.0" rx="8"/><text><tspan x="900.0" y="120.0">ragent 1540 · rmngr 1541</tspan></text></g>
+<g class="n n-sw"><rect x="825.5" y="218.0" width="149.0" height="44.0" rx="8"/><text><tspan x="900.0" y="240.0">rphost 1560–1591</tspan></text></g>
+<g class="n n-cyl"><path d="M1140.0,220.0 v40.0 a60.0,7.0 0 0 0 120.0,0 v-40.0"/><ellipse cx="1200.0" cy="220.0" rx="60.0" ry="7.0"/><text><tspan x="1200.0" y="240.0">база данных</tspan></text></g>
+<g class="lbl"><rect x="170.5" y="132.5" width="141" height="24" rx="4"/><text><tspan x="241.0" y="144.5">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="175.5" y="203.5" width="127" height="24" rx="4"/><text><tspan x="239.0" y="215.5">процесс на запуск</tspan></text></g>
+<g class="lbl"><rect x="566.0" y="148.0" width="148" height="24" rx="4"/><text><tspan x="640.0" y="160.0">опубликованные порты</tspan></text></g>
+<g class="lbl"><rect x="739.0" y="122.7" width="34" height="24" rx="4"/><text><tspan x="756.0" y="134.7">TCP</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-docker-cluster -->
 <ul class="opts">
   <li><strong>Администрирование</strong> — прежняя строка <code>Srvr=…;Ref=…</code> на опубликованный порт.</li>
   <li><strong>Публиковать нужно два порта, а не один</strong> — менеджер отдаёт клиенту адрес рабочего процесса, поэтому кроме 1541 наружу должен смотреть и диапазон <code>rphost</code>. Иначе соединение обрывается уже после удачного коннекта к менеджеру.</li>
@@ -638,43 +610,39 @@ flowchart LR
 
 <h2 id="d-docker-standalone">12. Автономный сервер в контейнере</h2>
 <p>Тот же <code>ibsrv</code>, но поднятый контейнером. Единственный вариант, где на машине раннера можно обойтись без утилит 1С: по SSH команды исполняет сервер в контейнере. С платформой у раннера открыт и прямой шлюз, если его порт опубликован.</p>
-<pre class="mermaid">
-flowchart LR
-  subgraph HOST["машина раннера"]
-    R["v8-runner"]
-    WP@{ shape: doc, label: "workPath<br/>остаётся здесь" }
-  end
-  subgraph C["контейнер ibsrv"]
-    GATE(["SSH-шлюз 1543"])
-    DGATE(["прямой шлюз — если порт опубликован"])
-    IBSRV["ibsrv"]
-    UD@{ shape: doc, label: "каталог пользователя шлюза<br/>смонтирован томом" }
-    HTTPS(["HTTP 8314"])
-    DB@{ shape: cyl, label: "база данных" }
-  end
-  BR(["браузер · тонкий клиент"])
-  R --> WP
-  R -.->|"SSH: команда строкой, ответ JSON"| GATE
-  R -.->|"1cv8 DESIGNER: TCP"| DGATE
-  DGATE --> IBSRV
-  R -.->|"exchange: sftp"| UD
-  R -->|"exchange: dir — если том виден раннеру"| UD
-  GATE --> IBSRV
-  IBSRV --> UD
-  IBSRV --> DB
-  IBSRV --> HTTPS
-  BR -.->|"HTTP"| HTTPS
-  class R run
-  class IBSRV sw
-  class GATE,DGATE,HTTPS,BR svc
-  class WP,UD,DB art
-  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
-  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
-  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
-  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
-  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
-  style C fill:#f1f8ea,stroke:#8aad76,color:#12210c
-</pre>
+<!-- diagram:d-docker-standalone -->
+<div class="diagram" role="img" aria-label="Автономный сервер в контейнере: SSH-шлюз, прямой шлюз и HTTP на опубликованных портах">
+<svg viewBox="-3.0 -94.0 1301.0 481.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1301px">
+<defs><marker id="arr-d-docker-standalone" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-srv"><rect x="472.0" y="-6.0" width="816.0" height="383.0" rx="12"/><text x="486.0" y="12.0">контейнер ibsrv</text></g>
+<g class="fr fr-host"><rect x="7.0" y="94.0" width="186.0" height="283.0" rx="12"/><text x="21.0" y="112.0">машина раннера</text></g>
+<path marker-end="url(#arr-d-docker-standalone)" class="e" d="M100.0,182.0 C100.0,235.6 100.0,247.4 100.0,301.0"/>
+<path marker-end="url(#arr-d-docker-standalone)" class="e dash" d="M165.0,144.6 C345.9,144.6 386.1,60.0 567.0,60.0"/>
+<path marker-end="url(#arr-d-docker-standalone)" class="e dash" d="M165.0,155.6 C311.2,155.6 343.8,160.0 490.0,160.0"/>
+<path marker-end="url(#arr-d-docker-standalone)" class="e dash" d="M165,178 C400,178 560,300 835,300"/>
+<path marker-end="url(#arr-d-docker-standalone)" class="e" d="M165,188 C400,215 560,336 835,336"/>
+<path marker-end="url(#arr-d-docker-standalone)" class="e" d="M715,70 C800,70 890,140 900,148"/>
+<path marker-end="url(#arr-d-docker-standalone)" class="e" d="M790.0,160.0 C844.9,160.0 857.1,160.0 912.0,160.0"/>
+<path marker-end="url(#arr-d-docker-standalone)" class="e" d="M960.0,182.0 C960.0,235.6 960.0,247.4 960.0,301.0"/>
+<path marker-end="url(#arr-d-docker-standalone)" class="e" d="M1008.0,160.0 C1071.9,160.0 1086.1,160.0 1150.0,160.0"/>
+<path marker-end="url(#arr-d-docker-standalone)" class="e" d="M960.0,138.0 C960.0,98.0 960.0,122.0 960.0,82.0"/>
+<path marker-end="url(#arr-d-docker-standalone)" class="e dash" d="M960.0,-40.0 C960.0,0.0 960.0,-2.0 960.0,38.0"/>
+<g class="n n-run"><rect x="35.0" y="138.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="160.0">v8-runner</tspan></text></g>
+<g class="n n-doc"><path d="M25.0,301.0 h150.0 v50.0 q-37.5,12.0 -75.0,0 q-37.5,-12.0 -75.0,0 z"/><text><tspan x="100.0" y="321.0">workPath</tspan><tspan x="100.0" y="339.0">остаётся здесь</tspan></text></g>
+<g class="n n-svc"><rect x="567.0" y="38.0" width="146.0" height="44.0" rx="22.0"/><text><tspan x="640.0" y="60.0">SSH-шлюз 1543</tspan></text></g>
+<g class="n n-svc"><rect x="490.0" y="138.0" width="300.0" height="44.0" rx="22.0"/><text><tspan x="640.0" y="160.0">прямой шлюз — если порт опубликован</tspan></text></g>
+<g class="n n-sw"><rect x="912.0" y="138.0" width="96.0" height="44.0" rx="8"/><text><tspan x="960.0" y="160.0">ibsrv</tspan></text></g>
+<g class="n n-doc"><path d="M835.0,301.0 h250.0 v50.0 q-62.5,12.0 -125.0,0 q-62.5,-12.0 -125.0,0 z"/><text><tspan x="960.0" y="321.0">каталог пользователя шлюза</tspan><tspan x="960.0" y="339.0">смонтирован томом</tspan></text></g>
+<g class="n n-svc"><rect x="902.0" y="38.0" width="116.0" height="44.0" rx="22.0"/><text><tspan x="960.0" y="60.0">HTTP 8314</tspan></text></g>
+<g class="n n-cyl"><path d="M1150.0,140.0 v40.0 a60.0,7.0 0 0 0 120.0,0 v-40.0"/><ellipse cx="1210.0" cy="140.0" rx="60.0" ry="7.0"/><text><tspan x="1210.0" y="160.0">база данных</tspan></text></g>
+<g class="n n-svc"><rect x="860.0" y="-84.0" width="200.0" height="44.0" rx="22.0"/><text><tspan x="960.0" y="-62.0">браузер · тонкий клиент</tspan></text></g>
+<g class="lbl"><rect x="218.0" y="103.0" width="228" height="24" rx="4"/><text><tspan x="332.0" y="115.0">SSH: команда строкой, ответ JSON</tspan></text></g>
+<g class="lbl"><rect x="263.0" y="145.9" width="134" height="24" rx="4"/><text><tspan x="330.0" y="157.9">1cv8 DESIGNER: TCP</tspan></text></g>
+<g class="lbl"><rect x="326.5" y="197.1" width="107" height="24" rx="4"/><text><tspan x="380.0" y="209.1">exchange: sftp</tspan></text></g>
+<g class="lbl"><rect x="506.0" y="350.0" width="268" height="24" rx="4"/><text><tspan x="640.0" y="362.0">exchange: dir — если том виден раннеру</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-docker-standalone -->
 <ul class="opts">
   <li><strong>Администрирование</strong> — <code>standalone.gate</code> на опубликованный порт шлюза. Контейнер поднимаете вы; раннер его не запускает и о Docker не знает.</li>
   <li><strong>Платформа раннеру не обязательна</strong> — по SSH команды исполняет сервер внутри контейнера; с платформой Конфигуратор идёт в прямой шлюз и получает полный набор <span class="ref">(<a href="platform.html#t65">65</a>)</span>.</li>
@@ -685,47 +653,38 @@ flowchart LR
 
 <h2 id="d-web-remote">13. Веб-сервер на отдельной машине</h2>
 <p>Публикацию держит отдельный веб-сервер, и его файловая система раннеру не принадлежит. Вариант интересен тем, что раннер здесь команду <strong>теряет</strong>, а не приобретает: <code>publish</code> становится невозможен.</p>
-<pre class="mermaid">
-flowchart LR
-  subgraph HOST["машина раннера"]
-    R["v8-runner"]
-    D["1cv8 DESIGNER"]
-    WI["webinst<br/>публиковать нечего"]
-    WP@{ shape: doc, label: "workPath" }
-  end
-  subgraph WEB["машина веб-сервера"]
-    AP["Apache · IIS<br/>модуль wsap · wsisapi"]
-    VRD@{ shape: doc, label: "каталог публикации<br/>default.vrd" }
-    CONF@{ shape: doc, label: "конфиг веб-сервера" }
-  end
-  subgraph SRV["сервер 1С"]
-    CL["ragent · rmngr 1541"]
-    RP["rphost"]
-  end
-  BR(["браузер · тонкий клиент"])
-  R --> D
-  R --> WI
-  R --> WP
-  D -.->|"Srvr=…;Ref=…, TCP 1541"| CL
-  CL --> RP
-  AP --> VRD
-  AP --> CONF
-  AP -.->|"TCP 1541"| CL
-  BR -.->|"HTTP · HTTPS, ws=…"| AP
-  class R run
-  class D,CL,RP sw
-  class BR svc
-  class WP art
-  class WI,AP,VRD,CONF off
-  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
-  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
-  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
-  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
-  classDef off fill:#e4e4e7,stroke:#9a9aa2,color:#33333a;
-  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
-  style WEB fill:#eeeef0,stroke:#a8a8b0,color:#33333a
-  style SRV fill:#f1f8ea,stroke:#8aad76,color:#12210c
-</pre>
+<!-- diagram:d-web-remote -->
+<div class="diagram" role="img" aria-label="Веб-сервер на отдельной машине: раннер публиковать не может">
+<svg viewBox="7.0 4.0 1416.0 448.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1416px">
+<defs><marker id="arr-d-web-remote" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-host"><rect x="17.0" y="14.0" width="471.0" height="346.0" rx="12"/><text x="31.0" y="32.0">машина раннера</text></g>
+<g class="fr fr-neutral"><rect x="647.0" y="57.0" width="471.0" height="250.0" rx="12"/><text x="661.0" y="75.0">машина веб-сервера</text></g>
+<g class="fr fr-srv"><rect x="1187.0" y="64.0" width="226.0" height="226.0" rx="12"/><text x="1201.0" y="82.0">сервер 1С</text></g>
+<path marker-end="url(#arr-d-web-remote)" class="e" d="M165.0,186.8 C233.4,186.8 248.6,80.0 317.0,80.0"/>
+<path marker-end="url(#arr-d-web-remote)" class="e" d="M165.0,200.0 C221.2,200.0 233.8,200.0 290.0,200.0"/>
+<path marker-end="url(#arr-d-web-remote)" class="e" d="M165.0,213.2 C232.5,213.2 247.5,320.0 315.0,320.0"/>
+<path marker-end="url(#arr-d-web-remote)" class="e dash" d="M444,72 C600,10 1050,10 1205,120"/>
+<path marker-end="url(#arr-d-web-remote)" class="e" d="M1300.0,152.0 C1300.0,192.0 1300.0,188.0 1300.0,228.0"/>
+<path marker-end="url(#arr-d-web-remote)" class="e" d="M757.0,159.0 C757.0,199.0 780.0,191.0 780.0,231.0"/>
+<path marker-end="url(#arr-d-web-remote)" class="e" d="M870,150 C930,160 1000,180 1010,230"/>
+<path marker-end="url(#arr-d-web-remote)" class="e dash" d="M895.0,124.2 C1034.5,124.2 1065.5,134.4 1205.0,134.4"/>
+<path marker-end="url(#arr-d-web-remote)" class="e dash" d="M352,420 C540,420 560,130 665,130"/>
+<g class="n n-run"><rect x="35.0" y="178.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="200.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="317.0" y="58.0" width="126.0" height="44.0" rx="8"/><text><tspan x="380.0" y="80.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-sw"><rect x="290.0" y="171.0" width="180.0" height="58.0" rx="8"/><text><tspan x="380.0" y="191.0">webinst</tspan><tspan x="380.0" y="209.0">публиковать нечего</tspan></text></g>
+<g class="n n-doc"><path d="M315.0,298.0 h130.0 v36.0 q-32.5,12.0 -65.0,0 q-32.5,-12.0 -65.0,0 z"/><text><tspan x="380.0" y="320.0">workPath</tspan></text></g>
+<g class="n n-sw"><rect x="665.0" y="101.0" width="230.0" height="58.0" rx="8"/><text><tspan x="780.0" y="121.0">Apache · IIS</tspan><tspan x="780.0" y="139.0">модуль wsap · wsisapi</tspan></text></g>
+<g class="n n-doc"><path d="M685.0,231.0 h190.0 v50.0 q-47.5,12.0 -95.0,0 q-47.5,-12.0 -95.0,0 z"/><text><tspan x="780.0" y="251.0">каталог публикации</tspan><tspan x="780.0" y="269.0">default.vrd</tspan></text></g>
+<g class="n n-doc"><path d="M920.0,238.0 h180.0 v36.0 q-45.0,12.0 -90.0,0 q-45.0,-12.0 -90.0,0 z"/><text><tspan x="1010.0" y="260.0">конфиг веб-сервера</tspan></text></g>
+<g class="n n-sw"><rect x="1205.0" y="108.0" width="190.0" height="44.0" rx="8"/><text><tspan x="1300.0" y="130.0">ragent · rmngr 1541</tspan></text></g>
+<g class="n n-sw"><rect x="1252.0" y="228.0" width="96.0" height="44.0" rx="8"/><text><tspan x="1300.0" y="250.0">rphost</tspan></text></g>
+<g class="n n-svc"><rect x="152.0" y="398.0" width="200.0" height="44.0" rx="22.0"/><text><tspan x="252.0" y="420.0">браузер · тонкий клиент</tspan></text></g>
+<g class="lbl"><rect x="749.5" y="16.0" width="161" height="24" rx="4"/><text><tspan x="830.0" y="28.0">Srvr=…;Ref=…, TCP 1541</tspan></text></g>
+<g class="lbl"><rect x="1016.5" y="117.3" width="67" height="24" rx="4"/><text><tspan x="1050.0" y="129.3">TCP 1541</tspan></text></g>
+<g class="lbl"><rect x="498.0" y="220.0" width="134" height="24" rx="4"/><text><tspan x="565.0" y="232.0">HTTP · HTTPS, ws=…</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-web-remote -->
 <ul class="opts">
   <li><strong>Почему <code>publish</code> не работает</strong> — <code>webinst</code> раннер запускает у себя, и оба пути в его аргументах открываются на его файловой системе: <code>-dir</code> — каталог публикации, <code>-confpath</code> — конфиг веб-сервера. Ни того, ни другого у раннера нет, и валидация отказывает ещё до запуска: <code>dir</code> обязан быть существующим каталогом.</li>
   <li><strong>Что остаётся</strong> — всё остальное. Публикация не участвует ни в одной другой команде: <code>push</code>, <code>pull</code>, <code>test</code>, <code>extensions</code> идут по строке подключения и об этом веб-сервере не знают.</li>
@@ -737,45 +696,38 @@ flowchart LR
 
 <h2 id="d-web-docker">14. Веб-сервер в контейнере</h2>
 <p>Тот же случай, но веб-сервер поднят контейнером. Разница с предыдущим одна и важная: том обычно виден обеим сторонам — только по разным путям.</p>
-<pre class="mermaid">
-flowchart LR
-  subgraph HOST["машина раннера"]
-    R["v8-runner"]
-    WI["webinst"]
-    VOL@{ shape: doc, label: "том с каталогом публикации<br/>путь раннера" }
-  end
-  subgraph C["контейнер веб-сервера"]
-    AP["Apache<br/>модуль wsap"]
-    VRDC@{ shape: doc, label: "тот же том<br/>путь внутри контейнера" }
-    CONF@{ shape: doc, label: "конфиг из образа<br/>настроен заранее" }
-    HTTPP(["HTTP 80 · 443"])
-  end
-  subgraph SRV["сервер 1С"]
-    CL["ragent · rmngr 1541"]
-  end
-  BR(["браузер · тонкий клиент"])
-  R -->|"процесс на операцию"| WI
-  WI -->|"-dir: пишет default.vrd"| VOL
-  VOL -.->|"один том, два пути"| VRDC
-  AP --> VRDC
-  AP --> CONF
-  AP -.->|"TCP 1541"| CL
-  AP --> HTTPP
-  BR -.->|"HTTP · HTTPS, ws=…"| HTTPP
-  class R run
-  class WI,CL sw
-  class BR,HTTPP svc
-  class VOL art
-  class AP,VRDC,CONF off
-  classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
-  classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
-  classDef svc fill:#e7f3dc,stroke:#4f7a3c,color:#12210c;
-  classDef art fill:#f6e8c8,stroke:#a4813a,color:#241c0c;
-  classDef off fill:#e4e4e7,stroke:#9a9aa2,color:#33333a;
-  style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
-  style C fill:#eeeef0,stroke:#a8a8b0,color:#33333a
-  style SRV fill:#f1f8ea,stroke:#8aad76,color:#12210c
-</pre>
+<!-- diagram:d-web-docker -->
+<div class="diagram" role="img" aria-label="Веб-сервер в контейнере с общим томом для каталога публикации">
+<svg viewBox="7.0 -3.0 1526.0 300.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1526px">
+<defs><marker id="arr-d-web-docker" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-host"><rect x="17.0" y="14.0" width="506.0" height="273.0" rx="12"/><text x="31.0" y="32.0">машина раннера</text></g>
+<g class="fr fr-neutral"><rect x="657.0" y="7.0" width="491.0" height="280.0" rx="12"/><text x="671.0" y="25.0">контейнер веб-сервера</text></g>
+<g class="fr fr-srv"><rect x="1297.0" y="14.0" width="226.0" height="106.0" rx="12"/><text x="1311.0" y="32.0">сервер 1С</text></g>
+<path marker-end="url(#arr-d-web-docker)" class="e" d="M165.0,141.2 C240.2,141.2 256.9,80.0 332.0,80.0"/>
+<path marker-end="url(#arr-d-web-docker)" class="e" d="M380.0,102.0 C380.0,151.1 380.0,161.9 380.0,211.0"/>
+<path marker-end="url(#arr-d-web-docker)" class="e dash" d="M505.0,240.0 C581.5,240.0 598.5,240.0 675.0,240.0"/>
+<path marker-end="url(#arr-d-web-docker)" class="e" d="M780.0,109.0 C780.0,154.9 780.0,165.1 780.0,211.0"/>
+<path marker-end="url(#arr-d-web-docker)" class="e" d="M855,92 C930,92 1030,140 1030,210"/>
+<path marker-end="url(#arr-d-web-docker)" class="e dash" d="M855,66 C960,20 1200,20 1315,72"/>
+<path marker-end="url(#arr-d-web-docker)" class="e" d="M855.0,80.0 C900.9,80.0 911.1,80.0 957.0,80.0"/>
+<path marker-end="url(#arr-d-web-docker)" class="e dash" d="M1310,230 C1230,200 1100,150 1080,102"/>
+<g class="n n-run"><rect x="35.0" y="128.0" width="130.0" height="44.0" rx="8"/><text><tspan x="100.0" y="150.0">v8-runner</tspan></text></g>
+<g class="n n-sw"><rect x="332.0" y="58.0" width="96.0" height="44.0" rx="8"/><text><tspan x="380.0" y="80.0">webinst</tspan></text></g>
+<g class="n n-doc"><path d="M255.0,211.0 h250.0 v50.0 q-62.5,12.0 -125.0,0 q-62.5,-12.0 -125.0,0 z"/><text><tspan x="380.0" y="231.0">том с каталогом публикации</tspan><tspan x="380.0" y="249.0">путь раннера</tspan></text></g>
+<g class="n n-sw"><rect x="705.0" y="51.0" width="150.0" height="58.0" rx="8"/><text><tspan x="780.0" y="71.0">Apache</tspan><tspan x="780.0" y="89.0">модуль wsap</tspan></text></g>
+<g class="n n-doc"><path d="M675.0,211.0 h210.0 v50.0 q-52.5,12.0 -105.0,0 q-52.5,-12.0 -105.0,0 z"/><text><tspan x="780.0" y="231.0">тот же том</tspan><tspan x="780.0" y="249.0">путь внутри контейнера</tspan></text></g>
+<g class="n n-doc"><path d="M930.0,211.0 h200.0 v50.0 q-50.0,12.0 -100.0,0 q-50.0,-12.0 -100.0,0 z"/><text><tspan x="1030.0" y="231.0">конфиг из образа</tspan><tspan x="1030.0" y="249.0">настроен заранее</tspan></text></g>
+<g class="n n-svc"><rect x="957.0" y="58.0" width="146.0" height="44.0" rx="22.0"/><text><tspan x="1030.0" y="80.0">HTTP 80 · 443</tspan></text></g>
+<g class="n n-sw"><rect x="1315.0" y="58.0" width="190.0" height="44.0" rx="8"/><text><tspan x="1410.0" y="80.0">ragent · rmngr 1541</tspan></text></g>
+<g class="n n-svc"><rect x="1310.0" y="218.0" width="200.0" height="44.0" rx="22.0"/><text><tspan x="1410.0" y="240.0">браузер · тонкий клиент</tspan></text></g>
+<g class="lbl"><rect x="191.9" y="89.5" width="141" height="24" rx="4"/><text><tspan x="262.4" y="101.5">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="296.0" y="144.5" width="168" height="24" rx="4"/><text><tspan x="380.0" y="156.5">-dir: пишет default.vrd</tspan></text></g>
+<g class="lbl"><rect x="523.0" y="228.0" width="134" height="24" rx="4"/><text><tspan x="590.0" y="240.0">один том, два пути</tspan></text></g>
+<g class="lbl"><rect x="1011.5" y="16.0" width="67" height="24" rx="4"/><text><tspan x="1045.0" y="28.0">TCP 1541</tspan></text></g>
+<g class="lbl"><rect x="1155.0" y="183.3" width="134" height="24" rx="4"/><text><tspan x="1222.0" y="195.3">HTTP · HTTPS, ws=…</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:d-web-docker -->
 <ul class="opts">
   <li><strong>Что работает</strong> — раннер пишет <code>default.vrd</code> в том своим путём, веб-сервер читает его своим. Содержимое файла от пути не зависит: в нём строка подключения, а не расположение публикации.</li>
   <li><strong>Что не работает</strong> — правка конфига веб-сервера. Внутри контейнера и модуль, и каталог лежат по другим путям, поэтому писать туда с машины раннера нечего: виртуальный каталог настраивается один раз в образе.</li>
@@ -788,32 +740,6 @@ flowchart LR
 <p class="hint">Назад к <a href="architecture.html">Компонентам</a>.</p>
 </main>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.12.0/mermaid.min.js"></script>
-<script>
-  var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-  // Схемы развёртывания нарисованы палитрой ArchiMate для светлой темы; в тёмной те же
-  // роли берут тёмные тона. Замена идёт до отрисовки и трогает только эти цвета.
-  var palette = {
-    '#cfe4fa': '#1d3550', '#3f7ba6': '#6ea6d2', '#0d2233': '#d9e8f7',
-    '#cde8b9': '#2a4423', '#4f7a3c': '#7fae68', '#12210c': '#dfeed5',
-    '#e7f3dc': '#22381e',
-    '#f6e8c8': '#44371f', '#a4813a': '#b79141', '#241c0c': '#f2e4c4',
-    '#e4e4e7': '#2c3037', '#9a9aa2': '#787f8a', '#33333a': '#c7ccd5',
-    '#eef5fb': '#16222e', '#8fb4cf': '#3f6a8c',
-    '#f1f8ea': '#18261a', '#8aad76': '#4c7340',
-    '#fbfbfc': '#1b2027', '#c3c9d0': '#3b434d', '#4b5560': '#97a2af',
-    '#eeeef0': '#26262b', '#a8a8b0': '#5a5a63'
-  };
-  if (dark) {
-    document.querySelectorAll('pre.mermaid').forEach(function (block) {
-      // именно innerHTML: в textContent теряются <br/> внутри подписей
-      block.innerHTML = block.innerHTML.replace(/#[0-9a-f]{6}/g, function (colour) {
-        return palette[colour] || colour;
-      });
-    });
-  }
-  mermaid.initialize({ startOnLoad: true, theme: dark ? 'dark' : 'neutral', securityLevel: 'loose', fontFamily: 'Golos Text, system-ui, sans-serif' });
-</script>
-<script src="site.js?v=6" defer></script>
+<script src="site.js?v=7" defer></script>
 </body>
 </html>

@@ -6,7 +6,7 @@
 <title>v8-runner · Трудности</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="styles.css?v=15">
+<link rel="stylesheet" href="styles.css?v=16">
 <style>
   .ref { font-size: 0.9em; color: var(--muted, #7a7f87); }
   .ref a { margin-right: 6px; }
@@ -23,7 +23,7 @@
     <a href="problems.html" aria-current="page">Трудности</a>
     <a href="architecture.html">Компоненты</a>
     <a href="sources.html">Исходники</a>
-    <a href="cli.html">Словарь</a>
+    <a href="cli.html">CLI</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -82,7 +82,7 @@
 
 <h3 id="p8">8. У базы есть своё непринятое, и загрузка его стирает</h3>
 <p>Правка в Конфигураторе живёт в основной конфигурации до применения к базе данных <span class="ref">(<a href="platform.html#t1">1</a>, <a href="platform.html#t3">3</a>)</span>. Полная загрузка из файлов и загрузка .cf заменяют основную конфигурацию целиком <span class="ref">(<a href="platform.html#t11">11</a>, <a href="platform.html#t23">23</a>)</span>. Частичная загрузка при ошибке откатывается к последней сохранённой и теряет несохранённое <span class="ref">(<a href="platform.html#t24">24</a>)</span>. Интерактивный Конфигуратор об этом спрашивает <span class="ref">(<a href="platform.html#t11">11</a>)</span>, пакетный режим работает без диалогов <span class="ref">(<a href="platform.html#t78">78</a>)</span>.</p>
-<p><strong>Ответ раннера.</strong> Отправка отказывает, если поколение базы ушло вперёд с прошлой синхронизации, и отправляет к <code>pull</code>. Состояние «есть непринятое» показывает <code>status</code>.</p>
+<p><strong>Ответ раннера.</strong> Отправка отказывает, если поколение базы ушло вперёд с прошлой синхронизации, и отправляет к <code>pull</code>. Состояние «есть непринятое» показывает <code>status</code>, а отбрасывает <code>reset</code>; чужое он трогает только с <code>--force</code>.</p>
 
 <h3 id="p9">9. Применение требует монопольного доступа</h3>
 <p>Обновление конфигурации базы данных — отдельный акт, которому мешают чужие сеансы <span class="ref">(<a href="platform.html#t3">3</a>, <a href="platform.html#t4">4</a>)</span>. Динамическое обновление оставляет работающих на старой конфигурации до перезапуска <span class="ref">(<a href="platform.html#t6">6</a>)</span>.</p>
@@ -147,6 +147,6 @@
 </tbody>
 </table></div>
 </main>
-<script src="site.js?v=6" defer></script>
+<script src="site.js?v=7" defer></script>
 </body>
 </html>

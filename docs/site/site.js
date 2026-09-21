@@ -89,7 +89,7 @@
     : null;
 
   function mark() {
-    var boxes = document.querySelectorAll('.mermaid, .tablewrap, .axes');
+    var boxes = document.querySelectorAll('.diagram, .tablewrap, .axes');
     Array.prototype.forEach.call(boxes, function (box) {
       var scrollable = box.scrollWidth - box.clientWidth > 8;
       box.classList.toggle('scrollx', scrollable);
@@ -100,14 +100,6 @@
 
   mark();
   window.addEventListener('load', mark);
-  // Схемы появляются после отрисовки mermaid — ширина блока меняется уже после загрузки.
-  if (typeof MutationObserver === 'function') {
-    var diagrams = document.querySelectorAll('.mermaid');
-    var redraw = new MutationObserver(function () { mark(); });
-    Array.prototype.forEach.call(diagrams, function (box) {
-      redraw.observe(box, { childList: true, subtree: true });
-    });
-  }
   var resizeTimer = null;
   window.addEventListener('resize', function () {
     window.clearTimeout(resizeTimer);

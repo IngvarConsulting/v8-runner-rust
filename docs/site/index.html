@@ -6,7 +6,7 @@
 <title>v8-runner</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="styles.css?v=15">
+<link rel="stylesheet" href="styles.css?v=16">
 <style>
   ol.path { padding-left: 1.4em; }
   ol.path li { margin: 8px 0; }
@@ -21,7 +21,7 @@
     <a href="problems.html">Трудности</a>
     <a href="architecture.html">Компоненты</a>
     <a href="sources.html">Исходники</a>
-    <a href="cli.html">Словарь</a>
+    <a href="cli.html">CLI</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -53,7 +53,7 @@ v8-runner clone --from "File=/srv/ib/demo"   # привязать каталог
   <li><a href="problems.html"><strong>Трудности</strong></a> — что в поведении платформы мешает работать без рук, и чем раннер на это отвечает.</li>
   <li><a href="architecture.html"><strong>Компоненты</strong></a> — из чего состоит система: компоненты платформы, её утилиты, сам раннер и каналы между ними.</li>
   <li><a href="sources.html"><strong>Исходники и база</strong></a> — какие бывают исходники, что им соответствует в базе, в каких состояниях они бывают.</li>
-  <li><a href="cli.html"><strong>Словарь команд</strong></a> — вся поверхность командной строки и правило, по которому выбрано каждое имя.</li>
+  <li><a href="cli.html"><strong>CLI</strong></a> — словарь команд: вся поверхность командной строки и правило, по которому выбрано каждое имя.</li>
 </ol>
 <p>Рядом: <a href="scenarios.html">Подбор</a> команд под ваши условия, <a href="usecases.html">Сценарии</a> с потоками данных и <a href="deployments.html">Расстановки</a> платформы по машинам.</p>
 
@@ -67,7 +67,7 @@ v8-runner clone --from "File=/srv/ib/demo"   # привязать каталог
 <li><code>status</code> понять, что происходит</li>
 <li><code>init</code> · <code>clone</code> завести проект</li>
 <li><code>infobase create</code> создать базу</li>
-<li><code>push</code> · <code>apply</code> отправить исходники в базу и применить</li>
+<li><code>push</code> · <code>apply</code> · <code>reset</code> отправить исходники в базу, применить или отбросить непринятое</li>
 <li><code>pull</code> забрать изменения из базы</li>
 <li><code>upload</code> · <code>download</code> пакет .cf или .cfe в базу и из базы</li>
 <li><code>make</code> собрать пакет из исходников</li>
@@ -94,6 +94,6 @@ v8-runner clone --from "File=/srv/ib/demo"   # привязать каталог
 <tr><td class="k">превью</td><td><code>--dry-run</code>: показать план, ничего не делая</td></tr>
 </tbody></table></div>
 </main>
-<script src="site.js?v=6" defer></script>
+<script src="site.js?v=7" defer></script>
 </body>
 </html>

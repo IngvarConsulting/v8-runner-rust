@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>v8-runner · Словарь команд</title>
+<title>v8-runner · CLI</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="styles.css?v=15">
+<link rel="stylesheet" href="styles.css?v=16">
 <style>
   td.k { white-space: nowrap; }
   td.k code { white-space: nowrap; }
@@ -26,7 +26,7 @@
     <a href="problems.html">Трудности</a>
     <a href="architecture.html">Компоненты</a>
     <a href="sources.html">Исходники</a>
-    <a href="cli.html" aria-current="page">Словарь</a>
+    <a href="cli.html" aria-current="page">CLI</a>
     <a href="scenarios.html">Подбор</a>
     <a href="usecases.html">Сценарии</a>
     <a href="deployments.html">Расстановки</a>
@@ -35,7 +35,7 @@
 </div></div>
 
 <main class="page">
-<h1>Словарь команд</h1>
+<h1>CLI</h1>
 <p class="lede">Команды раннера названы словарём гита, потому что его уже знают и человек, и языковая модель. Знакомое имя избавляет от чтения справки, а незнакомое поведение под знакомым именем опаснее незнакомого имени. Здесь вся поверхность командной строки и правило, по которому выбрано каждое имя.</p>
 
 <ul class="toc">
@@ -114,13 +114,14 @@
 <tr><td class="k"><code>push --delete &lt;ссылка&gt;</code></td><td>убирает расширение из базы вместе с его данными</td><td>меняет</td></tr>
 <tr><td class="k"><code>apply</code></td><td>приводит базу данных к основной конфигурации и больше ничего <span class="ref">(<a href="platform.html#t104">104</a>)</span></td><td>меняет</td></tr>
 <tr><td class="k"><code>apply --sessions disable|force</code></td><td>что делать с чужими сеансами, когда нужен монопольный доступ. По умолчанию их не трогают <span class="ref">(<a href="platform.html#t4">4</a>)</span>; полное окно обслуживания собирают команды <code>sessions</code></td><td>меняет</td></tr>
+<tr><td class="k"><code>reset [&lt;ссылка&gt;]</code></td><td>отбрасывает непринятое в базе: основная конфигурация возвращается к конфигурации базы данных, у расширения — своя пара <span class="ref">(<a href="platform.html#t7">7</a>)</span>. Своё непринятое, отправленное <code>push --no-apply</code>, отбрасывает молча; чужое, сделанное в Конфигураторе, — только с <code>--force</code></td><td>меняет</td></tr>
 <tr><td class="k"><code>upload &lt;файл&gt;</code></td><td>загружает пакет <code>.cf</code> или <code>.cfe</code> в основную конфигурацию, целиком заменяя её <span class="ref">(<a href="platform.html#t11">11</a>)</span></td><td>меняет</td></tr>
 <tr><td class="k"><code>upload &lt;файл&gt; --mode combine|update</code></td><td>объединяет с пакетом по файлу настроек или обновляет конфигурацию поставщика <span class="ref">(<a href="platform.html#t49">49</a>)</span></td><td>меняет</td></tr>
 <tr><td class="k"><code>download</code></td><td>забирает конфигурацию базы в пакет <code>.cf</code> или <code>.cfe</code>: основную или, с <code>--state db</code>, конфигурацию базы данных <span class="ref">(<a href="platform.html#t12">12</a>)</span></td><td>читает</td></tr>
 </tbody>
 </table></div>
 
-<p><code>upload</code> и <code>download</code> носят конфигурацию одним файлом, <code>push</code> и <code>pull</code> — исходниками по частям; предмет у четырёх команд один. Пара названа по направлению: пакет отдают базе и забирают у неё, как <code>tools download</code> забирает дистрибутив. Слово платформы <code>load</code> осталось скрытым синонимом: пары у него нет, <code>save</code> читалось бы как запись внутрь базы, а <code>export</code> у платформы занят выгрузкой в XML <span class="ref">(<a href="platform.html#t12">12</a>)</span>. От сборки <code>download</code> отличается источником: пакет отражает базу, и в нём есть всё, что успели наделать в Конфигураторе. <code>upload</code> не часть <code>push</code> намеренно: у него свои режимы платформы, «объединение» там означает операцию по файлу настроек, слияния версий в нём нет. Поэтому режим называется <code>combine</code>: слово <code>merge</code> обещало бы трёхстороннее слияние.</p>
+<p><code>upload</code> и <code>download</code> носят конфигурацию одним файлом, <code>push</code> и <code>pull</code> — исходниками по частям; предмет у четырёх команд один. Пара названа по направлению: пакет отдают базе и забирают у неё, как <code>tools download</code> забирает дистрибутив. Слово платформы <code>load</code> осталось скрытым синонимом: пары у него нет, <code>save</code> читалось бы как запись внутрь базы, а <code>export</code> у платформы занят выгрузкой в XML <span class="ref">(<a href="platform.html#t12">12</a>)</span>. От сборки <code>download</code> отличается источником: пакет отражает базу, и в нём есть всё, что успели наделать в Конфигураторе. <code>upload</code> не часть <code>push</code> намеренно: у него свои режимы платформы, «объединение» там означает операцию по файлу настроек, слияния версий в нём нет. Поэтому режим называется <code>combine</code>: слово <code>merge</code> обещало бы трёхстороннее слияние. <code>reset</code> — обратный ход <code>apply</code>: он не трогает базу данных, а возвращает к ней основную конфигурацию. Слово взято у платформы, <code>ibcmd config reset</code>, и совпадает с гитовским <code>reset --hard</code>, который тоже уничтожает незафиксированное.</p>
 
 <h3>Сеансы</h3>
 
@@ -242,6 +243,7 @@ v8-runner status --all                           # все объявленные
 <tr><td class="k"><code>providers.push</code></td><td>отправкой исходников в базу</td></tr>
 <tr><td class="k"><code>providers.pull</code></td><td>выгрузкой из базы</td></tr>
 <tr><td class="k"><code>providers.apply</code></td><td>применением к базе данных</td></tr>
+<tr><td class="k"><code>providers.reset</code></td><td>откатом основной конфигурации к базе данных</td></tr>
 <tr><td class="k"><code>providers.upload</code></td><td>пакетом в базу</td></tr>
 <tr><td class="k"><code>providers.download</code></td><td>пакетом из базы</td></tr>
 <tr><td class="k"><code>providers.diff</code></td><td>сравнением</td></tr>
@@ -315,6 +317,7 @@ v8-runner pull --all              и расширения, которых в п�
 <thead><tr><th>имя</th><th>почему не взято</th></tr></thead>
 <tbody>
 <tr><td class="k"><code>checkout</code> для <code>upload</code></td><td>в гите это местное действие, а загрузка пакета меняет базу. Обманывает в опасную сторону</td></tr>
+<tr><td class="k"><code>restore</code> для отброса непринятого</td><td>в гите <code>restore</code> возвращает файлы к зафиксированному, но здесь это слово занято образом <code>.dt</code>: <code>infobase restore</code>. Отброс непринятого назван <code>reset</code>, как у платформы и как <code>reset --hard</code></td></tr>
 <tr><td class="k"><code>merge</code> для объединения конфигураций</td><td>объединение по файлу настроек совпадает с трёхсторонним слиянием только в букве; режим назван <code>combine</code></td></tr>
 <tr><td class="k"><code>push --force</code> для полной пересборки</td><td>в гите значит «перезапиши ту сторону», и ровно это он здесь и значит. Полная пересборка — «посчитай заново здесь», у неё другое имя: <code>push --full</code></td></tr>
 <tr><td class="k"><code>remote</code> отдельной командой</td><td>вышло бы два слова для одной вещи. Базы объявляются в местном слое, адреса видны в <code>status --all</code>, действия с базой собраны под <code>infobase</code></td></tr>
@@ -347,6 +350,6 @@ v8-runner pull --all              и расширения, которых в п�
 </tbody>
 </table></div>
 </main>
-<script src="site.js?v=6" defer></script>
+<script src="site.js?v=7" defer></script>
 </body>
 </html>

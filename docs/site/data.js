@@ -179,6 +179,18 @@ window.RUNNER_DATA = (function () {
       }
     },
     {
+      id: 'reset', verb: 'reset', title: 'Отбросить непринятое в базе',
+      what: 'Возвращает основную конфигурацию к конфигурации базы данных; чужое непринятое без --force не трогает.',
+      cmd: function (ctx) { return 'v8-runner reset'; },
+      applies: function (ctx) { return notExternal(ctx, 'reset'); },
+      today: function (ctx) { return { chain: [], config: [], note: 'нет' }; },
+      target: function (ctx) {
+        if (ctx.target === 'standalone') return { chain: [P.designer], config: ['connection'], note: '/RollbackCfg по прямому шлюзу; в наборе SSH-шлюза отката нет' };
+        if (ctx.target === 'cluster') return { chain: [P.designer], config: ['connection'], note: '/RollbackCfg, для расширения с -Extension' };
+        return { chain: [P.designer, P.ibcmd], config: ['connection'], note: '/RollbackCfg или ibcmd config reset; своё непринятое — по памяти о поколении, чужое — только с --force' };
+      }
+    },
+    {
       id: 'diff', verb: 'diff', title: 'Что изменилось в базе',
       what: 'Перечисляет объекты, изменившиеся в базе с последней синхронизации; --against сравнивает с базой данных, поставщиком или пакетом.',
       cmd: function (ctx) { return 'v8-runner diff'; },
