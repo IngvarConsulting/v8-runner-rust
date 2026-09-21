@@ -198,7 +198,7 @@ window.RUNNER_DATA = (function () {
       today: function (ctx) { return { chain: [], config: [], note: 'нет' }; },
       target: function (ctx) {
         if (ctx.target === 'standalone') return { chain: [P.ibcmd], config: ['standalone.*'], note: 'ibcmd session list и terminate; блокировки начала сеансов у автономного сервера нет' };
-        return { chain: [P.rac], config: ['cluster.ras', 'cluster.user и password — администратор кластера', 'user и password — для deny и allow'], note: 'rac session и rac infobase update --sessions-deny; исполнитель один, ключа нет' };
+        return { chain: [P.rac], config: ['cluster.ras — или раннер поднимет ras сам', 'cluster.user и password — администратор кластера', 'user и password — для deny и allow'], note: 'rac session и rac infobase update --sessions-deny; ras объявленный или поднятый раннером на время команды; исполнитель один, ключа нет' };
       }
     },
     {

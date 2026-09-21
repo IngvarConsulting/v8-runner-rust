@@ -93,7 +93,7 @@
    замер 5.13; единая адресация `--ref`.
 
 7. `SITE-TASK-007` (P2). `check` вместо двух подкоманд `syntax`. Сайт: `check` —
-   только `/CheckConfig` со всеми режимами, `/CheckModules` покрыт им (тезис 78);
+   только `/CheckConfig` со всеми режимами, `/CheckModules` покрыт им (тезис 79);
    для EDT — `validate`. Код: `syntax designer-config` и `syntax designer-modules`
    с 21 и 9 флагами (`src/cli/args.rs:738-816`), `/CheckModules` отдельной веткой
    (`src/use_cases/check_syntax.rs:215`).
@@ -117,7 +117,7 @@
 9. `SITE-TASK-011` (P0). Строка подключения рядом с SSH-шлюзом у автономной цели.
    Сайт: `connection: Srvr=…;Ref=…` ведёт Конфигуратор в прямой шлюз, `standalone.gate`
    ведёт по SSH; секция `standalone` объявляет вид цели, достаточно любого из двух
-   ключей (`architecture.html#targets`, `deployments.html#d-standalone-local`, тезис 64).
+   ключей (`architecture.html#targets`, `deployments.html#d-standalone-local`, тезис 65).
    Код: `standalone` вместе с непустой `connection` — `TargetDeclaredTwice`
    (`src/config/validate.rs:63,792`); `exchange` обязателен (`:805`); `dbms` запрещён.
    Сделать: снять взаимное исключение, `exchange` обязателен только когда объявлен
@@ -126,7 +126,7 @@
 
 10. `SITE-TASK-012` (P1). Секция `cluster` в секции базы: `ras`, `user`, `password`,
     `agent.user`, `agent.password`. Сайт: три уровня учётных данных, каждый
-    запрашивается только операцией, которой он нужен (`cli.html` «Сеансы», тезис 58).
+    запрашивается только операцией, которой он нужен (`cli.html` «Сеансы», тезис 59).
     Код: секции нет, серверные реквизиты только в `dbms` (`model.rs:265-285`).
     Нужна задачам D и 020.
 
@@ -154,7 +154,7 @@
     в кластере — Конфигуратор `CREATEINFOBASE` со строкой `Srvr/Ref/DBMS/DBSrvr/DB/
     DBUID/DBPwd/CrSQLDB=Y/SUsr/SPwd/SchJobDn`, `rac` — запасной путь; для автономного
     сервера отказ с рецептом `ibcmd server config init` + `ibcmd infobase create`
-    (`cli.html` «Начало работы», тезисы 72–74). Код: `CREATEINFOBASE` только для `File=`
+    (`cli.html` «Начало работы», тезисы 73–75). Код: `CREATEINFOBASE` только для `File=`
     (`src/platform/designer.rs:178-186`, `connection.rs:114-118`); серверная база —
     `ibcmd infobase create --create-database` по `dbms` (`ibcmd.rs:458-466`,
     `init_project.rs:705-717`); `init` сегодня и есть создание базы (`args.rs:56`).
@@ -168,7 +168,7 @@
     `agent` по SSH — когда строка не объявлена или назначен ключом; `upload`, `check`,
     `diff`, `download --state db`, снимок, `launch designer|thin`, `test` тонким
     клиентом работают по прямому шлюзу; толстый клиент и обычное приложение отказывают
-    (`architecture.html#d-ops`, `deployments.html#d-standalone-*`, тезисы 64, 59).
+    (`architecture.html#d-ops`, `deployments.html#d-standalone-*`, тезисы 65, 60).
     Код: единственная точка входа — SSH-шлюз (`capability.rs:284-299`,
     `agent_session.rs:166-193`); отказы `load`, `syntax`, `publish`, снимка
     (`provider_selection.rs:56-65`), `test` (`run_tests/coordinator.rs:535-540`),
@@ -181,7 +181,7 @@
 
 16. `SITE-TASK-022` (P1). Порядок цепочек по виду цели.
     Сайт: файловая база — `agent → designer → ibcmd`, кластер — `agent → designer`,
-    `ibcmd` в столбце кластера отсутствует (`architecture.html#d-ops`, тезисы 59, 73).
+    `ibcmd` в столбце кластера отсутствует (`architecture.html#d-ops`, тезисы 60, 74).
     Код: `designer → ibcmd`, `agent` экспериментален и в цепочку не входит
     (`capability.rs:233-237,304-310`); `ibcmd` участвует в цепочке серверной базы.
     Сделать: `agent` первым для файловой базы и кластера после стража «агентский
@@ -198,7 +198,7 @@
 18. `SITE-TASK-024` (P1). `launch` по единому правилу адреса.
     Сайт: без ключа тонкий клиент берёт строку подключения, веб-адрес — когда строка
     не объявлена; `--via web|connection` только для тонкого; `launch web` — браузером;
-    на автономной цели `thick` и `ordinary` отказывают (`architecture.html`, тезис 66).
+    на автономной цели `thick` и `ordinary` отказывают (`architecture.html`, тезис 67).
     Код: `--via` есть (`launch_app.rs:91-135`), но у автономной цели умолчание — веб, а
     `designer` и `thick` отказывают всегда (`launch_app.rs:72-79`); реквизиты клиенту не
     передаются, потому что считаются реквизитами шлюза.
@@ -232,15 +232,25 @@
     Сайт: окно обслуживания собирается из штатных свойств базы, исполнитель один —
     `rac` по `cluster.ras` с администратором кластера, `deny` и `allow` — с
     пользователем базы; у автономного сервера — `ibcmd session`; у файловой базы отказ
-    (`cli.html` «Сеансы», `deployments.html#d-ras`, тезисы 55–58). Код: `rac` в `src`
+    (`cli.html` «Сеансы», `deployments.html#d-ras`, тезисы 56–59). Код: `rac` в `src`
     отсутствует; `ibcmd session` не вызывается.
     Сделать: адаптер `rac` (процесс, разбор вывода, три уровня учётных данных),
     `ibcmd session` по SSH для автономной цели; команды `rac` — из его справки,
     замер 5.3. `providers.sessions` не заводить.
 
+23. `SITE-TASK-033` (P1). `ras`, поднятый раннером.
+    Сайт: без `cluster.ras` раннер поднимает `ras cluster` сам, на своей машине, против
+    агента кластера из строки подключения, и гасит вместе с командой, как управляемого
+    агента Конфигуратора (`deployments.html#d-ras-managed`, тезис 55). Код: `ras`
+    не запускается, серверные компоненты в поиске утилит не различаются
+    (`src/platform/locator.rs:26-33`).
+    Сделать: управляемый `ras` по образцу управляемого агента (`agent_session.rs:221-228`):
+    свободный порт, адрес агента из `Srvr=` с портом 1540 или `cluster.agent.address`,
+    жизнь с замком, квитанция называет, что сервер администрирования поднят раннером.
+
 ### E. Память и первый контакт
 
-23. `SITE-TASK-040` (P0). Память по базе.
+24. `SITE-TASK-040` (P0). Память по базе.
     Сайт: под `workPath/infobases/<имя>/` лежат `generation.json`, `hashes/` по
     наборам и `ConfigDumpInfo.xml` этой пары; отправка в `test` не сбивает память о
     `prod` (`sources.html#memory`). Код: хеши по набору исходников в одном `workPath`
@@ -251,7 +261,7 @@
     Сделать: раскладка памяти по имени базы, файл версий у раннера и подкладывается
     на время команды, полная выгрузка через staging (`INV.USE-CASES.*` перепроверить).
 
-24. `SITE-TASK-041` (P0). Поколение у всех исполнителей и правило первого контакта.
+25. `SITE-TASK-041` (P0). Поколение у всех исполнителей и правило первого контакта.
     Сайт: поколение спрашивается до операции и после; `push` в базу, ушедшую вперёд, —
     отказ `non_fast_forward` со ссылкой на `pull`; `push` в непустую базу без памяти —
     отказ с выбором `pull` или `push --force`; сорок нулей — пустая база
@@ -262,13 +272,13 @@
     Сделать: чтение поколения у трёх исполнителей, сравнение до `push` и `pull`,
     новые виды отказа (задача 005). Замер 5.7.
 
-25. `SITE-TASK-042` (P1). `status`, `status --deep`, `status --all`.
+26. `SITE-TASK-042` (P1). `status`, `status --deep`, `status --all`.
     Сайт: без ключа отвечает по памяти и платформу не запускает; `--deep` спрашивает
     поколение и состав расширений; `--all` перечисляет базы (`sources.html`, `cli.html`).
     Код: команды нет; состав расширений умеет `ibcmd config extension list`
     (`ibcmd.rs:306-309`) и агент, `/DumpDBCfgList` Конфигуратором не вызывается.
 
-26. `SITE-TASK-043` (P1). `pull` как слияние.
+27. `SITE-TASK-043` (P1). `pull` как слияние.
     Сайт: `pull` сливает выгрузку с каталогом, при конфликте отказывает и оставляет
     разметку системе версий; `pull --force` заменяет каталог; `pull --all` объявляет
     наборы (`cli.html`, `sources.html#states`). Код: `dump --mode full|incremental|partial`
@@ -277,7 +287,7 @@
 
 ### F. Исходники и расширения
 
-27. `SITE-TASK-050` (P1). Свойства расширения из исходников.
+28. `SITE-TASK-050` (P1). Свойства расширения из исходников.
     Сайт: имя, префикс и назначение — свойства в `Configuration.xml`; `push my-ext`
     заводит расширение в базе сам; `extensions set` правит свойства установленного
     экземпляра (`sources.html`, `cli.html#ext`, тезисы 36, 39). Код: `extensions create`
@@ -287,23 +297,23 @@
     (TODO 3 переезжает сюда), `create` и `delete` — скрытые синонимы `push`/`push --delete`.
     Замер 5.8 на переименование.
 
-28. `SITE-TASK-051` (P1). `diff`. Сайт: список изменившихся объектов по файлу версий
+29. `SITE-TASK-051` (P1). `diff`. Сайт: список изменившихся объектов по файлу версий
     (`/DumpConfigToFiles -getChanges`, `ibcmd export status`), отчёты `/CompareCfg`
     против базы данных, поставщика по имени или пакета (`cli.html`, тезисы 8, 10).
     Код: `-getChanges` не используется, `/CompareCfg` только как проба совместимости
     с фиксированными `-ReportType Brief -ReportFormat txt` (`designer.rs:147-176`).
 
-29. `SITE-TASK-052` (P2). Хранилище конфигурации. Сайт: выгрузка не ограничена, полная
+30. `SITE-TASK-052` (P2). Хранилище конфигурации. Сайт: выгрузка не ограничена, полная
     загрузка недоступна, частичная — для захваченных объектов (тезис 50). Код: команд
     хранилища нет. Замер 5.9, затем решение о захвате перед частичным `push`.
 
-30. `SITE-TASK-053` (P2). `download --state db` у агента. Сайт: у SSH-шлюза только
+31. `SITE-TASK-053` (P2). `download --state db` у агента. Сайт: у SSH-шлюза только
     основная конфигурация, `--state db` — Конфигуратор (`architecture.html#d-ops`).
     Код совпадает (`infobase_export/agent.rs:33`); переименование по 002.
 
 ### G. Реестр решений и контракты
 
-31. `SITE-TASK-060` (P0). Заменить записи, которым целевая модель противоречит, до
+32. `SITE-TASK-060` (P0). Заменить записи, которым целевая модель противоречит, до
     реализации, по `DEC.2026-09-16.A-SUPERSESSION-IS-RECORDED-BY-BOTH-DECISIONS`:
     - `INV.CLI.A-STANDALONE-CLIENT-GOES-BY-THE-WEB-ADDRESS`,
       `INV.CLI.A-STANDALONE-CLIENT-IS-NOT-GIVEN-THE-GATE-CREDENTIALS`,
@@ -318,14 +328,14 @@
     `DEC.2026-09-16.A-THIN-CLIENT-OPENS-EITHER-ADDRESS`, `DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE`,
     `INV.PLATFORM.AN-AGENT-FOR-A-FILE-OR-CLUSTER-TARGET-NEEDS-THE-LOCAL-PLATFORM`.
 
-32. `SITE-TASK-061` (P0). Новые решения, которых в реестре нет: имена `upload` и
+33. `SITE-TASK-061` (P0). Новые решения, которых в реестре нет: имена `upload` и
     `download`; `origin` как умолчание карты `infobases`; скрытые синонимы на один цикл;
     порядок цепочек по виду цели, включая Конфигуратор первым у автономного сервера;
     `infobase create` по виду цели; область `sessions` — только своя база; память по
     базе и правило первого контакта; `pull` как слияние с отказом при конфликте;
     `check` = `/CheckConfig`. Каждое — отдельной записью со ссылкой на страницу сайта.
 
-33. `SITE-TASK-062` (P1). Контракты `CTR.WIRE.*`: переименовать `BOOTSTRAP → CLONE`,
+34. `SITE-TASK-062` (P1). Контракты `CTR.WIRE.*`: переименовать `BOOTSTRAP → CLONE`,
     `BUILD → PUSH`, `DUMP → PULL`, `CONFIG-INIT → INIT`, `SYNTAX → CHECK`,
     `INFOBASE-CONFIGURATION-EXPORT → DOWNLOAD`, `LOAD → UPLOAD`; завести `STATUS`,
     `APPLY`, `DIFF`, `SESSIONS`, `INFOBASE-CREATE`; `CTR.WIRE.COMMAND-ENVELOPE` — поле `next`;
@@ -333,7 +343,7 @@
     `CTR.MCP.PUBLISHED-TOOL-SURFACE` не меняется: имена инструментов MCP — свой
     контракт, переименования командной строки в него не протекают (`cli.html#why`).
 
-34. `SITE-TASK-063` (P3). Стражи: тест, что скрытый синоним отсутствует в `--help`;
+35. `SITE-TASK-063` (P3). Стражи: тест, что скрытый синоним отсутствует в `--help`;
     тест, что состав инструментов MCP не изменился; проверка, что таблица
     `architecture.html#d-ops` и `docs/site/data.js` (`target()`) совпадают с
     `src/domain/capability.rs`, — скрипт в `scripts/`, запуск в CI; снятие синонимов
@@ -366,17 +376,17 @@
 платформы и командной строкой.
 
 1. Порт прямого шлюза `ibsrv` и строка `Srvr=host[:port];Ref=<имя>` для Конфигуратора
-   и тонкого клиента; имя равно `--name` сервера (тезис 64).
+   и тонкого клиента; имя равно `--name` сервера (тезис 65).
 2. Пакетные команды Конфигуратора по прямому шлюзу: `/LoadConfigFromFiles`,
    `/DumpConfigToFiles`, `/UpdateDBCfg -SessionTerminate`, `/CheckConfig`,
    `/CompareCfg`, `/DumpDBCfg`, `/DumpIB`, `/RestoreIB`.
 3. Команды `rac` для `sessions list|terminate|deny|allow` и `rac infobase create`:
-   состав ключей из `rac help` (тезис 57), поведение при заполненных списках
-   администраторов (тезис 58).
+   состав ключей из `rac help` (тезис 58), поведение при заполненных списках
+   администраторов (тезис 59).
 4. `CREATEINFOBASE` с клиент-серверной строкой: обязательные поля, `CrSQLDB=Y`,
-   `SUsr`/`SPwd`, `SchJobDn`, код выхода при существующей базе (тезис 72).
+   `SUsr`/`SPwd`, `SchJobDn`, код выхода при существующей базе (тезис 73).
 5. `ibcmd config import --out` для `.cf` и `.cfe` без базы (тезис 30).
-6. Состав `ibcmd config check` (тезис 104).
+6. Состав `ibcmd config check` (тезис 105).
 7. `/GetConfigGenerationID` с `/Out` в пакетном режиме и `ibcmd config generation-id`
    на живой базе СУБД (тезис 13; TODO 4).
 8. Переименование расширения через `push`: что делает платформа, когда имя в
