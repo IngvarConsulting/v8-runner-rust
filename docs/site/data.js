@@ -136,7 +136,7 @@ window.RUNNER_DATA = (function () {
       id: 'infobase-create', verb: 'infobase create', title: 'Создать базу',
       what: 'Создаёт базу, если её нет.',
       cmd: function (ctx) { return 'v8-runner infobase create'; },
-      applies: function (ctx) { return standaloneRefuses(ctx, 'у автономного сервера базу не создают снаружи: раннер к нему подключается, ничего не запуская') || needEdt(ctx); },
+      applies: function (ctx) { return standaloneRefuses(ctx, 'базу автономного сервера создают ibcmd до запуска сервера, на его машине; раннер к нему подключается, ничего не запуская') || needEdt(ctx); },
       today: function (ctx) {
         var chain = builderChoice(ctx, ctx.target === 'file', true);
         var cfg = ['infobase.connection'];
@@ -145,7 +145,7 @@ window.RUNNER_DATA = (function () {
         return { chain: chain, config: cfg, note: note };
       },
       target: function (ctx) {
-        if (ctx.target === 'standalone') return { kind: 'subject', why: 'автономный сервер поднимает человек', fix: 'раннер его не создаёт и не запускает: infobase.standalone называет уже работающий шлюз' };
+        if (ctx.target === 'standalone') return { kind: 'subject', why: 'базу автономного сервера создают до его запуска, на его машине', fix: 'ibcmd server config init, затем ibcmd infobase create --load|--import|--restore; раннер подключается к уже работающему шлюзу' };
         if (ctx.target === 'cluster') return { chain: [P.designer, P.rac], config: ['infobase.connection', 'infobase.dbms.*', 'infobase.cluster.user — если в кластере заведены администраторы'], note: 'CREATEINFOBASE с клиент-серверной строкой: регистрация в кластере и CrSQLDB=Y одной командой; rac — запасной путь' };
         return { chain: [P.ibcmd, P.designer], config: ['infobase.connection'], note: 'ibcmd создаёт файловую базу сразу с конфигурацией из исходников (--import)' };
       }
