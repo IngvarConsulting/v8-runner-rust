@@ -57,6 +57,7 @@ pub struct AppConfig {
 
     /// Build pipeline configuration
     #[serde(default)]
+    #[serde(rename = "push", alias = "build")]
     pub build: BuildConfig,
 
     /// Platform tools configuration

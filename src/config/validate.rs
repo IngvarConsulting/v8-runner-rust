@@ -307,6 +307,11 @@ pub enum ConfigValidationError {
     InfobaseKeysMixed { file: String },
 
     #[error(
+        "{file} names both `push:` and `build:`: `build:` is a one-cycle synonym for `push:`, keep one"
+    )]
+    PushSectionKeysMixed { file: String },
+
+    #[error(
         "infobases.{name}: an infobase name is a plain identifier matching {pattern} — it names a directory under workPath"
     )]
     InfobaseNameInvalid { name: String, pattern: &'static str },
@@ -2753,7 +2758,7 @@ mod tests {
         assert!(matches!(
             error,
             ConfigValidationError::ProviderKeyWithoutChoice {
-                operation: "load",
+                operation: "upload",
                 ..
             }
         ));

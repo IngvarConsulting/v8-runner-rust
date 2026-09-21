@@ -370,7 +370,16 @@ struct MainConfigSchema {
     /// Project source sets to build, test, dump, or materialize.
     #[serde(rename = "source-set", default)]
     source_sets: Vec<SourceSetSchema>,
-    /// Build pipeline settings.
+    /// Settings of `push`: how sources reach the infobase.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "BuildSchema")]
+    push: Option<BuildSchema>,
+    /// Previous spelling of `push`; accepted for one release cycle.
+    #[deprecated = "name the section by its command: push"]
     #[serde(
         default,
         deserialize_with = "deserialize_non_null_optional",
@@ -494,22 +503,46 @@ enum ProviderSchema {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
 struct ProvidersSchema {
-    /// Executor for `init`.
+    /// Executor for `infobase create`.
+    #[serde(
+        rename = "infobase.create",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    infobase_create: Option<ProviderSchema>,
+    /// Previous spelling of `infobase.create`; accepted for one release cycle.
+    #[deprecated = "name the executor by its command: providers.infobase.create"]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     init: Option<ProviderSchema>,
-    /// Executor for `build`.
+    /// Executor for `push`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    push: Option<ProviderSchema>,
+    /// Previous spelling of `push`; accepted for one release cycle.
+    #[deprecated = "name the executor by its command: providers.push"]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     build: Option<ProviderSchema>,
-    /// Executor for `load`.
+    /// Executor for `upload`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    upload: Option<ProviderSchema>,
+    /// Previous spelling of `upload`; accepted for one release cycle.
+    #[deprecated = "name the executor by its command: providers.upload"]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     load: Option<ProviderSchema>,
-    /// Executor for `dump`.
+    /// Executor for `pull`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pull: Option<ProviderSchema>,
+    /// Previous spelling of `pull`; accepted for one release cycle.
+    #[deprecated = "name the executor by its command: providers.pull"]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dump: Option<ProviderSchema>,
     /// Executor for `extensions`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     extensions: Option<ProviderSchema>,
-    /// Executor for `infobase configuration export`.
+    /// Executor for `download`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    download: Option<ProviderSchema>,
+    /// Previous spelling of `download`; accepted for one release cycle.
+    #[deprecated = "name the executor by its command: providers.download"]
     #[serde(
         rename = "infobase.configuration.export",
         default,

@@ -724,7 +724,19 @@
               "type": "null"
             }
           ],
-          "description": "Executor for `build`."
+          "deprecated": true,
+          "description": "Previous spelling of `push`; accepted for one release cycle."
+        },
+        "download": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `download`."
         },
         "dump": {
           "anyOf": [
@@ -735,7 +747,8 @@
               "type": "null"
             }
           ],
-          "description": "Executor for `dump`."
+          "deprecated": true,
+          "description": "Previous spelling of `pull`; accepted for one release cycle."
         },
         "extensions": {
           "anyOf": [
@@ -757,7 +770,19 @@
               "type": "null"
             }
           ],
-          "description": "Executor for `infobase configuration export`."
+          "deprecated": true,
+          "description": "Previous spelling of `download`; accepted for one release cycle."
+        },
+        "infobase.create": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `infobase create`."
         },
         "infobase.dump": {
           "anyOf": [
@@ -790,7 +815,8 @@
               "type": "null"
             }
           ],
-          "description": "Executor for `init`."
+          "deprecated": true,
+          "description": "Previous spelling of `infobase.create`; accepted for one release cycle."
         },
         "load": {
           "anyOf": [
@@ -801,7 +827,8 @@
               "type": "null"
             }
           ],
-          "description": "Executor for `load`."
+          "deprecated": true,
+          "description": "Previous spelling of `upload`; accepted for one release cycle."
         },
         "make": {
           "anyOf": [
@@ -825,6 +852,28 @@
           ],
           "description": "Executor for `publish`. Accepted by the schema so validation can say the operation has no choice."
         },
+        "pull": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `pull`."
+        },
+        "push": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `push`."
+        },
         "syntax": {
           "anyOf": [
             {
@@ -835,6 +884,17 @@
             }
           ],
           "description": "Executor for `syntax`."
+        },
+        "upload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `upload`."
         }
       },
       "type": "object"

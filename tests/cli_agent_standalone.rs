@@ -683,7 +683,7 @@ fn a_standalone_server_has_one_executor_and_no_load() {
     let (code, payload) = run(&harness, &["dump", "--mode", "full"]);
     assert_ne!(code, 0, "{payload}");
     assert!(
-        error_message(&payload).contains("providers.dump is not allowed"),
+        error_message(&payload).contains("providers.pull is not allowed"),
         "{payload}"
     );
 

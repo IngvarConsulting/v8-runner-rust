@@ -145,6 +145,7 @@ fn load_config_with_mode(
     reject_legacy_config_keys(&root)?;
     reject_infobases_in_project_file(&root)?;
     let mut warnings = Vec::new();
+    warnings.extend(fold_push_synonym(&mut root, ConfigFile::Project(&path))?);
     warnings.extend(fold_infobase_synonym(
         &mut root,
         ConfigFile::Project(&path),
@@ -165,6 +166,7 @@ fn load_config_with_mode(
         reject_local_overlay_keys(&overlay)?;
         validate_local_overlay_schema_boundary(overlay.clone())
             .map_err(|error| ConfigLoadError::LocalOverlayUnsupportedShape(error.to_string()))?;
+        warnings.extend(fold_push_synonym(&mut overlay, ConfigFile::Local)?);
         warnings.extend(fold_infobase_synonym(&mut overlay, ConfigFile::Local)?);
         provider_origins.extend(provider_override_keys(&overlay, LOCAL_CONFIG_FILE_NAME));
         merge_yaml_values(&mut root, overlay);
@@ -307,6 +309,29 @@ fn fold_infobase_synonym(
     Ok(Some(warning))
 }
 
+/// Секция настроек отправки названа именем команды. Прежнее имя принимается один цикл
+/// выпуска и сворачивается здесь: в карте `serde` оба ключа схлопнулись бы молча, а
+/// молчание тут — потерянная настройка.
+fn fold_push_synonym(
+    root: &mut serde_yaml::Value,
+    file: ConfigFile<'_>,
+) -> Result<Option<String>, ConfigValidationError> {
+    let mapping = root_mapping_mut(root)?;
+    let has_old = mapping.contains_key(yaml_key("build"));
+    let has_new = mapping.contains_key(yaml_key("push"));
+    if has_old && has_new {
+        return Err(ConfigValidationError::PushSectionKeysMixed { file: file.name() });
+    }
+    let Some(section) = mapping.remove(yaml_key("build")) else {
+        return Ok(None);
+    };
+    mapping.insert(yaml_key("push"), section);
+    let name = file.name();
+    Ok(Some(format!(
+        "`build:` in {name} is a one-cycle synonym for `push:`; rename the key"
+    )))
+}
+
 /// Выбирает базу запуска и кладёт её в документ как `infobase` и `infobaseName`, чтобы
 /// `AppConfig` собрался без сентинела: конфига без выбранной базы не бывает.
 fn select_infobase(
@@ -421,7 +446,12 @@ fn provider_override_keys(root: &serde_yaml::Value, file: &str) -> Vec<(String, 
             providers
                 .keys()
                 .filter_map(serde_yaml::Value::as_str)
-                .map(|key| (key.to_owned(), file.to_owned()))
+                // Квитанция называет ключ именем команды, как бы его ни написали в файле.
+                .map(|key| {
+                    let canonical = crate::domain::capability::Operation::parse_config_key(key)
+                        .map_or_else(|| key.to_owned(), |operation| operation.as_str().to_owned());
+                    (canonical, file.to_owned())
+                })
                 .collect()
         })
         .unwrap_or_default()
