@@ -38,7 +38,7 @@ window.RUNNER_DATA = (function () {
     target: [
       { id: 'file',       label: 'файловая',  hint: 'File=…; раннер может создать её сам. Агента для неё поднимает раннер — нужна платформа' },
       { id: 'cluster',    label: 'кластер 1С', hint: 'Srvr=…;Ref=…; данные СУБД нужны только чтобы создать базу. Агента для неё поднимает раннер — нужна платформа' },
-      { id: 'standalone', label: 'автономный сервер', hint: 'секция infobase.standalone; сервер держит свой SSH-шлюз, платформа на машине раннера не нужна' }
+      { id: 'standalone', label: 'автономный сервер', hint: 'секция infobase.standalone; Конфигуратор идёт в прямой шлюз как в кластер, SSH-шлюз сервера даёт агентский набор без платформы у раннера' }
     ],
     tools: [
       { id: 'designer', label: 'платформа 1С (1cv8, Конфигуратор)', short: 'платформа 1С', def: true },
@@ -67,10 +67,9 @@ window.RUNNER_DATA = (function () {
       ? { kind: 'subject', why: 'внешние обработки в базу не загружаются', fix: 'для них — make и convert' }
       : null;
   }
-  // Автономный сервер отвечает только через свой SSH-шлюз, и набор операций у него
-  // закрыт решением, а не недоделкой: в матрице (src/domain/capability.rs) строки есть
-  // только у build, dump, make, extensions и infobase configuration export. Остальное
-  // отказывает типизированно, и «когда-нибудь появится» тут сказать нельзя.
+  // У автономного сервера два канала: Конфигуратор по прямому шлюзу, как в кластер,
+  // и SSH-шлюз с урезанным агентским набором. Отказывает у него только создание базы:
+  // её создают ibcmd до запуска сервера, на его машине.
   function standaloneRefuses(ctx, why) {
     return ctx.target === 'standalone' ? { kind: 'target', why: why, fix: '' } : null;
   }
@@ -128,7 +127,7 @@ window.RUNNER_DATA = (function () {
       applies: function (ctx) { return notExternal(ctx, 'clone'); },
       today: function (ctx) { return { chain: builderChoice(ctx, true, true), config: [], note: 'сейчас это bootstrap' }; },
       target: function (ctx) {
-        if (ctx.target === 'standalone') return { chain: [P.agent], config: ['infobase.standalone.*'], note: '' };
+        if (ctx.target === 'standalone') return { chain: [P.designer, P.agent], config: ['infobase.connection или infobase.standalone.gate'], note: 'пишет v8project.yaml, местный слой и делает pull' };
         return { chain: [P.agent, P.designer], config: [], note: 'пишет v8project.yaml, местный слой и делает pull' };
       }
     },
@@ -162,7 +161,7 @@ window.RUNNER_DATA = (function () {
         return { chain: chain, config: cfg, note: ctx.format === 'EDT' ? 'шаг экспорта EDT → платформа, затем загрузка сгенерированного' : 'partial или full решает обнаружение изменений' };
       },
       target: function (ctx) {
-        if (ctx.target === 'standalone') return { chain: [P.agent], config: ['infobase.standalone.*'], note: 'load-config-from-files + update-db-cfg в одной сессии шлюза' };
+        if (ctx.target === 'standalone') return { chain: [P.designer, P.agent], config: ['infobase.connection — прямой шлюз', 'infobase.standalone.gate и exchange — для agent', 'source-set[]'], note: 'Конфигуратор по прямому шлюзу читает исходники у раннера; agent — load-config-from-files + update-db-cfg одной сессией, файлы через канал обмена' };
         if (ctx.target === 'cluster') return { chain: [P.agent, P.designer], config: ['infobase.connection', 'source-set[]'], note: 'одна сессия агента на всю команду; без агента — Designer' };
         return { chain: [P.agent, P.designer, P.ibcmd], config: ['infobase.connection', 'source-set[]'], note: 'одна сессия агента на всю команду; без агента — Designer' };
       }
@@ -174,7 +173,7 @@ window.RUNNER_DATA = (function () {
       applies: function (ctx) { return notExternal(ctx, 'apply') || needEdt(ctx); },
       today: function (ctx) { return { chain: builderChoice(ctx, true, true), config: ['infobase.connection'], note: 'часть build; отдельной команды нет' }; },
       target: function (ctx) {
-        if (ctx.target === 'standalone') return { chain: [P.agent], config: ['infobase.standalone.*'], note: 'update-db-cfg по шлюзу' };
+        if (ctx.target === 'standalone') return { chain: [P.designer, P.agent], config: ['infobase.connection', 'infobase.standalone.gate — для agent'], note: '/UpdateDBCfg по прямому шлюзу; agent — update-db-cfg по SSH' };
         if (ctx.target === 'cluster') return { chain: [P.agent, P.designer], config: ['infobase.connection'], note: '/UpdateDBCfg' };
         return { chain: [P.agent, P.designer, P.ibcmd], config: ['infobase.connection'], note: '/UpdateDBCfg или ibcmd config apply' };
       }
@@ -186,7 +185,7 @@ window.RUNNER_DATA = (function () {
       applies: function (ctx) { return notExternal(ctx, 'diff') || needEdt(ctx); },
       today: function (ctx) { return { chain: [], config: [], note: 'нет' }; },
       target: function (ctx) {
-        if (ctx.target === 'standalone') return { chain: [P.agent], config: ['infobase.standalone.*'], note: 'сравнения в наборе шлюза нет; только по файлу версий' };
+        if (ctx.target === 'standalone') return { chain: [P.designer, P.agent], config: ['infobase.connection'], note: '/CompareCfg и /DumpConfigToFiles -getChanges по прямому шлюзу; agent — только по файлу версий, отчёта сравнения у SSH-шлюза нет' };
         if (ctx.target === 'cluster') return { chain: [P.designer], config: ['infobase.connection'], note: '/DumpConfigToFiles -getChanges по файлу версий; отчёты сравнения — /CompareCfg' };
         return { chain: [P.ibcmd, P.designer], config: ['infobase.connection'], note: 'ibcmd export status по файлу версий; отчёты сравнения — /CompareCfg' };
       }
@@ -209,7 +208,7 @@ window.RUNNER_DATA = (function () {
       applies: function (ctx) { return notExternal(ctx, 'test') || needEdt(ctx); },
       today: function (ctx) { return { chain: [P.client], config: ['tests.yaxunit.* или tests.va.*', 'tools.va.epf_path — для Vanessa'], note: 'сначала отправка, как у push; test --no-build её пропускает' }; },
       target: function (ctx) {
-        if (ctx.target === 'standalone') return { chain: [P.client], config: ['infobase.web.url', 'tests.yaxunit.* или tests.va.*'], note: 'клиент по клиентскому адресу; сначала push через шлюз, --no-push пропускает' };
+        if (ctx.target === 'standalone') return { chain: [P.client], config: ['infobase.connection', 'infobase.web.url — для --via web', 'tests.yaxunit.* или tests.va.*'], note: 'тонкий клиент по прямому шлюзу или по HTTP с --via web; тесты в толстом клиенте недоступны — прямой шлюз его не пускает; сначала push, --no-push пропускает' };
         return { chain: [P.client], config: ['infobase.connection', 'tests.yaxunit.* или tests.va.*', 'tools.va.epf_path — для Vanessa'], note: 'сначала push, затем прогон; --no-push пропускает отправку' };
       }
     },
@@ -223,7 +222,7 @@ window.RUNNER_DATA = (function () {
         return { chain: chain, config: ['infobase.connection', 'source-set[]'], note: 'у ibcmd режим partial деградирует в incremental с предупреждением; публикация через staging и backup' };
       },
       target: function (ctx) {
-        if (ctx.target === 'standalone') return { chain: [P.agent], config: ['infobase.standalone.gate', 'infobase.standalone.exchange'], note: 'dump-config-to-files по шлюзу; результат забирается объявленным каналом — каталогом пользователя шлюза или SFTP того же соединения' };
+        if (ctx.target === 'standalone') return { chain: [P.designer, P.agent], config: ['infobase.connection', 'source-set[]', 'infobase.standalone.gate и exchange — для agent'], note: 'Конфигуратор пишет выгрузку у раннера; agent — dump-config-to-files по SSH, результат через объявленный канал обмена' };
         if (ctx.target === 'cluster') return { chain: [P.agent, P.designer], config: ['infobase.connection', 'source-set[]'], note: 'выгрузка агента побайтно равна выгрузке Конфигуратора (замер)' };
         return { chain: [P.agent, P.designer, P.ibcmd], config: ['infobase.connection', 'source-set[]'], note: 'выгрузка агента побайтно равна выгрузке Конфигуратора (замер)' };
       }
@@ -232,10 +231,10 @@ window.RUNNER_DATA = (function () {
       id: 'load', verb: 'load', title: 'Применить .cf / .cfe к базе',
       what: 'Применяет пакет к основной конфигурации, целиком заменяя её; --mode combine или update — по правилам платформы.',
       cmd: function (ctx) { return (ctx.type === 'EXTENSION' ? 'v8-runner load ext.cfe --ref my-ext' : 'v8-runner load main.cf'); },
-      applies: function (ctx) { return notExternal(ctx, 'load') || standaloneRefuses(ctx, 'в наборе шлюза нет сравнения, поэтому пакет через него не загружают'); },
+      applies: function (ctx) { return notExternal(ctx, 'load'); },
       today: function (ctx) { return { chain: ctx.tools.designer ? [P.designer] : [], config: ['infobase.connection'], note: 'только Конфигуратор; состояния совместимости supported / absent / not_established / not_probed' }; },
       target: function (ctx) {
-        if (ctx.target === 'standalone') return { kind: 'subject', why: 'в наборе шлюза нет сравнения', fix: 'проба совместимости перед загрузкой обязательна; отправляйте исходники через push' };
+        if (ctx.target === 'standalone') return { chain: [P.designer], config: ['infobase.connection'], note: 'по прямому шлюзу; через SSH-шлюз нет: в его наборе нет сравнения, а проба совместимости перед загрузкой обязательна' };
         return { chain: [P.agent, P.designer], config: ['infobase.connection'], note: '' };
       }
     },
@@ -263,7 +262,7 @@ window.RUNNER_DATA = (function () {
         return { chain: chain, config: ['infobase.connection'].concat(ctx.target === 'cluster' ? ['infobase.dbms.* — для ibcmd'] : []), note: 'раннер берёт первого готового из цепочки; квитанция называет пропущенных' };
       },
       target: function (ctx) {
-        if (ctx.target === 'standalone') return { chain: [P.agent], config: ['infobase.standalone.*'], note: 'dump-cfg по шлюзу: только основная конфигурация, --state db недоступен' };
+        if (ctx.target === 'standalone') return { chain: [P.designer, P.agent], config: ['infobase.connection'], note: '--state db — только Конфигуратор по прямому шлюзу; dump-cfg по SSH отдаёт основную' };
         if (ctx.target === 'cluster') return { chain: [P.agent, P.designer], config: ['infobase.connection'], note: '' };
         return { chain: [P.agent, P.designer, P.ibcmd], config: ['infobase.connection'], note: '' };
       }
@@ -272,10 +271,10 @@ window.RUNNER_DATA = (function () {
       id: 'ib-dump', verb: 'infobase dump / restore', title: 'Снять и вернуть всю базу (.dt)',
       what: 'Снимает базу в .dt и возвращает обратно.',
       cmd: function (ctx) { return 'v8-runner infobase dump --output ib.dt'; },
-      applies: function (ctx) { return notExternal(ctx, 'снимок базы') || standaloneRefuses(ctx, 'через шлюз снимок не снимают намеренно: dump-ib роняет ibsrv 8.3.27 (замер) — снимок снимают средствами самого сервера'); },
+      applies: function (ctx) { return notExternal(ctx, 'снимок базы'); },
       today: function (ctx) { return { chain: ctx.tools.designer ? [P.designer] : [], config: ['infobase.connection'], note: 'ibcmd для .dt остаётся экспериментом, пока нет проверки эксклюзивного доступа' }; },
       target: function (ctx) {
-        if (ctx.target === 'standalone') return { kind: 'subject', why: 'dump-ib через шлюз роняет ibsrv 8.3.27 (замер)', fix: 'снимок автономного сервера снимают его средствами' };
+        if (ctx.target === 'standalone') return { chain: [P.designer], config: ['infobase.connection'], note: '/DumpIB и /RestoreIB по прямому шлюзу; через SSH-шлюз намеренно нет: dump-ib роняет ibsrv 8.3.27 (замер)' };
         return { chain: [P.agent, P.designer], config: ['infobase.connection'], note: '' };
       }
     },
@@ -286,7 +285,7 @@ window.RUNNER_DATA = (function () {
       applies: function (ctx) { return notExternal(ctx, 'extensions'); },
       today: function (ctx) { return { chain: ctx.tools.ibcmd ? [P.ibcmd] : [], config: ['infobase.connection'].concat(ctx.target === 'cluster' ? ['infobase.dbms.*'] : []), note: 'состав базы умеет только ibcmd: у Конфигуратора нет пакетного списка' }; },
       target: function (ctx) {
-        if (ctx.target === 'standalone') return { chain: [P.agent], config: ['infobase.standalone.*'], note: 'состав и свойства расширений группой config extensions по шлюзу' };
+        if (ctx.target === 'standalone') return { chain: [P.agent, P.designer], config: ['infobase.standalone.gate', 'infobase.connection — для имён'], note: 'свойства — группой config extensions по SSH-шлюзу; имена — /DumpDBCfgList по прямому шлюзу' };
         if (ctx.target === 'cluster') return { chain: [P.agent, P.designer], config: ['infobase.connection'], note: 'Конфигуратор перечислит имена (/DumpDBCfgList), свойства — только агент; ibcmd к базе под кластером не применяется' };
         return { chain: [P.agent, P.ibcmd], config: ['infobase.connection'], note: '' };
       }
@@ -295,11 +294,12 @@ window.RUNNER_DATA = (function () {
       id: 'check', verb: 'check', title: 'Проверить конфигурацию и модули',
       what: 'Проверяет целостность, ссылки и синтаксис по режимам; для EDT — проект.',
       cmd: function (ctx) { return 'v8-runner check'; },
-      applies: function (ctx) { return ctx.format === 'EDT' ? needEdt(ctx) : (ctx.type === 'EXTERNAL' ? { kind: 'subject', why: 'для внешних наборов не описана', fix: '' } : standaloneRefuses(ctx, 'в наборе шлюза нет проверок')); },
+      applies: function (ctx) { return ctx.format === 'EDT' ? needEdt(ctx) : (ctx.type === 'EXTERNAL' ? { kind: 'subject', why: 'для внешних наборов не описана', fix: '' } : null); },
       today: function (ctx) { return ctx.format === 'EDT' ? { chain: [P.edt], config: ['tools.edt_cli.*'], note: 'validate; одна общая сессия EDT при interactive-mode=true' } : { chain: ctx.tools.designer ? [P.designer] : [], config: ['infobase.connection'], note: 'вердикт по коду выхода: 0 чисто, 101 есть замечания; журнал переносится как улика' }; },
       target: function (ctx) {
         if (ctx.format === 'EDT') return { chain: [P.edt], config: ['tools.edt_cli.*'], note: 'validate проекта; база не нужна' };
         if (ctx.target === 'cluster') return { chain: [P.designer], config: ['infobase.connection'], note: '/CheckConfig со всеми режимами' };
+        if (ctx.target === 'standalone') return { chain: [P.designer], config: ['infobase.connection'], note: '/CheckConfig по прямому шлюзу; в наборе SSH-шлюза проверок нет' };
         return { chain: [P.designer], config: ['infobase.connection'], note: '/CheckConfig со всеми режимами; у ibcmd состав проверки не описан' };
       }
     },
@@ -327,8 +327,8 @@ window.RUNNER_DATA = (function () {
         // У цели два адреса, и тонкий клиент открывается любым; умолчание задаёт вид цели.
         // Клиент запускается локально в любом случае — платформа нужна и для веб-пути.
         if (ctx.target === 'standalone') {
-          return { chain: [P.client], config: ['infobase.web.url', 'tools.enterprise.additional-launch-keys (необязательно)'],
-                   note: 'адрес один — клиентский, поэтому тонкий клиент идёт по нему без ключа; Конфигуратор, толстый и обычный отказывают. infobase.user и infobase.password здесь принадлежат шлюзу и клиенту не передаются' };
+          return { chain: [P.client], config: ['infobase.connection', 'infobase.web.url — для --via web', 'tools.enterprise.additional-launch-keys (необязательно)'],
+                   note: 'designer, thin и mcp по прямому шлюзу; thick и ordinary отказывают: прямой шлюз толстого клиента не пускает, обычное приложение сервер не поддерживает; --via web ведёт тонкий клиент по HTTP сервера' };
         }
         return { chain: [P.client], config: ['infobase.connection', 'infobase.web.url — для --via web', 'tools.enterprise.additional-launch-keys (необязательно)'],
                  note: 'умолчание — строка подключения; --via web открывает ту же базу по опубликованному адресу ws-соединением' };

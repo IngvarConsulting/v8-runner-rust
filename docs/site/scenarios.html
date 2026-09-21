@@ -156,11 +156,12 @@
     if (state.target === 'file') lines.push('  connection: "File=build/ib"');
     if (state.target === 'cluster') { lines.push('  connection: "Srvr=srv:1541;Ref=demo"'); lines.push('  user: Admin'); lines.push('  dbms:                    # нужна, чтобы раннер создал базу'); lines.push('    kind: PostgreSQL'); lines.push('    server: localhost'); lines.push('    name: demo'); }
     if (state.target === 'standalone') {
+      lines.push('  connection: "Srvr=127.0.0.1;Ref=demo"   # прямой шлюз: Конфигуратор и тонкий клиент');
       lines.push('  user: Admin');
-      lines.push('  standalone:');
-      lines.push('    gate: 127.0.0.1:1543   # админим по SSH; либо launch: {…}, чтобы раннер поднял свой');
+      lines.push('  standalone:              # объявляет вид цели');
+      lines.push('    gate: 127.0.0.1:1543   # SSH-шлюз: агентский набор, платформа у раннера не нужна');
       lines.push('  web:');
-      lines.push('    url: http://127.0.0.1:8314/demo   # открываем клиентом');
+      lines.push('    url: http://127.0.0.1:8314/   # HTTP самого сервера: launch web, --via web');
     }
     lines.push('source-set:');
     if (state.type === 'CONFIGURATION') lines.push('  - { name: main, type: CONFIGURATION, path: ' + (state.format === 'EDT' ? 'src/main' : 'src/cf') + ' }');

@@ -84,7 +84,7 @@ flowchart TB
 <p class="hint">Сам раннер ничего не исполняет. Утилиту он вызывает запуском процесса — аргументы командной строки, код выхода и журнал; с агентом и шлюзом говорит сессией SSH. Поэтому на стрелке от раннера стоит вид вызова, а не имя команды. Где раннер поднимает процесс сам, у стрелки написано «поднимает»: агент Конфигуратора он запускает и только потом к нему подключается, а шлюз автономного сервера поднимаете вы — туда идёт одна сессия.</p>
 
 <h2 id="d-map">Общая карта</h2>
-<p>Раннер запускает утилиты у себя и достаёт цель тремя способами: файлом, сетевым протоколом платформы и SSH. Четвёртого нет — консоль кластера и его RAS остаются вне раннера. Здесь показан только канал администрирования; чем и откуда базу открывает человек, видно в каждом варианте отдельно.</p>
+<p>Раннер запускает утилиты у себя и достаёт цель тремя способами: файлом, сетевым протоколом платформы и SSH. Автономный сервер достижим двумя из них: Конфигуратор идёт в его прямой шлюз тем же протоколом, что в кластер <span class="ref">(<a href="platform.html#t64">64</a>)</span>, а SSH ведёт в агентский шлюз <span class="ref">(<a href="platform.html#t60">60</a>)</span>. Четвёртого нет — консоль кластера и его RAS остаются вне раннера. Здесь показан только канал администрирования; чем и откуда базу открывает человек, видно в каждом варианте отдельно.</p>
 <pre class="mermaid">
 flowchart LR
   subgraph HOST["машина раннера"]
@@ -99,7 +99,7 @@ flowchart LR
   FDB@{ shape: doc, label: "файловая база<br/>каталог с 1Cv8.1CD" }
   CLU["кластер 1С<br/>ragent · rmngr · rphost"]
   DBMS@{ shape: cyl, label: "СУБД" }
-  GATE(["автономный сервер<br/>SSH-шлюз ibsrv 1543"])
+  GATE(["автономный сервер ibsrv<br/>прямой шлюз · SSH-шлюз 1543"])
   WS(["Apache · IIS"])
   R -->|"одна живая сессия"| EDT
   R -->|"процесс на операцию"| DES
@@ -112,6 +112,7 @@ flowchart LR
   DES --> SRC
   DES -->|"файл"| FDB
   DES -.->|"TCP 1541"| CLU
+  DES -.->|"TCP: прямой шлюз"| GATE
   IBC -->|"--db-path"| FDB
   IBC -.->|"--dbms: прямо в СУБД"| DBMS
   AGT -->|"файл"| FDB
@@ -206,7 +207,7 @@ flowchart LR
   style HOST fill:#eef5fb,stroke:#8fb4cf,color:#0d2233
 </pre>
 <ul class="opts">
-  <li><strong>Администрирование</strong> — <code>infobase.connection: "File=…"</code>. Строка <code>ws=…</code> здесь не принимается: она называет клиентский адрес, а не канал администрирования.</li>
+  <li><strong>Администрирование</strong> — <code>infobase.connection: "File=…"</code>. Строка <code>ws=…</code> здесь не принимается: она называет веб-адрес, а не строку подключения.</li>
   <li><strong>Публикация</strong> — <code>publish</code> собирает <code>webinst</code> из секции <code>infobase.web</code>: <code>server</code>, <code>wsdir</code>, <code>dir</code>, <code>conf</code>, <code>os-auth</code>. <code>default.vrd</code> замещается целиком, поэтому у команды есть превью, а снятие публикации — отдельный <code>publish --delete</code>.</li>
   <li><strong>Где стоит веб-сервер</strong> — на машине раннера: <code>webinst</code> запускается локально, и <code>dir</code> обязан существовать на его файловой системе. Модуль веб-сервера открывает ту же файловую базу с диска, значит и ему она должна быть видна.</li>
   <li><strong>Два пути у клиента</strong> — тонкий клиент открывает эту базу и по строке подключения <code>File=…</code> прямо с диска, и по веб-адресу через Apache или IIS. Оба пути запускает сам раннер: <code>launch thin</code> — по строке подключения, <code>launch thin --via web</code> — по <code>infobase.web.url</code> ws-соединением, <code>launch web</code> — тем же адресом в браузере. Умолчание здесь первое: вид цели файловый.</li>
@@ -395,16 +396,18 @@ flowchart LR
 </ul>
 
 <h2 id="d-standalone-local">7. Автономный сервер на своей машине</h2>
-<p><code>ibsrv</code> поднимаете вы, раннер его не запускает и не ищет. Разговор идёт не с утилитой платформы, а с процессом сервера — через его SSH-шлюз.</p>
+<p><code>ibsrv</code> поднимаете вы, раннер его не запускает и не ищет. Разговор идёт с процессом сервера по двум его шлюзам: Конфигуратор — по прямому, как в кластер; сессия SSH — по агентскому.</p>
 <pre class="mermaid">
 flowchart LR
   subgraph BOX["одна машина"]
     subgraph HOST["раннер"]
       R["v8-runner"]
       WP@{ shape: doc, label: "workPath<br/>всегда локален" }
+      DES["1cv8 DESIGNER"]
     end
     subgraph SRV["автономный сервер"]
       GATE(["SSH-шлюз 1543<br/>ibsrv --enable-ssh-gate"])
+      DGATE(["прямой шлюз<br/>Srvr=localhost;Ref=demo"])
       IBSRV["ibsrv<br/>поднят вами"]
       UD@{ shape: doc, label: "каталог пользователя шлюза<br/>users-data и имя пользователя" }
       HTTPS(["HTTP 8314"])
@@ -414,6 +417,9 @@ flowchart LR
   BR(["браузер · тонкий клиент"])
   R -->|"SSH: команда строкой, ответ JSON"| GATE
   R -->|"exchange: dir — ссылки и копии"| UD
+  R -->|"процесс на операцию"| DES
+  DES -->|"TCP"| DGATE
+  DGATE --> IBSRV
   R -->|"файл"| WP
   GATE --> IBSRV
   IBSRV --> UD
@@ -421,8 +427,8 @@ flowchart LR
   IBSRV --> HTTPS
   BR -->|"HTTP"| HTTPS
   class R run
-  class IBSRV sw
-  class GATE,HTTPS,BR svc
+  class IBSRV,DES sw
+  class GATE,DGATE,HTTPS,BR svc
   class WP,UD,DB art
   classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
   classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
@@ -433,24 +439,26 @@ flowchart LR
   style SRV fill:#f1f8ea,stroke:#8aad76,color:#12210c
 </pre>
 <ul class="opts">
-  <li><strong>Администрирование</strong> — <code>infobase.standalone.gate: "localhost:1543"</code>; <code>infobase.connection</code> при этом пустая, вид цели объявлен один раз.</li>
-  <li><strong>Как разговаривает</strong> — SSH-сессия встроенного клиента, без псевдотерминала. Первая команда переводит шлюз в машинный режим, дальше идут команды шлюза: <code>config load-config-from-files</code>, <code>config dump-cfg</code>, <code>config update-db-cfg</code> и прочие.</li>
-  <li><strong>Обмен</strong> — объявляется ключом <code>exchange</code>: <code>sftp</code> по тому же соединению или <code>{ dir: … }</code> — каталог пользователя шлюза, видимый раннеру. На одной машине дешевле второй: файлы переносятся ссылками, мимо сети и мимо SFTP. Без объявленного канала команда отказывает на валидации, до всякой сессии.</li>
-  <li><strong>Исполнитель один</strong> — <code>agent</code> через шлюз; <code>providers.&lt;операция&gt;</code> для этой цели не нужен и не разрешён. Платформа на машине раннера не требуется.</li>
-  <li><strong>Клиент</strong> — HTTP самого сервера: адрес известен сразу и публикации не требует. Открывают его браузером или тонким клиентом по веб-подключению, и раннер умеет оба: <code>launch web</code> — браузером, <code>launch thin</code> — тонким клиентом. Ключ здесь не нужен: административной строки у этой цели нет, поэтому веб — умолчание. Реквизиты клиенту не передаются — <code>infobase.user</code> и <code>infobase.password</code> у этой цели принадлежат шлюзу, а не базе. <code>test</code> и <code>launch thick · ordinary · designer</code> по-прежнему отказывают типизированно: по ws-соединению ходит только тонкий клиент.</li>
+  <li><strong>Администрирование</strong> — два ключа: <code>infobase.connection: "Srvr=localhost;Ref=demo"</code> для Конфигуратора по прямому шлюзу, имя базы равно <code>--name</code> сервера <span class="ref">(<a href="platform.html#t64">64</a>)</span>; <code>infobase.standalone.gate: "localhost:1543"</code> для SSH. Вид цели объявляет секция <code>standalone</code>; достаточно любого из двух ключей, второй расширяет набор.</li>
+  <li><strong>Как разговаривает</strong> — Конфигуратор: процесс на операцию, файлы на диске раннера, как с кластером. SSH-шлюз: сессия встроенного клиента, без псевдотерминала; первая команда переводит шлюз в машинный режим, дальше идут команды шлюза: <code>config load-config-from-files</code>, <code>config dump-cfg</code>, <code>config update-db-cfg</code> и прочие.</li>
+  <li><strong>Обмен</strong> — нужен только SSH-пути и объявляется ключом <code>exchange</code>: <code>sftp</code> по тому же соединению или <code>{ dir: … }</code> — каталог пользователя шлюза, видимый раннеру. На одной машине дешевле второй: файлы переносятся ссылками, мимо сети и мимо SFTP. Без объявленного канала команда отказывает на валидации, до всякой сессии.</li>
+  <li><strong>Исполнители</strong> — Конфигуратор по прямому шлюзу первым: полный набор, включая сравнение, проверки и откат; <code>agent</code> по SSH — когда строка не объявлена или его назначил <code>providers.&lt;операция&gt;</code>, и набор у него урезан <span class="ref">(<a href="platform.html#t60">60</a>)</span>. Платформа на машине раннера нужна только первому.</li>
+  <li><strong>Клиент</strong> — тонкий клиент идёт по строке подключения через прямой шлюз, <code>launch thin</code>, или по HTTP самого сервера, <code>launch thin --via web</code>; браузер — <code>launch web</code>, адрес известен сразу и публикации не требует; Конфигуратор — <code>launch designer</code>. <code>launch thick · ordinary</code> и тесты в толстом клиенте отказывают типизированно: прямой шлюз толстого клиента не пускает, а обычное приложение сервер не поддерживает <span class="ref">(<a href="platform.html#t64">64</a>, <a href="platform.html#t59">59</a>)</span>. <code>infobase.user</code> и <code>infobase.password</code> — пользователь базы; по нему же пускает SSH-шлюз.</li>
 </ul>
 
 <h2 id="d-standalone-remote">8. Автономный сервер на другой машине</h2>
-<p>Автономный сервер на отдельной машине. Раннеру не нужна ни платформа, ни доступ к чужому диску — нужен SSH до шлюза и объявленный канал файлов.</p>
+<p>Автономный сервер на отдельной машине. Доступ к чужому диску раннеру не нужен: с платформой у себя он идёт Конфигуратором в прямой шлюз и держит файлы у себя; без платформы ему хватает SSH до агентского шлюза и объявленного канала файлов.</p>
 <pre class="mermaid">
 flowchart LR
   subgraph HOST["машина раннера"]
     R["v8-runner"]
     WP@{ shape: doc, label: "workPath<br/>остаётся здесь" }
     SRC@{ shape: doc, label: "исходники и артефакты" }
+    DES["1cv8 DESIGNER"]
   end
   subgraph SRV["другая машина"]
     GATE(["SSH-шлюз 1543"])
+    DGATE(["прямой шлюз"])
     IBSRV["ibsrv"]
     UD@{ shape: doc, label: "каталог пользователя шлюза<br/>пути разрешаются здесь" }
     HTTPS(["HTTP 8314"])
@@ -460,6 +468,9 @@ flowchart LR
   R -->|"файл"| WP
   R -->|"файл"| SRC
   R -.->|"SSH: команда строкой, ответ JSON"| GATE
+  R -->|"процесс на операцию"| DES
+  DES -.->|"TCP"| DGATE
+  DGATE --> IBSRV
   SRC -.->|"SFTP того же соединения"| UD
   GATE --> IBSRV
   IBSRV --> UD
@@ -467,8 +478,8 @@ flowchart LR
   IBSRV --> HTTPS
   BR -.->|"HTTP"| HTTPS
   class R run
-  class IBSRV sw
-  class GATE,HTTPS,BR svc
+  class IBSRV,DES sw
+  class GATE,DGATE,HTTPS,BR svc
   class WP,SRC,UD,DB art
   classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
   classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
@@ -478,10 +489,10 @@ flowchart LR
   style SRV fill:#f1f8ea,stroke:#8aad76,color:#12210c
 </pre>
 <ul class="opts">
-  <li><strong>Администрирование</strong> — <code>gate: "srv.example:1543"</code>, учётные данные берутся из <code>infobase.user</code> и <code>infobase.password</code>: шлюз пускает по пользователю базы.</li>
-  <li><strong>Пути</strong> — разрешаются на стороне сервера, относительно каталога пользователя шлюза. <code>workPath</code> остаётся локальным и внутрь <code>exchange.dir</code> не кладётся — валидация это проверяет.</li>
-  <li><strong>Канал файлов</strong> — <code>sftp</code>; вариант <code>{ dir: … }</code> годится, только если этот каталог смонтирован у раннера.</li>
-  <li><strong>Замер 15.09.2026</strong> — шлюз <code>ibsrv</code> 8.3.27 отдаёт по SFTP чтение и каталоги, а запись не принимает ни с какими флагами: <code>pull --force</code>, <code>make</code> и экспорт <code>.cf</code> работают, <code>push</code> и слияние при <code>pull</code> отказывают типизированно, с путём и кодом шлюза.</li>
+  <li><strong>Администрирование</strong> — <code>connection: "Srvr=srv.example;Ref=demo"</code> для Конфигуратора по прямому шлюзу и <code>gate: "srv.example:1543"</code> для SSH; учётные данные для обоих — <code>infobase.user</code> и <code>infobase.password</code>: шлюз пускает по пользователю базы.</li>
+  <li><strong>Пути</strong> — у Конфигуратора остаются на машине раннера; у SSH-пути разрешаются на стороне сервера, относительно каталога пользователя шлюза. <code>workPath</code> остаётся локальным и внутрь <code>exchange.dir</code> не кладётся — валидация это проверяет.</li>
+  <li><strong>Канал файлов</strong> — нужен только SSH-пути: <code>sftp</code>; вариант <code>{ dir: … }</code> годится, только если этот каталог смонтирован у раннера.</li>
+  <li><strong>Замер 15.09.2026</strong> — шлюз <code>ibsrv</code> 8.3.27 отдаёт по SFTP чтение и каталоги, а запись не принимает ни с какими флагами: <code>pull --force</code>, <code>make</code> и экспорт <code>.cf</code> работают, <code>push</code> и слияние при <code>pull</code> отказывают типизированно, с путём и кодом шлюза. Прямой шлюз это ограничение снимает: Конфигуратор читает и пишет у раннера.</li>
   <li><strong>Своего агента раннер тут не поднимает</strong> — процесс он запускает только у себя, и управляемый агент всегда слушает 127.0.0.1. К автономному серверу он только подключается: ключи <code>tools.designer_agent</code> вместе с ним отвергаются валидацией.</li>
   <li><strong>После <code>update-db-cfg</code></strong> — сервер 15–20 секунд «обновляется» и отвергает SSH-логин; раннер ждёт шлюз до 30 секунд.</li>
 </ul>
@@ -573,7 +584,7 @@ flowchart LR
 </ul>
 
 <h2 id="d-docker-standalone">11. Автономный сервер в контейнере</h2>
-<p>Тот же <code>ibsrv</code>, но поднятый контейнером. Единственный вариант, где на машине раннера не нужно ни одной утилиты 1С.</p>
+<p>Тот же <code>ibsrv</code>, но поднятый контейнером. Единственный вариант, где на машине раннера можно обойтись без утилит 1С: по SSH команды исполняет сервер в контейнере. С платформой у раннера открыт и прямой шлюз, если его порт опубликован.</p>
 <pre class="mermaid">
 flowchart LR
   subgraph HOST["машина раннера"]
@@ -582,6 +593,7 @@ flowchart LR
   end
   subgraph C["контейнер ibsrv"]
     GATE(["SSH-шлюз 1543"])
+    DGATE(["прямой шлюз — если порт опубликован"])
     IBSRV["ibsrv"]
     UD@{ shape: doc, label: "каталог пользователя шлюза<br/>смонтирован томом" }
     HTTPS(["HTTP 8314"])
@@ -590,6 +602,8 @@ flowchart LR
   BR(["браузер · тонкий клиент"])
   R --> WP
   R -.->|"SSH: команда строкой, ответ JSON"| GATE
+  R -.->|"1cv8 DESIGNER: TCP"| DGATE
+  DGATE --> IBSRV
   R -.->|"exchange: sftp"| UD
   R -->|"exchange: dir — если том виден раннеру"| UD
   GATE --> IBSRV
@@ -599,7 +613,7 @@ flowchart LR
   BR -.->|"HTTP"| HTTPS
   class R run
   class IBSRV sw
-  class GATE,HTTPS,BR svc
+  class GATE,DGATE,HTTPS,BR svc
   class WP,UD,DB art
   classDef run fill:#cfe4fa,stroke:#3f7ba6,color:#0d2233;
   classDef sw fill:#cde8b9,stroke:#4f7a3c,color:#12210c;
@@ -610,8 +624,8 @@ flowchart LR
 </pre>
 <ul class="opts">
   <li><strong>Администрирование</strong> — <code>infobase.standalone.gate</code> на опубликованный порт шлюза. Контейнер поднимаете вы; раннер его не запускает и о Docker не знает.</li>
-  <li><strong>Платформа раннеру не нужна вовсе</strong> — команды исполняет сервер внутри контейнера, раннеру хватает SSH.</li>
-  <li><strong>Порта два</strong> — 1543 для шлюза и 8314 для клиента: без первого не подключится раннер, без второго базу не откроют люди.</li>
+  <li><strong>Платформа раннеру не обязательна</strong> — по SSH команды исполняет сервер внутри контейнера; с платформой Конфигуратор идёт в прямой шлюз и получает полный набор <span class="ref">(<a href="platform.html#t64">64</a>)</span>.</li>
+  <li><strong>Порты</strong> — 1543 для SSH-шлюза, 8314 для HTTP и порт прямого шлюза, если нужен Конфигуратор с машины раннера: без первого или третьего не подключится раннер, без второго базу не откроют люди.</li>
   <li><strong>Обмен — здесь есть выбор</strong> — <code>sftp</code> через шлюз или <code>{ dir: … }</code>, если каталог пользователя шлюза смонтирован томом и виден раннеру. Второй путь снимает ограничение на запись, которое есть у SFTP-шлюза <code>ibsrv</code> 8.3.27.</li>
   <li><strong>Клиент</strong> — HTTP контейнера, адрес известен сразу и публикации не требует.</li>
 </ul>
