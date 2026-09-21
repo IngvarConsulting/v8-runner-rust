@@ -145,9 +145,9 @@ window.RUNNER_DATA = (function () {
         return { chain: chain, config: cfg, note: note };
       },
       target: function (ctx) {
-        var chain = [P.ibcmd, P.designer];
         if (ctx.target === 'standalone') return { kind: 'subject', why: 'автономный сервер поднимает человек', fix: 'раннер его не создаёт и не запускает: infobase.standalone называет уже работающий шлюз' };
-        return { chain: chain, config: ['infobase.connection'].concat(ctx.target === 'cluster' ? ['infobase.dbms.*'] : []), note: 'цепочка: ibcmd, затем Designer' };
+        if (ctx.target === 'cluster') return { chain: [P.designer, P.rac], config: ['infobase.connection', 'infobase.dbms.*', 'infobase.cluster.user — если в кластере заведены администраторы'], note: 'CREATEINFOBASE с клиент-серверной строкой: регистрация в кластере и CrSQLDB=Y одной командой; rac — запасной путь' };
+        return { chain: [P.ibcmd, P.designer], config: ['infobase.connection'], note: 'ibcmd создаёт файловую базу сразу с конфигурацией из исходников (--import)' };
       }
     },
     {
