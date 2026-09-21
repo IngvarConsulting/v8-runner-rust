@@ -206,6 +206,11 @@ fn load_config_with_mode(
 /// Строка прямого шлюза рядом с секцией `standalone` принимается, но до появления
 /// исполнителя по прямому шлюзу (#205) её никто не читает: команды идут через
 /// `standalone.gate`. Молчать об этом нельзя — сайт обещает Конфигуратор по этой строке.
+///
+/// Секция `cluster` такого предупреждения не получает намеренно: её читатели —
+/// `sessions` (#212), `ras` раннера (#213) и `infobase create` в кластере (#204) — команды,
+/// которых ещё нет, и ни одна существующая команда с ней не ведёт себя иначе, чем без неё.
+/// Предупреждать на каждой команде было бы шумом о том, что и так не обещано.
 fn direct_gate_declared_but_not_used_yet(config: &AppConfig) -> Option<String> {
     if config.infobase.standalone.is_none() || config.infobase.connection.trim().is_empty() {
         return None;
@@ -1009,6 +1014,40 @@ mod tests {
         let error = load(&config_path, &InfobaseSelector::Default).expect_err("null map");
 
         assert!(error.to_string().contains("null is not allowed"), "{error}");
+    }
+
+    /// Три уровня учётных данных лежат в местном слое порознь: пользователь базы — в
+    /// секции базы, администратор кластера и агент центрального сервера — в `cluster`;
+    /// все шесть ключей секции доходят до модели рядом с `infobase.user`
+    /// (`DEC.2026-09-21.THE-CLUSTER-SECTION-HOLDS-RAS-AND-TWO-ADMIN-LEVELS`).
+    #[test]
+    fn the_cluster_section_is_read_from_the_local_layer_next_to_the_infobase_user() {
+        let dir = tempdir().expect("tempdir");
+        let config_dir = dir.path().join("project");
+        let config_path = write_minimal_project_config(
+            &config_dir,
+            "workPath: work\nformat: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\n",
+        );
+        std::fs::write(
+            config_dir.join(LOCAL_CONFIG_FILE_NAME),
+            "infobases:\n  origin:\n    connection: \"Srvr=srv:1541;Ref=demo\"\n    user: ib-admin\n    password: ib-secret\n    cluster:\n      ras: srv:1545\n      user: cluster-admin\n      password: cluster-secret\n      agent:\n        address: srv:1540\n        user: agent-admin\n        password: agent-secret\n",
+        )
+        .expect("local overlay");
+
+        let loaded = load(&config_path, &InfobaseSelector::Default).expect("load config");
+
+        let infobase = &loaded.config.infobase;
+        assert_eq!(infobase.user.as_deref(), Some("ib-admin"));
+        assert_eq!(infobase.password.as_deref(), Some("ib-secret"));
+        let cluster = infobase.cluster.as_ref().expect("cluster section");
+        assert_eq!(cluster.ras.as_deref(), Some("srv:1545"));
+        assert_eq!(cluster.user.as_deref(), Some("cluster-admin"));
+        assert_eq!(cluster.password.as_deref(), Some("cluster-secret"));
+        let agent = cluster.agent.as_ref().expect("agent section");
+        assert_eq!(agent.address.as_deref(), Some("srv:1540"));
+        assert_eq!(agent.user.as_deref(), Some("agent-admin"));
+        assert_eq!(agent.password.as_deref(), Some("agent-secret"));
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
     }
 
     /// Форма невыбранной секции проверяется и называет секцию по имени; среда — нет.

@@ -146,6 +146,53 @@ pub struct InfobaseConfig {
     /// the target kind; the runner never starts the server.
     #[serde(default)]
     pub standalone: Option<StandaloneConfig>,
+
+    /// The cluster around a server infobase: the administration server address and the
+    /// two administrator levels above the infobase user
+    /// (`DEC.2026-09-21.THE-CLUSTER-SECTION-HOLDS-RAS-AND-TWO-ADMIN-LEVELS`). Validation
+    /// checks its form; no operation reads it yet (`sessions` — #212, the runner's own
+    /// `ras` — #213, `infobase create` in a cluster — #204).
+    #[serde(default)]
+    pub cluster: Option<InfobaseClusterConfig>,
+}
+
+/// The cluster section of a server infobase. Every key is optional: each operation asks
+/// only for the level it needs, and the refusal names the level that is missing.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct InfobaseClusterConfig {
+    /// Administration server (`ras`) address as `host[:port]`; it goes to `rac` as is,
+    /// so the port default (1545) stays with the platform.
+    #[serde(default)]
+    pub ras: Option<String>,
+
+    /// Cluster administrator name.
+    #[serde(default)]
+    pub user: Option<String>,
+
+    /// Cluster administrator password.
+    #[serde(default)]
+    pub password: Option<String>,
+
+    /// The central server agent and its administrator.
+    #[serde(default)]
+    pub agent: Option<InfobaseClusterAgentConfig>,
+}
+
+/// The central server agent (`ragent`) of the cluster and its administrator.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct InfobaseClusterAgentConfig {
+    /// Agent address as `host[:port]` when it differs from the host of `Srvr=` with the
+    /// platform default port (1540).
+    #[serde(default)]
+    pub address: Option<String>,
+
+    /// Central server administrator name.
+    #[serde(default)]
+    pub user: Option<String>,
+
+    /// Central server administrator password.
+    #[serde(default)]
+    pub password: Option<String>,
 }
 
 /// A standalone server as the target: the runner attaches to its SSH gate and exchanges
@@ -292,6 +339,7 @@ impl InfobaseConfig {
             dbms: None,
             web: None,
             standalone: None,
+            cluster: None,
         }
     }
 
@@ -313,6 +361,7 @@ impl InfobaseConfig {
             web: None,
             standalone: None,
             dbms: Some(dbms),
+            cluster: None,
         }
     }
 }

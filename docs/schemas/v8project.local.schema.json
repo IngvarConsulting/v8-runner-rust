@@ -130,6 +130,73 @@
       },
       "type": "object"
     },
+    "InfobaseClusterAgentSchema": {
+      "additionalProperties": false,
+      "description": "The central server agent of the cluster and its administrator.",
+      "properties": {
+        "address": {
+          "description": "Agent address as `host[:port]` when it differs from the host of `Srvr=` with the\nplatform default port (1540); the runner's own `ras` connects to it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "password": {
+          "description": "Central server administrator password.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user": {
+          "description": "Central server administrator name; no runner operation asks for it by itself.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "InfobaseClusterSchema": {
+      "additionalProperties": false,
+      "description": "The cluster section of a server infobase: three credential levels lie side by side in\nthe local layer, the infobase user in the infobase section itself.",
+      "properties": {
+        "agent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InfobaseClusterAgentSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The central server agent (`ragent`) and its administrator."
+        },
+        "password": {
+          "description": "Cluster administrator password.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ras": {
+          "description": "Administration server (`ras`) address as `host[:port]` — an IPv6 address in\nbrackets. It goes to `rac` as is, so the port default (1545) stays with the platform.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user": {
+          "description": "Cluster administrator name; `sessions` (#212) and `infobase create` in a cluster (#204)\nwill ask for it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "InfobaseDbmsSchema": {
       "additionalProperties": false,
       "properties": {
@@ -174,6 +241,17 @@
     "InfobaseSchema": {
       "additionalProperties": false,
       "properties": {
+        "cluster": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InfobaseClusterSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The cluster around a server infobase: the administration server (`ras`) address and\nthe two administrator levels above the infobase user — cluster and central server.\nEach operation asks only for the level it needs; a file infobase and a standalone\nserver have no cluster and refuse the section."
+        },
         "connection": {
           "default": "",
           "description": "1C infobase connection string without embedded user or password: `File=…` for a file\ninfobase, `Srvr=…;Ref=…` for a cluster; next to `standalone` it is the server's direct\ngate address or empty.",

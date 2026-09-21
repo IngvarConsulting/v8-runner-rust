@@ -70,11 +70,39 @@ pub fn host_of_url(url: &Url) -> Option<Host> {
 /// Хост из authority — значения заголовка `Host` или записи `host:port`.
 ///
 /// Разбор идёт тем же парсером, что и для полного адреса: authority достраивается
-/// до `http://<authority>/`. Поэтому перед достройкой отсекается всё, чего в
-/// заголовке `Host` быть не может: иначе `evil.com@127.0.0.1` достроился бы в
-/// адрес с userinfo `evil.com` и петлевым хостом — то есть ровно в ту подмену,
-/// от которой разбор и защищает.
+/// до `http://<authority>/` (см. [`url_of_authority`]).
 pub fn host_of_authority(authority: &str) -> Option<Host> {
+    host_of_url(&url_of_authority(authority)?)
+}
+
+/// Хост и порт из записи `host[:port]` — адреса, который уходит утилите платформы как
+/// есть (`rac`, `ras cluster`). Читается тем же парсером, что [`host_of_authority`]:
+/// IPv6 — только в скобках (`[::1]:1545`), голый `::1` не разбирается; порт 0 — не адрес.
+/// Порт 80 парсер прячет как умолчание достроенной схемы, поэтому он читается из записи.
+pub fn host_and_port_of_authority(authority: &str) -> Option<(Host, Option<u16>)> {
+    // `srv:` парсер URL читает как адрес без порта; для записи, которая уйдёт утилите
+    // как есть, пустой порт — опечатка, а не умолчание.
+    if authority.ends_with(':') {
+        return None;
+    }
+    let url = url_of_authority(authority)?;
+    let host = host_of_url(&url)?;
+    let port = url.port().or_else(|| {
+        authority
+            .rsplit_once(':')
+            .and_then(|(_, port)| port.parse::<u16>().ok())
+            .filter(|port| *port == 80)
+    });
+    if port == Some(0) {
+        return None;
+    }
+    Some((host, port))
+}
+
+/// Authority, достроенная до адреса. Перед достройкой отсекается всё, чего в заголовке
+/// `Host` быть не может: иначе `evil.com@127.0.0.1` достроился бы в адрес с userinfo
+/// `evil.com` и петлевым хостом — то есть ровно в ту подмену, от которой разбор и защищает.
+fn url_of_authority(authority: &str) -> Option<Url> {
     let unusable = authority.is_empty()
         || authority.len() > MAX_AUTHORITY_LEN
         || authority
@@ -84,7 +112,7 @@ pub fn host_of_authority(authority: &str) -> Option<Host> {
         return None;
     }
 
-    host_of_url(&Url::parse(&format!("http://{authority}/")).ok()?)
+    Url::parse(&format!("http://{authority}/")).ok()
 }
 
 /// Длина с запасом: имя в DNS не длиннее 253 октетов, порт добавляет ещё шесть.
@@ -204,6 +232,45 @@ mod tests {
         ] {
             assert!(
                 host_of_authority(authority).is_none(),
+                "{authority:?} is refused"
+            );
+        }
+    }
+
+    /// Запись `host[:port]` читается так же, как заголовок: порт — если назван, IPv6 — в
+    /// скобках. Голый `::1` парсер по двоеточиям не режет, порт 0 адресом не считается.
+    #[test]
+    fn a_host_with_an_optional_port_is_read_as_the_header_is() {
+        let name = |name: &str| Host::Name(name.to_owned());
+        let address = |address: &str| Host::Address(address.parse().expect("literal address"));
+        for (authority, expected) in [
+            ("srv", (name("srv"), None)),
+            ("srv:1545", (name("srv"), Some(1545))),
+            ("SRV.example.:1540", (name("srv.example"), Some(1540))),
+            ("10.0.0.5:1545", (address("10.0.0.5"), Some(1545))),
+            ("[::1]:1540", (address("::1"), Some(1540))),
+            ("[::1]", (address("::1"), None)),
+            ("srv:80", (name("srv"), Some(80))),
+            ("srv:080", (name("srv"), Some(80))),
+        ] {
+            assert_eq!(
+                host_and_port_of_authority(authority),
+                Some(expected),
+                "{authority}"
+            );
+        }
+        for authority in [
+            "",
+            "::1",
+            ":1545",
+            "srv:",
+            "srv:0",
+            "srv:x",
+            "srv:99999",
+            "[::1",
+        ] {
+            assert!(
+                host_and_port_of_authority(authority).is_none(),
                 "{authority:?} is refused"
             );
         }
