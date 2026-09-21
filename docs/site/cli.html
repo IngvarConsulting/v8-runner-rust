@@ -111,12 +111,8 @@
 <tr><td class="k"><code>push --delete &lt;ссылка&gt;</code></td><td>убирает расширение из базы вместе с его данными</td><td>меняет</td></tr>
 <tr><td class="k"><code>apply</code></td><td>приводит базу данных к основной конфигурации и больше ничего <span class="ref">(<a href="platform.html#t103">103</a>)</span></td><td>меняет</td></tr>
 <tr><td class="k"><code>apply --sessions disable|force</code></td><td>что делать с чужими сеансами, когда нужен монопольный доступ. По умолчанию их не трогают <span class="ref">(<a href="platform.html#t4">4</a>)</span>; полное окно обслуживания собирают команды <code>sessions</code></td><td>меняет</td></tr>
-<tr><td class="k"><code>load &lt;файл&gt;</code></td><td>загружает пакет <code>.cf</code> или <code>.cfe</code> в основную конфигурацию, целиком заменяя её <span class="ref">(<a href="platform.html#t11">11</a>)</span></td><td>меняет</td></tr>
-<tr><td class="k"><code>load &lt;файл&gt; --mode combine|update</code></td><td>объединяет с пакетом по файлу настроек или обновляет конфигурацию поставщика <span class="ref">(<a href="platform.html#t49">49</a>)</span></td><td>меняет</td></tr>
 </tbody>
 </table></div>
-
-<p><code>load</code> не часть <code>push</code> намеренно. У него свои режимы платформы, и «объединение» там означает операцию по файлу настроек; слияния версий в нём нет. Поэтому режим называется <code>combine</code>: слово <code>merge</code> обещало бы трёхстороннее слияние.</p>
 
 <h3>Сеансы</h3>
 
@@ -189,13 +185,16 @@ v8-runner status --all                           # все объявленные
 <div class="tablewrap"><table class="map">
 <thead><tr><th>команда</th><th>что делает</th><th>база</th></tr></thead>
 <tbody>
-<tr><td class="k"><code>infobase save</code></td><td>сохраняет конфигурацию базы в пакет <code>.cf</code> или <code>.cfe</code>: основную или, с <code>--state db</code>, конфигурацию базы данных <span class="ref">(<a href="platform.html#t12">12</a>)</span></td><td>читает</td></tr>
+<tr><td class="k"><code>infobase download</code></td><td>забирает конфигурацию базы в пакет <code>.cf</code> или <code>.cfe</code>: основную или, с <code>--state db</code>, конфигурацию базы данных <span class="ref">(<a href="platform.html#t12">12</a>)</span></td><td>читает</td></tr>
+<tr><td class="k"><code>infobase load &lt;файл&gt;</code></td><td>загружает пакет <code>.cf</code> или <code>.cfe</code> в основную конфигурацию, целиком заменяя её <span class="ref">(<a href="platform.html#t11">11</a>)</span></td><td>меняет</td></tr>
+<tr><td class="k"><code>infobase load &lt;файл&gt; --mode combine|update</code></td><td>объединяет с пакетом по файлу настроек или обновляет конфигурацию поставщика <span class="ref">(<a href="platform.html#t49">49</a>)</span></td><td>меняет</td></tr>
 <tr><td class="k"><code>infobase dump</code></td><td>выгружает базу в переносимый <code>.dt</code>. Это образ для переноса; резервной копией документация его не считает <span class="ref">(<a href="platform.html#t70">70</a>)</span></td><td>читает, монопольно</td></tr>
 <tr><td class="k"><code>infobase restore</code></td><td>загружает базу из <code>.dt</code>, уничтожая текущие данные</td><td>заменяет</td></tr>
 </tbody>
 </table></div>
 
-<p><code>infobase save</code> назван словом платформы: у ibcmd эта команда так и называется <span class="ref">(<a href="platform.html#t12">12</a>)</span>. От сборки он отличается источником: пакет отражает базу, и в нём есть всё, что успели наделать в Конфигураторе.</p>
+<p>Пакет ходит под <code>infobase</code> вместе с образом <code>.dt</code>: это файлы, которые получают у базы или отдают ей целиком, тогда как <code>push</code> и <code>pull</code> двигают исходники по частям. <code>infobase download</code> назван по направлению: пакет забирают у базы, как <code>tools download</code> забирает дистрибутив. Слово платформы <code>save</code> читалось бы как запись внутрь базы, а <code>export</code> у платформы занят выгрузкой в XML <span class="ref">(<a href="platform.html#t12">12</a>)</span>. От сборки <code>infobase download</code> отличается источником: пакет отражает базу, и в нём есть всё, что успели наделать в Конфигураторе.</p>
+<p><code>infobase load</code> — слово платформы, и он не часть <code>push</code> намеренно. У него свои режимы платформы, и «объединение» там означает операцию по файлу настроек; слияния версий в нём нет. Поэтому режим называется <code>combine</code>: слово <code>merge</code> обещало бы трёхстороннее слияние. Образ <code>.dt</code> возвращает <code>infobase restore</code>: у платформы это другая команда с другим предметом <span class="ref">(<a href="platform.html#t70">70</a>)</span>.</p>
 
 <h3>Сборка и проверки</h3>
 
@@ -239,11 +238,10 @@ v8-runner status --all                           # все объявленные
 <tr><td class="k"><code>providers.push</code></td><td>отправкой исходников в базу</td></tr>
 <tr><td class="k"><code>providers.pull</code></td><td>выгрузкой из базы</td></tr>
 <tr><td class="k"><code>providers.apply</code></td><td>применением к базе данных</td></tr>
-<tr><td class="k"><code>providers.load</code></td><td>загрузкой пакета</td></tr>
 <tr><td class="k"><code>providers.diff</code></td><td>сравнением</td></tr>
 <tr><td class="k"><code>providers.make</code></td><td>сборкой пакета</td></tr>
 <tr><td class="k"><code>providers.extensions</code></td><td>работой со свойствами расширений</td></tr>
-<tr><td class="k"><code>providers.infobase.create</code><br><code>providers.infobase.save</code><br><code>providers.infobase.dump</code><br><code>providers.infobase.restore</code></td><td>действиями с базой целиком</td></tr>
+<tr><td class="k"><code>providers.infobase.create</code><br><code>providers.infobase.download</code><br><code>providers.infobase.load</code><br><code>providers.infobase.dump</code><br><code>providers.infobase.restore</code></td><td>действиями с базой целиком</td></tr>
 </tbody>
 </table></div>
 
@@ -310,11 +308,11 @@ v8-runner pull --all              и расширения, которых в п�
 <div class="tablewrap"><table>
 <thead><tr><th>имя</th><th>почему не взято</th></tr></thead>
 <tbody>
-<tr><td class="k"><code>checkout</code> для <code>load</code></td><td>в гите это местное действие, а загрузка пакета меняет базу. Обманывает в опасную сторону</td></tr>
+<tr><td class="k"><code>checkout</code> для <code>infobase load</code></td><td>в гите это местное действие, а загрузка пакета меняет базу. Обманывает в опасную сторону</td></tr>
 <tr><td class="k"><code>merge</code> для объединения конфигураций</td><td>объединение по файлу настроек совпадает с трёхсторонним слиянием только в букве; режим назван <code>combine</code></td></tr>
 <tr><td class="k"><code>push --force</code> для полной пересборки</td><td>в гите значит «перезапиши ту сторону», и ровно это он здесь и значит. Полная пересборка — «посчитай заново здесь», у неё другое имя: <code>push --full</code></td></tr>
 <tr><td class="k"><code>remote</code> отдельной командой</td><td>вышло бы два слова для одной вещи. Базы объявляются в местном слое, адреса видны в <code>status --all</code>, действия с базой собраны под <code>infobase</code></td></tr>
-<tr><td class="k"><code>export</code> для сохранения конфигурации базы</td><td>у платформы «экспорт» — выгрузка в XML. Пакет из базы получает слово самой платформы: <code>save</code></td></tr>
+<tr><td class="k"><code>export</code> и <code>save</code> для пакета из базы</td><td>у платформы «экспорт» — выгрузка в XML, а «сохранить» в Конфигураторе — записать правки в базу. Оба слова обманывают направлением; пакет из базы получает <code>download</code></td></tr>
 <tr><td class="k"><code>stash</code>, <code>commit</code>, <code>log</code></td><td>работа с системой версий принадлежит самой системе версий. Раннер её не подменяет и в неё не пишет</td></tr>
 </tbody>
 </table></div>
@@ -334,10 +332,11 @@ v8-runner pull --all              и расширения, которых в п�
 <tr><td class="k"><code>bootstrap</code></td><td><code>clone</code></td></tr>
 <tr><td class="k"><code>build</code></td><td><code>push</code></td></tr>
 <tr><td class="k"><code>dump</code></td><td><code>pull</code></td></tr>
-<tr><td class="k"><code>infobase configuration export</code></td><td><code>infobase save</code></td></tr>
+<tr><td class="k"><code>infobase configuration export</code></td><td><code>infobase download</code></td></tr>
+<tr><td class="k"><code>load</code></td><td><code>infobase load</code></td></tr>
 <tr><td class="k"><code>syntax</code></td><td><code>check</code></td></tr>
-<tr><td class="k"><code>load --mode merge</code></td><td><code>load --mode combine</code></td></tr>
-<tr><td class="k"><code>providers.build</code>, <code>providers.dump</code>, <code>providers.init</code></td><td><code>providers.push</code>, <code>providers.pull</code>, <code>providers.infobase.create</code></td></tr>
+<tr><td class="k"><code>load --mode merge</code></td><td><code>infobase load --mode combine</code></td></tr>
+<tr><td class="k"><code>providers.build</code>, <code>providers.dump</code>, <code>providers.init</code>, <code>providers.load</code>, <code>providers.infobase.configuration.export</code></td><td><code>providers.push</code>, <code>providers.pull</code>, <code>providers.infobase.create</code>, <code>providers.infobase.load</code>, <code>providers.infobase.download</code></td></tr>
 </tbody>
 </table></div>
 </main>

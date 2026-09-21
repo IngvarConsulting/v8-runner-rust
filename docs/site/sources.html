@@ -110,8 +110,8 @@ flowchart LR
   EMAIN -->|"pull my-ext"| EXTSRC
   EMAIN -->|"apply my-ext"| EDB
   CFSRC -->|"make"| PKG
-  PKG -->|"load"| MAIN
-  MAIN -->|"infobase save"| PKG
+  PKG -->|"infobase load"| MAIN
+  MAIN -->|"infobase download"| PKG
   MAIN -.->|"diff --against vendor:имя"| VEN
   class CFSRC,EXTSRC,PKG art
   class MAIN,EMAIN sw
@@ -130,8 +130,8 @@ flowchart LR
 <tbody>
 <tr><td class="k">исходники → база</td><td><code>push</code></td><td>да</td></tr>
 <tr><td class="k">база → исходники</td><td><code>pull</code></td><td>да</td></tr>
-<tr><td class="k">пакет → база</td><td><code>load</code></td><td>да</td></tr>
-<tr><td class="k">база → пакет</td><td><code>infobase save</code></td><td>да</td></tr>
+<tr><td class="k">пакет → база</td><td><code>infobase load</code></td><td>да</td></tr>
+<tr><td class="k">база → пакет</td><td><code>infobase download</code></td><td>да</td></tr>
 <tr><td class="k">исходники → пакет</td><td><code>make</code></td><td>нет для конфигурации и внешних <span class="ref">(<a href="platform.html#t30">30</a>)</span></td></tr>
 <tr><td class="k">пакет → исходники</td><td><code>convert</code></td><td>нет <span class="ref">(<a href="platform.html#t30">30</a>)</span></td></tr>
 </tbody>
@@ -173,7 +173,7 @@ stateDiagram-v2
   state "обновлено динамически" as Y
   S2 --> P: push --no-apply
   S2 --> P: правка в Конфигураторе
-  S2 --> P: load
+  S2 --> P: infobase load
   P --> S2: apply
   P --> Y: apply, когда сеансы не закрыть
   Y --> S2: перезапуск сеансов

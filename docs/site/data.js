@@ -228,10 +228,10 @@ window.RUNNER_DATA = (function () {
       }
     },
     {
-      id: 'load', verb: 'load', title: 'Применить .cf / .cfe к базе',
+      id: 'infobase-load', verb: 'infobase load', title: 'Загрузить .cf / .cfe в базу',
       what: 'Применяет пакет к основной конфигурации, целиком заменяя её; --mode combine или update — по правилам платформы.',
-      cmd: function (ctx) { return (ctx.type === 'EXTENSION' ? 'v8-runner load ext.cfe --ref my-ext' : 'v8-runner load main.cf'); },
-      applies: function (ctx) { return notExternal(ctx, 'load'); },
+      cmd: function (ctx) { return (ctx.type === 'EXTENSION' ? 'v8-runner infobase load ext.cfe --ref my-ext' : 'v8-runner infobase load main.cf'); },
+      applies: function (ctx) { return notExternal(ctx, 'infobase load'); },
       today: function (ctx) { return { chain: ctx.tools.designer ? [P.designer] : [], config: ['infobase.connection'], note: 'только Конфигуратор; состояния совместимости supported / absent / not_established / not_probed' }; },
       target: function (ctx) {
         if (ctx.target === 'standalone') return { chain: [P.designer], config: ['infobase.connection'], note: 'по прямому шлюзу; через SSH-шлюз нет: в его наборе нет сравнения, а проба совместимости перед загрузкой обязательна' };
@@ -253,9 +253,9 @@ window.RUNNER_DATA = (function () {
       }
     },
     {
-      id: 'infobase-save', verb: 'infobase save', title: 'Сохранить конфигурацию базы в пакет .cf / .cfe',
-      what: 'Сохраняет конфигурацию базы в пакет: основную или, с --state db, конфигурацию базы данных. Слово платформы.',
-      cmd: function (ctx) { return (ctx.type === 'EXTENSION' ? 'v8-runner infobase save my-ext --output ext.cfe' : 'v8-runner infobase save --output main.cf'); },
+      id: 'infobase-download', verb: 'infobase download', title: 'Забрать конфигурацию базы в пакет .cf / .cfe',
+      what: 'Забирает конфигурацию базы в пакет: основную или, с --state db, конфигурацию базы данных.',
+      cmd: function (ctx) { return (ctx.type === 'EXTENSION' ? 'v8-runner infobase download my-ext --output ext.cfe' : 'v8-runner infobase download --output main.cf'); },
       applies: function (ctx) { return notExternal(ctx, 'экспорт конфигурации'); },
       today: function (ctx) {
         var chain = builderChoice(ctx, true, ctx.target === 'file' || ctx.target === 'cluster');
