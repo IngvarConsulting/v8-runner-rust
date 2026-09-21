@@ -1,129 +1,71 @@
 {
   "$defs": {
-    "Issue": {
+    "BuildMode": {
       "oneOf": [
         {
-          "additionalProperties": false,
-          "properties": {
-            "column": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "kind": {
-              "const": "module",
-              "type": "string"
-            },
-            "line": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "message": {
-              "type": "string"
-            },
-            "path": {
-              "type": "string"
-            },
-            "severity": {
-              "$ref": "#/$defs/IssueSeverity"
-            }
-          },
-          "required": [
-            "kind",
-            "path",
-            "message",
-            "severity"
+          "enum": [
+            "edt_export",
+            "full",
+            "skipped"
           ],
-          "type": "object"
+          "type": "string"
         },
         {
           "additionalProperties": false,
           "properties": {
-            "kind": {
-              "const": "object",
-              "type": "string"
-            },
-            "message": {
-              "type": "string"
-            },
-            "object": {
-              "type": "string"
-            },
-            "severity": {
-              "$ref": "#/$defs/IssueSeverity"
+            "partial": {
+              "additionalProperties": false,
+              "properties": {
+                "file_count": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "file_count"
+              ],
+              "type": "object"
             }
           },
           "required": [
-            "kind",
-            "object",
-            "message",
-            "severity"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "check": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "column": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "kind": {
-              "const": "edt",
-              "type": "string"
-            },
-            "line": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "message": {
-              "type": "string"
-            },
-            "path": {
-              "type": "string"
-            },
-            "severity": {
-              "$ref": "#/$defs/IssueSeverity"
-            }
-          },
-          "required": [
-            "kind",
-            "path",
-            "message",
-            "severity"
+            "partial"
           ],
           "type": "object"
         }
       ]
     },
-    "IssueSeverity": {
-      "enum": [
-        "ERROR",
-        "WARNING",
-        "INFO"
+    "BuildStep": {
+      "additionalProperties": false,
+      "properties": {
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/BuildMode"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "source_set": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_set",
+        "mode",
+        "ok",
+        "duration_ms"
       ],
-      "type": "string"
+      "type": "object"
     },
     "Provider": {
       "description": "Исполнитель. Имя называет того, кто делает работу, а не способ его запуска.",
@@ -237,75 +179,19 @@
         "reason"
       ],
       "type": "object"
-    },
-    "SyntaxCheckStatus": {
-      "enum": [
-        "clean",
-        "issues_found",
-        "tool_failed"
-      ],
-      "type": "string"
-    },
-    "SyntaxIssueSummary": {
-      "additionalProperties": false,
-      "properties": {
-        "errors": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "info": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "warnings": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "errors",
-        "warnings",
-        "info"
-      ],
-      "type": "object"
     }
   },
-  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/syntax.schema.json",
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/push.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
-    "check_name": {
-      "type": "string"
-    },
     "duration_ms": {
       "format": "uint64",
       "minimum": 0,
       "type": "integer"
     },
-    "exit_code": {
-      "format": "int32",
-      "type": "integer"
-    },
-    "issues": {
-      "items": {
-        "$ref": "#/$defs/Issue"
-      },
-      "type": "array"
-    },
-    "log_read_warning": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "platform_log_path": {
-      "type": [
-        "string",
-        "null"
-      ]
+    "ok": {
+      "type": "boolean"
     },
     "provider": {
       "anyOf": [
@@ -318,27 +204,23 @@
       ],
       "description": "Квитанция о выборе исполнителя; `None`, пока выбор не начинался."
     },
-    "status": {
-      "$ref": "#/$defs/SyntaxCheckStatus"
+    "provider_dispatched": {
+      "description": "`false` when the run stopped at a preview instead of dispatching the platform.\n\nAlways present. In a preview each step's `mode` is the mode that would be used and\nits message says so; the flag is what separates planned from performed.",
+      "type": "boolean"
     },
-    "stderr": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "summary": {
-      "$ref": "#/$defs/SyntaxIssueSummary"
+    "steps": {
+      "items": {
+        "$ref": "#/$defs/BuildStep"
+      },
+      "type": "array"
     }
   },
   "required": [
-    "status",
-    "exit_code",
-    "check_name",
-    "issues",
-    "summary",
+    "ok",
+    "provider_dispatched",
+    "steps",
     "duration_ms"
   ],
-  "title": "SyntaxCheckResult",
+  "title": "BuildResult",
   "type": "object"
 }

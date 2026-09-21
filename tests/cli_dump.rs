@@ -312,7 +312,7 @@ fn dry_run_neither_takes_nor_waits_for_the_workspace_lock() {
     );
     let envelope: Value = serde_json::from_slice(&apply.stdout).expect("json");
     let message = envelope["error"]["message"].as_str().expect("message");
-    assert!(message.contains("cannot start dump"), "{message}");
+    assert!(message.contains("cannot start pull"), "{message}");
     assert!(message.contains("workspace"), "{message}");
 }
 
@@ -454,7 +454,7 @@ fn dump_edt_full_json_success_updates_designer_mirror_and_edt_target() {
     );
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], true);
-    assert_eq!(payload["command"], "dump");
+    assert_eq!(payload["command"], "pull");
     assert_eq!(
         payload["data"]["target_path"],
         fs::canonicalize(base_path.join("main"))

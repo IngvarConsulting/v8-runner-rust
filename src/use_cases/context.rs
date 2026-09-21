@@ -29,20 +29,20 @@ impl CommandName {
     /// Returns the stable command label used in logs and CLI envelopes.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Bootstrap => "bootstrap",
+            Self::Bootstrap => "clone",
             Self::ToolsDownload => "tools download",
-            Self::Init => "init",
+            Self::Init => "infobase create",
             Self::Extensions => "extensions",
-            Self::Build => "build",
-            Self::Load => "load",
+            Self::Build => "push",
+            Self::Load => "upload",
             Self::Test => "test",
-            Self::Dump => "dump",
-            Self::InfobaseConfigurationExport => "infobase.configuration.export",
+            Self::Dump => "pull",
+            Self::InfobaseConfigurationExport => "download",
             Self::InfobaseDump => "infobase.dump",
             Self::InfobaseRestore => "infobase.restore",
             Self::Convert => "convert",
             Self::Artifacts => "make",
-            Self::Syntax => "syntax",
+            Self::Syntax => "check",
             Self::Launch => "launch",
             Self::Publish => "publish",
         }

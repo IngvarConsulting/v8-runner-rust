@@ -102,18 +102,14 @@ pub fn execute_command(
     match command {
         Command::Version => unreachable!("version command is handled outside cli::execute"),
         Command::Bootstrap(_) => unreachable!("bootstrap command is handled outside cli::execute"),
-        Command::Config(_) => unreachable!("config commands are handled outside cli::execute"),
+        Command::Config(_) | Command::ConfigInit(_) => {
+            unreachable!("config commands are handled outside cli::execute")
+        }
+        Command::Download(_) => unreachable!("download is normalised into infobase in app::run"),
         Command::Tools(args) => execute_tools(
             config,
             args,
             required_primary_config_path(primary_config_path)?,
-            presenter,
-            clean_before_execution,
-            cancellation,
-        ),
-        Command::Init(args) => execute_init(
-            config,
-            args,
             presenter,
             clean_before_execution,
             cancellation,
@@ -147,6 +143,13 @@ pub fn execute_command(
             cancellation,
         ),
         Command::Dump(args) => execute_dump(
+            config,
+            args,
+            presenter,
+            clean_before_execution,
+            cancellation,
+        ),
+        Command::Init(args) => execute_init(
             config,
             args,
             presenter,
@@ -317,11 +320,13 @@ pub fn command_name(command: &Command) -> CommandName {
     match command {
         Command::Version => unreachable!("version command does not map to execution use cases"),
         Command::Bootstrap(_) => CommandName::Bootstrap,
-        Command::Config(_) => unreachable!("config commands do not map to execution use cases"),
+        Command::Config(_) | Command::ConfigInit(_) => {
+            unreachable!("config commands do not map to execution use cases")
+        }
+        Command::Download(_) => unreachable!("download is normalised into infobase in app::run"),
         Command::Tools(ToolsArgs {
             command: ToolsCommand::Download(_),
         }) => CommandName::ToolsDownload,
-        Command::Init(_) => CommandName::Init,
         Command::Extensions(_) => CommandName::Extensions,
         Command::Build(_) => CommandName::Build,
         Command::Load(_) => CommandName::Load,
@@ -333,6 +338,10 @@ pub fn command_name(command: &Command) -> CommandName {
                     command: InfobaseConfigurationCommand::Export(_),
                 }),
         }) => CommandName::InfobaseConfigurationExport,
+        Command::Init(_) => CommandName::Init,
+        Command::Infobase(InfobaseArgs {
+            command: InfobaseCommand::Create(_),
+        }) => unreachable!("infobase create is normalised into its own command in app::run"),
         Command::Infobase(InfobaseArgs {
             command: InfobaseCommand::Dump(_),
         }) => CommandName::InfobaseDump,
@@ -1042,6 +1051,9 @@ pub struct PreparedInfobaseCliCommand {
 
 pub fn validate_infobase_request(args: &InfobaseArgs) -> Result<(), AppError> {
     match &args.command {
+        InfobaseCommand::Create(_) => {
+            unreachable!("infobase create is normalised into its own command in app::run")
+        }
         InfobaseCommand::Configuration(configuration) => match &configuration.command {
             InfobaseConfigurationCommand::Export(args) => {
                 let request = map_infobase_configuration_export_request(args);
@@ -1104,6 +1116,9 @@ pub fn render_infobase_pre_dispatch_failure(
     // Выбор исполнителя не начинался: квитанции нет, причина — в ошибке конверта.
     let selection: Option<ProviderReceipt> = None;
     match &args.command {
+        InfobaseCommand::Create(_) => {
+            unreachable!("infobase create has no export request to render")
+        }
         InfobaseCommand::Configuration(configuration) => match &configuration.command {
             InfobaseConfigurationCommand::Export(args) => {
                 let request = map_infobase_configuration_export_request(args);
@@ -1157,6 +1172,9 @@ pub fn prepare_infobase_command(
     context: &ExecutionContext,
 ) -> Result<PreparedInfobaseCommand, UseCaseError> {
     match &args.command {
+        InfobaseCommand::Create(_) => {
+            unreachable!("infobase create is dispatched before the export machinery")
+        }
         InfobaseCommand::Configuration(configuration) => match &configuration.command {
             InfobaseConfigurationCommand::Export(args) => {
                 let request = map_infobase_configuration_export_request(args);
@@ -1242,6 +1260,9 @@ pub fn prepare_infobase_cli_command(
 
 fn infobase_command_name(args: &InfobaseArgs) -> CommandName {
     match &args.command {
+        InfobaseCommand::Create(_) => {
+            unreachable!("infobase create is normalised into its own command in app::run")
+        }
         InfobaseCommand::Configuration(_) => CommandName::InfobaseConfigurationExport,
         InfobaseCommand::Dump(_) => CommandName::InfobaseDump,
         InfobaseCommand::Restore(_) => CommandName::InfobaseRestore,
@@ -4932,9 +4953,9 @@ mod tests {
     fn pre_dispatch_json_error_keeps_command_identity() {
         let error = UseCaseError::new(UseCaseErrorKind::Runtime, "workspace is busy");
         for (command, expected) in [
-            (CommandName::Build, "build"),
-            (CommandName::Load, "load"),
-            (CommandName::Dump, "dump"),
+            (CommandName::Build, "push"),
+            (CommandName::Load, "upload"),
+            (CommandName::Dump, "pull"),
             (CommandName::Test, "test"),
             (CommandName::Artifacts, "make"),
             (CommandName::Launch, "launch"),
@@ -4963,10 +4984,10 @@ mod tests {
     #[test]
     fn pre_dispatch_json_error_supports_config_init_identity() {
         let error = UseCaseError::new(UseCaseErrorKind::Validation, "bad config init request");
-        let envelope = pre_dispatch_error_envelope("config init", &error);
+        let envelope = pre_dispatch_error_envelope("init", &error);
         let json = serde_json::to_value(envelope).expect("json");
 
-        assert_eq!(json["command"], "config init");
+        assert_eq!(json["command"], "init");
         assert_eq!(json["data"]["message"], "bad config init request");
         assert_eq!(json["error"]["code"], "invalid_argument");
     }

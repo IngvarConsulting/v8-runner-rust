@@ -136,7 +136,7 @@ fn config_init_uses_json_envelope_and_output_override() {
     assert!(config_path.exists());
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], true);
-    assert_eq!(payload["command"], "config init");
+    assert_eq!(payload["command"], "init");
     // Живая сверка формы: схема держит состав `data` только вместе с прогоном, иначе
     // команда вправе печатать не то, что за ней объявлено.
     assert_data_matches_a_declared_form(&payload, "`config init --output`");
@@ -233,7 +233,7 @@ fn config_init_rejects_global_config_shortcut_in_json_mode() {
     assert_eq!(output.status.code(), Some(2));
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], false);
-    assert_eq!(payload["command"], "config init");
+    assert_eq!(payload["command"], "init");
     assert_eq!(payload["error"]["code"], "invalid_argument");
     assert_eq!(payload["error"]["kind"], "validation");
     assert!(payload["data"]["message"]
@@ -375,7 +375,7 @@ fn config_init_refuses_to_overwrite_without_force() {
     assert_eq!(json_output.status.code(), Some(2));
     let payload: Value = serde_json::from_slice(&json_output.stdout).expect("json");
     assert_eq!(payload["ok"], false);
-    assert_eq!(payload["command"], "config init");
+    assert_eq!(payload["command"], "init");
     assert_eq!(payload["error"]["code"], "invalid_argument");
     assert!(payload["data"]["message"]
         .as_str()

@@ -3391,7 +3391,7 @@ exit 0"#,
 
         let json = serde_json::to_value(result).expect("json");
 
-        assert_eq!(DUMP_COMMAND, "dump");
+        assert_eq!(DUMP_COMMAND, "pull");
         assert_eq!(json["source_set"], "main");
         assert_eq!(json["extension"], "ext");
         assert_eq!(json["platform_log_path"], "/tmp/platform.log");

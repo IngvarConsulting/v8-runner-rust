@@ -1,28 +1,129 @@
 {
   "$defs": {
-    "DumpMode": {
+    "Issue": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "column": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "module",
+              "type": "string"
+            },
+            "line": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "message": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/$defs/IssueSeverity"
+            }
+          },
+          "required": [
+            "kind",
+            "path",
+            "message",
+            "severity"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "object",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "object": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/$defs/IssueSeverity"
+            }
+          },
+          "required": [
+            "kind",
+            "object",
+            "message",
+            "severity"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "check": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "column": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "edt",
+              "type": "string"
+            },
+            "line": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "message": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/$defs/IssueSeverity"
+            }
+          },
+          "required": [
+            "kind",
+            "path",
+            "message",
+            "severity"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "IssueSeverity": {
       "enum": [
-        "FULL",
-        "INCREMENTAL",
-        "PARTIAL"
+        "ERROR",
+        "WARNING",
+        "INFO"
       ],
       "type": "string"
-    },
-    "DumpSelectorResult": {
-      "additionalProperties": false,
-      "properties": {
-        "normalized": {
-          "type": "string"
-        },
-        "requested": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "requested",
-        "normalized"
-      ],
-      "type": "object"
     },
     "Provider": {
       "description": "Исполнитель. Имя называет того, кто делает работу, а не способ его запуска.",
@@ -136,34 +237,69 @@
         "reason"
       ],
       "type": "object"
+    },
+    "SyntaxCheckStatus": {
+      "enum": [
+        "clean",
+        "issues_found",
+        "tool_failed"
+      ],
+      "type": "string"
+    },
+    "SyntaxIssueSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "errors": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "info": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "warnings": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "errors",
+        "warnings",
+        "info"
+      ],
+      "type": "object"
     }
   },
-  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/dump.schema.json",
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/check.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "check_name": {
+      "type": "string"
+    },
     "duration_ms": {
       "format": "uint64",
       "minimum": 0,
       "type": "integer"
     },
-    "extension": {
+    "exit_code": {
+      "format": "int32",
+      "type": "integer"
+    },
+    "issues": {
+      "items": {
+        "$ref": "#/$defs/Issue"
+      },
+      "type": "array"
+    },
+    "log_read_warning": {
       "type": [
         "string",
         "null"
       ]
-    },
-    "message": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "mode": {
-      "$ref": "#/$defs/DumpMode"
-    },
-    "ok": {
-      "type": "boolean"
     },
     "platform_log_path": {
       "type": [
@@ -182,41 +318,27 @@
       ],
       "description": "Квитанция о выборе исполнителя; `None`, пока выбор не начинался."
     },
-    "provider_dispatched": {
-      "description": "`false` when the run stopped at a preview instead of dispatching the platform.",
-      "type": "boolean"
+    "status": {
+      "$ref": "#/$defs/SyntaxCheckStatus"
     },
-    "selectors": {
-      "items": {
-        "$ref": "#/$defs/DumpSelectorResult"
-      },
-      "type": [
-        "array",
-        "null"
-      ]
-    },
-    "source_set": {
+    "stderr": {
       "type": [
         "string",
         "null"
       ]
     },
-    "target_path": {
-      "type": "string"
-    },
-    "up_to_date": {
-      "default": false,
-      "description": "`true` when the platform reported the configuration generation unchanged since the\nlast recorded build or dump and nothing was dumped.",
-      "type": "boolean"
+    "summary": {
+      "$ref": "#/$defs/SyntaxIssueSummary"
     }
   },
   "required": [
-    "ok",
-    "provider_dispatched",
-    "mode",
-    "target_path",
+    "status",
+    "exit_code",
+    "check_name",
+    "issues",
+    "summary",
     "duration_ms"
   ],
-  "title": "DumpResult",
+  "title": "SyntaxCheckResult",
   "type": "object"
 }

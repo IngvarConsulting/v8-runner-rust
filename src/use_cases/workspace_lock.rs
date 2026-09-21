@@ -265,7 +265,7 @@ mod tests {
         let sidecar_path = canonical_work.join(WORKSPACE_LOCK_SIDECAR_FILE_NAME);
         fs::write(
             &sidecar_path,
-            r#"{"pid":999999,"command":"build","started_at":"2026-01-01T00:00:00Z","canonical_work_path":"/tmp/stale"}"#,
+            r#"{"pid":999999,"command":"push","started_at":"2026-01-01T00:00:00Z","canonical_work_path":"/tmp/stale"}"#,
         )
         .expect("sidecar");
 

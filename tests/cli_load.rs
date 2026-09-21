@@ -175,7 +175,7 @@ fn load_cf_json_success_loads_and_updates_without_asking() {
     assert!(output.status.success());
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], true);
-    assert_eq!(payload["command"], "load");
+    assert_eq!(payload["command"], "upload");
     assert_eq!(payload["data"]["artifact_type"], "configuration_cf");
     assert_eq!(payload["data"]["compatibility_state"], "not_probed");
     assert_eq!(payload["data"]["execution"]["payload"]["applied"], true);
@@ -333,7 +333,7 @@ fn load_update_mode_returns_validation_payload() {
     assert_eq!(output.status.code(), Some(2));
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], false);
-    assert_eq!(payload["command"], "load");
+    assert_eq!(payload["command"], "upload");
     assert_eq!(payload["data"]["mode"], "update");
     assert_eq!(payload["data"]["execution"]["payload"]["applied"], false);
     assert!(payload["data"]["message"]

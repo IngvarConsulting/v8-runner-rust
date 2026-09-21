@@ -4,7 +4,7 @@ status: active
 governs: product
 version: 2
 decision: DEC.2026-09-14.RECEIPT-EXPLAINS-PROVIDER-CHOICE
-artifact: docs/schemas/command-data/init.schema.json
+artifact: docs/schemas/command-data/infobase-create.schema.json
 producer: src/domain/init.rs
 consumers: [cli, unica]
 check: [src/command_data.rs::generated_command_data_schemas_are_current, tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it]

@@ -14,7 +14,7 @@ fn root_help_splits_commands_and_global_options() {
     assert!(stdout.contains("Commands:"));
     assert!(stdout.contains("Global options:"));
     assert!(stdout.contains("Print application version"));
-    assert!(stdout.contains("Build configured source-sets into the infobase"));
+    assert!(stdout.contains("Send configured source-sets to the infobase"));
     assert!(stdout.contains("--json-message"));
 }
 
@@ -50,9 +50,9 @@ fn config_init_help_separates_global_and_command_options() {
 }
 
 #[test]
-fn build_help_exposes_source_set_selector() {
+fn push_help_exposes_source_set_selector() {
     let output = v8_runner_command()
-        .args(["build", "--help"])
+        .args(["push", "--help"])
         .output()
         .expect("run command");
 
@@ -60,8 +60,10 @@ fn build_help_exposes_source_set_selector() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Command options:"));
     assert!(stdout.contains("--source-set <SOURCE_SET>"));
-    assert!(stdout.contains("--full-rebuild"));
+    assert!(stdout.contains("--full"));
     assert!(stdout.contains("--json-message"));
+    // Прежнее имя ключа принимается, но в справке его нет.
+    assert!(!stdout.contains("--full-rebuild"), "{stdout}");
 }
 
 #[test]
@@ -73,7 +75,7 @@ fn test_help_exposes_no_build_option() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("--no-build"));
+    assert!(stdout.contains("--no-push"));
 }
 
 #[test]

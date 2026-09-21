@@ -4,7 +4,7 @@ status: active
 governs: product
 version: 3
 decision: DEC.2026-09-14.PLATFORM-ANSWERS-WHETHER-THE-BASE-CHANGED
-artifact: docs/schemas/command-data/dump.schema.json
+artifact: docs/schemas/command-data/pull.schema.json
 producer: src/domain/dump.rs
 consumers: [cli, mcp, unica]
 check: [src/command_data.rs::generated_command_data_schemas_are_current, tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it]

@@ -134,7 +134,7 @@ fn syntax_designer_config_json_returns_clean_envelope() {
     assert!(output.status.success());
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], true);
-    assert_eq!(payload["command"], "syntax");
+    assert_eq!(payload["command"], "check");
     assert_eq!(payload["data"]["check_name"], "designer-config");
     assert_eq!(payload["data"]["status"], "clean");
     assert_eq!(payload["data"]["exit_code"], 0);
@@ -251,7 +251,7 @@ fn syntax_designer_modules_without_modes_renders_json_error() {
 
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], false);
-    assert_eq!(payload["command"], "syntax");
+    assert_eq!(payload["command"], "check");
     assert_eq!(
         payload["data"]["message"],
         "syntax designer-modules requires at least one mode flag"

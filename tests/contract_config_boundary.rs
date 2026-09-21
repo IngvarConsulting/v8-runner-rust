@@ -79,7 +79,11 @@ fn an_unsupported_combination_is_refused_before_any_utility_runs() {
     for (why, yaml) in cases {
         let dir = temp_workspace();
         let project = write_project(dir.path(), &yaml);
-        for command in [vec!["build"], vec!["dump", "--mode", "full"], vec!["init"]] {
+        for command in [
+            vec!["push"],
+            vec!["pull", "--mode", "full"],
+            vec!["infobase", "create"],
+        ] {
             let output = v8_runner_command()
                 .args([
                     "--config",

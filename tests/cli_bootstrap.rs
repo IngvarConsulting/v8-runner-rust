@@ -171,7 +171,7 @@ fn bootstrap_json_success_keeps_credentials_in_local_overlay_only() {
     assert!(output.status.success());
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], true);
-    assert_eq!(payload["command"], "bootstrap");
+    assert_eq!(payload["command"], "clone");
     // Настоящая база для живой сверки не нужна: харнесс подкладывает утилиты платформы,
     // и команда доходит до собранного ответа.
     assert_data_matches_a_declared_form(&payload, "`bootstrap`");
@@ -389,7 +389,7 @@ fn bootstrap_rejects_global_config_flag_in_json_mode() {
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(2));
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
-    assert_eq!(payload["command"], "bootstrap");
+    assert_eq!(payload["command"], "clone");
     assert_eq!(payload["error"]["kind"], "validation");
     assert!(payload["data"]["message"]
         .as_str()
@@ -437,7 +437,7 @@ fn bootstrap_failed_dump_redacts_secrets_in_outputs() {
     assert!(!stderr.contains("Admin"));
     assert!(!stderr.contains("super-secret"));
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
-    assert_eq!(payload["command"], "bootstrap");
+    assert_eq!(payload["command"], "clone");
     assert_eq!(payload["data"]["dumped"], false);
     assert!(payload["data"]["path"]
         .as_str()
@@ -499,7 +499,7 @@ fn missing_config_in_json_mode_keeps_error_envelope_shape() {
 
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], false);
-    assert_eq!(payload["command"], "build");
+    assert_eq!(payload["command"], "push");
     assert_eq!(payload["duration_ms"], 0);
     assert_eq!(payload["error"]["code"], "invalid_argument");
     assert_eq!(payload["error"]["kind"], "validation");
@@ -523,7 +523,7 @@ fn default_config_path_uses_v8project_yaml_from_current_dir() {
     assert!(output.status.success());
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], true);
-    assert_eq!(payload["command"], "build");
+    assert_eq!(payload["command"], "push");
 }
 
 #[test]
@@ -546,7 +546,7 @@ fn default_config_path_applies_sibling_local_overlay() {
     assert!(output.status.success());
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], true);
-    assert_eq!(payload["command"], "build");
+    assert_eq!(payload["command"], "push");
     assert!(local_work_path.exists());
 }
 
@@ -571,7 +571,7 @@ fn unsupported_main_config_shape_is_rejected_in_json_mode() {
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(2));
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
-    assert_eq!(payload["command"], "build");
+    assert_eq!(payload["command"], "push");
     assert_eq!(payload["error"]["code"], "invalid_argument");
     assert!(payload["data"]["message"]
         .as_str()
@@ -602,7 +602,7 @@ fn unsupported_local_overlay_shape_is_rejected_in_json_mode() {
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(2));
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
-    assert_eq!(payload["command"], "build");
+    assert_eq!(payload["command"], "push");
     assert_eq!(payload["error"]["code"], "invalid_argument");
     assert!(payload["data"]["message"]
         .as_str()
@@ -633,7 +633,7 @@ fn action_logging_failure_in_json_mode_keeps_command_identity() {
 
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], false);
-    assert_eq!(payload["command"], "build");
+    assert_eq!(payload["command"], "push");
     assert_eq!(payload["error"]["code"], "runtime_failure");
     assert_eq!(payload["error"]["kind"], "runtime");
     assert!(payload["data"]["message"]
@@ -758,7 +758,7 @@ fn legacy_top_level_connection_is_rejected_in_json_mode() {
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(2));
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
-    assert_eq!(payload["command"], "build");
+    assert_eq!(payload["command"], "push");
     assert_eq!(payload["error"]["code"], "invalid_argument");
     assert!(payload["data"]["message"]
         .as_str()
@@ -796,7 +796,7 @@ fn legacy_top_level_credentials_is_rejected_in_json_mode() {
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(2));
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
-    assert_eq!(payload["command"], "build");
+    assert_eq!(payload["command"], "push");
     assert_eq!(payload["error"]["code"], "invalid_argument");
     assert!(payload["data"]["message"]
         .as_str()
@@ -834,7 +834,7 @@ fn top_level_execution_timeout_seconds_is_rejected_in_json_mode() {
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(2));
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
-    assert_eq!(payload["command"], "build");
+    assert_eq!(payload["command"], "push");
     assert_eq!(payload["error"]["code"], "invalid_argument");
     let message = payload["data"]["message"].as_str().expect("message");
     assert!(message.contains("top-level key 'execution_timeout_seconds'"));

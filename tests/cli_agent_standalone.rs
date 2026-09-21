@@ -702,7 +702,7 @@ fn a_standalone_server_has_one_executor_and_no_load() {
     );
     assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));
 
-    let (code, payload) = run(&harness, &["init"]);
+    let (code, payload) = run(&harness, &["infobase", "create"]);
     assert_eq!(code, 0, "{payload}");
     assert_eq!(
         payload["data"]["steps"][0]["status"], "skipped",

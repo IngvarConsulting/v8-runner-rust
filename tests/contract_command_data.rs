@@ -88,7 +88,7 @@ fn every_previewable_command_answers_in_the_form_declared_for_it() {
         vec!["convert", "--dry-run"],
         vec!["make", "--output", &artifact_argument, "--dry-run"],
         vec!["load", "--path", &artifact_argument, "--dry-run"],
-        vec!["init", "--dry-run"],
+        vec!["infobase", "create", "--dry-run"],
         vec!["launch", "designer", "--dry-run"],
         vec!["extensions", "list", "--dry-run"],
         vec![

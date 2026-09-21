@@ -454,7 +454,7 @@ fn build_json_failure_returns_step_payload() {
 
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], false);
-    assert_eq!(payload["command"], "build");
+    assert_eq!(payload["command"], "push");
     assert_eq!(payload["error"]["code"], "platform_failure");
     assert_eq!(payload["error"]["kind"], "platform");
     assert_eq!(payload["data"]["ok"], false);
@@ -594,7 +594,7 @@ fn build_text_workspace_lock_conflict_prints_single_error() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let error_prefix = "runtime error: cannot start build";
+    let error_prefix = "runtime error: cannot start push";
     let combined = format!("{stdout}{stderr}");
 
     assert_eq!(
@@ -603,7 +603,7 @@ fn build_text_workspace_lock_conflict_prints_single_error() {
         "stdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("ERROR: runtime error: cannot start build"),
+        stderr.contains("ERROR: runtime error: cannot start push"),
         "stderr:\n{stderr}"
     );
     assert!(
@@ -698,7 +698,7 @@ fn build_source_set_json_rejects_unknown_source_set() {
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(2));
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
-    assert_eq!(payload["command"], "build");
+    assert_eq!(payload["command"], "push");
     assert_eq!(payload["error"]["kind"], "validation");
     assert_eq!(payload["error"]["message"], "unknown source-set 'missing'");
     assert_eq!(payload["data"]["steps"].as_array().expect("steps").len(), 0);

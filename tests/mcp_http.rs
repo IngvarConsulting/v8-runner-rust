@@ -753,7 +753,7 @@ async fn mcp_http_dump_config_full_ibcmd_server_contract_passes_dbms_and_infobas
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let payload = extract_sse_json(&response.text().await.expect("dump body"));
     let structured = &payload["result"]["structuredContent"];
-    assert_envelope_success(structured, "dump");
+    assert_envelope_success(structured, "pull");
     assert_eq!(structured["data"]["ok"], true);
     let calls = fs::read_to_string(calls_log).expect("ibcmd calls");
     assert!(calls.contains("--dbms PostgreSQL --database-server localhost --database-name maindb"));
@@ -821,7 +821,7 @@ async fn mcp_http_dump_config_partial_ibcmd_returns_degraded_success() {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let payload = extract_sse_json(&response.text().await.expect("dump body"));
     let structured = &payload["result"]["structuredContent"];
-    assert_envelope_success(structured, "dump");
+    assert_envelope_success(structured, "pull");
     assert_eq!(structured["data"]["ok"], true);
     assert_eq!(structured["data"]["mode"], "PARTIAL");
     assert!(structured["data"]["message"]
@@ -862,7 +862,7 @@ async fn mcp_http_dump_config_partial_ibcmd_preserves_partial_mode_on_failure() 
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let payload = extract_sse_json(&response.text().await.expect("dump failure body"));
     let structured = &payload["result"]["structuredContent"];
-    assert_envelope_business_failure(structured, "dump");
+    assert_envelope_business_failure(structured, "pull");
     assert_eq!(structured["data"]["mode"], "PARTIAL");
     assert!(structured["data"]["message"]
         .as_str()
@@ -1277,8 +1277,8 @@ async fn mcp_http_reuses_one_edt_process_across_sessions_and_shares_capacity() {
     assert_eq!(second.status(), reqwest::StatusCode::OK);
     let first_payload = extract_sse_json(&first.text().await.expect("first edt body"));
     let second_payload = extract_sse_json(&second.text().await.expect("second edt body"));
-    assert_envelope_success(&first_payload["result"]["structuredContent"], "syntax");
-    assert_envelope_success(&second_payload["result"]["structuredContent"], "syntax");
+    assert_envelope_success(&first_payload["result"]["structuredContent"], "check");
+    assert_envelope_success(&second_payload["result"]["structuredContent"], "check");
 
     let lifecycle = fs::read_to_string(&lifecycle_log).expect("lifecycle log");
     let lines = lifecycle.lines().collect::<Vec<_>>();
@@ -1313,7 +1313,7 @@ async fn mcp_http_returns_terminal_business_failure_for_edt_syntax_timeout() {
     .await;
     assert_eq!(ready.status(), reqwest::StatusCode::OK);
     let ready_payload = extract_sse_json(&ready.text().await.expect("EDT readiness body"));
-    assert_envelope_success(&ready_payload["result"]["structuredContent"], "syntax");
+    assert_envelope_success(&ready_payload["result"]["structuredContent"], "check");
 
     let response = call_tool(
         &client,
@@ -1327,7 +1327,7 @@ async fn mcp_http_returns_terminal_business_failure_for_edt_syntax_timeout() {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let payload = extract_sse_json(&response.text().await.expect("edt timeout body"));
     let structured = &payload["result"]["structuredContent"];
-    assert_envelope_business_failure(structured, "syntax");
+    assert_envelope_business_failure(structured, "check");
     assert_eq!(structured["data"]["status"], "tool_failed");
     assert!(structured["error"]["message"]
         .as_str()
@@ -1368,7 +1368,7 @@ async fn mcp_http_edt_action_log_contains_runtime_telemetry_events() {
     .await;
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let payload = extract_sse_json(&response.text().await.expect("edt body"));
-    assert_envelope_success(&payload["result"]["structuredContent"], "syntax");
+    assert_envelope_success(&payload["result"]["structuredContent"], "check");
 
     wait_for_log_contains(&action_log, "mcp_execution_semaphore_wait").await;
     wait_for_log_contains(&action_log, "mcp_edt_queue_depth").await;
