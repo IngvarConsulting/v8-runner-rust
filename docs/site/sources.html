@@ -98,7 +98,8 @@ source-set:
 <g class="fr fr-host"><rect x="42.5" y="7.0" width="155.0" height="400.0" rx="12"/><text x="56.5" y="25.0">каталог проекта</text></g>
 <path marker-end="url(#arr-mapping)" class="e" d="M179.5,68.4 C305.9,68.4 334.1,68.4 460.5,68.4"/>
 <path marker-end="url(#arr-mapping)" class="e" d="M460.5,91.6 C334.1,91.6 305.9,91.6 179.5,91.6"/>
-<path marker-end="url(#arr-mapping)" class="e" d="M579.5,80.0 C652.0,80.0 668.0,80.0 740.5,80.0"/>
+<path marker-end="url(#arr-mapping)" class="e" d="M579.5,68.4 C652.0,68.4 668.0,68.4 740.5,68.4"/>
+<path marker-end="url(#arr-mapping)" class="e" d="M740.5,91.6 C668.0,91.6 652.0,91.6 579.5,91.6"/>
 <path marker-end="url(#arr-mapping)" class="e" d="M172.0,348.4 C301.8,348.4 330.7,348.4 460.5,348.4"/>
 <path marker-end="url(#arr-mapping)" class="e" d="M460.5,371.6 C330.7,371.6 301.8,371.6 172.0,371.6"/>
 <path marker-end="url(#arr-mapping)" class="e" d="M579.5,360.0 C653.8,360.0 670.2,360.0 744.5,360.0"/>
@@ -116,7 +117,8 @@ source-set:
 <g class="n n-run"><rect x="744.5" y="331.0" width="111.0" height="58.0" rx="8"/><text><tspan x="800.0" y="351.0">база данных</tspan><tspan x="800.0" y="369.0">расширения</tspan></text></g>
 <g class="lbl"><rect x="283.0" y="56.4" width="74" height="24" rx="4"/><text><tspan x="320.0" y="68.4">push main</tspan></text></g>
 <g class="lbl"><rect x="283.0" y="79.6" width="74" height="24" rx="4"/><text><tspan x="320.0" y="91.6">pull main</tspan></text></g>
-<g class="lbl"><rect x="636.5" y="68.0" width="47" height="24" rx="4"/><text><tspan x="660.0" y="80.0">apply</tspan></text></g>
+<g class="lbl"><rect x="636.5" y="56.4" width="47" height="24" rx="4"/><text><tspan x="660.0" y="68.4">apply</tspan></text></g>
+<g class="lbl"><rect x="636.5" y="79.6" width="47" height="24" rx="4"/><text><tspan x="660.0" y="91.6">reset</tspan></text></g>
 <g class="lbl"><rect x="272.8" y="336.4" width="87" height="24" rx="4"/><text><tspan x="316.2" y="348.4">push my-ext</tspan></text></g>
 <g class="lbl"><rect x="272.8" y="359.6" width="87" height="24" rx="4"/><text><tspan x="316.2" y="371.6">pull my-ext</tspan></text></g>
 <g class="lbl"><rect x="615.0" y="348.0" width="94" height="24" rx="4"/><text><tspan x="662.0" y="360.0">apply my-ext</tspan></text></g>
@@ -184,29 +186,31 @@ source-set:
 
 <!-- diagram:states-inside -->
 <div class="diagram" role="img" aria-label="Состояния основной конфигурации и конфигурации базы данных внутри базы">
-<svg viewBox="20.0 18.0 895.0 230.0" xmlns="http://www.w3.org/2000/svg" style="max-width:895px">
+<svg viewBox="20.0 23.0 895.0 259.5" xmlns="http://www.w3.org/2000/svg" style="max-width:895px">
 <defs><marker id="arr-states-inside" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
-<path marker-end="url(#arr-states-inside)" class="e" d="M150,104 C230,40 310,40 350,104"/>
-<path marker-end="url(#arr-states-inside)" class="e" d="M150,112 C230,70 320,70 350,112"/>
+<path marker-end="url(#arr-states-inside)" class="e" d="M150,102 C230,26 310,26 350,102"/>
+<path marker-end="url(#arr-states-inside)" class="e" d="M150,112 C230,72 320,72 350,112"/>
 <path marker-end="url(#arr-states-inside)" class="e" d="M150.0,125.3 C240.0,125.3 260.0,125.3 350.0,125.3"/>
-<path marker-end="url(#arr-states-inside)" class="e" d="M350,136 C300,190 200,190 150,136"/>
+<path marker-end="url(#arr-states-inside)" class="e" d="M350,136 C300,180 200,180 150,136"/>
+<path marker-end="url(#arr-states-inside)" class="e" d="M350,141 C300,236 200,236 150,141"/>
 <path marker-end="url(#arr-states-inside)" class="e" d="M510.0,115.6 C593.2,115.6 611.8,115.6 695.0,115.6"/>
-<path marker-end="url(#arr-states-inside)" class="e" d="M760,142 C650,230 250,230 150,142"/>
+<path marker-end="url(#arr-states-inside)" class="e" d="M760,142 C650,300 250,300 150,142"/>
 <g class="n n-sw"><rect x="30.0" y="98.0" width="120.0" height="44.0" rx="8"/><text><tspan x="90.0" y="120.0">совпадают</tspan></text></g>
 <g class="n n-sw"><rect x="350.0" y="98.0" width="160.0" height="44.0" rx="8"/><text><tspan x="430.0" y="120.0">есть непринятое</tspan></text></g>
 <g class="n n-sw"><rect x="695.0" y="98.0" width="210.0" height="44.0" rx="8"/><text><tspan x="800.0" y="120.0">обновлено динамически</tspan></text></g>
-<g class="lbl"><rect x="208.0" y="28.0" width="114" height="24" rx="4"/><text><tspan x="265.0" y="40.0">push --no-apply</tspan></text></g>
-<g class="lbl"><rect x="188.2" y="54.5" width="161" height="24" rx="4"/><text><tspan x="268.8" y="66.5">правка в Конфигураторе</tspan></text></g>
-<g class="lbl"><rect x="223.0" y="111.3" width="54" height="24" rx="4"/><text><tspan x="250.0" y="123.3">upload</tspan></text></g>
-<g class="lbl"><rect x="226.5" y="182.5" width="47" height="24" rx="4"/><text><tspan x="250.0" y="194.5">apply</tspan></text></g>
-<g class="lbl"><rect x="495.0" y="87.6" width="215" height="24" rx="4"/><text><tspan x="602.5" y="99.6">apply, когда сеансы не закрыть</tspan></text></g>
-<g class="lbl"><rect x="384.2" y="214.0" width="134" height="24" rx="4"/><text><tspan x="451.2" y="226.0">перезапуск сеансов</tspan></text></g>
+<g class="lbl"><rect x="208.0" y="33.0" width="114" height="24" rx="4"/><text><tspan x="265.0" y="45.0">push --no-apply</tspan></text></g>
+<g class="lbl"><rect x="188.2" y="70.0" width="161" height="24" rx="4"/><text><tspan x="268.8" y="82.0">правка в Конфигураторе</tspan></text></g>
+<g class="lbl"><rect x="223.0" y="113.3" width="54" height="24" rx="4"/><text><tspan x="250.0" y="125.3">upload</tspan></text></g>
+<g class="lbl"><rect x="226.5" y="157.0" width="47" height="24" rx="4"/><text><tspan x="250.0" y="169.0">apply</tspan></text></g>
+<g class="lbl"><rect x="226.5" y="200.2" width="47" height="24" rx="4"/><text><tspan x="250.0" y="212.2">reset</tspan></text></g>
+<g class="lbl"><rect x="495.0" y="103.6" width="215" height="24" rx="4"/><text><tspan x="602.5" y="115.6">apply, когда сеансы не закрыть</tspan></text></g>
+<g class="lbl"><rect x="384.2" y="248.5" width="134" height="24" rx="4"/><text><tspan x="451.2" y="260.5">перезапуск сеансов</tspan></text></g>
 </svg>
 </div>
 <!-- /diagram:states-inside -->
 <p class="hint">Состояния основной конфигурации и конфигурации базы данных: внутри самой базы.</p>
 
-<p>«Есть непринятое» — штатное состояние: ради него разведены <code>push --no-apply</code> и <code>apply</code>, чтобы реструктуризацию можно было отложить до окна обслуживания. «Обновлено динамически» означает, что новые сеансы получат новую конфигурацию, а работающие останутся на прежней до перезапуска.</p>
+<p>«Есть непринятое» — штатное состояние: ради него разведены <code>push --no-apply</code> и <code>apply</code>, чтобы реструктуризацию можно было отложить до окна обслуживания. Обратный ход — <code>reset</code>: основная конфигурация возвращается к конфигурации базы данных, непринятое пропадает <span class="ref">(<a href="platform.html#t7">7</a>)</span>. «Обновлено динамически» означает, что новые сеансы получат новую конфигурацию, а работающие останутся на прежней до перезапуска.</p>
 
 <p>Кроме содержимого у ссылки есть собственное состояние: существует ли она с обеих сторон.</p>
 
