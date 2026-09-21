@@ -11,6 +11,14 @@
   .ref { font-size: 0.9em; color: var(--muted, #7a7f87); }
   pre.sh { background: var(--code-bg); padding: 12px 16px; border-radius: 8px; overflow-x: auto; margin: 16px 0; }
   pre.sh code { background: none; padding: 0; }
+  .diagram { background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin: 16px 0; overflow-x: auto; }
+  .diagram svg { display: block; width: 100%; max-width: 920px; height: auto; margin: 0 auto; font-family: 'Golos Text', system-ui, sans-serif; }
+  .diagram .n rect { fill: var(--paper); stroke: var(--ink-2); stroke-width: 1.2; }
+  .diagram .n text { fill: var(--ink); font-size: 15px; text-anchor: middle; dominant-baseline: middle; }
+  .diagram .e { fill: none; stroke: var(--ink-3); stroke-width: 1.4; marker-end: url(#sd-arr); }
+  .diagram marker path { fill: var(--ink-3); }
+  .diagram .lbl rect { fill: var(--code-bg); }
+  .diagram .lbl text { fill: var(--ink-2); font-size: 13px; text-anchor: middle; dominant-baseline: middle; }
   td.k { white-space: nowrap; }
 </style>
 </head>
@@ -102,9 +110,9 @@ flowchart LR
     direction TB
     MAIN["основная<br/>конфигурация"]
     DB["конфигурация<br/>базы данных"]
+    VEN["конфигурации<br/>поставщиков"]
     EMAIN["конфигурация<br/>расширения"]
     EDB["база данных<br/>расширения"]
-    VEN["конфигурации<br/>поставщиков"]
   end
   CFSRC -->|"push main"| MAIN
   MAIN -->|"pull main"| CFSRC
@@ -145,22 +153,32 @@ flowchart LR
 <h2 id="states">Состояния и переходы</h2>
 <p>Исходники и основная конфигурация меняются независимо: файлы правят в редакторе, конфигурацию — в Конфигураторе. Отсюда четыре состояния снаружи базы и два способа вернуться к согласию.</p>
 
-<pre class="mermaid">
-stateDiagram-v2
-  direction LR
-  state "совпадают" as S
-  state "исходники впереди" as L
-  state "база впереди" as B
-  state "разошлись" as D
-  S --> L: правка в файлах
-  L --> S: push
-  S --> B: правка в Конфигураторе
-  B --> S: pull
-  L --> D: правка в Конфигураторе
-  B --> D: правка в файлах
-  D --> L: pull
-  D --> D: push отклоняется
-</pre>
+<div class="diagram" role="img" aria-label="Четыре состояния пары выгрузка и основная конфигурация: совпадают, исходники впереди, база впереди, разошлись">
+<svg viewBox="0 0 920 300" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="sd-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+  <path class="e" d="M95,128 C95,58 190,58 288,58"/>
+  <path class="e" d="M300,80 C250,80 230,142 157,142"/>
+  <path class="e" d="M95,172 C95,242 190,242 303,242"/>
+  <path class="e" d="M315,220 C260,220 240,158 157,158"/>
+  <path class="e" d="M472,58 C560,58 660,60 660,126"/>
+  <path class="e" d="M457,242 C560,242 660,240 660,174"/>
+  <path class="e" d="M598,150 C540,150 530,74 474,74"/>
+  <path class="e" d="M720,140 C790,120 790,180 722,160"/>
+  <g class="n"><rect x="35" y="128" width="120" height="44" rx="8"/><text x="95" y="151">совпадают</text></g>
+  <g class="n"><rect x="290" y="36" width="180" height="44" rx="8"/><text x="380" y="59">исходники впереди</text></g>
+  <g class="n"><rect x="305" y="220" width="150" height="44" rx="8"/><text x="380" y="243">база впереди</text></g>
+  <g class="n"><rect x="600" y="128" width="120" height="44" rx="8"/><text x="660" y="151">разошлись</text></g>
+  <g class="lbl"><rect x="122" y="29" width="127" height="22" rx="4"/><text x="185" y="41">правка в файлах</text></g>
+  <g class="lbl"><rect x="213" y="107" width="45" height="22" rx="4"/><text x="235" y="119">push</text></g>
+  <g class="lbl"><rect x="96" y="253" width="178" height="22" rx="4"/><text x="185" y="265">правка в Конфигураторе</text></g>
+  <g class="lbl"><rect x="213" y="179" width="45" height="22" rx="4"/><text x="235" y="191">pull</text></g>
+  <g class="lbl"><rect x="481" y="29" width="178" height="22" rx="4"/><text x="570" y="41">правка в Конфигураторе</text></g>
+  <g class="lbl"><rect x="507" y="253" width="127" height="22" rx="4"/><text x="570" y="265">правка в файлах</text></g>
+  <g class="lbl"><rect x="523" y="101" width="45" height="22" rx="4"/><text x="545" y="113">pull</text></g>
+  <g class="lbl"><rect x="771" y="139" width="134" height="22" rx="4"/><text x="838" y="151">push отклоняется</text></g>
+</svg>
+</div>
+<p class="hint">Состояния выгрузки и основной конфигурации: каталог исходников против основной конфигурации базы.</p>
 
 <p>Петля у «разошлись» — отказ по несовпадению предка. Раннер не выбирает, чья правка важнее: он возвращает к <code>pull</code>, а сводит расхождение система контроля версий.</p>
 
@@ -181,6 +199,7 @@ stateDiagram-v2
   P --> Y: apply, когда сеансы не закрыть
   Y --> S2: перезапуск сеансов
 </pre>
+<p class="hint">Состояния основной конфигурации и конфигурации базы данных: внутри самой базы.</p>
 
 <p>«Есть непринятое» — штатное состояние: ради него разведены <code>push --no-apply</code> и <code>apply</code>, чтобы реструктуризацию можно было отложить до окна обслуживания. «Обновлено динамически» означает, что новые сеансы получат новую конфигурацию, а работающие останутся на прежней до перезапуска.</p>
 
