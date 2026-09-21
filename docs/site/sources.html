@@ -228,7 +228,11 @@ origin: File="/srv/ib/demo"
     origin/                  # база по умолчанию
       generation.json        # поколение, чем получено, после какой операции
       hashes/                # хеши исходников по наборам
-      ConfigDumpInfo.xml     # файл версий этой пары
+      dump-info/
+        main/
+          ConfigDumpInfo.xml # файл версий набора: у конфигурации и у каждого расширения свой
+        my-ext/
+          …
     test/
       …</code></pre>
 

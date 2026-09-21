@@ -108,7 +108,7 @@ window.RUNNER_USECASES = [
 
   { id: 'ext', title: 'Первая установка расширения',
     who: 'разработчик расширения',
-    pre: 'есть .cfe или его исходники',
+    pre: 'есть исходники расширения',
     steps: [
       { id: 'push', cmd: 'v8-runner push my-ext', in: ['repo'], out: ['ib'], note: 'первая отправка заводит расширение сама' },
       { id: 'extensions', in: ['ib'], out: ['extlist'], note: 'смотрим состав и свойства' }
