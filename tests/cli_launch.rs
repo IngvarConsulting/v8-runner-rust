@@ -2092,7 +2092,12 @@ fn a_thin_client_plan_shows_a_declared_server_address_as_s_with_masked_credentia
         .iter()
         .position(|arg| arg == "/S")
         .unwrap_or_else(|| panic!("no /S in {args:?}"));
-    let window: Vec<&str> = args[at..at + 6].iter().map(String::as_str).collect();
+    let window: Vec<&str> = args
+        .get(at..at + 6)
+        .unwrap_or_else(|| panic!("/S is not followed by an address and credentials: {args:?}"))
+        .iter()
+        .map(String::as_str)
+        .collect();
     assert_eq!(
         window,
         ["/S", "srv:1541\\demo", "/N", "Admin", "/P", "***"],

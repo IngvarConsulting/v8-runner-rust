@@ -1618,6 +1618,35 @@ mod tests {
         );
     }
 
+    /// Адрес кластерной базы приходит к агенту в той же форме, в какой уходит
+    /// Конфигуратору пакетно: `/S host\name` (#55). Агент разбирает строку не сам —
+    /// он получает готовый адрес от `V8Connection`, и эти два пути не расходятся.
+    #[test]
+    fn a_cluster_address_reaches_the_agent_in_the_platform_form() {
+        let connection = crate::platform::connection::V8Connection::from_connection_string(
+            "Srvr=srv:1541;Ref=demo",
+        );
+        let launch = AgentLaunch {
+            v8: PathBuf::from("/opt/1cv8/1cv8"),
+            infobase_args: connection.infobase_args(),
+            port: 1543,
+            host_key: None,
+            base_dir: PathBuf::from("/work/agent"),
+            process_log: PathBuf::from("/work/logs/agent"),
+        };
+        let args = launch.args();
+        assert_eq!(&args[..3], ["DESIGNER", "/S", "srv:1541\\demo"], "{args:?}");
+        assert!(
+            !args.iter().any(|arg| arg == "/IBConnectionString"),
+            "{args:?}"
+        );
+        // Реквизиты в этом режиме не передаются: их несёт SSH.
+        assert!(
+            !args.iter().any(|arg| arg == "/N" || arg == "/P"),
+            "{args:?}"
+        );
+    }
+
     /// Журнал и отказ печатают точку входа так, как её объявляют: адрес IPv6 — в
     /// скобках; соединению при этом уходит голый адрес.
     #[test]

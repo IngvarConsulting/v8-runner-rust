@@ -632,6 +632,7 @@ fn a_direct_gate_address_next_to_the_standalone_section_is_accepted_but_not_used
             !command.contains("Srvr=")
                 && !command.contains("Ref=")
                 && !command.contains("1541\\demo")
+                && !command.contains("/S ")
         }),
         "the direct gate address never reaches the gate in any form: {commands:?}"
     );

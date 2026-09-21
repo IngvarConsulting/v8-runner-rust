@@ -16,13 +16,12 @@ impl V8Connection {
         let connection_args = if trimmed.starts_with('/') || trimmed.starts_with('-') {
             split_arg_string(trimmed)
         } else if let Some(address) =
-            declared_server_address(trimmed).filter(|address| address.parts == 2)
+            declared_server_address(trimmed).and_then(|address| address.sole_s_argument())
         {
-            // Объявленный серверный адрес из двух частей уходит платформе её же ключом
-            // `/S host\name`: рядом с `/IBConnectionString` реквизиты `/N`/`/P` она не
-            // принимала (Windows, 8.3.27.1936, #55), рядом с `/S` — принимает. Строка с
-            // дополнительными частями отдаётся целиком: терять их нельзя.
-            vec!["/S".to_owned(), address.as_s_argument()]
+            // Объявленный серверный адрес уходит платформе её же ключом `/S host\name`:
+            // рядом с `/IBConnectionString` реквизиты `/N`/`/P` она не принимала
+            // (Windows, 8.3.27.1936, #55), рядом с `/S` — принимает.
+            vec!["/S".to_owned(), address]
         } else {
             vec!["/IBConnectionString".to_owned(), trimmed.to_owned()]
         };
@@ -81,6 +80,8 @@ impl V8Connection {
     }
 
     /// Returns whether the raw value has a supported file or server connection shape.
+    /// The declared form is answered by [`declared_server_address`], the same predicate
+    /// that decides how the address reaches the platform.
     pub fn has_supported_shape(&self) -> bool {
         if let Some(path) = self.file_path() {
             return !path.trim().is_empty();
@@ -109,19 +110,25 @@ impl V8Connection {
 }
 
 /// Серверный адрес объявленной строки: `Srvr` и `Ref` без кавычек и число частей строки.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeclaredServerAddress {
-    pub server: String,
-    pub reference: String,
-    /// Сколько частей `ключ=значение` в строке: адрес из двух частей уходит как `/S` и
-    /// ничего не теряет, строка с дополнительными частями отдаётся целиком.
-    pub parts: usize,
+#[derive(Debug)]
+struct DeclaredServerAddress {
+    server: String,
+    reference: String,
+    /// Сколько частей `ключ=значение` в строке.
+    parts: usize,
 }
 
 impl DeclaredServerAddress {
-    /// Значение ключа `/S`: `host[:port]\name`.
-    pub fn as_s_argument(&self) -> String {
-        format!("{}\\{}", self.server, self.reference)
+    /// Значение ключа `/S` — `host[:port]\name`, — когда строку можно им заменить без
+    /// потерь и без догадок. Условий два, и держит их сам адрес, а не тот, кто спрашивает:
+    /// в строке ровно две части (дополнительные — `Locale=`, `Usr=`, иное — ключ `/S` не
+    /// несёт, и терять их нельзя), и хост не перечисляет резервные серверы через запятую
+    /// (справка платформы знает у `/S` одну машину, а замера списка нет — #55).
+    fn sole_s_argument(&self) -> Option<String> {
+        if self.parts != 2 || self.server.contains(',') {
+            return None;
+        }
+        Some(format!("{}\\{}", self.server, self.reference))
     }
 }
 
@@ -129,7 +136,7 @@ impl DeclaredServerAddress {
 /// сборке argv: `Srvr` и `Ref` с непустыми значениями, регистр и порядок ключей свободны,
 /// завершающая `;` и парные кавычки допустимы (`Srvr="srv";Ref="ut";`). `None` — строку
 /// платформа серверным адресом не считает: части нет, значение пусто или кавычка непарная.
-pub fn declared_server_address(raw: &str) -> Option<DeclaredServerAddress> {
+fn declared_server_address(raw: &str) -> Option<DeclaredServerAddress> {
     let parameters = declared_parameters(raw)?;
     let mut server = None;
     let mut reference = None;
@@ -333,7 +340,7 @@ mod tests {
         for (raw, expected) in [
             ("Srvr=srv:1541;Ref=demo", "srv:1541\\demo"),
             (" Ref = demo ; SRVR = srv ", "srv\\demo"),
-            ("Srvr='srv1,srv2:1641';Ref=demo", "srv1,srv2:1641\\demo"),
+            ("Srvr=srv;Ref=demo;", "srv\\demo"),
         ] {
             assert_eq!(
                 V8Connection::from_connection_string(raw).args(),
@@ -343,13 +350,17 @@ mod tests {
         }
     }
 
-    /// Строка с дополнительными частями, файловая строка и строка, которую платформа
-    /// серверной не считает, отдаются целиком: частей терять нельзя, а `/S` получает
-    /// только серверный адрес.
+    /// Строка с дополнительными частями, список резервных серверов, файловая строка и
+    /// строка, которую платформа серверной не считает, отдаются целиком: частей терять
+    /// нельзя, а форму `/S` раннер берёт только там, где она замерена — одна машина и
+    /// ничего кроме адреса. Список серверов рядом с `/S` не замерен (#55), поэтому такая
+    /// строка остаётся прежней формой и продолжает работать как работала.
     #[test]
     fn other_declared_strings_stay_whole_in_ibconnectionstring() {
         for raw in [
             "Srvr=host;Ref=name;Usr=a;Pwd=b",
+            "Srvr=srv;Ref=demo;Locale=ru",
+            "Srvr='srv1,srv2:1641';Ref=demo",
             "File=/tmp/ib;Locale=ru",
             "File=/tmp/ib",
             "Srvr=\"host;Ref=x",
