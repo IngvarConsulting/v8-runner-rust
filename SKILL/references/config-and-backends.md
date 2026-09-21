@@ -1,6 +1,6 @@
 # Config And Backends
 
-Inspect `v8project.yaml` before diagnosing build, syntax, dump, test, and launch behavior.
+Inspect `v8project.yaml` before diagnosing push, check, pull, test, and launch behavior.
 If a sibling `v8project.local.yaml` exists, inspect it too because it overrides machine-local
 settings before CLI overrides.
 
@@ -24,7 +24,7 @@ settings before CLI overrides.
 - `tools.edt_cli.path`, `version`, and `interactive-mode`: EDT CLI discovery and execution mode.
 - `tests.yaxunit` and `tests.va`: test runner configuration.
 - `tools.client_mcp`, `tools.va`, and `tools.enterprise`: launch and client-side MCP integration hints.
-- `tools.client_mcp.extension`: optional tool extension prepared by `build`; it is not a project `source-set`.
+- `tools.client_mcp.extension`: optional tool extension prepared by `push`; it is not a project `source-set`.
 - `tools.client_mcp.wait_ready_timeout_ms`: optional readiness timeout for `launch mcp --wait-ready`; defaults to five minutes and is capped by nothing else — a command has no deadline.
 
 ## Choosing The Executor
@@ -34,13 +34,13 @@ matrix, and `providers.<operation>` names one explicitly.
 
 - Executors are `designer`, `ibcmd`, and `agent`.
 - The key is accepted only where the matrix gives this target more than one executor. On a file
-  or cluster infobase that means `init`, `build`, `dump`, `extensions`,
-  `infobase.configuration.export`, `infobase.dump`, `infobase.restore`, and `make`. Naming an
-  executor for a single-executor operation is a config error, so `providers.load` and
+  or cluster infobase that means `infobase.create`, `push`, `pull`, `extensions`,
+  `download`, `infobase.dump`, `infobase.restore`, and `make`. Naming an
+  executor for a single-executor operation is a config error, so `providers.upload` and
   `providers.syntax` are refused — both are Designer-only.
-- Defaults: `init`, `build`, `dump`, `infobase.configuration.export` try Designer then `ibcmd`;
+- Defaults: `infobase.create`, `push`, `pull`, `download` try Designer then `ibcmd`;
   `infobase.dump` and `infobase.restore` use Designer (experimental IBCMD DT only when named);
-  `load` and `syntax` are Designer-only; `extensions` defaults to `ibcmd`. `agent` is
+  `upload` and `syntax` are Designer-only; `extensions` defaults to `ibcmd`. `agent` is
   experimental for most rows and is reached only by naming it — except on a standalone server,
   where its SSH gate is the only executor there is.
 - An override is strict: if the named executor is not ready the command refuses with a reason
@@ -49,11 +49,11 @@ matrix, and `providers.<operation>` names one explicitly.
 
 ## Format And Backend Rules
 
-- `format=DESIGNER`: init, build, extensions, dump, Designer syntax checks, tests, and
-  make/load/artifact workflows if configured.
-- `format=EDT`: init and build through EDT export to Designer files, EDT syntax checks,
+- `format=DESIGNER`: `infobase create`, `push`, `extensions`, `pull`, Designer syntax checks, tests, and
+  make/upload/artifact workflows if configured.
+- `format=EDT`: `infobase create` and `push` through EDT export to Designer files, EDT syntax checks,
   extensions, and tests.
-- `ibcmd` as the executor for `build` covers file infobases and server infobases with `infobase.dbms`;
+- `ibcmd` as the executor for `push` covers file infobases and server infobases with `infobase.dbms`;
   for an EDT project it runs after the EDT export to Designer files and requires a file infobase.
 - `infobase.cluster` (`ras`, `user`/`password`, `agent.address`/`user`/`password`) declares the
   administration server and the two administrator levels above the infobase user; it is refused
@@ -61,12 +61,12 @@ matrix, and `providers.<operation>` names one explicitly.
   and `infobase create` in a cluster arrive later).
 - `extensions` supports Designer and EDT projects: `--name` selects an extension `source-set`,
   `--installed-name` selects an installed platform name without a matching source-set.
-- `syntax designer-config` and `syntax designer-modules` require `format=DESIGNER`; `syntax edt` requires `format=EDT`.
+- `check designer-config` and `check designer-modules` require `format=DESIGNER`; `check edt` requires `format=EDT`.
 - IBCMD dump uses project-local standalone-server data under `workPath/ibcmd-data`.
-- `dump --mode partial` with IBCMD degrades to incremental dump and must be called out in user-facing summaries.
+- `pull --mode partial` with IBCMD degrades to incremental and must be called out in user-facing summaries.
 - `convert` is CLI-only, repo-aware, uses configured `source-set`, takes no `providers` key, and does not require an infobase.
-- `load` supports `.cf` and `.cfe` only for `format=DESIGNER`.
-- `tools.client_mcp.extension.source` is prepared during `build`, skipped when unchanged, and refreshed by `build --full-rebuild`; `.artifact.path` must point to `.cfe` and currently needs the Designer executor.
+- `upload` supports `.cf` and `.cfe` only for `format=DESIGNER`.
+- `tools.client_mcp.extension.source` is prepared during `push`, skipped when unchanged, and refreshed by `push --full`; `.artifact.path` must point to `.cfe` and currently needs the Designer executor.
 - `make` / `artifacts` are Designer-only and publish `.cf`, `.cfe`, `.epf`, or `.erf` depending on target/source-set.
 
 ## Source-Set Notes
@@ -81,7 +81,7 @@ Supported `source-set.type` values:
 - `EXTERNAL_DATA_PROCESSORS`
 - `EXTERNAL_REPORTS`
 
-Prefer `--source-set <NAME>` for narrow build, dump, convert, and artifact flows when the user's change is scoped to one configured source-set.
+Prefer `--source-set <NAME>` for narrow push, pull, convert, and artifact flows when the user's change is scoped to one configured source-set.
 
 ## Config Path
 
@@ -90,5 +90,5 @@ Prefer `--source-set <NAME>` for narrow build, dump, convert, and artifact flows
 `v8project.local.yaml` is an automatic local overlay only. It may override only `workPath`,
 `infobase.*`, `tools.*`, `tests.*`, `providers`, and `mcp.*`; it must not define `source-set` or
 `format`, and it must not be used as `--config`. `--workdir` wins over both config files.
-`config init` creates the sibling local overlay as an empty mapping with a schema modeline and adds
+`init` creates the sibling local overlay as an empty mapping with a schema modeline and adds
 `v8project.local.yaml` to `.gitignore` when needed.

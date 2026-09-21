@@ -1,6 +1,6 @@
 ## 6. Представление времени выполнения
 
-### 6.1 Сценарий `build`
+### 6.1 Сценарий `push`
 
 ```mermaid
 sequenceDiagram
@@ -11,7 +11,7 @@ sequenceDiagram
     participant PF as Платформенный адаптер
     participant IB as Информационная база 1С
 
-    User->>Adapter: запрос build
+    User->>Adapter: запрос push
     Adapter->>UC: нормализованный запрос
     UC->>CD: определить изменённые source-set
     CD-->>UC: изменённые файлы и подсказки по режиму
@@ -22,7 +22,7 @@ sequenceDiagram
         PF->>IB: import/apply изменений
         IB-->>PF: результат платформы
         PF-->>UC: структурированный итог исполнения
-        UC-->>Adapter: результат build
+        UC-->>Adapter: результат push
     end
 ```
 
@@ -36,8 +36,8 @@ sequenceDiagram
 
 ### 6.2 Сценарий `test`
 
-- `test` всегда начинается с `build`.
-- Внешний command boundary владеет workspace lock, а вложенный `build` вызывается через explicit unlocked entrypoint.
+- `test` всегда начинается с `push`.
+- Внешний command boundary владеет workspace lock, а вложенный `push` вызывается через explicit unlocked entrypoint.
 - Если сборка завершилась ошибкой, тесты не запускаются.
 - Генерируется временный JSON-конфиг YaXUnit.
 - Затем запускается Enterprise, а JUnit XML и runner-log разбираются в структурированные результаты.
@@ -68,7 +68,7 @@ sequenceDiagram
 
 - Сценарий остаётся CLI-only и не публикуется как MCP tool.
 - Работает только с `source-set` типа `EXTENSION`.
-- Используется как более узкий operational path по сравнению с `build`, когда нужно синхронизировать свойства расширений без полной загрузки исходников.
+- Используется как более узкий operational path по сравнению с `push`, когда нужно синхронизировать свойства расширений без полной загрузки исходников.
 - Так как операция мутирует ИБ, будущая общая execution policy должна помечать соответствующий platform step как critical DB phase.
 
 ### 6.4 Сценарий `tools download`
@@ -81,12 +81,12 @@ sequenceDiagram
   `source-set` `tests`, если его ещё нет. Без `--sources` скачивается `.cfe` в `build/tools`.
 - Для `client-mcp --sources` распаковывается source subtree в
   `build/tools/onec-client-mcp-devkit/exts/client-mcp`; без `--sources` команда требует
-  `builder=DESIGNER` и скачивает `.cfe` в `build/tools`.
+  исполнителя `designer` и скачивает `.cfe` в `build/tools`.
 - Vanessa Automation single материализуется командой `vanessa` как
   `build/tools/vanessa-automation-single.epf`.
 - `v8project.local.yaml` обновляется machine-local настройками `tools.va.epf_path` для
   `vanessa` и `tools.client_mcp.extension` для `client-mcp`; загрузка не устанавливает
-  расширения в ИБ, не подменяет `build` и при `--force` заменяет только managed targets,
+  расширения в ИБ, не подменяет `push` и при `--force` заменяет только managed targets,
   созданные этой командой.
 - Managed target фиксируется sidecar marker-файлом до publish phase. Если публикация скачанного
   файла или каталога завершается ошибкой, новый marker очищается, чтобы следующий запуск не считал
@@ -102,18 +102,18 @@ sequenceDiagram
 - Ожидание в очереди, baseline reset/probe и выполнение команды используют один и тот же ограниченный бюджет таймаута.
 - Host policy различается: MCP может отпустить caller после running cancel/timeout и дождаться terminal state асинхронно внутри shared actor, а CLI blocking adapter ждёт terminal cleanup или завершает собственный short-lived manager принудительно перед возвратом.
 
-### 6.6 Full Replacement `dump` / `artifacts` Publication
+### 6.6 Full Replacement `pull` / `artifacts` Publication
 
 ```mermaid
 sequenceDiagram
     participant User as CLI пользователь
-    participant UC as Use case dump/artifacts
+    participant UC as Use case pull/artifacts
     participant PF as Platform adapter
     participant Stage as Sibling staging path
     participant Target as User target path
     participant Backup as Sibling backup path
 
-    User->>UC: dump/artifacts request
+    User->>UC: pull/artifacts request
     UC->>Stage: подготовить staging рядом с target
     UC->>PF: записать результат в staging
     PF-->>UC: platform result
@@ -137,7 +137,7 @@ sequenceDiagram
 
 - Staging и backup находятся рядом с target, чтобы не переходить границу файловой системы при rename.
 - Orphan cleanup может удалять только stale staging/backup paths с metadata `tool=v8-runner` и matching target identity.
-- `dump incremental` и `dump partial` не получают full replacement guarantee и остаются non-atomic update modes.
+- `pull incremental` и `pull partial` не получают full replacement guarantee и остаются non-atomic update modes.
 - Publication phase после переноса старого target в backup является filesystem critical phase.
 
 ### 6.7 Command Boundary, Admission и Cancellation

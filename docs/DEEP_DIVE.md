@@ -8,7 +8,7 @@
 
 - [Модель выполнения](#модель-выполнения)
 - [source-set и change detection](#source-set-и-change-detection)
-- [Пайплайн build](#пайплайн-build)
+- [Пайплайн push](#пайплайн-push)
 - [Проверка и тесты](#проверка-и-тесты)
 - [Файловые сценарии и публикация](#файловые-сценарии-и-публикация)
 - [Shared EDT](#shared-edt)
@@ -34,15 +34,15 @@ MCP DTO в одном слое.
 - Для `format=DESIGNER` используется один runtime context `designer-<sourceSetName>`.
 - Для `format=EDT` используются два context-а:
   - `edt-<sourceSetName>` для решения, нужен ли export;
-  - `designer-<sourceSetName>` для решения, что именно грузить в ИБ.
+  - `designer-<sourceSetName>` для решения, что именно загружать в ИБ.
 - Persisted state живёт в `workPath/hash-storages/`.
 - Generated Designer output для EDT flow живёт под `workPath/designer/<sourceSetName>`.
 
 Change detection выполняется on-demand во время build/export/load decision и не требует
-background watcher. `build --source-set <NAME>` ограничивает анализ, export/load decision и
+background watcher. `push --source-set <NAME>` ограничивает анализ, export/load decision и
 runtime snapshot commit только указанным source-set.
 
-## Пайплайн `build`
+## Пайплайн `push`
 
 Для `DESIGNER`:
 
@@ -63,12 +63,12 @@ runtime snapshot commit только указанным source-set.
 
 ## Проверка и тесты
 
-`test` и `syntax` проектируются как часть того же локального цикла, а не как отдельная
+`test` и `check` проектируются как часть того же локального цикла, а не как отдельная
 эксплуатационная подсистема.
 
-- `test` всегда сначала делает `build`, затем запускает YaXUnit или Vanessa Automation.
-- `syntax designer-*` работает только для `DESIGNER` source format.
-- `syntax edt` использует EDT `validate` и привязан к `format=EDT`.
+- `test` всегда сначала делает `push`, затем запускает YaXUnit или Vanessa Automation.
+- `check designer-*` работает только для `DESIGNER` source format.
+- `check edt` использует EDT `validate` и привязан к `format=EDT`.
 - Таймауты и interruption metadata должны проходить через общий command-level contract, а не
   жить как ad hoc special case конкретной команды.
 
@@ -76,7 +76,7 @@ runtime snapshot commit только указанным source-set.
 
 Важно различать три разных класса файловых операций:
 
-### `dump`
+### `pull`
 
 Это reverse sync из ИБ обратно в файловые исходники.
 
@@ -89,14 +89,14 @@ runtime snapshot commit только указанным source-set.
 Это repo-aware файловая конвертация текущих project files между `DESIGNER` и `EDT`.
 
 - Не использует ИБ.
-- Не является alias для `dump`.
+- Не является alias для `pull`.
 - Работает только в модели `v8project.yaml` + `source-set`.
 
-### `load`, `make`, `artifacts`
+### `upload`, `make`, `artifacts`
 
 Это materialization сценарии поверх готовых артефактов или publish targets.
 
-- `load` работает с готовыми `.cf` / `.cfe`.
+- `upload` работает с готовыми `.cf` / `.cfe`.
 - `make` / `artifacts` публикуют final `.cf`, `.cfe`, `.epf`, `.erf`.
 - Full replacement target publication идёт через staged publication model.
 

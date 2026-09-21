@@ -21,21 +21,21 @@ CLI help, доверяйте текущему коду и затем синхр�
 | Сценарий | Поддерживаемые комбинации | Примечания |
 | --- | --- | --- |
 | `version` | Работает без существующего конфига | Печатает имя приложения и версию; с `--json-message` возвращает JSON envelope |
-| `bootstrap` | Работает без существующего конфига | Создаёт проект из существующей ИБ: config, local overlay, `.gitignore`, `src/configuration` |
-| `config init` | Работает без существующего конфига | Создаёт `v8project.yaml`, sibling `v8project.local.yaml`, `.gitignore` entry, autodetect-ит supported `source-set` и aggregate external roots |
+| `clone` | Работает без существующего конфига | Создаёт проект из существующей ИБ: config, local overlay, `.gitignore`, `src/configuration` |
+| `init` | Работает без существующего конфига | Создаёт `v8project.yaml`, sibling `v8project.local.yaml`, `.gitignore` entry, autodetect-ит supported `source-set` и aggregate external roots |
 | `tools download <tool>` | CLI-only загрузка latest releases | Загружает выбранный YAxUnit, Vanessa Automation single или onec-client-mcp-devkit; обновляет local overlay для Vanessa/client MCP и при `yaxunit --sources` добавляет YAxUnit как `source-set` `tests` |
-| `init` | провайдер `designer` (умолчание) или `ibcmd` | Конфигуратор создаёт файловую ИБ, серверную оставляет ручной предпосылкой; `providers.init: ibcmd` создаёт файловую или серверную через `ibcmd infobase create` (серверной нужна `infobase.dbms`); при `format=EDT` дополнительно импортирует EDT workspace |
+| `infobase create` | провайдер `designer` (умолчание) или `ibcmd` | Конфигуратор создаёт файловую ИБ, серверную оставляет ручной предпосылкой; `providers.infobase.create: ibcmd` создаёт файловую или серверную через `ibcmd infobase create` (серверной нужна `infobase.dbms`); при `format=EDT` дополнительно импортирует EDT workspace |
 | `extensions` | `format=DESIGNER` или `format=EDT`; провайдер `ibcmd`, `agent` только по `providers.extensions: agent` | Обновляет свойства extension `source-set` или установленного расширения, названного платформенным именем (`--installed-name`); `list`/`info`/`create`/`delete`/`activate` — состав расширений ИБ; у `agent` всё это группа `config extensions` одной сессией на команду, состав читается из структурного ответа `properties get`, синоним при `create` уходит в форме `NStr()` |
-| `build` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.build: agent` при `format=DESIGNER`; у автономного сервера (`infobase.standalone`) — только `agent` через SSH-шлюз сервера, платформа на машине раннера не нужна | Incremental/full загрузка в ИБ; при `format=EDT` сначала экспортирует изменённые EDT `source-set`; у `agent` загрузка и `update-db-cfg` — одна сессия на команду, исходники выставляются агенту ссылкой в `AgentBaseDir`, после загрузки записывается поколение конфигурации |
-| `test` | Та же матрица, что и у `build` | По умолчанию запускает `build` |
-| `test --no-build` | Подготовленная file/server ИБ; source-set и build tooling не требуются | Запускает выбранный test engine без build |
-| `dump` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.dump: agent` при `format=DESIGNER` | Полная, инкрементальная или object-scoped partial выгрузка; у `ibcmd` `partial` деградирует в incremental с warning; у `agent` `incremental` и `partial` обновляют цель на месте через ссылку в `AgentBaseDir`, `full` публикуется через staging; перед `full` и `incremental` агента спрашивают поколение конфигурации, и равное записанному после последней сборки или выгрузки через агента означает «выгружать нечего»; при `format=EDT` — reverse sync через internal Designer snapshot и EDT import; перед заменой каталога цели раннер спрашивает git, что в нём не восстановить, и найдя незафиксированное, файл вне учёта или в игноре, отказывает с выходом 2 и называет потери, а `--discard-uncommitted` уничтожает их без копии; там, где git не отвечает, поведение прежнее и защиты нет |
-| `infobase configuration export` | цепочка `designer` → `ibcmd`; `agent` только по `providers.infobase.configuration.export: agent` | Выгружает working/database configuration в `.cf` или named extension в `.cfe`; раннер берёт первого готового до spawn, квитанция называет пропущенных; у `agent` только `working` (`config dump-cfg`, команды для конфигурации базы данных у агента нет — `database` отказывает до сессии), файл пишется в каталог агента и переносится в staging |
+| `push` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.push: agent` при `format=DESIGNER`; у автономного сервера (`infobase.standalone`) — только `agent` через SSH-шлюз сервера, платформа на машине раннера не нужна | Incremental/full загрузка в ИБ; при `format=EDT` сначала экспортирует изменённые EDT `source-set`; у `agent` загрузка и `update-db-cfg` — одна сессия на команду, исходники выставляются агенту ссылкой в `AgentBaseDir`, после загрузки записывается поколение конфигурации |
+| `test` | Та же матрица, что и у `push` | По умолчанию запускает `push` |
+| `test --no-push` | Подготовленная file/server ИБ; source-set и build tooling не требуются | Запускает выбранный test engine без `push` |
+| `pull` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.pull: agent` при `format=DESIGNER` | Полная, инкрементальная или object-scoped partial выгрузка; у `ibcmd` `partial` деградирует в incremental с warning; у `agent` `incremental` и `partial` обновляют цель на месте через ссылку в `AgentBaseDir`, `full` публикуется через staging; перед `full` и `incremental` агента спрашивают поколение конфигурации, и равное записанному после последней сборки или выгрузки через агента означает «выгружать нечего»; при `format=EDT` — reverse sync через internal Designer snapshot и EDT import; перед заменой каталога цели раннер спрашивает git, что в нём не восстановить, и найдя незафиксированное, файл вне учёта или в игноре, отказывает с выходом 2 и называет потери, а `--force` уничтожает их без копии; там, где git не отвечает, поведение прежнее и защиты нет |
+| `download` | цепочка `designer` → `ibcmd`; `agent` только по `providers.download: agent` | Выгружает working/database configuration в `.cf` или named extension в `.cfe`; раннер берёт первого готового до spawn, квитанция называет пропущенных; у `agent` только `working` (`config dump-cfg`, команды для конфигурации базы данных у агента нет — `database` отказывает до сессии), файл пишется в каталог агента и переносится в staging |
 | `infobase dump` | провайдер `designer`; `ibcmd` только по `providers.infobase.dump`; `agent` только по `providers.infobase.dump: agent` | Выгружает полную ИБ в переносимый `.dt`; это не backup; `ibcmd` остаётся experimental до exclusive-access preflight; у `agent` — `infobase-tools dump-ib` в каталог агента и перенос в staging |
 | `convert` | CLI-only repo-aware конвертация текущих `source-set` | Строки в матрице провайдеров не имеет и не требует ИБ |
-| `load` | `format=DESIGNER`, провайдер только `designer` | Загрузка `.cf` / `.cfe` артефактов в ИБ |
+| `upload` | `format=DESIGNER`, провайдер только `designer` | Загрузка `.cf` / `.cfe` артефактов в ИБ |
 | `make` / `artifacts` | `format=DESIGNER`, провайдер `designer`; `agent` только по `providers.make: agent` | Экспорт `.cf` / `.cfe` и публикация `.epf` / `.erf`; у `agent` `.cf`/`.cfe` — `config dump-cfg` в каталог агента, `.epf`/`.erf` — исходники копируются в каталог агента (файловые параметры через ссылку агент не разрешает), сборка `load-external-…-from-files` и обратная выгрузка для сверки вида и имени, как у Конфигуратора |
-| `syntax` | `format=DESIGNER` или `format=EDT` | Designer checks для `DESIGNER`, EDT `validate` для `EDT` |
+| `check` | `format=DESIGNER` или `format=EDT` | Designer checks для `DESIGNER`, EDT `validate` для `EDT` |
 | `infobase restore` | провайдер `designer`; `ibcmd` только по `providers.infobase.restore`; `agent` только по `providers.infobase.restore: agent`; у автономного сервера (`infobase.standalone`) строки нет — снимок снимают средствами сервера | Загрузка полной ИБ из DT; обязателен `--create` или `--replace`; у `agent` DT подкладывается в каталог агента жёсткой ссылкой или копией, `infobase-tools restore-ib`, после чего агент сам завершает сеанс и рвёт соединение — это не ошибка |
 | `launch` | Не зависит от `format` | Прямой запуск 1C utility по позиционному mode; `launch web` открывает `infobase.web.url` в браузере, а `launch thin --via web` — тонким клиентом по тому же адресу |
 | `publish` | Файловая и кластерная база, провайдер только `webinst` | Публикует базу на веб-сервере из `infobase.web`; `--delete` снимает публикацию; `--dry-run` показывает команду `webinst` со всеми параметрами и замаскированным паролем в `-connstr` |
@@ -49,17 +49,17 @@ CLI help, доверяйте текущему коду и затем синхр�
 других выключателей (флага CLI, переменной окружения, состояния на диске) нет. Что
 включилось, видно по квитанции ответа: `provider.selected` и `provider.origin.kind: override`.
 Экспериментальный исполнитель не откатывается на следующего по цепочке: если он не готов,
-команда отказывает. Сейчас экспериментальны `agent` у `build`, `dump`, `make`, `extensions`
-и `infobase configuration export` на файловой базе и кластере, а также `ibcmd` у
+команда отказывает. Сейчас экспериментальны `agent` у `push`, `pull`, `make`, `extensions`
+и `download` на файловой базе и кластере, а также `ibcmd` у
 `infobase dump` и `infobase restore`; у автономного сервера `agent` — единственный
 исполнитель, ключ ему не нужен и не разрешён. Подробнее — раздел «Эксперименты» на
 [сайте](https://ingvarconsulting.github.io/v8-runner-rust/architecture.html).
 
 ## Превью у глаголов, работающих с платформой
 
-Восемь глаголов принимают `--dry-run`: `infobase configuration export`,
-`infobase dump`, `infobase restore`, `launch`, `convert`, `init`, `build`,
-`load`, `dump` и `artifacts`.
+Восемь глаголов принимают `--dry-run`: `download`,
+`infobase dump`, `infobase restore`, `launch`, `convert`, `infobase create`, `push`,
+`upload`, `pull` и `artifacts`.
 
 **Квитанция об исполнителе одна у всех.** Каждая операция, у которой есть строка в
 матрице провайдеров, кладёт в ответ `provider`: `selected` — кто выбран, `origin` —
@@ -76,10 +76,10 @@ CLI help, доверяйте текущему коду и затем синхр�
 |---|---|
 | `launch` | `plan.program` и составленный `plan.args` с замаскированными credential |
 | `convert` | `outputs` — что и куда было бы сконвертировано |
-| `init` | по шагу `status: planned` с тем, что было бы создано и чем |
-| `build` | по набору исходников планируемый `mode` и причину |
-| `load` | артефакт, режим, расширение; `compatibility_state: not_probed` |
-| `dump` | набор, режим, целевой путь |
+| `infobase create` | по шагу `status: planned` с тем, что было бы создано и чем |
+| `push` | по набору исходников планируемый `mode` и причину |
+| `upload` | артефакт, режим, расширение; `compatibility_state: not_probed` |
+| `pull` | набор, режим, целевой путь |
 | `artifacts` | вид артефакта и выход, `published: false` |
 | `extensions` | целевые имена, отключаемые свойства безопасности, ИБ, учётку и путь `ibcmd` |
 
@@ -101,14 +101,14 @@ CLI help, доверяйте текущему коду и затем синхр�
 
 **Названные пределы, а не умолчания:**
 
-- `load` возвращается до зонда совместимости, потому что зонд сам запускает
+- `upload` возвращается до зонда совместимости, потому что зонд сам запускает
   конфигуратор. Поэтому состояние совместимости — `not_probed`, и это отдельное
   значение от `unknown`: «не спрашивали» и «спросили и не получили ответа» —
   разные факты для того, кто решает, применять ли.
-- `init` для серверной ИБ не различает «создана» и «уже была»: это различие даёт
+- `infobase create` для серверной ИБ не различает «создана» и «уже была»: это различие даёт
   сама `ibcmd infobase create`, то есть действие. Превью называет цель и утилиту
   и на этом останавливается.
-- `build` в формате EDT планирует шаг экспорта целиком: выгрузка в файлы
+- `push` в формате EDT планирует шаг экспорта целиком: выгрузка в файлы
   конфигуратора и последующая загрузка в базу не разделяются, потому что вторая
   зависит от результата первой.
 
@@ -152,10 +152,10 @@ v8-runner --version
 - В text mode печатает `v8-runner <version>`.
 - С `--json-message` команда `version` возвращает envelope с `data.name` и `data.version`.
 
-### `config init`
+### `init`
 
 ```bash
-v8-runner config init [--force] [--output <FILE>] [--connection <CONNECTION>] [--format <auto|designer|edt>]
+v8-runner init [--force] [--output <FILE>] [--connection <CONNECTION>] [--format <auto|designer|edt>]
 ```
 
 - Не требует существующего `v8project.yaml`.
@@ -167,10 +167,10 @@ v8-runner config init [--force] [--output <FILE>] [--connection <CONNECTION>] [-
 - Для external roots создаёт aggregate `source-set` только при однородной классификации каталога.
 - Не пишет synthetic `CONFIGURATION`: отсутствие конфигурационного source-set это validation error.
 
-### `bootstrap`
+### `clone`
 
 ```bash
-v8-runner bootstrap --connection <CONNECTION> --platform-version <VERSION> [--project-dir <DIR>] [--source-dir <DIR>] [--user <USER>] [--password <PASSWORD>] [--platform-path <PATH>] [--force]
+v8-runner clone --connection <CONNECTION> --platform-version <VERSION> [--project-dir <DIR>] [--source-dir <DIR>] [--user <USER>] [--password <PASSWORD>] [--platform-path <PATH>] [--force]
 ```
 
 - Работает до загрузки `v8project.yaml` и предназначен для пустого project directory.
@@ -181,15 +181,15 @@ v8-runner bootstrap --connection <CONNECTION> --platform-version <VERSION> [--pr
   Эти значения пишутся только в `v8project.local.yaml`.
 - Не обнаруживает и не выгружает расширения автоматически.
 
-### `init`
+### `infobase create`
 
 ```bash
-v8-runner init [--dry-run]
+v8-runner infobase create [--dry-run]
 ```
 
 - Всегда разделяет шаг подготовки ИБ и шаг EDT workspace.
 - Для file connection Конфигуратор (умолчание) использует `1cv8 CREATEINFOBASE`.
-- При `providers.init: ibcmd` использует `ibcmd infobase create`; server path добавляет
+- При `providers.infobase.create: ibcmd` использует `ibcmd infobase create`; server path добавляет
   `--create-database` и требует `infobase.dbms`.
 - При `ibcmd` неудачное создание считается «база уже есть» только если сама база
   после этого читается: спрашивается `config generation-id`, и ноль она отвечает
@@ -298,10 +298,10 @@ v8-runner extensions activate --name <NAME> --active <yes|no> [--dry-run]
 - Требуемое право превью не называет: платформа его не сообщает, и выдумывать имя
   права оно не станет.
 
-### `build`
+### `push`
 
 ```bash
-v8-runner build [--source-set <NAME>] [--full-rebuild] [--dry-run]
+v8-runner push [--source-set <NAME>] [--full] [--dry-run]
 ```
 
 - Без `--source-set` обрабатывает все configured `source-set` в canonical order.
@@ -315,7 +315,7 @@ v8-runner build [--source-set <NAME>] [--full-rebuild] [--dry-run]
   исходников, `.cfe` `artifact` загружается как extension с именем
   `tools.client_mcp.extension.name`.
 - Для source-backed `tools.client_mcp.extension` использует отдельное состояние change detection
-  под `workPath/hash-storages`: неизменённый source пропускает export/load, `--full-rebuild`
+  под `workPath/hash-storages`: неизменённый source пропускает export/load, `--full`
   принудительно обновляет расширение.
 - `tools.client_mcp.extension` не является project `source-set`; `--source-set` выбирает только
   project source-set.
@@ -327,18 +327,18 @@ v8-runner build [--source-set <NAME>] [--full-rebuild] [--dry-run]
 ### `test`
 
 ```bash
-v8-runner test [--full] [--no-build] yaxunit all
-v8-runner test [--full] [--no-build] yaxunit module <NAME>
-v8-runner test [--no-build] va
-v8-runner test [--no-build] va --feature login --filter-tag @smoke
+v8-runner test [--full] [--no-push] yaxunit all
+v8-runner test [--full] [--no-push] yaxunit module <NAME>
+v8-runner test [--no-push] va
+v8-runner test [--no-push] va --feature login --filter-tag @smoke
 ```
 
-- По умолчанию сначала запускает `build`. `--no-build` отмечает build-step как `skipped` и
+- По умолчанию сначала запускает `push`. `--no-push` отмечает build-step как `skipped` и
   запускает тесты на подготовленной ИБ; для file connection до запуска платформы требуется
   `<infobase>/1Cv8.1CD`, для server connection доступность подтверждается запуском test engine.
-- В `--no-build` source-set и build tooling не проходят filesystem/layout validation: исходники
+- В `--no-push` source-set и build tooling не проходят filesystem/layout validation: исходники
   configuration могут отсутствовать. Валидация ИБ, платформы и настроек test engine сохраняется.
-- `--no-build` является CLI-only контрактом; MCP `run_all_tests` сохраняет build-first поведение.
+- `--no-push` является CLI-only контрактом; MCP `run_all_tests` сохраняет build-first поведение.
 - `test yaxunit module <NAME>` требует непустое имя модуля.
 - `test va` использует профиль из `tests.va.profile`; `--feature`, `--filter-tag`,
   `--ignore-tag` и `--scenario-filter` переопределяют соответствующие списки выбранного профиля
@@ -348,12 +348,12 @@ v8-runner test [--no-build] va --feature login --filter-tag @smoke
 - `--full` включает полный вывод успешных кейсов и расширенные stack traces.
 - `tests.*.timeouts.total_ms` остаётся активным пользовательским контрактом таймаутов.
 
-### `syntax`
+### `check`
 
 ```bash
-v8-runner syntax designer-config [FLAGS]
-v8-runner syntax designer-modules [FLAGS]
-v8-runner syntax edt [--project <PROJECT>...]
+v8-runner check designer-config [FLAGS]
+v8-runner check designer-modules [FLAGS]
+v8-runner check edt [--project <PROJECT>...]
 ```
 
 `designer-config`:
@@ -376,17 +376,17 @@ v8-runner syntax edt [--project <PROJECT>...]
 
 ## Файлы и артефакты
 
-### `dump`
+### `pull`
 
 ```bash
-v8-runner dump --mode <full|incremental|partial> [--source-set <NAME>] [--extension <EXTENSION>] [--object <TYPE:NAME>...] [--dry-run] [--discard-uncommitted]
+v8-runner pull --mode <full|incremental|partial> [--source-set <NAME>] [--extension <EXTENSION>] [--object <TYPE:NAME>...] [--dry-run] [--force]
 ```
 
 - `partial` требует хотя бы один `--object`.
 - Перед заменой каталога исходников команда спрашивает git, что нельзя вернуть:
   неотслеживаемые и игнорируемые файлы, правки рабочего дерева, неразрешённые маркеры
   слияния. Найдя такое, она отказывает с кодом выхода 2 и называет файлы;
-  `--discard-uncommitted` заменяет каталог всё равно. Там, где git не отвечает,
+  `--force` заменяет каталог всё равно. Там, где git не отвечает,
   поведение прежнее и защиты нет.
 - Канонический ввод селектора — `TYPE:NAME` (например, `Catalog:Items`); для
   совместимости принимается и `TYPE.NAME`. Переданный селектор сохраняется в JSON как
@@ -404,14 +404,14 @@ v8-runner dump --mode <full|incremental|partial> [--source-set <NAME>] [--extens
 ### `convert`
 
 ```bash
-v8-runner convert [--source-set <NAME>] [--output <DIR>] [--dry-run] [--discard-uncommitted]
+v8-runner convert [--source-set <NAME>] [--output <DIR>] [--dry-run] [--force]
 ```
 
 - CLI-only; не публикуется как MCP tool.
 - Перед заменой целевого каталога команда спрашивает git, что нельзя вернуть:
   неотслеживаемые и игнорируемые файлы, правки рабочего дерева, неразрешённые маркеры
   слияния. Найдя такое, она отказывает с кодом выхода 2 и называет файлы;
-  `--discard-uncommitted` заменяет каталог всё равно. Там, где git не отвечает,
+  `--force` заменяет каталог всё равно. Там, где git не отвечает,
   поведение прежнее и защиты нет.
 - Работает от текущего `v8project.yaml`, а не по arbitrary source/target paths.
 - Направление определяется только из `format`.
@@ -419,17 +419,17 @@ v8-runner convert [--source-set <NAME>] [--output <DIR>] [--dry-run] [--discard-
 - `--output` задаёт только target root и зеркалит `source-set.path` относительно каталога primary config.
 - Публикация остаётся staged full replacement с overlap guardrails.
 
-### `infobase configuration export`
+### `download`
 
 ```bash
-v8-runner infobase configuration export --state <working|database> --output <FILE.cf> [--dry-run]
-v8-runner infobase configuration export --state <working|database> --extension <NAME> --output <FILE.cfe> [--dry-run]
+v8-runner download --state <working|database> --output <FILE.cf> [--dry-run]
+v8-runner download --state <working|database> --extension <NAME> --output <FILE.cfe> [--dry-run]
 ```
 
 - Сохраняет состояние конфигурации из ИБ, а не собирает пакет из project sources.
 - Без `--extension` экспортирует main configuration и требует `.cf`; с extension требует `.cfe`.
 - Умолчание — цепочка `designer` → `ibcmd`: runner берёт первого готового до spawn и кладёт
-  в квитанцию `provider`, кого пропустил и почему. `providers.infobase.configuration.export`
+  в квитанцию `provider`, кого пропустил и почему. `providers.download`
   назначает одного исполнителя без отката.
 - Переключение допустимо только во время pure preflight; после первого spawn provider не меняется.
 - Публикация идёт через sibling staging и target-specific lock; `published=true` означает, что
@@ -470,7 +470,7 @@ v8-runner infobase dump --output <FILE.dt> [--dry-run]
 - Безопасный IBCMD path требует проверки отсутствия активных сеансов.
 - Обе операции требуют существующий `v8project.yaml`, но используют infobase-only validation:
   отсутствующий `source-set` равнозначен `source-set: []`, а сломанные project sources не блокируют чтение ИБ.
-  Build/source/test/EDT/client-MCP настройки для этих команд не валидируются.
+  Push/source/test/EDT/client-MCP настройки для этих команд не валидируются.
 
 ### `infobase restore`
 
@@ -503,16 +503,16 @@ v8-runner infobase restore --input <FILE.dt> --create  [--dry-run]
 - Принудительного завершения сеансов пока нет: ключ IBCMD `--force` не проброшен, у Designer
   такого ключа нет. Занятая ИБ отвечает ошибкой платформы.
 
-### `load`
+### `upload`
 
 ```bash
-v8-runner load --path <FILE> [--mode <load|merge>] [--settings <FILE>] [--extension <NAME>] [--dry-run]
+v8-runner upload --path <FILE> [--mode <load|combine>] [--settings <FILE>] [--extension <NAME>] [--dry-run]
 ```
 
 - Поддерживает `.cf` и `.cfe`.
 - Работает только для `format=DESIGNER`; исполнитель — только Конфигуратор.
 - `.cfe` требует `--extension`.
-- `--mode merge` требует `--settings <FILE>`.
+- `--mode combine` требует `--settings <FILE>`.
 - Состояние совместимости имеет три публичных значения: `supported` — вопрос задан
   и доказан; `absent` — расширение доказано отсутствует в ИБ; `not_established` —
   вопрос задан и не доказан; `not_probed` — вопрос не задавался. Формулировки
@@ -520,15 +520,15 @@ v8-runner load --path <FILE> [--mode <load|merge>] [--settings <FILE>] [--extens
   структурно через `ibcmd config extension list`, у конфигурации сравнение считается
   состоявшимся только по нулевому коду выхода.
 - Первая загрузка отсутствующего в ИБ расширения возвращает
-  `compatibility_state=absent` и выполняется через `--mode load`; `merge` для
+  `compatibility_state=absent` и выполняется через `--mode load`; `combine` для
   такого расширения отклоняется с рекомендацией сначала выполнить `load`.
 - `not_established` не разрешает изменяющую операцию ни в одном режиме: ни
   загрузку, ни слияние. Сюда попадают отказ авторизации, недоступная ИБ и
   нечитаемый состав расширений — всё, что платформа сообщает ненулевым кодом.
-- `--mode merge` для конфигурации требует `--vendor-name <ИМЯ>`: без имени
+- `--mode combine` для конфигурации требует `--vendor-name <ИМЯ>`: без имени
   конфигурации поставщика платформа сравнение не выполняет, поэтому состояние
   остаётся `not_probed` и слияние отклоняется. `--mode load` имени не требует.
-- `load --mode update` не поддержан; используйте `load` или `merge`.
+- `upload --mode update` не поддержан; используйте `load` или `combine`.
 
 ### `make` / `artifacts`
 
@@ -555,7 +555,7 @@ v8-runner publish [--delete] [--dry-run]
   `conf` для apache2/apache22, `os-auth` только для iis.
 - Публикация замещает `default.vrd` целиком, поэтому у команды есть превью; удаление —
   отдельный явный ключ `--delete`.
-- Не входит ни в одну цепочку умолчаний: `build`, `test` и остальные публикацию не делают.
+- Не входит ни в одну цепочку умолчаний: `push`, `test` и остальные публикацию не делают.
 - Развилки нет: `providers.publish` отклоняется валидацией.
 
 ## Прямой запуск и MCP
@@ -606,7 +606,7 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--via <web|connection>
 - Timeout ожидания задаётся `tools.client_mcp.wait_ready_timeout_ms`; если он не задан,
   ожидание длится пять минут. Это единственная его граница: срока у команды нет.
 - Если настроено `tools.client_mcp.extension`, `launch mcp` не устанавливает и не обновляет его;
-  подготовка выполняется командой `v8-runner build`.
+  подготовка выполняется командой `v8-runner push`.
 - `--mcp-config` не должен содержать `;`, потому что `/C` payload разделяется точкой с запятой.
 - `launch mcp` не принимает `--c` и `--execute`, потому что `/C` управляется командой.
 - Для локальной проверки external EPF используйте только `launch thin --execute <file.epf> --output <out> --stderr-output <stderr> --wait-for-exit --wait-timeout-ms <ms>`: это opt-in bounded wait с JSON-полями PID, execute path, exit code/timeout и заявленными artifact paths. Timeout считается CLI failure и возвращает error envelope с payload после остановки группы процесса. Ненулевой exit code external EPF возвращается в JSON как наблюдаемый результат; вызывающий runtime gate обязан проверить `external_epf_wait.exit_code`. Обычный `launch` остаётся асинхронным. В wait-режиме запрещены raw `/C`, `/Execute` и `/Out` (включая configured additional launch keys).
@@ -671,7 +671,7 @@ v8-runner mcp serve http
 Важные runtime директории:
 
 - `workPath/hash-storages/`: persisted change-detection state.
-- `workPath/edt-workspace/`: общий EDT workspace для `init`.
+- `workPath/edt-workspace/`: общий EDT workspace для `infobase create`.
 - `workPath/convert/edt-workspace/`: отдельный EDT workspace для `convert`.
 - `workPath/ibcmd-data/`: изолированный standalone-server data directory для IBCMD dump; это runtime state `v8-runner`, его можно удалить, когда нет активных CLI/MCP команд проекта.
 - `workPath/logs/platform/`: platform logs.
@@ -682,6 +682,6 @@ v8-runner mcp serve http
 
 - Публикация CLI-only команд в MCP без отдельного ADR.
 - Object-scoped partial dump через `ibcmd`.
-- `load` через `ibcmd`.
+- `upload` через `ibcmd`.
 - Arbitrary path-based `convert source -> target` contract.
 - Отдельная пользовательская настройка EDT `working-directory`.

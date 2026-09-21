@@ -23,8 +23,8 @@ source-set:
   #   type: EXTENSION
   #   path: extensions/my-extension
 
-# Build pipeline settings (optional)
-build:
+# Push settings: how sources reach the infobase (optional)
+push:
   # Switch to full load when the expanded partial file list grows beyond this number.
   partialLoadThreshold: 20
 
@@ -58,7 +58,7 @@ tools:
   client_mcp:
     port: 9874
     wait_ready_timeout_ms: 300000
-    # Tool extension is prepared by `v8-runner build`, not by `launch mcp`.
+    # Tool extension is prepared by `v8-runner push`, not by `launch mcp`.
     # extension:
     #   name: client_mcp
     #   source:
