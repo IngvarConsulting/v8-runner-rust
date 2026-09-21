@@ -47,13 +47,13 @@
 <div class="tablewrap"><table>
 <thead><tr><th>предмет</th><th>XML платформы</th><th>проект EDT</th><th>пакет</th></tr></thead>
 <tbody>
-<tr><td class="k">конфигурация</td><td>каталог с <code>Configuration.xml</code> <span class="ref">(<a href="platform.html#t14">14</a>)</span></td><td>проект конфигурации <span class="ref">(<a href="platform.html#t98">98</a>)</span></td><td><code>.cf</code></td></tr>
-<tr><td class="k">расширение</td><td>тот же формат, объявлено расширением <span class="ref">(<a href="platform.html#t31">31</a>)</span></td><td>проект расширения, связан с проектом конфигурации <span class="ref">(<a href="platform.html#t99">99</a>)</span></td><td><code>.cfe</code></td></tr>
-<tr><td class="k">внешние обработки и отчёты</td><td>каталог с несколькими обработками</td><td>проект внешних отчётов и обработок <span class="ref">(<a href="platform.html#t99">99</a>)</span></td><td><code>.epf</code>, <code>.erf</code></td></tr>
+<tr><td class="k">конфигурация</td><td>каталог с <code>Configuration.xml</code> <span class="ref">(<a href="platform.html#t15">15</a>)</span></td><td>проект конфигурации <span class="ref">(<a href="platform.html#t102">102</a>)</span></td><td><code>.cf</code></td></tr>
+<tr><td class="k">расширение</td><td>тот же формат, объявлено расширением <span class="ref">(<a href="platform.html#t32">32</a>)</span></td><td>проект расширения, связан с проектом конфигурации <span class="ref">(<a href="platform.html#t103">103</a>)</span></td><td><code>.cfe</code></td></tr>
+<tr><td class="k">внешние обработки и отчёты</td><td>каталог с несколькими обработками</td><td>проект внешних отчётов и обработок <span class="ref">(<a href="platform.html#t103">103</a>)</span></td><td><code>.epf</code>, <code>.erf</code></td></tr>
 </tbody>
 </table></div>
 
-<p>Пакет — четвёртый вид того же предмета: один файл, который платформа умеет применить к базе или разобрать обратно в файлы <span class="ref">(<a href="platform.html#t29">29</a>)</span>. Снимок всей базы в <code>.dt</code> к исходникам не относится: в нём данные.</p>
+<p>Пакет — четвёртый вид того же предмета: один файл, который платформа умеет применить к базе или разобрать обратно в файлы <span class="ref">(<a href="platform.html#t30">30</a>)</span>. Снимок всей базы в <code>.dt</code> к исходникам не относится: в нём данные.</p>
 
 <p>Наборы объявлены в <code>v8project.yaml</code>. Тип набора раннер определяет по содержимому маркерных файлов: каталог можно назвать как угодно, тип задаёт <code>Configuration.xml</code> внутри.</p>
 
@@ -69,18 +69,18 @@ source-set:
     type: external
     path: src/epf</code></pre>
 
-<p>У формата EDT две ступени. Проект правят в EDT, а с базой платформа обменивается только XML-выгрузкой <span class="ref">(<a href="platform.html#t97">97</a>)</span>. Экспорт проекта в XML раннер держит у себя как кеш: он не лежит под контролем версий и пересчитывается по изменившемуся.</p>
+<p>У формата EDT две ступени. Проект правят в EDT, а с базой платформа обменивается только XML-выгрузкой <span class="ref">(<a href="platform.html#t101">101</a>)</span>. Экспорт проекта в XML раннер держит у себя как кеш: он не лежит под контролем версий и пересчитывается по изменившемуся.</p>
 
 <h2 id="inside">Что лежит в базе</h2>
-<p>Информационная база держит несколько конфигураций сразу <span class="ref">(<a href="platform.html#t1">1</a>)</span>. Для каждого набора исходников в ней есть <strong>своя пара</strong>: то, что правят, и то, с чем работают пользователи <span class="ref">(<a href="platform.html#t7">7</a>)</span>.</p>
+<p>Информационная база держит несколько конфигураций сразу <span class="ref">(<a href="platform.html#t1">1</a>)</span>. Для каждого набора исходников в ней есть <strong>своя пара</strong>: то, что правят, и то, с чем работают пользователи <span class="ref">(<a href="platform.html#t8">8</a>)</span>.</p>
 
 <div class="tablewrap"><table>
 <thead><tr><th>в базе</th><th>что это</th><th>кто пишет</th></tr></thead>
 <tbody>
 <tr><td class="k">основная конфигурация</td><td>то, что правят в Конфигураторе и куда загружают исходники</td><td>отправка, Конфигуратор</td></tr>
 <tr><td class="k">конфигурация базы данных</td><td>то, по чему построены таблицы и с чем работают сеансы; только для чтения <span class="ref">(<a href="platform.html#t2">2</a>)</span></td><td>только применение</td></tr>
-<tr><td class="k">конфигурации поставщика</td><td>эталоны типовых решений, есть у базы на поддержке <span class="ref">(<a href="platform.html#t8">8</a>)</span>; их может быть несколько, каждая с именем <span class="ref">(<a href="platform.html#t7">7</a>)</span></td><td>обновление поставщика</td></tr>
-<tr><td class="k">расширение и его база данных</td><td>та же пара на каждое установленное расширение <span class="ref">(<a href="platform.html#t40">40</a>)</span></td><td>отправка и применение с именем расширения</td></tr>
+<tr><td class="k">конфигурации поставщика</td><td>эталоны типовых решений, есть у базы на поддержке <span class="ref">(<a href="platform.html#t9">9</a>)</span>; их может быть несколько, каждая с именем <span class="ref">(<a href="platform.html#t8">8</a>)</span></td><td>обновление поставщика</td></tr>
+<tr><td class="k">расширение и его база данных</td><td>та же пара на каждое установленное расширение <span class="ref">(<a href="platform.html#t41">41</a>)</span></td><td>отправка и применение с именем расширения</td></tr>
 </tbody>
 </table></div>
 
@@ -132,8 +132,8 @@ flowchart LR
 <tr><td class="k">база → исходники</td><td><code>pull</code></td><td>да</td></tr>
 <tr><td class="k">пакет → база</td><td><code>load</code></td><td>да</td></tr>
 <tr><td class="k">база → пакет</td><td><code>infobase save</code></td><td>да</td></tr>
-<tr><td class="k">исходники → пакет</td><td><code>make</code></td><td>нет для конфигурации и внешних <span class="ref">(<a href="platform.html#t29">29</a>)</span></td></tr>
-<tr><td class="k">пакет → исходники</td><td><code>convert</code></td><td>нет <span class="ref">(<a href="platform.html#t29">29</a>)</span></td></tr>
+<tr><td class="k">исходники → пакет</td><td><code>make</code></td><td>нет для конфигурации и внешних <span class="ref">(<a href="platform.html#t30">30</a>)</span></td></tr>
+<tr><td class="k">пакет → исходники</td><td><code>convert</code></td><td>нет <span class="ref">(<a href="platform.html#t30">30</a>)</span></td></tr>
 </tbody>
 </table></div>
 
@@ -163,7 +163,7 @@ stateDiagram-v2
 
 <p>До первого обмена состояния нет: раннер ещё не знает, как относятся друг к другу каталог и база. <code>status</code> так и говорит. Из этого положения <code>pull</code> идёт всегда, <code>push</code> — только в пустую базу; в непустую без памяти он отказывает и предлагает <code>pull</code> или <code>push --force</code>.</p>
 
-<p>Внутри базы у каждой пары свои состояния. Сохранить изменение в основную конфигурацию и применить его к базе данных — два разных события <span class="ref">(<a href="platform.html#t3">3</a>, <a href="platform.html#t5">5</a>)</span>.</p>
+<p>Внутри базы у каждой пары свои состояния. Сохранить изменение в основную конфигурацию и применить его к базе данных — два разных события <span class="ref">(<a href="platform.html#t3">3</a>, <a href="platform.html#t6">6</a>)</span>.</p>
 
 <pre class="mermaid">
 stateDiagram-v2
@@ -187,10 +187,10 @@ stateDiagram-v2
 <thead><tr><th>состояние ссылки</th><th>что это значит</th><th>чем переходят</th></tr></thead>
 <tbody>
 <tr><td class="k">есть с обеих сторон</td><td>обычная работа</td><td><code>push</code>, <code>pull</code></td></tr>
-<tr><td class="k">есть в проекте, нет в базе</td><td>расширение ещё не заведено</td><td><code>push my-ext</code> заводит его сам <span class="ref">(<a href="platform.html#t38">38</a>)</span></td></tr>
+<tr><td class="k">есть в проекте, нет в базе</td><td>расширение ещё не заведено</td><td><code>push my-ext</code> заводит его сам <span class="ref">(<a href="platform.html#t39">39</a>)</span></td></tr>
 <tr><td class="k">есть в базе, нет в проекте</td><td>поставил кто-то другой или пришло с обновлением</td><td><code>pull my-ext</code> после объявления набора исходников</td></tr>
 <tr><td class="k">выключено</td><td>установлено, но не действует</td><td><code>extensions set my-ext --active no</code></td></tr>
-<tr><td class="k">больше не нужно</td><td>уводит данные, которые добавляло <span class="ref">(<a href="platform.html#t41">41</a>)</span></td><td><code>push --delete my-ext</code></td></tr>
+<tr><td class="k">больше не нужно</td><td>уводит данные, которые добавляло <span class="ref">(<a href="platform.html#t42">42</a>)</span></td><td><code>push --delete my-ext</code></td></tr>
 </tbody>
 </table></div>
 
@@ -211,8 +211,8 @@ infobase: File="/srv/ib/demo"
 <thead><tr><th>память</th><th>отвечает на вопрос</th><th>кто ведёт</th><th>где лежит</th></tr></thead>
 <tbody>
 <tr><td class="k">хеши исходников</td><td>какие файлы я тронул</td><td>раннер считает сам</td><td><code>workPath</code>, по файлу на набор</td></tr>
-<tr><td class="k">поколение базы</td><td>менялась ли база</td><td>платформа отвечает, раннер записывает <span class="ref">(<a href="platform.html#t12">12</a>)</span></td><td><code>workPath</code>, с именем инструмента и операции</td></tr>
-<tr><td class="k">файл версий <code>ConfigDumpInfo.xml</code></td><td>что платформе выгружать заново</td><td>платформа <span class="ref">(<a href="platform.html#t15">15</a>)</span></td><td><code>workPath</code>; в каталог исходников подкладывается на время команды</td></tr>
+<tr><td class="k">поколение базы</td><td>менялась ли база</td><td>платформа отвечает, раннер записывает <span class="ref">(<a href="platform.html#t13">13</a>)</span></td><td><code>workPath</code>, с именем инструмента и операции</td></tr>
+<tr><td class="k">файл версий <code>ConfigDumpInfo.xml</code></td><td>что платформе выгружать заново</td><td>платформа <span class="ref">(<a href="platform.html#t16">16</a>)</span></td><td><code>workPath</code>; в каталог исходников подкладывается на время команды</td></tr>
 </tbody>
 </table></div>
 
@@ -245,13 +245,13 @@ infobase: File="/srv/ib/demo"
 </tbody>
 </table></div>
 
-<p>Выгрузить один файл версий, не трогая остального, платформа умеет <span class="ref">(<a href="platform.html#t20">20</a>)</span>, и раннер этого не делает: новый файл опишет базу такой, какая она сейчас, и заявит, что все её объекты уже лежат в каталоге. Следующая работа по изменившемуся пропустит настоящие изменения.</p>
+<p>Выгрузить один файл версий, не трогая остального, платформа умеет <span class="ref">(<a href="platform.html#t21">21</a>)</span>, и раннер этого не делает: новый файл опишет базу такой, какая она сейчас, и заявит, что все её объекты уже лежат в каталоге. Следующая работа по изменившемуся пропустит настоящие изменения.</p>
 
 <h3>Проверка до выбора режима</h3>
-<p>Наличие файла версий и версия формата в нём читаются до запуска платформы. Файла нет — выгрузка полная, она же его создаст. Версия чужая — тоже полная. Для загрузки та же проверка работает в обратную сторону: формат новее платформы — отказ до запуска с обеими версиями <span class="ref">(<a href="platform.html#t21">21</a>)</span>.</p>
+<p>Наличие файла версий и версия формата в нём читаются до запуска платформы. Файла нет — выгрузка полная, она же его создаст. Версия чужая — тоже полная. Для загрузки та же проверка работает в обратную сторону: формат новее платформы — отказ до запуска с обеими версиями <span class="ref">(<a href="platform.html#t22">22</a>)</span>.</p>
 
 <h3>Ответ описывает случившееся</h3>
-<p>Платформа может перейти на полную выгрузку сама, и узнать об этом заранее нельзя <span class="ref">(<a href="platform.html#t17">17</a>)</span>. Поэтому раннер не обещает быстро: ответ называет запрошенный режим и рядом — что вышло на самом деле, с причиной.</p>
+<p>Платформа может перейти на полную выгрузку сама, и узнать об этом заранее нельзя <span class="ref">(<a href="platform.html#t18">18</a>)</span>. Поэтому раннер не обещает быстро: ответ называет запрошенный режим и рядом — что вышло на самом деле, с причиной.</p>
 
 <h3>Токен хранится с именем инструмента</h3>
 <p>Рядом с поколением лежит то, чем оно получено. Сравниваются только значения от одного инструмента, чужое считается отсутствием ответа. Сорок нулей пустой базы тоже хранятся как отсутствие ответа, поэтому после работы с пустой базой выгрузка не пропускается.</p>
@@ -264,7 +264,7 @@ infobase: File="/srv/ib/demo"
 <tbody>
 <tr><td class="k">что происходит</td><td>выгрузка ложится поверх; чего в базе нет, остаётся на месте</td><td>каталог приводится ровно к базе, лишнее исчезает</td></tr>
 <tr><td class="k">когда нужно</td><td>базу правили мимо исходников, расхождение надо увидеть в системе контроля версий</td><td>каталог считается производным от базы и должен ей соответствовать</td></tr>
-<tr><td class="k">формат EDT</td><td colspan="2">слияния нет ни в одном режиме: EDT сводит изменения интерактивно <span class="ref">(<a href="platform.html#t98">98</a>)</span>, поэтому выгрузка либо заменяет проект, либо отказывается</td></tr>
+<tr><td class="k">формат EDT</td><td colspan="2">слияния нет ни в одном режиме: EDT сводит изменения интерактивно <span class="ref">(<a href="platform.html#t102">102</a>)</span>, поэтому выгрузка либо заменяет проект, либо отказывается</td></tr>
 </tbody>
 </table></div>
 

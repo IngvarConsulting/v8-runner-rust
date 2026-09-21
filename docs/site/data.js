@@ -20,6 +20,7 @@ window.RUNNER_DATA = (function () {
     edt:      { key: 'edt-cli',  name: 'EDT CLI',  cls: 'neutral', needs: 'edt' },
     client:   { key: 'client',   name: 'клиент 1С', cls: 'neutral', needs: 'designer' },
     webinst:  { key: 'webinst',  name: 'webinst',   cls: 'neutral', needs: 'web' },
+    rac:      { key: 'rac',      name: 'rac',       cls: 'neutral', needs: 'rac' },
     browser:  { key: 'browser',  name: 'браузер',   cls: 'neutral', needs: 'browser' }
   };
 
@@ -45,7 +46,8 @@ window.RUNNER_DATA = (function () {
       { id: 'edt',      label: 'EDT и 1cedtcli', short: 'EDT', def: false },
       { id: 'agent',    label: 'агентский режим', short: 'агент', def: true },
       { id: 'rs',       label: 'ibcmd-rs', short: 'ibcmd-rs', def: false },
-      { id: 'web',      label: 'веб-сервер Apache или IIS', short: 'веб-сервер', def: false }
+      { id: 'web',      label: 'веб-сервер Apache или IIS', short: 'веб-сервер', def: false },
+      { id: 'rac',      label: 'rac и сервер администрирования кластера', short: 'rac', def: false }
     ]
   };
 
@@ -187,6 +189,17 @@ window.RUNNER_DATA = (function () {
         if (ctx.target === 'standalone') return { chain: [P.agent], config: ['infobase.standalone.*'], note: 'сравнения в наборе шлюза нет; только по файлу версий' };
         if (ctx.target === 'cluster') return { chain: [P.designer], config: ['infobase.connection'], note: '/DumpConfigToFiles -getChanges по файлу версий; отчёты сравнения — /CompareCfg' };
         return { chain: [P.ibcmd, P.designer], config: ['infobase.connection'], note: 'ibcmd export status по файлу версий; отчёты сравнения — /CompareCfg' };
+      }
+    },
+    {
+      id: 'sessions', verb: 'sessions', title: 'Сеансы: список, завершение, блокировка',
+      what: 'Окно обслуживания: запретить новые сеансы, завершить старые, после применения разрешить.',
+      cmd: function (ctx) { return 'v8-runner sessions terminate --all'; },
+      applies: function (ctx) { return ctx.target === 'file' ? { kind: 'target', why: 'у файловой базы нет сервера, который ведёт сеансы', fix: 'веб-сеансы завершает apply --sessions force в момент применения' } : notExternal(ctx, 'sessions'); },
+      today: function (ctx) { return { chain: [], config: [], note: 'нет' }; },
+      target: function (ctx) {
+        if (ctx.target === 'standalone') return { chain: [P.ibcmd], config: ['infobase.standalone.*'], note: 'ibcmd session list и terminate; блокировки начала сеансов у автономного сервера нет' };
+        return { chain: [P.rac], config: ['infobase.cluster.ras', 'infobase.cluster.user и password'], note: 'rac session и rac infobase update --sessions-deny; исполнитель один, ключа нет' };
       }
     },
     {

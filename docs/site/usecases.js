@@ -74,7 +74,10 @@ window.RUNNER_USECASES = [
     pre: 'в базе работают пользователи',
     steps: [
       { id: 'push', cmd: 'v8-runner push --no-apply', in: ['repo'], out: ['ib'], note: 'исходники ложатся в основную конфигурацию; база данных не тронута, сеансы работают' },
-      { id: 'apply', cmd: 'v8-runner apply --sessions force', in: ['ib'], out: ['ib'], note: 'в окно обслуживания: монопольный доступ, при необходимости чужие сеансы завершаются' }
+      { id: 'sessions', cmd: 'v8-runner sessions deny --message "Обновление" --jobs', in: ['ib'], out: ['ib'], note: 'новые сеансы и регламентные задания не начинаются' },
+      { id: 'sessions', cmd: 'v8-runner sessions terminate --all', in: ['ib'], out: ['ib'], note: 'работающие сеансы завершаются с сообщением' },
+      { id: 'apply', in: ['ib'], out: ['ib'], note: 'монопольный доступ свободен, реструктуризация идёт' },
+      { id: 'sessions', cmd: 'v8-runner sessions allow', in: ['ib'], out: ['ib'], note: 'блокировка снята' }
     ] },
 
   { id: 'vendor', title: 'Установить обновление поставщика',
