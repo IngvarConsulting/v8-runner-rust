@@ -279,6 +279,26 @@ fn an_infobase_name_is_a_plain_identifier() {
     assert!(message.contains("plain identifier"), "{message}");
 }
 
+/// Третий ответ на вопрос о виде цели получает только строка серверной формы; форма
+/// проверяется у каждой объявленной секции, не только у выбранной.
+#[test]
+fn a_connection_without_a_supported_shape_is_refused_as_neither_file_nor_server() {
+    let project = project();
+    project.write_local(
+        "infobases:\n  origin:\n    connection: 'File=/tmp/origin-ib'\n  prod:\n    connection: 'not a connection'\n",
+    );
+
+    let output = project.run_json(&[], LAUNCH_PREVIEW);
+
+    let message = refusal_message(&output);
+    assert!(message.contains("infobases.prod:"), "{message}");
+    assert!(message.contains("neither a file address"), "{message}");
+    assert!(
+        message.contains("Srvr=<host[:port]>;Ref=<name>"),
+        "{message}"
+    );
+}
+
 #[test]
 fn the_map_is_refused_in_the_project_file() {
     let project = project();

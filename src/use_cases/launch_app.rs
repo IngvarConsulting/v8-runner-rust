@@ -66,9 +66,10 @@ pub fn execute(
         }
     };
 
-    // У автономной цели нет административного адреса, поэтому её открывает только
-    // клиентский — а по нему ходит только тонкий клиент. Конфигуратор, толстый и обычный
-    // отказывают здесь ровно так же, как отказывали до появления второго пути.
+    // Прямой шлюз автономной цели раннер пока не использует (#205), поэтому её
+    // открывает только клиентский адрес — а по нему ходит только тонкий клиент.
+    // Конфигуратор, толстый и обычный отказывают здесь ровно так же, как отказывали до
+    // появления второго пути.
     let standalone = config.target_kind() == crate::domain::capability::TargetKind::Standalone;
     if standalone && !matches!(client_mode, LaunchClientMode::Thin) {
         return Err(UseCaseFailure::without_payload(
@@ -602,8 +603,8 @@ fn client_address(config: &AppConfig) -> Result<&str, AppError> {
 
 /// Каким адресом открывать базу: то, что попросили, иначе умолчание по виду цели.
 ///
-/// Вид цели берётся объявленным, а не разобранным из строки подключения. У автономной
-/// цели административного адреса нет вовсе, поэтому умолчание для неё — веб.
+/// Вид цели берётся объявленным, а не разобранным из строки подключения. Строку прямого
+/// шлюза автономной цели раннер пока не использует (#205), поэтому умолчание для неё — веб.
 fn resolve_launch_via(
     requested: Option<LaunchVia>,
     client_mode: LaunchClientMode,
@@ -624,7 +625,7 @@ fn resolve_launch_via(
     }
     if requested == LaunchVia::Connection && standalone {
         return Err(AppError::Validation(
-            "a standalone server has no administrative connection string: --via connection is not available for this target".to_owned(),
+            "the direct gate address of a standalone server is not used by the runner yet (#205): the thin client goes by infobase.web.url — use --via web or launch web".to_owned(),
         ));
     }
     Ok(requested)

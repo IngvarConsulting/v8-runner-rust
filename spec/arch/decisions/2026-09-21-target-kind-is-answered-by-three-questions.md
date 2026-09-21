@@ -1,9 +1,9 @@
 ---
 id: DEC.2026-09-21.TARGET-KIND-IS-ANSWERED-BY-THREE-QUESTIONS
-status: planned
+status: active
 governs: product
-realized: null
-supersedes: []
+realized: [tests/cli_agent_standalone.rs::a_direct_gate_address_next_to_the_standalone_section_is_accepted_but_not_used_yet, tests/cli_agent_standalone.rs::a_file_address_next_to_the_standalone_section_is_refused, tests/cli_infobases.rs::a_connection_without_a_supported_shape_is_refused_as_neither_file_nor_server, tests/cli_publish.rs::a_web_connection_string_is_refused_as_an_administrative_channel]
+supersedes: [DEC.2026-09-14.TARGET-KIND-IS-DECLARED-NOT-PARSED]
 superseded-by: null
 establishes: [INV.CONFIG.TARGET-DECLARATIONS-ARE-EXCLUSIVE]
 changes: [INV.CONFIG.TARGET-DECLARATIONS-ARE-EXCLUSIVE]

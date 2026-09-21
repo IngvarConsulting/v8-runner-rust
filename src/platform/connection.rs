@@ -95,20 +95,35 @@ impl V8Connection {
             return false;
         }
 
+        // Платформа принимает завершающую `;` и значения в кавычках: `Srvr="srv";Ref="ut";`
+        // — такая же серверная строка, как без них.
         let mut server = None;
         let mut reference = None;
-        for part in self.raw.split(';') {
+        for part in self
+            .raw
+            .split(';')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+        {
             let Some((key, value)) = part.split_once('=') else {
                 return false;
             };
+            let value = unquote_connection_value(value.trim());
+            if ['"', '\'']
+                .iter()
+                .any(|quote| value.starts_with(*quote) || value.ends_with(*quote))
+            {
+                // Непарная кавычка: платформа такую строку не примет.
+                return false;
+            }
             match key.trim().to_ascii_lowercase().as_str() {
-                "srvr" => server = Some(value.trim()),
-                "ref" => reference = Some(value.trim()),
+                "srvr" => server = Some(value),
+                "ref" => reference = Some(value),
                 _ => {}
             }
         }
-        server.is_some_and(|value| !value.is_empty())
-            && reference.is_some_and(|value| !value.is_empty())
+        server.is_some_and(|value| !value.trim().is_empty())
+            && reference.is_some_and(|value| !value.trim().is_empty())
     }
 
     /// Returns a stable file-based infobase connection string when available.
@@ -116,6 +131,21 @@ impl V8Connection {
         self.file_path()
             .map(|path| format!("File='{}'", path.replace('\'', "''")))
     }
+}
+
+/// Значение параметра строки подключения без обрамляющих кавычек: платформа принимает
+/// `Srvr="srv"` и `Srvr='srv'` наравне с `Srvr=srv`.
+pub fn unquote_connection_value(value: &str) -> &str {
+    let Some(inner) = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    else {
+        return value
+            .strip_prefix('\'')
+            .and_then(|value| value.strip_suffix('\''))
+            .unwrap_or(value);
+    };
+    inner
 }
 
 fn file_path_from_args(args: &[String]) -> Option<&str> {
@@ -196,6 +226,37 @@ mod tests {
         assert!(!V8Connection::from_connection_string("not a connection").has_supported_shape());
         assert!(!V8Connection::from_connection_string("Srvr=cluster;Ref=").has_supported_shape());
         assert!(!V8Connection::from_connection_string("File=").has_supported_shape());
+    }
+
+    /// Канонические формы платформы: завершающая `;`, кавычки, пробелы вокруг `=` и `;`,
+    /// дополнительные параметры.
+    #[test]
+    fn a_server_connection_keeps_its_shape_with_a_trailing_separator_quotes_and_spaces() {
+        for raw in [
+            "Srvr=host;Ref=name;",
+            "Srvr=\"host:1541\";Ref=\"name\";",
+            "Srvr='host';Ref='name'",
+            " Srvr = host ; Ref = name ",
+            "Srvr=host;Ref=name;Usr=a;Pwd=b",
+        ] {
+            assert!(
+                V8Connection::from_connection_string(raw).has_supported_shape(),
+                "{raw}"
+            );
+        }
+        for raw in [
+            "Srvr=\"\";Ref=name",
+            "Srvr=host;Ref=;",
+            "Srvr=host",
+            ";",
+            "Srvr=\"host;Ref=x",
+            "Srvr=host;Ref='x",
+        ] {
+            assert!(
+                !V8Connection::from_connection_string(raw).has_supported_shape(),
+                "{raw}"
+            );
+        }
     }
 
     #[test]

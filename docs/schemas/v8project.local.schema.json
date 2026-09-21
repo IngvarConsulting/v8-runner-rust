@@ -176,7 +176,7 @@
       "properties": {
         "connection": {
           "default": "",
-          "description": "1C infobase connection string without embedded user or password; empty for a\nstandalone server, which `standalone` declares.",
+          "description": "1C infobase connection string without embedded user or password: `File=…` for a file\ninfobase, `Srvr=…;Ref=…` for a cluster; next to `standalone` it is the server's direct\ngate address or empty.",
           "type": "string"
         },
         "dbms": {
