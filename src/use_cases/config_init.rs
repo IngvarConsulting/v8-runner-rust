@@ -20,8 +20,34 @@ pub struct ConfigInitRequest {
     pub project_dir: PathBuf,
     pub output_path: PathBuf,
     pub force: bool,
-    pub connection: Option<String>,
+    pub connection: Option<DeclaredOrigin>,
     pub format: ConfigFormatRequest,
+}
+
+/// Адрес, которым назвали `origin`, вместе с ключом, которым его назвали: отказ обязан
+/// называть тот ключ, что передал вызывающий, а не тот, что помнит код.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredOrigin {
+    pub key: OriginKey,
+    pub connection: String,
+}
+
+/// Ключ, которым назвали адрес базы при создании проекта.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OriginKey {
+    /// Свой ключ команды.
+    Connection,
+    /// Глобальный ключ базы: `init` им базу объявляет.
+    Infobase,
+}
+
+impl OriginKey {
+    pub fn flag(self) -> &'static str {
+        match self {
+            Self::Connection => "--connection",
+            Self::Infobase => "--infobase",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +124,7 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
             output_path.display()
         ))
     })?;
-    ensure_local_config(&local_path, request.connection.as_deref())?;
+    ensure_local_config(&local_path, request.connection.as_ref())?;
     ensure_gitignore_ignores_local_config(&local_path, &gitignore_path)?;
 
     Ok(ConfigInitResult {
@@ -142,7 +168,7 @@ fn declared_infobase_name(path: &std::path::Path) -> Option<String> {
         .then(|| crate::config::model::DEFAULT_INFOBASE_NAME.to_owned())
 }
 
-fn ensure_local_config(path: &Path, connection: Option<&str>) -> Result<(), AppError> {
+fn ensure_local_config(path: &Path, origin: Option<&DeclaredOrigin>) -> Result<(), AppError> {
     let content = if path.exists() {
         let existing = std::fs::read_to_string(path).map_err(|error| {
             AppError::Runtime(format!(
@@ -150,9 +176,11 @@ fn ensure_local_config(path: &Path, connection: Option<&str>) -> Result<(), AppE
                 path.display()
             ))
         })?;
-        local_config_with_origin(&existing, connection, path)?
+        local_config_with_origin(&existing, origin, path)?
     } else {
-        render_local_config_with_origin(connection.unwrap_or(DEFAULT_ORIGIN_CONNECTION))
+        render_local_config_with_origin(
+            origin.map_or(DEFAULT_ORIGIN_CONNECTION, |origin| &origin.connection),
+        )
     };
 
     std::fs::write(path, content).map_err(|error| {
@@ -216,7 +244,7 @@ fn render_local_config_with_origin(connection: &str) -> String {
 
 fn local_config_with_origin(
     existing: &str,
-    connection: Option<&str>,
+    origin: Option<&DeclaredOrigin>,
     path: &Path,
 ) -> Result<String, AppError> {
     let content = with_local_schema_modeline(existing);
@@ -226,21 +254,26 @@ fn local_config_with_origin(
             path.display()
         ))
     })?;
-    let requested = connection;
-    let connection = connection.unwrap_or(DEFAULT_ORIGIN_CONNECTION);
+    let connection = origin.map_or(DEFAULT_ORIGIN_CONNECTION, |origin| &origin.connection);
     match origin_state(&document) {
-        OriginState::Connection(declared) => match requested {
-            Some(requested) if requested != declared => Err(AppError::Validation(format!(
-                "local config file '{}' already declares infobases.origin.connection = '{declared}'; it is not replaced by --connection '{requested}'",
-                path.display()
-            ))),
+        OriginState::Connection(declared) => match origin {
+            Some(requested) if requested.connection != declared => {
+                let (key, address) = (requested.key.flag(), &requested.connection);
+                Err(AppError::Validation(format!(
+                    "local config file '{}' already declares infobases.origin.connection = '{declared}'; it is not replaced by {key} '{address}'",
+                    path.display()
+                )))
+            }
             _ => Ok(content),
         },
-        OriginState::Standalone => match requested {
-            Some(requested) => Err(AppError::Validation(format!(
-                "local config file '{}' already declares infobases.origin as a standalone server; it is not replaced by --connection '{requested}'",
-                path.display()
-            ))),
+        OriginState::Standalone => match origin {
+            Some(requested) => {
+                let (key, address) = (requested.key.flag(), &requested.connection);
+                Err(AppError::Validation(format!(
+                    "local config file '{}' already declares infobases.origin as a standalone server; it is not replaced by {key} '{address}'",
+                    path.display()
+                )))
+            }
             None => Ok(content),
         },
         OriginState::Absent if yaml_document_is_empty(&content) => {
@@ -1139,7 +1172,10 @@ fn escape_yaml(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{discover_sources, execute, ConfigFormatRequest, ConfigInitRequest, SourcePurpose};
+    use super::{
+        discover_sources, execute, ConfigFormatRequest, ConfigInitRequest, DeclaredOrigin,
+        OriginKey, SourcePurpose,
+    };
     use crate::config::loader::load_config;
     use crate::config::model::InfobaseSelector;
     use std::path::Path;
@@ -1493,7 +1529,10 @@ mod tests {
             project_dir: dir.path().to_path_buf(),
             output_path: "v8project.yaml".into(),
             force: true,
-            connection: Some("File=/other/ib".to_owned()),
+            connection: Some(DeclaredOrigin {
+                key: OriginKey::Connection,
+                connection: "File=/other/ib".to_owned(),
+            }),
             format: ConfigFormatRequest::Designer,
         })
         .expect_err("another address for a declared origin");
@@ -1521,7 +1560,10 @@ mod tests {
             project_dir: dir.path().to_path_buf(),
             output_path: "v8project.yaml".into(),
             force: false,
-            connection: Some("Srvr=srv;Ref=erp".to_owned()),
+            connection: Some(DeclaredOrigin {
+                key: OriginKey::Connection,
+                connection: "Srvr=srv;Ref=erp".to_owned(),
+            }),
             format: ConfigFormatRequest::Designer,
         })
         .expect("init config");
@@ -1582,7 +1624,10 @@ mod tests {
             project_dir: dir.path().to_path_buf(),
             output_path: "v8project.yaml".into(),
             force: false,
-            connection: Some("Srvr=srv;Ref=erp".to_owned()),
+            connection: Some(DeclaredOrigin {
+                key: OriginKey::Connection,
+                connection: "Srvr=srv;Ref=erp".to_owned(),
+            }),
             format: ConfigFormatRequest::Designer,
         })
         .expect("init config");

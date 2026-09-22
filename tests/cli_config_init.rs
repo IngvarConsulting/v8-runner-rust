@@ -568,3 +568,106 @@ fn a_generated_config_names_the_push_section_by_its_command() {
         "the header names the command that wrote the file:\n{generated}"
     );
 }
+
+/// `init` объявляет базу, а не выбирает её: глобальный ключ здесь называет адрес, который
+/// уезжает в `infobases.origin` местного слоя.
+#[test]
+fn init_writes_the_address_named_by_the_global_key_into_origin() {
+    let dir = temp_workspace();
+    fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
+
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .args(["init", "--infobase", "Srvr=srv;Ref=erp"])
+        .output()
+        .expect("run init");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let local = fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("local");
+    assert!(local.contains("connection: 'Srvr=srv;Ref=erp'"), "{local}");
+}
+
+/// Имя базы разрешать не по чему: местного слоя ещё нет, и `init` отвечает отказом.
+#[test]
+fn init_refuses_a_base_named_by_name_because_it_has_nothing_to_resolve_it_against() {
+    let dir = temp_workspace();
+    fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
+
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .args(["init", "--infobase", "test"])
+        .output()
+        .expect("run init");
+
+    assert_eq!(output.status.code(), Some(2));
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(reported.contains("connection string"), "{reported}");
+    assert!(reported.contains("test"), "{reported}");
+    assert!(
+        !dir.path().join("v8project.yaml").exists(),
+        "отказ случается до того, как проект написан"
+    );
+}
+
+/// Два ключа об одном адресе — отказ: выбирать за вызывающего раннер не станет.
+#[test]
+fn init_refuses_two_keys_naming_one_address() {
+    let dir = temp_workspace();
+    fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
+
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .args([
+            "init",
+            "--connection",
+            "File=build/ib",
+            "--infobase",
+            "Srvr=srv;Ref=erp",
+        ])
+        .output()
+        .expect("run init");
+
+    assert_eq!(output.status.code(), Some(2));
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(reported.contains("--connection"), "{reported}");
+    assert!(reported.contains("--infobase"), "{reported}");
+}
+
+/// Отказ существующего слоя называет тот ключ, которым адрес передали.
+#[test]
+fn an_existing_origin_is_not_replaced_and_the_refusal_names_the_key_that_was_used() {
+    let dir = temp_workspace();
+    fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
+    fs::write(
+        dir.path().join("v8project.local.yaml"),
+        "infobases:\n  origin:\n    connection: 'File=/srv/ib'\n",
+    )
+    .expect("local");
+
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .args(["init", "--infobase", "Srvr=srv;Ref=erp"])
+        .output()
+        .expect("run init");
+
+    assert_eq!(output.status.code(), Some(2));
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(reported.contains("--infobase"), "{reported}");
+    assert!(!reported.contains("--connection"), "{reported}");
+}

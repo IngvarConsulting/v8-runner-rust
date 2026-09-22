@@ -9,9 +9,9 @@ use crate::cli::args::{
     ArtifactsArgs, BuildArgs, Command, ConvertArgs, DesignerConfigSyntaxArgs,
     DesignerModulesSyntaxArgs, DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs,
     ExtensionsCommand, InfobaseArgs, InfobaseCommand, InfobaseConfigurationCommand,
-    InfobaseConfigurationExportArgs, InfobaseRestoreArgs, InitArgs, LaunchArgs, LaunchOptionsArgs,
-    LoadArgs, SyntaxArgs, SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope,
-    TestVaArgs, TestYaxunitArgs, ToolsArgs, ToolsCommand, ToolsDownloadArgs, ToolsDownloadCommand,
+    InfobaseConfigurationExportArgs, InfobaseRestoreArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs,
+    SyntaxArgs, SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope, TestVaArgs,
+    TestYaxunitArgs, ToolsArgs, ToolsCommand, ToolsDownloadArgs, ToolsDownloadCommand,
 };
 use crate::cli::output::{
     cli_error_contract, failure_envelope, pre_dispatch_error_envelope,
@@ -96,6 +96,7 @@ pub fn execute_command(
     primary_config_path: Option<PathBuf>,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
 ) -> Result<(), UseCaseError> {
     let cancellation = CancellationToken::new();
     let _signal_guard = CliSignalGuard::install(cancellation.clone());
@@ -119,6 +120,7 @@ pub fn execute_command(
             args,
             presenter,
             clean_before_execution,
+            dry_run,
             cancellation,
         ),
         Command::Build(args) => execute_build(
@@ -126,6 +128,7 @@ pub fn execute_command(
             args,
             presenter,
             clean_before_execution,
+            dry_run,
             cancellation,
         ),
         Command::Load(args) => execute_load(
@@ -133,6 +136,7 @@ pub fn execute_command(
             args,
             presenter,
             clean_before_execution,
+            dry_run,
             cancellation,
         ),
         Command::Test(args) => execute_test(
@@ -147,13 +151,14 @@ pub fn execute_command(
             args,
             presenter,
             clean_before_execution,
+            dry_run,
             cancellation,
         ),
-        Command::Init(args) => execute_init(
+        Command::Init => execute_init(
             config,
-            args,
             presenter,
             clean_before_execution,
+            dry_run,
             cancellation,
         ),
         Command::Infobase(args) => execute_infobase(
@@ -161,6 +166,7 @@ pub fn execute_command(
             args,
             presenter,
             clean_before_execution,
+            dry_run,
             cancellation,
         ),
         Command::Convert(args) => execute_convert(
@@ -168,6 +174,7 @@ pub fn execute_command(
             args,
             presenter,
             clean_before_execution,
+            dry_run,
             cancellation,
         ),
         Command::Artifacts(args) => execute_artifacts(
@@ -175,6 +182,7 @@ pub fn execute_command(
             args,
             presenter,
             clean_before_execution,
+            dry_run,
             cancellation,
         ),
         Command::Syntax(args) => execute_syntax(
@@ -189,6 +197,7 @@ pub fn execute_command(
             args,
             presenter,
             clean_before_execution,
+            dry_run,
             cancellation,
         ),
         Command::Publish(args) => execute_publish(
@@ -196,6 +205,7 @@ pub fn execute_command(
             args,
             presenter,
             clean_before_execution,
+            dry_run,
             cancellation,
         ),
         Command::Mcp(_) => unreachable!("mcp commands are handled outside cli::execute"),
@@ -207,6 +217,7 @@ fn execute_publish(
     args: &crate::cli::args::PublishArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
     use crate::domain::publish::PublishAction;
@@ -218,7 +229,7 @@ fn execute_publish(
         } else {
             PublishAction::Publish
         },
-        dry_run: args.dry_run,
+        dry_run,
     };
     let context = cli_context(config, CommandName::Publish, cancellation);
     with_cli_workspace_lock(
@@ -226,7 +237,7 @@ fn execute_publish(
         presenter,
         CommandName::Publish,
         clean_before_execution,
-        args.dry_run,
+        dry_run,
         || match publish_infobase::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -338,9 +349,9 @@ pub fn command_name(command: &Command) -> CommandName {
                     command: InfobaseConfigurationCommand::Export(_),
                 }),
         }) => CommandName::InfobaseConfigurationExport,
-        Command::Init(_) => CommandName::Init,
+        Command::Init => CommandName::Init,
         Command::Infobase(InfobaseArgs {
-            command: InfobaseCommand::Create(_),
+            command: InfobaseCommand::Create,
         }) => unreachable!("infobase create is normalised into its own command in app::run"),
         Command::Infobase(InfobaseArgs {
             command: InfobaseCommand::Dump(_),
@@ -464,6 +475,7 @@ fn execute_extensions(
     args: &ExtensionsArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
     args.validate_property_options().map_err(|message| {
@@ -479,10 +491,11 @@ fn execute_extensions(
             command,
             presenter,
             clean_before_execution,
+            dry_run,
             cancellation,
         );
     }
-    let request = map_extensions_request(args);
+    let request = map_extensions_request(args, dry_run);
     configure_extensions::resolve_targets(config, &request)
         .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Extensions, error))?;
     let context = cli_context(config, CommandName::Extensions, cancellation);
@@ -491,7 +504,7 @@ fn execute_extensions(
         presenter,
         CommandName::Extensions,
         clean_before_execution,
-        args.dry_run,
+        dry_run,
         || match configure_extensions::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -538,29 +551,24 @@ fn execute_extension_command(
     command: &ExtensionsCommand,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
     let context = cli_context(config, CommandName::Extensions, cancellation);
-    // Превью любой подкоманды платформу не поднимает, значит и `workPath` ему не нужен.
-    let preview = match command {
-        ExtensionsCommand::List(args) => args.dry_run,
-        ExtensionsCommand::Info(args) | ExtensionsCommand::Delete(args) => args.dry_run,
-        ExtensionsCommand::Create(args) => args.dry_run,
-        ExtensionsCommand::Activate(args) => args.dry_run,
-    };
     with_cli_workspace_lock(
         config,
         presenter,
         CommandName::Extensions,
         clean_before_execution,
-        preview,
+        // Превью любой подкоманды платформу не поднимает, значит и `workPath` ему не нужен.
+        dry_run,
         || match command {
-            ExtensionsCommand::List(args) => run_extension_inventory(
+            ExtensionsCommand::List => run_extension_inventory(
                 config,
                 &context,
                 presenter,
                 ExtensionInventoryScope::All,
-                args.dry_run,
+                dry_run,
             ),
             ExtensionsCommand::Info(args) => run_extension_inventory(
                 config,
@@ -569,7 +577,7 @@ fn execute_extension_command(
                 ExtensionInventoryScope::Named {
                     name: args.name.clone(),
                 },
-                args.dry_run,
+                dry_run,
             ),
             ExtensionsCommand::Create(args) => run_extension_change(
                 config,
@@ -581,7 +589,7 @@ fn execute_extension_command(
                     synonym: args.synonym.clone(),
                     purpose: args.purpose.clone(),
                 },
-                args.dry_run,
+                dry_run,
             ),
             ExtensionsCommand::Delete(args) => run_extension_change(
                 config,
@@ -590,7 +598,7 @@ fn execute_extension_command(
                 ExtensionChangeRequest::Delete {
                     name: args.name.clone(),
                 },
-                args.dry_run,
+                dry_run,
             ),
             ExtensionsCommand::Activate(args) => run_extension_change(
                 config,
@@ -600,7 +608,7 @@ fn execute_extension_command(
                     name: args.name.clone(),
                     active: args.active == "yes",
                 },
-                args.dry_run,
+                dry_run,
             ),
         },
     )
@@ -781,21 +789,19 @@ fn render_extensions_text(
 
 fn execute_init(
     config: &AppConfig,
-    args: &InitArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    let request = InitRequest {
-        dry_run: args.dry_run,
-    };
+    let request = InitRequest { dry_run };
     let context = cli_context(config, CommandName::Init, cancellation);
     with_cli_workspace_lock(
         config,
         presenter,
         CommandName::Init,
         clean_before_execution,
-        args.dry_run,
+        dry_run,
         || match init_project::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -837,16 +843,17 @@ fn execute_build(
     args: &BuildArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    let request = map_build_request(args);
+    let request = map_build_request(args, dry_run);
     let context = cli_context(config, CommandName::Build, cancellation);
     with_cli_workspace_lock(
         config,
         presenter,
         CommandName::Build,
         clean_before_execution,
-        args.dry_run,
+        dry_run,
         || match build_project::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -936,9 +943,10 @@ fn execute_load(
     args: &LoadArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    let request = map_load_request(args)
+    let request = map_load_request(args, dry_run)
         .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Load, error))?;
     let context = cli_context(config, CommandName::Load, cancellation);
     with_cli_workspace_lock(
@@ -946,7 +954,7 @@ fn execute_load(
         presenter,
         CommandName::Load,
         clean_before_execution,
-        args.dry_run,
+        dry_run,
         || match load_artifact::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -981,9 +989,10 @@ fn execute_dump(
     args: &DumpArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    let request = map_dump_request(args)
+    let request = map_dump_request(args, dry_run)
         .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Dump, error))?;
     let context = cli_context(config, CommandName::Dump, cancellation);
     with_cli_workspace_lock(
@@ -991,7 +1000,7 @@ fn execute_dump(
         presenter,
         CommandName::Dump,
         clean_before_execution,
-        args.dry_run,
+        dry_run,
         || match dump_config::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -1051,7 +1060,7 @@ pub struct PreparedInfobaseCliCommand {
 
 pub fn validate_infobase_request(args: &InfobaseArgs) -> Result<(), AppError> {
     match &args.command {
-        InfobaseCommand::Create(_) => {
+        InfobaseCommand::Create => {
             unreachable!("infobase create is normalised into its own command in app::run")
         }
         InfobaseCommand::Configuration(configuration) => match &configuration.command {
@@ -1095,6 +1104,7 @@ pub fn render_invalid_infobase_request(
     args: &InfobaseArgs,
     presenter: &Presenter,
     error: AppError,
+    dry_run: bool,
 ) -> UseCaseError {
     let error = UseCaseError::from(error);
     render_infobase_pre_dispatch_failure(
@@ -1103,6 +1113,7 @@ pub fn render_invalid_infobase_request(
         error,
         "provider selection was not attempted because the request is invalid",
         ExportPhase::Validation,
+        dry_run,
     )
 }
 
@@ -1112,11 +1123,12 @@ pub fn render_infobase_pre_dispatch_failure(
     error: UseCaseError,
     _selection_reason: &str,
     phase: ExportPhase,
+    dry_run: bool,
 ) -> UseCaseError {
     // Выбор исполнителя не начинался: квитанции нет, причина — в ошибке конверта.
     let selection: Option<ProviderReceipt> = None;
     match &args.command {
-        InfobaseCommand::Create(_) => {
+        InfobaseCommand::Create => {
             unreachable!("infobase create has no export request to render")
         }
         InfobaseCommand::Configuration(configuration) => match &configuration.command {
@@ -1124,7 +1136,7 @@ pub fn render_infobase_pre_dispatch_failure(
                 let request = map_infobase_configuration_export_request(args);
                 let mut result =
                     configuration_pre_dispatch_failure(&request, selection.clone(), &error, phase);
-                if args.dry_run {
+                if dry_run {
                     result.mark_preview_failure();
                 }
                 render_configuration_failure(
@@ -1141,7 +1153,7 @@ pub fn render_infobase_pre_dispatch_failure(
             };
             let mut result =
                 snapshot_pre_dispatch_failure(&request, selection.clone(), &error, phase);
-            if args.dry_run {
+            if dry_run {
                 result.mark_preview_failure();
             }
             render_snapshot_failure(CommandName::InfobaseDump, result, &error, presenter);
@@ -1156,7 +1168,7 @@ pub fn render_infobase_pre_dispatch_failure(
                 }
             });
             let mut result = restore_pre_dispatch_failure(&request, selection, &error, phase);
-            if args.dry_run {
+            if dry_run {
                 result.mark_preview_failure();
             }
             render_restore_failure(CommandName::InfobaseRestore, result, &error, presenter);
@@ -1170,9 +1182,10 @@ pub fn prepare_infobase_command(
     args: &InfobaseArgs,
     presenter: &Presenter,
     context: &ExecutionContext,
+    dry_run: bool,
 ) -> Result<PreparedInfobaseCommand, UseCaseError> {
     match &args.command {
-        InfobaseCommand::Create(_) => {
+        InfobaseCommand::Create => {
             unreachable!("infobase create is dispatched before the export machinery")
         }
         InfobaseCommand::Configuration(configuration) => match &configuration.command {
@@ -1188,7 +1201,7 @@ pub fn prepare_infobase_command(
                     Err(failure) => {
                         let error = failure.error;
                         if let Some(mut result) = failure.payload {
-                            if args.dry_run {
+                            if dry_run {
                                 result.mark_preview_failure();
                             }
                             render_configuration_failure(command, result, &error, presenter);
@@ -1210,7 +1223,7 @@ pub fn prepare_infobase_command(
                 Err(failure) => {
                     let error = failure.error;
                     if let Some(mut result) = failure.payload {
-                        if args.dry_run {
+                        if dry_run {
                             result.mark_preview_failure();
                         }
                         render_snapshot_failure(command, result, &error, presenter);
@@ -1230,7 +1243,7 @@ pub fn prepare_infobase_command(
                 Err(failure) => {
                     let error = failure.error;
                     if let Some(mut result) = failure.payload {
-                        if args.dry_run {
+                        if dry_run {
                             result.mark_preview_failure();
                         }
                         render_restore_failure(command, result, &error, presenter);
@@ -1246,11 +1259,12 @@ pub fn prepare_infobase_cli_command(
     config: &AppConfig,
     args: &InfobaseArgs,
     presenter: &Presenter,
+    dry_run: bool,
 ) -> Result<PreparedInfobaseCliCommand, UseCaseError> {
     let cancellation = CancellationToken::new();
     let signal_guard = CliSignalGuard::install(cancellation.clone());
     let context = cli_context(config, infobase_command_name(args), cancellation);
-    let command = prepare_infobase_command(config, args, presenter, &context)?;
+    let command = prepare_infobase_command(config, args, presenter, &context, dry_run)?;
     Ok(PreparedInfobaseCliCommand {
         command,
         context,
@@ -1260,7 +1274,7 @@ pub fn prepare_infobase_cli_command(
 
 fn infobase_command_name(args: &InfobaseArgs) -> CommandName {
     match &args.command {
-        InfobaseCommand::Create(_) => {
+        InfobaseCommand::Create => {
             unreachable!("infobase create is normalised into its own command in app::run")
         }
         InfobaseCommand::Configuration(_) => CommandName::InfobaseConfigurationExport,
@@ -1294,10 +1308,11 @@ fn execute_infobase(
     args: &InfobaseArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
     let context = cli_context(config, infobase_command_name(args), cancellation);
-    let prepared = prepare_infobase_command(config, args, presenter, &context)?;
+    let prepared = prepare_infobase_command(config, args, presenter, &context, dry_run)?;
     execute_prepared_infobase(
         config,
         prepared,
@@ -2078,9 +2093,10 @@ fn execute_convert(
     args: &ConvertArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    let request = map_convert_request(args);
+    let request = map_convert_request(args, dry_run);
     if let Err(error) = convert_sources::preflight_validate(config, &request) {
         return Err(render_pre_dispatch_error(
             presenter,
@@ -2094,7 +2110,7 @@ fn execute_convert(
         presenter,
         CommandName::Convert,
         clean_before_execution,
-        args.dry_run,
+        dry_run,
         || match convert_sources::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -2136,9 +2152,10 @@ fn execute_artifacts(
     args: &ArtifactsArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    let request = map_artifacts_request_with_config(config, args)
+    let request = map_artifacts_request_with_config(config, args, dry_run)
         .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Artifacts, error))?;
     let context = cli_context(config, CommandName::Artifacts, cancellation);
     with_cli_workspace_lock(
@@ -2146,7 +2163,7 @@ fn execute_artifacts(
         presenter,
         CommandName::Artifacts,
         clean_before_execution,
-        args.dry_run,
+        dry_run,
         || match artifacts::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -2234,9 +2251,10 @@ fn execute_launch(
     args: &LaunchArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    let request = map_launch_request(args)
+    let request = map_launch_request(args, dry_run)
         .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Launch, error))?;
     let context = cli_context(config, CommandName::Launch, cancellation);
     let started = Instant::now();
@@ -2245,7 +2263,7 @@ fn execute_launch(
         presenter,
         CommandName::Launch,
         clean_before_execution,
-        args.dry_run,
+        dry_run,
         || match launch_app::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -2304,7 +2322,8 @@ fn execute_launch(
 /// который возвращается до блокировок вообще.
 ///
 /// Решение живёт здесь, а не в отдельном помощнике рядом: у границы один владелец,
-/// иначе её легко обойти новым вызовом.
+/// иначе её легко обойти новым вызовом. Спор превью с очисткой — вопрос не границы, а
+/// двух глобальных ключей, и отвечает на него `app::run` до загрузки конфига.
 fn with_cli_workspace_lock<T>(
     config: &AppConfig,
     presenter: &Presenter,
@@ -2314,19 +2333,13 @@ fn with_cli_workspace_lock<T>(
     run: impl FnOnce() -> Result<T, UseCaseError>,
 ) -> Result<T, UseCaseError> {
     if preview {
-        // Чистка меняет `workPath`, поэтому с превью она отклоняется, а не
-        // пропускается молча: иначе флаг обещает одно, а делает другое.
-        if clean_before_execution {
-            let message = format!(
-                "--clean-before-execution cannot be combined with {} --dry-run because preview must not modify workPath",
-                command.as_str()
-            );
-            return Err(render_pre_dispatch_error(
-                presenter,
-                command,
-                UseCaseError::new(UseCaseErrorKind::Validation, message),
-            ));
-        }
+        // Чистка меняет `workPath` и с превью не сочетается; спор двух глобальных ключей
+        // разрешается один раз на запуске (`app::run`) — до того, как каталог тронут, — и
+        // здесь уже не повторяется.
+        debug_assert!(
+            !clean_before_execution,
+            "очистка с превью отклонена на запуске"
+        );
         return run();
     }
     with_cli_workspace_lock_observed(
@@ -2398,19 +2411,19 @@ fn render_pre_dispatch_error(
     error
 }
 
-fn map_build_request(args: &BuildArgs) -> BuildRequest {
+fn map_build_request(args: &BuildArgs, dry_run: bool) -> BuildRequest {
     BuildRequest {
-        dry_run: args.dry_run,
+        dry_run,
         full_rebuild: args.full_rebuild,
         source_set: args.source_set.clone(),
     }
 }
 
-fn map_extensions_request(args: &ExtensionsArgs) -> ConfigureExtensionsRequest {
+fn map_extensions_request(args: &ExtensionsArgs, dry_run: bool) -> ConfigureExtensionsRequest {
     ConfigureExtensionsRequest {
         names: args.names.clone(),
         installed_names: args.installed_names.clone(),
-        dry_run: args.dry_run,
+        dry_run,
     }
 }
 
@@ -2681,9 +2694,9 @@ fn cli_context(
         .with_cancellation(cancellation)
 }
 
-fn map_load_request(args: &LoadArgs) -> Result<LoadRequest, UseCaseError> {
+fn map_load_request(args: &LoadArgs, dry_run: bool) -> Result<LoadRequest, UseCaseError> {
     Ok(LoadRequest {
-        dry_run: args.dry_run,
+        dry_run,
         mode: match args.mode.as_str() {
             "load" => LoadMode::Load,
             "combine" | "merge" => LoadMode::Merge,
@@ -2702,9 +2715,9 @@ fn map_load_request(args: &LoadArgs) -> Result<LoadRequest, UseCaseError> {
     })
 }
 
-fn map_dump_request(args: &DumpArgs) -> Result<DumpRequest, UseCaseError> {
+fn map_dump_request(args: &DumpArgs, dry_run: bool) -> Result<DumpRequest, UseCaseError> {
     Ok(DumpRequest {
-        dry_run: args.dry_run,
+        dry_run,
         mode: parse_required_dump_mode(&args.mode)?,
         source_set: args.source_set.clone(),
         extension: args.extension.clone(),
@@ -2713,7 +2726,7 @@ fn map_dump_request(args: &DumpArgs) -> Result<DumpRequest, UseCaseError> {
     })
 }
 
-fn map_convert_request(args: &ConvertArgs) -> ConvertRequest {
+fn map_convert_request(args: &ConvertArgs, dry_run: bool) -> ConvertRequest {
     ConvertRequest {
         scope: match args.source_set.as_deref() {
             Some(name) => ConvertScopeRequest::SourceSet {
@@ -2722,7 +2735,7 @@ fn map_convert_request(args: &ConvertArgs) -> ConvertRequest {
             None => ConvertScopeRequest::All,
         },
         output_root: args.output.clone(),
-        dry_run: args.dry_run,
+        dry_run,
         discard_uncommitted: args.discard_uncommitted,
     }
 }
@@ -2730,6 +2743,7 @@ fn map_convert_request(args: &ConvertArgs) -> ConvertRequest {
 fn map_artifacts_request_with_config(
     config: &AppConfig,
     args: &ArtifactsArgs,
+    dry_run: bool,
 ) -> Result<ArtifactsRequest, UseCaseError> {
     let mode = match (args.source_set.as_deref(), args.extension.is_some()) {
         (_, true) => ArtifactsModeRequest::ExtensionCfe,
@@ -2757,7 +2771,7 @@ fn map_artifacts_request_with_config(
     };
 
     Ok(ArtifactsRequest {
-        dry_run: args.dry_run,
+        dry_run,
         execution: ArtifactsRequest::default_execution(mode),
         mode,
         output_path: args.output.clone(),
@@ -2872,7 +2886,7 @@ fn map_designer_modules_request(
     )
 }
 
-fn map_launch_request(args: &LaunchArgs) -> Result<LaunchRequest, UseCaseError> {
+fn map_launch_request(args: &LaunchArgs, dry_run: bool) -> Result<LaunchRequest, UseCaseError> {
     let mut target = parse_launch_target(&args.target, "mode", LaunchModeAliases::Cli)?;
     let client_mcp = if matches!(
         target,
@@ -2902,7 +2916,7 @@ fn map_launch_request(args: &LaunchArgs) -> Result<LaunchRequest, UseCaseError> 
         launch: map_direct_launch_options(target, &args.launch, client_mcp.is_some())?,
         client_mcp,
         via: map_launch_via(args.via.as_deref())?,
-        dry_run: args.dry_run,
+        dry_run,
     })
 }
 
@@ -4138,9 +4152,8 @@ mod tests {
         ArtifactsArgs, BuildArgs, Command, DesignerConfigSyntaxArgs, DesignerModulesSyntaxArgs,
         DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs, InfobaseArgs, InfobaseCommand,
         InfobaseConfigurationArgs, InfobaseConfigurationCommand, InfobaseConfigurationExportArgs,
-        InfobaseDumpArgs, InitArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs, SyntaxArgs,
-        SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope, TestVaArgs,
-        TestYaxunitArgs,
+        InfobaseDumpArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs, SyntaxArgs, SyntaxTarget,
+        TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope, TestVaArgs, TestYaxunitArgs,
     };
     use crate::cli::output::pre_dispatch_error_envelope;
     use crate::config::model::{
@@ -4336,71 +4349,81 @@ mod tests {
     #[test]
     fn maps_build_dump_launch_and_load_requests() {
         assert!(
-            map_build_request(&BuildArgs {
-                dry_run: false,
-                full_rebuild: true,
-                source_set: None,
-            })
+            map_build_request(
+                &BuildArgs {
+                    full_rebuild: true,
+                    source_set: None,
+                },
+                false,
+            )
             .full_rebuild
         );
         assert_eq!(
-            map_extensions_request(&ExtensionsArgs {
-                command: None,
-                names: vec!["client_mcp".to_owned()],
-                installed_names: vec![],
-                dry_run: false,
-            })
+            map_extensions_request(
+                &ExtensionsArgs {
+                    command: None,
+                    names: vec!["client_mcp".to_owned()],
+                    installed_names: vec![],
+                },
+                false,
+            )
             .names,
             vec!["client_mcp"]
         );
         assert_eq!(
-            map_dump_request(&DumpArgs {
-                dry_run: false,
-                discard_uncommitted: false,
-                mode: "incremental".to_owned(),
-                source_set: Some("main".to_owned()),
-                extension: Some("Ext".to_owned()),
-                objects: vec!["Catalog.Item".to_owned()],
-            })
+            map_dump_request(
+                &DumpArgs {
+                    discard_uncommitted: false,
+                    mode: "incremental".to_owned(),
+                    source_set: Some("main".to_owned()),
+                    extension: Some("Ext".to_owned()),
+                    objects: vec!["Catalog.Item".to_owned()],
+                },
+                false,
+            )
             .expect("request")
             .mode,
             DumpModeRequest::Incremental
         );
         assert_eq!(
-            map_dump_request(&DumpArgs {
-                dry_run: false,
-                discard_uncommitted: false,
-                mode: "incremental".to_owned(),
-                source_set: Some("main".to_owned()),
-                extension: Some("Ext".to_owned()),
-                objects: vec!["Catalog.Item".to_owned()],
-            })
+            map_dump_request(
+                &DumpArgs {
+                    discard_uncommitted: false,
+                    mode: "incremental".to_owned(),
+                    source_set: Some("main".to_owned()),
+                    extension: Some("Ext".to_owned()),
+                    objects: vec!["Catalog.Item".to_owned()],
+                },
+                false,
+            )
             .expect("request")
             .source_set
             .as_deref(),
             Some("main")
         );
         assert_eq!(
-            map_launch_request(&LaunchArgs {
-                via: None,
-                target: "thin".to_owned(),
-                mcp_scenario: None,
-                mcp_mode: None,
-                launch: DirectLaunchOptionsArgs {
-                    common: LaunchOptionsArgs {
-                        c: Some("Command".to_owned()),
-                        execute: Some("tool.epf".to_owned()),
-                        use_privileged_mode: true,
-                        output: Some("launch.log".to_owned()),
-                        raw_keys: vec!["/WA-".to_owned(), "/DisplayAllFunctions".to_owned()],
+            map_launch_request(
+                &LaunchArgs {
+                    via: None,
+                    target: "thin".to_owned(),
+                    mcp_scenario: None,
+                    mcp_mode: None,
+                    launch: DirectLaunchOptionsArgs {
+                        common: LaunchOptionsArgs {
+                            c: Some("Command".to_owned()),
+                            execute: Some("tool.epf".to_owned()),
+                            use_privileged_mode: true,
+                            output: Some("launch.log".to_owned()),
+                            raw_keys: vec!["/WA-".to_owned(), "/DisplayAllFunctions".to_owned()],
+                        },
+                        ..DirectLaunchOptionsArgs::default()
                     },
-                    ..DirectLaunchOptionsArgs::default()
+                    mcp_config: None,
+                    mcp_port: None,
+                    wait_ready: false,
                 },
-                mcp_config: None,
-                mcp_port: None,
-                wait_ready: false,
-                dry_run: false,
-            })
+                false,
+            )
             .expect("request"),
             LaunchRequest {
                 via: None,
@@ -4419,49 +4442,55 @@ mod tests {
             }
         );
         assert_eq!(
-            map_launch_request(&LaunchArgs {
-                via: None,
-                target: "ordinary".to_owned(),
-                mcp_scenario: None,
-                mcp_mode: None,
-                launch: DirectLaunchOptionsArgs::default(),
-                mcp_config: None,
-                mcp_port: None,
-                wait_ready: false,
-                dry_run: false,
-            })
+            map_launch_request(
+                &LaunchArgs {
+                    via: None,
+                    target: "ordinary".to_owned(),
+                    mcp_scenario: None,
+                    mcp_mode: None,
+                    launch: DirectLaunchOptionsArgs::default(),
+                    mcp_config: None,
+                    mcp_port: None,
+                    wait_ready: false,
+                },
+                false,
+            )
             .expect("request")
             .target,
             LaunchTargetRequest::ordinary_application()
         );
         assert_eq!(
-            map_launch_request(&LaunchArgs {
-                via: None,
-                target: "thin".to_owned(),
-                mcp_scenario: None,
-                mcp_mode: None,
-                launch: DirectLaunchOptionsArgs::default(),
-                mcp_config: None,
-                mcp_port: None,
-                wait_ready: false,
-                dry_run: false,
-            })
+            map_launch_request(
+                &LaunchArgs {
+                    via: None,
+                    target: "thin".to_owned(),
+                    mcp_scenario: None,
+                    mcp_mode: None,
+                    launch: DirectLaunchOptionsArgs::default(),
+                    mcp_config: None,
+                    mcp_port: None,
+                    wait_ready: false,
+                },
+                false,
+            )
             .expect("request")
             .target,
             LaunchTargetRequest::thin_client()
         );
         assert_eq!(
-            map_launch_request(&LaunchArgs {
-                via: None,
-                target: "mcp".to_owned(),
-                mcp_scenario: Some("va".to_owned()),
-                mcp_mode: Some("ordinary".to_owned()),
-                launch: DirectLaunchOptionsArgs::default(),
-                mcp_config: Some("C:\\tmp\\mcp-conf.json".to_owned()),
-                mcp_port: Some(123),
-                wait_ready: true,
-                dry_run: false,
-            })
+            map_launch_request(
+                &LaunchArgs {
+                    via: None,
+                    target: "mcp".to_owned(),
+                    mcp_scenario: Some("va".to_owned()),
+                    mcp_mode: Some("ordinary".to_owned()),
+                    launch: DirectLaunchOptionsArgs::default(),
+                    mcp_config: Some("C:\\tmp\\mcp-conf.json".to_owned()),
+                    mcp_port: Some(123),
+                    wait_ready: true,
+                },
+                false,
+            )
             .expect("request"),
             LaunchRequest {
                 via: None,
@@ -4484,14 +4513,16 @@ mod tests {
                 dry_run: false,
             }
         );
-        let load = map_load_request(&LoadArgs {
-            dry_run: false,
-            path: "dist/main.cf".to_owned(),
-            mode: "merge".to_owned(),
-            settings: Some("merge.xml".to_owned()),
-            vendor_name: None,
-            extension: Some("Ext".to_owned()),
-        })
+        let load = map_load_request(
+            &LoadArgs {
+                path: "dist/main.cf".to_owned(),
+                mode: "merge".to_owned(),
+                settings: Some("merge.xml".to_owned()),
+                vendor_name: None,
+                extension: Some("Ext".to_owned()),
+            },
+            false,
+        )
         .expect("load request");
         assert_eq!(load.mode, LoadMode::Merge);
         assert_eq!(load.artifact_path, "dist/main.cf");
@@ -4500,11 +4531,11 @@ mod tests {
         let artifacts = map_artifacts_request_with_config(
             &sample_config(Path::new("/tmp/work")),
             &ArtifactsArgs {
-                dry_run: false,
                 output: "dist/ext.cfe".to_owned(),
                 source_set: Some("ext-sales".to_owned()),
                 extension: Some("SalesAddon".to_owned()),
             },
+            false,
         )
         .expect("request");
         assert_eq!(artifacts.mode, ArtifactsModeRequest::ExtensionCfe);
@@ -4517,11 +4548,11 @@ mod tests {
         let artifacts = map_artifacts_request_with_config(
             &sample_config(Path::new("/tmp/work")),
             &ArtifactsArgs {
-                dry_run: false,
                 output: "dist/main.cf".to_owned(),
                 source_set: Some("main".to_owned()),
                 extension: Some("   ".to_owned()),
             },
+            false,
         )
         .expect("request");
 
@@ -4532,26 +4563,30 @@ mod tests {
 
     #[test]
     fn rejects_invalid_mode_mapping() {
-        let dump_error = map_dump_request(&DumpArgs {
-            dry_run: false,
-            discard_uncommitted: false,
-            mode: "garbage".to_owned(),
-            source_set: None,
-            extension: None,
-            objects: vec![],
-        })
+        let dump_error = map_dump_request(
+            &DumpArgs {
+                discard_uncommitted: false,
+                mode: "garbage".to_owned(),
+                source_set: None,
+                extension: None,
+                objects: vec![],
+            },
+            false,
+        )
         .expect_err("dump mode should be rejected");
-        let launch_error = map_launch_request(&LaunchArgs {
-            via: None,
-            target: "garbage".to_owned(),
-            mcp_scenario: None,
-            mcp_mode: None,
-            launch: DirectLaunchOptionsArgs::default(),
-            mcp_config: None,
-            mcp_port: None,
-            wait_ready: false,
-            dry_run: false,
-        })
+        let launch_error = map_launch_request(
+            &LaunchArgs {
+                via: None,
+                target: "garbage".to_owned(),
+                mcp_scenario: None,
+                mcp_mode: None,
+                launch: DirectLaunchOptionsArgs::default(),
+                mcp_config: None,
+                mcp_port: None,
+                wait_ready: false,
+            },
+            false,
+        )
         .expect_err("launch mode should be rejected");
 
         assert_eq!(dump_error.kind(), UseCaseErrorKind::Validation);
@@ -4560,14 +4595,16 @@ mod tests {
 
     #[test]
     fn rejects_invalid_load_mode_mapping() {
-        let error = map_load_request(&LoadArgs {
-            dry_run: false,
-            path: "dist/main.cf".to_owned(),
-            mode: "garbage".to_owned(),
-            settings: None,
-            vendor_name: None,
-            extension: None,
-        })
+        let error = map_load_request(
+            &LoadArgs {
+                path: "dist/main.cf".to_owned(),
+                mode: "garbage".to_owned(),
+                settings: None,
+                vendor_name: None,
+                extension: None,
+            },
+            false,
+        )
         .expect_err("load mode should be rejected");
 
         assert_eq!(error.kind(), UseCaseErrorKind::Validation);
@@ -4652,22 +4689,17 @@ mod tests {
 
     #[test]
     fn resolves_command_name() {
-        assert_eq!(
-            command_name(&Command::Init(InitArgs { dry_run: false })),
-            CommandName::Init
-        );
+        assert_eq!(command_name(&Command::Init), CommandName::Init);
         assert_eq!(
             command_name(&Command::Extensions(ExtensionsArgs {
                 command: None,
                 names: vec![],
                 installed_names: vec![],
-                dry_run: false,
             })),
             CommandName::Extensions
         );
         assert_eq!(
             command_name(&Command::Build(BuildArgs {
-                dry_run: false,
                 full_rebuild: false,
                 source_set: None,
             })),
@@ -4675,7 +4707,6 @@ mod tests {
         );
         assert_eq!(
             command_name(&Command::Load(LoadArgs {
-                dry_run: false,
                 path: "dist/main.cf".to_owned(),
                 mode: "load".to_owned(),
                 settings: None,
@@ -4686,7 +4717,6 @@ mod tests {
         );
         assert_eq!(
             command_name(&Command::Artifacts(ArtifactsArgs {
-                dry_run: false,
                 output: "dist/main.cf".to_owned(),
                 source_set: None,
                 extension: None,
@@ -4743,12 +4773,12 @@ mod tests {
         let error = execute_command(
             &config,
             &Command::Build(BuildArgs {
-                dry_run: false,
                 full_rebuild: true,
                 source_set: None,
             }),
             None,
             &presenter,
+            false,
             false,
         )
         .expect_err("busy workspace");
@@ -4782,6 +4812,7 @@ mod tests {
             }),
             None,
             &presenter,
+            false,
             false,
         )
         .expect_err("busy workspace");
@@ -4828,7 +4859,6 @@ mod tests {
                             state: "working".to_owned(),
                             extension: None,
                             output: dir.path().join("main.cf").display().to_string(),
-                            dry_run: false,
                         },
                     ),
                 }),
@@ -4836,13 +4866,12 @@ mod tests {
             Command::Infobase(InfobaseArgs {
                 command: InfobaseCommand::Dump(InfobaseDumpArgs {
                     output: dir.path().join("base.dt").display().to_string(),
-                    dry_run: false,
                 }),
             }),
         ];
 
         for command in commands {
-            let error = execute_command(&config, &command, None, &presenter, false)
+            let error = execute_command(&config, &command, None, &presenter, false, false)
                 .expect_err("busy workspace");
             assert_eq!(error.kind(), UseCaseErrorKind::WorkspaceBusy);
             assert!(error.to_string().contains("workspace"));
@@ -4872,10 +4901,10 @@ mod tests {
                 mcp_config: None,
                 mcp_port: None,
                 wait_ready: false,
-                dry_run: false,
             }),
             None,
             &presenter,
+            false,
             false,
         )
         .expect_err("invalid mode");
@@ -4911,6 +4940,7 @@ mod tests {
             None,
             &presenter,
             false,
+            false,
         )
         .expect_err("invalid module");
 
@@ -4936,13 +4966,13 @@ mod tests {
         let _ = execute_command(
             &config,
             &Command::Build(BuildArgs {
-                dry_run: false,
                 full_rebuild: true,
                 source_set: None,
             }),
             None,
             &presenter,
             true,
+            false,
         )
         .expect_err("busy workspace");
 

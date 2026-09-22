@@ -29,6 +29,11 @@
    - корректный boundary до dispatch в use case;
    - validation-before-lock, если команда имеет раннюю валидацию аргументов.
 
+5. Объявить строку листа в `src/cli/global_flags.rs`: умеет ли команда превью и что делает
+   с базой. Страж полноты — `src/cli/global_flags.rs::every_leaf_of_the_command_tree_declares_what_it_does_with_the_global_keys`;
+   лист без строки не собирается в отказ, а глобальный ключ, которого команда не умеет,
+   обязан отвергаться, а не игнорироваться.
+
 ## Новый public config field, `source-set` type или `infobase` subtree
 
 1. Добавить typed field и нужные `serde` defaults/renames в `src/config/model.rs`.
