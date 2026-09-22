@@ -22,6 +22,8 @@ fn apply_reset_preview_does_not_dispatch_or_create_work_path() {
             "--json-message",
             command,
             "--dry-run",
+            "--extension",
+            "InstalledAddon",
         ]);
         if command == "reset" {
             invocation.arg("--force");
@@ -81,11 +83,30 @@ fn invoke(
     (output.status, json)
 }
 
+const PRESENT_EXTENSION: &str = r#"previous=''
+for argument in "$@"; do
+  if [ "$previous" = /DumpCfg ]; then printf 'cfe payload' > "$argument"; fi
+  previous="$argument"
+done
+exit 0"#;
+
+fn set_timeout(config: &std::path::Path, millis: u64) {
+    fs::write(
+        config,
+        fs::read_to_string(config).unwrap().replace(
+            "execution_timeout: 300",
+            &format!("execution_timeout: {millis}"),
+        ),
+    )
+    .unwrap();
+}
+
 #[test]
 fn transitions_use_exact_designer_operation_and_extension_for_file_and_cluster() {
     for (command, flag) in [("apply", "/UpdateDBCfg"), ("reset", "/RollbackCfg")] {
         for connection in ["File=base", "Srvr=server;Ref=database"] {
-            let (dir, config, calls) = setup(connection, "exit 0");
+            let (dir, config, calls) = setup(connection, PRESENT_EXTENSION);
+            set_timeout(&config, 3000);
             let (status, json) = invoke(&config, command, &["--extension", "InstalledAddon"]);
             assert!(status.success(), "{json}");
             assert_eq!(json["data"]["provider_dispatched"], true);
@@ -129,6 +150,7 @@ fn transitions_use_exact_designer_operation_and_extension_for_file_and_cluster()
 fn unknown_extension_failure_never_retries_on_main_configuration() {
     for command in ["apply", "reset"] {
         let (_dir, config, calls) = setup("File=base", "exit 7");
+        set_timeout(&config, 3000);
         let (status, json) = invoke(&config, command, &["--extension", "Unknown"]);
         assert!(!status.success());
         assert_eq!(json["data"]["provider_dispatched"], true);
@@ -302,4 +324,99 @@ fn text_transition_reports_deferred_timeout_on_success() {
 #[test]
 fn text_transition_reports_deferred_timeout_on_failure() {
     assert_text_transition_reports_deferred_timeout(7);
+}
+
+#[test]
+fn missing_extension_is_refused_even_when_designer_would_exit_successfully() {
+    for command in ["apply", "reset"] {
+        let (_dir, config, calls) = setup("File=base", "exit 0");
+        let (status, json) = invoke(&config, command, &["--extension", "NoSuchCompatExtension"]);
+        assert!(!status.success(), "{json}");
+        assert_eq!(json["data"]["completed"], false);
+        let recorded = fs::read_to_string(calls).unwrap_or_default();
+        assert!(
+            !recorded
+                .lines()
+                .any(|arg| arg == "/UpdateDBCfg" || arg == "/RollbackCfg"),
+            "{recorded}"
+        );
+    }
+}
+
+#[test]
+fn extension_presence_requires_fresh_nonempty_regular_artifact_and_cleans_probe() {
+    for command in ["apply", "reset"] {
+        for artifact_action in [": > \"$argument\"", "ln -s \"$0\" \"$argument\"", "exit 1"] {
+            let script = format!("previous=''\nfor argument in \"$@\"; do\n  if [ \"$previous\" = /DumpCfg ]; then {artifact_action}; fi\n  previous=\"$argument\"\ndone\nexit 0");
+            let (dir, config, calls) = setup("File=base", &script);
+            set_timeout(&config, 3000);
+            let (status, json) = invoke(&config, command, &["--extension", "InstalledAddon"]);
+            assert!(!status.success(), "{json}");
+            assert_eq!(json["data"]["completed"], false);
+            assert_eq!(json["data"]["provider_dispatched"], true);
+            let recorded = fs::read_to_string(calls).unwrap();
+            assert!(!recorded
+                .lines()
+                .any(|arg| arg == "/UpdateDBCfg" || arg == "/RollbackCfg"));
+            assert!(!fs::read_dir(dir.path().join("work"))
+                .unwrap()
+                .any(|item| item
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".extension-presence-")));
+        }
+    }
+}
+
+#[test]
+fn cancelled_presence_probe_never_dispatches_critical_transition() {
+    for command in ["apply", "reset"] {
+        let (dir, config, calls) = setup("File=base", "sleep 10\nexit 0");
+        set_timeout(&config, 30000);
+        let mut invocation = v8_runner_command();
+        invocation.args([
+            "--config",
+            config.to_str().unwrap(),
+            "--json-message",
+            command,
+            "--extension",
+            "InstalledAddon",
+        ]);
+        if command == "reset" {
+            invocation.arg("--force");
+        }
+        let child = invocation
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        assert!(
+            support::wait_for_file(&calls, std::time::Duration::from_secs(10)),
+            "probe was not dispatched"
+        );
+        assert!(std::process::Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status()
+            .unwrap()
+            .success());
+        let output = child.wait_with_output().unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(!output.status.success(), "{json}");
+        assert_eq!(json["data"]["status"], "cancelled");
+        assert_eq!(json["data"]["completed"], false);
+        assert_eq!(json["data"]["interruption"]["deferred"], false);
+        assert_eq!(json["data"]["interruption"]["phase"], "extension_presence");
+        let recorded = fs::read_to_string(calls).unwrap();
+        assert!(!recorded
+            .lines()
+            .any(|arg| arg == "/UpdateDBCfg" || arg == "/RollbackCfg"));
+        assert!(!fs::read_dir(dir.path().join("work"))
+            .unwrap()
+            .any(|item| item
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".extension-presence-")));
+    }
 }

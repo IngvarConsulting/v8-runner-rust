@@ -88,22 +88,7 @@ fn run(
     result: &mut ConfigurationTransitionResult,
 ) -> Result<(), AppError> {
     validate(extension)?;
-    if let Some(interruption) = context.interruption() {
-        result.status = command_interruption_status(interruption);
-        result.interruption = Some(command_interruption_details(
-            interruption,
-            "before_dispatch",
-            interruption.message(context.command()),
-        ));
-        return Err(match interruption {
-            ExecutionInterruption::Cancelled => {
-                AppError::Cancelled(interruption.message(context.command()).into())
-            }
-            ExecutionInterruption::TimedOut => {
-                AppError::TimedOut(interruption.message(context.command()).into())
-            }
-        });
-    }
+    check_interruption(context, result, "before_dispatch")?;
     let plan = config.provider_plan(transition.operation());
     let unsupported: Vec<_> = plan
         .candidates()
@@ -146,7 +131,14 @@ fn run(
         ));
     }
     if dry_run {
+        if extension.is_some() {
+            result.warnings.push("extension presence is not checked during preview; execution first verifies it by exporting a temporary CFE".into());
+        }
         return Ok(());
+    }
+    if let Some(name) = extension {
+        verify_extension_presence(context, config, &location.path, &utilities, name, result)?;
+        check_interruption(context, result, "after_extension_presence")?;
     }
     let log_file = platform_logs_dir(&config.work_path)
         .map_err(|error| {
@@ -168,33 +160,13 @@ fn run(
         Transition::Reset => dsl.rollback_cfg(extension),
     };
     let platform = executed.map_err(|error| {
-        result.provider_dispatched = match &error {
-            DesignerError::Spawn(ProcessError::SpawnFailed { .. })
-            | DesignerError::StaleLogCleanup { .. }
-            | DesignerError::UtilityNotFound(_) => Some(false),
-            _ => None,
-        };
-        match &error {
-            DesignerError::Spawn(ProcessError::Cancelled { .. })
-            | DesignerError::Spawn(ProcessError::TimedOut { .. }) => {
-                // A critical process is never killed; these errors occur only before spawn.
-                let interruption =
-                    if matches!(&error, DesignerError::Spawn(ProcessError::Cancelled { .. })) {
-                        ExecutionInterruption::Cancelled
-                    } else {
-                        ExecutionInterruption::TimedOut
-                    };
-                result.provider_dispatched = Some(false);
-                result.status = command_interruption_status(interruption);
-                result.interruption = Some(command_interruption_details(
-                    interruption,
-                    "before_dispatch",
-                    interruption.message(context.command()),
-                ));
-            }
-            _ => {}
-        }
-        AppError::from(error)
+        record_designer_failure(
+            error,
+            context,
+            result,
+            InterruptionSafetyClass::CriticalNonAbortable,
+            "before_dispatch",
+        )
     })?;
     result.provider_dispatched = Some(true);
     result.interruption = deferred_process_interruption_details(
@@ -218,10 +190,155 @@ fn run(
     Ok(())
 }
 
+fn check_interruption(
+    context: &ExecutionContext,
+    result: &mut ConfigurationTransitionResult,
+    phase: &str,
+) -> Result<(), AppError> {
+    if let Some(interruption) = context.interruption() {
+        result.status = command_interruption_status(interruption);
+        result.interruption = Some(command_interruption_details(
+            interruption,
+            phase,
+            interruption.message(context.command()),
+        ));
+        return Err(match interruption {
+            ExecutionInterruption::Cancelled => {
+                AppError::Cancelled(interruption.message(context.command()).into())
+            }
+            ExecutionInterruption::TimedOut => {
+                AppError::TimedOut(interruption.message(context.command()).into())
+            }
+        });
+    }
+    Ok(())
+}
+
+fn record_designer_failure(
+    error: DesignerError,
+    context: &ExecutionContext,
+    result: &mut ConfigurationTransitionResult,
+    safety: InterruptionSafetyClass,
+    phase: &str,
+) -> AppError {
+    let interruption = match &error {
+        DesignerError::Spawn(ProcessError::Cancelled { .. }) => {
+            Some(ExecutionInterruption::Cancelled)
+        }
+        DesignerError::Spawn(ProcessError::TimedOut { .. }) => {
+            Some(ExecutionInterruption::TimedOut)
+        }
+        _ => None,
+    };
+    let not_spawned = matches!(
+        &error,
+        DesignerError::Spawn(ProcessError::SpawnFailed { .. })
+            | DesignerError::StaleLogCleanup { .. }
+            | DesignerError::UtilityNotFound(_)
+    ) || (interruption.is_some()
+        && matches!(safety, InterruptionSafetyClass::CriticalNonAbortable));
+    // A completed presence probe is evidence of dispatch even when mutation never starts.
+    if result.provider_dispatched != Some(true) && !not_spawned {
+        result.provider_dispatched = None;
+    }
+    if let Some(interruption) = interruption {
+        result.status = command_interruption_status(interruption);
+        result.interruption = Some(command_interruption_details(
+            interruption,
+            phase,
+            interruption.message(context.command()),
+        ));
+    }
+    AppError::from(error)
+}
+
+fn verify_extension_presence(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    binary: &std::path::Path,
+    utilities: &PlatformUtilities,
+    name: &str,
+    result: &mut ConfigurationTransitionResult,
+) -> Result<(), AppError> {
+    let log_dir = platform_logs_dir(&config.work_path).map_err(|error| {
+        AppError::Runtime(format!("failed to create platform log directory: {error}"))
+    })?;
+    let scratch = tempfile::Builder::new()
+        .prefix(".extension-presence-")
+        .tempdir_in(&config.work_path)
+        .map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to prepare extension presence probe: {error}"
+            ))
+        })?;
+    let artifact = scratch.path().join("extension.cfe");
+    let log = log_dir.join(format!(
+        "{}-extension-presence.log",
+        context.command().as_str()
+    ));
+    result.platform_log_path = Some(log.clone());
+    let safety = InterruptionSafetyClass::GracefulThenKill;
+    let probe = DesignerDsl::new(
+        binary.to_path_buf(),
+        config.v8_connection(),
+        utilities.runner_for(UtilityType::V8),
+        Some(log),
+    )
+    .with_execution_policy(context.process_policy(safety, None))
+    .dump_cfg(&artifact, Some(name))
+    .map_err(|error| {
+        record_designer_failure(error, context, result, safety, "extension_presence")
+    })?;
+    result.provider_dispatched = Some(true);
+    if probe.process.exit_code != 0 {
+        return Err(AppError::Platform(format!("extension presence was not established by Designer /DumpCfg (exit {}); configuration transition was not dispatched; see platform_log_path", probe.process.exit_code)));
+    }
+    crate::use_cases::infobase_export::validate_platform_artifact(&artifact)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn successful_probe_dispatch_survives_mutation_spawn_failure_and_cancellation() {
+        let cancellation = CancellationToken::new();
+        let context =
+            ExecutionContext::cli(CommandName::Apply).with_cancellation(cancellation.clone());
+        let mut result = ConfigurationTransitionResult {
+            duration_ms: 0,
+            dry_run: false,
+            extension: Some("InstalledAddon".into()),
+            provider_dispatched: Some(true),
+            completed: false,
+            status: ExecutionStatus::Failed,
+            provider: None,
+            platform_log_path: None,
+            interruption: None,
+            warnings: vec![],
+        };
+        let error = DesignerError::Spawn(ProcessError::SpawnFailed {
+            cmd: "mutation".into(),
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        });
+        let _ = record_designer_failure(
+            error,
+            &context,
+            &mut result,
+            InterruptionSafetyClass::CriticalNonAbortable,
+            "before_dispatch",
+        );
+        assert_eq!(result.provider_dispatched, Some(true));
+        assert!(!result.completed);
+        cancellation.cancel();
+        assert!(check_interruption(&context, &mut result, "after_extension_presence").is_err());
+        assert_eq!(result.status, ExecutionStatus::Cancelled);
+        assert_eq!(result.provider_dispatched, Some(true));
+        assert!(!result.interruption.unwrap().deferred);
+        assert!(!result.completed);
+    }
 
     #[test]
     fn cancelled_transition_keeps_receipt_and_does_not_create_work_path() {
