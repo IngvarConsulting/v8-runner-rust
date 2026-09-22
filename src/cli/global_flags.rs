@@ -340,4 +340,45 @@ mod tests {
             .collect();
         assert!(stale.is_empty(), "строки без листа в дереве: {stale:?}");
     }
+
+    // Состав таблицы, общий с `tests/cli_global_flags.rs`.
+    include!("global_flags_expected.in");
+
+    fn paths_of(kept: impl Fn(&Leaf) -> bool) -> Vec<&'static str> {
+        let mut paths: Vec<&str> = LEAVES
+            .iter()
+            .filter(|leaf| kept(leaf))
+            .map(|leaf| leaf.path)
+            .collect();
+        // Сравнение по составу, а не по порядку: перестановка строк в таблице ничего не
+        // меняет, а двойник ловится проверкой уникальности выше.
+        paths.sort_unstable();
+        paths
+    }
+
+    fn expected(paths: &[&'static str]) -> Vec<&'static str> {
+        let mut paths: Vec<&'static str> = paths.to_vec();
+        paths.sort_unstable();
+        paths
+    }
+
+    /// Лист, объявивший поведение по глобальному ключу, обязан это поведение ещё и
+    /// показать: отказы держат проверки в `tests/cli_global_flags.rs`. Обе половины
+    /// сверяются с одним включаемым файлом, поэтому новый лист ломает эту проверку, а
+    /// потерянная строка — ту.
+    #[test]
+    fn the_leaves_declaring_each_global_key_are_the_ones_the_shared_list_names() {
+        assert_eq!(
+            paths_of(|leaf| matches!(leaf.preview, Preview::Absent(_))),
+            expected(LEAVES_WITHOUT_PREVIEW)
+        );
+        assert_eq!(
+            paths_of(|leaf| matches!(leaf.base, Base::Ignores)),
+            expected(LEAVES_IGNORING_THE_BASE)
+        );
+        assert_eq!(
+            paths_of(|leaf| matches!(leaf.base, Base::Declares)),
+            expected(LEAVES_DECLARING_THE_BASE)
+        );
+    }
 }
