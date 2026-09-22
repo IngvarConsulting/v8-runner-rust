@@ -100,37 +100,6 @@ fn previews(artifact: &str) -> Vec<Vec<&str>> {
     ]
 }
 
-/// Превью не прячется: строка о вызове появляется в журнале действий, хотя предмет
-/// не меняется. Журнал ведётся под `--json-message` в `workPath/logs/mcp/actions.log`.
-#[test]
-fn every_preview_leaves_a_line_in_the_action_log() {
-    let dir = temp_workspace();
-    let config_path = write_project(dir.path(), true);
-    // `load` проверяет, что артефакт существует, раньше, чем строит план.
-    fs::write(dir.path().join("main.cf"), "cf").expect("artifact");
-    let artifact = dir.path().join("main.cf").display().to_string();
-    let log = dir.path().join("work/logs/mcp/actions.log");
-
-    for preview in previews(&artifact) {
-        let _ = fs::remove_file(&log);
-        let (code, payload) = run(&config_path, &preview);
-        // Проверяется след успешного превью: отказ и так оставляет строку об ошибке,
-        // и на нём правило доказать нельзя.
-        assert_eq!(
-            code,
-            0,
-            "`{}` did not preview: {payload}",
-            preview.join(" ")
-        );
-        let text = fs::read_to_string(&log).unwrap_or_default();
-        assert!(
-            !text.trim().is_empty(),
-            "`{}` left the action log empty: {payload}",
-            preview.join(" ")
-        );
-    }
-}
-
 /// Пути внутри `root`, относительно него, в устойчивом порядке.
 fn entries_under(root: &Path, dir: &Path, found: &mut Vec<String>) {
     let Ok(read) = fs::read_dir(dir) else {
@@ -147,16 +116,15 @@ fn entries_under(root: &Path, dir: &Path, found: &mut Vec<String>) {
     }
 }
 
-/// Превью ничего не создаёт: в рабочем каталоге после него нет ничего, кроме журнала
-/// действий, который правило велит оставить. Проверяется по отсутствию файлов, а не по
-/// отсутствию вызова — так требует `DEC.2026-09-11.PREVIEW-STOPS-BEFORE-THE-PROVIDER-IS-DISPATCHED`.
+/// Превью не оставляет следов: рабочего каталога после него нет вовсе. Проверяется по
+/// отсутствию файлов, а не по отсутствию вызова — так требует
+/// `DEC.2026-09-23.A-PREVIEW-LEAVES-NO-TRACE`.
 ///
-/// Этого стража не хватало: обещание держалось на проверке, которая называла каталог,
-/// не существующий в продукте, и потому не падала никогда (#252).
+/// Прежде здесь допускался журнал действий: правило велело превью оставить строку. Но
+/// открытие журнала создаёт рабочий каталог, а превью запускают из песочниц, где запись
+/// запрещена вовсе. Запись о вызове несёт конверт на stdout.
 #[test]
-fn no_preview_creates_anything_in_the_work_path_but_the_action_log() {
-    const LEFT_BY_THE_RULE: &[&str] = &["logs", "logs/mcp", "logs/mcp/actions.log"];
-
+fn no_preview_creates_anything_in_the_work_path() {
     let dir = temp_workspace();
     let config_path = write_project(dir.path(), true);
     fs::write(dir.path().join("main.cf"), "cf").expect("artifact");
@@ -164,10 +132,10 @@ fn no_preview_creates_anything_in_the_work_path_but_the_action_log() {
     let work = dir.path().join("work");
 
     for preview in previews(&artifact) {
-        // Каждое превью смотрится на чистом рабочем каталоге: иначе след одного сошёл бы
-        // за след другого.
+        // Каждое превью смотрится на чистом месте: иначе след одного сошёл бы за след
+        // другого. Каталог именно удаляется, а не опустошается — превью не должно
+        // создавать и его самого.
         let _ = fs::remove_dir_all(&work);
-        fs::create_dir_all(&work).expect("work dir");
 
         let (code, payload) = run(&config_path, &preview);
         assert_eq!(
@@ -177,14 +145,16 @@ fn no_preview_creates_anything_in_the_work_path_but_the_action_log() {
             preview.join(" ")
         );
 
-        let mut left = Vec::new();
-        entries_under(&work, &work, &mut left);
-        left.retain(|path| !LEFT_BY_THE_RULE.contains(&path.as_str()));
-        left.sort();
         assert!(
-            left.is_empty(),
-            "`{}` left behind: {left:?}",
-            preview.join(" ")
+            !work.exists(),
+            "`{}` created the work path: {:?}",
+            preview.join(" "),
+            {
+                let mut left = Vec::new();
+                entries_under(&work, &work, &mut left);
+                left.sort();
+                left
+            }
         );
     }
 }

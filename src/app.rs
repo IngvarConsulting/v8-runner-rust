@@ -223,6 +223,7 @@ pub fn run() -> i32 {
             output_format,
             color_enabled(cli.no_color),
             &config.work_path,
+            cli.dry_run,
         )
     } else {
         crate::support::logging::init_action_logging(
@@ -230,6 +231,7 @@ pub fn run() -> i32 {
             output_format,
             color_enabled(cli.no_color),
             &config.work_path,
+            cli.dry_run,
         )
     };
     let action_log_path = match logging_result {
@@ -329,8 +331,9 @@ fn load_cli_config(
         load_config_for_infobase_export(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Test(args) if args.no_build) {
         load_config_for_prepared_test(config_path, workdir, &selector)
-    } else if matches!(&cli.command, Command::Extensions(args) if args.command.is_none() && cli.dry_run)
-    {
+    } else if cli.dry_run {
+        // Превью не создаёт рабочего каталога: проверки те же, готовит `workPath` только
+        // применение. Прежде так загружалось одно лишь `extensions --dry-run`.
         load_config_for_preview(config_path, workdir, &selector)
     } else {
         load_config(config_path, workdir, &selector)
@@ -409,6 +412,7 @@ fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 
         if presenter.is_json() { "json" } else { "text" },
         color_enabled(cli.no_color),
         &work_path,
+        cli.dry_run,
     ) {
         let message = error.to_string();
         let error = UseCaseError::new(UseCaseErrorKind::Runtime, message.clone());
@@ -730,7 +734,14 @@ fn prepare_mcp_runtime(
 
     let level = cli.log_level.as_deref().unwrap_or("info");
     if let Err(error) =
-        crate::support::logging::init_action_logging(level, "json", false, &config.work_path)
+        // Сервер превью не предлагает: ключа нет в опубликованной поверхности.
+        crate::support::logging::init_action_logging(
+            level,
+            "json",
+            false,
+            &config.work_path,
+            false,
+        )
     {
         eprintln!("{error}");
         return Err(crate::output::exit_codes::RUNTIME_ERROR);
