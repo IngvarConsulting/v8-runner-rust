@@ -603,6 +603,27 @@ pub(super) fn run_build_edt(
                     location.path
                 }
             };
+
+            if args.dry_run {
+                // Экспорт внешних артефактов пересоздаёт каталог в `workPath`, запускает
+                // EDT CLI и фиксирует состояние обнаружения изменений; превью
+                // останавливается до всех трёх. Остановка стоит там же, где у соседней
+                // ветки набора исходников: после поиска утилиты.
+                push_build_step(
+                    &mut steps,
+                    &source_set.name,
+                    BuildMode::EdtExport,
+                    true,
+                    format!(
+                        "would export the external artifacts of '{}' to Designer files via {}; planned, nothing dispatched",
+                        source_set.name,
+                        edt.display()
+                    ),
+                    0,
+                );
+                continue;
+            }
+
             let export_started = Instant::now();
             if let Some(error) = interruption_before_safe_point(
                 context,
@@ -1014,6 +1035,21 @@ pub(super) fn run_build_edt(
                                 location.path
                             }
                         };
+                        // Загрузка сюда доходит и тогда, когда этап EDT пропущен: каталог
+                        // файлов конфигуратора уже есть, а состояние Конфигуратора
+                        // устарело. Превью останавливается здесь — дальше идёт запуск
+                        // против базы и запись состояния.
+                        if args.dry_run {
+                            push_build_step(
+                                &mut steps,
+                                &source_set.name,
+                                mode,
+                                true,
+                                format!("{message}; planned, Designer not dispatched"),
+                                0,
+                            );
+                            continue;
+                        }
                         execute_source_set_step(
                             context,
                             config,
@@ -1053,6 +1089,17 @@ pub(super) fn run_build_edt(
                                 location.path
                             }
                         };
+                        if args.dry_run {
+                            push_build_step(
+                                &mut steps,
+                                &source_set.name,
+                                mode,
+                                true,
+                                format!("{message}; planned, ibcmd not dispatched"),
+                                0,
+                            );
+                            continue;
+                        }
                         execute_source_set_step_ibcmd(
                             context,
                             config,
