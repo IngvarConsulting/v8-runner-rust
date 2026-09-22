@@ -52,11 +52,12 @@ pub(crate) fn prepare_client_mcp_extension(
     context: &ExecutionContext,
     config: &AppConfig,
     full_rebuild: bool,
+    dry_run: bool,
 ) -> Result<Option<BuildStep>, ToolExtensionFailure> {
     let Some(extension) = client_mcp_extension(config) else {
         return Ok(None);
     };
-    prepare_extension(context, config, extension, full_rebuild)
+    prepare_extension(context, config, extension, full_rebuild, dry_run)
         .map(Some)
         .map_err(|error| {
             let message = error.to_string();
@@ -72,6 +73,7 @@ fn prepare_extension(
     config: &AppConfig,
     extension: &ToolExtensionConfig,
     full_rebuild: bool,
+    dry_run: bool,
 ) -> Result<BuildStep, AppError> {
     let started = Instant::now();
 
@@ -80,6 +82,11 @@ fn prepare_extension(
     }
 
     let mut utilities = PlatformUtilities::from_config(config);
+    // Превью отвечает раньше подготовки: она запускает платформу против базы, фиксирует
+    // состояние обнаружения изменений, а при исходниках EDT ещё и сносит каталог экспорта.
+    if dry_run {
+        return preview_extension(config, extension, &mut utilities, full_rebuild, started);
+    }
     match &extension.input {
         ToolExtensionInput::Source(source) => prepare_source_extension(
             context,
@@ -99,6 +106,113 @@ fn prepare_extension(
             ))
         }
     }
+}
+
+/// Превью подготовки расширения: тот же поиск утилиты и тот же разбор изменений, но ни
+/// запуска, ни записи. Поиск обязателен — `INV.CLI.PREVIEW-RETURNS-AFTER-TOOL-LOOKUP`
+/// требует, чтобы отсутствие платформы отказывало и превью, а не одобряло план, который
+/// боевой прогон выполнить не сможет.
+fn preview_extension(
+    config: &AppConfig,
+    extension: &ToolExtensionConfig,
+    utilities: &mut PlatformUtilities,
+    full_rebuild: bool,
+    started: Instant,
+) -> Result<BuildStep, AppError> {
+    let tools = locate_extension_tools(config, extension, utilities)?;
+    // Словарь тот же, что у соседнего шага набора исходников: в одном ответе шаги не
+    // должны говорить о запланированном разными словами.
+    let planned = |what: String| {
+        Ok(successful_build_step(
+            extension,
+            format!(
+                "would prepare extension '{}' {what} via {tools}; planned, nothing dispatched",
+                extension.name
+            ),
+            started.elapsed().as_millis() as u64,
+        ))
+    };
+
+    match &extension.input {
+        ToolExtensionInput::Artifact(artifact) => {
+            planned(format!("from artifact '{}'", artifact.path.display()))
+        }
+        ToolExtensionInput::Source(source) => {
+            let source_context = tool_extension_source_context(config, extension, source)?;
+            if full_rebuild {
+                return planned("from sources in full".to_owned());
+            }
+            // Разбор изменений — чтение: снимок загружается, каталог обходится, ничего не
+            // создаётся. Поэтому превью называет режим, который был бы применён, а не
+            // отделывается общими словами. Так же поступает превью обычного набора.
+            match analyzer::analyze_context(&source_context, &config.work_path).outcome {
+                Ok(AnalysisOutcome::NoChanges) => Ok(skipped_build_step(
+                    extension,
+                    "no changes".to_owned(),
+                    started.elapsed().as_millis() as u64,
+                )),
+                Ok(AnalysisOutcome::Fallback | AnalysisOutcome::Changes { .. }) => {
+                    planned("from sources".to_owned())
+                }
+                Err(_error) if storage_needs_recovery(&source_context, &config.work_path) => {
+                    planned("from sources after recovering its change-detection state".to_owned())
+                }
+                Err(error) => Err(AppError::Runtime(error.to_string())),
+            }
+        }
+    }
+}
+
+/// Утилиты, которые выполнили бы подготовку. Набор тот же, что у боевого прогона, и в том
+/// же порядке: при исходниках EDT сначала ищется EDT CLI, потом исполнитель сборки.
+fn locate_extension_tools(
+    config: &AppConfig,
+    extension: &ToolExtensionConfig,
+    utilities: &mut PlatformUtilities,
+) -> Result<String, AppError> {
+    // Артефакт `.cfe` загружает Конфигуратор независимо от матрицы: своей ветки у этого
+    // входа нет. Существование файла здесь не проверяется — этим владеет разбор конфига.
+    if matches!(extension.input, ToolExtensionInput::Artifact(_)) {
+        let binary = utilities
+            .locate(UtilityType::V8)
+            .map_err(AppError::from)?
+            .path;
+        return Ok(format!("Конфигуратор `{}`", binary.display()));
+    }
+
+    let mut named = Vec::new();
+    if let ToolExtensionInput::Source(source) = &extension.input {
+        if source.format.unwrap_or(config.format) == SourceFormat::Edt {
+            let binary = utilities
+                .locate(UtilityType::EdtCli)
+                .map_err(AppError::from)?
+                .path;
+            named.push(format!("EDT CLI `{}`", binary.display()));
+        }
+    }
+    match config.selected_provider(Operation::Build) {
+        other @ (Provider::Agent | Provider::IbcmdRs | Provider::Webinst) => {
+            return Err(crate::use_cases::unimplemented_provider(
+                Operation::Build,
+                other,
+            ))
+        }
+        Provider::Designer => {
+            let binary = utilities
+                .locate(UtilityType::V8)
+                .map_err(AppError::from)?
+                .path;
+            named.push(format!("Конфигуратор `{}`", binary.display()));
+        }
+        Provider::Ibcmd => {
+            let binary = utilities
+                .locate(UtilityType::Ibcmd)
+                .map_err(AppError::from)?
+                .path;
+            named.push(format!("ibcmd `{}`", binary.display()));
+        }
+    }
+    Ok(named.join(" и "))
 }
 
 fn prepare_source_extension(

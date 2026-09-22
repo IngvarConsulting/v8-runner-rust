@@ -17,6 +17,21 @@ fn write_project(dir: &Path, with_platform: bool) -> PathBuf {
     let base_path = dir.join("project");
     let work_path = dir.join("work");
     let install_dir = dir.join("platform");
+    let extension_source = base_path.join("exts").join("client-mcp");
+    fs::create_dir_all(&extension_source).expect("extension dir");
+    // Расширение инструмента объявлено намеренно: шаг его подготовки — место, где превью
+    // сборки однажды запускало платформу и писало состояние (#252). Без него образец
+    // этого класса не видит.
+    fs::write(
+        extension_source.join("Configuration.xml"),
+        "<Configuration><Properties><Name>client_mcp</Name><ConfigurationExtensionPurpose kind=\"Customization\">Customization</ConfigurationExtensionPurpose></Properties></Configuration>",
+    )
+    .expect("extension marker");
+    fs::write(
+        extension_source.join("Module.bsl"),
+        "procedure Tool() endprocedure",
+    )
+    .expect("extension module");
     fs::create_dir_all(base_path.join("configuration")).expect("configuration dir");
     fs::write(
         base_path.join("configuration").join("Configuration.xml"),
@@ -41,10 +56,11 @@ fn write_project(dir: &Path, with_platform: bool) -> PathBuf {
     fs::write(
         &config_path,
         format!(
-            "workPath: {}\nformat: DESIGNER\ninfobase:\n  connection: 'File={}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: {}\n{strictness}",
+            "workPath: {}\nformat: DESIGNER\ninfobase:\n  connection: 'File={}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: {}\n{strictness}  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: {}\n",
             work_path.display(),
             dir.join("ib").display(),
-            install_dir.display()
+            install_dir.display(),
+            extension_source.display()
         ),
     )
     .expect("write config");
@@ -110,6 +126,145 @@ fn every_preview_leaves_a_line_in_the_action_log() {
         assert!(
             !text.trim().is_empty(),
             "`{}` left the action log empty: {payload}",
+            preview.join(" ")
+        );
+    }
+}
+
+/// Пути внутри `root`, относительно него, в устойчивом порядке.
+fn entries_under(root: &Path, dir: &Path, found: &mut Vec<String>) {
+    let Ok(read) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        if let Ok(relative) = path.strip_prefix(root) {
+            found.push(relative.display().to_string());
+        }
+        if path.is_dir() {
+            entries_under(root, &path, found);
+        }
+    }
+}
+
+/// Превью ничего не создаёт: в рабочем каталоге после него нет ничего, кроме журнала
+/// действий, который правило велит оставить. Проверяется по отсутствию файлов, а не по
+/// отсутствию вызова — так требует `DEC.2026-09-11.PREVIEW-STOPS-BEFORE-THE-PROVIDER-IS-DISPATCHED`.
+///
+/// Этого стража не хватало: обещание держалось на проверке, которая называла каталог,
+/// не существующий в продукте, и потому не падала никогда (#252).
+#[test]
+fn no_preview_creates_anything_in_the_work_path_but_the_action_log() {
+    const LEFT_BY_THE_RULE: &[&str] = &["logs", "logs/mcp", "logs/mcp/actions.log"];
+
+    let dir = temp_workspace();
+    let config_path = write_project(dir.path(), true);
+    fs::write(dir.path().join("main.cf"), "cf").expect("artifact");
+    let artifact = dir.path().join("main.cf").display().to_string();
+    let work = dir.path().join("work");
+
+    for preview in previews(&artifact) {
+        // Каждое превью смотрится на чистом рабочем каталоге: иначе след одного сошёл бы
+        // за след другого.
+        let _ = fs::remove_dir_all(&work);
+        fs::create_dir_all(&work).expect("work dir");
+
+        let (code, payload) = run(&config_path, &preview);
+        assert_eq!(
+            code,
+            0,
+            "`{}` did not preview: {payload}",
+            preview.join(" ")
+        );
+
+        let mut left = Vec::new();
+        entries_under(&work, &work, &mut left);
+        left.retain(|path| !LEFT_BY_THE_RULE.contains(&path.as_str()));
+        left.sort();
+        assert!(
+            left.is_empty(),
+            "`{}` left behind: {left:?}",
+            preview.join(" ")
+        );
+    }
+}
+
+/// Содержимое каждого файла под `root`, кроме журнала действий: его превью пополняет по
+/// правилу.
+fn contents_under(root: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut paths = Vec::new();
+    entries_under(root, root, &mut paths);
+    paths.sort();
+    paths
+        .into_iter()
+        .filter(|path| path != "logs/mcp/actions.log")
+        .filter_map(|path| {
+            let bytes = fs::read(root.join(&path)).ok()?;
+            Some((path, bytes))
+        })
+        .collect()
+}
+
+/// Предыдущий страж видит созданное на чистом месте. Этот — тронутое: рабочий каталог засевается
+/// боевой сборкой, и после каждого превью его содержимое обязано совпадать побайтно.
+/// Сравнивается содержимое, а не время правки: открытие базы состояния сдвигает `mtime`,
+/// ничего в неё не записав.
+#[test]
+fn no_preview_changes_what_a_real_build_left_in_the_work_path() {
+    let dir = temp_workspace();
+    let config_path = write_project(dir.path(), true);
+    fs::write(dir.path().join("main.cf"), "cf").expect("artifact");
+    let artifact = dir.path().join("main.cf").display().to_string();
+    let work = dir.path().join("work");
+
+    let (code, payload) = run(&config_path, &["build"]);
+    assert_eq!(code, 0, "боевая сборка образца не прошла: {payload}");
+    // Расширение меняется после засева: иначе переписывать нечего — утечка нашла бы
+    // состояние свежим, пропустила подготовку, и страж промолчал бы.
+    fs::write(
+        dir.path()
+            .join("project")
+            .join("exts")
+            .join("client-mcp")
+            .join("Module.bsl"),
+        "procedure Tool() // changed after the seed\nendprocedure",
+    )
+    .expect("modify extension");
+
+    let seeded = contents_under(&work);
+    assert!(
+        !seeded.is_empty(),
+        "боевая сборка ничего не оставила — сравнивать нечего"
+    );
+
+    for preview in previews(&artifact) {
+        let (code, payload) = run(&config_path, &preview);
+        assert_eq!(
+            code,
+            0,
+            "`{}` did not preview: {payload}",
+            preview.join(" ")
+        );
+        // Сравниваются оба снимка целиком: превью, которое снесло бы засеянный файл, из
+        // сравнения «только по новому» ускользнуло бы, а снос — ровно то, что делает
+        // подготовка расширения из исходников EDT.
+        let after = contents_under(&work);
+        let mut differs = Vec::new();
+        for (path, before) in &seeded {
+            match after.iter().find(|(was, _)| was == path) {
+                None => differs.push(format!("removed {path}")),
+                Some((_, now)) if now != before => differs.push(format!("rewrote {path}")),
+                Some(_) => {}
+            }
+        }
+        for (path, _) in &after {
+            if !seeded.iter().any(|(was, _)| was == path) {
+                differs.push(format!("added {path}"));
+            }
+        }
+        assert!(
+            differs.is_empty(),
+            "`{}` changed the work path: {differs:?}",
             preview.join(" ")
         );
     }
