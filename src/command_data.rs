@@ -69,17 +69,17 @@ macro_rules! command_data_forms {
 
 command_data_forms! {
     "version", "version" => crate::app::VersionInfo;
-    "bootstrap", "bootstrap" => crate::domain::bootstrap::BootstrapResult;
-    "config init", "config-init" => crate::domain::config_init::ConfigInitResult;
+    "clone", "clone" => crate::domain::bootstrap::BootstrapResult;
+    "init", "init" => crate::domain::config_init::ConfigInitResult;
     "tools download", "tools-download" => crate::domain::tools_download::ToolsDownloadResult;
-    "init", "init" => crate::domain::init::InitResult;
+    "infobase create", "infobase-create" => crate::domain::init::InitResult;
     "extensions", "extensions" => crate::domain::extensions::ExtensionsResult;
     "extensions", "extensions-inventory" => crate::domain::extensions::ExtensionInventoryResult;
-    "build", "build" => crate::domain::build::BuildResult;
-    "load", "load" => crate::cli::execute::LoadJsonData<'static>;
+    "push", "push" => crate::domain::build::BuildResult;
+    "upload", "upload" => crate::cli::execute::LoadJsonData<'static>;
     "test", "test" => crate::command_envelope::TestEnvelopeData;
-    "dump", "dump" => crate::domain::dump::DumpResult;
-    "infobase.configuration.export", "infobase-configuration-export"
+    "pull", "pull" => crate::domain::dump::DumpResult;
+    "download", "download"
         => crate::domain::infobase_export::ExportConfigurationPackageResult;
     "infobase.dump", "infobase-dump"
         => crate::domain::infobase_export::ExportInfobaseSnapshotResult;
@@ -87,7 +87,7 @@ command_data_forms! {
         => crate::domain::infobase_export::RestoreInfobaseSnapshotResult;
     "convert", "convert" => crate::domain::convert::ConvertResult;
     "make", "make" => crate::cli::execute::ArtifactsJsonData<'static>;
-    "syntax", "syntax" => crate::domain::syntax::SyntaxCheckResult;
+    "check", "check" => crate::domain::syntax::SyntaxCheckResult;
     "launch", "launch" => crate::domain::launch::LaunchResult;
     "publish", "publish" => crate::domain::publish::PublishResult;
     "*", "refusal" => crate::cli::output::RefusalData;
@@ -451,8 +451,8 @@ mod tests {
     fn a_field_added_inside_a_variant_breaks_the_form() {
         let form = command_data_forms()
             .into_iter()
-            .find(|form| form.slug == "syntax")
-            .expect("syntax form");
+            .find(|form| form.slug == "check")
+            .expect("check form");
         let validator = jsonschema::validator_for(&form.schema).expect("form compiles");
         let mut issue = serde_json::json!({
             "kind": "module",

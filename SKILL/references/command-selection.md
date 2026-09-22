@@ -2,66 +2,66 @@
 
 Choose commands by user intent, not by listing every CLI surface.
 
-## Bootstrap
+## Setup
 
 Use these when a project is missing `v8project.yaml` or generated runtime state:
 
 ```bash
-v8-runner bootstrap --connection "File=/path/to/ib" --platform-version 8.3.27
-v8-runner config init
-v8-runner config init --connection "File=build/ib"
-v8-runner config init --format edt
+v8-runner clone --connection "File=/path/to/ib" --platform-version 8.3.27
 v8-runner init
+v8-runner init --connection "File=build/ib"
+v8-runner init --format edt
+v8-runner infobase create
 ```
 
-Use `bootstrap` when an existing infobase is the source of truth and source files need to be
-materialized. Use `config init` when supported source files are already present.
+Use `clone` when an existing infobase is the source of truth and source files need to be
+materialized. Use `init` when supported source files are already present.
 
-Inspect `v8project.yaml` after `config init` and before commands that create or mutate infobases, workspaces, or source files.
+Inspect `v8project.yaml` after `init` and before commands that create or mutate infobases, workspaces, or source files.
 
-## Build And Recovery
+## Push And Recovery
 
 Apply Git-visible source changes to the configured infobase:
 
 ```bash
-v8-runner build
+v8-runner push
 ```
 
-Limit build to one configured source-set:
+Limit `push` to one configured source-set:
 
 ```bash
-v8-runner build --source-set <NAME>
+v8-runner push --source-set <NAME>
 ```
 
 Recover after branch switches, rebases, large object moves, or suspicious incremental state:
 
 ```bash
-v8-runner build --full-rebuild
+v8-runner push --full
 ```
 
-Use `test` directly when behavior matters; test commands perform `build` first.
+Use `test` directly when behavior matters; test commands perform `push` first.
 
-## Syntax
+## Syntax Checks
 
 Designer modules:
 
 ```bash
-v8-runner build
-v8-runner syntax designer-modules --server --thin-client
+v8-runner push
+v8-runner check designer-modules --server --thin-client
 ```
 
 Designer configuration:
 
 ```bash
-v8-runner build
-v8-runner syntax designer-config
+v8-runner push
+v8-runner check designer-config
 ```
 
 EDT:
 
 ```bash
-v8-runner build
-v8-runner syntax edt
+v8-runner push
+v8-runner check edt
 ```
 
 ## Tests
@@ -121,20 +121,20 @@ Apply disables safe mode and unsafe action protection. Selectors are repeatable;
 explicit targets run when either is supplied. Unknown `--name` remains an error.
 Preview does not establish whether the extension is installed; apply reports platform failures.
 
-## Dump, Convert, Load, And Artifacts
+## Pull, Convert, Upload, And Artifacts
 
 Bring infobase changes back into Git-visible files:
 
 ```bash
 git status --short
-v8-runner dump --mode incremental
+v8-runner pull --mode incremental
 git diff
 ```
 
-Dump specific objects when the backend supports it:
+Pull specific objects when the backend supports it:
 
 ```bash
-v8-runner dump --mode partial --object <TYPE:NAME>
+v8-runner pull --mode partial --object <TYPE:NAME>
 ```
 
 Convert configured source-sets between Designer and EDT file formats:
@@ -148,9 +148,9 @@ v8-runner convert --output <DIR>
 Apply built `.cf` or `.cfe` artifacts:
 
 ```bash
-v8-runner load --path <FILE>
-v8-runner load --path <FILE> --mode merge --settings <FILE>
-v8-runner load --path <FILE> --extension <NAME>
+v8-runner upload --path <FILE>
+v8-runner upload --path <FILE> --mode combine --settings <FILE>
+v8-runner upload --path <FILE> --extension <NAME>
 ```
 
 Export release artifacts or publish external artifacts:

@@ -6,8 +6,8 @@
 
 Обязательный smoke-контур для обеих ОС один и тот же, когда для matrix OS настроены platform bundle secrets:
 
-1. `build`
-2. `syntax/check`
+1. `push`
+2. `check`
 3. `test` Rust/CLI/MCP-контракта
 4. `package`
 5. `deploy-ready artifacts`
@@ -21,7 +21,7 @@
 - `.epf`
 - `.erf`
 
-Ни `load`, ни обратное `apply` в mandatory happy-path не входят.
+Ни `upload`, ни обратное `apply` в mandatory happy-path не входят.
 
 Default mandatory `live-cli-fixture` не запускает интерактивный 1С test runner: в фикстурной ИБ репозитория нет надежного headless раннера, который обязан завершаться на всех ОС. Реальная 1С test-stage остается явным opt-in через `V8TR_DESIGNER_TEST_MODE=va|yaxunit-all|module`.
 
@@ -69,12 +69,12 @@ V8_RUNNER_CI_SCOPE=happy-path bash scripts/test/ci-rust.sh
 
 `scripts/test/live-cli-fixture.sh` в mandatory профиле обязан выполнить одинаковые стадии для обеих ОС, когда `V8TR_DESIGNER_REAL_CONFIG` материализован:
 
-1. `init/setup infobase`
-2. `build --full-rebuild`
-3. incremental `build` без изменений
-4. Designer-only partial `build --source-set <configuration>` после изменения существующего `.bsl` файла с кириллическим путём
-5. `syntax designer-config`
-6. `syntax designer-modules`
+1. `infobase create` / setup infobase
+2. `push --full`
+3. incremental `push` без изменений
+4. Designer-only partial `push --source-set <configuration>` после изменения существующего `.bsl` файла с кириллическим путём
+5. `check designer-config`
+6. `check designer-modules`
 7. `test`
 8. `make` для `.cf/.cfe/.epf/.erf`
 9. проверку, что все deploy-ready артефакты существуют и не пусты
@@ -83,7 +83,7 @@ Partial smoke contract:
 
 - partial stage запускается только для `builder: DESIGNER`, потому что проверяет Designer `/LoadConfigFromFiles -partial -listFile`;
 - изменяемый `.bsl` файл должен резолвиться внутри скопированного fixture workspace;
-- JSON build result для configuration source-set должен содержать successful step с mode object exactly `{"partial":{"file_count":N}}`, где `N > 0`;
+- JSON-результат `push` для configuration source-set должен содержать successful step с mode object exactly `{"partial":{"file_count":N}}`, где `N > 0`;
 - byte-level контракт самого `listFile` проверяется unit/regression тестами `change_detection::partial_load`, а trusted smoke подтверждает, что созданный partial-list принимается реальным Designer в Linux/Windows happy-path.
 
 ### 3. Non-blocking live contours
@@ -130,7 +130,7 @@ bash scripts/test/live-cli-fixture.sh
 
 - `V8TR_BIN` - путь к бинарю `v8-runner`
 - `V8TR_PLATFORM_PATH` - явный override пути до `1cv8`/`1cv8.exe`
-- `V8TR_DESIGNER_SMOKE_PROFILE=mandatory|extended` - mandatory по умолчанию; `extended` включает dump-only хвост
+- `V8TR_DESIGNER_SMOKE_PROFILE=mandatory|extended` - mandatory по умолчанию; `extended` включает `pull`-only хвост
 - `V8TR_DESIGNER_TEST_MODE=none|va|yaxunit-all|module` - явный запуск 1С test-stage helper-а; `none` по умолчанию
 - `V8TR_DESIGNER_TEST_MODULE` - обязателен при `V8TR_DESIGNER_TEST_MODE=module`
 - `V8TR_DESIGNER_ALLOW_MISSING_CONFIG=1` - разрешить `SKIPPED` вместо hard failure только для non-blocking/soft-skip контекстов
@@ -149,11 +149,11 @@ Cross-platform hardening:
 - в `bash`-окружении поддерживаются и `1cv8`, и `1cv8.exe`
 - платформа может быть найдена через config path, `V8TR_PLATFORM_PATH`, `PATH`, Linux `/opt/1cv8` и Windows `Program Files`
 - mandatory path не зависит от GUI и не использует `launch`
-- mandatory path не делает `load/apply`
+- mandatory path не делает `upload`/apply
 
 Критерий успеха:
 
-- все стадии `build -> syntax/check -> test -> package -> deploy-ready artifacts` завершаются с `exit code 0`
+- все стадии `push -> check -> test -> package -> deploy-ready artifacts` завершаются с `exit code 0`
 - существуют и не пусты:
   - `target/manual-tests/live-cli-designer/artifacts/configuration.cf`
   - `target/manual-tests/live-cli-designer/artifacts/extension.cfe`

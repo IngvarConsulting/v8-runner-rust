@@ -75,17 +75,17 @@ impl fmt::Display for Provider {
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
 )]
 pub enum Operation {
-    #[serde(rename = "init")]
+    #[serde(rename = "infobase.create", alias = "init")]
     Init,
-    #[serde(rename = "build")]
+    #[serde(rename = "push", alias = "build")]
     Build,
-    #[serde(rename = "load")]
+    #[serde(rename = "upload", alias = "load")]
     Load,
-    #[serde(rename = "dump")]
+    #[serde(rename = "pull", alias = "dump")]
     Dump,
     #[serde(rename = "extensions")]
     Extensions,
-    #[serde(rename = "infobase.configuration.export")]
+    #[serde(rename = "download", alias = "infobase.configuration.export")]
     ConfigurationExport,
     #[serde(rename = "infobase.dump")]
     InfobaseDump,
@@ -117,18 +117,38 @@ impl Operation {
     /// Ключ в `providers:` и имя в квитанции.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Init => "init",
-            Self::Build => "build",
-            Self::Load => "load",
-            Self::Dump => "dump",
+            Self::Init => "infobase.create",
+            Self::Build => "push",
+            Self::Load => "upload",
+            Self::Dump => "pull",
             Self::Extensions => "extensions",
-            Self::ConfigurationExport => "infobase.configuration.export",
+            Self::ConfigurationExport => "download",
             Self::InfobaseDump => "infobase.dump",
             Self::InfobaseRestore => "infobase.restore",
             Self::Syntax => "syntax",
             Self::Make => "make",
             Self::Publish => "publish",
         }
+    }
+
+    /// Прежнее имя ключа `providers.*`, принимаемое один цикл выпуска. Один владелец
+    /// списка синонимов: по нему и разбирают ключ, и объясняют переименование.
+    pub const fn previous_key(self) -> Option<&'static str> {
+        match self {
+            Self::Init => Some("init"),
+            Self::Build => Some("build"),
+            Self::Load => Some("load"),
+            Self::Dump => Some("dump"),
+            Self::ConfigurationExport => Some("infobase.configuration.export"),
+            _ => None,
+        }
+    }
+
+    /// Ключ конфигурации: имя команды или прежнее имя того же ключа.
+    pub fn parse_config_key(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|operation| {
+            operation.as_str() == value || operation.previous_key() == Some(value)
+        })
     }
 
     pub fn parse(value: &str) -> Option<Self> {

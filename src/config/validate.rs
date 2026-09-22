@@ -145,7 +145,7 @@ pub enum ConfigValidationError {
     WebPublicationDirMissing(String),
 
     #[error(
-        "top-level key 'builder' is not supported: the executor is chosen per operation; name one with providers.<operation> (for example providers.build: ibcmd) or remove the key to use the defaults"
+        "top-level key 'builder' is not supported: the executor is chosen per operation; name one with providers.<operation> (for example providers.push: ibcmd) or remove the key to use the defaults"
     )]
     BuilderKeyRemoved,
 
@@ -204,7 +204,7 @@ pub enum ConfigValidationError {
     #[error("platform version must use format major.minor, major.minor.patch or major.minor.patch.build: {0}")]
     InvalidPlatformVersion(String),
 
-    #[error("build.partialLoadThreshold must be greater than or equal to 1")]
+    #[error("push.partialLoadThreshold must be greater than or equal to 1")]
     InvalidPartialLoadThreshold,
 
     #[error("mcp.execution.admission_timeout_ms must be between 1 and 86400000 milliseconds")]
@@ -287,7 +287,7 @@ pub enum ConfigValidationError {
     #[error("tools.client_mcp.extension.artifact.path must point to an existing .cfe file: {0}")]
     ToolExtensionArtifactPathInvalid(String),
 
-    #[error("tools.client_mcp.extension.artifact is loaded by the Designer only; providers.build names another executor")]
+    #[error("tools.client_mcp.extension.artifact is loaded by the Designer only; providers.push names another executor")]
     ToolExtensionArtifactRequiresDesigner,
 
     #[error("tools.edt_cli.startup_timeout_ms must be greater than or equal to 1")]
@@ -307,6 +307,20 @@ pub enum ConfigValidationError {
     InfobaseKeysMixed { file: String },
 
     #[error(
+        "{file} names both `push:` and `build:`: `build:` is a one-cycle synonym for `push:`, keep one"
+    )]
+    PushSectionKeysMixed { file: String },
+
+    #[error(
+        "{file} names the executor of one command twice: `providers.{previous}` is a one-cycle synonym for `providers.{canonical}`, keep one"
+    )]
+    ProviderKeysMixed {
+        file: String,
+        canonical: &'static str,
+        previous: &'static str,
+    },
+
+    #[error(
         "infobases.{name}: an infobase name is a plain identifier matching {pattern} — it names a directory under workPath"
     )]
     InfobaseNameInvalid { name: String, pattern: &'static str },
@@ -317,7 +331,7 @@ pub enum ConfigValidationError {
     InfobaseNotDeclared { name: String, declared: String },
 
     #[error(
-        "no infobase is selected: `origin` is not declared in v8project.local.yaml (declared: {declared}); pass --infobase <name|connection string> or declare infobases.origin.connection there (a new project starts with `config init`)"
+        "no infobase is selected: `origin` is not declared in v8project.local.yaml (declared: {declared}); pass --infobase <name|connection string> or declare infobases.origin.connection there (a new project starts with `init`)"
     )]
     OriginNotDeclared { declared: String },
 
@@ -2753,7 +2767,7 @@ mod tests {
         assert!(matches!(
             error,
             ConfigValidationError::ProviderKeyWithoutChoice {
-                operation: "load",
+                operation: "upload",
                 ..
             }
         ));

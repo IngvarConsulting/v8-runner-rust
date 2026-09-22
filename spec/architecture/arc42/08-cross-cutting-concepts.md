@@ -46,14 +46,14 @@
 - Телеметрия MCP публикуется как структурированные tracing-события, а не через отдельный metrics-backend.
 - `output::Presenter` является частью CLI presentation, а shared command envelope является adapter-level machine contract для CLI JSON и MCP structured content, но не observability backend.
 
-### 8.4.1 Публикация dump/artifacts
+### 8.4.1 Публикация pull/artifacts
 
-- Full replacement dump/artifacts сначала пишутся в staging path рядом с target.
+- Full replacement pull/artifacts сначала пишутся в staging path рядом с target.
 - При замене существующего target старое состояние временно переносится в backup и используется для rollback при publish failure.
 - Cleanup backup/staging после успешной публикации выполняется best-effort и может вернуться как warning.
 - Staging/backup cleanup опирается на metadata sidecar: `tool`, `kind`, `run_id`, `target_path`, `target_identity`, `created_at`.
 - Orphan cleanup не должен удалять malformed, foreign или recent temp paths.
-- Incremental/partial dump остаются non-atomic update modes.
+- Incremental/partial `pull` остаются non-atomic update modes.
 - Правила staging/backup publication описаны в `DEC.2026-04-21.FULL-REPLACEMENT-PUBLISHES-THROUGH-STAGING`.
 
 ### 8.5 Параллелизм и таймауты

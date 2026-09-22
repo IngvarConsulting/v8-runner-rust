@@ -227,7 +227,8 @@ fn init_dry_run_plans_the_infobase_without_creating_it() {
             "--config",
             &config_path.display().to_string(),
             "--json-message",
-            "init",
+            "infobase",
+            "create",
             "--dry-run",
         ])
         .output()
@@ -269,7 +270,12 @@ fn init_designer_creates_infobase_and_skips_edt_workspace() {
     let (_dir, config_path, work_path, infobase_path) = setup_designer_init_project();
 
     let output = v8_runner_command()
-        .args(["--config", &config_path.display().to_string(), "init"])
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "infobase",
+            "create",
+        ])
         .output()
         .expect("run command");
 
@@ -293,7 +299,8 @@ fn init_designer_non_zero_create_exit_stays_fatal_even_when_marker_appears() {
             "--config",
             &config_path.display().to_string(),
             "--json-message",
-            "init",
+            "infobase",
+            "create",
         ])
         .output()
         .expect("run command");
@@ -321,7 +328,8 @@ fn init_text_reports_infobase_failure_before_continuing_edt_import() {
             "--config",
             &config_path.display().to_string(),
             "--no-color",
-            "init",
+            "infobase",
+            "create",
         ])
         .output()
         .expect("run command");
@@ -347,7 +355,12 @@ fn init_ibcmd_creates_infobase_and_imports_edt_projects_in_order() {
         setup_edt_init_project("DESIGNER", "IBCMD", "__AUTO_FILE__");
 
     let output = v8_runner_command()
-        .args(["--config", &config_path.display().to_string(), "init"])
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "infobase",
+            "create",
+        ])
         .output()
         .expect("run command");
 
@@ -381,7 +394,8 @@ fn init_ibcmd_file_already_exists_without_marker_is_fatal() {
             "--config",
             &config_path.display().to_string(),
             "--json-message",
-            "init",
+            "infobase",
+            "create",
         ])
         .output()
         .expect("run command");
@@ -401,7 +415,12 @@ fn init_edt_with_ibcmd_creates_infobase_and_imports_projects_in_order() {
         setup_edt_init_project("EDT", "IBCMD", "__AUTO_FILE__");
 
     let output = v8_runner_command()
-        .args(["--config", &config_path.display().to_string(), "init"])
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "infobase",
+            "create",
+        ])
         .output()
         .expect("run command");
 
@@ -435,7 +454,12 @@ fn init_edt_imports_projects_in_configuration_then_extension_order() {
         setup_edt_init_project("EDT", "DESIGNER", "__AUTO_FILE__");
 
     let output = v8_runner_command()
-        .args(["--config", &config_path.display().to_string(), "init"])
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "infobase",
+            "create",
+        ])
         .output()
         .expect("run command");
 
@@ -469,14 +493,15 @@ fn init_non_file_connection_keeps_running_workspace_step_and_returns_payload() {
             "--config",
             &config_path.display().to_string(),
             "--json-message",
-            "init",
+            "infobase",
+            "create",
         ])
         .output()
         .expect("run command");
 
     assert!(output.status.success());
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
-    assert_eq!(payload["command"], "init");
+    assert_eq!(payload["command"], "infobase create");
     assert_eq!(payload["data"]["steps"][0]["status"], "skipped");
     assert_eq!(payload["data"]["steps"][1]["status"], "ok");
     assert!(work_path.join("edt-workspace").exists());
@@ -502,7 +527,8 @@ fn init_skips_existing_workspace() {
             "--config",
             &config_path.display().to_string(),
             "--json-message",
-            "init",
+            "infobase",
+            "create",
         ])
         .output()
         .expect("run command");
@@ -531,14 +557,15 @@ fn init_retries_edt_import_when_previous_run_left_incomplete_workspace() {
             "--config",
             &config_path.display().to_string(),
             "--json-message",
-            "init",
+            "infobase",
+            "create",
         ])
         .output()
         .expect("first run");
 
     assert!(!first.status.success());
     let first_payload: Value = serde_json::from_slice(&first.stdout).expect("json");
-    assert_eq!(first_payload["command"], "init");
+    assert_eq!(first_payload["command"], "infobase create");
     assert_eq!(first_payload["data"]["steps"][0]["status"], "ok");
     assert_eq!(first_payload["data"]["steps"][1]["status"], "failed");
     assert!(work_path.join("edt-workspace").exists());
@@ -564,7 +591,8 @@ fn init_retries_edt_import_when_previous_run_left_incomplete_workspace() {
             "--config",
             &config_path.display().to_string(),
             "--json-message",
-            "init",
+            "infobase",
+            "create",
         ])
         .output()
         .expect("second run");
@@ -594,7 +622,8 @@ fn init_rejects_workspace_path_that_is_not_a_directory() {
             "--config",
             &config_path.display().to_string(),
             "--json-message",
-            "init",
+            "infobase",
+            "create",
         ])
         .output()
         .expect("run command");
@@ -617,7 +646,8 @@ fn init_ibcmd_server_provisions_infobase_without_precheck() {
             "--config",
             &config_path.display().to_string(),
             "--json-message",
-            "init",
+            "infobase",
+            "create",
         ])
         .output()
         .expect("run command");
@@ -646,7 +676,8 @@ fn init_ibcmd_server_already_exists_is_non_fatal() {
             "--config",
             &config_path.display().to_string(),
             "--json-message",
-            "init",
+            "infobase",
+            "create",
         ])
         .output()
         .expect("run command");
@@ -670,7 +701,8 @@ fn init_ibcmd_server_auth_failure_stays_fatal() {
             "--config",
             &config_path.display().to_string(),
             "--json-message",
-            "init",
+            "infobase",
+            "create",
         ])
         .output()
         .expect("run command");

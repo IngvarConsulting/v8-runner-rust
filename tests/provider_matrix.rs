@@ -71,10 +71,10 @@ fn run(config_path: &Path, arguments: &[&str]) -> (i32, Value) {
 #[test]
 fn no_command_accepts_a_provider_flag() {
     let commands: [&[&str]; 16] = [
-        &["config", "init"],
-        &["bootstrap"],
-        &["tools", "download"],
         &["init"],
+        &["clone"],
+        &["tools", "download"],
+        &["infobase", "create"],
         &["extensions"],
         &["extensions", "create"],
         &["build"],
@@ -181,9 +181,9 @@ fn no_default_chain_names_the_publication_provider() {
     let dir = temp_workspace();
     let config_path = write_project(dir.path(), "");
     for command in [
-        vec!["build", "--dry-run"],
-        vec!["init", "--dry-run"],
-        vec!["dump", "--mode", "full", "--dry-run"],
+        vec!["push", "--dry-run"],
+        vec!["infobase", "create", "--dry-run"],
+        vec!["pull", "--mode", "full", "--dry-run"],
     ] {
         let (code, payload) = run(&config_path, &command);
         assert_eq!(code, 0, "{payload}");

@@ -82,7 +82,7 @@ fn every_operation_with_an_executor_answers_with_a_receipt() {
     let expectations: Vec<(Vec<&str>, &str)> = vec![
         (vec!["build", "--dry-run"], "designer"),
         (vec!["dump", "--mode", "full", "--dry-run"], "designer"),
-        (vec!["init", "--dry-run"], "designer"),
+        (vec!["infobase", "create", "--dry-run"], "designer"),
         (vec!["make", "--output", &artifact, "--dry-run"], "designer"),
         (vec!["load", "--path", &artifact, "--dry-run"], "designer"),
         (

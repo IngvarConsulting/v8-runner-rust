@@ -1,69 +1,26 @@
 {
   "$defs": {
-    "BuildMode": {
-      "oneOf": [
-        {
-          "enum": [
-            "edt_export",
-            "full",
-            "skipped"
-          ],
-          "type": "string"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "partial": {
-              "additionalProperties": false,
-              "properties": {
-                "file_count": {
-                  "format": "uint",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              },
-              "required": [
-                "file_count"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "partial"
-          ],
-          "type": "object"
-        }
-      ]
+    "DumpMode": {
+      "enum": [
+        "FULL",
+        "INCREMENTAL",
+        "PARTIAL"
+      ],
+      "type": "string"
     },
-    "BuildStep": {
+    "DumpSelectorResult": {
       "additionalProperties": false,
       "properties": {
-        "duration_ms": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
+        "normalized": {
+          "type": "string"
         },
-        "message": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "mode": {
-          "$ref": "#/$defs/BuildMode"
-        },
-        "ok": {
-          "type": "boolean"
-        },
-        "source_set": {
+        "requested": {
           "type": "string"
         }
       },
       "required": [
-        "source_set",
-        "mode",
-        "ok",
-        "duration_ms"
+        "requested",
+        "normalized"
       ],
       "type": "object"
     },
@@ -181,7 +138,7 @@
       "type": "object"
     }
   },
-  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/build.schema.json",
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/pull.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
@@ -190,8 +147,29 @@
       "minimum": 0,
       "type": "integer"
     },
+    "extension": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "message": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mode": {
+      "$ref": "#/$defs/DumpMode"
+    },
     "ok": {
       "type": "boolean"
+    },
+    "platform_log_path": {
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "provider": {
       "anyOf": [
@@ -205,22 +183,40 @@
       "description": "Квитанция о выборе исполнителя; `None`, пока выбор не начинался."
     },
     "provider_dispatched": {
-      "description": "`false` when the run stopped at a preview instead of dispatching the platform.\n\nAlways present. In a preview each step's `mode` is the mode that would be used and\nits message says so; the flag is what separates planned from performed.",
+      "description": "`false` when the run stopped at a preview instead of dispatching the platform.",
       "type": "boolean"
     },
-    "steps": {
+    "selectors": {
       "items": {
-        "$ref": "#/$defs/BuildStep"
+        "$ref": "#/$defs/DumpSelectorResult"
       },
-      "type": "array"
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "source_set": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "target_path": {
+      "type": "string"
+    },
+    "up_to_date": {
+      "default": false,
+      "description": "`true` when the platform reported the configuration generation unchanged since the\nlast recorded build or dump and nothing was dumped.",
+      "type": "boolean"
     }
   },
   "required": [
     "ok",
     "provider_dispatched",
-    "steps",
+    "mode",
+    "target_path",
     "duration_ms"
   ],
-  "title": "BuildResult",
+  "title": "DumpResult",
   "type": "object"
 }

@@ -24,7 +24,7 @@
               "type": "null"
             }
           ],
-          "description": "Optional tool extension prepared by `build` for client MCP launches."
+          "description": "Optional tool extension prepared by `push` for client MCP launches."
         },
         "port": {
           "description": "Default port passed to onec-client-mcp-devkit.",
@@ -592,7 +592,19 @@
               "type": "null"
             }
           ],
-          "description": "Executor for `build`."
+          "deprecated": true,
+          "description": "Previous spelling of `push`; accepted for one release cycle."
+        },
+        "download": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `download`."
         },
         "dump": {
           "anyOf": [
@@ -603,7 +615,8 @@
               "type": "null"
             }
           ],
-          "description": "Executor for `dump`."
+          "deprecated": true,
+          "description": "Previous spelling of `pull`; accepted for one release cycle."
         },
         "extensions": {
           "anyOf": [
@@ -625,7 +638,19 @@
               "type": "null"
             }
           ],
-          "description": "Executor for `infobase configuration export`."
+          "deprecated": true,
+          "description": "Previous spelling of `download`; accepted for one release cycle."
+        },
+        "infobase.create": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `infobase create`."
         },
         "infobase.dump": {
           "anyOf": [
@@ -658,7 +683,8 @@
               "type": "null"
             }
           ],
-          "description": "Executor for `init`."
+          "deprecated": true,
+          "description": "Previous spelling of `infobase.create`; accepted for one release cycle."
         },
         "load": {
           "anyOf": [
@@ -669,7 +695,8 @@
               "type": "null"
             }
           ],
-          "description": "Executor for `load`."
+          "deprecated": true,
+          "description": "Previous spelling of `upload`; accepted for one release cycle."
         },
         "make": {
           "anyOf": [
@@ -693,6 +720,28 @@
           ],
           "description": "Executor for `publish`. Accepted by the schema so validation can say the operation has no choice."
         },
+        "pull": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `pull`."
+        },
+        "push": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `push`."
+        },
         "syntax": {
           "anyOf": [
             {
@@ -703,6 +752,17 @@
             }
           ],
           "description": "Executor for `syntax`."
+        },
+        "upload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `upload`."
         }
       },
       "type": "object"
@@ -1027,7 +1087,8 @@
   "properties": {
     "build": {
       "$ref": "#/$defs/BuildSchema",
-      "description": "Build pipeline settings."
+      "deprecated": true,
+      "description": "Previous spelling of `push`; accepted for one release cycle."
     },
     "format": {
       "$ref": "#/$defs/SourceFormatSchema",
@@ -1045,6 +1106,10 @@
     "providers": {
       "$ref": "#/$defs/ProvidersSchema",
       "description": "Per-operation executor overrides. A missing key means the default chain from the\ncapability matrix; a present key means exactly that provider and no fallback."
+    },
+    "push": {
+      "$ref": "#/$defs/BuildSchema",
+      "description": "Settings of `push`: how sources reach the infobase."
     },
     "source-set": {
       "default": [],

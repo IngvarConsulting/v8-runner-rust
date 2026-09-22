@@ -890,7 +890,7 @@ async fn mcp_stdio_structured_content_matches_cli_json_envelope() {
     let build_payload: Value = build_response
         .structured_content
         .expect("build structured payload");
-    assert_envelope_success(&build_payload, "build");
+    assert_envelope_success(&build_payload, "push");
     assert_eq!(build_payload["ok"], cli_build["ok"]);
     assert_eq!(build_payload["command"], cli_build["command"]);
     assert_eq!(build_payload["data"]["ok"], cli_build["data"]["ok"]);
@@ -921,7 +921,7 @@ async fn mcp_stdio_structured_content_matches_cli_json_envelope() {
     let dump_payload: Value = dump_response
         .structured_content
         .expect("dump structured payload");
-    assert_envelope_success(&dump_payload, "dump");
+    assert_envelope_success(&dump_payload, "pull");
     assert_eq!(dump_payload["ok"], cli_dump["ok"]);
     assert_eq!(dump_payload["command"], cli_dump["command"]);
     assert_eq!(dump_payload["data"]["ok"], cli_dump["data"]["ok"]);
@@ -935,7 +935,7 @@ async fn mcp_stdio_structured_content_matches_cli_json_envelope() {
     let syntax_payload: Value = syntax_response
         .structured_content
         .expect("syntax structured payload");
-    assert_envelope_business_failure(&syntax_payload, "syntax");
+    assert_envelope_business_failure(&syntax_payload, "check");
     assert_eq!(syntax_payload["ok"], cli_syntax["ok"]);
     assert_eq!(syntax_payload["command"], cli_syntax["command"]);
     assert_eq!(syntax_payload["error"], cli_syntax["error"]);
@@ -1100,7 +1100,7 @@ async fn mcp_stdio_build_project_runs_full_rebuild_successfully() {
 
     assert_eq!(response.is_error, Some(false));
     let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_success(&payload, "build");
+    assert_envelope_success(&payload, "push");
     assert_eq!(payload["data"]["ok"], true);
     assert!(fs::read_to_string(designer_calls_log)
         .expect("designer calls")
@@ -1212,7 +1212,7 @@ async fn mcp_stdio_check_syntax_designer_modules_returns_structured_issues() {
 
     assert_eq!(response.is_error, Some(true));
     let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_business_failure(&payload, "syntax");
+    assert_envelope_business_failure(&payload, "check");
     assert_eq!(payload["data"]["status"], "issues_found");
     assert_eq!(payload["data"]["issues"][0]["kind"], "module");
     assert_eq!(
@@ -1253,7 +1253,7 @@ async fn mcp_stdio_dump_config_full_returns_success_payload() {
 
     assert_eq!(response.is_error, Some(false));
     let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_success(&payload, "dump");
+    assert_envelope_success(&payload, "pull");
     assert_eq!(payload["data"]["ok"], true);
     assert_eq!(payload["data"]["mode"], "FULL");
     assert!(fs::read_to_string(designer_calls_log)
@@ -1295,7 +1295,7 @@ async fn mcp_stdio_dump_config_partial_designer_preserves_partial_mode() {
 
     assert_eq!(response.is_error, Some(false));
     let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_success(&payload, "dump");
+    assert_envelope_success(&payload, "pull");
     assert_eq!(payload["data"]["ok"], true);
     assert_eq!(payload["data"]["mode"], "PARTIAL");
     let calls = fs::read_to_string(designer_calls_log).expect("designer calls");
@@ -1336,7 +1336,7 @@ async fn mcp_stdio_dump_config_partial_ibcmd_returns_degraded_success() {
 
     assert_eq!(response.is_error, Some(false));
     let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_success(&payload, "dump");
+    assert_envelope_success(&payload, "pull");
     assert_eq!(payload["data"]["ok"], true);
     assert_eq!(payload["data"]["mode"], "PARTIAL");
     assert!(payload["data"]["message"]
@@ -1379,7 +1379,7 @@ async fn mcp_stdio_dump_config_full_ibcmd_server_contract_passes_dbms_and_infoba
 
     assert_eq!(response.is_error, Some(false));
     let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_success(&payload, "dump");
+    assert_envelope_success(&payload, "pull");
     assert_eq!(payload["data"]["ok"], true);
     let calls = fs::read_to_string(calls_log).expect("ibcmd calls");
     assert!(calls.contains("--dbms PostgreSQL --database-server localhost --database-name maindb"));
@@ -1420,7 +1420,7 @@ async fn mcp_stdio_dump_config_partial_ibcmd_preserves_partial_mode_on_failure()
 
     assert_eq!(response.is_error, Some(true));
     let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_business_failure(&payload, "dump");
+    assert_envelope_business_failure(&payload, "pull");
     assert_eq!(payload["data"]["mode"], "PARTIAL");
     assert!(payload["data"]["message"]
         .as_str()
@@ -1463,7 +1463,7 @@ async fn mcp_stdio_returns_terminal_business_failure_for_edt_syntax_timeout() {
         .expect("EDT readiness call");
     assert_eq!(ready.is_error, Some(false));
     let ready_payload: Value = ready.structured_content.expect("readiness payload");
-    assert_envelope_success(&ready_payload, "syntax");
+    assert_envelope_success(&ready_payload, "check");
 
     let response = client
         .peer()
@@ -1477,7 +1477,7 @@ async fn mcp_stdio_returns_terminal_business_failure_for_edt_syntax_timeout() {
 
     assert_eq!(response.is_error, Some(true));
     let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_business_failure(&payload, "syntax");
+    assert_envelope_business_failure(&payload, "check");
     assert_eq!(payload["data"]["status"], "tool_failed");
     assert!(payload["error"]["message"]
         .as_str()
@@ -1520,7 +1520,7 @@ async fn mcp_stdio_edt_syntax_resets_interactive_state_before_each_call() {
             .expect("edt syntax call");
         assert_eq!(response.is_error, Some(false));
         let payload: Value = response.structured_content.expect("structured payload");
-        assert_envelope_success(&payload, "syntax");
+        assert_envelope_success(&payload, "check");
     }
 
     let commands = fs::read_to_string(dir.path().join("edt-commands.log")).expect("command log");
@@ -1654,7 +1654,7 @@ async fn mcp_stdio_edt_syntax_preserves_issues_found_when_stdout_is_non_empty() 
 
     assert_eq!(response.is_error, Some(true));
     let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_business_failure(&payload, "syntax");
+    assert_envelope_business_failure(&payload, "check");
     assert_eq!(payload["data"]["status"], "issues_found");
     assert_eq!(payload["data"]["issues"][0]["path"], "Catalogs.Items");
 
@@ -1695,7 +1695,7 @@ async fn mcp_stdio_edt_syntax_treats_stdout_without_issues_as_tool_failure() {
 
     assert_eq!(response.is_error, Some(true));
     let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_business_failure(&payload, "syntax");
+    assert_envelope_business_failure(&payload, "check");
     assert_eq!(payload["data"]["status"], "tool_failed");
 
     client.cancel().await.expect("cancel client");
@@ -1798,7 +1798,7 @@ async fn mcp_stdio_standard_tools_do_not_inherit_edt_running_timeout() {
 
     assert_eq!(response.is_error, Some(false));
     let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_success(&payload, "syntax");
+    assert_envelope_success(&payload, "check");
     assert_eq!(payload["data"]["status"], "clean");
 
     client.cancel().await.expect("cancel client");

@@ -3183,7 +3183,7 @@ mod tests {
         };
 
         let json = serde_json::to_value(result).expect("json");
-        assert_eq!(BUILD_COMMAND, "build");
+        assert_eq!(BUILD_COMMAND, "push");
         assert_eq!(json["steps"][0]["mode"], "full");
     }
 }

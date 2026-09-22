@@ -533,7 +533,7 @@ fn extensions_create_activate_and_delete_reach_the_agent_verbs() {
 
 /// `load` через агента не предусмотрен: у агента нет `compare-cfg`, а проба
 /// совместимости перед загрузкой обязательна. Строки в матрице нет, и конфиг с
-/// `providers.load: agent` отвергается валидацией — до сессии и до процесса.
+/// `providers.upload: agent` отвергается валидацией — до сессии и до процесса.
 #[test]
 fn load_through_the_agent_is_refused_without_a_session() {
     let harness = harness_with("  load: agent\n");
@@ -550,7 +550,7 @@ fn load_through_the_agent_is_refused_without_a_session() {
     assert!(
         payload["error"]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("providers.load is not allowed")),
+            .is_some_and(|message| message.contains("providers.upload is not allowed")),
         "{payload}"
     );
     assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));

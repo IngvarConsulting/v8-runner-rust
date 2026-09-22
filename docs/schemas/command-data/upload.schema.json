@@ -1,5 +1,15 @@
 {
   "$defs": {
+    "ArtifactBuildMode": {
+      "enum": [
+        "unknown",
+        "configuration_cf",
+        "extension_cfe",
+        "external_data_processor_epf",
+        "external_report_erf"
+      ],
+      "type": "string"
+    },
     "ArtifactKind": {
       "description": "Stable artifact classification for runner/package outputs.",
       "oneOf": [
@@ -77,46 +87,28 @@
       },
       "type": "object"
     },
-    "ConfigurationState": {
-      "description": "Configuration state persisted into a package.",
-      "enum": [
-        "working",
-        "database"
-      ],
-      "type": "string"
-    },
-    "ConfigurationSubject": {
-      "description": "Configuration whose state is persisted into a package.",
+    "CompatibilityState": {
+      "description": "What the compatibility probe established, and nothing more.\n\nThe probe asks the platform to compare the target with its counterpart, and the only part\nof the answer the platform guarantees is whether the comparison ran: exit code zero, and\nexactly then a comparison report appears. Why it did not run is said in prose, and prose is\nnot a contract — see DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES — so this enum has no variant for a reason.",
       "oneOf": [
         {
-          "additionalProperties": false,
-          "properties": {
-            "kind": {
-              "const": "main",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "type": "object"
+          "const": "supported",
+          "description": "The comparison ran, so both sides exist: a configuration is on support, an extension\nis installed and comparable.",
+          "type": "string"
         },
         {
-          "additionalProperties": false,
-          "properties": {
-            "kind": {
-              "const": "extension",
-              "type": "string"
-            },
-            "name": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "name"
-          ],
-          "type": "object"
+          "const": "absent",
+          "description": "Proven absent from the infobase, by the infobase's own extension list — keyed output,\nnot a sentence. A first installation is exactly this state; a merge has nothing to\nmerge into.",
+          "type": "string"
+        },
+        {
+          "const": "not_established",
+          "description": "The comparison did not run, and the runner does not guess why. Never permits a merge,\nnever blocks a first installation.",
+          "type": "string"
+        },
+        {
+          "const": "not_probed",
+          "description": "Nobody asked. The run is a preview, or the target cannot be named — a configuration\nneeds the vendor configuration's name before the platform will compare it.",
+          "type": "string"
         }
       ]
     },
@@ -283,7 +275,14 @@
           ]
         },
         "payload": {
-          "type": "null"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LoadExecutionMetadata"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "status": {
           "$ref": "#/$defs/ExecutionStatus"
@@ -305,54 +304,53 @@
       ],
       "type": "string"
     },
-    "ExportTargetState": {
-      "description": "Observable state of the final output path after an export attempt.",
-      "enum": [
-        "unchanged",
-        "created",
-        "replaced",
-        "restored",
-        "uncertain"
-      ],
-      "type": "string"
-    },
-    "InfobaseExportArtifactKind": {
-      "description": "Closed file format vocabulary for information-base exports.\n\nThis type is deliberately namespaced: [`crate::domain::artifact::ArtifactKind`]\nclassifies retained execution artifacts and does not distinguish CF, CFE,\nand DT package formats.",
-      "enum": [
-        "cf",
-        "cfe",
-        "dt"
-      ],
-      "type": "string"
-    },
-    "InfobaseExportMode": {
-      "description": "Whether the command only proves its execution plan or applies it.",
-      "enum": [
-        "preview",
-        "apply"
-      ],
-      "type": "string"
-    },
-    "InfobaseExportPlan": {
+    "LoadExecutionMetadata": {
       "additionalProperties": false,
-      "description": "Compact machine-facing plan produced by a non-executing preflight.",
       "properties": {
-        "artifact_kind": {
-          "$ref": "#/$defs/InfobaseExportArtifactKind"
+        "applied": {
+          "type": "boolean"
         },
-        "output": {
-          "type": "string"
+        "compatibility_state": {
+          "$ref": "#/$defs/CompatibilityState"
         },
-        "provider": {
-          "$ref": "#/$defs/Provider"
+        "target_kind": {
+          "$ref": "#/$defs/LoadTargetKind"
+        },
+        "update_db_cfg_ran": {
+          "type": "boolean"
         }
       },
       "required": [
-        "provider",
-        "artifact_kind",
-        "output"
+        "applied",
+        "target_kind",
+        "compatibility_state",
+        "update_db_cfg_ran"
       ],
       "type": "object"
+    },
+    "LoadMode": {
+      "oneOf": [
+        {
+          "enum": [
+            "load",
+            "update"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "combine",
+          "description": "Объединение по файлу настроек. Прежнее имя режима — `merge`, оно принимается\nещё один цикл выпуска, а ответ называет режим новым именем.",
+          "type": "string"
+        }
+      ]
+    },
+    "LoadTargetKind": {
+      "enum": [
+        "unknown",
+        "configuration",
+        "extension"
+      ],
+      "type": "string"
     },
     "Provider": {
       "description": "Исполнитель. Имя называет того, кто делает работу, а не способ его запуска.",
@@ -468,31 +466,49 @@
       "type": "object"
     }
   },
-  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/infobase-configuration-export.schema.json",
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/upload.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Typed presentation data for a configuration package export.",
   "properties": {
-    "artifact_kind": {
-      "$ref": "#/$defs/InfobaseExportArtifactKind"
+    "artifact_path": {
+      "type": "string"
+    },
+    "artifact_type": {
+      "$ref": "#/$defs/ArtifactBuildMode"
+    },
+    "compatibility_state": {
+      "$ref": "#/$defs/CompatibilityState"
+    },
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
     },
     "execution": {
       "$ref": "#/$defs/ExecutionOutcome"
     },
+    "extension": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "message": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "mode": {
-      "$ref": "#/$defs/InfobaseExportMode"
+      "$ref": "#/$defs/LoadMode"
     },
-    "output": {
-      "type": "string"
+    "ok": {
+      "type": "boolean"
     },
-    "plan": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/InfobaseExportPlan"
-        },
-        {
-          "type": "null"
-        }
+    "platform_log_path": {
+      "type": [
+        "string",
+        "null"
       ]
     },
     "provider": {
@@ -507,34 +523,24 @@
       "description": "Квитанция о выборе исполнителя; `None`, пока выбор не начинался."
     },
     "provider_dispatched": {
-      "type": [
-        "boolean",
-        "null"
-      ]
-    },
-    "published": {
+      "description": "`false` when the run stopped at a preview instead of dispatching the platform.",
       "type": "boolean"
     },
-    "state": {
-      "$ref": "#/$defs/ConfigurationState"
-    },
-    "subject": {
-      "$ref": "#/$defs/ConfigurationSubject"
-    },
-    "target_state": {
-      "$ref": "#/$defs/ExportTargetState"
+    "target_kind": {
+      "$ref": "#/$defs/LoadTargetKind"
     }
   },
   "required": [
+    "ok",
+    "provider_dispatched",
     "mode",
-    "state",
-    "subject",
-    "artifact_kind",
-    "output",
-    "published",
-    "target_state",
+    "artifact_path",
+    "artifact_type",
+    "target_kind",
+    "compatibility_state",
+    "duration_ms",
     "execution"
   ],
-  "title": "ExportConfigurationPackageResult",
+  "title": "LoadJsonData",
   "type": "object"
 }

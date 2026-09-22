@@ -26,10 +26,10 @@ nuances вынесены в [DEEP_DIVE.md](DEEP_DIVE.md).
 Базовый файл можно сгенерировать командой:
 
 ```bash
-v8-runner config init
+v8-runner init
 ```
 
-Что делает `config init`:
+Что делает `init`:
 
 - создаёт `v8project.yaml` в текущем каталоге или по `--output <FILE>`;
 - добавляет modeline `yaml-language-server` со ссылкой на опубликованный schema artifact в
@@ -75,7 +75,7 @@ schema artifacts для редактирования `v8project.yaml` и `v8proj
 - `docs/schemas/v8project.schema.json` для основного `v8project.yaml`;
 - `docs/schemas/v8project.local.schema.json` для локального overlay `v8project.local.yaml`.
 
-`v8-runner config init` пишет в начало `v8project.yaml` modeline:
+`v8-runner init` пишет в начало `v8project.yaml` modeline:
 
 ```yaml
 # yaml-language-server: $schema=https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.schema.json
@@ -84,7 +84,7 @@ schema artifacts для редактирования `v8project.yaml` и `v8proj
 В VS Code установите расширение `redhat.vscode-yaml`. Оно использует эту строку
 автоматически; отдельная настройка workspace для основного файла не нужна.
 
-Для `v8project.local.yaml` `config init` пишет отдельную modeline:
+Для `v8project.local.yaml` `init` пишет отдельную modeline:
 
 ```yaml
 # yaml-language-server: $schema=https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.local.schema.json
@@ -109,9 +109,9 @@ artifact без привязки к release tag.
 `v8project.yaml` использует не один стиль на весь документ. Это текущий loader contract, и docs
 ниже повторяют именно literal YAML keys.
 
-- top-level app keys: `workPath`, `format`, `providers`, `source-set`, `build`, `tools`,
+- top-level app keys: `workPath`, `format`, `providers`, `source-set`, `push`, `tools`,
   `mcp`, `tests`; базы объявляет местный слой ключом `infobases`;
-- `build` использует `partialLoadThreshold`;
+- `push` использует `partialLoadThreshold`;
 - `mcp.*` и `tests.*` используют `snake_case`;
 - canonical key для EDT tool section: `tools.edt_cli`;
 - у `tools.edt_cli` literal child keys смешанные:
@@ -121,6 +121,14 @@ artifact без привязки к release tag.
   - `command_timeout_ms`
 - canonical key для агента Конфигуратора: `tools.designer_agent`; child keys —
   `attach`, `base-dir`, `port`, `host-key` и `startup_timeout_ms`.
+
+Ключи названы именами команд. Прежние написания приняты ещё один цикл выпуска и помечены
+`deprecated` в опубликованной схеме: `providers.init` → `providers.infobase.create`,
+`providers.build` → `providers.push`, `providers.load` → `providers.upload`,
+`providers.dump` → `providers.pull`, `providers.infobase.configuration.export` →
+`providers.download`, секция `build:` → `push:`. Прежнее имя секции загрузчик сворачивает в
+новое с предупреждением; оба ключа в одном файле — отказ, потому что в карте они схлопнулись
+бы молча. Квитанция ответа называет ключ новым именем, как бы его ни написали в файле.
 
 Ниже фиксируются только поддержанные canonical keys.
 
@@ -141,7 +149,7 @@ source-set:
     type: EXTENSION
     path: ext
 
-build:
+push:
   partialLoadThreshold: 20
 
 tools:
@@ -203,7 +211,7 @@ tests:
 ## Локальный overlay
 
 `v8project.local.yaml` расположен рядом с выбранным primary config и применяется автоматически.
-`config init` создаёт пустой local overlay как валидный YAML mapping (`{}`), добавляет schema
+`init` создаёт пустой local overlay как валидный YAML mapping (`{}`), добавляет schema
 modeline и сохраняет существующие значения, если файл уже был создан вручную. Файл не является
 самостоятельным config entrypoint: передавать его через `--config` нельзя.
 
@@ -270,9 +278,9 @@ tests:
 - Обязателен: да
 
 Для обычных project-команд список должен содержать поддерживаемый source-set. Исключение —
-`infobase configuration export` и `infobase dump`: они используют только ИБ и принимают
+`download` и `infobase dump`: они используют только ИБ и принимают
 отсутствующий `source-set` как пустой список (явный `source-set: []` равнозначен). Это
-command-specific validation, а не ослабление `build`, source `dump`, `convert`, `make` или
+command-specific validation, а не ослабление `push`, source `pull`, `convert`, `make` или
 остальных project workflows.
 
 Корень runtime state:
@@ -312,8 +320,8 @@ selection для infobase export не создаёт `workPath` и runtime-фа�
 
 ```yaml
 providers:
-  build: ibcmd
-  infobase.configuration.export: ibcmd
+  push: ibcmd
+  download: ibcmd
 ```
 
 Правила:
@@ -324,15 +332,15 @@ providers:
   операции с одним исполнителем это ошибка конфигурации, а не подтверждение очевидного;
 - переопределение строгое: если названный исполнитель не готов, команда отказывает с
   причиной и на умолчание не откатывается;
-- допустимые ключи: `init`, `build`, `load`, `dump`, `extensions`,
-  `infobase.configuration.export`, `infobase.dump`, `infobase.restore`, `syntax`, `make`;
+- допустимые ключи: `infobase.create`, `push`, `upload`, `pull`, `extensions`,
+  `download`, `infobase.dump`, `infobase.restore`, `syntax`, `make`;
 - ключ разрешён и в `v8project.local.yaml` — для машинно-локального эксперимента; в
   квитанции ответа видно, из какого файла он пришёл.
 
-Умолчания по операциям: `init`, `build`, `dump` — Конфигуратор, затем `ibcmd`;
-`infobase configuration export` — Конфигуратор, затем `ibcmd`; `infobase dump` и
+Умолчания по операциям: `infobase.create`, `push`, `pull` — Конфигуратор, затем `ibcmd`;
+`download` — Конфигуратор, затем `ibcmd`; `infobase dump` и
 `infobase restore` — Конфигуратор (`ibcmd` для DT остаётся экспериментальным и
-назначается только явно); `load`, `syntax`, `make` — только Конфигуратор;
+назначается только явно); `upload`, `syntax`, `make` — только Конфигуратор;
 `extensions` — только `ibcmd`.
 
 Ключ `builder` снят: конфиг с ним не проходит валидацию, а ошибка называет замену.
@@ -441,8 +449,8 @@ infobases:
   обратно — изменённые файлы поверх локальной цели; частичная сборка возит только
   `Configuration.xml`, `ConfigDumpInfo.xml`, изменённые файлы и список. Шлюз `ibsrv` 8.3.27 отдаёт по SFTP
   чтение и каталоги, а **запись не принимает** ни с какими флагами открытия (замер
-  15.09.2026): через него по SFTP работают `dump --mode full`, `make` и экспорт `.cf`,
-  а `build` и инкрементальная выгрузка отказывают типизированно, с путём и кодом шлюза;
+  15.09.2026): через него по SFTP работают `pull --mode full`, `make` и экспорт `.cf`,
+  а `push` и инкрементальная выгрузка отказывают типизированно, с путём и кодом шлюза;
   на стороне сервера при этом ничего не остаётся. Раннер пробует сочетания флагов
   открытия по убыванию строгости, так что точка входа, принимающая запись (агент
   Конфигуратора по документации), получит и загрузку.
@@ -455,12 +463,12 @@ infobases:
 `infobase.dbms` и `infobase.cluster` — тоже: `ibsrv` — один процесс вместо кластера, и
 `ras` им не управляет.
 
-У автономного сервера один исполнитель — `agent` через шлюз — для `build`, `dump`,
-`make`, `extensions` и `infobase configuration export`. `infobase dump` и `infobase restore`
+У автономного сервера один исполнитель — `agent` через шлюз — для `push`, `pull`,
+`make`, `extensions` и `download`. `infobase dump` и `infobase restore`
 через шлюз не выполняются намеренно: `infobase-tools dump-ib` роняет `ibsrv` 8.3.27
 (замер 15.09.2026), а `restore-ib` по документации завершает сеанс сервера — снимок
-автономного сервера снимают его собственными средствами. `load` (у шлюза нет
-`compare-cfg`), `syntax`, `init`, `publish` и `test` отказывают типизированно. Клиент
+автономного сервера снимают его собственными средствами. `upload` (у шлюза нет
+`compare-cfg`), `check`, `infobase create`, `publish` и `test` отказывают типизированно. Клиент
 открывается по `infobase.web.url`: либо `launch web` в браузере, либо `launch thin` —
 тонкий клиент идёт по тому же адресу ws-соединением, без всякого ключа, потому что
 объявленная строка прямого шлюза раннером пока не используется (#205), а `--via connection`
@@ -513,8 +521,8 @@ infobases:
 - Обязателен: нет
 
 Нужна там, где раннер идёт в СУБД напрямую: создать серверную информационную базу
-(`init` с `providers.init: ibcmd`). Для обычной работы с уже существующей серверной базой
-секция не требуется и валидацией не запрашивается.
+(`infobase create` с `providers.infobase.create: ibcmd`). Для обычной работы с уже
+существующей серверной базой секция не требуется и валидацией не запрашивается.
 
 Поддержанные поля:
 
@@ -607,9 +615,9 @@ Validation rules:
 
 ## Опциональные секции
 
-### `build`
+### `push`
 
-#### `build.partialLoadThreshold`
+#### `push.partialLoadThreshold`
 
 - Тип: integer
 - По умолчанию: `20`
@@ -617,8 +625,8 @@ Validation rules:
 
 Порог между partial и full load.
 
-CLI selector `v8-runner build --source-set <name>` использует `source-set[].name` как stable
-runtime identity и не добавляет отдельное поле конфигурации. Если selector не задан, `build`
+CLI selector `v8-runner push --source-set <name>` использует `source-set[].name` как stable
+runtime identity и не добавляет отдельное поле конфигурации. Если selector не задан, `push`
 обрабатывает все `source-set`.
 
 ### `tests`
@@ -739,17 +747,18 @@ MCP endpoint и не гарантирует наличие Vanessa tools.
   - `artifact.path` на существующий `.cfe` файл.
 
 `tools.client_mcp.extension` не добавляется в `source-set` и не выбирается через `--source-set`.
-`init` импортирует EDT `source` в workspace, `build` подготавливает расширение после project
-source-set build, а `launch mcp` и `launch mcp va` расширение не устанавливают и не обновляют.
-Для `source` build хранит отдельный snapshot под `workPath/hash-storages`: повторный запуск с
-неизменёнными исходниками пропускает export/load, а `build --full-rebuild` принудительно
+`infobase create` импортирует EDT `source` в workspace, `push` подготавливает расширение
+после project source-set, а `launch mcp` и `launch mcp va` расширение не устанавливают и
+не обновляют.
+Для `source` `push` хранит отдельный snapshot под `workPath/hash-storages`: повторный запуск с
+неизменёнными исходниками пропускает export/load, а `push --full` принудительно
 обновляет расширение.
 
 `v8-runner tools download client-mcp` может заполнить этот блок в `v8project.local.yaml`:
 с `--sources` он указывает `source.path` на
 `build/tools/onec-client-mcp-devkit/exts/client-mcp` и `source.format: EDT`, без
 `--sources` указывает `artifact.path` на скачанный `client_mcp.cfe`. Artifact-режим
-доступен, только когда сборку исполняет Конфигуратор; при `providers.build: ibcmd`
+доступен, только когда сборку исполняет Конфигуратор; при `providers.push: ibcmd`
 используйте `--sources`.
 
 ### `tools.va`
@@ -939,7 +948,7 @@ SSH-клиент встроен в раннер: внешний `ssh` не ну�
 ### `tools.designer_agent.base-dir`
 
 - Тип: путь
-- Обязателен: только вместе с `attach` для операций, читающих результат с диска (`dump`)
+- Обязателен: только вместе с `attach` для операций, читающих результат с диска (`pull`)
 
 `AgentBaseDir` чужого агента: относительно его пользовательского каталога агент
 трактует пути команд.

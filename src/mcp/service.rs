@@ -1234,7 +1234,7 @@ mod tests {
             .expect("success");
 
         assert!(response.ok);
-        assert_eq!(response.command, "build");
+        assert_eq!(response.command, "push");
         assert_eq!(response.duration_ms, 42);
         assert_eq!(response.data["ok"], true);
         assert_eq!(response.data["steps"][0]["mode"], "full");
@@ -1275,7 +1275,7 @@ mod tests {
             McpServiceError::Business(failure) => {
                 assert_eq!(failure.error.code, McpErrorCode::RuntimeFailure);
                 assert!(!failure.response.ok);
-                assert_eq!(failure.response.command, "build");
+                assert_eq!(failure.response.command, "push");
                 assert_eq!(failure.response.duration_ms, 19);
                 assert_eq!(failure.response.data["steps"][0]["ok"], false);
                 assert_eq!(
@@ -1568,7 +1568,7 @@ mod tests {
             .expect("success");
 
         assert!(response.ok);
-        assert_eq!(response.command, "dump");
+        assert_eq!(response.command, "pull");
         assert_eq!(response.data["mode"], "INCREMENTAL");
         let requests = service.port.dump_requests.borrow();
         assert_eq!(requests[0].1.mode, DumpModeRequest::Incremental);
@@ -1615,7 +1615,7 @@ mod tests {
         assert_eq!(requests[0].1.mode, DumpModeRequest::Incremental);
         match error {
             McpServiceError::Business(failure) => {
-                assert_eq!(failure.response.command, "dump");
+                assert_eq!(failure.response.command, "pull");
                 assert_eq!(failure.response.data["mode"], "INCREMENTAL");
                 assert_eq!(failure.response.data["message"], "dump failed");
             }
@@ -1649,7 +1649,7 @@ mod tests {
         assert_eq!(requests[0].1.mode, DumpModeRequest::Incremental);
         match error {
             McpServiceError::Business(failure) => {
-                assert_eq!(failure.response.command, "dump");
+                assert_eq!(failure.response.command, "pull");
                 assert_eq!(failure.response.data["mode"], "INCREMENTAL");
                 assert_eq!(failure.response.data["message"], "dump failed");
                 assert_eq!(failure.response.data["tool"], "dump_config");
@@ -1693,7 +1693,7 @@ mod tests {
         match error {
             McpServiceError::Business(failure) => {
                 assert_eq!(failure.error.code, McpErrorCode::UnsupportedValue);
-                assert_eq!(failure.response.command, "dump");
+                assert_eq!(failure.response.command, "pull");
                 assert_eq!(failure.response.data["mode"], "garbage");
                 assert_eq!(
                     failure.response.data["errors"][0],
@@ -2264,7 +2264,7 @@ mod tests {
             .expect("success");
 
         assert!(response.ok);
-        assert_eq!(response.command, "syntax");
+        assert_eq!(response.command, "check");
         let requests = service.port.syntax_requests.borrow();
         assert_eq!(
             requests[0].1.target,
@@ -2352,7 +2352,7 @@ mod tests {
             .expect("success");
 
         assert!(response.ok);
-        assert_eq!(response.command, "syntax");
+        assert_eq!(response.command, "check");
         let requests = service.port.syntax_requests.borrow();
         match &requests[0].1.target {
             SyntaxTargetRequest::DesignerConfig(request) => {

@@ -22,12 +22,39 @@ use crate::use_cases::config_init::{ConfigFormatRequest, ConfigInitRequest};
 use crate::use_cases::context::CommandName;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
-const BOOTSTRAP_COMMAND: &str = "bootstrap";
-const CONFIG_INIT_COMMAND: &str = "config init";
+/// Новые имена команд словаря, у которых внутри остался прежний путь разбора: `init` —
+/// это `config init`, `download` — `infobase configuration export`. Обе формы разбираются
+/// `clap` и здесь сводятся к одной, чтобы ниже по течению имя было одно.
+fn canonical_command(command: Command) -> Command {
+    use crate::cli::args::{
+        ConfigArgs, ConfigCommand, InfobaseArgs, InfobaseCommand, InfobaseConfigurationArgs,
+        InfobaseConfigurationCommand,
+    };
+    match command {
+        Command::ConfigInit(args) => Command::Config(ConfigArgs {
+            command: ConfigCommand::Init(args),
+        }),
+        Command::Download(args) => Command::Infobase(InfobaseArgs {
+            command: InfobaseCommand::Configuration(InfobaseConfigurationArgs {
+                command: InfobaseConfigurationCommand::Export(args),
+            }),
+        }),
+        // Создание базы — свой сценарий, а не выгрузка: путь `infobase create` сводится
+        // к внутреннему варианту, и ниже по течению команда остаётся прежней.
+        Command::Infobase(InfobaseArgs {
+            command: InfobaseCommand::Create(args),
+        }) => Command::Init(args),
+        command => command,
+    }
+}
+
+const BOOTSTRAP_COMMAND: &str = "clone";
+const CONFIG_INIT_COMMAND: &str = "init";
 const VERSION_COMMAND: &str = "version";
 
 pub fn run() -> i32 {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    cli.command = canonical_command(cli.command);
     let output_format = cli_output_format(cli.json_message);
 
     if let Command::Version = &cli.command {
@@ -187,6 +214,9 @@ pub fn run() -> i32 {
     let result = match &cli.command {
         Command::Version => unreachable!("version command is handled before config loading"),
         Command::Bootstrap(_) => unreachable!("bootstrap command is handled before config loading"),
+        Command::ConfigInit(_) | Command::Download(_) => {
+            unreachable!("new command names are normalised in canonical_command")
+        }
         Command::Init(_)
         | Command::Config(_)
         | Command::Tools(_)
@@ -306,7 +336,7 @@ fn run_config_command(args: &crate::cli::args::ConfigArgs, presenter: &Presenter
 fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 {
     if config_flag_was_explicitly_set() {
         let message =
-            "global --config flag is not supported for `bootstrap`; use `bootstrap --project-dir <DIR>` to choose where the generated project is written";
+            "global --config flag is not supported for `clone`; use `clone --project-dir <DIR>` to choose where the generated project is written";
         let error = UseCaseError::new(UseCaseErrorKind::Validation, message);
         print_command_error(presenter, BOOTSTRAP_COMMAND, &error, message);
         return error.exit_code();
@@ -408,7 +438,7 @@ fn resolve_bootstrap_project_dir(
 fn run_config_init(args: &ConfigInitArgs, presenter: &Presenter) -> i32 {
     if config_flag_was_explicitly_set() {
         let message =
-            "global --config flag is not supported for `config init`; use `config init --output <FILE>` to choose where the generated config is written";
+            "global --config flag is not supported for `init`; use `init --output <FILE>` to choose where the generated config is written";
         let error = UseCaseError::new(UseCaseErrorKind::Validation, message);
         print_command_error(presenter, CONFIG_INIT_COMMAND, &error, message);
         return error.exit_code();
@@ -520,9 +550,9 @@ fn render_bootstrap_text(
     }
 
     let label = if succeeded {
-        "Project bootstrapped successfully"
+        "Project cloned successfully"
     } else {
-        "Project bootstrap failed"
+        "Project clone failed"
     };
     let timeline = vec![
         TimelineItem::new(
@@ -531,7 +561,7 @@ fn render_bootstrap_text(
             } else {
                 TimelineStatus::Failed
             },
-            "bootstrap:",
+            "clone:",
         )
         .with_detail(details.join("\n")),
         TimelineItem::new(

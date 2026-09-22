@@ -966,14 +966,15 @@ fn init_preview_clean_rejection_uses_the_shared_canonical_error_envelope() {
         .args([
             "--json-message",
             "--clean-before-execution",
-            "init",
+            "infobase",
+            "create",
             "--dry-run",
         ])
         .output()
         .expect("reject init preview with clean");
     let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(output.status.code(), Some(2), "{payload}");
-    assert_eq!(payload["command"], "init", "{payload}");
+    assert_eq!(payload["command"], "infobase create", "{payload}");
     assert_eq!(payload["ok"], false, "{payload}");
     assert_eq!(payload["error"]["code"], "invalid_argument", "{payload}");
     assert_eq!(payload["error"]["kind"], "validation", "{payload}");

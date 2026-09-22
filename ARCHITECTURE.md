@@ -74,7 +74,7 @@ This result grammar is governed by [решение 0016 в реестре](spec/
 `v8project.yaml`, loaded into `AppConfig` and accepted by `config::validate`, is the main project configuration contract.
 `source-set.name` is a stable identity for runtime state, generated directories, diagnostics, and source-set selection.
 The supported `source-set[].type` contract and validation boundary are governed by [решение 0017 в реестре](spec/arch/index.md).
-`config init` must autodetect source-set types only from marker content: Designer `CONFIGURATION` / `EXTENSION` come from `Configuration.xml`, ordinary EDT `CONFIGURATION` / `EXTENSION` come from `.project` natures plus `DT-INF/PROJECT.PMF` (`EXTENSION` also requires `Base-Project`) and `src/Configuration/Configuration.mdo`, while EDT external `.epf`/`.erf` sources are discovered only through homogeneous aggregate roots of valid child projects classified by canonical `src/root.xml`, never through recursive descriptor scans, per-artifact fallback, or phantom source-set generation.
+`init` must autodetect source-set types only from marker content: Designer `CONFIGURATION` / `EXTENSION` come from `Configuration.xml`, ordinary EDT `CONFIGURATION` / `EXTENSION` come from `.project` natures plus `DT-INF/PROJECT.PMF` (`EXTENSION` also requires `Base-Project`) and `src/Configuration/Configuration.mdo`, while EDT external `.epf`/`.erf` sources are discovered only through homogeneous aggregate roots of valid child projects classified by canonical `src/root.xml`, never through recursive descriptor scans, per-artifact fallback, or phantom source-set generation.
 
 The typed config model now splits MCP knobs into active HTTP/session settings and shared execution guardrails:
 
@@ -84,7 +84,7 @@ The typed config model now splits MCP knobs into active HTTP/session settings an
 - `tools.client_mcp.wait_ready_timeout_ms` is the per-readiness wait budget for client MCP launch probing; when unset it waits five minutes. Nothing caps it from above: a command carries no deadline.
 
 This keeps the config surface stable while allowing both MCP transports to share the same execution/session infrastructure.
-Новые public config fields, `source-set` types и `infobase` subtrees должны обновлять typed model, validation, `config init`, примеры и архитектурную документацию синхронно по checklist из `spec/architecture/change-checklist.md`.
+Новые public config fields, `source-set` types и `infobase` subtrees должны обновлять typed model, validation, `init`, примеры и архитектурную документацию синхронно по checklist из `spec/architecture/change-checklist.md`.
 
 ## MCP Boundary
 
@@ -105,11 +105,11 @@ The MCP adapter no longer needs to talk to `cli::execute` or to reuse domain ser
 - HTTP session capacity is tracked via atomic reservation (`reserve -> delegate initialize -> confirm/release`) plus lazy pruning of expired rmcp sessions, so `max_sessions` remains correct across explicit close, TTL expiry, and failed initializes.
 - Queued MCP cancellation/timeout still return early as transport-level admission errors. Detached one-shot work retains the server-side permit until completion, while live `check_syntax_edt` retains both the server-side permit and the shared actor's internal admission slot until the in-flight interactive command reaches terminal state and the server can return a structured tool result.
 - MCP normalization is finalized in the service layer: dump-mode defaulting, launch alias mapping, `allExtensions` tri-state inference, and MCP-only pre-validation for syntax flag dependencies all live there instead of leaking into transport-neutral use cases.
-- Общий shared actor применяет deterministic baseline contract перед каждой interactive EDT-командой: `cd <scenario EDT workspace>`, затем `cd`, который обязан вернуть тот же workspace path. Для `init` это обычно `workPath/edt-workspace`, для `convert` — `workPath/convert/edt-workspace`. Exhaustion request budget в этой pre-dispatch phase остаётся `QueuedTimeout`; reset/probe faults форсят session restart и queue drain.
+- Общий shared actor применяет deterministic baseline contract перед каждой interactive EDT-командой: `cd <scenario EDT workspace>`, затем `cd`, который обязан вернуть тот же workspace path. Для `infobase create` это обычно `workPath/edt-workspace`, для `convert` — `workPath/convert/edt-workspace`. Exhaustion request budget в этой pre-dispatch phase остаётся `QueuedTimeout`; reset/probe faults форсят session restart и queue drain.
 
 Important staging note:
 
-- Shared EDT actor теперь живёт в `platform` и используется всеми поддержанными interactive EDT сценариями: CLI `init`, EDT export в `build`, CLI `syntax edt` и live MCP `check_syntax_edt`.
+- Shared EDT actor теперь живёт в `platform` и используется всеми поддержанными interactive EDT сценариями: CLI `infobase create`, EDT export в `push`, CLI `check edt` и live MCP `check_syntax_edt`.
 - `tools.edt_cli.auto_start=true` остаётся eager prewarm только для long-lived host process вроде MCP server; short-lived CLI commands всегда стартуют shared EDT lazy и держат session только в рамках current command lifetime.
 - `spec/archive/MCP_IMPLEMENTATION_PLAN_2026-03-21.md` remains the canonical staged MCP rollout history/reference for the closed Stage 1-5 MCP rollout; it is not the active backlog for follow-up EDT work.
 
@@ -129,17 +129,17 @@ Important staging note:
   либо называет `tools.designer_agent.attach`; готовность доказывает
   аутентификация. Ключ хоста сверяется с объявленным: у управляемого — с открытой
   частью `host-key`, у чужой точки входа — с отпечатком `host-fingerprint`;
-  сверять не с чем — ключ принимается, а отпечаток называется вслух. Одна сессия на команду (`use_cases::agent_session`): `dump`,
-  `build`, `make`, экспортное семейство `infobase …` и `extensions` ходят через
+  сверять не с чем — ключ принимается, а отпечаток называется вслух. Одна сессия на команду (`use_cases::agent_session`): `pull`,
+  `push`, `make`, экспортное семейство `infobase …` и `extensions` ходят через
   неё. Каталоги проекта выставляются агенту ссылкой в его `AgentBaseDir` (`--dir=`),
   а файловые параметры (`--file=`, `--ext-file=`) агент через ссылку не разрешает —
   такие файлы пишутся прямо в каталог агента и переносятся в staging, исходники
   внешних обработок копируются, DT для загрузки подкладывается жёсткой ссылкой.
   После удачной загрузки или выгрузки записывается поколение конфигурации, и
-  неизменившееся поколение не выгружается. `load` через агента не предусмотрен:
+  неизменившееся поколение не выгружается. `upload` через агента не предусмотрен:
   у агента нет `compare-cfg`, а проба совместимости перед загрузкой обязательна.
-  В матрице агент стоит экспериментально у `dump`, `build`, `make`, `extensions`,
-  `infobase configuration export`, `infobase dump` и `infobase restore`. Автономный
+  В матрице агент стоит экспериментально у `pull`, `push`, `make`, `extensions`,
+  `download`, `infobase dump` и `infobase restore`. Автономный
   сервер (`infobase.standalone`) — та же сессия к SSH-шлюзу `ibsrv`, которую раннер
   не запускает; его файловая система раннеру не принадлежит: пути в командах
   относительны каталога пользователя шлюза, а файлы идут только объявленным каналом
@@ -196,7 +196,7 @@ Incremental and partial dump modes remain direct non-atomic update modes.
 Use cases now return transport-neutral payloads or structured failures.
 
 - `cli::execute` converts successful command payloads into `Envelope<T>` for JSON mode.
-- `cli::execute` preserves command-specific text formatting for build, test, dump, convert, syntax, and launch.
+- `cli::execute` preserves command-specific text formatting for push, test, pull, convert, check, and launch.
 - Failure payload emission is also decided at the adapter boundary, which keeps `launch --json-message` failure semantics unchanged while allowing other commands to keep structured JSON failures.
 - `mcp::service` returns MCP-specific DTOs and never reuses CLI `Envelope` or presenter logic.
 - Runner-like command payloads use `ExecutionOutcome<T>` as their domain source of truth for status, diagnostics, structured errors, metrics, artifacts, and typed parsed payload; compatibility fields are computed by CLI/MCP adapters when a presentation contract still needs them.
@@ -206,7 +206,7 @@ Use cases now return transport-neutral payloads or structured failures.
 `workPath` is the root for runtime artifacts:
 
 - `workPath/logs/platform/` stores platform log files.
-- `workPath/edt-workspace/` stores the shared EDT workspace used by `init`.
+- `workPath/edt-workspace/` stores the shared EDT workspace used by `infobase create`.
 - `workPath/convert/edt-workspace/` stores the dedicated EDT workspace used by `convert`.
 - `workPath/convert/out/<sourceSetName>/<designer|edt>/` stores default generated convert outputs; `convert --output <dir>` publishes the same converted source-set content under a caller-provided root using source-set path mirror layout.
 - `workPath/temp/partial-lists/` stores partial load and partial dump list files.

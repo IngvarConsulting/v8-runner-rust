@@ -4,108 +4,108 @@ Use these flows by user intent. Do not split the workflow only because source fi
 
 For exact support rules, read `config-and-backends.md` together with this file.
 
-## Bootstrap
+## Setup
 
 Create the default config when the project has no `v8project.yaml`:
 
 ```bash
-v8-runner config init
+v8-runner init
 ```
 
 This creates `v8project.yaml`, a sibling empty `v8project.local.yaml` for machine-local overrides,
 and a `.gitignore` entry for the local overlay when needed.
 
-Choose a narrower init command only when the project shape is known:
+Choose a narrower `init` command only when the project shape is known:
 
 ```bash
-v8-runner config init --connection "File=build/ib"
-v8-runner config init --format edt
+v8-runner init --connection "File=build/ib"
+v8-runner init --format edt
 ```
 
 Create a new project from an existing infobase when the infobase is the current source of truth:
 
 ```bash
-v8-runner bootstrap --connection "File=/path/to/ib" --platform-version 8.3.27
+v8-runner clone --connection "File=/path/to/ib" --platform-version 8.3.27
 ```
 
-`bootstrap` creates config/local overlay/gitignore, dumps the main configuration to
+`clone` creates config/local overlay/gitignore, dumps the main configuration to
 `src/configuration`, and stores credentials only in `v8project.local.yaml` when `--user` or
 `--password` is passed. It does not auto-discover extensions.
 
 Initialize generated runtime state only when the file infobase or EDT workspace needs to be created:
 
 ```bash
-v8-runner init
+v8-runner infobase create
 ```
 
-## Build
+## Push
 
 Apply Git-visible source changes to the configured runtime state:
 
 ```bash
-v8-runner build
+v8-runner push
 ```
 
-Use a full rebuild after branch switches, rebases, broad object moves, or suspicious incremental state:
+Use a full push after branch switches, rebases, broad object moves, or suspicious incremental state:
 
 ```bash
-v8-runner build --full-rebuild
+v8-runner push --full
 ```
 
-`build` is a common workflow. For EDT projects it may export EDT sources to Designer files before applying them through the configured backend. For Designer projects it applies Designer sources directly through the configured backend.
+`push` is a common workflow. For EDT projects it may export EDT sources to Designer files before applying them through the configured backend. For Designer projects it applies Designer sources directly through the configured backend.
 
-If `tools.client_mcp.extension` is configured, `build` also prepares that tool extension after the project source-set stage, including scoped `--source-set` builds. Source-backed tool extensions use their own change-detection state and are skipped when unchanged; use `build --full-rebuild` to force refresh. Do not add a tool extension as a project `source-set` or select it with `--source-set`.
+If `tools.client_mcp.extension` is configured, `push` also prepares that tool extension after the project source-set stage, including scoped `--source-set` builds. Source-backed tool extensions use their own change-detection state and are skipped when unchanged; use `push --full` to force refresh. Do not add a tool extension as a project `source-set` or select it with `--source-set`.
 
-## Syntax
+## Syntax Checks
 
 Choose syntax checks from config capabilities, not from assumptions about the repository name.
 
 Designer module checks:
 
 ```bash
-v8-runner build
-v8-runner syntax designer-modules --server --thin-client
+v8-runner push
+v8-runner check designer-modules --server --thin-client
 ```
 
 Designer configuration checks:
 
 ```bash
-v8-runner build
-v8-runner syntax designer-config
+v8-runner push
+v8-runner check designer-config
 ```
 
 EDT checks:
 
 ```bash
-v8-runner build
-v8-runner syntax edt
+v8-runner push
+v8-runner check edt
 ```
 
-If a syntax command is unavailable for the current `format`, report the config limitation instead of inventing raw platform commands.
+If a `check` command is unavailable for the current `format`, report the config limitation instead of inventing raw platform commands.
 
-## Dump
+## Pull
 
-Use dump when the desired source of truth is the current infobase state.
+Use `pull` when the desired source of truth is the current infobase state.
 
-Before dumping, inspect current Git changes:
+Before pulling, inspect current Git changes:
 
 ```bash
 git status --short
 ```
 
-Incremental dump:
+Incremental pull:
 
 ```bash
-v8-runner dump --mode incremental
+v8-runner pull --mode incremental
 ```
 
-Partial object dump when the backend supports it:
+Partial object pull when the backend supports it:
 
 ```bash
-v8-runner dump --mode partial --object <TYPE:NAME>
+v8-runner pull --mode partial --object <TYPE:NAME>
 ```
 
-Run `git diff` after dump and report the affected files.
+Run `git diff` after `pull` and report the affected files.
 
 ## Extensions
 
@@ -151,6 +151,6 @@ For ordinary direct launches, typed launch flags include `--c`, `--execute`, `--
 For `launch mcp`, use `--mcp-config` and `--mcp-port`; do not pass `/C` through `--c`.
 Use `--wait-ready` when a following agent or tool needs the client MCP HTTP endpoint to be initialized and able to return `tools/list`.
 
-`launch mcp` and `launch mcp va` do not install or update `tools.client_mcp.extension`; run `v8-runner build` first when that extension may be missing or stale.
+`launch mcp` and `launch mcp va` do not install or update `tools.client_mcp.extension`; run `v8-runner push` first when that extension may be missing or stale.
 
 For `launch mcp va`, read `testing.md`; it is part of the Vanessa Automation debugging and scenario-authoring workflow.

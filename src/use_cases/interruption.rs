@@ -241,7 +241,7 @@ mod tests {
                 CommandName::Dump,
                 ExecutionInterruption::Cancelled,
             ),
-            "dump publication completed after cancellation request for command 'dump' during critical phase; unsafe interruption was not performed"
+            "dump publication completed after cancellation request for command 'pull' during critical phase; unsafe interruption was not performed"
         );
     }
 

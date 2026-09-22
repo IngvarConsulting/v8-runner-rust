@@ -10,7 +10,7 @@
 | `CTR.WIRE.BOOTSTRAP-DATA` | контракт · product | active | да | `data` команды `bootstrap` | [contracts/CTR.WIRE.BOOTSTRAP-DATA.md](contracts/CTR.WIRE.BOOTSTRAP-DATA.md) |
 | `CTR.WIRE.BUILD-DATA` | контракт · product | active | да | `data` команды `build` | [contracts/CTR.WIRE.BUILD-DATA.md](contracts/CTR.WIRE.BUILD-DATA.md) |
 | `CTR.WIRE.COMMAND-ENVELOPE` | контракт · product | active | да | Конверт ответа команды | [contracts/CTR.WIRE.COMMAND-ENVELOPE.md](contracts/CTR.WIRE.COMMAND-ENVELOPE.md) |
-| `CTR.WIRE.CONFIG-INIT-DATA` | контракт · product | active | да | `data` команды `config init` | [contracts/CTR.WIRE.CONFIG-INIT-DATA.md](contracts/CTR.WIRE.CONFIG-INIT-DATA.md) |
+| `CTR.WIRE.CONFIG-INIT-DATA` | контракт · product | active | да | `data` команды `init` | [contracts/CTR.WIRE.CONFIG-INIT-DATA.md](contracts/CTR.WIRE.CONFIG-INIT-DATA.md) |
 | `CTR.WIRE.CONVERT-DATA` | контракт · product | active | да | `data` команды `convert` | [contracts/CTR.WIRE.CONVERT-DATA.md](contracts/CTR.WIRE.CONVERT-DATA.md) |
 | `CTR.WIRE.DUMP-DATA` | контракт · product | active | да | `data` команды `dump` | [contracts/CTR.WIRE.DUMP-DATA.md](contracts/CTR.WIRE.DUMP-DATA.md) |
 | `CTR.WIRE.EXTENSIONS-DATA` | контракт · product | active | да | `data` изменения состава расширений | [contracts/CTR.WIRE.EXTENSIONS-DATA.md](contracts/CTR.WIRE.EXTENSIONS-DATA.md) |
@@ -18,7 +18,7 @@
 | `CTR.WIRE.INFOBASE-CONFIGURATION-EXPORT-DATA` | контракт · product | active | да | `data` команды `infobase configuration export` | [contracts/CTR.WIRE.INFOBASE-CONFIGURATION-EXPORT-DATA.md](contracts/CTR.WIRE.INFOBASE-CONFIGURATION-EXPORT-DATA.md) |
 | `CTR.WIRE.INFOBASE-DUMP-DATA` | контракт · product | active | да | `data` команды `infobase dump` | [contracts/CTR.WIRE.INFOBASE-DUMP-DATA.md](contracts/CTR.WIRE.INFOBASE-DUMP-DATA.md) |
 | `CTR.WIRE.INFOBASE-RESTORE-DATA` | контракт · product | active | да | `data` команды `infobase restore` | [contracts/CTR.WIRE.INFOBASE-RESTORE-DATA.md](contracts/CTR.WIRE.INFOBASE-RESTORE-DATA.md) |
-| `CTR.WIRE.INIT-DATA` | контракт · product | active | да | `data` команды `init` | [contracts/CTR.WIRE.INIT-DATA.md](contracts/CTR.WIRE.INIT-DATA.md) |
+| `CTR.WIRE.INIT-DATA` | контракт · product | active | да | `data` команды `infobase create` | [contracts/CTR.WIRE.INIT-DATA.md](contracts/CTR.WIRE.INIT-DATA.md) |
 | `CTR.WIRE.LAUNCH-DATA` | контракт · product | active | да | `data` команды `launch` | [contracts/CTR.WIRE.LAUNCH-DATA.md](contracts/CTR.WIRE.LAUNCH-DATA.md) |
 | `CTR.WIRE.LOAD-DATA` | контракт · product | active | да | `data` команды `load` | [contracts/CTR.WIRE.LOAD-DATA.md](contracts/CTR.WIRE.LOAD-DATA.md) |
 | `CTR.WIRE.MAKE-DATA` | контракт · product | active | да | `data` команды `make` | [contracts/CTR.WIRE.MAKE-DATA.md](contracts/CTR.WIRE.MAKE-DATA.md) |

@@ -103,7 +103,7 @@ fn configuration_cf_dry_run_selects_provider_without_process_or_filesystem_mutat
         String::from_utf8_lossy(&command.stderr)
     );
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
-    assert_eq!(envelope["command"], "infobase.configuration.export");
+    assert_eq!(envelope["command"], "download");
     assert_eq!(envelope["data"]["mode"], "preview");
     assert_eq!(envelope["data"]["provider_dispatched"], false);
     assert_eq!(envelope["data"]["provider"]["selected"], "designer");
@@ -392,7 +392,7 @@ fn malformed_config_keeps_the_typed_infobase_failure_payload() {
 
     assert!(!command.status.success());
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
-    assert_eq!(envelope["command"], "infobase.configuration.export");
+    assert_eq!(envelope["command"], "download");
     // Выбор исполнителя не начинался: квитанции нет, а не «никто не подошёл».
     assert!(envelope["data"]["provider"].is_null());
     assert_eq!(envelope["data"]["published"], false);
@@ -463,7 +463,7 @@ fn designer_exports_database_extension_to_cfe_with_typed_json() {
         String::from_utf8_lossy(&command.stderr)
     );
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
-    assert_eq!(envelope["command"], "infobase.configuration.export");
+    assert_eq!(envelope["command"], "download");
     assert_eq!(envelope["data"]["state"], "database");
     assert_eq!(envelope["data"]["subject"]["kind"], "extension");
     assert_eq!(envelope["data"]["provider"]["selected"], "designer");
@@ -1231,7 +1231,7 @@ fn invalid_suffix_is_rejected_before_workspace_lock_and_provider_dispatch() {
 
     assert_eq!(command.status.code(), Some(2));
     let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
-    assert_eq!(envelope["command"], "infobase.configuration.export");
+    assert_eq!(envelope["command"], "download");
     assert_eq!(envelope["error"]["kind"], "validation");
     assert_eq!(envelope["error"]["code"], "invalid_argument");
     assert_eq!(envelope["data"]["subject"]["kind"], "main");

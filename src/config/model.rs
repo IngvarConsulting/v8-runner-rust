@@ -55,8 +55,9 @@ pub struct AppConfig {
     #[serde(rename = "source-set", default)]
     pub source_sets: Vec<SourceSetConfig>,
 
-    /// Build pipeline configuration
+    /// Settings of `push`: how sources reach the infobase
     #[serde(default)]
+    #[serde(rename = "push", alias = "build")]
     pub build: BuildConfig,
 
     /// Platform tools configuration
@@ -604,7 +605,7 @@ pub struct ClientMcpToolConfig {
     /// Optional wait-ready timeout in milliseconds. Defaults to five minutes when unset.
     pub wait_ready_timeout_ms: Option<u64>,
 
-    /// Optional tool extension prepared by `build` for client MCP launches.
+    /// Optional tool extension prepared by `push` for client MCP launches.
     pub extension: Option<ToolExtensionConfig>,
 }
 

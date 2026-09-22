@@ -1,6 +1,6 @@
 # Testing
 
-Use tests when behavior matters. Test commands build first, so do not run a separate `build` unless the user specifically asked for a build-only diagnosis. For an immutable prepared infobase clone, use `test --no-build`; never infer this mode merely because a previous build appears successful.
+Use tests when behavior matters. Test commands run `push` first, so do not run a separate `push` unless the user specifically asked for a push-only diagnosis. For an already prepared, immutable infobase, use `test --no-push`; never infer this mode merely because a previous push appears successful.
 
 ## YaXUnit
 
@@ -9,7 +9,7 @@ All tests:
 ```bash
 v8-runner test yaxunit all
 v8-runner test yaxunit --full all
-v8-runner test --no-build yaxunit all
+v8-runner test --no-push yaxunit all
 ```
 
 Target one module:
@@ -19,7 +19,7 @@ v8-runner test yaxunit module <MODULE_NAME>
 v8-runner test yaxunit --full module <MODULE_NAME>
 ```
 
-Use module-level runs for narrow code changes. Use all tests for pre-push confidence or broad changes.
+Use module-level runs for narrow code changes. Use all tests for confidence before sharing broad changes.
 
 ## Vanessa Automation
 
@@ -27,14 +27,14 @@ Run the configured Vanessa Automation profile:
 
 ```bash
 v8-runner test va
-v8-runner test --no-build va
+v8-runner test --no-push va
 ```
 
 If the user points to a specific feature or profile, inspect `tests.va` in `v8project.yaml` before changing the command.
 
 `test va` uses the configured `tests.va.profile`; do not invent ad hoc feature paths without updating config or using the repo's established wrapper.
 
-`--no-build` requires an existing `1Cv8.1CD` for file infobases. Server infobases are validated by the test-engine connection because a local filesystem preflight is not possible.
+`--no-push` requires an existing `1Cv8.1CD` for file infobases. Server infobases are validated by the test-engine connection because a local filesystem preflight is not possible.
 This mode does not require project source-set directories or build tooling to be present; runner and platform inputs are still validated.
 
 When driving tests through the MCP `run_all_tests` tool, pass `runner: "vanessa"` plus optional `profile`, `feature`, `filterTag`, `ignoreTag`, or `scenarioFilter`; do not use the default YaXUnit runner for functional `.feature` acceptance scenarios.
@@ -70,19 +70,19 @@ Use these only when the user needs a specific 1C launch context; otherwise prefe
 Designer module syntax:
 
 ```bash
-v8-runner syntax designer-modules --server --thin-client
+v8-runner check designer-modules --server --thin-client
 ```
 
 Designer configuration syntax:
 
 ```bash
-v8-runner syntax designer-config
+v8-runner check designer-config
 ```
 
 EDT syntax:
 
 ```bash
-v8-runner syntax edt
+v8-runner check edt
 ```
 
 ## Artifacts

@@ -17,7 +17,7 @@ AI-агентам безопасную, уже ограниченную MCP-по
 
 ## Зачем это нужно
 
-- Быстрый feedback loop (цикл обратной связи): `build -> syntax/test -> diagnose`.
+- Быстрый feedback loop (цикл обратной связи): `push -> check/test -> diagnose`.
 - Один config (конфиг) `v8project.yaml` для исходников, рабочей ИБ, инструментов и тестов.
 - Поддержка source sets (наборов исходников) в форматах `DESIGNER` и `EDT`.
 - Исполнителя каждой операции выбирает матрица возможностей — Конфигуратор или `ibcmd` там, где это разрешает контракт 1С; вручную назначается ключом `providers.<операция>`.
@@ -97,7 +97,7 @@ done
 ### Создайте стартовый config (конфиг) в текущем репозитории:
 
 ```bash
-v8-runner config init
+v8-runner init
 ```
 
 Команда анализирует структуру проекта, находит поддержанные `source-set` (наборы исходников),
@@ -112,15 +112,15 @@ credentials и настройки инструментов. Файл приме�
 ### Или создайте проект из существующей информационной базы:
 
 ```bash
-v8-runner bootstrap \
+v8-runner clone \
   --connection "File=/path/to/ib" \
   --platform-version 8.3.27
 ```
 
 Команда создает `v8project.yaml`, локальный overlay, `.gitignore` и выгружает основную
 конфигурацию в `src/configuration`. Адрес базы и credentials (`--user`, `--password`)
-попадают только в `v8project.local.yaml`, в секцию `infobases.origin`. Автоматическое обнаружение расширений этим bootstrap
-slice не выполняется.
+попадают только в `v8project.local.yaml`, в секцию `infobases.origin`. Автоматическое обнаружение расширений этот `clone`
+slice не выполняет.
 
 ### Загрузите тестовые и MCP-инструменты:
 
@@ -138,7 +138,7 @@ Vanessa Automation single всегда скачивается как EPF в `bui
 ### Подготовьте рабочую информационную базу:
 
 ```bash
-v8-runner init
+v8-runner infobase create
 ```
 
 Команда создает или подготавливает ИБ и, для `EDT`, импортирует workspace (рабочую область).
@@ -146,7 +146,7 @@ v8-runner init
 ### Загрузите исходники в ИБ:
 
 ```bash
-v8-runner build
+v8-runner push
 ```
 
 Команда выполняет incremental build (инкрементальную сборку) или full path (полную сборку) по
@@ -155,7 +155,7 @@ v8-runner build
 ### Спланируйте или выгрузите состояние ИБ:
 
 ```bash
-v8-runner infobase configuration export --state working --output dist/main.cf --dry-run
+v8-runner download --state working --output dist/main.cf --dry-run
 v8-runner infobase dump --output dist/base.dt --dry-run
 ```
 
@@ -176,7 +176,7 @@ v8-runner infobase restore --input dist/base.dt --create
 ### Проверьте синтаксис серверных модулей:
 
 ```bash
-v8-runner syntax designer-modules --server
+v8-runner check designer-modules --server
 ```
 
 Команда запускает Designer syntax check (проверку синтаксиса Конфигуратором) для серверного
@@ -188,10 +188,10 @@ v8-runner syntax designer-modules --server
 v8-runner test yaxunit all
 ```
 
-Для уже подготовленной файловой или серверной ИБ можно явно пропустить build:
+Для уже подготовленной файловой или серверной ИБ можно явно пропустить `push`:
 
 ```bash
-v8-runner test --no-build yaxunit all
+v8-runner test --no-push yaxunit all
 ```
 
 Для файловой ИБ этот режим до запуска 1С проверяет наличие `1Cv8.1CD`.
@@ -205,8 +205,8 @@ v8-runner test --no-build yaxunit all
 v8-runner test va
 ```
 
-По умолчанию команда сначала выполняет `build`, затем запускает настроенный профиль Vanessa
-Automation. Для подготовленной ИБ используйте `v8-runner test --no-build va`.
+По умолчанию команда сначала выполняет `push`, затем запускает настроенный профиль Vanessa
+Automation. Для подготовленной ИБ используйте `v8-runner test --no-push va`.
 
 Для отладки и написания тестов Vanessa Automation запустите ее в режиме MCP и, если агенту нужно
 сразу подключаться к endpoint, дождитесь готовности:
@@ -242,18 +242,26 @@ v8-runner mcp serve stdio
 Команда запускает MCP server (сервер Model Context Protocol) поверх `stdio` transport
 (транспорта стандартного ввода-вывода).
 
-Если `config init` не покрывает вашу структуру репозитория, настройте `v8project.yaml` вручную по
+Если `init` не покрывает вашу структуру репозитория, настройте `v8project.yaml` вручную по
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ## Что умеет
 
 | Зона | Команды | Что делает |
 | --- | --- | --- |
-| Project setup (настройка проекта) | `bootstrap`, `config init`, `tools download`, `init`, `extensions`, `build` | Создает проект/config, скачивает инструменты, готовит ИБ, обновляет расширения и загружает исходники |
-| Verification (проверка) | `syntax`, `test` | Запускает syntax checks, YAxUnit и Vanessa Automation |
-| File materialization (материализация файлов) | `dump`, `convert`, `load`, `make`, `artifacts` | Выгружает, конвертирует, загружает и публикует `.cf`, `.cfe`, `.epf`, `.erf` |
-| Direct launch (прямой запуск) | `launch <designer|thin|thick|ordinary>`, `launch mcp [va]` | Запускает 1C clients (клиенты 1С), Designer и MCP/Vanessa сценарии |
+| Project setup (настройка проекта) | `clone`, `init`, `tools download`, `infobase create`, `extensions`, `push` | Создает проект/config, скачивает инструменты, готовит ИБ, обновляет расширения и загружает исходники |
+| Verification (проверка) | `check`, `test` | Запускает syntax checks, YAxUnit и Vanessa Automation |
+| File materialization (материализация файлов) | `pull`, `download`, `convert`, `upload`, `make`, `artifacts` | Выгружает, конвертирует, загружает и публикует `.cf`, `.cfe`, `.epf`, `.erf` |
+| Direct launch (прямой запуск) | `launch <designer\|thin\|thick\|ordinary>`, `launch mcp [va]` | Запускает 1C clients (клиенты 1С), Designer и MCP/Vanessa сценарии |
 | MCP automation (автоматизация через MCP) | `mcp serve stdio`, `mcp serve http` | Открывает 8 MCP tools для агентных workflow |
+
+Команды названы словарём гита. Прежние имена приняты ещё один цикл выпуска и в справке не
+печатаются: `bootstrap` → `clone`, `config init` → `init`, `build` → `push`, `load` → `upload`,
+`dump` → `pull`, `syntax` → `check`; прежний путь `infobase configuration export` тоже
+принимается. То же с ключами: `--full-rebuild` → `--full`, `--discard-uncommitted` → `--force`,
+`--no-build` → `--no-push`, `--mode merge` → `--mode combine`. Ответ приходит под новым именем.
+Создание базы синонима не имеет: имя `init` занято подготовкой проекта, база создаётся командой
+`infobase create`.
 
 ## Для кого
 

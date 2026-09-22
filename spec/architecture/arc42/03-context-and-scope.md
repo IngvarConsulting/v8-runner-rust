@@ -26,7 +26,7 @@ flowchart LR
 - вызовы MCP tool по stdio и streamable HTTP, включая shared command envelope в `structured_content`;
 - YAML-конфигурация;
 - доступ к файловой системе для исходников проекта и `workPath`;
-- target paths для `dump`, `load` и `artifacts`;
+- target paths для `pull`, `upload` и `artifacts`;
 - запуск дочерних процессов для локальных утилит 1С;
 - файловая или серверная строка подключения к информационной базе 1С.
 
@@ -36,7 +36,7 @@ flowchart LR
 
 - нормализация запросов;
 - валидация конфигурации;
-- оркестрация сценариев `build` / `test` / `dump` / `syntax` / `launch` / `init` / `extensions`;
+- оркестрация сценариев `push` / `test` / `pull` / `check` / `launch` / `infobase create` / `extensions`;
 - парсинг результатов тестов и синтаксических проверок;
 - обработка транспортов и сессий MCP;
 - анализ изменений и управление временными артефактами;

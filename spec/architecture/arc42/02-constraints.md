@@ -7,14 +7,14 @@
 - Компоненты платформы 1С должны разрешаться через общий locator/facade по `tools.platform.version` или версии-маске, а не через ad hoc поиск в use case.
 - `v8project.yaml`, загруженный в `AppConfig` и прошедший `config::validate`, является главным конфигурационным контрактом.
 - Публичный ключ типа source-set — `source-set[].type`; поддержанные значения: `CONFIGURATION`, `EXTENSION`, `EXTERNAL_DATA_PROCESSORS`, `EXTERNAL_REPORTS`. Legacy `purpose` не является публичным контрактом.
-- Для реализованных сценариев `builder=IBCMD` уже поддерживает file и server ИБ; server path требует полный `infobase.dbms.kind/server/name`, а оставшиеся ограничения считаются gaps, а не целевой нормой.
+- Для реализованных сценариев исполнитель `ibcmd` уже поддерживает file и server ИБ; server path требует полный `infobase.dbms.kind/server/name`, а оставшиеся ограничения считаются gaps, а не целевой нормой.
 - Все инструменты должны проектироваться с целевой поддержкой серверных информационных баз, если соответствующая операция платформы 1С принципиально поддерживает серверное подключение.
 - MCP реализован на `rmcp`, `tokio` и `axum`.
 - Состояние отслеживания изменений хранится в `workPath/hash-storages/*.redb`.
 - `workPath` является owned runtime root; публичные CLI/MCP команды, которые читают или пишут runtime state под ним, должны владеть workspace lock.
 - MCP execution admission и HTTP session capacity являются разными лимитами и не заменяют workspace lock.
-- Публичная поверхность MCP намеренно уже, чем CLI: например, `init` и `extensions` не публикуются как MCP tools.
-- Full replacement `dump` и `artifacts` должны публиковаться через staging/backup рядом с target; incremental/partial dump остаются non-atomic update modes.
+- Публичная поверхность MCP намеренно уже, чем CLI: например, `infobase create` и `extensions` не публикуются как MCP tools.
+- Full replacement `pull` и `artifacts` должны публиковаться через staging/backup рядом с target; incremental/partial `pull` остаются non-atomic update modes.
 - Единая политика прерывания для CLI и MCP является целевым контрактом: у команды нет срока, её досрочно заканчивает только оператор (`DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE`). Предел бывает у шага и только если шаг объявил его сам.
 
 ### 2.2 Организационные и продуктовые ограничения

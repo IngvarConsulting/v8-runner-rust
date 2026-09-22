@@ -795,7 +795,7 @@ fn tools_download_artifacts_requires_designer_builder() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(combined.contains("needs the Designer as the build provider"));
+    assert!(combined.contains("needs the Designer as the push provider"));
 }
 
 #[test]

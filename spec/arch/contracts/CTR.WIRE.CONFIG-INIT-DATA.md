@@ -4,14 +4,14 @@ status: active
 governs: product
 version: 2
 decision: DEC.2026-09-14.BUILDER-KEY-IS-REMOVED
-artifact: docs/schemas/command-data/config-init.schema.json
+artifact: docs/schemas/command-data/init.schema.json
 producer: src/domain/config_init.rs
 consumers: [cli]
 check: [src/command_data.rs::generated_command_data_schemas_are_current, tests/cli_config_init.rs::config_init_uses_json_envelope_and_output_override]
 scope: [wire, cli]
 ---
 
-# `data` команды `config init`
+# `data` команды `init`
 
 Форма отвечает на один вопрос: что записано в только что созданный конфиг. Найденные
 наборы исходников перечислены тем же составом полей, каким они лягут в `v8project.yaml`,

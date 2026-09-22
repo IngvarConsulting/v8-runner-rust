@@ -4,7 +4,7 @@ use clap::{Args, Parser, Subcommand};
 #[command(
     name = "v8-runner",
     version,
-    about = "Run 1C:Enterprise build, test, dump, convert, and launch workflows"
+    about = "Run 1C:Enterprise push, test, pull, convert, and launch workflows"
 )]
 pub struct Cli {
     /// Path to an existing YAML config file. Defaults to ./v8project.yaml
@@ -56,23 +56,35 @@ pub enum Command {
     /// Print application version
     Version,
     /// Create a v8-runner project from an existing infobase
+    #[command(name = "clone", alias = "bootstrap")]
     Bootstrap(BootstrapArgs),
-    /// Generate project configuration and autodetect source-sets
+    /// Prepare the project: generate configuration and autodetect source-sets
+    #[command(name = "init")]
+    ConfigInit(ConfigInitArgs),
+    /// Previous spelling of `init`; hidden for one release cycle
+    #[command(hide = true)]
     Config(ConfigArgs),
+    /// Creating the infobase; parsed as `infobase create` and normalised here.
+    #[command(skip)]
+    Init(InitArgs),
     /// Download YaXUnit, Vanessa Automation, and client MCP tool assets
     Tools(ToolsArgs),
-    /// Initialize the infobase and EDT workspace
-    Init(InitArgs),
     /// Update extension security properties or manage installed extensions
     Extensions(ExtensionsArgs),
-    /// Build configured source-sets into the infobase
+    /// Send configured source-sets to the infobase
+    #[command(name = "push", alias = "build")]
     Build(BuildArgs),
-    /// Apply built release artifacts to the infobase
+    /// Upload a built package (.cf/.cfe) into the infobase
+    #[command(name = "upload", alias = "load")]
     Load(LoadArgs),
     /// Run YaXUnit or Vanessa Automation tests, building first by default
     Test(TestArgs),
-    /// Dump infobase state back to project files
+    /// Pull infobase state back into project files
+    #[command(name = "pull", alias = "dump")]
     Dump(DumpArgs),
+    /// Take the configuration out of the infobase as a package
+    #[command(name = "download")]
+    Download(InfobaseConfigurationExportArgs),
     /// Export configuration packages or a full DT snapshot from the configured infobase
     Infobase(InfobaseArgs),
     /// Convert configured source-sets between EDT and Designer file formats
@@ -80,7 +92,8 @@ pub enum Command {
     /// Export release artifacts via Designer batch commands
     #[command(name = "make", visible_alias = "artifacts")]
     Artifacts(ArtifactsArgs),
-    /// Run Designer or EDT syntax validation
+    /// Check the configuration with Designer or EDT
+    #[command(name = "check", alias = "syntax")]
     Syntax(SyntaxArgs),
     /// Launch 1C application
     Launch(LaunchArgs),
@@ -224,8 +237,8 @@ pub struct ConfigInitArgs {
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Command options")]
 pub struct BuildArgs {
-    /// Clear change cache and rebuild everything
-    #[arg(long)]
+    /// Clear change cache and send everything anew
+    #[arg(long = "full", alias = "full-rebuild")]
     pub full_rebuild: bool,
 
     /// Limit build to one source-set from v8project.yaml
@@ -243,11 +256,21 @@ pub struct LoadArgs {
     #[arg(long)]
     pub path: String,
 
-    /// Load mode
-    #[arg(long, default_value = "load", value_parser = ["load", "merge", "update"])]
+    /// Upload mode
+    #[arg(
+        long,
+        default_value = "load",
+        value_parser = clap::builder::PossibleValuesParser::new([
+            clap::builder::PossibleValue::new("load"),
+            clap::builder::PossibleValue::new("combine"),
+            clap::builder::PossibleValue::new("update"),
+            // Прежнее имя режима живёт один цикл выпуска и в справке не печатается.
+            clap::builder::PossibleValue::new("merge").hide(true),
+        ]),
+    )]
     pub mode: String,
 
-    /// Merge settings file used by --mode merge
+    /// Settings file used by --mode combine
     #[arg(long)]
     pub settings: Option<String>,
 
@@ -389,8 +412,8 @@ pub struct TestArgs {
     #[arg(long, global = true)]
     pub full: bool,
 
-    /// Run tests against the configured prepared infobase without building sources first
-    #[arg(long, global = true)]
+    /// Run tests against the configured prepared infobase without sending sources first
+    #[arg(long = "no-push", alias = "no-build", global = true)]
     pub no_build: bool,
 
     /// Client mode used for enterprise launch during test execution
@@ -493,7 +516,7 @@ pub struct DumpArgs {
     pub dry_run: bool,
 
     /// Replace the target directory even when it holds work version control cannot give back
-    #[arg(long)]
+    #[arg(long = "force", alias = "discard-uncommitted")]
     pub discard_uncommitted: bool,
 }
 
@@ -509,6 +532,7 @@ impl InfobaseArgs {
             InfobaseCommand::Configuration(configuration) => match &configuration.command {
                 InfobaseConfigurationCommand::Export(args) => args.dry_run,
             },
+            InfobaseCommand::Create(args) => args.dry_run,
             InfobaseCommand::Dump(args) => args.dry_run,
             InfobaseCommand::Restore(args) => args.dry_run,
         }
@@ -517,7 +541,10 @@ impl InfobaseArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum InfobaseCommand {
-    /// Export working/database configuration state to CF or CFE
+    /// Create the infobase and the EDT workspace declared by the project
+    Create(InitArgs),
+    /// Previous spelling of `download`; hidden for one release cycle
+    #[command(hide = true)]
     Configuration(InfobaseConfigurationArgs),
     /// Export the complete infobase to a DT transfer file (not a backup)
     Dump(InfobaseDumpArgs),
@@ -605,7 +632,7 @@ pub struct ConvertArgs {
     pub output: Option<String>,
 
     /// Replace the target directory even when it holds work version control cannot give back
-    #[arg(long)]
+    #[arg(long = "force", alias = "discard-uncommitted")]
     pub discard_uncommitted: bool,
 }
 
@@ -836,8 +863,8 @@ pub struct DesignerModulesSyntaxArgs {
 mod tests {
     use super::{
         ArtifactsArgs, Cli, Command, ConvertArgs, DirectLaunchOptionsArgs, ExtensionsArgs,
-        InitArgs, LaunchArgs, LoadArgs, McpCommand, McpServeTransport, SyntaxTarget,
-        TestLaunchOptionsArgs, TestRunner, TestScope,
+        InfobaseArgs, InfobaseCommand, InitArgs, LaunchArgs, LoadArgs, McpCommand,
+        McpServeTransport, SyntaxTarget, TestLaunchOptionsArgs, TestRunner, TestScope,
     };
     use clap::Parser;
 
@@ -867,13 +894,41 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Имя `init` перешло к подготовке проекта, а создание базы живёт под
+    /// `infobase create`: это единственное имя словаря без синонима.
     #[test]
-    fn parses_init_command() {
+    fn init_prepares_the_project_and_the_infobase_is_created_by_its_own_command() {
         let cli = Cli::try_parse_from(["v8-runner", "init"]).expect("parse");
+        assert!(matches!(cli.command, Command::ConfigInit(_)));
+
+        let cli = Cli::try_parse_from(["v8-runner", "infobase", "create"]).expect("parse");
         assert!(matches!(
             cli.command,
-            Command::Init(InitArgs { dry_run: false })
+            Command::Infobase(InfobaseArgs {
+                command: InfobaseCommand::Create(InitArgs { dry_run: false }),
+            })
         ));
+    }
+
+    /// Прежние имена принимаются и в справке не печатаются.
+    #[test]
+    fn a_previous_command_name_is_accepted_as_a_hidden_synonym() {
+        for (previous, expected) in [
+            ("build", "push"),
+            ("dump", "pull"),
+            ("load", "upload"),
+            ("syntax", "check"),
+            ("bootstrap", "clone"),
+        ] {
+            let cli = Cli::try_parse_from(["v8-runner", previous, "--help"]);
+            // `--help` прерывает разбор, но имя уже разрешено: ошибка печатает новое имя.
+            let rendered = cli.expect_err("help exits with an error kind").to_string();
+            assert!(rendered.contains(expected), "{previous}: {rendered}");
+            assert!(
+                !rendered.contains(&format!("v8-runner {previous}")),
+                "{rendered}"
+            );
+        }
     }
 
     #[test]
