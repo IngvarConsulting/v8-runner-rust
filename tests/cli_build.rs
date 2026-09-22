@@ -386,6 +386,123 @@ fn setup_edt_extension_project() -> (tempfile::TempDir, PathBuf, PathBuf) {
     (dir, config_path, work_path)
 }
 
+const V8_EXTERNAL_OBJECTS_NATURE: &str = "com._1c.g5.v8.dt.core.V8ExternalObjectsNature";
+
+fn write_edt_external_project(path: &Path, name: &str) {
+    fs::create_dir_all(path.join("DT-INF")).expect("dt-inf");
+    fs::create_dir_all(path.join("src")).expect("src");
+    fs::write(
+        path.join(".project"),
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<projectDescription>\n  <name>{name}</name>\n  <natures>\n    <nature>{V8_EXTERNAL_OBJECTS_NATURE}</nature>\n  </natures>\n</projectDescription>\n"
+        ),
+    )
+    .expect("project");
+    fs::write(
+        path.join("DT-INF").join("PROJECT.PMF"),
+        format!(
+            "Base-Project: BaseProject\nManifest-Version: 1.0\nRuntime-Version: {EDT_RUNTIME_VERSION}\n"
+        ),
+    )
+    .expect("manifest");
+    fs::write(
+        path.join("src").join("root.xml"),
+        format!(
+            "<ExternalDataProcessor><Properties><Name>{name}</Name></Properties></ExternalDataProcessor>\n"
+        ),
+    )
+    .expect("descriptor");
+}
+
+/// Превью сборки EDT не экспортирует внешние артефакты. Экспорт запускает EDT CLI,
+/// пересоздаёт каталог в рабочем каталоге и фиксирует состояние обнаружения изменений —
+/// превью не делает ничего из этого (`INV.CLI.PREVIEW-DISPATCHES-NOTHING`).
+#[test]
+fn a_planned_edt_build_does_not_export_the_external_artifacts() {
+    let dir = temp_workspace();
+    let base_path = dir.path().join("project");
+    let work_path = dir.path().join("work");
+    let config_path = dir.path().join("v8project.yaml");
+    let platform_path = dir.path().join("platform").join("bin").join("1cv8");
+    let edt_cli_path = dir.path().join("edt").join("1cedtcli");
+    let edt_calls_log = dir.path().join("edt-calls.log");
+
+    fs::create_dir_all(base_path.join("configuration")).expect("base");
+    fs::create_dir_all(&work_path).expect("work");
+    write_native_edt_project(
+        &base_path.join("configuration"),
+        "configuration",
+        V8_CONFIGURATION_NATURE,
+        None,
+    );
+    write_edt_external_project(
+        &base_path.join("processors").join("processor-a"),
+        "ProcessorA",
+    );
+    write_build_script(&platform_path, None);
+    write_edt_script(&edt_cli_path, &edt_calls_log);
+
+    fs::write(
+        &config_path,
+        format!(
+            "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\n  - name: processors\n    type: EXTERNAL_DATA_PROCESSORS\n    path: project/processors\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
+            work_path.display(),
+            platform_path.display(),
+            edt_cli_path.display()
+        ),
+    )
+    .expect("config");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "build",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+
+    // Правило проверяется по отсутствию файлов, а не по отсутствию вызова, и проверяется
+    // первым: иначе утечка свалила бы тест на исходе прогона, не дойдя до предмета.
+    assert!(
+        !edt_calls_log.exists(),
+        "превью запустило EDT CLI: {}",
+        fs::read_to_string(&edt_calls_log).unwrap_or_default()
+    );
+    for left in ["designer", "edt-workspace", "hash-storages"] {
+        assert!(
+            !work_path.join(left).exists(),
+            "превью создало `{left}` в рабочем каталоге"
+        );
+    }
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["data"]["provider_dispatched"], false, "{payload}");
+    let step = payload["data"]["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .find(|step| step["source_set"] == "processors")
+        .cloned()
+        .unwrap_or_else(|| panic!("шаг внешнего набора пропал из ответа: {payload}"));
+    let message = step["message"].as_str().expect("message");
+    assert!(message.contains("planned"), "{message}");
+    // Предмет назван: найденная утилита попадает в сообщение.
+    assert!(
+        message.contains(&edt_cli_path.display().to_string()),
+        "{message}"
+    );
+}
+
 #[test]
 fn build_dry_run_plans_every_source_set_without_dispatching_designer() {
     let (dir, config_path, binary_path, work_path) = setup_project();

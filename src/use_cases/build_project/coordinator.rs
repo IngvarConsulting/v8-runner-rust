@@ -603,6 +603,27 @@ pub(super) fn run_build_edt(
                     location.path
                 }
             };
+
+            if args.dry_run {
+                // Экспорт внешних артефактов пересоздаёт каталог в `workPath`, запускает
+                // EDT CLI и фиксирует состояние обнаружения изменений; превью
+                // останавливается до всех трёх. Остановка стоит там же, где у соседней
+                // ветки набора исходников: после поиска утилиты.
+                push_build_step(
+                    &mut steps,
+                    &source_set.name,
+                    BuildMode::EdtExport,
+                    true,
+                    format!(
+                        "would export the external artifacts of '{}' to Designer files via {}; planned, nothing dispatched",
+                        source_set.name,
+                        edt.display()
+                    ),
+                    0,
+                );
+                continue;
+            }
+
             let export_started = Instant::now();
             if let Some(error) = interruption_before_safe_point(
                 context,
