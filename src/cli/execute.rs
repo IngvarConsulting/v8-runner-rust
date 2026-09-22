@@ -189,6 +189,7 @@ pub fn execute_command(
             args,
             presenter,
             clean_before_execution,
+            dry_run,
             cancellation,
         ),
         Command::Launch(args) => execute_launch(
@@ -2216,18 +2217,18 @@ fn execute_syntax(
     args: &SyntaxArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
     let context = cli_context(config, CommandName::Syntax, cancellation);
-    let request = map_syntax_request(config, args)
+    let request = map_syntax_request(config, args, dry_run)
         .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Syntax, error))?;
     with_cli_workspace_lock(
         config,
         presenter,
         CommandName::Syntax,
         clean_before_execution,
-        // превью у синтаксического контроля нет.
-        false,
+        dry_run,
         || match check_syntax::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -2805,6 +2806,7 @@ fn map_artifacts_request_with_config(
 fn map_syntax_request(
     config: &AppConfig,
     args: &SyntaxArgs,
+    dry_run: bool,
 ) -> Result<SyntaxRequest, UseCaseError> {
     if let Some(message) = args.keys_next_to_a_previous_name() {
         return Err(UseCaseError::new(UseCaseErrorKind::Validation, message));
@@ -2850,7 +2852,7 @@ fn map_syntax_request(
             SyntaxTargetRequest::DesignerConfig(request)
         }
     };
-    Ok(SyntaxRequest { target })
+    Ok(SyntaxRequest { target, dry_run })
 }
 
 fn map_designer_config_request(
@@ -3961,12 +3963,20 @@ fn render_convert_scope(scope: ConvertScope, source_set: Option<&str>) -> String
 }
 
 fn render_syntax_text(result: &SyntaxCheckResult, presenter: &Presenter) {
-    let succeeded = matches!(result.status, SyntaxCheckStatus::Clean);
+    // Превью — исход успешный: проверка не выполнялась, значит и приговора нет.
+    let succeeded = matches!(
+        result.status,
+        SyntaxCheckStatus::Clean | SyntaxCheckStatus::Planned
+    );
     // «Найдены замечания» — не стандартный исход, у него своя подпись. У остальных
     // слово выбирает presenter. Непрочитанный журнал больше не остаётся одним
     // предупреждением среди подробностей: он делает вердикт неизвестным, то есть
     // `tool_failed`, и подпись следует за знаком сама.
-    let subject = format!("Syntax check {}", result.check_name);
+    let subject = if result.provider_dispatched {
+        format!("Syntax check {}", result.check_name)
+    } else {
+        format!("Syntax check {} preview", result.check_name)
+    };
     let issues_label = matches!(result.status, SyntaxCheckStatus::IssuesFound)
         .then(|| format!("{subject} found issues"));
     let mut details = vec![format!(
@@ -3978,6 +3988,17 @@ fn render_syntax_text(result: &SyntaxCheckResult, presenter: &Presenter) {
         result.summary.info,
         result.duration_ms
     )];
+
+    append_if_present(
+        &mut details,
+        result
+            .message
+            .as_deref()
+            .map(|message| bracketed_detail("preview", message)),
+    );
+    if !result.provider_dispatched {
+        details.push("provider dispatched: false".to_owned());
+    }
 
     if !succeeded {
         for issue in &result.issues {
@@ -4025,6 +4046,7 @@ fn render_syntax_status(status: SyntaxCheckStatus) -> &'static str {
         SyntaxCheckStatus::Clean => "clean",
         SyntaxCheckStatus::IssuesFound => "issues_found",
         SyntaxCheckStatus::ToolFailed => "tool_failed",
+        SyntaxCheckStatus::Planned => "planned",
     }
 }
 
@@ -4402,6 +4424,7 @@ mod tests {
                 projects: vec!["main".to_owned()],
                 target: None,
             },
+            false,
         )
         .expect("request");
 
@@ -4436,6 +4459,7 @@ mod tests {
                     all_extensions: false,
                 })),
             },
+            false,
         )
         .expect("request");
 

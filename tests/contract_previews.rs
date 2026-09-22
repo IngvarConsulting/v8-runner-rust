@@ -80,6 +80,7 @@ fn previews(artifact: &str) -> Vec<Vec<&str>> {
         vec!["make", "--output", artifact, "--dry-run"],
         vec!["load", "--path", artifact, "--dry-run"],
         vec!["launch", "designer", "--dry-run"],
+        vec!["check", "--dry-run"],
     ]
 }
 

@@ -2,7 +2,7 @@
 id: CTR.WIRE.SYNTAX-DATA
 status: active
 governs: product
-version: 4
+version: 5
 decision: DEC.2026-09-14.RECEIPT-EXPLAINS-PROVIDER-CHOICE
 artifact: docs/schemas/command-data/check.schema.json
 producer: src/domain/syntax.rs
@@ -31,6 +31,21 @@ scope: [wire, cli, mcp]
 отвечают инструменты MCP `check_syntax_designer_config`, `check_syntax_designer_modules`
 и `check_syntax_edt`.
 
+Четвёртое значение `status` — `planned`: так отвечает превью. Остальные три — приговоры
+конфигурации, а превью конфигурацию не смотрело, поэтому `clean` из него был бы
+приговором выдуманным. `exit_code` при `planned` равен `-1`: кода выхода не наблюдалось,
+потому что платформа не запускалась. Поле остаётся обязательным и числовым — вызывающий,
+читавший его раньше, читает его и теперь. `platform_log_path` превью не называет: каталог
+журналов платформы не создаётся, и файла не будет. Через MCP `planned` не приходит:
+превью в опубликованной поверхности сервера не предлагается.
+
+`provider_dispatched` отделяет запланированное от выполненного: `false` ровно тогда, когда
+прогон остановился на превью. Ветка EDT квитанции `provider` не несёт ни в превью, ни в
+боевом прогоне — выбирать там не из чего, EDT CLI ищется напрямую.
+
+Необязательное поле `message` называет предмет словами: превью говорит им, что было бы
+выполнено — команду платформы с режимами и найденную утилиту.
+
 Поле `check_name` называет, чем платформа выполнила проверку, и набор его значений
 закрыт: `designer-config` или `edt`. Прежнее `designer-modules` исчезло вместе с отдельным
 путём `/CheckModules` — режимы проверки модулей выполняет `/CheckConfig`, и вызов прежнего
@@ -43,6 +58,7 @@ scope: [wire, cli, mcp]
 ```json
 {
   "provider": {"selected": "designer", "origin": {"kind": "default"}},
+  "provider_dispatched": true,
   "status": "issues_found",
   "exit_code": 1,
   "check_name": "designer-config",
@@ -63,5 +79,25 @@ scope: [wire, cli, mcp]
   },
   "duration_ms": 321,
   "platform_log_path": "build/logs/platform/syntax_designer-config_0.log"
+}
+```
+
+Превью той же команды:
+
+```json
+{
+  "provider": {"selected": "designer", "origin": {"kind": "default"}},
+  "provider_dispatched": false,
+  "status": "planned",
+  "exit_code": -1,
+  "check_name": "designer-config",
+  "issues": [],
+  "summary": {
+    "errors": 0,
+    "warnings": 0,
+    "info": 0
+  },
+  "duration_ms": 3,
+  "message": "would run `/CheckConfig -ThinClient -Server` via /opt/1cv8/x86_64/8.3.27.1000/1cv8; configuration not checked"
 }
 ```

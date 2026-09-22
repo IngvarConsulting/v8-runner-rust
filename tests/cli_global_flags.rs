@@ -47,10 +47,6 @@ const WITHOUT_PREVIEW: &[(&[&str], &str)] = &[
         "test yaxunit module",
     ),
     (&["test", "va"], "test va"),
-    (&["check"], "check"),
-    (&["check", "designer-config"], "check designer-config"),
-    (&["check", "designer-modules"], "check designer-modules"),
-    (&["check", "edt"], "check edt"),
     (&["mcp", "serve", "stdio"], "mcp serve stdio"),
     (&["mcp", "serve", "http"], "mcp serve http"),
 ];

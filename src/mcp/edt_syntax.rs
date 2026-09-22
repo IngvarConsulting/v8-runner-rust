@@ -276,6 +276,8 @@ pub async fn execute(
     let log_read_warning = (!log_warnings.is_empty()).then_some(log_warnings.join("\n"));
     let result = SyntaxCheckResult {
         provider: None,
+        provider_dispatched: true,
+        message: None,
         status,
         exit_code,
         check_name: CheckName::Edt,
@@ -288,7 +290,8 @@ pub async fn execute(
     };
 
     match result.status {
-        SyntaxCheckStatus::Clean => Ok(Ok(result)),
+        // Превью сервер не предлагает, поэтому `Planned` сюда не приходит.
+        SyntaxCheckStatus::Clean | SyntaxCheckStatus::Planned => Ok(Ok(result)),
         SyntaxCheckStatus::IssuesFound | SyntaxCheckStatus::ToolFailed => {
             Ok(Err(SyntaxExecutionFailure::with_payload(
                 AppError::Runtime(format!(
@@ -378,7 +381,8 @@ fn actor_exit_code(status: SyntaxCheckStatus) -> i32 {
     match status {
         SyntaxCheckStatus::Clean => 0,
         SyntaxCheckStatus::IssuesFound => 101,
-        SyntaxCheckStatus::ToolFailed => -1,
+        // `-1` — принятый здесь знак «кода выхода не наблюдалось».
+        SyntaxCheckStatus::ToolFailed | SyntaxCheckStatus::Planned => -1,
     }
 }
 
@@ -406,6 +410,8 @@ fn failed_result(
 ) -> SyntaxCheckResult {
     SyntaxCheckResult {
         provider: None,
+        provider_dispatched: true,
+        message: None,
         status,
         exit_code,
         check_name,

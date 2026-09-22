@@ -101,6 +101,7 @@ fn every_previewable_command_answers_in_the_form_declared_for_it() {
             "--dry-run",
         ],
         vec!["syntax", "designer-config", "--thin-client"],
+        vec!["check", "--dry-run"],
         vec![
             "infobase",
             "configuration",

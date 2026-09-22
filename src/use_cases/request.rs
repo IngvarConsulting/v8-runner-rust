@@ -231,6 +231,8 @@ pub const MODULES_WITHOUT_MODES_ERROR: &str =
 pub struct SyntaxRequest {
     /// Selected syntax target and validation flags.
     pub target: SyntaxTargetRequest,
+    /// Preview: locate the utility and name the plan, dispatch nothing.
+    pub dry_run: bool,
 }
 
 /// Transport-neutral syntax target.

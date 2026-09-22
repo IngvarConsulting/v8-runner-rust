@@ -254,12 +254,21 @@
       "type": "object"
     },
     "SyntaxCheckStatus": {
-      "enum": [
-        "clean",
-        "issues_found",
-        "tool_failed"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "clean",
+            "issues_found",
+            "tool_failed"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "planned",
+          "description": "Превью: проверка запланирована, но не выполнялась. Остальные три значения —\nприговоры конфигурации, и `clean` из превью был бы приговором выдуманным:\nплатформа конфигурацию не смотрела. Предел знания называется своим значением.",
+          "type": "string"
+        }
+      ]
     },
     "SyntaxIssueSummary": {
       "additionalProperties": false,
@@ -316,6 +325,13 @@
         "null"
       ]
     },
+    "message": {
+      "description": "Фраза о предмете. Превью называет ею, что было бы выполнено.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "platform_log_path": {
       "type": [
         "string",
@@ -333,6 +349,10 @@
       ],
       "description": "Квитанция о выборе исполнителя; `None`, пока выбор не начинался."
     },
+    "provider_dispatched": {
+      "description": "`false`, когда прогон остановился на превью и платформу не запускал.",
+      "type": "boolean"
+    },
     "status": {
       "$ref": "#/$defs/SyntaxCheckStatus"
     },
@@ -347,6 +367,7 @@
     }
   },
   "required": [
+    "provider_dispatched",
     "status",
     "exit_code",
     "check_name",
