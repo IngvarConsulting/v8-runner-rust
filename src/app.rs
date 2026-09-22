@@ -1,6 +1,6 @@
 use std::io::IsTerminal;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use serde::Serialize;
 use tracing::{debug, error};
 
@@ -9,6 +9,7 @@ use crate::cli::args::{
     ToolsCommand,
 };
 use crate::cli::execute;
+use crate::cli::global_flags;
 use crate::cli::output::{failure_envelope, print_command_error};
 use crate::command_envelope::Envelope;
 use crate::config::loader::{
@@ -18,7 +19,9 @@ use crate::config::loader::{
 use crate::output::presenter::Presenter;
 use crate::output::text::{TimelineItem, TimelineStatus};
 use crate::support::error::AppError;
-use crate::use_cases::config_init::{ConfigFormatRequest, ConfigInitRequest};
+use crate::use_cases::config_init::{
+    ConfigFormatRequest, ConfigInitRequest, DeclaredOrigin, OriginKey,
+};
 use crate::use_cases::context::CommandName;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
@@ -42,10 +45,32 @@ fn canonical_command(command: Command) -> Command {
         // Создание базы — свой сценарий, а не выгрузка: путь `infobase create` сводится
         // к внутреннему варианту, и ниже по течению команда остаётся прежней.
         Command::Infobase(InfobaseArgs {
-            command: InfobaseCommand::Create(args),
-        }) => Command::Init(args),
+            command: InfobaseCommand::Create,
+        }) => Command::Init,
         command => command,
     }
+}
+
+/// Отказ по глобальному ключу случается до того, как команда выбрала себе вывод. У
+/// `mcp serve` stdout занят протоколом, поэтому его отказы уходят голой строкой в stderr —
+/// как и остальные отказы запуска сервера; у прочих команд отказ рисует конверт.
+fn render_startup_refusal(
+    leaf: &str,
+    command: &Command,
+    no_color: bool,
+    output_format: &str,
+    error: UseCaseError,
+) -> i32 {
+    if leaf.starts_with("mcp ") {
+        eprintln!("{error}");
+        return error.exit_code();
+    }
+    let presenter = Presenter::new(output_format.to_owned(), color_mode(no_color));
+    let message = error.to_string();
+    // Конверт называет команду тем же именем, что и остальные её ответы; лист назван внутри
+    // сообщения, где он и нужен читателю.
+    print_command_error(&presenter, command_name(command), &error, &message);
+    error.exit_code()
 }
 
 const BOOTSTRAP_COMMAND: &str = "clone";
@@ -53,9 +78,30 @@ const CONFIG_INIT_COMMAND: &str = "init";
 const VERSION_COMMAND: &str = "version";
 
 pub fn run() -> i32 {
-    let mut cli = Cli::parse();
+    let mut matches = Cli::command().get_matches();
+    // Путь листа читается до нормализации имён: `clap` уже свёл синонимы к каноническому
+    // имени, а `canonical_command` ниже схлопывает разные листья в один вариант.
+    let leaf = global_flags::leaf_command_path(&matches);
+    let mut cli = match Cli::from_arg_matches_mut(&mut matches) {
+        Ok(cli) => cli,
+        Err(error) => error.exit(),
+    };
     cli.command = canonical_command(cli.command);
     let output_format = cli_output_format(cli.json_message);
+    if let Some(error) =
+        global_flags::refusal(&leaf, cli.dry_run, cli.infobase.as_deref()).or_else(|| {
+            // Очистка рабочего каталога и превью об одном каталоге спорят одинаково у всякой
+            // команды, поэтому спрашивается это один раз и до того, как каталог тронут.
+            (cli.dry_run && cli.clean_before_execution).then(|| {
+                UseCaseError::new(
+                    UseCaseErrorKind::Validation,
+                    "--clean-before-execution cannot be combined with --dry-run because preview must not modify workPath",
+                )
+            })
+        })
+    {
+        return render_startup_refusal(&leaf, &cli.command, cli.no_color, output_format, error);
+    }
 
     if let Command::Version = &cli.command {
         return run_version_command(output_format);
@@ -69,7 +115,7 @@ pub fn run() -> i32 {
     let mut presenter = Presenter::new(output_format.to_owned(), color_mode);
 
     if let Command::Config(args) = &cli.command {
-        return run_config_command(args, &presenter);
+        return run_config_command(args, &cli, &presenter);
     }
 
     if let Command::Bootstrap(args) = &cli.command {
@@ -78,13 +124,8 @@ pub fn run() -> i32 {
 
     if let Command::Infobase(args) = &cli.command {
         if let Err(error) = execute::validate_infobase_request(args) {
-            let error = execute::render_invalid_infobase_request(args, &presenter, error);
-            return error.exit_code();
-        }
-        if args.dry_run() && cli.clean_before_execution {
-            let message = "--clean-before-execution cannot be combined with infobase --dry-run because preview must not modify workPath";
-            let error = UseCaseError::new(UseCaseErrorKind::Validation, message);
-            print_command_error(&presenter, command_name(&cli.command), &error, message);
+            let error =
+                execute::render_invalid_infobase_request(args, &presenter, error, cli.dry_run);
             return error.exit_code();
         }
     }
@@ -117,6 +158,7 @@ pub fn run() -> i32 {
                     error,
                     "provider selection was not attempted because configuration loading failed",
                     crate::domain::infobase_export::ExportPhase::ConfigurationLoad,
+                    cli.dry_run,
                 );
                 return error.exit_code();
             }
@@ -126,15 +168,15 @@ pub fn run() -> i32 {
     };
     let mut prepared_infobase = match &cli.command {
         Command::Infobase(args) => {
-            match execute::prepare_infobase_cli_command(&config, args, &presenter) {
+            match execute::prepare_infobase_cli_command(&config, args, &presenter, cli.dry_run) {
                 Ok(prepared) => Some(prepared),
                 Err(error) => return error.exit_code(),
             }
         }
         _ => None,
     };
-    if let Command::Infobase(args) = &cli.command {
-        if args.dry_run() {
+    if let Command::Infobase(_) = &cli.command {
+        if cli.dry_run {
             return match execute::preview_prepared_infobase_command(
                 &config,
                 prepared_infobase
@@ -159,13 +201,14 @@ pub fn run() -> i32 {
 
     // Like infobase previews, security-update previews must finish before JSON
     // action logging creates workPath. Keep the normal command/error dispatcher.
-    if matches!(&cli.command, Command::Extensions(args) if args.command.is_none() && args.dry_run) {
+    if matches!(&cli.command, Command::Extensions(args) if args.command.is_none() && cli.dry_run) {
         return match execute::execute_command(
             &config,
             &cli.command,
             Some(primary_config_path),
             &presenter,
             cli.clean_before_execution,
+            cli.dry_run,
         ) {
             Ok(()) => 0,
             Err(error) => error.exit_code(),
@@ -217,7 +260,7 @@ pub fn run() -> i32 {
         Command::ConfigInit(_) | Command::Download(_) => {
             unreachable!("new command names are normalised in canonical_command")
         }
-        Command::Init(_)
+        Command::Init
         | Command::Config(_)
         | Command::Tools(_)
         | Command::Extensions(_)
@@ -235,6 +278,7 @@ pub fn run() -> i32 {
             Some(primary_config_path),
             &presenter,
             cli.clean_before_execution,
+            cli.dry_run,
         ),
         Command::Infobase(_) => execute::execute_prepared_infobase_command(
             &config,
@@ -285,7 +329,7 @@ fn load_cli_config(
         load_config_for_infobase_export(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Test(args) if args.no_build) {
         load_config_for_prepared_test(config_path, workdir, &selector)
-    } else if matches!(&cli.command, Command::Extensions(args) if args.command.is_none() && args.dry_run)
+    } else if matches!(&cli.command, Command::Extensions(args) if args.command.is_none() && cli.dry_run)
     {
         load_config_for_preview(config_path, workdir, &selector)
     } else {
@@ -297,7 +341,10 @@ fn command_name(command: &Command) -> &'static str {
     match command {
         Command::Version => VERSION_COMMAND,
         Command::Bootstrap(_) => BOOTSTRAP_COMMAND,
-        Command::Config(_) => "config",
+        Command::Config(_) | Command::ConfigInit(_) => CONFIG_INIT_COMMAND,
+        // Сервер отвечает голой строкой в stderr, имени конверта ему не нужно; здесь оно
+        // есть, чтобы имя было у всякой команды.
+        Command::Mcp(_) => "mcp serve",
         _ => execute::command_name(command).as_str(),
     }
 }
@@ -327,9 +374,13 @@ fn run_version_command(output_format: &str) -> i32 {
     0
 }
 
-fn run_config_command(args: &crate::cli::args::ConfigArgs, presenter: &Presenter) -> i32 {
+fn run_config_command(
+    args: &crate::cli::args::ConfigArgs,
+    cli: &Cli,
+    presenter: &Presenter,
+) -> i32 {
     match &args.command {
-        ConfigCommand::Init(init_args) => run_config_init(init_args, presenter),
+        ConfigCommand::Init(init_args) => run_config_init(init_args, cli, presenter),
     }
 }
 
@@ -435,7 +486,7 @@ fn resolve_bootstrap_project_dir(
     }
 }
 
-fn run_config_init(args: &ConfigInitArgs, presenter: &Presenter) -> i32 {
+fn run_config_init(args: &ConfigInitArgs, cli: &Cli, presenter: &Presenter) -> i32 {
     if config_flag_was_explicitly_set() {
         let message =
             "global --config flag is not supported for `init`; use `init --output <FILE>` to choose where the generated config is written";
@@ -455,11 +506,42 @@ fn run_config_init(args: &ConfigInitArgs, presenter: &Presenter) -> i32 {
     };
     let output_path = args.output.as_deref().unwrap_or("v8project.yaml");
 
+    // `init` объявляет базу, а не выбирает её: адрес приходит либо своим ключом команды,
+    // либо глобальным `--infobase` — сайт называет `init --infobase <строка>` рецептом
+    // объявления `origin`. Два ключа об одном адресе — отказ, а не тихий выбор одного.
+    let declared_by_flag =
+        match crate::config::model::InfobaseSelector::from_flag(cli.infobase.as_deref()) {
+            crate::config::model::InfobaseSelector::Connection(connection) => Some(connection),
+            _ => None,
+        };
+    let own_key = args
+        .connection
+        .clone()
+        .filter(|connection| !connection.trim().is_empty());
+    let connection = match (own_key, declared_by_flag) {
+        (Some(_), Some(_)) => {
+            let message =
+                "--connection and --infobase name the same address for `init`; pass one of them";
+            let error = UseCaseError::new(UseCaseErrorKind::Validation, message);
+            print_command_error(presenter, CONFIG_INIT_COMMAND, &error, message);
+            return error.exit_code();
+        }
+        (Some(connection), None) => Some(DeclaredOrigin {
+            key: OriginKey::Connection,
+            connection,
+        }),
+        (None, Some(connection)) => Some(DeclaredOrigin {
+            key: OriginKey::Infobase,
+            connection,
+        }),
+        (None, None) => None,
+    };
+
     let request = ConfigInitRequest {
         project_dir,
         output_path: output_path.into(),
         force: args.force,
-        connection: args.connection.clone(),
+        connection,
         format: map_config_format(&args.format),
     };
 

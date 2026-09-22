@@ -57,9 +57,11 @@ CLI help, доверяйте текущему коду и затем синхр�
 
 ## Превью у глаголов, работающих с платформой
 
-Одиннадцать глаголов принимают `--dry-run`: `download`, `infobase dump`,
-`infobase restore`, `launch`, `convert`, `infobase create`, `push`, `upload`, `pull`,
-`extensions` и `make`/`artifacts`.
+`--dry-run` — глобальный ключ: он значит одно и то же перед командой и после неё.
+Исполняют его `push`, `upload`, `pull`, `download`, `make`/`artifacts`, `convert`,
+`launch`, `publish`, `extensions` со всеми подкомандами и `infobase create|dump|restore`.
+У `version`, `clone`, `init`, `tools download`, `test`, `check` и `mcp serve` превью нет:
+ключ там отвергается с названной причиной, а не исполняется молча.
 
 **Квитанция об исполнителе одна у всех.** Каждая операция, у которой есть строка в
 матрице провайдеров, кладёт в ответ `provider`: `selected` — кто выбран, `origin` —
@@ -123,6 +125,8 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `--clean-before-execution` | Очистить лог-файлы перед запуском |
 | `--no-color` | Отключить ANSI-цвета |
 | `--workdir <WORKDIR>` | Переопределить `workPath` из конфига |
+| `--infobase <NAME\|CONNECTION>` | База: имя из карты `infobases` местного слоя или строка соединения целиком; без ключа берётся `origin`. У `init` этот ключ базу объявляет, а не выбирает |
+| `--dry-run` | Превью: показать план, ничего не запуская. Команда без превью ключ отвергает |
 
 Если рядом с primary config лежит `v8project.local.yaml`, он применяется автоматически до CLI
 overrides. Сам local overlay нельзя передавать как `--config`.

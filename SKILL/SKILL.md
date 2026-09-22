@@ -136,6 +136,9 @@ v8-runner infobase create
   recoverable from the index. Where git cannot answer — no git, outside a worktree, a git error, a
   directory git could not read — the command proceeds exactly as it did before this check existed,
   and the guard claims no protection there.
+- `--dry-run` is a global key: it means the same before and after the command. Commands with no
+  preview — `version`, `clone`, `init`, `tools download`, `test`, `check`, `mcp serve` — refuse it
+  with a named reason instead of running.
 - Before any command that starts the platform or touches the infobase, append `--dry-run` to see
   what it would do: `infobase create`, `push`, `upload`, `pull`, `convert`, `artifacts`, `launch`,
   `infobase restore`, `download` and `infobase dump` accept it. A preview locates the platform first,
@@ -155,8 +158,8 @@ v8-runner infobase create
   infobase, not the workspace — bare `v8-runner extensions` still means "update the security
   properties of the configured extension source-sets". The family is IBCMD-only because Designer
   cannot report installed extensions, and the platform does not report a name prefix on read.
-  Every subcommand, reads included, accepts `--dry-run`: reading the composition starts the
-  platform, authenticates and leaves a journal trace, so it is an action. The preview names the
+  Every subcommand of this family, reads included, accepts `--dry-run`: reading the composition
+  starts the platform, authenticates and leaves a journal trace, so it is an action. The preview names the
   target infobase, the account and the utility, and never echoes the connection string.
 - Need a 1C UI session: use `v8-runner launch designer`, `launch thin`, `launch thick`, or `launch ordinary`.
 - Need the thin client against a published base: `launch thin --via web` opens `infobase.web.url` as a ws connection. A standalone-server target takes that path by default — its direct gate address, when declared, is not used by the runner yet — while `launch web` still opens the same address in a browser. `--via` is accepted only where the client is thin.
