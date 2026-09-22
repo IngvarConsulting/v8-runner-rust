@@ -81,6 +81,10 @@ pub enum Operation {
     Build,
     #[serde(rename = "load")]
     Load,
+    #[serde(rename = "apply")]
+    Apply,
+    #[serde(rename = "reset")]
+    Reset,
     #[serde(rename = "dump")]
     Dump,
     #[serde(rename = "extensions")]
@@ -100,10 +104,12 @@ pub enum Operation {
 }
 
 impl Operation {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 13] = [
         Self::Init,
         Self::Build,
         Self::Load,
+        Self::Apply,
+        Self::Reset,
         Self::Dump,
         Self::Extensions,
         Self::ConfigurationExport,
@@ -120,6 +126,8 @@ impl Operation {
             Self::Init => "init",
             Self::Build => "build",
             Self::Load => "load",
+            Self::Apply => "apply",
+            Self::Reset => "reset",
             Self::Dump => "dump",
             Self::Extensions => "extensions",
             Self::ConfigurationExport => "infobase.configuration.export",
@@ -235,6 +243,7 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
         implemented(Ibcmd, ArgvTested),
         experimental(Agent, LiveVerified),
     ];
+    const TRANSITION: &[Capability] = &[implemented(Designer, ArgvTested)];
     const DESIGNER_ONLY: &[Capability] = &[implemented(Designer, LiveVerified)];
     // Шлюз прогнан раннером на живом `ibsrv` 8.3.27 15.09.2026: build (полная и частичная
     // загрузка), dump (полная и пропуск по поколению), make cf, export cf, extensions.
@@ -273,6 +282,7 @@ pub fn capabilities(operation: Operation, target: TargetKind) -> &'static [Capab
         (Operation::Load | Operation::Syntax, TargetKind::File | TargetKind::Cluster) => {
             DESIGNER_ONLY
         }
+        (Operation::Apply | Operation::Reset, TargetKind::File | TargetKind::Cluster) => TRANSITION,
         (Operation::Make, TargetKind::File | TargetKind::Cluster) => MAKE,
         (Operation::Extensions, TargetKind::File | TargetKind::Cluster) => EXTENSIONS,
         (Operation::ConfigurationExport, TargetKind::File | TargetKind::Cluster) => EXPORT,

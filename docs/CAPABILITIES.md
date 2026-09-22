@@ -34,6 +34,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `infobase dump` | провайдер `designer`; `ibcmd` только по `providers.infobase.dump`; `agent` только по `providers.infobase.dump: agent` | Выгружает полную ИБ в переносимый `.dt`; это не backup; `ibcmd` остаётся experimental до exclusive-access preflight; у `agent` — `infobase-tools dump-ib` в каталог агента и перенос в staging |
 | `convert` | CLI-only repo-aware конвертация текущих `source-set` | Строки в матрице провайдеров не имеет и не требует ИБ |
 | `load` | `format=DESIGNER`, провайдер только `designer` | Загрузка `.cf` / `.cfe` артефактов в ИБ |
+| `apply` / `reset --force` | `format=DESIGNER`, провайдер только `designer`, файловая ИБ или кластер | Обновляет конфигурацию БД либо возвращает рабочую конфигурацию к конфигурации БД; `--extension` выбирает одно расширение |
 | `make` / `artifacts` | `format=DESIGNER`, провайдер `designer`; `agent` только по `providers.make: agent` | Экспорт `.cf` / `.cfe` и публикация `.epf` / `.erf`; у `agent` `.cf`/`.cfe` — `config dump-cfg` в каталог агента, `.epf`/`.erf` — исходники копируются в каталог агента (файловые параметры через ссылку агент не разрешает), сборка `load-external-…-from-files` и обратная выгрузка для сверки вида и имени, как у Конфигуратора |
 | `syntax` | `format=DESIGNER` или `format=EDT` | Designer checks для `DESIGNER`, EDT `validate` для `EDT` |
 | `infobase restore` | провайдер `designer`; `ibcmd` только по `providers.infobase.restore`; `agent` только по `providers.infobase.restore: agent`; у автономного сервера (`infobase.standalone`) строки нет — снимок снимают средствами сервера | Загрузка полной ИБ из DT; обязателен `--create` или `--replace`; у `agent` DT подкладывается в каталог агента жёсткой ссылкой или копией, `infobase-tools restore-ib`, после чего агент сам завершает сеанс и рвёт соединение — это не ошибка |
@@ -57,9 +58,9 @@ CLI help, доверяйте текущему коду и затем синхр�
 
 ## Превью у глаголов, работающих с платформой
 
-Восемь глаголов принимают `--dry-run`: `infobase configuration export`,
+Превью через `--dry-run` принимают: `infobase configuration export`,
 `infobase dump`, `infobase restore`, `launch`, `convert`, `init`, `build`,
-`load`, `dump` и `artifacts`.
+`load`, `apply`, `reset`, `dump` и `artifacts`.
 
 **Квитанция об исполнителе одна у всех.** Каждая операция, у которой есть строка в
 матрице провайдеров, кладёт в ответ `provider`: `selected` — кто выбран, `origin` —
@@ -79,6 +80,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `init` | по шагу `status: planned` с тем, что было бы создано и чем |
 | `build` | по набору исходников планируемый `mode` и причину |
 | `load` | артефакт, режим, расширение; `compatibility_state: not_probed` |
+| `apply` / `reset` | переход и выбранное расширение либо основная конфигурация; `provider_dispatched: false` |
 | `dump` | набор, режим, целевой путь |
 | `artifacts` | вид артефакта и выход, `published: false` |
 
@@ -95,8 +97,8 @@ CLI help, доверяйте текущему коду и затем синхр�
   чистка меняет `workPath`.
 - Превью не создаёт ни целевых каталогов, ни артефактов, ни staging, ни
   EDT-рабочего пространства, ни состояния обнаружения изменений. В журнале
-  действий (`workPath/logs`) строка о вызове остаётся — как у любого запуска;
-  превью не прячется, оно не меняет предмет.
+  действий (`workPath/logs`) прежних команд строка о вызове остаётся.
+  Новые `apply` и `reset` в превью не создают ни `workPath`, ни журнал.
 
 **Названные пределы, а не умолчания:**
 
@@ -478,10 +480,15 @@ v8-runner infobase restore --input <FILE.dt> --create  [--dry-run]
 ### `load`
 
 ```bash
-v8-runner load --path <FILE> [--mode <load|merge>] [--settings <FILE>] [--extension <NAME>] [--dry-run]
+v8-runner load --path <FILE> [--mode <load|merge>] [--settings <FILE>] [--extension <NAME>] [--no-apply] [--dry-run]
 ```
 
 - Поддерживает `.cf` и `.cfe`.
+- По умолчанию после загрузки обновляет конфигурацию БД. `--no-apply` завершает
+  работу после загрузки рабочей конфигурации; квитанция содержит `applied=true`,
+  `update_db_cfg_ran=false`. Отдельный `apply` применяет её к БД.
+- Если загрузка выполнена, а обновление БД завершилось ошибкой, `applied=true`
+  сохраняется: повторять всю загрузку без разбора квитанции нельзя.
 - Работает только для `format=DESIGNER`; исполнитель — только Конфигуратор.
 - `.cfe` требует `--extension`.
 - `--mode merge` требует `--settings <FILE>`.
@@ -501,6 +508,28 @@ v8-runner load --path <FILE> [--mode <load|merge>] [--settings <FILE>] [--extens
   конфигурации поставщика платформа сравнение не выполняет, поэтому состояние
   остаётся `not_probed` и слияние отклоняется. `--mode load` имени не требует.
 - `load --mode update` не поддержан; используйте `load` или `merge`.
+
+### `apply` / `reset`
+
+```bash
+v8-runner apply [--extension <NAME>] [--dry-run]
+v8-runner reset --force [--extension <NAME>] [--dry-run]
+```
+
+- `apply` обновляет конфигурацию БД из рабочей конфигурации, например после
+  `load --no-apply`. `reset` возвращает рабочую конфигурацию к конфигурации БД;
+  это не восстановление DT и не удаление расширения.
+- Без `--extension` цель — основная конфигурация. Для расширения укажите его
+  установленное имя; неизвестное имя не переключает действие на основную.
+- Перед переходом расширения Designer выгружает его во временный CFE:
+  успешный код выхода и свежий непустой файл подтверждают наличие цели. Если
+  подтверждения нет, apply/reset не запускаются. Preview не проверяет наличие
+  расширения; для server connection дополнительные DBMS-реквизиты не нужны.
+- `reset` требует `--force`, поскольку защита поколений в этой совместимой
+  версии не реализована. Для preview reset также передайте `--force`.
+- Исполнитель — Designer, подключения файловое и серверное. Команды CLI-only,
+  не опубликованы отдельными MCP tools. Preview не пишет workPath/журнал,
+  не берёт lock и не запускает платформу.
 
 ### `make` / `artifacts`
 

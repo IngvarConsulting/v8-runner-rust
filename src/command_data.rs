@@ -76,6 +76,8 @@ command_data_forms! {
     "extensions", "extensions" => crate::domain::extensions::ExtensionsResult;
     "extensions", "extensions-inventory" => crate::domain::extensions::ExtensionInventoryResult;
     "build", "build" => crate::domain::build::BuildResult;
+    "apply", "apply" => crate::domain::configuration_transition::ConfigurationTransitionResult;
+    "reset", "reset" => crate::domain::configuration_transition::ConfigurationTransitionResult;
     "load", "load" => crate::cli::execute::LoadJsonData<'static>;
     "test", "test" => crate::command_envelope::TestEnvelopeData;
     "dump", "dump" => crate::domain::dump::DumpResult;

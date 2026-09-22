@@ -1,10 +1,10 @@
 ---
 id: DEC.2026-09-11.PREVIEW-STOPS-BEFORE-THE-PROVIDER-IS-DISPATCHED
-status: active
+status: superseded
 governs: product
 realized: tests/cli_build.rs::build_dry_run_plans_every_source_set_without_dispatching_designer
 supersedes: []
-superseded-by: null
+superseded-by: DEC.2026-09-22.PREVIEW-LOGGING-FOLLOWS-THE-COMMAND-CONTRACT
 establishes: [INV.CLI.LAUNCH-PREVIEW-NAMES-PROGRAM-AND-ARGS, INV.CLI.PREVIEW-DISPATCHES-NOTHING, INV.CLI.PREVIEW-LEAVES-A-LOG-ENTRY, INV.CLI.PREVIEW-RETURNS-AFTER-TOOL-LOOKUP]
 ---
 

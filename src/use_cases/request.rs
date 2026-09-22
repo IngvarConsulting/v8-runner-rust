@@ -37,6 +37,8 @@ pub struct ToolsDownloadRequest {
 /// Transport-neutral request for the `load` use case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadRequest {
+    /// Preserve the loaded working configuration without updating the database.
+    pub no_apply: bool,
     /// Requested mode for artifact application.
     pub mode: LoadMode,
     /// Path to artifact file.

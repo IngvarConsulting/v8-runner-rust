@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import re
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +29,53 @@ def load_release_verifier():
 
 
 class ReleaseGovernanceTest(unittest.TestCase):
+    def test_release_source_ref_is_closed_and_version_bound(self) -> None:
+        verifier = load_release_verifier()
+        for tag in ("v0.11.1", "v0.11.2-pre.1"):
+            self.assertEqual(
+                verifier.release_source_ref(tag, "refs/heads/release/0.11"),
+                "refs/heads/release/0.11",
+            )
+        for tag in ("v0.7.0", "v0.11.0", "v1.0.0"):
+            self.assertEqual(verifier.release_source_ref(tag, "refs/heads/master"),
+                             "refs/heads/master")
+        for tag, ref in (
+            ("v1.0.0", "refs/heads/release/0.11"),
+            ("v0.12.0", "refs/heads/release/0.11"),
+            ("v0.11.1", "refs/heads/codex/work"),
+            ("v0.11.1", "refs/heads/release/0.11-extra"),
+            ("v0.11.1", "refs/tags/v0.11.1"),
+            ("v0.11.1", ""),
+            ("v0.11.01", "refs/heads/release/0.11"),
+        ):
+            with self.subTest(tag=tag, ref=ref), self.assertRaises(SystemExit):
+                verifier.release_source_ref(tag, ref)
+
+    def test_release_identity_binds_selected_branch_tag_checkout_and_workflow(self) -> None:
+        verifier = load_release_verifier()
+        for branch in ("master", "release/0.11"):
+            identities = {"HEAD": "a" * 40, "refs/tags/v0.11.1^{commit}": "a" * 40,
+                          f"refs/remotes/origin/{branch}": "a" * 40}
+            with patch.object(verifier, "git_revision", side_effect=identities.__getitem__):
+                verifier.require_source_identity("v0.11.1", f"refs/heads/{branch}", "a" * 40)
+                for key in identities:
+                    identities[key] = "b" * 40
+                    with self.subTest(branch=branch, mismatched=key), self.assertRaises(SystemExit):
+                        verifier.require_source_identity("v0.11.1", f"refs/heads/{branch}", "a" * 40)
+                    identities[key] = "a" * 40
+                with self.assertRaises(SystemExit):
+                    verifier.require_source_identity("v0.11.1", f"refs/heads/{branch}", "")
+                with self.assertRaises(SystemExit):
+                    verifier.require_source_identity("v0.11.1", f"refs/heads/{branch}", "b" * 40)
+
+    def test_maintenance_workflow_retains_source_audit_and_ci(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn("github.ref == 'refs/heads/release/0.11'", workflow)
+        self.assertEqual(workflow.count('--source-ref "${release_source_ref}"'), 2)
+        self.assertEqual(workflow.count('--source-ref-only'), 3)
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("      - release/0.11", ci.split("  pull_request:")[0])
+
     def test_release_is_verified_and_self_describing(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         self.assertIn("preflight:", workflow)
@@ -111,8 +159,8 @@ class ReleaseGovernanceTest(unittest.TestCase):
         )
         self.assertIn('toolchain: "1.95.0"', workflow)
         self.assertIn("MACOSX_DEPLOYMENT_TARGET", workflow)
-        self.assertIn("refs/remotes/origin/master", verifier)
-        self.assertIn("refs/tags/{args.tag}^{{commit}}", verifier)
+        self.assertIn("refs/remotes/origin/{branch}", verifier)
+        self.assertIn("refs/tags/{tag}^{{commit}}", verifier)
         self.assertIn("GITHUB_SHA", verifier)
         self.assertIn("MIN_CONSOLIDATED_MANIFEST_VERSION", verifier)
         self.assertIn("consolidated release assets require", verifier)

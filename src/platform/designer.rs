@@ -108,6 +108,20 @@ impl<'a> DesignerDsl<'a> {
         self.run(&args)
     }
 
+    /// `/RollbackCfg [-Extension <name>]` discards the unapplied primary configuration.
+    pub fn rollback_cfg(
+        &self,
+        extension: Option<&str>,
+    ) -> Result<PlatformCommandResult, DesignerError> {
+        let mut args = self.base_args();
+        args.push("/RollbackCfg".to_owned());
+        if let Some(extension) = extension {
+            args.push("-Extension".to_owned());
+            args.push(extension.to_owned());
+        }
+        self.run(&args)
+    }
+
     /// `/LoadCfg <file> [-Extension <name>]`
     pub fn load_cfg(
         &self,

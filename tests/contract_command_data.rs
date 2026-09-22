@@ -82,6 +82,8 @@ fn every_previewable_command_answers_in_the_form_declared_for_it() {
     let snapshot_argument = snapshot.display().to_string();
 
     let previews: Vec<Vec<&str>> = vec![
+        vec!["apply", "--dry-run"],
+        vec!["reset", "--force", "--dry-run"],
         vec!["version"],
         vec!["build", "--dry-run"],
         vec!["dump", "--mode", "full", "--dry-run"],

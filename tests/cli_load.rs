@@ -462,3 +462,67 @@ fn load_rejects_external_artifact_type_with_unknown_target_kind_payload_metadata
         .expect("message")
         .contains("only .cf and .cfe"));
 }
+
+#[test]
+fn load_no_apply_stops_after_cf_and_cfe_artifact_load() {
+    for (artifact, extension) in [("release.cf", None), ("release.cfe", Some("NewExt"))] {
+        let (_dir, config, _, base, calls) = setup_project();
+        fs::write(base.join(artifact), "artifact").expect("artifact");
+        let mut command = v8_runner_command();
+        command.args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "load",
+            "--path",
+            artifact,
+            "--no-apply",
+        ]);
+        if let Some(name) = extension {
+            command.args(["--extension", name]);
+        }
+        let output = command.output().expect("run");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).expect("json");
+        assert_eq!(value["data"]["execution"]["payload"]["applied"], true);
+        assert_eq!(
+            value["data"]["execution"]["payload"]["update_db_cfg_ran"],
+            false
+        );
+        assert!(value["data"]["platform_log_path"].is_string());
+        let calls = fs::read_to_string(calls).expect("calls");
+        assert!(calls.contains("/LoadCfg"));
+        assert!(!calls.contains("/UpdateDBCfg"), "{calls}");
+    }
+}
+
+#[test]
+fn load_no_apply_preview_never_dispatches_and_names_the_boundary() {
+    let (_dir, config, _, base, calls) = setup_project();
+    fs::write(base.join("release.cf"), "artifact").expect("artifact");
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "load",
+            "--path",
+            "release.cf",
+            "--no-apply",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run");
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(value["data"]["provider_dispatched"], false);
+    assert_eq!(value["data"]["execution"]["payload"]["applied"], false);
+    assert!(value
+        .to_string()
+        .contains("without updating database configuration"));
+    assert!(!calls.exists());
+}

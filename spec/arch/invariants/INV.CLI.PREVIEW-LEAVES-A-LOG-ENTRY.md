@@ -1,8 +1,8 @@
 ---
 id: INV.CLI.PREVIEW-LEAVES-A-LOG-ENTRY
-status: active
+status: superseded
 governs: product
-decision: DEC.2026-09-11.PREVIEW-STOPS-BEFORE-THE-PROVIDER-IS-DISPATCHED
+decision: DEC.2026-09-22.PREVIEW-LOGGING-FOLLOWS-THE-COMMAND-CONTRACT
 check: tests/contract_previews.rs::every_preview_leaves_a_line_in_the_action_log
 scope: [cli]
 ---

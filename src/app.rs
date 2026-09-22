@@ -104,6 +104,18 @@ pub fn run() -> i32 {
             };
         }
     }
+    if matches!(&cli.command, Command::Apply(_) | Command::Reset(_)) {
+        return match execute::execute_command(
+            &config,
+            &cli.command,
+            None,
+            &presenter,
+            cli.clean_before_execution,
+        ) {
+            Ok(()) => 0,
+            Err(error) => error.exit_code(),
+        };
+    }
     let primary_config_path = match resolve_primary_config_path(cli.config.as_deref()) {
         Ok(path) => path,
         Err(e) => {
@@ -162,6 +174,8 @@ pub fn run() -> i32 {
         | Command::Extensions(_)
         | Command::Build(_)
         | Command::Load(_)
+        | Command::Apply(_)
+        | Command::Reset(_)
         | Command::Test(_)
         | Command::Dump(_)
         | Command::Convert(_)
@@ -217,7 +231,9 @@ fn load_cli_config(
         })
     ) {
         load_config_for_tools_download(cli.config.as_deref(), cli.workdir.as_deref())
-    } else if execute::uses_infobase_export_config(&cli.command) {
+    } else if execute::uses_infobase_export_config(&cli.command)
+        || matches!(&cli.command, Command::Apply(_) | Command::Reset(_))
+    {
         load_config_for_infobase_export(cli.config.as_deref(), cli.workdir.as_deref())
     } else if matches!(&cli.command, Command::Test(args) if args.no_build) {
         load_config_for_prepared_test(cli.config.as_deref(), cli.workdir.as_deref())
