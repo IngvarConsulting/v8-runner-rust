@@ -1,8 +1,8 @@
 ---
 id: DEC.2026-09-21.CHECK-IS-CHECKCONFIG
-status: planned
+status: active
 governs: product
-realized: null
+realized: tests/cli_syntax.rs::check_takes_its_modes_without_a_subcommand
 supersedes: []
 superseded-by: null
 establishes: []

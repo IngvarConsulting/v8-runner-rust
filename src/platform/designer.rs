@@ -330,14 +330,6 @@ impl<'a> DesignerDsl<'a> {
         self.run(&args)
     }
 
-    /// `/CheckModules [-ThinClient] [-Server] ...`
-    pub fn check_modules(&self, flags: &[&str]) -> Result<PlatformCommandResult, DesignerError> {
-        let mut args = self.base_args();
-        args.push("/CheckModules".to_owned());
-        args.extend(flags.iter().map(|flag| (*flag).to_owned()));
-        self.run(&args)
-    }
-
     fn base_args(&self) -> Vec<String> {
         let mut args = vec![
             "DESIGNER".to_owned(),
@@ -505,7 +497,7 @@ mod tests {
             Some(log_path.clone()),
         );
 
-        let result = dsl.check_modules(&["-Server"]).expect("check modules");
+        let result = dsl.check_config(&["-Server"]).expect("check config");
 
         assert_eq!(result.process.exit_code, 1);
         assert_eq!(result.platform_log_path, Some(log_path));
@@ -528,7 +520,7 @@ mod tests {
             Some(log_path.clone()),
         );
 
-        let result = dsl.check_modules(&["-Server"]).expect("check modules");
+        let result = dsl.check_config(&["-Server"]).expect("check config");
 
         assert_eq!(result.process.exit_code, 101);
         assert_eq!(result.platform_log_path, Some(log_path));

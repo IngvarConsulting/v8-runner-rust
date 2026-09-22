@@ -2,7 +2,7 @@
 id: CTR.WIRE.SYNTAX-DATA
 status: active
 governs: product
-version: 3
+version: 4
 decision: DEC.2026-09-14.RECEIPT-EXPLAINS-PROVIDER-CHOICE
 artifact: docs/schemas/command-data/check.schema.json
 producer: src/domain/syntax.rs
@@ -11,7 +11,7 @@ check: [src/command_data.rs::generated_command_data_schemas_are_current, tests/c
 scope: [wire, cli, mcp]
 ---
 
-# `data` команды `syntax`
+# `data` команды `check`
 
 Проверка синтаксиса отвечает разобранными замечаниями, а не текстом журнала. У каждого
 замечания есть `kind`, и он определяет остальные поля: у модульного — путь, строка и
@@ -30,6 +30,13 @@ scope: [wire, cli, mcp]
 нулём, а его вердикт прочитать не удалось. Этой же формой
 отвечают инструменты MCP `check_syntax_designer_config`, `check_syntax_designer_modules`
 и `check_syntax_edt`.
+
+Поле `check_name` называет, чем платформа выполнила проверку, и набор его значений
+закрыт: `designer-config` или `edt`. Прежнее `designer-modules` исчезло вместе с отдельным
+путём `/CheckModules` — режимы проверки модулей выполняет `/CheckConfig`, и вызов прежнего
+имени отвечает под новым. Это же значение попадает в имя файла журнала платформы, поэтому у проверки модулей он
+теперь `syntax_designer-config_*.log`; у ветки EDT в имя входит ещё и набор исходников —
+`syntax_edt_<набор>_*.log`.
 
 ## Пример
 

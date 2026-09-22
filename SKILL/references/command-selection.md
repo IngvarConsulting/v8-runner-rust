@@ -47,21 +47,21 @@ Designer modules:
 
 ```bash
 v8-runner push
-v8-runner check designer-modules --server --thin-client
+v8-runner check --server --thin-client
 ```
 
 Designer configuration:
 
 ```bash
 v8-runner push
-v8-runner check designer-config
+v8-runner check
 ```
 
 EDT:
 
 ```bash
 v8-runner push
-v8-runner check edt
+v8-runner check
 ```
 
 ## Tests

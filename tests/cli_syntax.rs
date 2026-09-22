@@ -198,7 +198,7 @@ fn syntax_with_an_unreadable_log_refuses_instead_of_reporting_clean() {
 #[test]
 fn syntax_designer_modules_json_returns_structured_validation_failure() {
     let (_dir, config_path) = setup_project(
-        "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif printf '%s' \"$args\" | grep -F -q -- '/CheckModules'; then\n  cat <<'LOG' > \"$out\"\n{CommonModules.TestModule(4,2)}: Ошибка компиляции\n{1}: context\nLOG\n  exit 101\nfi\nexit 0",
+        "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif printf '%s' \"$args\" | grep -F -q -- '/CheckConfig'; then\n  cat <<'LOG' > \"$out\"\n{CommonModules.TestModule(4,2)}: Ошибка компиляции\n{1}: context\nLOG\n  exit 101\nfi\nexit 0",
     );
 
     let output = v8_runner_command()
@@ -230,38 +230,52 @@ fn syntax_designer_modules_json_returns_structured_validation_failure() {
     );
 }
 
+/// Прежнее имя без режимов больше не отвергается: требование «хотя бы один режим»
+/// принадлежало `/CheckModules`, а её путь исчез. Пустой запрос выполняет профиль по
+/// умолчанию, и проверка действительно идёт.
 #[test]
-fn syntax_designer_modules_without_modes_renders_json_error() {
-    let (_dir, config_path) = setup_project("exit 0");
+fn a_check_without_modes_runs_the_default_profile() {
+    let (_dir, config_path) = setup_project(
+        "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"$(dirname \"$0\")/calls.log\"\n: > \"$out\"\nexit 0",
+    );
 
     let output = v8_runner_command()
         .args([
             "--config",
             &config_path.display().to_string(),
             "--json-message",
-            "syntax",
-            "designer-modules",
+            "check",
         ])
         .output()
         .expect("run command");
 
-    assert!(!output.status.success());
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stderr.is_empty());
-
+    assert!(output.status.success(), "{output:?}");
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
-    assert_eq!(payload["ok"], false);
     assert_eq!(payload["command"], "check");
-    assert_eq!(
-        payload["data"]["message"],
-        "syntax designer-modules requires at least one mode flag"
-    );
+    assert_eq!(payload["data"]["check_name"], "designer-config");
+    let root = config_path
+        .parent()
+        .and_then(Path::parent)
+        .expect("project root");
+    let calls = fs::read_to_string(root.join("platform").join("bin").join("calls.log"))
+        .expect("designer calls");
+    for flag in [
+        "/CheckConfig",
+        "-ThinClient",
+        "-Server",
+        "-UnreferenceProcedures",
+        "-HandlersExistence",
+        "-EmptyHandlers",
+        "-ExtendedModulesCheck",
+    ] {
+        assert!(calls.contains(flag), "{flag}: {calls}");
+    }
 }
 
 #[test]
 fn syntax_text_output_hides_raw_stdout_and_prints_structured_issue() {
     let (_dir, config_path) = setup_project(
-        "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf 'RAW_STDOUT\\n'\nif printf '%s' \"$args\" | grep -F -q -- '/CheckModules'; then\n  cat <<'LOG' > \"$out\"\nCommonModules.TestModule Warning: потенциальная проблема\nLOG\n  exit 101\nfi\nexit 0",
+        "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf 'RAW_STDOUT\\n'\nif printf '%s' \"$args\" | grep -F -q -- '/CheckConfig'; then\n  cat <<'LOG' > \"$out\"\nCommonModules.TestModule Warning: потенциальная проблема\nLOG\n  exit 101\nfi\nexit 0",
     );
 
     let output = v8_runner_command()
@@ -280,7 +294,7 @@ fn syntax_text_output_hides_raw_stdout_and_prints_structured_issue() {
     assert_eq!(output.status.code(), Some(3));
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Syntax check designer-modules found issues"));
+    assert!(stdout.contains("Syntax check designer-config found issues"));
     assert!(stdout.contains("CommonModules.TestModule"));
     assert!(stdout.contains("[issue] WARNING"));
     assert!(!stdout.contains("RAW_STDOUT"));
@@ -313,4 +327,189 @@ fn syntax_edt_json_returns_structured_edt_issues() {
     assert_eq!(payload["data"]["summary"]["errors"], 1);
     assert_eq!(payload["data"]["issues"][0]["kind"], "edt");
     assert_eq!(payload["data"]["issues"][0]["path"], "CommonModules.Test");
+}
+
+/// Команда одна: режимы `/CheckConfig` живут на ней самой, подкоманда не нужна.
+#[test]
+fn check_takes_its_modes_without_a_subcommand() {
+    let (_dir, config_path) = setup_project(
+        "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"$(dirname \"$0\")/calls.log\"\n: > \"$out\"\nexit 0",
+    );
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "check",
+            "--server",
+            "--incorrect-references",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(output.status.success(), "{output:?}");
+    let root = config_path
+        .parent()
+        .and_then(Path::parent)
+        .expect("project root");
+    let calls =
+        fs::read_to_string(root.join("platform").join("bin").join("calls.log")).expect("calls");
+    assert!(calls.contains("/CheckConfig"), "{calls}");
+    assert!(calls.contains("-IncorrectReferences"), "{calls}");
+    assert!(calls.contains("-Server"), "{calls}");
+    // Назван режим — профиль по умолчанию не подмешивается.
+    assert!(!calls.contains("-EmptyHandlers"), "{calls}");
+}
+
+/// Ключ, который ветка не исполняет, отвергается, а не игнорируется.
+#[test]
+fn check_refuses_a_key_the_branch_does_not_execute() {
+    let (_dir, config_path) = setup_project("exit 0");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "check",
+            "--project",
+            "main",
+        ])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    let message = payload["data"]["message"].as_str().expect("message");
+    assert!(message.contains("--project"), "{payload}");
+    assert!(message.contains("/CheckConfig"), "{payload}");
+}
+
+/// Ключи самой команды рядом с прежним именем не исполняются, поэтому отвергаются.
+#[test]
+fn check_refuses_its_keys_next_to_a_previous_name() {
+    let (_dir, config_path) = setup_project("exit 0");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "check",
+            "--server",
+            "designer-config",
+        ])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert!(
+        payload["data"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("cannot be combined with a subcommand"),
+        "{payload}"
+    );
+}
+
+/// Проверка внешних обработок платформой не описана: проект, где других наборов нет,
+/// получил бы «чисто», не проверив предмета. Отказ — по предмету, и он не изменится.
+#[test]
+fn check_refuses_a_project_of_external_subjects_only() {
+    let (dir, config_path) = setup_project("exit 0");
+    let work_path = dir.path().join("work");
+    let install_dir = dir.path().join("platform");
+    // Раскладка внешнего набора проверяется раньше: отказ по предмету должен приходить
+    // на верном проекте, а не на пустом каталоге.
+    let sources = config_path.parent().expect("project dir").join("reports");
+    fs::create_dir_all(&sources).expect("sources");
+    fs::write(sources.join("Report.xml"), "<ExternalReport/>").expect("descriptor");
+    fs::write(
+        &config_path,
+        format!(
+            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: reports\n    type: EXTERNAL_REPORTS\n    path: reports\ntools:\n  platform:\n    path: '{}'\n",
+            work_path.display(),
+            install_dir.display()
+        ),
+    )
+    .expect("config");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "check",
+        ])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["error"]["kind"], "capability", "{payload}");
+    assert_eq!(payload["error"]["code"], "subject", "{payload}");
+}
+
+/// Синоним держится один цикл ровно тем, чем был: у проверки модулей режим обязателен, и
+/// профиль по умолчанию сюда не подмешивается.
+#[test]
+fn a_previous_name_keeps_its_own_rule_about_modes() {
+    let (_dir, config_path) = setup_project("exit 0");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "check",
+            "designer-modules",
+        ])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["command"], "check", "{payload}");
+    assert!(
+        payload["data"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("requires at least one mode flag"),
+        "{payload}"
+    );
+}
+
+/// Прежнее имя без режимов не получает профиль по умолчанию и тогда, когда режимы названы:
+/// проверки конфигурации остаются пустыми.
+#[test]
+fn a_previous_name_runs_only_the_modes_it_was_given() {
+    let (_dir, config_path) = setup_project(
+        "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"$(dirname \"$0\")/calls.log\"\n: > \"$out\"\nexit 0",
+    );
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "check",
+            "designer-modules",
+            "--server",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(output.status.success(), "{output:?}");
+    let root = config_path
+        .parent()
+        .and_then(Path::parent)
+        .expect("project root");
+    let calls =
+        fs::read_to_string(root.join("platform").join("bin").join("calls.log")).expect("calls");
+    assert!(calls.contains("/CheckConfig"), "{calls}");
+    assert!(calls.contains("-Server"), "{calls}");
+    assert!(!calls.contains("-EmptyHandlers"), "{calls}");
+    assert!(!calls.contains("-ThinClient"), "{calls}");
 }

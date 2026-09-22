@@ -7,7 +7,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig};
 use crate::domain::capability::{Operation, Provider};
 use crate::domain::issue::{EdtIssue, Issue, IssueSeverity, ObjectIssue};
-use crate::domain::syntax::{SyntaxCheckResult, SyntaxCheckStatus, SyntaxIssueSummary};
+use crate::domain::syntax::{CheckName, SyntaxCheckResult, SyntaxCheckStatus, SyntaxIssueSummary};
 use crate::parsers::designer_validation;
 use crate::parsers::edt_validation;
 use crate::platform::designer::DesignerDsl;
@@ -16,7 +16,7 @@ use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
 use crate::platform::locator::UtilityType;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
-use crate::support::error::AppError;
+use crate::support::error::{AppError, CapabilityReason};
 use crate::support::temp::platform_logs_dir;
 #[cfg(test)]
 use crate::use_cases::context::CommandName;
@@ -24,8 +24,7 @@ use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::{
     DesignerClientScope, DesignerConfigCheck,
-    DesignerConfigSyntaxRequest as DesignerConfigSyntaxArgs,
-    DesignerModulesSyntaxRequest as DesignerModulesSyntaxArgs, ExtendedModulesPolicy,
+    DesignerConfigSyntaxRequest as DesignerConfigSyntaxArgs, ExtendedModulesPolicy,
     SyntaxExtensionScope, SyntaxRequest as SyntaxArgs, SyntaxTargetRequest as SyntaxTarget,
 };
 use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
@@ -33,9 +32,9 @@ use crate::use_cases::source_inventory::SourceSetInventory;
 use tracing::debug;
 
 const SUPPORTED_DESIGNER_SYNTAX_ERROR: &str =
-    "syntax currently supports only the Designer provider and format=DESIGNER";
+    "check currently supports only the Designer provider and format=DESIGNER";
 const SUPPORTED_EDT_SYNTAX_ERROR: &str =
-    "syntax edt currently supports only the Designer provider and format=EDT";
+    "check edt currently supports only the Designer provider and format=EDT";
 static LOG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub fn execute(
@@ -59,66 +58,39 @@ fn run_syntax(config: &AppConfig, args: &SyntaxArgs) -> UseCaseResult<SyntaxChec
     run_syntax_with_context(&context, config, args)
 }
 
-#[derive(Debug)]
-struct DesignerInvocation {
-    kind: DesignerCommandKind,
-    flags: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum DesignerCommandKind {
-    Config,
-    Modules,
-}
-
-impl DesignerCommandKind {
-    fn check_name(self) -> &'static str {
-        match self {
-            Self::Config => "designer-config",
-            Self::Modules => "designer-modules",
-        }
-    }
-}
-
 fn run_syntax_with_context(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &SyntaxArgs,
 ) -> UseCaseResult<SyntaxCheckResult> {
     let started = Instant::now();
-    if let Some(failure) = interrupted_syntax_failure(context, "syntax", started, None) {
+    if let Some(failure) =
+        interrupted_syntax_failure(context, CheckName::DesignerConfig, started, None)
+    {
         return Err(failure);
     }
     if let SyntaxTarget::Edt { projects } = &args.target {
         return run_edt_syntax(context, config, projects, started);
     }
+    // Отказ по предмету спрашивается на ветке платформы: проверку проекта EDT внешние
+    // наборы переживают — её выполняет EDT CLI, и предмет у неё свой.
+    if let Some(failure) = external_subject_refusal(config, started) {
+        return Err(failure);
+    }
 
-    let invocation = match normalize_invocation(args) {
-        Ok(invocation) => invocation,
-        Err((kind, error)) => {
-            let error_message = error.to_string();
-            return Err(SyntaxExecutionFailure::with_payload(
-                error,
-                failed_result(
-                    kind.check_name(),
-                    SyntaxCheckStatus::ToolFailed,
-                    -1,
-                    started,
-                    vec![],
-                    None,
-                    Some(error_message),
-                    None,
-                ),
-            ));
-        }
-    };
+    // Ветка одна: проверку конфигурации выполняет `/CheckConfig`, а проверку проекта EDT
+    // — свой путь выше. Нормализация теперь только раскладывает режимы в argv.
+    let flags = normalize_config_flags(match &args.target {
+        SyntaxTarget::DesignerConfig(config_args) => config_args,
+        SyntaxTarget::Edt { .. } => unreachable!("EDT syntax is handled before normalization"),
+    });
 
     if let Some(error) = validate_designer_supported_matrix(config) {
         let error_message = error.to_string();
         return Err(SyntaxExecutionFailure::with_payload(
             error,
             failed_result(
-                invocation.kind.check_name(),
+                CheckName::DesignerConfig,
                 SyntaxCheckStatus::ToolFailed,
                 -1,
                 started,
@@ -131,8 +103,8 @@ fn run_syntax_with_context(
     }
 
     debug!(
-        check = invocation.kind.check_name(),
-        flags = ?invocation.flags,
+        check = CheckName::DesignerConfig.as_str(),
+        flags = ?flags,
         "starting syntax check"
     );
     let log_dir = match platform_logs_dir(&config.work_path) {
@@ -146,7 +118,7 @@ fn run_syntax_with_context(
             return Err(SyntaxExecutionFailure::with_payload(
                 app_error,
                 failed_result(
-                    invocation.kind.check_name(),
+                    CheckName::DesignerConfig,
                     SyntaxCheckStatus::ToolFailed,
                     -1,
                     started,
@@ -159,7 +131,7 @@ fn run_syntax_with_context(
         }
     };
 
-    let log_path = unique_log_path(&log_dir, invocation.kind.check_name());
+    let log_path = unique_log_path(&log_dir, CheckName::DesignerConfig.as_str());
     debug!(path = %log_path.display(), "syntax platform log reserved");
 
     let mut utilities = PlatformUtilities::from_config(config);
@@ -172,7 +144,7 @@ fn run_syntax_with_context(
         Err((error, receipt)) => {
             let message = error.to_string();
             let mut result = failed_result(
-                invocation.kind.check_name(),
+                CheckName::DesignerConfig,
                 SyntaxCheckStatus::ToolFailed,
                 -1,
                 started,
@@ -204,16 +176,10 @@ fn run_syntax_with_context(
     )
     .with_execution_policy(context.process_policy(InterruptionSafetyClass::GracefulThenKill, None));
 
-    let flags: Vec<&str> = invocation.flags.iter().map(String::as_str).collect();
-    let stage_label = match invocation.kind {
-        DesignerCommandKind::Config => "syntax: designer-config",
-        DesignerCommandKind::Modules => "syntax: designer-modules",
-    };
+    let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+    let stage_label = "check: designer-config";
     log_live_stage(stage_label, "[Конфигуратор] running syntax check");
-    let platform_result = match invocation.kind {
-        DesignerCommandKind::Config => dsl.check_config(&flags),
-        DesignerCommandKind::Modules => dsl.check_modules(&flags),
-    };
+    let platform_result = dsl.check_config(&flags);
 
     let platform_result = match platform_result {
         Ok(result) => result,
@@ -221,7 +187,7 @@ fn run_syntax_with_context(
             let app_error = AppError::from(error);
             let message = app_error.to_string();
             let mut result = failed_result(
-                invocation.kind.check_name(),
+                CheckName::DesignerConfig,
                 SyntaxCheckStatus::ToolFailed,
                 -1,
                 started,
@@ -235,7 +201,7 @@ fn run_syntax_with_context(
         }
     };
 
-    let mut result = build_result(invocation.kind.check_name(), platform_result, started);
+    let mut result = build_result(CheckName::DesignerConfig, platform_result, started);
     result.provider = Some(receipt);
     match result.status {
         SyntaxCheckStatus::Clean => Ok(result),
@@ -251,31 +217,36 @@ fn run_syntax_with_context(
     }
 }
 
-fn normalize_invocation(
-    args: &SyntaxArgs,
-) -> Result<DesignerInvocation, (DesignerCommandKind, AppError)> {
-    match &args.target {
-        SyntaxTarget::DesignerConfig(config_args) => Ok(DesignerInvocation {
-            kind: DesignerCommandKind::Config,
-            flags: normalize_config_flags(config_args),
-        }),
-        SyntaxTarget::DesignerModules(module_args) => {
-            if !modules_has_modes(module_args) {
-                return Err((
-                    DesignerCommandKind::Modules,
-                    AppError::Validation(
-                        "syntax designer-modules requires at least one mode flag".to_owned(),
-                    ),
-                ));
-            }
-
-            Ok(DesignerInvocation {
-                kind: DesignerCommandKind::Modules,
-                flags: normalize_modules_flags(module_args),
-            })
-        }
-        SyntaxTarget::Edt { .. } => unreachable!("EDT syntax is handled before normalization"),
+/// Проверка внешних обработок и отчётов платформой не описана: `/CheckConfig` проверяет
+/// конфигурацию базы, а не внешний файл. Проект, где других наборов нет, получил бы ответ
+/// «чисто», ничего не проверив, поэтому отказ — по предмету, и он не изменится со временем
+/// (`DEC.2026-09-21.CHECK-IS-CHECKCONFIG`).
+fn external_subject_refusal(
+    config: &AppConfig,
+    started: Instant,
+) -> Option<SyntaxExecutionFailure> {
+    let sets = &config.source_sets;
+    if sets.is_empty() || !sets.iter().all(|set| set.purpose.is_external()) {
+        return None;
     }
+    let error = AppError::capability_for(
+        CapabilityReason::Subject,
+        "the project declares only external data processors and reports, and the platform describes no check for them: `check` checks the configuration",
+    );
+    let message = error.to_string();
+    Some(SyntaxExecutionFailure::with_payload(
+        error,
+        failed_result(
+            CheckName::DesignerConfig,
+            SyntaxCheckStatus::ToolFailed,
+            -1,
+            started,
+            vec![],
+            None,
+            Some(message),
+            None,
+        ),
+    ))
 }
 
 fn normalize_config_flags(args: &DesignerConfigSyntaxArgs) -> Vec<String> {
@@ -325,25 +296,6 @@ fn normalize_config_flags(args: &DesignerConfigSyntaxArgs) -> Vec<String> {
     flags
 }
 
-fn normalize_modules_flags(args: &DesignerModulesSyntaxArgs) -> Vec<String> {
-    let mut flags = Vec::new();
-    push_client_scope(&mut flags, args, DesignerClientScope::ThinClient);
-    push_client_scope(&mut flags, args, DesignerClientScope::WebClient);
-    push_client_scope(&mut flags, args, DesignerClientScope::Server);
-    push_client_scope(&mut flags, args, DesignerClientScope::ExternalConnection);
-    push_client_scope(
-        &mut flags,
-        args,
-        DesignerClientScope::ThickClientOrdinaryApplication,
-    );
-    push_client_scope(&mut flags, args, DesignerClientScope::MobileAppClient);
-    push_client_scope(&mut flags, args, DesignerClientScope::MobileAppServer);
-    push_client_scope(&mut flags, args, DesignerClientScope::MobileClient);
-    push_extended_modules_policy(&mut flags, args.extended_modules());
-    push_extension_scope(&mut flags, args.extension_scope());
-    flags
-}
-
 fn push_flag(flags: &mut Vec<String>, enabled: bool, flag: &str) {
     if enabled {
         flags.push(flag.to_owned());
@@ -385,10 +337,6 @@ fn push_extension_scope(flags: &mut Vec<String>, scope: &SyntaxExtensionScope) {
     }
 }
 
-fn modules_has_modes(args: &DesignerModulesSyntaxArgs) -> bool {
-    args.has_modes()
-}
-
 trait HasClientScopes {
     fn has_client_scope(&self, scope: DesignerClientScope) -> bool;
 }
@@ -396,12 +344,6 @@ trait HasClientScopes {
 impl HasClientScopes for DesignerConfigSyntaxArgs {
     fn has_client_scope(&self, scope: DesignerClientScope) -> bool {
         DesignerConfigSyntaxArgs::has_client_scope(self, scope)
-    }
-}
-
-impl HasClientScopes for DesignerModulesSyntaxArgs {
-    fn has_client_scope(&self, scope: DesignerClientScope) -> bool {
-        DesignerModulesSyntaxArgs::has_client_scope(self, scope)
     }
 }
 
@@ -433,7 +375,7 @@ fn run_edt_syntax(
     projects: &[String],
     started: Instant,
 ) -> UseCaseResult<SyntaxCheckResult> {
-    if let Some(failure) = interrupted_syntax_failure(context, "edt", started, None) {
+    if let Some(failure) = interrupted_syntax_failure(context, CheckName::Edt, started, None) {
         return Err(failure);
     }
     if let Some(error) = validate_edt_supported_matrix(config) {
@@ -441,7 +383,7 @@ fn run_edt_syntax(
         return Err(SyntaxExecutionFailure::with_payload(
             error,
             failed_result(
-                "edt",
+                CheckName::Edt,
                 SyntaxCheckStatus::ToolFailed,
                 -1,
                 started,
@@ -461,7 +403,7 @@ fn run_edt_syntax(
             return Err(SyntaxExecutionFailure::with_payload(
                 error,
                 failed_result(
-                    "edt",
+                    CheckName::Edt,
                     SyntaxCheckStatus::ToolFailed,
                     -1,
                     started,
@@ -485,7 +427,7 @@ fn run_edt_syntax(
             return Err(SyntaxExecutionFailure::with_payload(
                 app_error,
                 failed_result(
-                    "edt",
+                    CheckName::Edt,
                     SyntaxCheckStatus::ToolFailed,
                     -1,
                     started,
@@ -507,7 +449,7 @@ fn run_edt_syntax(
             return Err(SyntaxExecutionFailure::with_payload(
                 app_error,
                 failed_result(
-                    "edt",
+                    CheckName::Edt,
                     SyntaxCheckStatus::ToolFailed,
                     -1,
                     started,
@@ -544,7 +486,7 @@ fn run_edt_syntax(
                     return Err(SyntaxExecutionFailure::with_payload(
                         app_error,
                         failed_result(
-                            "edt",
+                            CheckName::Edt,
                             SyntaxCheckStatus::ToolFailed,
                             -1,
                             started,
@@ -562,7 +504,7 @@ fn run_edt_syntax(
                 return Err(SyntaxExecutionFailure::with_payload(
                     app_error,
                     failed_result(
-                        "edt",
+                        CheckName::Edt,
                         SyntaxCheckStatus::ToolFailed,
                         -1,
                         started,
@@ -592,11 +534,11 @@ fn run_edt_syntax(
             &format!("edt_{}", source_set.name.replace(' ', "_")),
         );
         if let Some(failure) =
-            interrupted_syntax_failure(context, "edt", started, Some(log_path.clone()))
+            interrupted_syntax_failure(context, CheckName::Edt, started, Some(log_path.clone()))
         {
             return Err(failure);
         }
-        log_live_stage("syntax: edt", "[EDT] validating project");
+        log_live_stage("check: edt", "[EDT] validating project");
         let result = match if let Some(dsl) = interactive_dsl.as_ref() {
             dsl.validate_project(&source_path, &log_path)
         } else {
@@ -619,7 +561,7 @@ fn run_edt_syntax(
                 return Err(SyntaxExecutionFailure::with_payload(
                     app_error,
                     failed_result(
-                        "edt",
+                        CheckName::Edt,
                         SyntaxCheckStatus::ToolFailed,
                         -1,
                         started,
@@ -688,7 +630,7 @@ fn run_edt_syntax(
         provider: None,
         status,
         exit_code,
-        check_name: "edt".to_owned(),
+        check_name: CheckName::Edt,
         summary: summarize_issues(&issues),
         issues,
         duration_ms: elapsed_millis(started),
@@ -713,7 +655,7 @@ fn run_edt_syntax(
 
 fn interrupted_syntax_failure(
     context: &ExecutionContext,
-    check_name: &str,
+    check_name: CheckName,
     started: Instant,
     platform_log_path: Option<PathBuf>,
 ) -> Option<SyntaxExecutionFailure> {
@@ -741,7 +683,7 @@ fn resolve_edt_source_sets<'a>(
 ) -> Result<Vec<&'a SourceSetConfig>, AppError> {
     if !inventory.has_edt_contexts() {
         return Err(AppError::Validation(
-            "syntax edt requires at least one source-set".to_owned(),
+            "check requires at least one source-set".to_owned(),
         ));
     }
 
@@ -815,7 +757,7 @@ fn unique_log_path(dir: &Path, check_name: &str) -> PathBuf {
 }
 
 fn build_result(
-    check_name: &str,
+    check_name: CheckName,
     platform_result: PlatformCommandResult,
     started: Instant,
 ) -> SyntaxCheckResult {
@@ -847,7 +789,7 @@ fn build_result(
         provider: None,
         status,
         exit_code,
-        check_name: check_name.to_owned(),
+        check_name,
         summary: summarize_issues(&issues),
         issues,
         duration_ms: elapsed_millis(started),
@@ -858,7 +800,7 @@ fn build_result(
 }
 
 fn failed_result(
-    check_name: &str,
+    check_name: CheckName,
     status: SyntaxCheckStatus,
     exit_code: i32,
     started: Instant,
@@ -871,7 +813,7 @@ fn failed_result(
         provider: None,
         status,
         exit_code,
-        check_name: check_name.to_owned(),
+        check_name,
         summary: summarize_issues(&issues),
         issues,
         duration_ms: elapsed_millis(started),
@@ -1006,20 +948,19 @@ fn fallback_edt_issue(
 #[cfg(test)]
 mod tests {
     use super::{
-        edt_status_from_result, normalize_config_flags, normalize_modules_flags, run_syntax,
-        run_syntax_with_context, status_from_exit_code,
+        edt_status_from_result, normalize_config_flags, run_syntax, run_syntax_with_context,
+        status_from_exit_code,
     };
     use crate::config::model::{
         AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
         ToolsConfig,
     };
     use crate::domain::issue::{Issue, IssueSeverity};
-    use crate::domain::syntax::SyntaxCheckStatus;
+    use crate::domain::syntax::{CheckName, SyntaxCheckStatus};
     use crate::use_cases::context::{CommandName, ExecutionContext};
     use crate::use_cases::request::{
         DesignerClientScope, DesignerClientScopes, DesignerConfigChecks,
-        DesignerConfigSyntaxRequest as DesignerConfigSyntaxArgs,
-        DesignerModulesSyntaxRequest as DesignerModulesSyntaxArgs, ExtendedModulesPolicy,
+        DesignerConfigSyntaxRequest as DesignerConfigSyntaxArgs, ExtendedModulesPolicy,
         SyntaxExtensionScope, SyntaxRequest as SyntaxArgs, SyntaxTargetRequest as SyntaxTarget,
     };
     use crate::use_cases::result::UseCaseErrorKind;
@@ -1306,30 +1247,51 @@ mod tests {
         assert_eq!(flags, vec!["-ThinClient", "-Server", "-Extension", "Ext"]);
     }
 
+    /// Режимы проверки модулей выполняет та же `/CheckConfig`: проверок конфигурации в
+    /// таком запросе нет, а сам набор режимов доезжает до платформы прежним.
     #[test]
-    fn normalizes_modules_flags() {
-        let args = DesignerModulesSyntaxArgs::new(
+    fn module_modes_are_checked_by_check_config() {
+        let args = DesignerConfigSyntaxArgs::new(
+            DesignerConfigChecks::new([]),
             DesignerClientScopes::new([DesignerClientScope::Server]),
-            ExtendedModulesPolicy::basic(false),
+            ExtendedModulesPolicy::basic(true),
             SyntaxExtensionScope::AllExtensions,
-        )
-        .expect("modules args");
-        let flags = normalize_modules_flags(&args);
+        );
+        let flags = normalize_config_flags(&args);
 
-        assert_eq!(flags, vec!["-Server", "-AllExtensions"]);
+        assert_eq!(
+            flags,
+            vec!["-Server", "-ExtendedModulesCheck", "-AllExtensions"]
+        );
     }
 
+    /// Пустой запрос выполняет профиль по умолчанию: пустая `/CheckConfig` не проверяет
+    /// ничего и отвечает «чисто», а команда обещает проверку.
     #[test]
-    fn modules_without_modes_are_rejected() {
-        let error = DesignerModulesSyntaxArgs::new(
+    fn a_request_without_modes_runs_the_default_profile() {
+        let args = DesignerConfigSyntaxArgs::new(
+            DesignerConfigChecks::new([]),
             DesignerClientScopes::default(),
             ExtendedModulesPolicy::basic(false),
             SyntaxExtensionScope::MainConfiguration,
-        )
-        .expect_err("expected failure");
+        );
+        assert!(args.names_no_mode());
 
-        assert_eq!(error.kind(), UseCaseErrorKind::Validation);
-        assert!(error.message().contains("requires at least one mode"));
+        let profile =
+            DesignerConfigSyntaxArgs::default_profile(SyntaxExtensionScope::MainConfiguration);
+        let flags = normalize_config_flags(&profile);
+
+        assert_eq!(
+            flags,
+            vec![
+                "-ThinClient",
+                "-Server",
+                "-UnreferenceProcedures",
+                "-HandlersExistence",
+                "-EmptyHandlers",
+                "-ExtendedModulesCheck"
+            ]
+        );
     }
 
     #[test]
@@ -1424,9 +1386,12 @@ mod tests {
         );
         let config = sample_config(&base, &work, &dir.path().join("platform"));
         let args = SyntaxArgs {
-            target: SyntaxTarget::DesignerModules(modules_args_with_scopes([
-                DesignerClientScope::Server,
-            ])),
+            target: SyntaxTarget::DesignerConfig(DesignerConfigSyntaxArgs::new(
+                DesignerConfigChecks::new([]),
+                DesignerClientScopes::new([DesignerClientScope::Server]),
+                ExtendedModulesPolicy::basic(false),
+                SyntaxExtensionScope::MainConfiguration,
+            )),
         };
 
         let failure = run_syntax(&config, &args).expect_err("expected validation failure");
@@ -1455,9 +1420,12 @@ mod tests {
         write_designer_script(&binary, None, Some("license error"), 1);
         let config = sample_config(&base, &work, &dir.path().join("platform"));
         let args = SyntaxArgs {
-            target: SyntaxTarget::DesignerModules(modules_args_with_scopes([
-                DesignerClientScope::Server,
-            ])),
+            target: SyntaxTarget::DesignerConfig(DesignerConfigSyntaxArgs::new(
+                DesignerConfigChecks::new([]),
+                DesignerClientScopes::new([DesignerClientScope::Server]),
+                ExtendedModulesPolicy::basic(false),
+                SyntaxExtensionScope::MainConfiguration,
+            )),
         };
 
         let failure = run_syntax(&config, &args).expect_err("expected tool failure");
@@ -1487,9 +1455,12 @@ mod tests {
         write_script(&binary, "exit 101");
         let config = sample_config(&base, &work, &dir.path().join("platform"));
         let args = SyntaxArgs {
-            target: SyntaxTarget::DesignerModules(modules_args_with_scopes([
-                DesignerClientScope::Server,
-            ])),
+            target: SyntaxTarget::DesignerConfig(DesignerConfigSyntaxArgs::new(
+                DesignerConfigChecks::new([]),
+                DesignerClientScopes::new([DesignerClientScope::Server]),
+                ExtendedModulesPolicy::basic(false),
+                SyntaxExtensionScope::MainConfiguration,
+            )),
         };
 
         let failure = run_syntax(&config, &args).expect_err("expected failure");
@@ -1530,7 +1501,7 @@ mod tests {
             .payload
             .expect("syntax EDT failures should preserve a structured payload");
 
-        assert_eq!(result.check_name, "edt");
+        assert_eq!(result.check_name, CheckName::Edt);
         assert_eq!(result.status, SyntaxCheckStatus::IssuesFound);
         assert_eq!(result.summary.errors, 2);
         assert!(result.platform_log_path.is_none());
@@ -1755,16 +1726,5 @@ mod tests {
             ExtendedModulesPolicy::basic(false),
             SyntaxExtensionScope::MainConfiguration,
         )
-    }
-
-    fn modules_args_with_scopes(
-        scopes: impl IntoIterator<Item = DesignerClientScope>,
-    ) -> DesignerModulesSyntaxArgs {
-        DesignerModulesSyntaxArgs::new(
-            DesignerClientScopes::new(scopes),
-            ExtendedModulesPolicy::basic(false),
-            SyntaxExtensionScope::MainConfiguration,
-        )
-        .expect("modules args")
     }
 }

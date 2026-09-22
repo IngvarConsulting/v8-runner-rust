@@ -581,18 +581,40 @@ pub struct ArtifactsArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(
+    after_help = "Ветку выбирает format проекта: DESIGNER — /CheckConfig, EDT — проверка проекта.\nБез единого ключа режима выполняется профиль по умолчанию: --thin-client --server\n--unreference-procedures --handlers-existence --empty-handlers --extended-modules-check."
+)]
 pub struct SyntaxArgs {
+    /// Режимы `/CheckConfig`. Без единого ключа выполняется профиль по умолчанию.
+    #[command(flatten)]
+    pub modes: DesignerConfigSyntaxArgs,
+    /// EDT project names
+    #[arg(long = "project", help_heading = "Command options")]
+    pub projects: Vec<String>,
+    /// Прежние имена: приняты один цикл, в справке их нет.
     #[command(subcommand)]
-    pub target: SyntaxTarget,
+    pub target: Option<SyntaxTarget>,
+}
+
+impl SyntaxArgs {
+    /// Ключи самой команды рядом с прежним именем не исполняются, поэтому отвергаются.
+    pub fn keys_next_to_a_previous_name(&self) -> Option<&'static str> {
+        (self.target.is_some()
+            && (self.modes != DesignerConfigSyntaxArgs::default() || !self.projects.is_empty()))
+        .then_some("check keys cannot be combined with a subcommand; place the keys after its name")
+    }
 }
 
 #[derive(Subcommand, Debug)]
 pub enum SyntaxTarget {
     /// Check configuration via Designer CheckConfig
+    #[command(hide = true)]
     DesignerConfig(DesignerConfigSyntaxArgs),
-    /// Check modules via Designer CheckModules
+    /// Check modules via Designer CheckConfig module modes
+    #[command(hide = true)]
     DesignerModules(DesignerModulesSyntaxArgs),
     /// Check via EDT validate
+    #[command(hide = true)]
     Edt {
         /// EDT project names
         #[arg(long = "project")]
@@ -698,7 +720,7 @@ pub enum McpServeTransport {
     Http,
 }
 
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default, PartialEq, Eq)]
 #[command(next_help_heading = "Command options")]
 pub struct DesignerConfigSyntaxArgs {
     #[arg(long)]
@@ -1274,7 +1296,7 @@ mod tests {
             .expect("parse syntax config");
 
         match cli.command {
-            Command::Syntax(args) => match args.target {
+            Command::Syntax(args) => match args.target.expect("hidden synonym") {
                 SyntaxTarget::DesignerConfig(config) => {
                     assert!(!config.server);
                     assert!(!config.all_extensions);

@@ -387,28 +387,35 @@ v8-runner test [--no-push] va --feature login --filter-tag @smoke
 ### `check`
 
 ```bash
-v8-runner check designer-config [FLAGS]
-v8-runner check designer-modules [FLAGS]
-v8-runner check edt [--project <PROJECT>...]
+v8-runner check [MODE FLAGS]
+v8-runner check --project <PROJECT>...
 ```
 
-`designer-config`:
+Команда одна, ветку выбирает `format` проекта.
 
-- Только Конфигуратор, `format=DESIGNER`.
-- Позволяет комбинировать config checks и client scopes.
+`format=DESIGNER` — `/CheckConfig` Конфигуратора:
+
+- Режимы платформы называются ключами команды: проверки конфигурации и области клиента.
+- Ни один режим не назван — выполняется профиль по умолчанию: `-ThinClient`, `-Server`,
+  `-UnreferenceProcedures`, `-HandlersExistence`, `-EmptyHandlers`, `-ExtendedModulesCheck`.
+  Пустая `/CheckConfig` не проверяет ничего и отвечает «чисто», поэтому пустой она не
+  вызывается.
+- Назван хотя бы один режим — выполняются ровно названные.
 - Поддерживает `--extension <EXTENSION>` или `--all-extensions`.
+- `--project` здесь не исполняется и отвергается.
 
-`designer-modules`:
+`format=EDT` — проверка проекта средствами EDT CLI:
 
-- Только Конфигуратор, `format=DESIGNER`.
-- Требует как минимум один mode flag.
-- Поддерживает `--extension <EXTENSION>` или `--all-extensions`.
+- Исполнитель — EDT CLI, строки в матрице провайдеров нет; база не нужна.
+- Повторяемый `--project`; без него берутся все EDT-проекты конфига.
+- Режимы `/CheckConfig` здесь не исполняются и отвергаются.
 
-`edt`:
+Проект, у которого все наборы исходников внешние, получает отказ рода `capability` с кодом
+`subject`: проверка внешних обработок и отчётов платформой не описана.
 
-- Только `format=EDT`; исполнитель — EDT CLI, строки в матрице провайдеров нет.
-- Повторяемый `--project`.
-- Без `--project` использует дефолтный набор EDT-проектов из конфига.
+Прежние имена `check designer-config`, `check designer-modules` и `check edt` приняты один
+цикл скрытыми синонимами. Отдельного пути `/CheckModules` не осталось: его режимы целиком
+покрыты `/CheckConfig`, и ответ такого вызова называет `check_name: designer-config`.
 
 ## Файлы и артефакты
 

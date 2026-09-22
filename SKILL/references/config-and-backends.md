@@ -61,7 +61,7 @@ matrix, and `providers.<operation>` names one explicitly.
   and `infobase create` in a cluster arrive later).
 - `extensions` supports Designer and EDT projects: `--name` selects an extension `source-set`,
   `--installed-name` selects an installed platform name without a matching source-set.
-- `check designer-config` and `check designer-modules` require `format=DESIGNER`; `check edt` requires `format=EDT`.
+- `check` picks its branch by `format`: `/CheckConfig` under DESIGNER, EDT validation under EDT.
 - IBCMD dump uses project-local standalone-server data under `workPath/ibcmd-data`.
 - `pull --mode partial` with IBCMD degrades to incremental and must be called out in user-facing summaries.
 - `convert` is CLI-only, repo-aware, uses configured `source-set`, takes no `providers` key, and does not require an infobase.

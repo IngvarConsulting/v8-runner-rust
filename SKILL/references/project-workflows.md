@@ -64,21 +64,21 @@ Designer module checks:
 
 ```bash
 v8-runner push
-v8-runner check designer-modules --server --thin-client
+v8-runner check --server --thin-client
 ```
 
 Designer configuration checks:
 
 ```bash
 v8-runner push
-v8-runner check designer-config
+v8-runner check
 ```
 
 EDT checks:
 
 ```bash
 v8-runner push
-v8-runner check edt
+v8-runner check
 ```
 
 If a `check` command is unavailable for the current `format`, report the config limitation instead of inventing raw platform commands.

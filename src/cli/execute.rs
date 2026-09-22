@@ -18,7 +18,7 @@ use crate::cli::output::{
 };
 use crate::cli::signal::CliSignalGuard;
 use crate::command_envelope::{test_envelope, Envelope};
-use crate::config::model::{AppConfig, SourceSetPurpose};
+use crate::config::model::{AppConfig, SourceFormat, SourceSetPurpose};
 use crate::domain::artifact::{
     ArtifactRef, ArtifactSet, ARTIFACT_ROLE_PACKAGE_FILE, ARTIFACT_ROLE_PLATFORM_LOG,
 };
@@ -77,10 +77,10 @@ use crate::use_cases::request::{
     effective_test_timeouts, ArtifactsModeRequest, ArtifactsRequest, BuildRequest,
     ClientMcpAddonRequest, ClientMcpMode, ClientMcpOptionsRequest, ConfigureExtensionsRequest,
     ConvertRequest, ConvertScopeRequest, DesignerClientScope, DesignerClientScopes,
-    DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest,
-    DesignerModulesSyntaxRequest, DumpRequest, ExtensionInventoryRequest, ExtensionInventoryScope,
-    InitRequest, LaunchRequest, LoadRequest, SyntaxExtensionScope, SyntaxRequest,
-    SyntaxTargetRequest, TestRequest, TestScopeRequest, ToolsDownloadRequest,
+    DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest, DumpRequest,
+    ExtensionInventoryRequest, ExtensionInventoryScope, InitRequest, LaunchRequest, LoadRequest,
+    SyntaxExtensionScope, SyntaxRequest, SyntaxTargetRequest, TestRequest, TestScopeRequest,
+    ToolsDownloadRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
@@ -2219,7 +2219,7 @@ fn execute_syntax(
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
     let context = cli_context(config, CommandName::Syntax, cancellation);
-    let request = map_syntax_request(args)
+    let request = map_syntax_request(config, args)
         .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Syntax, error))?;
     with_cli_workspace_lock(
         config,
@@ -2798,20 +2798,59 @@ fn map_artifacts_request_with_config(
     })
 }
 
-fn map_syntax_request(args: &SyntaxArgs) -> Result<SyntaxRequest, UseCaseError> {
-    Ok(SyntaxRequest {
-        target: match &args.target {
-            SyntaxTarget::DesignerConfig(config) => {
-                SyntaxTargetRequest::DesignerConfig(map_designer_config_request(config)?)
-            }
-            SyntaxTarget::DesignerModules(modules) => {
-                SyntaxTargetRequest::DesignerModules(map_designer_modules_request(modules)?)
-            }
-            SyntaxTarget::Edt { projects } => SyntaxTargetRequest::Edt {
-                projects: projects.clone(),
-            },
+/// Ветку выбирает формат проекта, а не подкоманда: проверка одна, а чем её выполнить —
+/// свойство проекта. Прежние имена приняты один цикл и держат своё утверждение о ветке:
+/// `check edt` в проекте формата платформы отказывает, как отказывал, — синоним не меняет
+/// инструмент молча.
+fn map_syntax_request(
+    config: &AppConfig,
+    args: &SyntaxArgs,
+) -> Result<SyntaxRequest, UseCaseError> {
+    if let Some(message) = args.keys_next_to_a_previous_name() {
+        return Err(UseCaseError::new(UseCaseErrorKind::Validation, message));
+    }
+    let target = match &args.target {
+        Some(SyntaxTarget::DesignerConfig(modes)) => {
+            SyntaxTargetRequest::DesignerConfig(map_designer_config_request(modes)?)
+        }
+        Some(SyntaxTarget::DesignerModules(modules)) => {
+            SyntaxTargetRequest::DesignerConfig(map_designer_modules_request(modules)?)
+        }
+        Some(SyntaxTarget::Edt { projects }) => SyntaxTargetRequest::Edt {
+            projects: projects.clone(),
         },
-    })
+        None if config.format == SourceFormat::Edt => {
+            // Ключ, которого ветка не исполняет, отвергается, а не игнорируется.
+            if args.modes != DesignerConfigSyntaxArgs::default() {
+                return Err(UseCaseError::new(
+                    UseCaseErrorKind::Validation,
+                    "the project format is EDT, and the check runs EDT validation: modes of /CheckConfig are not executed there. Name the project with --project or drop the keys",
+                ));
+            }
+            SyntaxTargetRequest::Edt {
+                projects: args.projects.clone(),
+            }
+        }
+        None => {
+            if !args.projects.is_empty() {
+                return Err(UseCaseError::new(
+                    UseCaseErrorKind::Validation,
+                    "--project names an EDT project, and the project format is DESIGNER: the check runs /CheckConfig there. Drop the key",
+                ));
+            }
+            let named = map_designer_config_request(&args.modes)?;
+            // Ключей не назвали — выполняется профиль по умолчанию: пустая `/CheckConfig`
+            // не проверяет ничего и отвечает «чисто», а команда обещает проверку. Прежние
+            // имена сюда не попадают: у них свой состав и своя проверка режимов.
+            let request = if named.names_no_mode() {
+                DesignerConfigSyntaxRequest::default_profile(named.extension_scope().clone())
+            } else {
+                named
+            };
+            SyntaxTargetRequest::DesignerConfig(request)
+        }
+    };
+    Ok(SyntaxRequest { target })
 }
 
 fn map_designer_config_request(
@@ -2876,10 +2915,15 @@ fn map_designer_config_request(
     ))
 }
 
+/// Прежнее имя `designer-modules` исполняется той же `/CheckConfig`: её режимы покрывают
+/// режимы проверки модулей целиком. Проверки конфигурации остаются пустыми, а требование
+/// «хотя бы один режим» сохраняется: синоним держится один цикл ровно тем, чем был, и
+/// профиль по умолчанию сюда не подмешивается.
 fn map_designer_modules_request(
     args: &DesignerModulesSyntaxArgs,
-) -> Result<DesignerModulesSyntaxRequest, UseCaseError> {
-    DesignerModulesSyntaxRequest::new(
+) -> Result<DesignerConfigSyntaxRequest, UseCaseError> {
+    let request = DesignerConfigSyntaxRequest::new(
+        DesignerConfigChecks::new([]),
         DesignerClientScopes::new(
             [
                 args.thin_client.then_some(DesignerClientScope::ThinClient),
@@ -2901,7 +2945,14 @@ fn map_designer_modules_request(
         ),
         crate::use_cases::request::ExtendedModulesPolicy::basic(args.extended_modules_check),
         SyntaxExtensionScope::new(args.extension.clone(), args.all_extensions),
-    )
+    );
+    if request.names_no_mode() {
+        return Err(UseCaseError::new(
+            UseCaseErrorKind::Validation,
+            crate::use_cases::request::MODULES_WITHOUT_MODES_ERROR,
+        ));
+    }
+    Ok(request)
 }
 
 fn map_launch_request(args: &LaunchArgs, dry_run: bool) -> Result<LaunchRequest, UseCaseError> {
@@ -4336,31 +4387,41 @@ mod tests {
         assert_eq!(no_build_request.build_policy, TestBuildPolicy::Skip);
     }
 
+    /// Прежнее имя `designer-modules` исполняется `/CheckConfig`: режимы доезжают, а
+    /// проверок конфигурации в запросе нет.
     #[test]
     fn maps_syntax_request() {
-        let request = map_syntax_request(&SyntaxArgs {
-            target: SyntaxTarget::DesignerModules(DesignerModulesSyntaxArgs {
-                thin_client: true,
-                web_client: false,
-                server: true,
-                external_connection: false,
-                thick_client_ordinary_application: false,
-                mobile_app_client: false,
-                mobile_app_server: false,
-                mobile_client: false,
-                extended_modules_check: true,
-                extension: Some("Ext".to_owned()),
-                all_extensions: false,
-            }),
-        })
+        let work = tempfile::tempdir().expect("tempdir");
+        let config = sample_config(work.path());
+        let request = map_syntax_request(
+            &config,
+            &SyntaxArgs {
+                modes: DesignerConfigSyntaxArgs::default(),
+                projects: Vec::new(),
+                target: Some(SyntaxTarget::DesignerModules(DesignerModulesSyntaxArgs {
+                    thin_client: true,
+                    web_client: false,
+                    server: true,
+                    external_connection: false,
+                    thick_client_ordinary_application: false,
+                    mobile_app_client: false,
+                    mobile_app_server: false,
+                    mobile_client: false,
+                    extended_modules_check: true,
+                    extension: Some("Ext".to_owned()),
+                    all_extensions: false,
+                })),
+            },
+        )
         .expect("request");
 
         assert!(matches!(
             request.target,
-            SyntaxTargetRequest::DesignerModules(ref modules)
-                if modules.has_client_scope(DesignerClientScope::ThinClient)
-                    && modules.has_client_scope(DesignerClientScope::Server)
-                    && modules.extension_scope().extension() == Some("Ext")
+            SyntaxTargetRequest::DesignerConfig(ref modes)
+                if modes.has_client_scope(DesignerClientScope::ThinClient)
+                    && modes.has_client_scope(DesignerClientScope::Server)
+                    && modes.extension_scope().extension() == Some("Ext")
+                    && !modes.has_check(crate::use_cases::request::DesignerConfigCheck::UnreferenceProcedures)
         ));
     }
 

@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig};
 use crate::domain::capability::{Operation, Provider};
 use crate::domain::issue::{EdtIssue, Issue, IssueSeverity};
-use crate::domain::syntax::{SyntaxCheckResult, SyntaxCheckStatus, SyntaxIssueSummary};
+use crate::domain::syntax::{CheckName, SyntaxCheckResult, SyntaxCheckStatus, SyntaxIssueSummary};
 use crate::parsers::edt_validation;
 use crate::platform::edt::render_interactive_validate_command;
 use crate::platform::edt_session::{EdtSessionError, EdtSessionManager, EdtSessionRequest};
@@ -18,7 +18,7 @@ use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 
 const SUPPORTED_EDT_SYNTAX_ERROR: &str =
-    "syntax edt currently supports only the Designer provider and format=EDT";
+    "check edt currently supports only the Designer provider and format=EDT";
 static LOG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Executes MCP `check_syntax_edt` through the shared EDT session actor.
@@ -44,7 +44,7 @@ pub async fn execute(
             return Ok(Err(SyntaxExecutionFailure::with_payload(
                 error,
                 failed_result(
-                    "edt",
+                    CheckName::Edt,
                     SyntaxCheckStatus::ToolFailed,
                     -1,
                     started,
@@ -64,7 +64,7 @@ pub async fn execute(
         return Ok(Err(SyntaxExecutionFailure::with_payload(
             error,
             failed_result(
-                "edt",
+                CheckName::Edt,
                 SyntaxCheckStatus::ToolFailed,
                 -1,
                 started,
@@ -84,7 +84,7 @@ pub async fn execute(
             return Ok(Err(SyntaxExecutionFailure::with_payload(
                 error,
                 failed_result(
-                    "edt",
+                    CheckName::Edt,
                     SyntaxCheckStatus::ToolFailed,
                     -1,
                     started,
@@ -108,7 +108,7 @@ pub async fn execute(
             return Ok(Err(SyntaxExecutionFailure::with_payload(
                 app_error,
                 failed_result(
-                    "edt",
+                    CheckName::Edt,
                     SyntaxCheckStatus::ToolFailed,
                     -1,
                     started,
@@ -158,7 +158,7 @@ pub async fn execute(
                 return Ok(Err(SyntaxExecutionFailure::with_payload(
                     AppError::Runtime(message.clone()),
                     failed_result(
-                        "edt",
+                        CheckName::Edt,
                         SyntaxCheckStatus::ToolFailed,
                         -1,
                         started,
@@ -177,7 +177,7 @@ pub async fn execute(
                 return Ok(Err(SyntaxExecutionFailure::with_payload(
                     AppError::Runtime(message.clone()),
                     failed_result(
-                        "edt",
+                        CheckName::Edt,
                         SyntaxCheckStatus::ToolFailed,
                         -1,
                         started,
@@ -194,7 +194,7 @@ pub async fn execute(
                 return Ok(Err(SyntaxExecutionFailure::with_payload(
                     app_error,
                     failed_result(
-                        "edt",
+                        CheckName::Edt,
                         SyntaxCheckStatus::ToolFailed,
                         -1,
                         started,
@@ -278,7 +278,7 @@ pub async fn execute(
         provider: None,
         status,
         exit_code,
-        check_name: "edt".to_owned(),
+        check_name: CheckName::Edt,
         summary: summarize_issues(&issues),
         issues,
         duration_ms: elapsed_millis(started),
@@ -395,7 +395,7 @@ fn combine_status(current: SyntaxCheckStatus, next: SyntaxCheckStatus) -> Syntax
 }
 
 fn failed_result(
-    check_name: &str,
+    check_name: CheckName,
     status: SyntaxCheckStatus,
     exit_code: i32,
     started: Instant,
@@ -408,7 +408,7 @@ fn failed_result(
         provider: None,
         status,
         exit_code,
-        check_name: check_name.to_owned(),
+        check_name,
         summary: summarize_issues(&issues),
         issues,
         duration_ms: elapsed_millis(started),

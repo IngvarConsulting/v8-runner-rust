@@ -195,6 +195,11 @@ const LEAVES: &[Leaf] = &[
         base: Base::Resolves,
     },
     Leaf {
+        path: "check",
+        preview: Preview::Absent("its preview is not written yet"),
+        base: Base::Resolves,
+    },
+    Leaf {
         path: "check designer-config",
         preview: Preview::Absent("its preview is not written yet"),
         base: Base::Resolves,

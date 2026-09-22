@@ -221,6 +221,11 @@ impl ArtifactsRequest {
     }
 }
 
+/// Отказ синонима `designer-modules`, у которого режим обязателен: так вела себя
+/// `/CheckModules`, и один цикл синоним ведёт себя ровно так же.
+pub const MODULES_WITHOUT_MODES_ERROR: &str =
+    "check designer-modules requires at least one mode flag";
+
 /// Transport-neutral request for the `syntax` use case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyntaxRequest {
@@ -232,7 +237,6 @@ pub struct SyntaxRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyntaxTargetRequest {
     DesignerConfig(DesignerConfigSyntaxRequest),
-    DesignerModules(DesignerModulesSyntaxRequest),
     /// Runs EDT validation for selected projects or all EDT projects when empty.
     Edt {
         projects: Vec<String>,
@@ -348,6 +352,10 @@ impl DesignerConfigChecks {
 
     pub fn contains(&self, check: DesignerConfigCheck) -> bool {
         self.checks.contains(&check)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.checks.is_empty()
     }
 }
 
@@ -513,6 +521,34 @@ pub struct DesignerConfigSyntaxRequest {
 }
 
 impl DesignerConfigSyntaxRequest {
+    /// Режимы, которыми `check` проверяет конфигурацию, когда ни один не назван.
+    ///
+    /// Сайт обещает `/CheckConfig` со всеми режимами, а пустая `/CheckConfig` не проверяет
+    /// ничего и отвечает «чисто» — это обещание наоборот. Профиль один на оба транспорта:
+    /// MCP вёз его и раньше, командная строка теперь везёт тот же.
+    pub fn default_profile(extension_scope: SyntaxExtensionScope) -> Self {
+        Self {
+            checks: DesignerConfigChecks::new([
+                DesignerConfigCheck::UnreferenceProcedures,
+                DesignerConfigCheck::HandlersExistence,
+                DesignerConfigCheck::EmptyHandlers,
+            ]),
+            client_scopes: DesignerClientScopes::new([
+                DesignerClientScope::ThinClient,
+                DesignerClientScope::Server,
+            ]),
+            extended_modules: ExtendedModulesPolicy::basic(true),
+            extension_scope,
+        }
+    }
+
+    /// Назван ли хоть один режим: пустой набор означает профиль по умолчанию.
+    pub fn names_no_mode(&self) -> bool {
+        self.checks.is_empty()
+            && self.client_scopes.is_empty()
+            && !self.extended_modules.is_enabled()
+    }
+
     pub fn new(
         checks: DesignerConfigChecks,
         client_scopes: DesignerClientScopes,
@@ -533,51 +569,6 @@ impl DesignerConfigSyntaxRequest {
 
     pub fn has_client_scope(&self, scope: DesignerClientScope) -> bool {
         self.client_scopes.contains(scope)
-    }
-
-    pub const fn extended_modules(&self) -> ExtendedModulesPolicy {
-        self.extended_modules
-    }
-
-    pub const fn extension_scope(&self) -> &SyntaxExtensionScope {
-        &self.extension_scope
-    }
-}
-
-/// Transport-neutral request for Designer module checks.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DesignerModulesSyntaxRequest {
-    client_scopes: DesignerClientScopes,
-    extended_modules: ExtendedModulesPolicy,
-    extension_scope: SyntaxExtensionScope,
-}
-
-impl DesignerModulesSyntaxRequest {
-    pub fn new(
-        client_scopes: DesignerClientScopes,
-        extended_modules: ExtendedModulesPolicy,
-        extension_scope: SyntaxExtensionScope,
-    ) -> Result<Self, UseCaseError> {
-        if client_scopes.is_empty() && !extended_modules.is_enabled() {
-            return Err(UseCaseError::new(
-                UseCaseErrorKind::Validation,
-                "syntax designer-modules requires at least one mode flag",
-            ));
-        }
-
-        Ok(Self {
-            client_scopes,
-            extended_modules,
-            extension_scope,
-        })
-    }
-
-    pub fn has_client_scope(&self, scope: DesignerClientScope) -> bool {
-        self.client_scopes.contains(scope)
-    }
-
-    pub fn has_modes(&self) -> bool {
-        !self.client_scopes.is_empty() || self.extended_modules.is_enabled()
     }
 
     pub const fn extended_modules(&self) -> ExtendedModulesPolicy {
@@ -699,8 +690,8 @@ pub struct ConfigureExtensionsRequest {
 mod tests {
     use super::{
         DesignerClientScope, DesignerClientScopes, DesignerConfigCheck, DesignerConfigChecks,
-        DesignerConfigSyntaxRequest, DesignerModulesSyntaxRequest, ExtendedModulesDetail,
-        ExtendedModulesPolicy, SyntaxExtensionScope,
+        DesignerConfigSyntaxRequest, ExtendedModulesDetail, ExtendedModulesPolicy,
+        SyntaxExtensionScope,
     };
     use crate::use_cases::result::UseCaseErrorKind;
 
@@ -745,19 +736,21 @@ mod tests {
         );
     }
 
+    /// Требование «хотя бы один режим» жило у `/CheckModules`; у `/CheckConfig` его нет,
+    /// а пустой запрос выполняет профиль по умолчанию.
     #[test]
-    fn modules_request_requires_at_least_one_mode_or_extended_modules() {
-        let error = DesignerModulesSyntaxRequest::new(
+    fn a_config_request_without_modes_names_no_mode() {
+        let request = DesignerConfigSyntaxRequest::new(
+            DesignerConfigChecks::default(),
             DesignerClientScopes::default(),
             ExtendedModulesPolicy::basic(false),
             SyntaxExtensionScope::new(None, true),
-        )
-        .expect_err("err");
+        );
 
-        assert_eq!(error.kind(), UseCaseErrorKind::Validation);
-        assert_eq!(
-            error.message(),
-            "syntax designer-modules requires at least one mode flag"
+        assert!(request.names_no_mode());
+        assert!(
+            !DesignerConfigSyntaxRequest::default_profile(SyntaxExtensionScope::new(None, true))
+                .names_no_mode()
         );
     }
 }

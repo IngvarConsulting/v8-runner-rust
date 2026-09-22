@@ -662,15 +662,15 @@ assert_json_command_ok "$extensions_json" "extensions"
 
 if [[ "$BUILDER_BACKEND" == "DESIGNER" ]]; then
     print_stage "syntax and checks"
-    run_cli syntax designer-config --all-extensions
-    run_cli syntax designer-config \
+    run_cli check --all-extensions
+    run_cli check \
         --server \
         --extended-modules-check \
         --check-use-synchronous-calls \
         --check-use-modality \
         --extension "$EXTENSION_SOURCE_SET_NAME"
-    run_cli syntax designer-modules --server --all-extensions
-    run_cli syntax designer-modules --thin-client --extended-modules-check --extension "$EXTENSION_SOURCE_SET_NAME"
+    run_cli check --server --all-extensions
+    run_cli check --thin-client --extended-modules-check --extension "$EXTENSION_SOURCE_SET_NAME"
 
     print_stage "test"
     run_test_stage

@@ -73,8 +73,8 @@ V8_RUNNER_CI_SCOPE=happy-path bash scripts/test/ci-rust.sh
 2. `push --full`
 3. incremental `push` без изменений
 4. Designer-only partial `push --source-set <configuration>` после изменения существующего `.bsl` файла с кириллическим путём
-5. `check designer-config`
-6. `check designer-modules`
+5. `check` с профилем по умолчанию
+6. `check` с названными режимами
 7. `test`
 8. `make` для `.cf/.cfe/.epf/.erf`
 9. проверку, что все deploy-ready артефакты существуют и не пусты
