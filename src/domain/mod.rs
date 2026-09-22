@@ -42,3 +42,5 @@ pub mod syntax;
 pub mod test;
 /// Tool download domain models.
 pub mod tools_download;
+
+pub mod configuration_transition;

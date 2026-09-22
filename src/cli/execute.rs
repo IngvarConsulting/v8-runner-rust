@@ -141,6 +141,24 @@ pub fn execute_command(
             clean_before_execution,
             cancellation,
         ),
+        Command::Apply(args) => execute_configuration_transition(
+            config,
+            crate::use_cases::configuration_transition::Transition::Apply,
+            args.extension.as_deref(),
+            args.dry_run,
+            presenter,
+            clean_before_execution,
+            cancellation,
+        ),
+        Command::Reset(args) => execute_configuration_transition(
+            config,
+            crate::use_cases::configuration_transition::Transition::Reset,
+            args.extension.as_deref(),
+            args.dry_run,
+            presenter,
+            clean_before_execution,
+            cancellation,
+        ),
         Command::Test(args) => execute_test(
             config,
             args,
@@ -329,6 +347,8 @@ pub fn command_name(command: &Command) -> CommandName {
         Command::Extensions(_) => CommandName::Extensions,
         Command::Build(_) => CommandName::Build,
         Command::Load(_) => CommandName::Load,
+        Command::Apply(_) => CommandName::Apply,
+        Command::Reset(_) => CommandName::Reset,
         Command::Test(_) => CommandName::Test,
         Command::Dump(_) => CommandName::Dump,
         Command::Infobase(InfobaseArgs {
@@ -2660,6 +2680,7 @@ fn launch_cli_context(
 
 fn map_load_request(args: &LoadArgs) -> Result<LoadRequest, UseCaseError> {
     Ok(LoadRequest {
+        no_apply: args.no_apply,
         dry_run: args.dry_run,
         mode: match args.mode.as_str() {
             "load" => LoadMode::Load,
@@ -4101,6 +4122,89 @@ fn status_label(status: &TestStatus) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn execute_configuration_transition(
+    config: &AppConfig,
+    transition: crate::use_cases::configuration_transition::Transition,
+    extension: Option<&str>,
+    dry_run: bool,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    let command = transition.command();
+    crate::use_cases::configuration_transition::validate(extension)
+        .map_err(|error| render_pre_dispatch_error(presenter, command, error))?;
+    let context = cli_context(config, command, cancellation);
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        command,
+        clean_before_execution,
+        dry_run,
+        || match crate::use_cases::configuration_transition::execute(
+            &context, config, transition, extension, dry_run,
+        ) {
+            Ok(result) => {
+                if presenter.is_json() {
+                    presenter.print_envelope(&Envelope::ok(
+                        command.as_str(),
+                        result.duration_ms,
+                        result,
+                    ));
+                } else {
+                    render_configuration_transition_warnings(&result, presenter);
+                    presenter.print_bare(&format!(
+                        "{} {}",
+                        command.as_str(),
+                        if dry_run {
+                            "preview ready"
+                        } else {
+                            "completed"
+                        }
+                    ));
+                }
+                Ok(())
+            }
+            Err(failure) => {
+                let error = failure.error;
+                if presenter.is_json() {
+                    if let Some(result) = failure.payload {
+                        presenter.print_envelope(&failure_envelope(
+                            command.as_str(),
+                            result.duration_ms,
+                            result,
+                            &error,
+                        ));
+                    }
+                } else {
+                    if let Some(result) = failure.payload.as_ref() {
+                        render_configuration_transition_warnings(result, presenter);
+                    }
+                    presenter.print_error(&error.to_string());
+                }
+                Err(error)
+            }
+        },
+    )
+}
+
+fn render_configuration_transition_warnings(
+    result: &crate::domain::configuration_transition::ConfigurationTransitionResult,
+    presenter: &Presenter,
+) {
+    let mut details = Vec::new();
+    if let Some(interruption) = result.interruption.as_ref() {
+        append_interruptions(&mut details, std::slice::from_ref(interruption));
+    }
+    for warning in &result.warnings {
+        push_unique_detail(&mut details, bracketed_detail("warning", warning));
+    }
+    for detail in details {
+        presenter.print_bare(&detail);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -4456,6 +4560,7 @@ mod tests {
             }
         );
         let load = map_load_request(&LoadArgs {
+            no_apply: false,
             dry_run: false,
             path: "dist/main.cf".to_owned(),
             mode: "merge".to_owned(),
@@ -4531,6 +4636,7 @@ mod tests {
     #[test]
     fn rejects_invalid_load_mode_mapping() {
         let error = map_load_request(&LoadArgs {
+            no_apply: false,
             dry_run: false,
             path: "dist/main.cf".to_owned(),
             mode: "garbage".to_owned(),
@@ -4643,6 +4749,7 @@ mod tests {
         );
         assert_eq!(
             command_name(&Command::Load(LoadArgs {
+                no_apply: false,
                 dry_run: false,
                 path: "dist/main.cf".to_owned(),
                 mode: "load".to_owned(),

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing release tag on the current protected master commit"
+        description: "Existing release tag on the current protected master or release/0.11 commit"
         required: true
         type: string
       prerelease:
@@ -28,7 +28,7 @@ env:
 jobs:
   preflight:
     name: Verify release contract
-    if: ${{ github.ref == 'refs/heads/master' }}
+    if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/release/0.11' }}
     environment: release
     runs-on: ubuntu-latest
     permissions:
@@ -40,8 +40,11 @@ jobs:
           ref: ${{ inputs.tag }}
           fetch-depth: 0
 
-      - name: Fetch protected master identity
-        run: git fetch --no-tags origin master:refs/remotes/origin/master
+      - name: Fetch approved protected source identity
+        run: |
+          release_source_ref="$(python3 scripts/release/verify-release-contract.py "${RELEASE_TAG}" --source-ref-only)"
+          release_branch="${release_source_ref#refs/heads/}"
+          git fetch --no-tags origin "${release_source_ref}:refs/remotes/origin/${release_branch}"
 
       - name: Install Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -325,10 +328,11 @@ jobs:
         run: |
           gh release download "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --dir dist
           python3 scripts/release/release_assets.py verify-assets --dist dist --tag "${RELEASE_TAG}" --commit "${GITHUB_SHA}"
+          release_source_ref="$(python3 scripts/release/verify-release-contract.py "${RELEASE_TAG}" --source-ref-only)"
           for asset in $(python3 scripts/release/release_assets.py attested-assets); do
             gh attestation verify "dist/${asset}" --repo "${GITHUB_REPOSITORY}" \
               --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
-              --source-ref refs/heads/master --source-digest "${GITHUB_SHA}" --deny-self-hosted-runners
+              --source-ref "${release_source_ref}" --source-digest "${GITHUB_SHA}" --deny-self-hosted-runners
           done
           gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets \
             --jq '.assets | map({name,size,digest}) | sort_by(.name)' > release-assets.snapshot.json
@@ -369,10 +373,11 @@ jobs:
           diff -u release-assets.snapshot.json release-assets.current.json
           gh release download "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --dir dist
           python3 scripts/release/release_assets.py verify-assets --dist dist --tag "${RELEASE_TAG}" --commit "${GITHUB_SHA}"
+          release_source_ref="$(python3 scripts/release/verify-release-contract.py "${RELEASE_TAG}" --source-ref-only)"
           for asset in $(python3 scripts/release/release_assets.py attested-assets); do
             gh attestation verify "dist/${asset}" --repo "${GITHUB_REPOSITORY}" \
               --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
-              --source-ref refs/heads/master --source-digest "${GITHUB_SHA}" --deny-self-hosted-runners
+              --source-ref "${release_source_ref}" --source-digest "${GITHUB_SHA}" --deny-self-hosted-runners
           done
           gh release edit "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --verify-tag --draft=false
           test "$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json isImmutable --jq .isImmutable)" = true

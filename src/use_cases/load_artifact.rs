@@ -216,9 +216,14 @@ fn run_load_selected(
                 update_db_cfg_ran: false,
             })
             .with_diagnostics(vec![format!(
-                "would load {} via {}; compatibility not probed and nothing applied",
+                "would load {} via {} {}; compatibility not probed and nothing applied",
                 target_label(&resolved),
-                location.path.display()
+                location.path.display(),
+                if args.no_apply {
+                    "without updating database configuration"
+                } else {
+                    "and update database configuration"
+                }
             )]);
         return Ok(LoadResult {
             provider: None,
@@ -378,6 +383,39 @@ fn run_load_selected(
         ));
     }
 
+    if args.no_apply {
+        let mut execution =
+            ExecutionOutcome::new(ExecutionStatus::Succeeded).with_payload(LoadExecutionMetadata {
+                applied: true,
+                target_kind: resolved.target_kind,
+                compatibility_state,
+                update_db_cfg_ran: false,
+            });
+        if let Some(warning) = deferred_interruption_warning("apply", &apply_result) {
+            execution = execution.with_diagnostics(vec![warning]);
+        }
+        if let Some(interruption) = deferred_process_interruption_details(
+            "apply",
+            "apply completed successfully",
+            &apply_result,
+        ) {
+            execution = execution.with_interruptions(vec![interruption]);
+        }
+        return Ok(LoadResult {
+            provider: None,
+            provider_dispatched: true,
+            mode: resolved.mode,
+            artifact_path: resolved.artifact_path,
+            artifact_type: resolved.artifact_type,
+            extension: resolved.extension,
+            duration_ms: started.elapsed().as_millis() as u64,
+            execution: with_platform_log_artifact(
+                execution,
+                apply_result.platform_log_path.or(probe_log_path),
+            ),
+        });
+    }
+
     if let Some(interruption) = context.interruption() {
         let message =
             interruption_before_safe_point_message(context, interruption, "update_db_cfg");
@@ -407,7 +445,7 @@ fn run_load_selected(
             let message = error.to_string();
             return Err(LoadExecutionFailure::with_payload(
                 error,
-                empty_result_from_resolved(
+                loaded_result_from_resolved(
                     dispatched,
                     &resolved,
                     compatibility_state,
@@ -436,7 +474,7 @@ fn run_load_selected(
             let message = error.to_string();
             return Err(LoadExecutionFailure::with_payload(
                 error,
-                empty_result_from_resolved(
+                loaded_result_from_resolved(
                     dispatched,
                     &resolved,
                     compatibility_state,
@@ -453,7 +491,7 @@ fn run_load_selected(
         let message = error.to_string();
         return Err(LoadExecutionFailure::with_payload(
             error,
-            empty_result_from_resolved(
+            loaded_result_from_resolved(
                 dispatched,
                 &resolved,
                 compatibility_state,
@@ -463,7 +501,7 @@ fn run_load_selected(
                     .platform_log_path
                     .or(apply_result.platform_log_path)
                     .or(probe_log_path),
-                false,
+                true,
             ),
         ));
     }
@@ -1040,6 +1078,32 @@ fn deferred_interruption_warning(action: &str, result: &PlatformCommandResult) -
     deferred_process_interruption_warning(&format!("{action} completed successfully"), result)
 }
 
+// Loading the artifact and updating the database are separate effects. An update
+// failure cannot erase evidence that the first effect already succeeded.
+fn loaded_result_from_resolved(
+    provider_dispatched: bool,
+    resolved: &ResolvedLoadRequest,
+    compatibility_state: CompatibilityState,
+    started: Instant,
+    message: Option<String>,
+    platform_log_path: Option<PathBuf>,
+    update_db_cfg_ran: bool,
+) -> LoadResult {
+    let mut result = empty_result_from_resolved(
+        provider_dispatched,
+        resolved,
+        compatibility_state,
+        started,
+        message,
+        platform_log_path,
+        update_db_cfg_ran,
+    );
+    if let Some(metadata) = result.execution.payload.as_mut() {
+        metadata.applied = true;
+    }
+    result
+}
+
 fn empty_result_from_resolved(
     provider_dispatched: bool,
     resolved: &ResolvedLoadRequest,
@@ -1487,6 +1551,7 @@ mod tests {
         write_extension_list_ibcmd(&root.join("ibcmd"), &[]);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            no_apply: false,
             vendor_name: None,
             dry_run: false,
             mode: LoadMode::Load,
@@ -1537,6 +1602,7 @@ mod tests {
         make_executable(&ibcmd);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            no_apply: false,
             vendor_name: None,
             dry_run: false,
             mode: LoadMode::Load,
@@ -1572,6 +1638,7 @@ mod tests {
         write_extension_list_ibcmd(&root.join("ibcmd"), &[]);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            no_apply: false,
             vendor_name: None,
             dry_run: false,
             mode: LoadMode::Merge,
@@ -1611,6 +1678,7 @@ mod tests {
         let unsupported = resolve_request(
             &config,
             &LoadRequest {
+                no_apply: false,
                 vendor_name: None,
                 dry_run: false,
                 mode: LoadMode::Load,
@@ -1625,6 +1693,7 @@ mod tests {
         let missing_extension = resolve_request(
             &config,
             &LoadRequest {
+                no_apply: false,
                 vendor_name: None,
                 dry_run: false,
                 mode: LoadMode::Load,
@@ -1651,6 +1720,7 @@ mod tests {
         write_designer_script(&binary, &calls);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            no_apply: false,
             vendor_name: None,
             dry_run: false,
             mode: LoadMode::Load,
@@ -1681,6 +1751,100 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn update_failure_preserves_the_already_loaded_artifact_receipt() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("work")).expect("work");
+        let binary = root.join("1cv8");
+        let calls = root.join("calls.log");
+        fs::write(root.join("main.cf"), "cf").expect("artifact");
+        write_designer_script(&binary, &calls);
+        let script = fs::read_to_string(&binary).expect("script");
+        fs::write(
+            &binary,
+            script.replace(
+                "exit 0",
+                "case \"$*\" in */UpdateDBCfg*) exit 23;; esac\nexit 0",
+            ),
+        )
+        .expect("script");
+        let config = sample_config(root, &binary);
+        let request = LoadRequest {
+            no_apply: false,
+            vendor_name: None,
+            dry_run: false,
+            mode: LoadMode::Load,
+            artifact_path: "main.cf".to_owned(),
+            settings_path: None,
+            extension: None,
+        };
+        let failure = execute(&ExecutionContext::cli(CommandName::Load), &config, &request)
+            .expect_err("update fails");
+        let result = failure.payload.expect("receipt");
+        assert!(
+            load_payload(&result).applied,
+            "successful load cannot be reported as unapplied"
+        );
+        assert!(
+            load_payload(&result).update_db_cfg_ran,
+            "update did run, although it failed"
+        );
+        assert!(!result.execution.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_apply_preserves_deferred_cancellation_after_successful_load() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("work")).expect("work");
+        let binary = root.join("1cv8");
+        let calls = root.join("calls.log");
+        fs::write(root.join("main.cf"), "cf").expect("artifact");
+        write_designer_script(&binary, &calls);
+        let script = fs::read_to_string(&binary).expect("script");
+        fs::write(&binary, script.replace("exit 0", "sleep 0.5\nexit 0")).expect("script");
+        let config = sample_config(root, &binary);
+        let request = LoadRequest {
+            no_apply: true,
+            vendor_name: None,
+            dry_run: false,
+            mode: LoadMode::Load,
+            artifact_path: "main.cf".to_owned(),
+            settings_path: None,
+            extension: None,
+        };
+        let cancellation = CancellationToken::new();
+        let signal = cancellation.clone();
+        let observed_calls = calls.clone();
+        let worker = std::thread::spawn(move || {
+            for _ in 0..500 {
+                if observed_calls.exists() {
+                    signal.cancel();
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            panic!("load process never started");
+        });
+        let outcome = execute(
+            &ExecutionContext::cli(CommandName::Load).with_cancellation(cancellation),
+            &config,
+            &request,
+        );
+        worker.join().expect("cancellation worker");
+        let result = outcome.expect("completed load remains success");
+        assert!(load_payload(&result).applied);
+        assert!(!load_payload(&result).update_db_cfg_ran);
+        assert!(!result.execution.diagnostics.is_empty());
+        assert_eq!(result.execution.interruptions.len(), 1);
+        assert!(!fs::read_to_string(calls)
+            .expect("calls")
+            .contains("/UpdateDBCfg"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn execute_rejects_unsupported_matrix_with_real_cfe_metadata() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
@@ -1695,6 +1859,7 @@ mod tests {
         .into();
 
         let request = LoadRequest {
+            no_apply: false,
             vendor_name: None,
             dry_run: false,
             mode: LoadMode::Load,
@@ -1730,6 +1895,7 @@ mod tests {
         write_designer_script(&binary, &calls);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            no_apply: false,
             vendor_name: None,
             dry_run: false,
             mode: LoadMode::Load,
@@ -1765,6 +1931,7 @@ mod tests {
         write_extension_list_ibcmd(&root.join("ibcmd"), &["ExistingExt"]);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            no_apply: false,
             vendor_name: None,
             dry_run: false,
             mode: LoadMode::Merge,
@@ -1805,6 +1972,7 @@ mod tests {
         write_extension_list_ibcmd(&root.join("ibcmd"), &["UnsupportedExt"]);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            no_apply: false,
             vendor_name: None,
             dry_run: false,
             mode: LoadMode::Load,
@@ -1844,6 +2012,7 @@ mod tests {
         write_designer_script(&binary, &calls);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            no_apply: false,
             vendor_name: None,
             dry_run: false,
             mode: LoadMode::Merge,
@@ -1892,6 +2061,7 @@ mod tests {
         make_executable(&binary);
         let config = sample_config(root, &binary);
         let request = LoadRequest {
+            no_apply: false,
             vendor_name: None,
             dry_run: false,
             mode: LoadMode::Merge,
@@ -1922,6 +2092,7 @@ mod tests {
         let config = sample_config(root, &root.join("1cv8"));
 
         let request = LoadRequest {
+            no_apply: false,
             vendor_name: None,
             dry_run: false,
             mode: LoadMode::Load,
@@ -1953,6 +2124,7 @@ mod tests {
         let config = sample_config(root, &root.join("1cv8"));
 
         let request = LoadRequest {
+            no_apply: false,
             vendor_name: None,
             dry_run: false,
             mode: LoadMode::Load,
@@ -1983,6 +2155,7 @@ mod tests {
         let config = sample_config(root, &root.join("1cv8"));
 
         let request = LoadRequest {
+            no_apply: false,
             vendor_name: None,
             dry_run: false,
             mode: LoadMode::Load,
@@ -2011,6 +2184,7 @@ mod tests {
         let config = sample_config(root, &root.join("1cv8"));
 
         let request = LoadRequest {
+            no_apply: false,
             vendor_name: None,
             dry_run: false,
             mode: LoadMode::Load,

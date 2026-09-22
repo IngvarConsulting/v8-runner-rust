@@ -60,6 +60,10 @@ pub enum Command {
     Build(BuildArgs),
     /// Apply built release artifacts to the infobase
     Load(LoadArgs),
+    /// Apply the primary configuration to the database
+    Apply(ApplyArgs),
+    /// Discard unapplied primary configuration changes
+    Reset(ResetArgs),
     /// Run YaXUnit or Vanessa Automation tests, building first by default
     Test(TestArgs),
     /// Dump infobase state back to project files
@@ -79,6 +83,25 @@ pub enum Command {
     Publish(PublishArgs),
     /// Serve Model Context Protocol transports
     Mcp(McpArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ApplyArgs {
+    #[arg(long)]
+    pub extension: Option<String>,
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ResetArgs {
+    #[arg(long)]
+    pub extension: Option<String>,
+    /// Explicitly acknowledge discarding unapplied changes
+    #[arg(long, required = true)]
+    pub force: bool,
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
@@ -230,6 +253,10 @@ pub struct BuildArgs {
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Command options")]
 pub struct LoadArgs {
+    /// Load the working configuration without updating the database configuration
+    #[arg(long)]
+    pub no_apply: bool,
+
     /// Path to a built artifact (.cf/.cfe)
     #[arg(long)]
     pub path: String,
@@ -871,6 +898,7 @@ mod tests {
 
         match cli.command {
             Command::Load(LoadArgs {
+                no_apply,
                 path,
                 dry_run,
                 mode,
@@ -878,6 +906,7 @@ mod tests {
                 extension,
                 vendor_name,
             }) => {
+                assert!(!no_apply);
                 assert_eq!(path, "dist/main.cf");
                 assert!(!dry_run);
                 assert_eq!(mode, "load");
@@ -907,6 +936,7 @@ mod tests {
 
         match cli.command {
             Command::Load(LoadArgs {
+                no_apply,
                 path,
                 dry_run,
                 mode,
@@ -914,6 +944,7 @@ mod tests {
                 extension,
                 vendor_name: _,
             }) => {
+                assert!(!no_apply);
                 assert_eq!(path, "dist/ext.cfe");
                 assert!(!dry_run);
                 assert_eq!(mode, "merge");

@@ -75,6 +75,22 @@ for asset in v8-runner-assets.json v8-runner-linux-x64; do
 done
 ```
 
+Исправления линии `0.11` выпускаются отдельно от разработки `1.0` из
+защищённой ветки `release/0.11`, исходно созданной от `v0.11.0`. У неё должны
+быть те же обязательные проверки и запрет обхода PR, force-push и удаления,
+что у `master`; environment `release` продолжает допускать только защищённые
+ветки. Изменения вливаются PR в `release/0.11`; CI проверяет PR и итоговый push.
+После зелёных проверок tag `v0.11.x` ставится на текущий head этой ветки, и
+существующий workflow `Release` запускается на ref `release/0.11` с этим tag.
+Произвольные ветки и версии других линий с этой ветки не допускаются.
+Workflow проверяет совпадение tag, checkout, head выбранной ветки и SHA запуска;
+публикация проходит прежние build, audit, native smoke и immutable freeze.
+
+Для проверки maintenance-выпуска `0.11.1` и последующих `0.11.x` в приведённой
+выше команде attestations используйте `--source-ref refs/heads/release/0.11`;
+исторический `v0.11.0` и прежние выпуски проверяются с `refs/heads/master`.
+Запуск другого workflow и ручная публикация бинарников maintenance-путём не являются.
+
 Для offline-проверки сначала проверьте и перенесите в изолированную среду
 `v8-runner-assets.json`, затем сравните SHA-256 нужного файла с соответствующей
 записью manifest. Manifest, скачанный вместе с бинарником без предварительной
@@ -236,8 +252,14 @@ v8-runner mcp serve stdio
 | Project setup (настройка проекта) | `bootstrap`, `config init`, `tools download`, `init`, `extensions`, `build` | Создает проект/config, скачивает инструменты, готовит ИБ, обновляет расширения и загружает исходники |
 | Verification (проверка) | `syntax`, `test` | Запускает syntax checks, YAxUnit и Vanessa Automation |
 | File materialization (материализация файлов) | `dump`, `convert`, `load`, `make`, `artifacts` | Выгружает, конвертирует, загружает и публикует `.cf`, `.cfe`, `.epf`, `.erf` |
+| Configuration transitions (переходы конфигурации) | `apply`, `reset --force` | Применяет рабочую конфигурацию к БД либо возвращает её к конфигурации БД; `--extension NAME` выбирает расширение |
 | Direct launch (прямой запуск) | `launch <designer|thin|thick|ordinary>`, `launch mcp [va]` | Запускает 1C clients (клиенты 1С), Designer и MCP/Vanessa сценарии |
 | MCP automation (автоматизация через MCP) | `mcp serve stdio`, `mcp serve http` | Открывает 8 MCP tools для агентных workflow |
+
+Для раздельной загрузки и применения используйте `v8-runner load --path main.cf --no-apply`, затем `v8-runner apply`. Отказаться от неприменённых изменений:
+`v8-runner reset --force`. Для расширения передавайте `--extension NAME` на каждом
+шаге. Reset не удаляет расширение и не восстанавливает данные базы. Новые apply/reset
+поддерживают `--dry-run` без записи файлов; preview reset также требует `--force`.
 
 ## Для кого
 

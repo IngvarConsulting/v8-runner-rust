@@ -117,10 +117,11 @@ v8-runner init
   there is no staging step that could undo a load. Append `--dry-run` first to see the selected
   provider and the planned input without touching the infobase.
 - Before any command that starts the platform or touches the infobase, append `--dry-run` to see
-  what it would do: `init`, `build`, `load`, `dump`, `convert`, `artifacts`, `launch`,
+  what it would do: `init`, `build`, `load`, `apply`, `reset`, `dump`, `convert`, `artifacts`, `launch`,
   `infobase restore` and both `infobase` exports accept it. A preview locates the platform first,
   so a missing one is refused before the plan is approved, and it takes no locks and creates
-  nothing, and it neither takes nor waits for the workspace lock, so a preview works while
+  no target artifacts (legacy commands still log the preview; `apply`/`reset` write no files),
+  and it neither takes nor waits for the workspace lock, so a preview works while
   another command holds it. Proof that nothing ran: `provider_dispatched: false` for the
   launch-shaped verbs, `mode: preview` for the `infobase` ones — each form carries its own
   closed signal. Two limits are named
@@ -129,6 +130,14 @@ v8-runner init
   "already existed" without creating it.
 - Source files need conversion between Designer and EDT: use `v8-runner convert`; this is CLI-only and does not use the infobase.
 - Existing `.cf` or `.cfe` artifacts need to be applied to an infobase: use `v8-runner load ...`.
+  To load only the working configuration, add `--no-apply`; the receipt has `applied: true`
+  and `update_db_cfg_ran: false`. Run `apply` separately to update the database configuration.
+  A failed update can still have `applied: true`; inspect the receipt before retrying.
+- Apply the working configuration to the database with `v8-runner apply`; discard
+  unapplied configuration edits with `v8-runner reset --force`. Use `--extension NAME`
+  on either command to address an extension. Reset does not delete extensions or restore
+  infobase data; force acknowledges that generation protection is unavailable. Preview
+  with `--dry-run` first (reset still needs force). Both commands are CLI-only Designer operations.
 - Release artifacts need to be exported or external artifacts published: use `v8-runner make ...` or the `artifacts` alias.
 - Need to know which extensions are installed in an infobase, or to change that composition:
   use `v8-runner extensions list|info|create|delete|activate`. These subcommands address the

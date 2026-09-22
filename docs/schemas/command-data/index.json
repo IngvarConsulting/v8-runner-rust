@@ -1,6 +1,9 @@
 {
   "_comment": "Порождается UPDATE_COMMAND_DATA_SCHEMAS=1 cargo test generated_command_data_schemas_are_current; руками не правится.",
   "forms": {
+    "apply": [
+      "apply"
+    ],
     "bootstrap": [
       "bootstrap"
     ],
@@ -43,6 +46,9 @@
     ],
     "publish": [
       "publish"
+    ],
+    "reset": [
+      "reset"
     ],
     "syntax": [
       "syntax"

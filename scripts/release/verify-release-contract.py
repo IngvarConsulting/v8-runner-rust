@@ -44,10 +44,46 @@ def require_consolidated_manifest_version(version: str) -> None:
         fail("consolidated release assets require v0.7.0 or newer")
 
 
+def release_source_ref(tag: str, workflow_ref: str) -> str:
+    """Resolve only supported release lines; never accept an arbitrary input ref."""
+    version = tag.removeprefix("v")
+    match = SEMVER_PATTERN.fullmatch(version)
+    if not tag.startswith("v") or match is None:
+        fail("release tag must be v followed by a valid semantic version")
+    if workflow_ref == "refs/heads/master":
+        return workflow_ref
+    if workflow_ref == "refs/heads/release/0.11":
+        if tuple(int(component) for component in match.groups()[:2]) != (0, 11):
+            fail("release/0.11 only publishes version 0.11.x")
+        return workflow_ref
+    fail(f"unsupported release workflow ref: {workflow_ref!r}")
+
+
+def require_source_identity(tag: str, workflow_ref: str, workflow_commit: str) -> None:
+    source_ref = release_source_ref(tag, workflow_ref)
+    branch = source_ref.removeprefix("refs/heads/")
+    head = git_revision("HEAD")
+    tag_commit = git_revision(f"refs/tags/{tag}^{{commit}}")
+    source = git_revision(f"refs/remotes/origin/{branch}")
+    if not workflow_commit:
+        fail("GITHUB_SHA is required to bind the approved workflow commit")
+    if len({head, tag_commit, source, workflow_commit}) != 1:
+        fail(
+            "release source identity must match HEAD, tag commit, protected source branch, "
+            f"and GITHUB_SHA: HEAD={head}, tag={tag_commit}, "
+            f"source={source_ref}@{source}, workflow={workflow_commit}"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("tag")
+    parser.add_argument("--source-ref-only", action="store_true")
     args = parser.parse_args()
+    source_ref = release_source_ref(args.tag, os.environ.get("GITHUB_REF", ""))
+    if args.source_ref_only:
+        print(source_ref)
+        return
 
     cargo = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
     package_section = cargo.split("[package]", 1)[1].split("\n[", 1)[0]
@@ -87,17 +123,7 @@ def main() -> None:
     if status:
         fail("release checkout must be clean")
 
-    head = git_revision("HEAD")
-    tag_commit = git_revision(f"refs/tags/{args.tag}^{{commit}}")
-    master = git_revision("refs/remotes/origin/master")
-    workflow_commit = os.environ.get("GITHUB_SHA")
-    if not workflow_commit:
-        fail("GITHUB_SHA is required to bind the approved workflow commit")
-    if len({head, tag_commit, master, workflow_commit}) != 1:
-        fail(
-            "release source identity must match HEAD, tag commit, protected origin/master, "
-            f"and GITHUB_SHA: HEAD={head}, tag={tag_commit}, master={master}, workflow={workflow_commit}"
-        )
+    require_source_identity(args.tag, source_ref, os.environ.get("GITHUB_SHA", ""))
 
     print(f"release contract verified for {args.tag}")
 

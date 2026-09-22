@@ -78,3 +78,5 @@ pub(crate) fn unimplemented_provider(
         "provider '{provider}' is not implemented for {operation} in this build of the runner"
     ))
 }
+
+pub mod configuration_transition;
