@@ -1093,7 +1093,7 @@ pub(super) fn run_build_edt(
                         crate::use_cases::unimplemented_provider(Operation::Build, other),
                     ),
                     Provider::Designer => {
-                        let designer = loader.clone();
+                        let designer = &loader;
                         // Загрузка сюда доходит и тогда, когда этап EDT пропущен: каталог
                         // файлов конфигуратора уже есть, а состояние Конфигуратора
                         // устарело. Превью останавливается здесь — дальше идёт запуск
@@ -1112,7 +1112,7 @@ pub(super) fn run_build_edt(
                         execute_source_set_step(
                             context,
                             config,
-                            &designer,
+                            designer,
                             utilities.runner_for(UtilityType::V8),
                             source_set,
                             &designer_context,
@@ -1123,7 +1123,7 @@ pub(super) fn run_build_edt(
                         )
                     }
                     Provider::Ibcmd => {
-                        let ibcmd = loader.clone();
+                        let ibcmd = &loader;
                         if args.dry_run {
                             push_build_step(
                                 &mut steps,
@@ -1138,7 +1138,7 @@ pub(super) fn run_build_edt(
                         execute_source_set_step_ibcmd(
                             context,
                             config,
-                            &ibcmd,
+                            ibcmd,
                             utilities.runner_for(UtilityType::Ibcmd),
                             source_set,
                             &designer_context,
