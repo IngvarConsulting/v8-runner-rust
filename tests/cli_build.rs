@@ -429,8 +429,13 @@ fn build_dry_run_plans_every_source_set_without_dispatching_designer() {
         );
     }
     assert!(!marker.exists(), "preview must not dispatch Designer");
-    // A planned build commits no change-detection state either.
-    assert!(!work_path.join("storage").exists());
+    // A planned build commits no change-detection state either. The state lives in
+    // `workPath/hash-storages/<key>.redb`; the directory this once named never existed,
+    // so the promise went unchecked and a real leak survived it (#252).
+    assert!(
+        !work_path.join("hash-storages").exists(),
+        "preview committed change-detection state"
+    );
 }
 
 #[test]
@@ -829,6 +834,96 @@ fn build_json_writes_action_log_file_without_polluting_stdout() {
     assert!(contents.contains("Изменения: найдено"));
     assert!(contents.contains("[Конфигуратор] Загрузка изменений в базу"));
     assert!(contents.contains("✓ partial load"));
+}
+
+/// Превью сборки не готовит расширение клиентского MCP. Подготовка запускает платформу
+/// против базы и фиксирует состояние обнаружения изменений, а превью не делает ни того,
+/// ни другого (`INV.CLI.PREVIEW-DISPATCHES-NOTHING`). Поиск утилиты превью при этом
+/// проходит — иначе оно одобрило бы план, который боевой прогон выполнить не может.
+#[test]
+fn a_planned_build_does_not_prepare_the_client_mcp_extension() {
+    let (dir, config_path, binary_path, work_path) = setup_project();
+    let base_path = dir.path().join("project");
+    let tool_source = base_path.join("exts").join("client-mcp");
+    let calls_log = dir.path().join("calls.log");
+
+    fs::create_dir_all(&tool_source).expect("tool source");
+    fs::write(
+        tool_source.join("Module.bsl"),
+        "procedure Tool() endprocedure",
+    )
+    .expect("tool bsl");
+    fs::write(
+        tool_source.join("Configuration.xml"),
+        "<Configuration><Properties><Name>client_mcp</Name><ConfigurationExtensionPurpose kind=\"Customization\">Customization</ConfigurationExtensionPurpose></Properties></Configuration>",
+    )
+    .expect("tool descriptor");
+    // Сценарий отмечает каждый вызов: у превью отметок быть не должно.
+    write_script(
+        &binary_path,
+        &format!("printf '%s\\n' \"$*\" >> '{}'\nexit 0", calls_log.display()),
+    );
+    fs::write(
+        &config_path,
+        format!(
+            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: '{}'\n",
+            work_path.display(),
+            binary_path.display(),
+            tool_source.display()
+        ),
+    )
+    .expect("config");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "build",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["data"]["provider_dispatched"], false, "{payload}");
+
+    assert!(
+        !calls_log.exists(),
+        "превью запустило платформу: {}",
+        fs::read_to_string(&calls_log).unwrap_or_default()
+    );
+    // Состояние обнаружения изменений проверяется по отсутствию файла, а не по времени
+    // правки: открытие базы состояния сдвигает mtime, ничего в неё не записав.
+    assert!(
+        !work_path
+            .join("hash-storages")
+            .join("tool-client_mcp-source.redb")
+            .exists(),
+        "превью зафиксировало состояние обнаружения изменений"
+    );
+
+    let step = payload["data"]["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .find(|step| step["source_set"] == "tool:client_mcp")
+        .cloned()
+        .unwrap_or_else(|| panic!("шаг расширения пропал из ответа: {payload}"));
+    assert_eq!(step["ok"], true, "{step}");
+    let message = step["message"].as_str().expect("message");
+    assert!(message.starts_with("would prepare"), "{message}");
+    // Предмет назван: найденная утилита попадает в сообщение.
+    assert!(
+        message.contains(&binary_path.display().to_string()),
+        "{message}"
+    );
 }
 
 #[test]

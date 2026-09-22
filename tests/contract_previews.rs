@@ -17,6 +17,16 @@ fn write_project(dir: &Path, with_platform: bool) -> PathBuf {
     let base_path = dir.join("project");
     let work_path = dir.join("work");
     let install_dir = dir.join("platform");
+    let extension_source = base_path.join("exts").join("client-mcp");
+    fs::create_dir_all(&extension_source).expect("extension dir");
+    // Расширение инструмента объявлено намеренно: шаг его подготовки — место, где превью
+    // сборки однажды запускало платформу и писало состояние (#252). Без него образец
+    // этого класса не видит.
+    fs::write(
+        extension_source.join("Configuration.xml"),
+        "<Configuration><Properties><Name>client_mcp</Name><ConfigurationExtensionPurpose kind=\"Customization\">Customization</ConfigurationExtensionPurpose></Properties></Configuration>",
+    )
+    .expect("extension marker");
     fs::create_dir_all(base_path.join("configuration")).expect("configuration dir");
     fs::write(
         base_path.join("configuration").join("Configuration.xml"),
@@ -41,10 +51,11 @@ fn write_project(dir: &Path, with_platform: bool) -> PathBuf {
     fs::write(
         &config_path,
         format!(
-            "workPath: {}\nformat: DESIGNER\ninfobase:\n  connection: 'File={}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: {}\n{strictness}",
+            "workPath: {}\nformat: DESIGNER\ninfobase:\n  connection: 'File={}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: {}\n{strictness}  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: {}\n",
             work_path.display(),
             dir.join("ib").display(),
-            install_dir.display()
+            install_dir.display(),
+            extension_source.display()
         ),
     )
     .expect("write config");
@@ -110,6 +121,64 @@ fn every_preview_leaves_a_line_in_the_action_log() {
         assert!(
             !text.trim().is_empty(),
             "`{}` left the action log empty: {payload}",
+            preview.join(" ")
+        );
+    }
+}
+
+/// Пути внутри `root`, относительно него, в устойчивом порядке.
+fn entries_under(root: &Path, dir: &Path, found: &mut Vec<String>) {
+    let Ok(read) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        if let Ok(relative) = path.strip_prefix(root) {
+            found.push(relative.display().to_string());
+        }
+        if path.is_dir() {
+            entries_under(root, &path, found);
+        }
+    }
+    found.sort();
+}
+
+/// Превью ничего не создаёт: в рабочем каталоге после него нет ничего, кроме журнала
+/// действий, который правило велит оставить. Проверяется по отсутствию файлов, а не по
+/// отсутствию вызова — так требует `DEC.2026-09-11.PREVIEW-STOPS-BEFORE-THE-PROVIDER-IS-DISPATCHED`.
+///
+/// Этого стража не хватало: обещание держалось на проверке, которая называла каталог,
+/// не существующий в продукте, и потому не падала никогда (#252).
+#[test]
+fn no_preview_creates_anything_in_the_work_path_but_the_action_log() {
+    const LEFT_BY_THE_RULE: &[&str] = &["logs", "logs/mcp", "logs/mcp/actions.log"];
+
+    let dir = temp_workspace();
+    let config_path = write_project(dir.path(), true);
+    fs::write(dir.path().join("main.cf"), "cf").expect("artifact");
+    let artifact = dir.path().join("main.cf").display().to_string();
+    let work = dir.path().join("work");
+
+    for preview in previews(&artifact) {
+        // Каждое превью смотрится на чистом рабочем каталоге: иначе след одного сошёл бы
+        // за след другого.
+        let _ = fs::remove_dir_all(&work);
+        fs::create_dir_all(&work).expect("work dir");
+
+        let (code, payload) = run(&config_path, &preview);
+        assert_eq!(
+            code,
+            0,
+            "`{}` did not preview: {payload}",
+            preview.join(" ")
+        );
+
+        let mut left = Vec::new();
+        entries_under(&work, &work, &mut left);
+        left.retain(|path| !LEFT_BY_THE_RULE.contains(&path.as_str()));
+        assert!(
+            left.is_empty(),
+            "`{}` left behind: {left:?}",
             preview.join(" ")
         );
     }

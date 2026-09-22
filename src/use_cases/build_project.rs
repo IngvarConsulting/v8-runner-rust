@@ -239,7 +239,12 @@ fn append_client_mcp_extension_step(
     started: Instant,
     result: &mut BuildResult,
 ) -> Result<(), BuildExecutionFailure> {
-    match tool_extension::prepare_client_mcp_extension(context, config, args.full_rebuild) {
+    match tool_extension::prepare_client_mcp_extension(
+        context,
+        config,
+        args.full_rebuild,
+        args.dry_run,
+    ) {
         Ok(Some(step)) => {
             log_build_step_timeline(&step);
             result.steps.push(step);

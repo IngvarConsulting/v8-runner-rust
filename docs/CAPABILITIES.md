@@ -351,7 +351,8 @@ v8-runner push [--source-set <NAME>] [--full] [--dry-run]
 - После успешного project stage, включая scoped `--source-set`, подготавливает
   `tools.client_mcp.extension`, если оно настроено: `source` загружается как extension из
   исходников, `.cfe` `artifact` загружается как extension с именем
-  `tools.client_mcp.extension.name`.
+  `tools.client_mcp.extension.name`. Под `--dry-run` подготовки не происходит: превью
+  находит утилиту, называет режим, который был бы применён, и на этом останавливается.
 - Для source-backed `tools.client_mcp.extension` использует отдельное состояние change detection
   под `workPath/hash-storages`: неизменённый source пропускает export/load, `--full`
   принудительно обновляет расширение.
