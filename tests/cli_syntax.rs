@@ -159,6 +159,50 @@ fn a_preview_of_the_configuration_check_plans_without_running_the_designer() {
     );
 }
 
+/// Отказ превью — тоже превью: платформа не запускалась, и признак обязан это сказать.
+/// Иначе отказ поиска утилиты сообщал бы о запуске, которого не было.
+#[test]
+fn a_preview_that_cannot_find_the_platform_still_reports_no_dispatch() {
+    let dir = temp_workspace();
+    let base_path = dir.path().join("project");
+    let work_path = dir.path().join("work");
+    let install_dir = dir.path().join("platform");
+    let config_path = base_path.join("v8project.yaml");
+    fs::create_dir_all(&base_path).expect("base");
+    fs::create_dir_all(&work_path).expect("work");
+    fs::create_dir_all(install_dir.join("bin")).expect("platform dir");
+    // Строгий режим с версией не даёт локатору уйти в PATH или в корни по умолчанию:
+    // отказать обязан поиск, а не запуск чужой утилиты.
+    fs::write(
+        &config_path,
+        format!(
+            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\ntools:\n  platform:\n    path: '{}'\n    strict: true\n    version: '8.3.27'\n",
+            work_path.display(),
+            install_dir.display()
+        ),
+    )
+    .expect("config");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "check",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(
+        !output.status.success(),
+        "превью одобрило план без платформы"
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["ok"], false, "{payload}");
+    assert_eq!(payload["data"]["provider_dispatched"], false, "{payload}");
+}
+
 /// Ветка EDT останавливается там же. Квитанции о выборе исполнителя у неё нет — её не
 /// имеет и боевой прогон: EDT CLI ищется напрямую.
 #[test]

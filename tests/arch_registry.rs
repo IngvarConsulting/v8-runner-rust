@@ -605,10 +605,11 @@ fn every_contract_shows_an_example_checked_against_its_form() {
             wrong.push(format!("{name}: no artifact prop"));
             continue;
         };
-        let Some((language, example)) = example_block(&text) else {
+        let examples = example_blocks(&text);
+        if examples.is_empty() {
             wrong.push(format!("{name}: no example block"));
             continue;
-        };
+        }
 
         let artifact_text = match std::fs::read_to_string(root.join(&artifact)) {
             Ok(text) => text,
@@ -627,55 +628,57 @@ fn every_contract_shows_an_example_checked_against_its_form() {
             }
         };
 
-        if let Some(line_kinds) = artifact_value
-            .get("line_kinds")
-            .and_then(serde_json::Value::as_object)
-        {
-            // Артефакт-грамматика описывает не документ, а строки. Пример к нему —
-            // кусок настоящего вывода, и проверяется он построчно.
-            let patterns: Vec<regex::Regex> = line_kinds
-                .values()
-                .filter_map(|kind| kind.get("pattern").and_then(serde_json::Value::as_str))
-                .map(|pattern| regex::Regex::new(pattern).expect("kind pattern compiles"))
-                .collect();
-            for line in example.lines().filter(|line| !line.trim().is_empty()) {
-                if !patterns.iter().any(|pattern| pattern.is_match(line)) {
-                    wrong.push(format!(
-                        "{name}: example line matches no kind of {artifact}: {line:?}"
-                    ));
+        for (language, example) in &examples {
+            if let Some(line_kinds) = artifact_value
+                .get("line_kinds")
+                .and_then(serde_json::Value::as_object)
+            {
+                // Артефакт-грамматика описывает не документ, а строки. Пример к нему —
+                // кусок настоящего вывода, и проверяется он построчно.
+                let patterns: Vec<regex::Regex> = line_kinds
+                    .values()
+                    .filter_map(|kind| kind.get("pattern").and_then(serde_json::Value::as_str))
+                    .map(|pattern| regex::Regex::new(pattern).expect("kind pattern compiles"))
+                    .collect();
+                for line in example.lines().filter(|line| !line.trim().is_empty()) {
+                    if !patterns.iter().any(|pattern| pattern.is_match(line)) {
+                        wrong.push(format!(
+                            "{name}: example line matches no kind of {artifact}: {line:?}"
+                        ));
+                    }
                 }
-            }
-        } else if artifact_value.get("$schema").is_some() {
-            let Some(parsed) = parse_example(&language, &example, &name, &mut wrong) else {
-                continue;
-            };
-            let validator = match jsonschema::validator_for(&artifact_value) {
-                Ok(validator) => validator,
-                Err(error) => {
-                    wrong.push(format!(
-                        "{name}: artifact {artifact} is not a schema: {error}"
-                    ));
+            } else if artifact_value.get("$schema").is_some() {
+                let Some(parsed) = parse_example(language, example, &name, &mut wrong) else {
                     continue;
+                };
+                let validator = match jsonschema::validator_for(&artifact_value) {
+                    Ok(validator) => validator,
+                    Err(error) => {
+                        wrong.push(format!(
+                            "{name}: artifact {artifact} is not a schema: {error}"
+                        ));
+                        continue;
+                    }
+                };
+                let errors: Vec<String> = validator
+                    .iter_errors(&parsed)
+                    .map(|error| format!("{} at {}", error, error.instance_path))
+                    .collect();
+                if !errors.is_empty() {
+                    wrong.push(format!(
+                        "{name}: example fails its own form {artifact}:\n{}",
+                        errors.join("\n")
+                    ));
                 }
-            };
-            let errors: Vec<String> = validator
-                .iter_errors(&parsed)
-                .map(|error| format!("{} at {}", error, error.instance_path))
-                .collect();
-            if !errors.is_empty() {
-                wrong.push(format!(
-                    "{name}: example fails its own form {artifact}:\n{}",
-                    errors.join("\n")
-                ));
-            }
-        } else {
-            let Some(parsed) = parse_example(&language, &example, &name, &mut wrong) else {
-                continue;
-            };
-            if !contains(&artifact_value, &parsed) {
-                wrong.push(format!(
-                    "{name}: example is not a fragment of the pinned {artifact}"
-                ));
+            } else {
+                let Some(parsed) = parse_example(language, example, &name, &mut wrong) else {
+                    continue;
+                };
+                if !contains(&artifact_value, &parsed) {
+                    wrong.push(format!(
+                        "{name}: example is not a fragment of the pinned {artifact}"
+                    ));
+                }
             }
         }
     }
@@ -706,17 +709,37 @@ fn parse_example(
     }
 }
 
-/// Язык и тело первого блока кода в разделе «Пример».
-fn example_block(text: &str) -> Option<(String, String)> {
-    let heading = text.find("\n## Пример\n")? + "\n## Пример\n".len();
-    let rest = &text[heading..];
-    let open = rest.find("```")? + 3;
-    let after_open = &rest[open..];
-    let newline = after_open.find('\n')?;
-    let language = after_open[..newline].trim().to_owned();
-    let body = &after_open[newline + 1..];
-    let close = body.find("\n```")?;
-    Some((language, body[..close + 1].to_owned()))
+/// Язык и тело каждого блока кода в разделе «Пример».
+///
+/// Блоков бывает несколько: запись показывает и обычный ответ, и ответ превью. Проверяется
+/// каждый — иначе второй пример держался бы на внимательности автора.
+fn example_blocks(text: &str) -> Vec<(String, String)> {
+    let Some(heading) = text.find("\n## Пример\n") else {
+        return Vec::new();
+    };
+    let section = &text[heading + "\n## Пример\n".len()..];
+    // Раздел кончается следующим заголовком того же уровня.
+    let section = match section.find("\n## ") {
+        Some(end) => &section[..end],
+        None => section,
+    };
+
+    let mut blocks = Vec::new();
+    let mut rest = section;
+    while let Some(open) = rest.find("```") {
+        let after_open = &rest[open + 3..];
+        let Some(newline) = after_open.find('\n') else {
+            break;
+        };
+        let language = after_open[..newline].trim().to_owned();
+        let body = &after_open[newline + 1..];
+        let Some(close) = body.find("\n```") else {
+            break;
+        };
+        blocks.push((language, body[..close + 1].to_owned()));
+        rest = &body[close + "\n```".len()..];
+    }
+    blocks
 }
 
 /// Проверяет, что `fragment` целиком встречается в `whole`.

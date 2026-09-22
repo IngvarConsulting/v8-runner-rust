@@ -63,6 +63,28 @@ fn run_syntax_with_context(
     config: &AppConfig,
     args: &SyntaxArgs,
 ) -> UseCaseResult<SyntaxCheckResult> {
+    let mut outcome = run_syntax_branch(context, config, args);
+    // Признак решается в одном месте за обе ветки и за оба исхода: превью платформу не
+    // запускает, чем бы оно ни кончилось — планом или отказом поиска утилиты. Иначе отказ
+    // превью сообщал бы о запуске, которого не было.
+    if args.dry_run {
+        match &mut outcome {
+            Ok(result) => result.provider_dispatched = false,
+            Err(failure) => {
+                if let Some(result) = failure.payload.as_mut() {
+                    result.provider_dispatched = false;
+                }
+            }
+        }
+    }
+    outcome
+}
+
+fn run_syntax_branch(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &SyntaxArgs,
+) -> UseCaseResult<SyntaxCheckResult> {
     let started = Instant::now();
     // Ветка выбирается раньше всего остального: иначе отказ уже отменённой проверки EDT
     // назвался бы именем проверки конфигурации. У ветки EDT своя такая же проверка.

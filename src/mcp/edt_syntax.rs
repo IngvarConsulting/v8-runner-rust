@@ -394,7 +394,13 @@ fn combine_status(current: SyntaxCheckStatus, next: SyntaxCheckStatus) -> Syntax
         (SyntaxCheckStatus::IssuesFound, _) | (_, SyntaxCheckStatus::IssuesFound) => {
             SyntaxCheckStatus::IssuesFound
         }
-        _ => SyntaxCheckStatus::Clean,
+        // `planned` здесь недостижим — сервер превью не предлагает, — но общей веткой он
+        // молча стал бы `clean`, то есть приговором, которого никто не выносил. Поэтому
+        // «запланировано» поглощает «чисто», а не наоборот.
+        (SyntaxCheckStatus::Planned, _) | (_, SyntaxCheckStatus::Planned) => {
+            SyntaxCheckStatus::Planned
+        }
+        (SyntaxCheckStatus::Clean, SyntaxCheckStatus::Clean) => SyntaxCheckStatus::Clean,
     }
 }
 

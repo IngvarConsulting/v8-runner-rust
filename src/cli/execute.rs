@@ -3994,7 +3994,7 @@ fn render_syntax_text(result: &SyntaxCheckResult, presenter: &Presenter) {
         result
             .message
             .as_deref()
-            .map(|message| bracketed_detail("preview", message)),
+            .map(|message| bracketed_detail("status", message)),
     );
     if !result.provider_dispatched {
         details.push("provider dispatched: false".to_owned());
