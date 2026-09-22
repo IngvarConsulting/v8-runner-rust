@@ -386,6 +386,33 @@ fn setup_edt_extension_project() -> (tempfile::TempDir, PathBuf, PathBuf) {
     (dir, config_path, work_path)
 }
 
+/// Всё, что лежит в рабочем каталоге, кроме журнала действий: его превью оставляет по
+/// правилу `INV.CLI.PREVIEW-LEAVES-A-LOG-ENTRY`.
+fn left_in_work_path(work_path: &Path) -> Vec<String> {
+    const LEFT_BY_THE_RULE: &[&str] = &["logs", "logs/mcp", "logs/mcp/actions.log"];
+
+    fn walk(root: &Path, dir: &Path, found: &mut Vec<String>) {
+        let Ok(read) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            if let Ok(relative) = path.strip_prefix(root) {
+                found.push(relative.display().to_string());
+            }
+            if path.is_dir() {
+                walk(root, &path, found);
+            }
+        }
+    }
+
+    let mut found = Vec::new();
+    walk(work_path, work_path, &mut found);
+    found.retain(|path| !LEFT_BY_THE_RULE.contains(&path.as_str()));
+    found.sort();
+    found
+}
+
 const V8_EXTERNAL_OBJECTS_NATURE: &str = "com._1c.g5.v8.dt.core.V8ExternalObjectsNature";
 
 fn write_edt_external_project(path: &Path, name: &str) {
@@ -412,6 +439,120 @@ fn write_edt_external_project(path: &Path, name: &str) {
         ),
     )
     .expect("descriptor");
+}
+
+/// Превью сборки EDT не грузит файлы конфигуратора в базу. Этот путь доходит и тогда,
+/// когда этап EDT пропущен: каталог файлов уже есть, а состояние Конфигуратора устарело —
+/// так бывает после оборванного боевого прогона. Запуск идёт против базы, поэтому
+/// нарушение здесь дороже прочих.
+#[test]
+fn a_planned_edt_build_does_not_load_the_generated_designer_files() {
+    let dir = temp_workspace();
+    let base_path = dir.path().join("project");
+    let work_path = dir.path().join("work");
+    let config_path = dir.path().join("v8project.yaml");
+    let platform_path = dir.path().join("platform").join("bin").join("1cv8");
+    let edt_cli_path = dir.path().join("edt").join("1cedtcli");
+    let edt_calls_log = dir.path().join("edt-calls.log");
+    let v8_calls_log = dir.path().join("v8-calls.log");
+
+    fs::create_dir_all(base_path.join("configuration")).expect("base");
+    fs::create_dir_all(&work_path).expect("work");
+    write_native_edt_project(
+        &base_path.join("configuration"),
+        "configuration",
+        V8_CONFIGURATION_NATURE,
+        None,
+    );
+    fs::write(
+        base_path
+            .join("configuration")
+            .join("src")
+            .join("Configuration")
+            .join("Module.bsl"),
+        "procedure Test() endprocedure",
+    )
+    .expect("configuration bsl");
+    write_edt_script(&edt_cli_path, &edt_calls_log);
+    write_script(
+        &platform_path,
+        &format!(
+            "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$out\" ]; then printf 'designer log\\n' > \"$out\"; fi\nprintf '%s\\n' \"$args\" >> '{}'\nexit 0",
+            v8_calls_log.display()
+        ),
+    );
+    fs::write(
+        &config_path,
+        format!(
+            "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n",
+            work_path.display(),
+            platform_path.display(),
+            edt_cli_path.display()
+        ),
+    )
+    .expect("config");
+
+    let seed = v8_runner_command()
+        .args(["--config", &config_path.display().to_string(), "build"])
+        .output()
+        .expect("seed build");
+    assert!(
+        seed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&seed.stderr)
+    );
+
+    // Состояние Конфигуратора теряется — так выглядит база после оборванного прогона.
+    // Этап EDT при этом остаётся пройденным, и загрузка планируется заново.
+    let designer_state = work_path
+        .join("hash-storages")
+        .join("designer-configuration.redb");
+    fs::remove_file(&designer_state).expect("drop designer state");
+    fs::remove_file(&v8_calls_log).expect("drop calls log");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "build",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(
+        !v8_calls_log.exists(),
+        "превью запустило Конфигуратор против базы: {}",
+        fs::read_to_string(&v8_calls_log).unwrap_or_default()
+    );
+    assert!(
+        !designer_state.exists(),
+        "превью зафиксировало состояние обнаружения изменений"
+    );
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    let step = payload["data"]["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .find(|step| step["mode"] == "full")
+        .cloned()
+        .unwrap_or_else(|| panic!("шаг загрузки пропал из ответа: {payload}"));
+    assert_eq!(step["ok"], true, "{step}");
+    assert!(
+        step["message"]
+            .as_str()
+            .expect("message")
+            .contains("planned"),
+        "{step}"
+    );
 }
 
 /// Превью сборки EDT не экспортирует внешние артефакты. Экспорт запускает EDT CLI,
@@ -471,12 +612,13 @@ fn a_planned_edt_build_does_not_export_the_external_artifacts() {
         "превью запустило EDT CLI: {}",
         fs::read_to_string(&edt_calls_log).unwrap_or_default()
     );
-    for left in ["designer", "edt-workspace", "hash-storages"] {
-        assert!(
-            !work_path.join(left).exists(),
-            "превью создало `{left}` в рабочем каталоге"
-        );
-    }
+    // Подметается весь рабочий каталог, а не три имени: перечень пропустил бы и журнал
+    // платформы, и staging, и всякий новый каталог.
+    let left = left_in_work_path(&work_path);
+    assert!(
+        left.is_empty(),
+        "превью оставило в рабочем каталоге: {left:?}"
+    );
 
     assert!(
         output.status.success(),
@@ -494,6 +636,8 @@ fn a_planned_edt_build_does_not_export_the_external_artifacts() {
         .find(|step| step["source_set"] == "processors")
         .cloned()
         .unwrap_or_else(|| panic!("шаг внешнего набора пропал из ответа: {payload}"));
+    assert_eq!(step["ok"], true, "{step}");
+    assert_eq!(step["mode"], "edt_export", "{step}");
     let message = step["message"].as_str().expect("message");
     assert!(message.contains("planned"), "{message}");
     // Предмет назван: найденная утилита попадает в сообщение.

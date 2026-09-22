@@ -1035,6 +1035,21 @@ pub(super) fn run_build_edt(
                                 location.path
                             }
                         };
+                        // Загрузка сюда доходит и тогда, когда этап EDT пропущен: каталог
+                        // файлов конфигуратора уже есть, а состояние Конфигуратора
+                        // устарело. Превью останавливается здесь — дальше идёт запуск
+                        // против базы и запись состояния.
+                        if args.dry_run {
+                            push_build_step(
+                                &mut steps,
+                                &source_set.name,
+                                mode,
+                                true,
+                                format!("{message}; planned, Designer not dispatched"),
+                                0,
+                            );
+                            continue;
+                        }
                         execute_source_set_step(
                             context,
                             config,
@@ -1074,6 +1089,17 @@ pub(super) fn run_build_edt(
                                 location.path
                             }
                         };
+                        if args.dry_run {
+                            push_build_step(
+                                &mut steps,
+                                &source_set.name,
+                                mode,
+                                true,
+                                format!("{message}; planned, ibcmd not dispatched"),
+                                0,
+                            );
+                            continue;
+                        }
                         execute_source_set_step_ibcmd(
                             context,
                             config,
