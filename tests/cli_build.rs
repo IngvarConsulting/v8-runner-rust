@@ -441,6 +441,64 @@ fn write_edt_external_project(path: &Path, name: &str) {
     .expect("descriptor");
 }
 
+/// Превью сборки EDT ищет обе утилиты. Шаг обещает выгрузку и следующую за ней загрузку
+/// в базу, поэтому одобрить его, не зная, чем грузить, значит одобрить невыполнимое
+/// (`INV.CLI.PREVIEW-RETURNS-AFTER-TOOL-LOOKUP`).
+#[test]
+fn a_planned_edt_build_refuses_when_the_designer_that_would_load_it_is_missing() {
+    let dir = temp_workspace();
+    let base_path = dir.path().join("project");
+    let work_path = dir.path().join("work");
+    let config_path = dir.path().join("v8project.yaml");
+    let edt_cli_path = dir.path().join("edt").join("1cedtcli");
+    let edt_calls_log = dir.path().join("edt-calls.log");
+    // Платформы нет: каталог пуст, а строгий режим с версией не даёт локатору уйти в PATH.
+    let empty_platform = dir.path().join("empty-platform");
+
+    fs::create_dir_all(base_path.join("configuration")).expect("base");
+    fs::create_dir_all(&work_path).expect("work");
+    fs::create_dir_all(empty_platform.join("bin")).expect("empty platform");
+    write_native_edt_project(
+        &base_path.join("configuration"),
+        "configuration",
+        V8_CONFIGURATION_NATURE,
+        None,
+    );
+    write_edt_script(&edt_cli_path, &edt_calls_log);
+    fs::write(
+        &config_path,
+        format!(
+            "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: '{}'\n    strict: true\n    version: '8.3.27'\n  edt_cli:\n    path: '{}'\n",
+            work_path.display(),
+            empty_platform.display(),
+            edt_cli_path.display()
+        ),
+    )
+    .expect("config");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "build",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success(),
+        "превью одобрило план, которому нечем грузить: {reported}"
+    );
+    assert!(reported.contains("1cv8"), "{reported}");
+}
+
 /// Превью сборки EDT не грузит файлы конфигуратора в базу. Этот путь доходит и тогда,
 /// когда этап EDT пропущен: каталог файлов уже есть, а состояние Конфигуратора устарело —
 /// так бывает после оборванного боевого прогона. Запуск идёт против базы, поэтому
