@@ -57,9 +57,9 @@ CLI help, доверяйте текущему коду и затем синхр�
 
 ## Превью у глаголов, работающих с платформой
 
-Восемь глаголов принимают `--dry-run`: `download`,
-`infobase dump`, `infobase restore`, `launch`, `convert`, `infobase create`, `push`,
-`upload`, `pull` и `artifacts`.
+Одиннадцать глаголов принимают `--dry-run`: `download`, `infobase dump`,
+`infobase restore`, `launch`, `convert`, `infobase create`, `push`, `upload`, `pull`,
+`extensions` и `make`/`artifacts`.
 
 **Квитанция об исполнителе одна у всех.** Каждая операция, у которой есть строка в
 матрице провайдеров, кладёт в ответ `provider`: `selected` — кто выбран, `origin` —

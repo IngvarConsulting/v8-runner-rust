@@ -24,7 +24,7 @@
               "type": "null"
             }
           ],
-          "description": "Optional tool extension prepared by `build` for client MCP launches."
+          "description": "Optional tool extension prepared by `push` for client MCP launches."
         },
         "port": {
           "description": "Default port passed to onec-client-mcp-devkit.",

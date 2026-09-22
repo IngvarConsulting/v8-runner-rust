@@ -41,7 +41,7 @@ flowchart TB
 
 #### `use_cases`
 
-- Центральная оркестрация для `init`, `tools download`, `infobase create`, `extensions`, `push`, `upload`, `test`, `pull`, `convert`, `artifacts`, `check` и `launch`.
+- Центральная оркестрация для `init`, `tools download`, `infobase create`, `extensions`, `push`, `upload`, `test`, `pull`, `download`, `convert`, `artifacts`, `check` и `launch`.
 - Определяет transport-neutral request/result contracts, которые должны оставаться стабильной внутренней опорой для адаптеров и AI-агентов, работающих через эти адаптеры.
 - Предоставляет workspace lock helper и internal unlocked entrypoints для nested flows вроде `test -> push`; public lock boundary остаётся в CLI/MCP adapters.
 - Для runner-like сценариев собирает typed pipeline-like flow и заполняет `ExecutionOutcome<T>` вместо нового ad hoc result shape.

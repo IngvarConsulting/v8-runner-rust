@@ -11,7 +11,7 @@ check: [src/command_data.rs::generated_command_data_schemas_are_current, tests/c
 scope: [wire, cli]
 ---
 
-# `data` команды `init`
+# `data` команды `infobase create`
 
 Команда доводит окружение до состояния, в котором можно собирать: создаёт базу и, для
 формата EDT, рабочее пространство. Форма перечисляет шаги со статусом каждого, поэтому

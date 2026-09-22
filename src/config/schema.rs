@@ -1002,7 +1002,7 @@ struct ClientMcpToolSchema {
     /// Optional wait-ready timeout in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     wait_ready_timeout_ms: Option<u64>,
-    /// Optional tool extension prepared by `build` for client MCP launches.
+    /// Optional tool extension prepared by `push` for client MCP launches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     extension: Option<ToolExtensionSchema>,
 }

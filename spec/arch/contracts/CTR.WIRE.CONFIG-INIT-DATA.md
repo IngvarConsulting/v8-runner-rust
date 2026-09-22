@@ -11,7 +11,7 @@ check: [src/command_data.rs::generated_command_data_schemas_are_current, tests/c
 scope: [wire, cli]
 ---
 
-# `data` команды `config init`
+# `data` команды `init`
 
 Форма отвечает на один вопрос: что записано в только что созданный конфиг. Найденные
 наборы исходников перечислены тем же составом полей, каким они лягут в `v8project.yaml`,

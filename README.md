@@ -252,7 +252,7 @@ v8-runner mcp serve stdio
 | Project setup (настройка проекта) | `clone`, `init`, `tools download`, `infobase create`, `extensions`, `push` | Создает проект/config, скачивает инструменты, готовит ИБ, обновляет расширения и загружает исходники |
 | Verification (проверка) | `check`, `test` | Запускает syntax checks, YAxUnit и Vanessa Automation |
 | File materialization (материализация файлов) | `pull`, `download`, `convert`, `upload`, `make`, `artifacts` | Выгружает, конвертирует, загружает и публикует `.cf`, `.cfe`, `.epf`, `.erf` |
-| Direct launch (прямой запуск) | `launch <designer|thin|thick|ordinary>`, `launch mcp [va]` | Запускает 1C clients (клиенты 1С), Designer и MCP/Vanessa сценарии |
+| Direct launch (прямой запуск) | `launch <designer\|thin\|thick\|ordinary>`, `launch mcp [va]` | Запускает 1C clients (клиенты 1С), Designer и MCP/Vanessa сценарии |
 | MCP automation (автоматизация через MCP) | `mcp serve stdio`, `mcp serve http` | Открывает 8 MCP tools для агентных workflow |
 
 Команды названы словарём гита. Прежние имена приняты ещё один цикл выпуска и в справке не
