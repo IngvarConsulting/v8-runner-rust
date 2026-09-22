@@ -16,21 +16,68 @@ pub fn normalize_optional_string(value: Option<&str>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+/// Что не так со значением, пришедшим строкой: оно пустое или не из набора.
+///
+/// Различие типизировано, потому что код отказа на проводе у этих случаев разный, а
+/// восстанавливать его сравнением текста сообщения значит решать прозой.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawValueProblem {
+    /// Значение пустое.
+    Blank,
+    /// Значение не из набора.
+    Unsupported,
+}
+
+/// Отказ по значению, пришедшему строкой: причина и готовый отказ вызывающему.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawValueError {
+    problem: RawValueProblem,
+    message: String,
+}
+
+impl RawValueError {
+    /// Значение не из набора.
+    pub fn unsupported(message: impl Into<String>) -> Self {
+        Self::new(RawValueProblem::Unsupported, message.into())
+    }
+
+    fn new(problem: RawValueProblem, message: String) -> Self {
+        Self { problem, message }
+    }
+
+    /// Что не так со значением.
+    pub const fn problem(&self) -> RawValueProblem {
+        self.problem
+    }
+
+    /// Текст отказа вызывающему.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl From<RawValueError> for UseCaseError {
+    /// Род у такого отказа один — проверка входа; различает случаи код, а не род.
+    fn from(value: RawValueError) -> Self {
+        Self::new(UseCaseErrorKind::Validation, value.message)
+    }
+}
+
 /// Trims a required raw string and rejects blank values.
 pub fn normalize_required_string(
     value: &str,
     field_name: &'static str,
-) -> Result<String, UseCaseError> {
+) -> Result<String, RawValueError> {
     normalize_optional_string(Some(value)).ok_or_else(|| {
-        UseCaseError::new(
-            UseCaseErrorKind::Validation,
+        RawValueError::new(
+            RawValueProblem::Blank,
             format!("{field_name} must not be blank"),
         )
     })
 }
 
 /// Parses a required CLI dump mode.
-pub fn parse_required_dump_mode(raw: &str) -> Result<DumpModeRequest, UseCaseError> {
+pub fn parse_required_dump_mode(raw: &str) -> Result<DumpModeRequest, RawValueError> {
     let mode = normalize_required_string(raw, "dump mode")?;
     parse_normalized_dump_mode(&mode)
 }
@@ -39,20 +86,20 @@ pub fn parse_required_dump_mode(raw: &str) -> Result<DumpModeRequest, UseCaseErr
 pub fn parse_optional_dump_mode(
     raw: Option<&str>,
     default_mode: DumpModeRequest,
-) -> Result<DumpModeRequest, UseCaseError> {
+) -> Result<DumpModeRequest, RawValueError> {
     match normalize_optional_string(raw) {
         Some(mode) => parse_normalized_dump_mode(&mode),
         None => Ok(default_mode),
     }
 }
 
-fn parse_normalized_dump_mode(mode: &str) -> Result<DumpModeRequest, UseCaseError> {
+fn parse_normalized_dump_mode(mode: &str) -> Result<DumpModeRequest, RawValueError> {
     match mode.to_ascii_uppercase().as_str() {
         "FULL" => Ok(DumpModeRequest::Full),
         "INCREMENTAL" => Ok(DumpModeRequest::Incremental),
         "PARTIAL" => Ok(DumpModeRequest::Partial),
-        _ => Err(UseCaseError::new(
-            UseCaseErrorKind::Validation,
+        _ => Err(RawValueError::new(
+            RawValueProblem::Unsupported,
             format!("unsupported dump mode: {mode}"),
         )),
     }
@@ -63,7 +110,7 @@ pub fn parse_launch_target(
     raw: &str,
     field_name: &'static str,
     aliases: LaunchModeAliases,
-) -> Result<LaunchTargetRequest, UseCaseError> {
+) -> Result<LaunchTargetRequest, RawValueError> {
     let normalized = normalize_required_string(raw, field_name)?.to_lowercase();
     let mode = match aliases {
         LaunchModeAliases::Cli => match normalized.as_str() {
@@ -98,8 +145,8 @@ pub fn parse_launch_target(
     };
 
     mode.ok_or_else(|| {
-        UseCaseError::new(
-            UseCaseErrorKind::Validation,
+        RawValueError::new(
+            RawValueProblem::Unsupported,
             format!("unsupported launch {field_name}: {raw}"),
         )
     })
@@ -124,9 +171,10 @@ pub fn normalize_edt_projects(project_name: Option<&str>) -> Vec<String> {
 mod tests {
     use super::{
         normalize_edt_projects, normalize_extension_scope, parse_launch_target,
-        parse_optional_dump_mode, parse_required_dump_mode, LaunchModeAliases,
+        parse_optional_dump_mode, parse_required_dump_mode, LaunchModeAliases, RawValueProblem,
     };
     use crate::use_cases::request::{DumpModeRequest, LaunchTargetRequest, SyntaxExtensionScope};
+    use crate::use_cases::result::UseCaseError;
     use crate::use_cases::result::UseCaseErrorKind;
 
     #[test]
@@ -163,8 +211,12 @@ mod tests {
         );
         let error = parse_launch_target("ordinary", "utility_type", LaunchModeAliases::Mcp)
             .expect_err("ordinary is not published for MCP");
-        assert_eq!(error.kind(), UseCaseErrorKind::Validation);
+        assert_eq!(error.problem(), RawValueProblem::Unsupported);
         assert_eq!(error.message(), "unsupported launch utility_type: ordinary");
+        assert_eq!(
+            UseCaseError::from(error).kind(),
+            UseCaseErrorKind::Validation
+        );
     }
 
     #[test]

@@ -1,11 +1,11 @@
 ---
 id: DEC.2026-09-21.ERROR-KINDS-ARE-A-CLOSED-SET
-status: planned
+status: active
 governs: product
-realized: null
+realized: src/command_envelope.rs::every_error_kind_and_code_is_named_by_the_schema_and_by_a_table
 supersedes: []
 superseded-by: null
-establishes: []
+establishes: [CTR.WIRE.COMMAND-ENVELOPE]
 changes: [CTR.WIRE.COMMAND-ENVELOPE]
 ---
 

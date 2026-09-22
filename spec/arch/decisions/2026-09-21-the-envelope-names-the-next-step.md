@@ -1,8 +1,8 @@
 ---
 id: DEC.2026-09-21.THE-ENVELOPE-NAMES-THE-NEXT-STEP
-status: planned
+status: active
 governs: product
-realized: null
+realized: tests/cli_agent_standalone.rs::a_standalone_target_refusal_names_the_next_step_as_a_field
 supersedes: []
 superseded-by: null
 establishes: []

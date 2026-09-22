@@ -30,7 +30,7 @@ pub(super) fn export_configuration(
     staging_path: &Path,
 ) -> Result<PlatformCommandResult, AppError> {
     if state == ConfigurationState::Database {
-        return Err(AppError::CapabilityUnavailable(
+        return Err(AppError::capability(
             "the agent exports only the working configuration: it has no command for the database configuration; use providers.infobase.configuration.export: designer or ibcmd".to_owned(),
         ));
     }

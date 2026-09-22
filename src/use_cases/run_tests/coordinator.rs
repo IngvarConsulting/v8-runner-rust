@@ -1,4 +1,5 @@
 use super::*;
+use crate::support::error::CapabilityReason;
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::TestBuildPolicy;
 
@@ -534,8 +535,9 @@ pub(super) fn run_tests(
 
 fn validate_prepared_infobase(config: &AppConfig) -> Result<(), AppError> {
     if config.target_kind() == crate::domain::capability::TargetKind::Standalone {
-        return Err(AppError::CapabilityUnavailable(
-            "tests start an enterprise client by the connection string; the direct gate of a standalone server is not used by the runner yet (#205) — run tests against a File= or Srvr= target".to_owned(),
+        return Err(AppError::capability_for(
+            CapabilityReason::Soon,
+            "tests start an enterprise client by the connection string; the direct gate of a standalone server is not used by the runner yet (#205) — run tests against a File= or Srvr= target",
         ));
     }
     let connection = config.v8_connection();

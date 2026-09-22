@@ -1,7 +1,8 @@
 use serde::Serialize;
 
-use crate::command_envelope::{Envelope, EnvelopeError};
+use crate::command_envelope::{Envelope, EnvelopeError, ErrorCode, ErrorKind};
 use crate::output::presenter::Presenter;
+use crate::support::error::CapabilityReason;
 use crate::use_cases::context::CommandName;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
@@ -57,19 +58,31 @@ pub fn with_cli_error<T: Serialize>(envelope: Envelope<T>, error: &UseCaseError)
 
 fn cli_envelope_error(error: &UseCaseError) -> EnvelopeError {
     let (code, kind) = cli_error_contract(error.kind());
-    EnvelopeError::new(code, kind, error.message())
+    EnvelopeError::new(code, kind, error.message()).with_next(error.next().cloned())
 }
 
-pub(crate) const fn cli_error_contract(kind: UseCaseErrorKind) -> (&'static str, &'static str) {
+/// Род отказа определяет пару «код, род» на проводе. Причина возможности различает коды
+/// внутри одного рода: подбор команд на сайте зовёт их `subject`, `target` и `soon`.
+pub(crate) const fn cli_error_contract(kind: UseCaseErrorKind) -> (ErrorCode, ErrorKind) {
     match kind {
-        UseCaseErrorKind::Capability => ("capability_unavailable", "capability"),
-        UseCaseErrorKind::Environment => ("environment_unavailable", "environment"),
-        UseCaseErrorKind::WorkspaceBusy => ("workspace_busy", "workspace"),
-        UseCaseErrorKind::InvalidOutput => ("invalid_output", "invalid_output"),
-        UseCaseErrorKind::Cancelled => ("cancelled", "interruption"),
-        UseCaseErrorKind::TimedOut => ("timed_out", "interruption"),
-        UseCaseErrorKind::Validation => ("invalid_argument", "validation"),
-        UseCaseErrorKind::Runtime => ("runtime_failure", "runtime"),
-        UseCaseErrorKind::Platform => ("platform_failure", "platform"),
+        UseCaseErrorKind::Capability(reason) => (
+            match reason {
+                CapabilityReason::Unavailable => ErrorCode::CapabilityUnavailable,
+                CapabilityReason::Subject => ErrorCode::Subject,
+                CapabilityReason::Target => ErrorCode::Target,
+                CapabilityReason::Soon => ErrorCode::Soon,
+            },
+            ErrorKind::Capability,
+        ),
+        UseCaseErrorKind::Environment => {
+            (ErrorCode::EnvironmentUnavailable, ErrorKind::Environment)
+        }
+        UseCaseErrorKind::WorkspaceBusy => (ErrorCode::WorkspaceBusy, ErrorKind::Workspace),
+        UseCaseErrorKind::InvalidOutput => (ErrorCode::InvalidOutput, ErrorKind::InvalidOutput),
+        UseCaseErrorKind::Cancelled => (ErrorCode::Cancelled, ErrorKind::Interruption),
+        UseCaseErrorKind::TimedOut => (ErrorCode::TimedOut, ErrorKind::Interruption),
+        UseCaseErrorKind::Validation => (ErrorCode::InvalidArgument, ErrorKind::Validation),
+        UseCaseErrorKind::Runtime => (ErrorCode::RuntimeFailure, ErrorKind::Runtime),
+        UseCaseErrorKind::Platform => (ErrorCode::PlatformFailure, ErrorKind::Platform),
     }
 }

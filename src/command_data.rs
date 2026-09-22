@@ -20,6 +20,10 @@ use serde_json::Value;
 const REPOSITORY_RAW_SCHEMA_BASE: &str =
     "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data";
 
+/// Основание адреса схем, лежащих рядом с формами команд.
+pub(crate) const REPOSITORY_RAW_SCHEMA_ROOT: &str =
+    "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas";
+
 /// Каталог, в котором лежат порождённые формы.
 pub const COMMAND_DATA_SCHEMA_DIR: &str = "docs/schemas/command-data";
 
@@ -117,7 +121,7 @@ pub fn command_data_index() -> Value {
     })
 }
 
-fn generated_schema(schema: schemars::Schema, slug: &str) -> Value {
+pub(crate) fn generated_schema(schema: schemars::Schema, slug: &str) -> Value {
     let mut value = serde_json::to_value(schema).expect("schema json");
     inline_tagged_variants(&mut value);
     close_every_object(&mut value);

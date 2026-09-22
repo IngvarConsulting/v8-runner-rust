@@ -8,10 +8,42 @@ use crate::platform::locator::LocatorError;
 use crate::platform::process::ProcessError;
 use thiserror::Error;
 
+/// Почему операция здесь не выполняется. Род отказа один — `capability`, — а причина
+/// различает случаи, которые сайт называет разными словами: предмет не тот навсегда, цель
+/// не та, или раннер пока не умеет.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityReason {
+    /// Операция здесь не выполняется, и точнее сказать нечего.
+    Unavailable,
+    /// Предмет не тот, и другим он не станет.
+    #[allow(
+        dead_code,
+        reason = "код заведён в наборе; производитель приходит со своей задачей"
+    )]
+    Subject,
+    /// Не для этой цели.
+    Target,
+    /// Пока не умеет.
+    Soon,
+}
+
+/// Отказ по возможности: причина и текст человеку.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityRefusal {
+    pub reason: CapabilityReason,
+    pub message: String,
+}
+
+impl std::fmt::Display for CapabilityRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("capability unavailable: {0}")]
-    CapabilityUnavailable(String),
+    CapabilityUnavailable(CapabilityRefusal),
 
     #[error("environment unavailable: {0}")]
     EnvironmentUnavailable(String),
@@ -109,11 +141,28 @@ pub enum AppError {
 }
 
 impl AppError {
+    /// Отказ по возможности без уточнения причины.
+    pub fn capability(message: impl Into<String>) -> Self {
+        Self::capability_for(CapabilityReason::Unavailable, message)
+    }
+
+    /// Отказ по возможности с названной причиной: её видит и код отказа в конверте.
+    pub fn capability_for(reason: CapabilityReason, message: impl Into<String>) -> Self {
+        Self::CapabilityUnavailable(CapabilityRefusal {
+            reason,
+            message: message.into(),
+        })
+    }
+
     pub fn with_context(self, context: impl Into<String>) -> Self {
         let context = context.into();
         match self {
-            Self::CapabilityUnavailable(message) => {
-                Self::CapabilityUnavailable(format!("{context}; {message}"))
+            // Причина переживает уточнение текста: иначе `target` молча становится общим.
+            Self::CapabilityUnavailable(refusal) => {
+                Self::CapabilityUnavailable(CapabilityRefusal {
+                    reason: refusal.reason,
+                    message: format!("{context}; {}", refusal.message),
+                })
             }
             Self::EnvironmentUnavailable(message) => {
                 Self::EnvironmentUnavailable(format!("{context}; {message}"))
