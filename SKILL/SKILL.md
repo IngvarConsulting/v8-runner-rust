@@ -94,7 +94,7 @@ v8-runner infobase create
 - Source files changed and infobase may be stale: run `v8-runner push`.
 - Only one source-set changed: use commands that accept `--source-set <NAME>` instead of rebuilding or materializing everything.
 - Branch switch, rebase, large object moves, stale source-backed tool extension state, or suspicious incremental state: run `v8-runner push --full`.
-- Syntax check: inspect `format`, then choose `check designer-modules`, `check designer-config`, or `check edt`. `check` has one executor (Designer) and takes no `providers` key.
+- Configuration check: run `v8-runner check`. The project `format` picks the branch — `/CheckConfig` for DESIGNER, EDT validation for EDT — and a key the branch does not execute is refused. With no mode key the default profile runs; name modes to narrow it. One executor (Designer), no `providers` key. A project of external data processors and reports only is refused with `error.code: subject`.
 - Behavior validation: run the relevant `v8-runner test ...` command; tests run `push` first unless the
   caller explicitly requests `--no-push` for an already prepared infobase.
 - Missing local YAxUnit, Vanessa Automation, or onec-client-mcp-devkit setup: run

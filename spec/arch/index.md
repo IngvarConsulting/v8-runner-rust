@@ -25,7 +25,7 @@
 | `CTR.WIRE.MCP-REFUSAL-DATA` | контракт · product | active | да | `data` отказа адаптера MCP | [contracts/CTR.WIRE.MCP-REFUSAL-DATA.md](contracts/CTR.WIRE.MCP-REFUSAL-DATA.md) |
 | `CTR.WIRE.PUBLISH-DATA` | контракт · product | active | да | `data` команды `publish` | [contracts/CTR.WIRE.PUBLISH-DATA.md](contracts/CTR.WIRE.PUBLISH-DATA.md) |
 | `CTR.WIRE.REFUSAL-DATA` | контракт · product | active | да | `data` отказа до диспетчеризации | [contracts/CTR.WIRE.REFUSAL-DATA.md](contracts/CTR.WIRE.REFUSAL-DATA.md) |
-| `CTR.WIRE.SYNTAX-DATA` | контракт · product | active | да | `data` команды `syntax` | [contracts/CTR.WIRE.SYNTAX-DATA.md](contracts/CTR.WIRE.SYNTAX-DATA.md) |
+| `CTR.WIRE.SYNTAX-DATA` | контракт · product | active | да | `data` команды `check` | [contracts/CTR.WIRE.SYNTAX-DATA.md](contracts/CTR.WIRE.SYNTAX-DATA.md) |
 | `CTR.WIRE.TEST-DATA` | контракт · product | active | да | `data` команды `test` | [contracts/CTR.WIRE.TEST-DATA.md](contracts/CTR.WIRE.TEST-DATA.md) |
 | `CTR.WIRE.TOOLS-DOWNLOAD-DATA` | контракт · product | active | да | `data` команды `tools download` | [contracts/CTR.WIRE.TOOLS-DOWNLOAD-DATA.md](contracts/CTR.WIRE.TOOLS-DOWNLOAD-DATA.md) |
 | `CTR.WIRE.VERSION-DATA` | контракт · product | active | да | `data` команды `version` | [contracts/CTR.WIRE.VERSION-DATA.md](contracts/CTR.WIRE.VERSION-DATA.md) |
@@ -122,7 +122,7 @@
 | `DEC.2026-09-21.A-STANDALONE-TARGET-HAS-TWO-GATES` | решение · product | planned | нет | У автономной цели два шлюза | [decisions/2026-09-21-a-standalone-target-has-two-gates.md](decisions/2026-09-21-a-standalone-target-has-two-gates.md) |
 | `DEC.2026-09-21.AN-UNTRACKED-DIRECTORY-IS-REFUSED-NOT-REPLACED` | решение · product | planned | нет | Каталог вне системы контроля версий не заменяется молча | [decisions/2026-09-21-an-untracked-directory-is-refused-not-replaced.md](decisions/2026-09-21-an-untracked-directory-is-refused-not-replaced.md) |
 | `DEC.2026-09-21.APPLY-IS-A-SEPARATE-STEP` | решение · product | planned | нет | Применение — отдельный шаг, а не часть отправки | [decisions/2026-09-21-apply-is-a-separate-step.md](decisions/2026-09-21-apply-is-a-separate-step.md) |
-| `DEC.2026-09-21.CHECK-IS-CHECKCONFIG` | решение · product | planned | нет | Одна команда `check` | [decisions/2026-09-21-check-is-checkconfig.md](decisions/2026-09-21-check-is-checkconfig.md) |
+| `DEC.2026-09-21.CHECK-IS-CHECKCONFIG` | решение · product | active | да | Одна команда `check` | [decisions/2026-09-21-check-is-checkconfig.md](decisions/2026-09-21-check-is-checkconfig.md) |
 | `DEC.2026-09-21.COMMANDS-FOLLOW-THE-GIT-VOCABULARY` | решение · product | planned | нет | Команды называются словарём гита | [decisions/2026-09-21-commands-follow-the-git-vocabulary.md](decisions/2026-09-21-commands-follow-the-git-vocabulary.md) |
 | `DEC.2026-09-21.DEFAULT-CHAINS-FOLLOW-THE-TARGET-KIND` | решение · product | planned | нет | Цепочки умолчаний строятся по виду цели | [decisions/2026-09-21-default-chains-follow-the-target-kind.md](decisions/2026-09-21-default-chains-follow-the-target-kind.md) |
 | `DEC.2026-09-21.ERROR-KINDS-ARE-A-CLOSED-SET` | решение · product | active | да | Роды ошибки — закрытое перечисление | [decisions/2026-09-21-error-kinds-are-a-closed-set.md](decisions/2026-09-21-error-kinds-are-a-closed-set.md) |

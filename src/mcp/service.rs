@@ -31,9 +31,8 @@ use crate::use_cases::context::{CommandName, ExecutionContext, ExecutionTranspor
 use crate::use_cases::request::{
     effective_test_timeouts, BuildRequest, ClientMcpAddonRequest, ClientMcpMode,
     ClientMcpOptionsRequest, DesignerClientScope, DesignerClientScopes, DesignerConfigCheck,
-    DesignerConfigChecks, DesignerConfigSyntaxRequest, DesignerModulesSyntaxRequest,
-    DumpModeRequest, DumpRequest, LaunchRequest, SyntaxRequest, SyntaxTargetRequest,
-    TestBuildPolicy, TestRequest, TestScopeRequest,
+    DesignerConfigChecks, DesignerConfigSyntaxRequest, DumpModeRequest, DumpRequest, LaunchRequest,
+    SyntaxRequest, SyntaxTargetRequest, TestBuildPolicy, TestRequest, TestScopeRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult};
 
@@ -313,7 +312,7 @@ where
         let context = execution_context(call_context, CommandName::Syntax)
             .map_err(McpServiceError::Internal)?;
         let use_case_request = SyntaxRequest {
-            target: SyntaxTargetRequest::DesignerModules(
+            target: SyntaxTargetRequest::DesignerConfig(
                 map_designer_modules_request(request).map_err(|error| {
                     invalid_syntax_request(error, "check_syntax_designer_modules")
                 })?,
@@ -954,11 +953,17 @@ fn map_designer_config_request(
     ))
 }
 
+/// Инструмент проверки модулей исполняется той же `/CheckConfig`: её режимы покрывают
+/// режимы проверки модулей целиком. Проверки конфигурации остаются пустыми — профиль
+/// соседнего инструмента сюда не подмешивается, иначе два умолчания слились бы в одно, —
+/// а требование «хотя бы один режим» сохраняется: явно выключив все режимы, вызывающий
+/// получает отказ, а не подставленный профиль.
 fn map_designer_modules_request(
     request: &McpCheckSyntaxDesignerModulesRequest,
-) -> Result<DesignerModulesSyntaxRequest, UseCaseError> {
+) -> Result<DesignerConfigSyntaxRequest, UseCaseError> {
     let scope = normalize_extension_scope(request.extension.as_deref(), request.all_extensions);
-    DesignerModulesSyntaxRequest::new(
+    let request = DesignerConfigSyntaxRequest::new(
+        DesignerConfigChecks::new([]),
         DesignerClientScopes::new(
             [
                 (request.thin_client != Some(false)).then_some(DesignerClientScope::ThinClient),
@@ -981,7 +986,14 @@ fn map_designer_modules_request(
             request.extended_modules_check != Some(false),
         ),
         scope,
-    )
+    );
+    if request.names_no_mode() {
+        return Err(UseCaseError::new(
+            UseCaseErrorKind::Validation,
+            crate::use_cases::request::MODULES_WITHOUT_MODES_ERROR,
+        ));
+    }
+    Ok(request)
 }
 
 pub(crate) fn normalize_check_syntax_edt_request(
@@ -1013,6 +1025,47 @@ fn render_dump_mode(mode: DumpModeRequest) -> &'static str {
         DumpModeRequest::Full => "FULL",
         DumpModeRequest::Incremental => "INCREMENTAL",
         DumpModeRequest::Partial => "PARTIAL",
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+    use crate::mcp::request::McpCheckSyntaxDesignerConfigRequest;
+    use crate::use_cases::request::DesignerConfigSyntaxRequest;
+
+    /// Умолчания инструмента и профиль команды — один и тот же набор режимов. Держать их
+    /// порознь нельзя: разойдутся молча.
+    #[test]
+    fn the_designer_config_tool_defaults_to_the_same_profile_as_the_command() {
+        let request = McpCheckSyntaxDesignerConfigRequest::default();
+
+        let mapped = map_designer_config_request(&request).expect("request");
+
+        // Область расширений приходит от вызывающего, режимы — от общего профиля.
+        assert_eq!(
+            mapped,
+            DesignerConfigSyntaxRequest::default_profile(mapped.extension_scope().clone())
+        );
+    }
+
+    /// Явно выключив все режимы, вызывающий получает отказ синонима, а не профиль.
+    #[test]
+    fn the_modules_tool_refuses_when_every_mode_is_switched_off() {
+        let request = McpCheckSyntaxDesignerModulesRequest {
+            thin_client: Some(false),
+            server: Some(false),
+            extended_modules_check: Some(false),
+            ..Default::default()
+        };
+
+        let error = map_designer_modules_request(&request).expect_err("refusal");
+
+        assert!(
+            error.message().contains("requires at least one mode flag"),
+            "{}",
+            error.message()
+        );
     }
 }
 
@@ -2519,7 +2572,7 @@ mod tests {
         assert_eq!(response.data["status"], "issues_found");
         let requests = service.port.syntax_requests.borrow();
         match &requests[0].1.target {
-            SyntaxTargetRequest::DesignerModules(request) => {
+            SyntaxTargetRequest::DesignerConfig(request) => {
                 assert!(request.has_client_scope(DesignerClientScope::ThinClient));
                 assert!(request.has_client_scope(DesignerClientScope::Server));
                 assert_eq!(request.extension_scope().extension(), Some("Ext"));
@@ -2548,7 +2601,7 @@ mod tests {
 
         let requests = service.port.syntax_requests.borrow();
         match &requests[0].1.target {
-            SyntaxTargetRequest::DesignerModules(request) => {
+            SyntaxTargetRequest::DesignerConfig(request) => {
                 assert_eq!(request.extension_scope().extension(), None);
                 assert!(request.extension_scope().includes_all_extensions());
             }
@@ -2765,7 +2818,7 @@ mod tests {
             } else {
                 1
             },
-            check_name: "CheckConfig".to_owned(),
+            check_name: crate::domain::syntax::CheckName::DesignerConfig,
             issues: if matches!(status, SyntaxCheckStatus::IssuesFound) {
                 vec![Issue::Module(ModuleIssue {
                     path: "src/CommonModule.bsl".to_owned(),

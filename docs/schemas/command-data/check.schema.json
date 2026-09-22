@@ -1,5 +1,20 @@
 {
   "$defs": {
+    "CheckName": {
+      "description": "Чем платформа выполнила проверку. Набор закрыт: прежнее `designer-modules` исчезло\nвместе с отдельным путём `/CheckModules` — режимы проверки модулей выполняет\n`/CheckConfig`.",
+      "oneOf": [
+        {
+          "const": "designer-config",
+          "description": "`/CheckConfig` Конфигуратора.",
+          "type": "string"
+        },
+        {
+          "const": "edt",
+          "description": "Проверка проекта средствами EDT CLI.",
+          "type": "string"
+        }
+      ]
+    },
     "Issue": {
       "oneOf": [
         {
@@ -278,7 +293,7 @@
   "additionalProperties": false,
   "properties": {
     "check_name": {
-      "type": "string"
+      "$ref": "#/$defs/CheckName"
     },
     "duration_ms": {
       "format": "uint64",

@@ -70,19 +70,19 @@ Use these only when the user needs a specific 1C launch context; otherwise prefe
 Designer module syntax:
 
 ```bash
-v8-runner check designer-modules --server --thin-client
+v8-runner check --server --thin-client
 ```
 
 Designer configuration syntax:
 
 ```bash
-v8-runner check designer-config
+v8-runner check
 ```
 
 EDT syntax:
 
 ```bash
-v8-runner check edt
+v8-runner check
 ```
 
 ## Artifacts

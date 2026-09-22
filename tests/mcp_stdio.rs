@@ -310,7 +310,7 @@ fn setup_designer_suite_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathB
     .expect("module");
 
     let designer_script = format!(
-        "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> '{}'\nif [ -n \"$out\" ]; then\n  mkdir -p \"$(dirname \"$out\")\"\n  case \"$args\" in\n    *\"/CheckModules\"*)\n      cat <<'LOG' > \"$out\"\n{{CommonModules.TestModule(4,2)}}: Ошибка компиляции\n{{1}}: context\nLOG\n      exit 101\n      ;;\n    *)\n      : > \"$out\"\n      ;;\n  esac\nfi\nexit 0",
+        "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> '{}'\nif [ -n \"$out\" ]; then\n  mkdir -p \"$(dirname \"$out\")\"\n  case \"$args\" in\n    *\"/CheckConfig\"*)\n      cat <<'LOG' > \"$out\"\n{{CommonModules.TestModule(4,2)}}: Ошибка компиляции\n{{1}}: context\nLOG\n      exit 101\n      ;;\n    *)\n      : > \"$out\"\n      ;;\n  esac\nfi\nexit 0",
         designer_calls_log.display()
     );
     write_script(&platform_dir.join("bin").join("1cv8"), &designer_script);
@@ -1221,7 +1221,7 @@ async fn mcp_stdio_check_syntax_designer_modules_returns_structured_issues() {
     );
     assert!(fs::read_to_string(designer_calls_log)
         .expect("designer calls")
-        .contains("/CheckModules"));
+        .contains("/CheckConfig"));
 
     client.cancel().await.expect("cancel client");
 }

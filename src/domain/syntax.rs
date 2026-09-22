@@ -11,6 +11,34 @@ pub enum SyntaxCheckStatus {
     ToolFailed,
 }
 
+/// Чем платформа выполнила проверку. Набор закрыт: прежнее `designer-modules` исчезло
+/// вместе с отдельным путём `/CheckModules` — режимы проверки модулей выполняет
+/// `/CheckConfig`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum CheckName {
+    /// `/CheckConfig` Конфигуратора.
+    DesignerConfig,
+    /// Проверка проекта средствами EDT CLI.
+    Edt,
+}
+
+impl CheckName {
+    /// Имя проверки на проводе; оно же попадает в имя файла журнала платформы.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DesignerConfig => "designer-config",
+            Self::Edt => "edt",
+        }
+    }
+}
+
+impl std::fmt::Display for CheckName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SyntaxIssueSummary {
     pub errors: usize,
@@ -26,7 +54,7 @@ pub struct SyntaxCheckResult {
 
     pub status: SyntaxCheckStatus,
     pub exit_code: i32,
-    pub check_name: String,
+    pub check_name: CheckName,
     pub issues: Vec<Issue>,
     pub summary: SyntaxIssueSummary,
     pub duration_ms: u64,

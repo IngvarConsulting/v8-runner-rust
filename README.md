@@ -178,7 +178,7 @@ v8-runner infobase restore --input dist/base.dt --create
 ### Проверьте синтаксис серверных модулей:
 
 ```bash
-v8-runner check designer-modules --server
+v8-runner check --server
 ```
 
 Команда запускает Designer syntax check (проверку синтаксиса Конфигуратором) для серверного
