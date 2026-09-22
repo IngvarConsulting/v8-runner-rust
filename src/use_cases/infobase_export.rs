@@ -1561,7 +1561,7 @@ fn append_platform_diagnostic(details: &mut Vec<String>, label: &str, value: &st
     }
 }
 
-fn validate_platform_artifact(staging_path: &Path) -> Result<(), AppError> {
+pub(crate) fn validate_platform_artifact(staging_path: &Path) -> Result<(), AppError> {
     let metadata = std::fs::symlink_metadata(staging_path).map_err(|error| {
         AppError::InvalidOutput(format!(
             "provider did not produce export file '{}': {error}",
