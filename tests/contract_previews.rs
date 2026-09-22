@@ -27,6 +27,11 @@ fn write_project(dir: &Path, with_platform: bool) -> PathBuf {
         "<Configuration><Properties><Name>client_mcp</Name><ConfigurationExtensionPurpose kind=\"Customization\">Customization</ConfigurationExtensionPurpose></Properties></Configuration>",
     )
     .expect("extension marker");
+    fs::write(
+        extension_source.join("Module.bsl"),
+        "procedure Tool() endprocedure",
+    )
+    .expect("extension module");
     fs::create_dir_all(base_path.join("configuration")).expect("configuration dir");
     fs::write(
         base_path.join("configuration").join("Configuration.xml"),
@@ -140,7 +145,6 @@ fn entries_under(root: &Path, dir: &Path, found: &mut Vec<String>) {
             entries_under(root, &path, found);
         }
     }
-    found.sort();
 }
 
 /// Превью ничего не создаёт: в рабочем каталоге после него нет ничего, кроме журнала
@@ -176,9 +180,84 @@ fn no_preview_creates_anything_in_the_work_path_but_the_action_log() {
         let mut left = Vec::new();
         entries_under(&work, &work, &mut left);
         left.retain(|path| !LEFT_BY_THE_RULE.contains(&path.as_str()));
+        left.sort();
         assert!(
             left.is_empty(),
             "`{}` left behind: {left:?}",
+            preview.join(" ")
+        );
+    }
+}
+
+/// Содержимое каждого файла под `root`, кроме журнала действий: его превью пополняет по
+/// правилу.
+fn contents_under(root: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut paths = Vec::new();
+    entries_under(root, root, &mut paths);
+    paths.sort();
+    paths
+        .into_iter()
+        .filter(|path| path != "logs/mcp/actions.log")
+        .filter_map(|path| {
+            let bytes = fs::read(root.join(&path)).ok()?;
+            Some((path, bytes))
+        })
+        .collect()
+}
+
+/// Предыдущий страж видит созданное. Этот — переписанное: рабочий каталог засевается
+/// боевой сборкой, и после каждого превью его содержимое обязано совпадать побайтно.
+/// Сравнивается содержимое, а не время правки: открытие базы состояния сдвигает `mtime`,
+/// ничего в неё не записав.
+#[test]
+fn no_preview_rewrites_what_a_real_build_left_in_the_work_path() {
+    let dir = temp_workspace();
+    let config_path = write_project(dir.path(), true);
+    fs::write(dir.path().join("main.cf"), "cf").expect("artifact");
+    let artifact = dir.path().join("main.cf").display().to_string();
+    let work = dir.path().join("work");
+
+    let (code, payload) = run(&config_path, &["build"]);
+    assert_eq!(code, 0, "боевая сборка образца не прошла: {payload}");
+    // Расширение меняется после засева: иначе переписывать нечего — утечка нашла бы
+    // состояние свежим, пропустила подготовку, и страж промолчал бы.
+    fs::write(
+        dir.path()
+            .join("project")
+            .join("exts")
+            .join("client-mcp")
+            .join("Module.bsl"),
+        "procedure Tool() // changed after the seed\nendprocedure",
+    )
+    .expect("modify extension");
+
+    let seeded = contents_under(&work);
+    assert!(
+        !seeded.is_empty(),
+        "боевая сборка ничего не оставила — сравнивать нечего"
+    );
+
+    for preview in previews(&artifact) {
+        let (code, payload) = run(&config_path, &preview);
+        assert_eq!(
+            code,
+            0,
+            "`{}` did not preview: {payload}",
+            preview.join(" ")
+        );
+        let after = contents_under(&work);
+        let changed: Vec<&String> = after
+            .iter()
+            .filter(|(path, bytes)| {
+                !seeded
+                    .iter()
+                    .any(|(was, before)| was == path && before == bytes)
+            })
+            .map(|(path, _)| path)
+            .collect();
+        assert!(
+            changed.is_empty(),
+            "`{}` rewrote: {changed:?}",
             preview.join(" ")
         );
     }

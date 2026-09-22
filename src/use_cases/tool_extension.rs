@@ -120,14 +120,16 @@ fn preview_extension(
     started: Instant,
 ) -> Result<BuildStep, AppError> {
     let tools = locate_extension_tools(config, extension, utilities)?;
+    // Словарь тот же, что у соседнего шага набора исходников: в одном ответе шаги не
+    // должны говорить о запланированном разными словами.
     let planned = |what: String| {
-        Ok(planned_build_step(
+        Ok(successful_build_step(
             extension,
             format!(
-                "would prepare extension '{}' {what} via {tools}; nothing applied",
+                "would prepare extension '{}' {what} via {tools}; planned, nothing dispatched",
                 extension.name
             ),
-            started,
+            started.elapsed().as_millis() as u64,
         ))
     };
 
@@ -741,22 +743,6 @@ fn successful_build_step(
         ok: true,
         message: Some(message),
         duration_ms,
-    }
-}
-
-/// Шаг превью: режим тот, который был бы применён, а сообщение говорит об этом прямо.
-/// Отличает запланированное от выполненного признак `provider_dispatched` у всего ответа.
-fn planned_build_step(
-    extension: &ToolExtensionConfig,
-    message: String,
-    started: Instant,
-) -> BuildStep {
-    BuildStep {
-        source_set: format!("tool:{}", extension.name),
-        mode: BuildMode::Full,
-        ok: true,
-        message: Some(message),
-        duration_ms: started.elapsed().as_millis() as u64,
     }
 }
 

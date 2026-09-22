@@ -836,15 +836,18 @@ fn build_json_writes_action_log_file_without_polluting_stdout() {
     assert!(contents.contains("✓ partial load"));
 }
 
-/// Превью сборки не готовит расширение клиентского MCP. Подготовка запускает платформу
-/// против базы и фиксирует состояние обнаружения изменений, а превью не делает ни того,
-/// ни другого (`INV.CLI.PREVIEW-DISPATCHES-NOTHING`). Поиск утилиты превью при этом
-/// проходит — иначе оно одобрило бы план, который боевой прогон выполнить не может.
-#[test]
-fn a_planned_build_does_not_prepare_the_client_mcp_extension() {
+/// Проект с объявленным расширением клиентского MCP. Подставная утилита отмечает каждый
+/// свой вызов, поэтому запуск платформы виден по файлу, а не по косвенным признакам.
+fn setup_client_mcp_extension_project() -> (
+    tempfile::TempDir,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+) {
     let (dir, config_path, binary_path, work_path) = setup_project();
-    let base_path = dir.path().join("project");
-    let tool_source = base_path.join("exts").join("client-mcp");
+    let tool_source = dir.path().join("project").join("exts").join("client-mcp");
     let calls_log = dir.path().join("calls.log");
 
     fs::create_dir_all(&tool_source).expect("tool source");
@@ -858,21 +861,53 @@ fn a_planned_build_does_not_prepare_the_client_mcp_extension() {
         "<Configuration><Properties><Name>client_mcp</Name><ConfigurationExtensionPurpose kind=\"Customization\">Customization</ConfigurationExtensionPurpose></Properties></Configuration>",
     )
     .expect("tool descriptor");
-    // Сценарий отмечает каждый вызов: у превью отметок быть не должно.
+    // Сценарий и журнал платформы пишет, как остальные образцы, и отмечает свой вызов.
     write_script(
         &binary_path,
-        &format!("printf '%s\\n' \"$*\" >> '{}'\nexit 0", calls_log.display()),
+        &format!(
+            "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$out\" ]; then printf 'designer log for %s\\n' \"$args\" > \"$out\"; fi\nprintf '%s\\n' \"$args\" >> '{}'\nexit 0",
+            calls_log.display()
+        ),
     );
+    write_client_mcp_config(&config_path, &work_path, &binary_path, &tool_source, "");
+
+    (
+        dir,
+        config_path,
+        binary_path,
+        work_path,
+        tool_source,
+        calls_log,
+    )
+}
+
+fn write_client_mcp_config(
+    path: &Path,
+    work_path: &Path,
+    platform_path: &Path,
+    tool_source: &Path,
+    platform_extra: &str,
+) {
     fs::write(
-        &config_path,
+        path,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: '{}'\n",
+            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n{platform_extra}  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: '{}'\n",
             work_path.display(),
-            binary_path.display(),
+            platform_path.display(),
             tool_source.display()
         ),
     )
     .expect("config");
+}
+
+/// Превью сборки не готовит расширение клиентского MCP. Подготовка запускает платформу
+/// против базы и фиксирует состояние обнаружения изменений, а превью не делает ни того,
+/// ни другого (`INV.CLI.PREVIEW-DISPATCHES-NOTHING`). Поиск утилиты превью при этом
+/// проходит — иначе оно одобрило бы план, который боевой прогон выполнить не может.
+#[test]
+fn a_planned_build_does_not_prepare_the_client_mcp_extension() {
+    let (_dir, config_path, binary_path, work_path, _tool_source, calls_log) =
+        setup_client_mcp_extension_project();
 
     let output = v8_runner_command()
         .args([
@@ -924,6 +959,68 @@ fn a_planned_build_does_not_prepare_the_client_mcp_extension() {
         message.contains(&binary_path.display().to_string()),
         "{message}"
     );
+}
+
+/// Отказ превью приходит и тогда, когда искать утилиту больше некому: наборы исходников
+/// не изменились и пропускаются без поиска, а изменилось одно расширение. Поиск
+/// обязателен (`INV.CLI.PREVIEW-RETURNS-AFTER-TOOL-LOOKUP`) — иначе превью одобрит план,
+/// который боевой прогон выполнить не может.
+#[test]
+fn a_planned_build_refuses_when_only_the_extension_still_needs_a_missing_platform() {
+    let (dir, config_path, _binary_path, work_path, tool_source, _calls_log) =
+        setup_client_mcp_extension_project();
+
+    // Боевой прогон запоминает состояние и наборов, и расширения.
+    let seed = v8_runner_command()
+        .args(["--config", &config_path.display().to_string(), "build"])
+        .output()
+        .expect("seed build");
+    assert!(
+        seed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&seed.stderr)
+    );
+
+    // Меняется только расширение: наборы исходников останутся без изменений и пропустятся.
+    fs::write(
+        tool_source.join("Module.bsl"),
+        "procedure Tool() // changed\nendprocedure",
+    )
+    .expect("modify extension");
+
+    // Платформы больше нет. Строгий режим с версией не даёт локатору уйти в PATH или в
+    // корни по умолчанию: отказать обязан поиск.
+    let empty = dir.path().join("empty-platform");
+    fs::create_dir_all(empty.join("bin")).expect("empty platform");
+    write_client_mcp_config(
+        &config_path,
+        &work_path,
+        &empty,
+        &tool_source,
+        "    strict: true\n    version: '8.3.27'\n",
+    );
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "build",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success(),
+        "превью одобрило план без платформы: {reported}"
+    );
+    assert!(reported.contains("1cv8"), "{reported}");
 }
 
 #[test]
