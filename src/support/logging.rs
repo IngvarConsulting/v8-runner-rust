@@ -24,6 +24,17 @@ pub enum LoggingInitError {
     Install(String),
 }
 
+/// Когда открывать файл журнала. Значение типизировано: три подряд идущих `bool`
+/// переставляются молча, а перестановка здесь меняет поведение.
+enum FileOpening {
+    /// Открыть сразу.
+    Now,
+    /// Отложить до первой записи.
+    OnFirstWrite,
+    /// Не открывать вовсе: превью не оставляет следов.
+    Never,
+}
+
 pub fn init_action_logging(
     level: &str,
     output_format: &str,
@@ -31,14 +42,12 @@ pub fn init_action_logging(
     work_path: &Path,
     dry_run: bool,
 ) -> Result<Option<PathBuf>, LoggingInitError> {
-    init_action_logging_impl(
-        level,
-        output_format,
-        color_enabled,
-        work_path,
-        false,
-        dry_run,
-    )
+    let opening = if dry_run {
+        FileOpening::Never
+    } else {
+        FileOpening::Now
+    };
+    init_action_logging_impl(level, output_format, color_enabled, work_path, opening)
 }
 
 pub fn init_action_logging_deferred(
@@ -48,14 +57,12 @@ pub fn init_action_logging_deferred(
     work_path: &Path,
     dry_run: bool,
 ) -> Result<Option<PathBuf>, LoggingInitError> {
-    init_action_logging_impl(
-        level,
-        output_format,
-        color_enabled,
-        work_path,
-        true,
-        dry_run,
-    )
+    let opening = if dry_run {
+        FileOpening::Never
+    } else {
+        FileOpening::OnFirstWrite
+    };
+    init_action_logging_impl(level, output_format, color_enabled, work_path, opening)
 }
 
 fn init_action_logging_impl(
@@ -63,9 +70,10 @@ fn init_action_logging_impl(
     output_format: &str,
     color_enabled: bool,
     work_path: &Path,
-    defer_file_open: bool,
-    dry_run: bool,
+    opening: FileOpening,
 ) -> Result<Option<PathBuf>, LoggingInitError> {
+    let defer_file_open = matches!(opening, FileOpening::OnFirstWrite);
+    let dry_run = matches!(opening, FileOpening::Never);
     let log_path = resolve_action_log_path(output_format, work_path, dry_run);
     let writer = ActionLogMakeWriter {
         stdout_enabled: output_format == "text",

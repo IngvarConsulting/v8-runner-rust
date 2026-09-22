@@ -147,7 +147,9 @@ v8-runner infobase create
   what it would do: `infobase create`, `push`, `upload`, `pull`, `convert`, `artifacts`, `launch`,
   `check`, `infobase restore`, `download` and `infobase dump` accept it. A preview locates the platform first,
   so a missing one is refused before the plan is approved, and it takes no locks and creates
-  nothing, and it neither takes nor waits for the workspace lock, so a preview works while
+  nothing — not the target, not `workPath`, not the action log — so a preview also runs under a
+  read-only sandbox. The record of the call is the envelope on stdout, not a log file. It
+  neither takes nor waits for the workspace lock, so a preview works while
   another command holds it. Proof that nothing ran: `provider_dispatched: false` for the
   launch-shaped verbs, `mode: preview` for the export-shaped ones — each form carries its own
   closed signal. Two limits are named

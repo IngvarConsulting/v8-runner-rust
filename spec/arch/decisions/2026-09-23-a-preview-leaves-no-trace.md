@@ -2,7 +2,9 @@
 id: DEC.2026-09-23.A-PREVIEW-LEAVES-NO-TRACE
 status: active
 governs: product
-realized: tests/contract_previews.rs::no_preview_creates_anything_in_the_work_path
+realized:
+  - tests/contract_previews.rs::no_leaf_with_a_preview_creates_the_work_path
+  - tests/contract_previews.rs::a_named_action_log_path_is_not_honoured_by_a_preview
 supersedes: [DEC.2026-09-11.PREVIEW-STOPS-BEFORE-THE-PROVIDER-IS-DISPATCHED]
 superseded-by: null
 establishes:

@@ -1,5 +1,5 @@
-//! Что обещает превью любой команды: след в журнале действий и отказ до одобрения
-//! плана, если платформы нет.
+//! Что обещает превью любой команды: ни одного следа в файловой системе и отказ до
+//! одобрения плана, если платформы нет.
 //!
 //! Харнесс подкладывает shell-скрипты вместо утилит платформы, поэтому файл целиком
 //! собирается только под unix — как и остальные тесты, использующие тот же `support`.
@@ -88,16 +88,109 @@ fn run(config_path: &Path, arguments: &[&str]) -> (i32, Value) {
     (output.status.code().unwrap_or(-1), payload)
 }
 
-fn previews(artifact: &str) -> Vec<Vec<&str>> {
+// Состав таблицы листьев, общий с `src/cli/global_flags.rs`.
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/cli/global_flags_expected.in"
+));
+
+/// Каждый лист с превью: минимальный вызов и путь листа. Состав сверяется с общим
+/// списком `LEAVES_WITH_PREVIEW`, поэтому новый лист с превью обязан появиться и здесь.
+fn with_preview<'a>(artifact: &'a str, snapshot: &'a str) -> Vec<(Vec<&'a str>, &'static str)> {
     vec![
-        vec!["build", "--dry-run"],
-        vec!["dump", "--mode", "full", "--dry-run"],
-        vec!["infobase", "create", "--dry-run"],
-        vec!["make", "--output", artifact, "--dry-run"],
-        vec!["load", "--path", artifact, "--dry-run"],
-        vec!["launch", "designer", "--dry-run"],
-        vec!["check", "--dry-run"],
+        (vec!["extensions"], "extensions"),
+        (vec!["extensions", "list"], "extensions list"),
+        (
+            vec!["extensions", "info", "--name", "client_mcp"],
+            "extensions info",
+        ),
+        (
+            vec![
+                "extensions",
+                "create",
+                "--name",
+                "Demo",
+                "--name-prefix",
+                "Demo",
+            ],
+            "extensions create",
+        ),
+        (
+            vec!["extensions", "delete", "--name", "client_mcp"],
+            "extensions delete",
+        ),
+        (
+            vec![
+                "extensions",
+                "activate",
+                "--name",
+                "client_mcp",
+                "--active",
+                "yes",
+            ],
+            "extensions activate",
+        ),
+        (vec!["build"], "push"),
+        (vec!["load", "--path", artifact], "upload"),
+        (vec!["dump", "--mode", "full"], "pull"),
+        (
+            vec!["download", "--state", "working", "--output", artifact],
+            "download",
+        ),
+        (vec!["infobase", "create"], "infobase create"),
+        (
+            vec![
+                "infobase",
+                "configuration",
+                "export",
+                "--state",
+                "working",
+                "--output",
+                artifact,
+            ],
+            "infobase configuration export",
+        ),
+        (
+            vec!["infobase", "dump", "--output", snapshot],
+            "infobase dump",
+        ),
+        (
+            vec!["infobase", "restore", "--input", snapshot, "--replace"],
+            "infobase restore",
+        ),
+        (vec!["convert"], "convert"),
+        (vec!["make", "--output", artifact], "make"),
+        (vec!["check"], "check"),
+        (vec!["check", "designer-config"], "check designer-config"),
+        (vec!["check", "designer-modules"], "check designer-modules"),
+        (vec!["check", "edt"], "check edt"),
+        (vec!["launch", "designer"], "launch"),
+        (vec!["publish"], "publish"),
     ]
+}
+
+/// Подмножество, у которого превью на этом образце доходит до успеха. Только на нём можно
+/// требовать нулевого кода и сверять содержимое: остальным нужен свой проект — базу,
+/// веб-сервер или формат EDT этот образец не объявляет.
+const SUCCEEDS_HERE: &[&str] = &[
+    "push",
+    "upload",
+    "pull",
+    "infobase create",
+    "make",
+    "check",
+    "launch",
+];
+
+fn previews(artifact: &str) -> Vec<Vec<&str>> {
+    with_preview(artifact, artifact)
+        .into_iter()
+        .filter(|(_, leaf)| SUCCEEDS_HERE.contains(leaf))
+        .map(|(mut arguments, _)| {
+            arguments.push("--dry-run");
+            arguments
+        })
+        .collect()
 }
 
 /// Пути внутри `root`, относительно него, в устойчивом порядке.
@@ -123,6 +216,96 @@ fn entries_under(root: &Path, dir: &Path, found: &mut Vec<String>) {
 /// Прежде здесь допускался журнал действий: правило велело превью оставить строку. Но
 /// открытие журнала создаёт рабочий каталог, а превью запускают из песочниц, где запись
 /// запрещена вовсе. Запись о вызове несёт конверт на stdout.
+/// Половина сверки, которой здесь не хватало: перечень проверяемых превью назывался
+/// руками и держал семь команд из двадцати двух. Лист, переведённый в `Preview::Runs`,
+/// ускользал молча — проверено мутацией на `tools download`, которое под превью выкладывало
+/// файл, оставляя договор зелёным.
+#[test]
+fn every_leaf_with_a_preview_is_exercised_here() {
+    let mut covered: Vec<&str> = with_preview("artifact", "snapshot")
+        .into_iter()
+        .map(|(_, leaf)| leaf)
+        .collect();
+    covered.sort_unstable();
+    let mut named: Vec<&str> = LEAVES_WITH_PREVIEW.to_vec();
+    named.sort_unstable();
+
+    assert_eq!(covered, named);
+}
+
+/// Названный путь журнала под превью тоже не исполняется: переменная принимает любой
+/// путь, а открытие журнала создаёт родительский каталог — значит путь внутри проекта
+/// создал бы то, чего превью создавать не должно. Решение это обещает, и обещание
+/// проверяется.
+#[test]
+fn a_named_action_log_path_is_not_honoured_by_a_preview() {
+    let dir = temp_workspace();
+    let config_path = write_project(dir.path(), true);
+    let named = dir.path().join("named").join("actions.log");
+
+    let preview = v8_runner_command()
+        .env("V8TR_ACTION_LOG_FILE", &named)
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "check",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run preview");
+    assert_eq!(preview.status.code(), Some(0));
+    assert!(
+        !named.exists(),
+        "превью завело журнал по названному пути: {}",
+        fs::read_to_string(&named).unwrap_or_default()
+    );
+
+    // Боевой прогон названный путь по-прежнему исполняет: иначе проверка держала бы не
+    // отказ превью, а поломку самой переменной.
+    let real = v8_runner_command()
+        .env("V8TR_ACTION_LOG_FILE", &named)
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "check",
+        ])
+        .output()
+        .expect("run command");
+    // Исход боевого прогона здесь не важен: важно, что названный путь он исполняет.
+    assert!(
+        named.exists(),
+        "боевой прогон потерял названный путь журнала: код {:?}",
+        real.status.code()
+    );
+}
+
+/// Ни один лист с превью не создаёт рабочего каталога — ни тот, чьё превью здесь доходит
+/// до успеха, ни тот, кому для успеха нужен свой проект. Отказ следов оставлять тоже не
+/// вправе.
+#[test]
+fn no_leaf_with_a_preview_creates_the_work_path() {
+    let dir = temp_workspace();
+    let config_path = write_project(dir.path(), true);
+    fs::write(dir.path().join("main.cf"), "cf").expect("artifact");
+    let artifact = dir.path().join("main.cf").display().to_string();
+    let snapshot = dir.path().join("main.dt").display().to_string();
+    let work = dir.path().join("work");
+
+    for (arguments, leaf) in with_preview(&artifact, &snapshot) {
+        let _ = fs::remove_dir_all(&work);
+        let mut arguments = arguments;
+        arguments.push("--dry-run");
+
+        let (code, payload) = run(&config_path, &arguments);
+        if SUCCEEDS_HERE.contains(&leaf) {
+            assert_eq!(code, 0, "`{leaf}` did not preview: {payload}");
+        }
+        assert!(!work.exists(), "`{leaf}` created the work path");
+    }
+}
+
 #[test]
 fn no_preview_creates_anything_in_the_work_path() {
     let dir = temp_workspace();
@@ -159,15 +342,14 @@ fn no_preview_creates_anything_in_the_work_path() {
     }
 }
 
-/// Содержимое каждого файла под `root`, кроме журнала действий: его превью пополняет по
-/// правилу.
+/// Содержимое каждого файла под `root`. Журнал действий больше не исключается: превью
+/// его не ведёт, поэтому дописанная строка — такой же след, как всякий другой.
 fn contents_under(root: &Path) -> Vec<(String, Vec<u8>)> {
     let mut paths = Vec::new();
     entries_under(root, root, &mut paths);
     paths.sort();
     paths
         .into_iter()
-        .filter(|path| path != "logs/mcp/actions.log")
         .filter_map(|path| {
             let bytes = fs::read(root.join(&path)).ok()?;
             Some((path, bytes))

@@ -199,22 +199,6 @@ pub fn run() -> i32 {
         }
     };
 
-    // Like infobase previews, security-update previews must finish before JSON
-    // action logging creates workPath. Keep the normal command/error dispatcher.
-    if matches!(&cli.command, Command::Extensions(args) if args.command.is_none() && cli.dry_run) {
-        return match execute::execute_command(
-            &config,
-            &cli.command,
-            Some(primary_config_path),
-            &presenter,
-            cli.clean_before_execution,
-            cli.dry_run,
-        ) {
-            Ok(()) => 0,
-            Err(error) => error.exit_code(),
-        };
-    }
-
     let level = cli.log_level.as_deref().unwrap_or("info");
     let is_infobase_command = matches!(&cli.command, Command::Infobase(_));
     let logging_result = if is_infobase_command {
@@ -412,7 +396,8 @@ fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 
         if presenter.is_json() { "json" } else { "text" },
         color_enabled(cli.no_color),
         &work_path,
-        cli.dry_run,
+        // Превью у `clone` нет: лист отвергает ключ раньше этого места.
+        false,
     ) {
         let message = error.to_string();
         let error = UseCaseError::new(UseCaseErrorKind::Runtime, message.clone());
