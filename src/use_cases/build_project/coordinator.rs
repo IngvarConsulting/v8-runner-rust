@@ -489,6 +489,43 @@ pub(super) fn run_build_ibcmd(
     })
 }
 
+/// Утилита, которая загрузит файлы конфигуратора в базу. Кэш тот же, что у боевого
+/// прогона, поэтому превью и запуск ищут одно и то же и в одном порядке.
+fn locate_designer_loader(
+    provider: Provider,
+    utilities: &mut PlatformUtilities,
+    designer_binary: &mut Option<PathBuf>,
+    ibcmd_binary: &mut Option<PathBuf>,
+) -> Result<PathBuf, AppError> {
+    match provider {
+        other @ (Provider::Agent | Provider::IbcmdRs | Provider::Webinst) => Err(
+            crate::use_cases::unimplemented_provider(Operation::Build, other),
+        ),
+        Provider::Designer => {
+            if let Some(path) = designer_binary.clone() {
+                return Ok(path);
+            }
+            let path = utilities
+                .locate(UtilityType::V8)
+                .map_err(AppError::from)?
+                .path;
+            *designer_binary = Some(path.clone());
+            Ok(path)
+        }
+        Provider::Ibcmd => {
+            if let Some(path) = ibcmd_binary.clone() {
+                return Ok(path);
+            }
+            let path = utilities
+                .locate(UtilityType::Ibcmd)
+                .map_err(AppError::from)?
+                .path;
+            *ibcmd_binary = Some(path.clone());
+            Ok(path)
+        }
+    }
+}
+
 pub(super) fn run_build_edt(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -816,17 +853,41 @@ pub(super) fn run_build_edt(
                 };
 
                 if args.dry_run {
-                    // The EDT export writes a Designer snapshot and the load step below then
-                    // touches the infobase; a preview stops before both.
+                    // Экспорт пишет снимок файлов конфигуратора, а следующий за ним шаг
+                    // трогает базу; превью останавливается до обоих. Но сначала ищет и
+                    // вторую утилиту: шаг обещает загрузку, и одобрить его, не зная, чем
+                    // грузить, значит одобрить невыполнимое
+                    // (`INV.CLI.PREVIEW-RETURNS-AFTER-TOOL-LOOKUP`).
+                    let loader = match locate_designer_loader(
+                        provider,
+                        &mut utilities,
+                        &mut designer_binary,
+                        &mut ibcmd_binary,
+                    ) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            let result = fail_from_source_set_index(
+                                started,
+                                steps,
+                                &ordered_source_sets,
+                                index,
+                                source_set,
+                                BuildMode::EdtExport,
+                                error.to_string(),
+                            );
+                            return Err(BuildExecutionFailure::with_payload(error, result));
+                        }
+                    };
                     push_build_step(
                         &mut steps,
                         &source_set.name,
                         BuildMode::EdtExport,
                         true,
                         format!(
-                            "would export '{}' to Designer files via {} and then load it; planned, nothing dispatched",
+                            "would export '{}' to Designer files via {} and then load it via {}; planned, nothing dispatched",
                             source_set.name,
-                            edt.display()
+                            edt.display(),
+                            loader.display()
                         ),
                         0,
                     );
@@ -1005,36 +1066,34 @@ pub(super) fn run_build_edt(
                 commit,
             } => {
                 let load_started = Instant::now();
+                // Исполнитель загрузки ищется тем же помощником, что и в превью: иначе
+                // два поиска разошлись бы, и превью одобряло бы то, чего запуск не может.
+                let loader = match locate_designer_loader(
+                    provider,
+                    &mut utilities,
+                    &mut designer_binary,
+                    &mut ibcmd_binary,
+                ) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        let result = fail_from_source_set_index(
+                            started,
+                            steps,
+                            &ordered_source_sets,
+                            index,
+                            source_set,
+                            mode.clone(),
+                            error.to_string(),
+                        );
+                        return Err(BuildExecutionFailure::with_payload(error, result));
+                    }
+                };
                 let load_result = match provider {
                     other @ (Provider::Agent | Provider::IbcmdRs | Provider::Webinst) => Err(
                         crate::use_cases::unimplemented_provider(Operation::Build, other),
                     ),
                     Provider::Designer => {
-                        let designer = match designer_binary.clone() {
-                            Some(path) => path,
-                            None => {
-                                let location = match utilities.locate(UtilityType::V8) {
-                                    Ok(location) => location,
-                                    Err(error) => {
-                                        let result = fail_from_source_set_index(
-                                            started,
-                                            steps,
-                                            &ordered_source_sets,
-                                            index,
-                                            source_set,
-                                            mode.clone(),
-                                            error.to_string(),
-                                        );
-                                        return Err(BuildExecutionFailure::with_payload(
-                                            AppError::from(error),
-                                            result,
-                                        ));
-                                    }
-                                };
-                                designer_binary = Some(location.path.clone());
-                                location.path
-                            }
-                        };
+                        let designer = &loader;
                         // Загрузка сюда доходит и тогда, когда этап EDT пропущен: каталог
                         // файлов конфигуратора уже есть, а состояние Конфигуратора
                         // устарело. Превью останавливается здесь — дальше идёт запуск
@@ -1053,7 +1112,7 @@ pub(super) fn run_build_edt(
                         execute_source_set_step(
                             context,
                             config,
-                            &designer,
+                            designer,
                             utilities.runner_for(UtilityType::V8),
                             source_set,
                             &designer_context,
@@ -1064,31 +1123,7 @@ pub(super) fn run_build_edt(
                         )
                     }
                     Provider::Ibcmd => {
-                        let ibcmd = match ibcmd_binary.clone() {
-                            Some(path) => path,
-                            None => {
-                                let location = match utilities.locate(UtilityType::Ibcmd) {
-                                    Ok(location) => location,
-                                    Err(error) => {
-                                        let result = fail_from_source_set_index(
-                                            started,
-                                            steps,
-                                            &ordered_source_sets,
-                                            index,
-                                            source_set,
-                                            mode.clone(),
-                                            error.to_string(),
-                                        );
-                                        return Err(BuildExecutionFailure::with_payload(
-                                            AppError::from(error),
-                                            result,
-                                        ));
-                                    }
-                                };
-                                ibcmd_binary = Some(location.path.clone());
-                                location.path
-                            }
-                        };
+                        let ibcmd = &loader;
                         if args.dry_run {
                             push_build_step(
                                 &mut steps,
@@ -1103,7 +1138,7 @@ pub(super) fn run_build_edt(
                         execute_source_set_step_ibcmd(
                             context,
                             config,
-                            &ibcmd,
+                            ibcmd,
                             utilities.runner_for(UtilityType::Ibcmd),
                             source_set,
                             &designer_context,
