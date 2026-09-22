@@ -340,4 +340,37 @@ mod tests {
             .collect();
         assert!(stale.is_empty(), "строки без листа в дереве: {stale:?}");
     }
+
+    /// Лист, объявивший отсутствие превью, обязан этот отказ ещё и показать: поведение
+    /// держит `tests/cli_global_flags.rs::WITHOUT_PREVIEW`, а тот список живёт в другом
+    /// крейте и сверить себя с таблицей не может. Поэтому состав записан здесь дословно:
+    /// новый лист без превью ломает эту проверку и напоминает завести ему строку и там.
+    #[test]
+    fn every_leaf_without_a_preview_is_named_here_and_owes_a_row_to_the_falsifier() {
+        const WITHOUT_PREVIEW: &[&str] = &[
+            "version",
+            "clone",
+            "init",
+            "config init",
+            "tools download yaxunit",
+            "tools download vanessa",
+            "tools download client-mcp",
+            "test yaxunit all",
+            "test yaxunit module",
+            "test va",
+            "check",
+            "check designer-config",
+            "check designer-modules",
+            "check edt",
+            "mcp serve stdio",
+            "mcp serve http",
+        ];
+
+        let absent: Vec<&str> = LEAVES
+            .iter()
+            .filter(|leaf| matches!(leaf.preview, Preview::Absent(_)))
+            .map(|leaf| leaf.path)
+            .collect();
+        assert_eq!(absent, WITHOUT_PREVIEW);
+    }
 }
