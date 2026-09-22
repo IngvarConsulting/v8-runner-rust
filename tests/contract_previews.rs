@@ -205,12 +205,12 @@ fn contents_under(root: &Path) -> Vec<(String, Vec<u8>)> {
         .collect()
 }
 
-/// Предыдущий страж видит созданное. Этот — переписанное: рабочий каталог засевается
+/// Предыдущий страж видит созданное на чистом месте. Этот — тронутое: рабочий каталог засевается
 /// боевой сборкой, и после каждого превью его содержимое обязано совпадать побайтно.
 /// Сравнивается содержимое, а не время правки: открытие базы состояния сдвигает `mtime`,
 /// ничего в неё не записав.
 #[test]
-fn no_preview_rewrites_what_a_real_build_left_in_the_work_path() {
+fn no_preview_changes_what_a_real_build_left_in_the_work_path() {
     let dir = temp_workspace();
     let config_path = write_project(dir.path(), true);
     fs::write(dir.path().join("main.cf"), "cf").expect("artifact");
@@ -245,19 +245,26 @@ fn no_preview_rewrites_what_a_real_build_left_in_the_work_path() {
             "`{}` did not preview: {payload}",
             preview.join(" ")
         );
+        // Сравниваются оба снимка целиком: превью, которое снесло бы засеянный файл, из
+        // сравнения «только по новому» ускользнуло бы, а снос — ровно то, что делает
+        // подготовка расширения из исходников EDT.
         let after = contents_under(&work);
-        let changed: Vec<&String> = after
-            .iter()
-            .filter(|(path, bytes)| {
-                !seeded
-                    .iter()
-                    .any(|(was, before)| was == path && before == bytes)
-            })
-            .map(|(path, _)| path)
-            .collect();
+        let mut differs = Vec::new();
+        for (path, before) in &seeded {
+            match after.iter().find(|(was, _)| was == path) {
+                None => differs.push(format!("removed {path}")),
+                Some((_, now)) if now != before => differs.push(format!("rewrote {path}")),
+                Some(_) => {}
+            }
+        }
+        for (path, _) in &after {
+            if !seeded.iter().any(|(was, _)| was == path) {
+                differs.push(format!("added {path}"));
+            }
+        }
         assert!(
-            changed.is_empty(),
-            "`{}` rewrote: {changed:?}",
+            differs.is_empty(),
+            "`{}` changed the work path: {differs:?}",
             preview.join(" ")
         );
     }
