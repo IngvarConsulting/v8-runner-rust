@@ -94,7 +94,7 @@ v8-runner infobase create
 - Source files changed and infobase may be stale: run `v8-runner push`.
 - Only one source-set changed: use commands that accept `--source-set <NAME>` instead of rebuilding or materializing everything.
 - Branch switch, rebase, large object moves, stale source-backed tool extension state, or suspicious incremental state: run `v8-runner push --full`.
-- Configuration check: run `v8-runner check`. The project `format` picks the branch — `/CheckConfig` for DESIGNER, EDT validation for EDT — and a key the branch does not execute is refused. With no mode key the default profile runs; name modes to narrow it. One executor (Designer), no `providers` key. A project of external data processors and reports only is refused with `error.code: subject`.
+- Configuration check: run `v8-runner check`. The project `format` picks the branch — `/CheckConfig` for DESIGNER, EDT validation for EDT — and a key the branch does not execute is refused. With no mode key the default profile runs; name modes to narrow it. One executor (Designer), no `providers` key. A project of external data processors and reports only is refused with `error.code: subject`. `--dry-run` stops after the utility is located and before the platform runs: no platform log directory is created, and the answer names `status: planned`, `provider_dispatched: false` and `exit_code: -1`.
 - Behavior validation: run the relevant `v8-runner test ...` command; tests run `push` first unless the
   caller explicitly requests `--no-push` for an already prepared infobase.
 - Missing local YAxUnit, Vanessa Automation, or onec-client-mcp-devkit setup: run
@@ -141,11 +141,11 @@ v8-runner infobase create
   directory git could not read — the command proceeds exactly as it did before this check existed,
   and the guard claims no protection there.
 - `--dry-run` is a global key: it means the same before and after the command. Commands with no
-  preview — `version`, `clone`, `init`, `tools download`, `test`, `check`, `mcp serve` — refuse it
+  preview — `version`, `clone`, `init`, `tools download`, `test`, `mcp serve` — refuse it
   with a named reason instead of running.
 - Before any command that starts the platform or touches the infobase, append `--dry-run` to see
   what it would do: `infobase create`, `push`, `upload`, `pull`, `convert`, `artifacts`, `launch`,
-  `infobase restore`, `download` and `infobase dump` accept it. A preview locates the platform first,
+  `check`, `infobase restore`, `download` and `infobase dump` accept it. A preview locates the platform first,
   so a missing one is refused before the plan is approved, and it takes no locks and creates
   nothing, and it neither takes nor waits for the workspace lock, so a preview works while
   another command holds it. Proof that nothing ran: `provider_dispatched: false` for the

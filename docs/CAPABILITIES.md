@@ -59,8 +59,9 @@ CLI help, доверяйте текущему коду и затем синхр�
 
 `--dry-run` — глобальный ключ: он значит одно и то же перед командой и после неё.
 Исполняют его `push`, `upload`, `pull`, `download`, `make`/`artifacts`, `convert`,
-`launch`, `publish`, `extensions` со всеми подкомандами и `infobase create|dump|restore`.
-У `version`, `clone`, `init`, `tools download`, `test`, `check` и `mcp serve` превью нет:
+`launch`, `publish`, `check`, `extensions` со всеми подкомандами и
+`infobase create|dump|restore`.
+У `version`, `clone`, `init`, `tools download`, `test` и `mcp serve` превью нет:
 ключ там отвергается с названной причиной, а не исполняется молча.
 
 **Квитанция об исполнителе одна у всех.** Каждая операция, у которой есть строка в
@@ -84,6 +85,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `pull` | набор, режим, целевой путь |
 | `artifacts` | вид артефакта и выход, `published: false` |
 | `extensions` | целевые имена, отключаемые свойства безопасности, ИБ, учётку и путь `ibcmd` |
+| `check` | `status: planned`, команду платформы с режимами и найденную утилиту |
 
 - **Закрытый признак есть у обеих форм, но он разный.** У экспортной это `mode`
   (`preview` против `apply`), и `provider_dispatched` там появляется только в
@@ -387,8 +389,8 @@ v8-runner test [--no-push] va --feature login --filter-tag @smoke
 ### `check`
 
 ```bash
-v8-runner check [MODE FLAGS]
-v8-runner check --project <PROJECT>...
+v8-runner check [MODE FLAGS] [--dry-run]
+v8-runner check --project <PROJECT>... [--dry-run]
 ```
 
 Команда одна, ветку выбирает `format` проекта.
@@ -412,6 +414,13 @@ v8-runner check --project <PROJECT>...
 
 Проект, у которого все наборы исходников внешние, получает отказ рода `capability` с кодом
 `subject`: проверка внешних обработок и отчётов платформой не описана.
+
+`--dry-run` доходит до поиска утилиты и возвращается раньше собственных записей команды:
+каталог журналов платформы не создаётся, платформа не запускается. Сам вызов при этом
+остаётся в журнале действий — превью не прячется (`INV.CLI.PREVIEW-LEAVES-A-LOG-ENTRY`). Ответ называет `status: planned`,
+`provider_dispatched: false` и `exit_code: -1` — кода выхода не наблюдалось. Поле `message`
+говорит, что было бы выполнено: команда платформы с режимами и найденная утилита. Обе
+ветки останавливаются одинаково.
 
 Прежние имена `check designer-config`, `check designer-modules` и `check edt` приняты один
 цикл скрытыми синонимами. Отдельного пути `/CheckModules` не осталось: его режимы целиком

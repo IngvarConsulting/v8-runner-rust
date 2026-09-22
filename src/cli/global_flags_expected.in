@@ -23,10 +23,6 @@ const LEAVES_WITHOUT_PREVIEW: &[&str] = &[
     "test yaxunit all",
     "test yaxunit module",
     "test va",
-    "check",
-    "check designer-config",
-    "check designer-modules",
-    "check edt",
     "mcp serve stdio",
     "mcp serve http",
 ];

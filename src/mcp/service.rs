@@ -281,6 +281,8 @@ where
                     invalid_syntax_request(error, "check_syntax_designer_config")
                 })?,
             ),
+            // Превью сервер не предлагает: ключа нет в опубликованной поверхности.
+            dry_run: false,
         };
 
         match self
@@ -317,6 +319,7 @@ where
                     invalid_syntax_request(error, "check_syntax_designer_modules")
                 })?,
             ),
+            dry_run: false,
         };
 
         match self
@@ -1003,6 +1006,7 @@ pub(crate) fn normalize_check_syntax_edt_request(
         target: SyntaxTargetRequest::Edt {
             projects: normalize_edt_projects(request.project_name.as_deref()),
         },
+        dry_run: false,
     }
 }
 
@@ -2812,6 +2816,8 @@ mod tests {
     fn sample_syntax_result(status: SyntaxCheckStatus) -> SyntaxCheckResult {
         SyntaxCheckResult {
             provider: None,
+            provider_dispatched: true,
+            message: None,
             status,
             exit_code: if matches!(status, SyntaxCheckStatus::Clean) {
                 0

@@ -9,6 +9,10 @@ pub enum SyntaxCheckStatus {
     Clean,
     IssuesFound,
     ToolFailed,
+    /// Превью: проверка запланирована, но не выполнялась. Остальные три значения —
+    /// приговоры конфигурации, и `clean` из превью был бы приговором выдуманным:
+    /// платформа конфигурацию не смотрела. Предел знания называется своим значением.
+    Planned,
 }
 
 /// Чем платформа выполнила проверку. Набор закрыт: прежнее `designer-modules` исчезло
@@ -52,6 +56,9 @@ pub struct SyntaxCheckResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<crate::domain::capability::ProviderReceipt>,
 
+    /// `false`, когда прогон остановился на превью и платформу не запускал.
+    pub provider_dispatched: bool,
+
     pub status: SyntaxCheckStatus,
     pub exit_code: i32,
     pub check_name: CheckName,
@@ -64,4 +71,7 @@ pub struct SyntaxCheckResult {
     pub stderr: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_read_warning: Option<String>,
+    /// Фраза о предмете. Превью называет ею, что было бы выполнено.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }

@@ -469,6 +469,7 @@ mod tests {
         let document = |issue: &Value| {
             serde_json::json!({
                 "provider": {"selected": "designer", "origin": {"kind": "default"}},
+                "provider_dispatched": true,
                 "status": "issues_found",
                 "exit_code": 1,
                 "check_name": "designer-config",

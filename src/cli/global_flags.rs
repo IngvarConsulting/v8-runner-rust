@@ -196,22 +196,22 @@ const LEAVES: &[Leaf] = &[
     },
     Leaf {
         path: "check",
-        preview: Preview::Absent("its preview is not written yet"),
+        preview: Preview::Runs,
         base: Base::Resolves,
     },
     Leaf {
         path: "check designer-config",
-        preview: Preview::Absent("its preview is not written yet"),
+        preview: Preview::Runs,
         base: Base::Resolves,
     },
     Leaf {
         path: "check designer-modules",
-        preview: Preview::Absent("its preview is not written yet"),
+        preview: Preview::Runs,
         base: Base::Resolves,
     },
     Leaf {
         path: "check edt",
-        preview: Preview::Absent("its preview is not written yet"),
+        preview: Preview::Runs,
         base: Base::Resolves,
     },
     Leaf {
