@@ -13,6 +13,12 @@ use serde_json::Value;
 use support::{temp_workspace, v8_runner_command, write_shell_script};
 use tempfile::TempDir;
 
+// Состав таблицы листьев, общий с `src/cli/global_flags.rs`.
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/cli/global_flags_expected.in"
+));
+
 /// Листья без превью: минимальный вызов, доходящий до отказа, и путь листа, который
 /// отказ обязан назвать.
 const WITHOUT_PREVIEW: &[(&[&str], &str)] = &[
@@ -48,6 +54,25 @@ const WITHOUT_PREVIEW: &[(&[&str], &str)] = &[
     (&["mcp", "serve", "stdio"], "mcp serve stdio"),
     (&["mcp", "serve", "http"], "mcp serve http"),
 ];
+
+/// Листья, которые базы не выбирают вовсе.
+const IGNORING_THE_BASE: &[(&[&str], &str)] = &[
+    (&["version"], "version"),
+    (
+        &[
+            "clone",
+            "--connection",
+            "File=/tmp/ib",
+            "--platform-version",
+            "8.3.24",
+        ],
+        "clone",
+    ),
+];
+
+/// Листья, которые базу объявляют сами.
+const DECLARING_THE_BASE: &[(&[&str], &str)] =
+    &[(&["init"], "init"), (&["config", "init"], "config init")];
 
 struct Project {
     dir: TempDir,
@@ -182,18 +207,9 @@ fn the_preview_key_means_the_same_before_and_after_the_command() {
 
 #[test]
 fn a_leaf_that_selects_no_base_refuses_the_base_key() {
-    for arguments in [
-        vec!["version"],
-        vec![
-            "clone",
-            "--connection",
-            "File=/tmp/ib",
-            "--platform-version",
-            "8.3.24",
-        ],
-    ] {
+    for (arguments, leaf) in IGNORING_THE_BASE {
         let output = v8_runner_command()
-            .args(&arguments)
+            .args(arguments.iter())
             .args(["--infobase", "origin"])
             .output()
             .expect("run v8-runner");
@@ -203,7 +219,58 @@ fn a_leaf_that_selects_no_base_refuses_the_base_key() {
             reported.contains("selects no infobase"),
             "{arguments:?}: {reported}"
         );
+        assert!(
+            reported.contains(&format!("`{leaf}`")),
+            "{arguments:?}: {reported}"
+        );
     }
+}
+
+/// Лист, который базу объявляет сам, принимает по ключу строку подключения, а имя из
+/// карты баз отвергает: имени там ещё нет, объявляет его как раз этот вызов.
+#[test]
+fn a_leaf_that_declares_the_base_refuses_a_name_from_the_map() {
+    for (arguments, leaf) in DECLARING_THE_BASE {
+        let output = v8_runner_command()
+            .args(arguments.iter())
+            .args(["--infobase", "origin"])
+            .output()
+            .expect("run v8-runner");
+        let reported = reported(&output);
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}: {reported}");
+        assert!(
+            reported.contains("takes a connection string here, not the name `origin`"),
+            "{arguments:?}: {reported}"
+        );
+        assert!(
+            reported.contains(&format!("`{leaf}`")),
+            "{arguments:?}: {reported}"
+        );
+    }
+}
+
+/// Половина сверки, которой здесь не хватало: лист мог объявить поведение в
+/// `src/cli/global_flags.rs` и не получить строки ни в одной проверке. Обе половины
+/// сверяются с одним включаемым файлом.
+#[test]
+fn every_leaf_the_shared_list_names_is_exercised_here() {
+    fn covered(table: &[(&[&str], &'static str)]) -> Vec<&'static str> {
+        let mut leaves: Vec<&'static str> = table.iter().map(|(_, leaf)| *leaf).collect();
+        leaves.sort_unstable();
+        leaves
+    }
+    fn named(paths: &[&'static str]) -> Vec<&'static str> {
+        let mut paths: Vec<&'static str> = paths.to_vec();
+        paths.sort_unstable();
+        paths
+    }
+
+    assert_eq!(covered(WITHOUT_PREVIEW), named(LEAVES_WITHOUT_PREVIEW));
+    assert_eq!(covered(IGNORING_THE_BASE), named(LEAVES_IGNORING_THE_BASE));
+    assert_eq!(
+        covered(DECLARING_THE_BASE),
+        named(LEAVES_DECLARING_THE_BASE)
+    );
 }
 
 /// Ключ без значения — не отсутствие ключа: вызывающий что-то назвал, и раннер отвечает.

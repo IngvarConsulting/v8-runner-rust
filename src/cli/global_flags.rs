@@ -341,36 +341,44 @@ mod tests {
         assert!(stale.is_empty(), "строки без листа в дереве: {stale:?}");
     }
 
-    /// Лист, объявивший отсутствие превью, обязан этот отказ ещё и показать: поведение
-    /// держит `tests/cli_global_flags.rs::WITHOUT_PREVIEW`, а тот список живёт в другом
-    /// крейте и сверить себя с таблицей не может. Поэтому состав записан здесь дословно:
-    /// новый лист без превью ломает эту проверку и напоминает завести ему строку и там.
-    #[test]
-    fn every_leaf_without_a_preview_is_named_here_and_owes_a_row_to_the_falsifier() {
-        const WITHOUT_PREVIEW: &[&str] = &[
-            "version",
-            "clone",
-            "init",
-            "config init",
-            "tools download yaxunit",
-            "tools download vanessa",
-            "tools download client-mcp",
-            "test yaxunit all",
-            "test yaxunit module",
-            "test va",
-            "check",
-            "check designer-config",
-            "check designer-modules",
-            "check edt",
-            "mcp serve stdio",
-            "mcp serve http",
-        ];
+    // Состав таблицы, общий с `tests/cli_global_flags.rs`.
+    include!("global_flags_expected.in");
 
-        let absent: Vec<&str> = LEAVES
+    fn paths_of(kept: impl Fn(&Leaf) -> bool) -> Vec<&'static str> {
+        let mut paths: Vec<&str> = LEAVES
             .iter()
-            .filter(|leaf| matches!(leaf.preview, Preview::Absent(_)))
+            .filter(|leaf| kept(leaf))
             .map(|leaf| leaf.path)
             .collect();
-        assert_eq!(absent, WITHOUT_PREVIEW);
+        // Сравнение по составу, а не по порядку: перестановка строк в таблице ничего не
+        // меняет, а двойник ловится проверкой уникальности выше.
+        paths.sort_unstable();
+        paths
+    }
+
+    fn expected(paths: &[&'static str]) -> Vec<&'static str> {
+        let mut paths: Vec<&'static str> = paths.to_vec();
+        paths.sort_unstable();
+        paths
+    }
+
+    /// Лист, объявивший поведение по глобальному ключу, обязан это поведение ещё и
+    /// показать: отказы держат проверки в `tests/cli_global_flags.rs`. Обе половины
+    /// сверяются с одним включаемым файлом, поэтому новый лист ломает эту проверку, а
+    /// потерянная строка — ту.
+    #[test]
+    fn the_leaves_declaring_each_global_key_are_the_ones_the_shared_list_names() {
+        assert_eq!(
+            paths_of(|leaf| matches!(leaf.preview, Preview::Absent(_))),
+            expected(LEAVES_WITHOUT_PREVIEW)
+        );
+        assert_eq!(
+            paths_of(|leaf| matches!(leaf.base, Base::Ignores)),
+            expected(LEAVES_IGNORING_THE_BASE)
+        );
+        assert_eq!(
+            paths_of(|leaf| matches!(leaf.base, Base::Declares)),
+            expected(LEAVES_DECLARING_THE_BASE)
+        );
     }
 }
