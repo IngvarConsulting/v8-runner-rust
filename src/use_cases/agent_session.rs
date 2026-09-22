@@ -174,7 +174,7 @@ pub(crate) fn connect(
                 standalone
                     .exchange_dir()
                     .ok_or_else(|| {
-                        AppError::CapabilityUnavailable(
+                        AppError::capability(
                             "files travel to a standalone server only through a declared channel; set infobase.standalone.exchange".to_owned(),
                         )
                     })?
@@ -196,7 +196,7 @@ pub(crate) fn connect(
     match mode {
         DesignerAgentMode::Attached { host, port } => {
             let base_dir = agent.base_dir.clone().ok_or_else(|| {
-                AppError::CapabilityUnavailable(
+                AppError::capability(
                     "working through an attached agent exchanges files through its base dir and needs tools.designer_agent.base-dir".to_owned(),
                 )
             })?;

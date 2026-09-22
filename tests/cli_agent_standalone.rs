@@ -767,9 +767,14 @@ fn a_non_thin_mode_against_a_standalone_server_is_still_refused() {
     ] {
         let (code, payload) = run(&harness, &mode);
 
-        assert_ne!(code, 0, "{mode:?}: {payload}");
+        assert_eq!(code, 2, "{mode:?}: {payload}");
         assert_eq!(
             payload["error"]["kind"], "capability",
+            "{mode:?}: {payload}"
+        );
+        assert_eq!(payload["error"]["code"], "target", "{mode:?}: {payload}");
+        assert_eq!(
+            payload["error"]["next"]["command"], "launch web",
             "{mode:?}: {payload}"
         );
         assert!(
@@ -777,6 +782,42 @@ fn a_non_thin_mode_against_a_standalone_server_is_still_refused() {
             "{mode:?}: {payload}"
         );
     }
+}
+
+/// Отказ называет следующий шаг полем, а не только прозой: машина читает `error.next`,
+/// человеку остаётся текст. Код отличает «не для этой цели» от общего отказа.
+#[test]
+fn a_standalone_target_refusal_names_the_next_step_as_a_field() {
+    let harness = harness();
+
+    let (code, payload) = run(&harness, &["launch", "designer", "--dry-run"]);
+
+    assert_eq!(code, 2, "{payload}");
+    assert_eq!(payload["error"]["kind"], "capability", "{payload}");
+    assert_eq!(payload["error"]["code"], "target", "{payload}");
+    assert_eq!(
+        payload["error"]["next"]["command"], "launch web",
+        "{payload}"
+    );
+    // Проза не сокращается: шаг назван и ей тоже.
+    assert!(error_message(&payload).contains("launch web"), "{payload}");
+}
+
+/// «Пока не умеет» — свой код отказа: вызывающему видно, что дело во времени, а не в
+/// предмете и не в цели.
+#[test]
+fn a_test_run_against_a_standalone_server_refuses_with_the_soon_code() {
+    let harness = harness();
+
+    let (code, payload) = run(&harness, &["test", "yaxunit", "all", "--no-push"]);
+
+    assert_eq!(code, 2, "{payload}");
+    assert_eq!(payload["error"]["kind"], "capability", "{payload}");
+    assert_eq!(payload["error"]["code"], "soon", "{payload}");
+    assert!(
+        error_message(&payload).contains("not used by the runner yet"),
+        "{payload}"
+    );
 }
 
 /// Прямой шлюз автономной цели раннер пока не использует, поэтому просить его — ошибка

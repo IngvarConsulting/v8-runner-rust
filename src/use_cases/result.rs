@@ -1,6 +1,7 @@
 use std::fmt;
 
-use crate::support::error::AppError;
+use crate::domain::next_step::NextStep;
+use crate::support::error::{AppError, CapabilityReason};
 
 const VALIDATION_EXIT_CODE: i32 = 2;
 const RUNTIME_EXIT_CODE: i32 = 3;
@@ -9,7 +10,8 @@ const PLATFORM_EXIT_CODE: i32 = 4;
 /// Stable use-case error class used by transport adapters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UseCaseErrorKind {
-    Capability,
+    /// Операция здесь не выполняется; причина уточняет, почему именно.
+    Capability(CapabilityReason),
     Environment,
     WorkspaceBusy,
     InvalidOutput,
@@ -24,7 +26,7 @@ impl UseCaseErrorKind {
     /// Maps the error kind to the CLI exit code.
     pub const fn exit_code(self) -> i32 {
         match self {
-            Self::Capability => VALIDATION_EXIT_CODE,
+            Self::Capability(_) => VALIDATION_EXIT_CODE,
             Self::Environment => VALIDATION_EXIT_CODE,
             Self::WorkspaceBusy => RUNTIME_EXIT_CODE,
             Self::InvalidOutput | Self::Cancelled | Self::TimedOut => PLATFORM_EXIT_CODE,
@@ -36,7 +38,7 @@ impl UseCaseErrorKind {
 
     const fn label(self) -> &'static str {
         match self {
-            Self::Capability => "capability unavailable",
+            Self::Capability(_) => "capability unavailable",
             Self::Environment => "environment unavailable",
             Self::WorkspaceBusy => "workspace busy",
             Self::InvalidOutput => "invalid output",
@@ -54,6 +56,9 @@ impl UseCaseErrorKind {
 pub struct UseCaseError {
     kind: UseCaseErrorKind,
     message: String,
+    /// Шаг, которым вызывающий выходит из отказа. Живёт здесь и только здесь: конверт его
+    /// печатает, а транспорт не выдумывает.
+    next: Option<Box<NextStep>>,
 }
 
 impl UseCaseError {
@@ -62,7 +67,20 @@ impl UseCaseError {
         Self {
             kind,
             message: message.into(),
+            next: None,
         }
+    }
+
+    /// Называет шаг, которым вызывающий выходит из отказа.
+    #[must_use]
+    pub fn with_next(mut self, next: NextStep) -> Self {
+        self.next = Some(Box::new(next));
+        self
+    }
+
+    /// Шаг, названный отказом, если он есть.
+    pub fn next(&self) -> Option<&NextStep> {
+        self.next.as_deref()
     }
 
     /// Returns the error kind.
@@ -90,9 +108,10 @@ impl fmt::Display for UseCaseError {
 impl From<AppError> for UseCaseError {
     fn from(value: AppError) -> Self {
         match value {
-            AppError::CapabilityUnavailable(message) => {
-                Self::new(UseCaseErrorKind::Capability, message)
-            }
+            AppError::CapabilityUnavailable(refusal) => Self::new(
+                UseCaseErrorKind::Capability(refusal.reason),
+                refusal.message,
+            ),
             AppError::EnvironmentUnavailable(message) => {
                 Self::new(UseCaseErrorKind::Environment, message)
             }
@@ -183,11 +202,22 @@ mod tests {
     use crate::platform::edt_session::EdtSessionError;
     use crate::platform::ibcmd::IbcmdError;
     use crate::platform::process::ProcessError;
-    use crate::support::error::AppError;
+    use crate::support::error::{AppError, CapabilityReason};
 
     #[test]
     fn use_case_error_kinds_keep_stable_cli_exit_codes() {
-        assert_eq!(UseCaseErrorKind::Capability.exit_code(), 2);
+        for reason in [
+            CapabilityReason::Unavailable,
+            CapabilityReason::Subject,
+            CapabilityReason::Target,
+            CapabilityReason::Soon,
+        ] {
+            assert_eq!(
+                UseCaseErrorKind::Capability(reason).exit_code(),
+                2,
+                "{reason:?}"
+            );
+        }
         assert_eq!(UseCaseErrorKind::Environment.exit_code(), 2);
         assert_eq!(UseCaseErrorKind::WorkspaceBusy.exit_code(), 3);
         assert_eq!(UseCaseErrorKind::InvalidOutput.exit_code(), 4);

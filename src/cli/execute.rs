@@ -14,8 +14,7 @@ use crate::cli::args::{
     TestYaxunitArgs, ToolsArgs, ToolsCommand, ToolsDownloadArgs, ToolsDownloadCommand,
 };
 use crate::cli::output::{
-    cli_error_contract, failure_envelope, pre_dispatch_error_envelope,
-    print_command_use_case_error, with_cli_error,
+    failure_envelope, pre_dispatch_error_envelope, print_command_use_case_error, with_cli_error,
 };
 use crate::cli::signal::CliSignalGuard;
 use crate::command_envelope::{test_envelope, Envelope};
@@ -1733,16 +1732,35 @@ fn infobase_pre_dispatch_execution_phase(workspace_lock_acquired: bool) -> Expor
 }
 
 fn annotate_pre_dispatch_failure(execution: &mut ExecutionOutcome<()>, error: &UseCaseError) {
-    let (code, _) = cli_error_contract(error.kind());
     execution.status = match error.kind() {
         UseCaseErrorKind::InvalidOutput => ExecutionStatus::InvalidOutput,
         UseCaseErrorKind::Cancelled => ExecutionStatus::Cancelled,
         UseCaseErrorKind::TimedOut => ExecutionStatus::TimedOut,
         _ => ExecutionStatus::Failed,
     };
-    execution
-        .errors
-        .push(ExecutionError::new(code, error.message()));
+    execution.errors.push(ExecutionError::new(
+        execution_step_code(error.kind()),
+        error.message(),
+    ));
+}
+
+/// Код шага исполнителя: свой словарь, едущий внутри `data.execution.errors[]`.
+///
+/// Имена совпадают с кодами конверта, но поля разные, и различать их должен код, а не
+/// читатель: конверт стал точнее — у рода `capability` там четыре кода, — а шаг остаётся
+/// при прежнем словаре, потому что его читает другой потребитель.
+const fn execution_step_code(kind: UseCaseErrorKind) -> &'static str {
+    match kind {
+        UseCaseErrorKind::Capability(_) => "capability_unavailable",
+        UseCaseErrorKind::Environment => "environment_unavailable",
+        UseCaseErrorKind::WorkspaceBusy => "workspace_busy",
+        UseCaseErrorKind::InvalidOutput => "invalid_output",
+        UseCaseErrorKind::Cancelled => "cancelled",
+        UseCaseErrorKind::TimedOut => "timed_out",
+        UseCaseErrorKind::Validation => "invalid_argument",
+        UseCaseErrorKind::Runtime => "runtime_failure",
+        UseCaseErrorKind::Platform => "platform_failure",
+    }
 }
 
 fn configuration_pre_dispatch_failure(

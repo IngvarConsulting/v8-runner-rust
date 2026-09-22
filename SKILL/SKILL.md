@@ -116,6 +116,10 @@ v8-runner infobase create
   A DT is not a backup. The executor comes from the matrix (`providers.infobase.dump`),
   experimental IBCMD DT is skipped unless named explicitly, and a ready Designer is
   selected before spawn when available.
+- `error.kind` and `error.code` are closed enumerations. Within `capability`, the code says why:
+  `capability_unavailable`, `subject` (wrong subject, for good), `target` (not for this target),
+  `soon` (not yet). A refusal that has a way out names it in `error.next` — `{command, source_set?,
+  keys?}` — so an orchestrator reads the step instead of parsing the message.
 - For infobase export failures, distinguish `capability_unavailable` (no implemented adapter)
   from `environment_unavailable` (adapter exists, but binary/version/connection is not ready).
   Never retry another provider after the selected provider has been spawned.

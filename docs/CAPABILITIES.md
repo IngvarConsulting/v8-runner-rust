@@ -114,6 +114,38 @@ CLI help, доверяйте текущему коду и затем синхр�
   конфигуратора и последующая загрузка в базу не разделяются, потому что вторая
   зависит от результата первой.
 
+## Рода и коды отказа
+
+`error.kind` и `error.code` в конверте — закрытые перечисления, а не свободные строки:
+новый род приходит вместе с версией конверта, а не молча. Схема порождается из типов
+(`UPDATE_ENVELOPE_SCHEMA=1 cargo test generated_envelope_schema_is_current`), руками её не
+правят.
+
+| Род | Коды | Код выхода |
+| --- | --- | --- |
+| `capability` | `capability_unavailable`, `subject` (предмет не тот, навсегда), `target` (не для этой цели), `soon` (пока не умеет) | 2 |
+| `environment` | `environment_unavailable` | 2 |
+| `validation` | `invalid_argument`, `unsupported_value` (только MCP) | 2 |
+| `workspace` | `workspace_busy` | 3 |
+| `runtime` | `runtime_failure` | 3 |
+| `platform` | `platform_failure` | 4 |
+| `invalid_output` | `invalid_output` | 4 |
+| `interruption` | `cancelled`, `timed_out` | 4 |
+| `non_fast_forward`, `no_memory` | одноимённые коды | — |
+
+Последняя строка заведена без производителя: рода названы, чтобы набор не рос молча, но
+выдавать их будут сравнение поколений и память по базе. Тогда же у `non_fast_forward`
+заполнятся `base_generation` и `local_generation`. Код `subject` таблица называет, но ни
+один отказ пока им не отвечает.
+
+У MCP словарь уже: рода там сводятся к `validation`, `runtime` и `platform`, поэтому кода
+возможности в ответе инструмента не бывает. Поле `next` едет обоими транспортами.
+
+Отказ, у которого есть выход, называет его полем `error.next`: `command`, при нужде
+`source_set` и ключи. Проза сообщения при этом не сокращается — она остаётся человеку.
+Код шага исполнителя внутри `data.execution.errors[]` — другой словарь: совпадение имён
+не делает их одним полем.
+
 ## Глобальные CLI-опции
 
 | Опция | Значение |

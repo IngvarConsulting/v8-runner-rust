@@ -15,7 +15,10 @@
    - `src/mcp/server.rs`
    - `src/mcp/request.rs`
    - `src/mcp/service.rs`
-   - `src/command_envelope.rs`, если меняется machine-readable command payload
+   - `src/command_envelope.rs`, если меняется machine-readable command payload; форма
+     конверта порождается из типов командой
+     `UPDATE_ENVELOPE_SCHEMA=1 cargo test generated_envelope_schema_is_current`, а не
+     правится в `docs/schemas/command-envelope.schema.json` руками
 3. Добавить или обновить tests для `list_tools`, request DTO, shared envelope payload и business/runtime failure mapping по `DEC.2026-04-20.BUSINESS-FAILURES-ARE-NOT-TRANSPORT-FAULTS`.
 4. Явно проверить, что изменение не публикует CLI-only сценарий как MCP tool по умолчанию.
 

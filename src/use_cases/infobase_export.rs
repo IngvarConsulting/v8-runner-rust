@@ -619,7 +619,7 @@ fn run_restore_provider(
             .restore_infobase(source_file)
             .map_err(AppError::from)
         }
-        ExportProvider::Ibcmd => Err(AppError::CapabilityUnavailable(
+        ExportProvider::Ibcmd => Err(AppError::capability(
             "IBCMD DT restore is experimental and cannot be dispatched".to_owned(),
         )),
     }
@@ -817,7 +817,7 @@ fn select_provider(
     let plan = config.provider_plan(intent.operation());
     if plan.candidates().is_empty() {
         return Err((
-            AppError::CapabilityUnavailable(format!(
+            AppError::capability(format!(
                 "no executor implements {} on a {} target",
                 intent.operation(),
                 config.target_kind().as_str()
@@ -892,7 +892,7 @@ fn select_provider(
     let error = if has_implemented {
         AppError::EnvironmentUnavailable(reason)
     } else {
-        AppError::CapabilityUnavailable(reason)
+        AppError::capability(reason)
     };
     Err((error, receipt))
 }
@@ -1531,7 +1531,7 @@ fn run_snapshot_provider(
             .dump_infobase(staging_path)
             .map_err(AppError::from)
         }
-        ExportProvider::Ibcmd => Err(AppError::CapabilityUnavailable(
+        ExportProvider::Ibcmd => Err(AppError::capability(
             "IBCMD DT export is experimental and cannot be dispatched".to_owned(),
         )),
     }

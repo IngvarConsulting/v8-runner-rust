@@ -1,6 +1,7 @@
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::domain::next_step::NextStep;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
 /// Stable machine-readable code for MCP-facing service failures.
@@ -14,18 +15,6 @@ pub enum McpErrorCode {
     Internal,
 }
 
-impl McpErrorCode {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::InvalidArgument => "invalid_argument",
-            Self::UnsupportedValue => "unsupported_value",
-            Self::RuntimeFailure => "runtime_failure",
-            Self::PlatformFailure => "platform_failure",
-            Self::Internal => "internal",
-        }
-    }
-}
-
 /// High-level business error class surfaced by the MCP service layer.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -35,20 +24,10 @@ pub enum McpBusinessErrorKind {
     Platform,
 }
 
-impl McpBusinessErrorKind {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Validation => "validation",
-            Self::Runtime => "runtime",
-            Self::Platform => "platform",
-        }
-    }
-}
-
 impl From<UseCaseErrorKind> for McpBusinessErrorKind {
     fn from(value: UseCaseErrorKind) -> Self {
         match value {
-            UseCaseErrorKind::Capability => Self::Runtime,
+            UseCaseErrorKind::Capability(_) => Self::Runtime,
             UseCaseErrorKind::Environment | UseCaseErrorKind::WorkspaceBusy => Self::Runtime,
             UseCaseErrorKind::InvalidOutput
             | UseCaseErrorKind::Cancelled
@@ -66,6 +45,10 @@ pub struct McpBusinessError {
     pub code: McpErrorCode,
     pub kind: McpBusinessErrorKind,
     pub message: String,
+    /// Шаг, которым вызывающий выходит из отказа. Род и код у MCP свои и уже, а шаг —
+    /// тот же самый: он про предмет, а не про транспорт.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<NextStep>,
 }
 
 impl McpBusinessError {
@@ -73,7 +56,7 @@ impl McpBusinessError {
     pub fn from_use_case(error: &UseCaseError) -> Self {
         let kind = error.kind();
         let code = match kind {
-            UseCaseErrorKind::Capability => McpErrorCode::RuntimeFailure,
+            UseCaseErrorKind::Capability(_) => McpErrorCode::RuntimeFailure,
             UseCaseErrorKind::Environment | UseCaseErrorKind::WorkspaceBusy => {
                 McpErrorCode::RuntimeFailure
             }
@@ -88,6 +71,7 @@ impl McpBusinessError {
             code,
             kind: kind.into(),
             message: error.message().to_owned(),
+            next: error.next().cloned(),
         }
     }
 }
@@ -132,3 +116,29 @@ pub enum McpServiceError<T> {
 
 /// Top-level MCP service result contract.
 pub type McpServiceResult<T> = Result<T, McpServiceError<T>>;
+
+impl From<McpErrorCode> for crate::command_envelope::ErrorCode {
+    /// У MCP свой словарь кодов; на проводе он остаётся подмножеством одного закрытого
+    /// набора, поэтому переводится, а не печатается строкой.
+    fn from(value: McpErrorCode) -> Self {
+        match value {
+            McpErrorCode::InvalidArgument => Self::InvalidArgument,
+            McpErrorCode::UnsupportedValue => Self::UnsupportedValue,
+            McpErrorCode::RuntimeFailure => Self::RuntimeFailure,
+            McpErrorCode::PlatformFailure => Self::PlatformFailure,
+            // До конверта этот код не доходит: внутренняя ошибка отвечает не ответом
+            // команды, а ошибкой протокола. Ветка есть ради полноты перевода.
+            McpErrorCode::Internal => Self::RuntimeFailure,
+        }
+    }
+}
+
+impl From<McpBusinessErrorKind> for crate::command_envelope::ErrorKind {
+    fn from(value: McpBusinessErrorKind) -> Self {
+        match value {
+            McpBusinessErrorKind::Validation => Self::Validation,
+            McpBusinessErrorKind::Runtime => Self::Runtime,
+            McpBusinessErrorKind::Platform => Self::Platform,
+        }
+    }
+}

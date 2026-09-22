@@ -6,6 +6,7 @@ use crate::domain::launch::{
     ExternalEpfWaitResult, LaunchMode, LaunchPlan, LaunchResult, LaunchVia, PlatformResolution,
     PlatformResolutionSource,
 };
+use crate::domain::next_step::NextStep;
 use crate::domain::runner::{launch_key_alias_matches, LaunchOptions};
 use crate::platform::enterprise::{
     build_launch_args, normalize_launch_payload_path, LaunchAddress, LaunchClientMode,
@@ -15,6 +16,7 @@ use crate::platform::process::{ManagedSpawnMode, ProcessRequest};
 use crate::platform::secrets::{mask_preview_args, mask_url_userinfo};
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
+use crate::support::error::CapabilityReason;
 use crate::use_cases::client_mcp_readiness;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::launch_keys::vanessa_enterprise_launch_keys;
@@ -23,6 +25,7 @@ use crate::use_cases::request::{
     ClientMcpAddonRequest, ClientMcpMode, ClientMcpOptionsRequest, EnterpriseLaunchTarget,
     LaunchRequest as LaunchArgs, LaunchTargetRequest,
 };
+use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
 use crate::use_cases::tool_extension;
 use tracing::debug;
@@ -73,9 +76,11 @@ pub fn execute(
     let standalone = config.target_kind() == crate::domain::capability::TargetKind::Standalone;
     if standalone && !matches!(client_mode, LaunchClientMode::Thin) {
         return Err(UseCaseFailure::without_payload(
-            AppError::CapabilityUnavailable(
-                "a standalone server is opened by its web address: use `launch web` with infobase.web.url; a client is not launched against the gate".to_owned(),
-            ),
+            UseCaseError::new(
+                UseCaseErrorKind::Capability(CapabilityReason::Target),
+                "a standalone server is opened by its web address: use `launch web` with infobase.web.url; a client is not launched against the gate",
+            )
+            .with_next(NextStep::command("launch web")),
         ));
     }
 

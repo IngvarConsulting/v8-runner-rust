@@ -56,7 +56,7 @@ pub fn select(
     if plan.candidates().is_empty() {
         let target = config.target_kind();
         return Err((
-            AppError::CapabilityUnavailable(format!(
+            AppError::capability(format!(
                 "no executor implements {operation} on a {} target",
                 target.as_str()
             )),
@@ -110,7 +110,7 @@ pub fn select(
     let error = if had_an_adapter {
         AppError::EnvironmentUnavailable(reason)
     } else {
-        AppError::CapabilityUnavailable(reason)
+        AppError::capability(reason)
     };
     Err((error, receipt))
 }

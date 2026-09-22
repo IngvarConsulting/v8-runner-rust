@@ -24,6 +24,7 @@ use crate::mcp::request::{
 use crate::support::adapter_input::{
     normalize_edt_projects, normalize_extension_scope, normalize_optional_string,
     normalize_required_string, parse_launch_target, parse_optional_dump_mode, LaunchModeAliases,
+    RawValueError, RawValueProblem,
 };
 use crate::support::path::is_safe_path_segment;
 use crate::use_cases::context::{CommandName, ExecutionContext, ExecutionTransport};
@@ -119,7 +120,7 @@ where
         let module_name =
             normalize_required_string(&request.module_name, "module_name").map_err(|error| {
                 let message = error.message().to_owned();
-                let business_error = McpBusinessError::from_use_case(&error);
+                let business_error = McpBusinessError::from_use_case(&UseCaseError::from(error));
                 McpServiceError::Business(McpBusinessFailure::new(
                     business_error.clone(),
                     adapter_error_envelope(
@@ -165,7 +166,7 @@ where
             mode: parse_optional_dump_mode(request.mode.as_deref(), DumpModeRequest::Incremental)
                 .map_err(|error| {
                 let message = error.message().to_owned();
-                let business_error = raw_value_business_error(&error, "dump mode");
+                let business_error = raw_value_business_error(&error);
                 let mode = request
                     .mode
                     .as_deref()
@@ -589,8 +590,7 @@ fn map_launch_app_request(
         || normalize_optional_string(request.mcp_scenario.as_deref()).is_some()
         || request.wait_ready.unwrap_or(false)
     {
-        let error = UseCaseError::new(
-            UseCaseErrorKind::Validation,
+        let error = RawValueError::unsupported(
             "mcpConfig, mcpPort, mode, mcpScenario, and waitReady are supported only when utilityType is mcp",
         );
         return Err(launch_adapter_business_error(error, "utilityType"));
@@ -617,10 +617,7 @@ fn map_mcp_config_path(
         .is_some_and(|path| path.contains(';'))
     {
         return Err(launch_adapter_business_error(
-            UseCaseError::new(
-                UseCaseErrorKind::Validation,
-                "mcpConfig must not contain ';' because the /C runMcp payload is semicolon-delimited",
-            ),
+            RawValueError::unsupported("mcpConfig must not contain ';' because the /C runMcp payload is semicolon-delimited"),
             "mcpConfig",
         ));
     }
@@ -630,26 +627,20 @@ fn map_mcp_config_path(
 fn map_mcp_port(port: Option<u16>) -> Result<Option<u16>, McpServiceError<McpCommandEnvelope>> {
     if port == Some(0) {
         return Err(launch_adapter_business_error(
-            UseCaseError::new(
-                UseCaseErrorKind::Validation,
-                "mcpPort must be greater than or equal to 1",
-            ),
+            RawValueError::unsupported("mcpPort must be greater than or equal to 1"),
             "mcpPort",
         ));
     }
     Ok(port)
 }
 
-fn map_launch_via_input(value: Option<&str>) -> Result<Option<LaunchVia>, UseCaseError> {
+fn map_launch_via_input(value: Option<&str>) -> Result<Option<LaunchVia>, RawValueError> {
     let Some(value) = normalize_optional_string(value) else {
         return Ok(None);
     };
-    LaunchVia::parse(&value).map(Some).ok_or_else(|| {
-        UseCaseError::new(
-            UseCaseErrorKind::Validation,
-            "via accepts only `web` or `connection`",
-        )
-    })
+    LaunchVia::parse(&value)
+        .map(Some)
+        .ok_or_else(|| RawValueError::unsupported("via accepts only `web` or `connection`"))
 }
 
 fn map_mcp_launch_mode(
@@ -663,10 +654,7 @@ fn map_mcp_launch_mode(
         "thick" => Ok(ClientMcpMode::Thick),
         "ordinary" => Ok(ClientMcpMode::Ordinary),
         other => Err(launch_adapter_business_error(
-            UseCaseError::new(
-                UseCaseErrorKind::Validation,
-                format!("unsupported launch mode: {other}"),
-            ),
+            RawValueError::unsupported(format!("unsupported launch mode: {other}")),
             "mode",
         )),
     }
@@ -679,10 +667,7 @@ fn map_mcp_launch_addon(
     match addon.as_deref() {
         Some("va") => Ok(Some(ClientMcpAddonRequest::VanessaAutomation)),
         Some(other) => Err(launch_adapter_business_error(
-            UseCaseError::new(
-                UseCaseErrorKind::Validation,
-                format!("unsupported launch mcpScenario: {other}"),
-            ),
+            RawValueError::unsupported(format!("unsupported launch mcpScenario: {other}")),
             "mcpScenario",
         )),
         None => Ok(None),
@@ -690,11 +675,11 @@ fn map_mcp_launch_addon(
 }
 
 fn launch_adapter_business_error(
-    error: UseCaseError,
+    error: RawValueError,
     field: &'static str,
 ) -> McpServiceError<McpCommandEnvelope> {
     let message = error.message().to_owned();
-    let business_error = raw_value_business_error(&error, field);
+    let business_error = raw_value_business_error(&error);
     McpServiceError::Business(McpBusinessFailure::new(
         business_error.clone(),
         adapter_error_envelope(
@@ -871,11 +856,8 @@ fn adapter_error_envelope(
 }
 
 fn envelope_error(error: &McpBusinessError) -> EnvelopeError {
-    EnvelopeError::new(
-        error.code.as_str(),
-        error.kind.as_str(),
-        error.message.clone(),
-    )
+    EnvelopeError::new(error.code.into(), error.kind.into(), error.message.clone())
+        .with_next(error.next.clone())
 }
 
 fn invalid_syntax_request(
@@ -894,18 +876,19 @@ fn invalid_syntax_request(
     ))
 }
 
-fn raw_value_business_error(error: &UseCaseError, field_name: &'static str) -> McpBusinessError {
-    let blank_message = format!("{field_name} must not be blank");
-    let code = if error.message() == blank_message {
-        crate::mcp::error::McpErrorCode::InvalidArgument
-    } else {
-        crate::mcp::error::McpErrorCode::UnsupportedValue
+/// Код отказа берётся из типизированной причины, а не из сравнения текста сообщения:
+/// решать прозой нельзя (`DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES`).
+fn raw_value_business_error(error: &RawValueError) -> McpBusinessError {
+    let code = match error.problem() {
+        RawValueProblem::Blank => crate::mcp::error::McpErrorCode::InvalidArgument,
+        RawValueProblem::Unsupported => crate::mcp::error::McpErrorCode::UnsupportedValue,
     };
 
     McpBusinessError {
         code,
         kind: McpBusinessErrorKind::Validation,
         message: error.message().to_owned(),
+        next: None,
     }
 }
 
@@ -1030,6 +1013,33 @@ fn render_dump_mode(mode: DumpModeRequest) -> &'static str {
         DumpModeRequest::Full => "FULL",
         DumpModeRequest::Incremental => "INCREMENTAL",
         DumpModeRequest::Partial => "PARTIAL",
+    }
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::*;
+    use crate::domain::next_step::NextStep;
+    use crate::support::error::CapabilityReason;
+    use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
+
+    /// Шаг из отказа доезжает и до MCP: род и код у него свои и уже, а выход из отказа —
+    /// тот же самый, он про предмет, а не про транспорт.
+    #[test]
+    fn the_mcp_envelope_carries_the_next_step_of_a_refusal() {
+        let error = UseCaseError::new(
+            UseCaseErrorKind::Capability(CapabilityReason::Target),
+            "a standalone server is opened by its web address",
+        )
+        .with_next(NextStep::command("launch web"));
+
+        let business = McpBusinessError::from_use_case(&error);
+        let envelope = envelope_error(&business);
+
+        let rendered = serde_json::to_value(&envelope).expect("envelope error serializes");
+        assert_eq!(rendered["next"]["command"], "launch web", "{rendered}");
+        // Словарь MCP уже: кода возможности у него нет, и это граница, а не потеря.
+        assert_eq!(rendered["kind"], "runtime", "{rendered}");
     }
 }
 

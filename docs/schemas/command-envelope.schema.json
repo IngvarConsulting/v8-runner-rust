@@ -1,9 +1,396 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "ArtifactKind": {
+      "description": "Stable artifact classification for runner/package outputs.",
+      "oneOf": [
+        {
+          "enum": [
+            "run_directory",
+            "config",
+            "package",
+            "report",
+            "runner_log",
+            "platform_log",
+            "sentinel"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "other": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "other"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Reference to a single retained artifact.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ArtifactKind"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "path"
+      ],
+      "type": "object"
+    },
+    "ArtifactSet": {
+      "additionalProperties": false,
+      "description": "A retained artifact collection for a single execution.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ArtifactRef"
+          },
+          "type": "array"
+        },
+        "root_dir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "EnvelopeError": {
+      "additionalProperties": false,
+      "description": "Structured business error metadata carried by machine-readable command envelopes.",
+      "properties": {
+        "base_generation": {
+          "description": "Поколение конфигурации базы; заполняется отказом `non_fast_forward`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "kind": {
+          "$ref": "#/$defs/ErrorKind"
+        },
+        "local_generation": {
+          "description": "Поколение, записанное после прошлого обмена; заполняется тем же отказом.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "next": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NextStep"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Шаг, которым вызывающий выходит из отказа. Проза остаётся человеку."
+        }
+      },
+      "required": [
+        "code",
+        "kind",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ErrorCode": {
+      "description": "Код отказа — та же причина подробнее. Набор закрыт вместе с родом.",
+      "oneOf": [
+        {
+          "enum": [
+            "capability_unavailable",
+            "environment_unavailable",
+            "workspace_busy",
+            "invalid_output",
+            "cancelled",
+            "timed_out",
+            "invalid_argument",
+            "unsupported_value",
+            "runtime_failure",
+            "platform_failure"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "subject",
+          "description": "Предмет не тот, и другим он не станет.",
+          "type": "string"
+        },
+        {
+          "const": "target",
+          "description": "Не для этой цели.",
+          "type": "string"
+        },
+        {
+          "const": "soon",
+          "description": "Пока не умеет.",
+          "type": "string"
+        },
+        {
+          "const": "non_fast_forward",
+          "description": "Пара к роду `non_fast_forward`; производителя пока нет.",
+          "type": "string"
+        },
+        {
+          "const": "no_memory",
+          "description": "Пара к роду `no_memory`; производителя пока нет.",
+          "type": "string"
+        }
+      ]
+    },
+    "ErrorKind": {
+      "description": "Род отказа. Набор закрыт: новый род приходит вместе с версией конверта, а не молча.",
+      "oneOf": [
+        {
+          "enum": [
+            "capability",
+            "environment",
+            "workspace",
+            "invalid_output",
+            "interruption",
+            "validation",
+            "runtime",
+            "platform"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "non_fast_forward",
+          "description": "Отправка в базу, ушедшую вперёд. Производителя пока нет: его приносит сравнение\nпоколений.",
+          "type": "string"
+        },
+        {
+          "const": "no_memory",
+          "description": "Памяти о прошлом разе нет. Производителя пока нет: его приносит память по базе.",
+          "type": "string"
+        }
+      ]
+    },
+    "ExecutionError": {
+      "additionalProperties": false,
+      "description": "Structured execution error that can point to related artifacts.",
+      "properties": {
+        "artifact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "code": {
+          "type": "string"
+        },
+        "details": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ExecutionStepKind": {
+      "description": "Stable pipeline vocabulary for significant execution blocks.",
+      "enum": [
+        "validation",
+        "resolve_target",
+        "prepare_workspace",
+        "platform_command",
+        "parse_output",
+        "publish",
+        "cleanup",
+        "diagnostics",
+        "other"
+      ],
+      "type": "string"
+    },
+    "ExecutionStepStatus": {
+      "description": "Richer step status beyond the legacy boolean `ok`.",
+      "enum": [
+        "succeeded",
+        "failed",
+        "skipped",
+        "degraded"
+      ],
+      "type": "string"
+    },
+    "NextStep": {
+      "additionalProperties": false,
+      "description": "Шаг, которым вызывающий выходит из отказа: команда, при нужде набор исходников и ключи.\n\nПоле отвечает машине; человеку остаётся текст сообщения, и он не сокращается.",
+      "properties": {
+        "command": {
+          "description": "Имя команды словаря, как его печатает конверт: `launch web`, `pull`, `init`.",
+          "type": "string"
+        },
+        "keys": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Ключи команды со значениями: `--mode` → `combine`.",
+          "type": "object"
+        },
+        "source_set": {
+          "description": "Набор исходников, когда шаг относится к одному набору.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "StepResult": {
+      "additionalProperties": false,
+      "description": "A transport-neutral execution step shared by CLI envelopes and use-case payloads.",
+      "properties": {
+        "artifacts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactSet"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diagnostics": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/ExecutionError"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/ExecutionStepKind"
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/ExecutionStepStatus"
+        },
+        "target": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "ok",
+        "status",
+        "kind",
+        "duration_ms"
+      ],
+      "type": "object"
+    }
+  },
   "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-envelope.schema.json",
-  "title": "v8-runner command envelope",
-  "description": "Форма структурного ответа команды: CLI с --json-message и structuredContent у MCP. Поле data принадлежит команде и этой схемой не описывается.",
-  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Форма машинного ответа команды: общая часть конверта, шаги и отказ. Данные команды описывает её собственная форма из docs/schemas/command-data.",
+  "properties": {
+    "command": {
+      "type": "string"
+    },
+    "data": true,
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EnvelopeError"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "steps": {
+      "items": {
+        "$ref": "#/$defs/StepResult"
+      },
+      "type": "array"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
   "required": [
     "ok",
     "command",
@@ -12,108 +399,6 @@
     "warnings",
     "steps"
   ],
-  "additionalProperties": false,
-  "properties": {
-    "ok": {
-      "type": "boolean"
-    },
-    "command": {
-      "type": "string",
-      "minLength": 1
-    },
-    "duration_ms": {
-      "type": "integer",
-      "minimum": 0
-    },
-    "data": true,
-    "warnings": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "steps": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/step"
-      }
-    },
-    "error": {
-      "$ref": "#/$defs/error"
-    }
-  },
-  "$defs": {
-    "error": {
-      "type": "object",
-      "required": [
-        "code",
-        "kind",
-        "message"
-      ],
-      "additionalProperties": false,
-      "properties": {
-        "code": {
-          "type": "string",
-          "minLength": 1
-        },
-        "kind": {
-          "type": "string",
-          "minLength": 1
-        },
-        "message": {
-          "type": "string"
-        }
-      }
-    },
-    "step": {
-      "type": "object",
-      "required": [
-        "name",
-        "ok",
-        "status",
-        "kind",
-        "duration_ms"
-      ],
-      "additionalProperties": false,
-      "properties": {
-        "name": {
-          "type": "string",
-          "minLength": 1
-        },
-        "ok": {
-          "type": "boolean"
-        },
-        "status": {
-          "type": "string",
-          "minLength": 1
-        },
-        "kind": {
-          "type": "string",
-          "minLength": 1
-        },
-        "duration_ms": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "target": {
-          "type": "string"
-        },
-        "message": {
-          "type": "string"
-        },
-        "diagnostics": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "errors": {
-          "type": "array"
-        },
-        "artifacts": {
-          "type": "object"
-        }
-      }
-    }
-  }
+  "title": "v8-runner command envelope",
+  "type": "object"
 }
