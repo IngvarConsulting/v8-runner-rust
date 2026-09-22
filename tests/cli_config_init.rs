@@ -588,7 +588,14 @@ fn init_writes_the_address_named_by_the_global_key_into_origin() {
         String::from_utf8_lossy(&output.stderr)
     );
     let local = fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("local");
-    assert!(local.contains("connection: 'Srvr=srv;Ref=erp'"), "{local}");
+    // Адрес проверяется по пути, а не по строке: `connection` в другом месте документа
+    // подстроку даст, а базу не объявит.
+    let document: serde_yaml::Value = serde_yaml::from_str(&local).expect("local is YAML");
+    assert_eq!(
+        document["infobases"]["origin"]["connection"].as_str(),
+        Some("Srvr=srv;Ref=erp"),
+        "{local}"
+    );
 }
 
 /// Имя базы разрешать не по чему: местного слоя ещё нет, и `init` отвечает отказом.
@@ -614,6 +621,10 @@ fn init_refuses_a_base_named_by_name_because_it_has_nothing_to_resolve_it_agains
     assert!(
         !dir.path().join("v8project.yaml").exists(),
         "отказ случается до того, как проект написан"
+    );
+    assert!(
+        !dir.path().join("v8project.local.yaml").exists(),
+        "и до того, как объявлен местный слой"
     );
 }
 
@@ -670,4 +681,9 @@ fn an_existing_origin_is_not_replaced_and_the_refusal_names_the_key_that_was_use
     );
     assert!(reported.contains("--infobase"), "{reported}");
     assert!(!reported.contains("--connection"), "{reported}");
+    // Объявленный адрес переживает отказ дословно: отказ на то и отказ, чтобы его не терять.
+    assert_eq!(
+        fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("local"),
+        "infobases:\n  origin:\n    connection: 'File=/srv/ib'\n"
+    );
 }
