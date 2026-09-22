@@ -204,7 +204,7 @@ pub enum ConfigValidationError {
     #[error("platform version must use format major.minor, major.minor.patch or major.minor.patch.build: {0}")]
     InvalidPlatformVersion(String),
 
-    #[error("build.partialLoadThreshold must be greater than or equal to 1")]
+    #[error("push.partialLoadThreshold must be greater than or equal to 1")]
     InvalidPartialLoadThreshold,
 
     #[error("mcp.execution.admission_timeout_ms must be between 1 and 86400000 milliseconds")]
@@ -287,7 +287,7 @@ pub enum ConfigValidationError {
     #[error("tools.client_mcp.extension.artifact.path must point to an existing .cfe file: {0}")]
     ToolExtensionArtifactPathInvalid(String),
 
-    #[error("tools.client_mcp.extension.artifact is loaded by the Designer only; providers.build names another executor")]
+    #[error("tools.client_mcp.extension.artifact is loaded by the Designer only; providers.push names another executor")]
     ToolExtensionArtifactRequiresDesigner,
 
     #[error("tools.edt_cli.startup_timeout_ms must be greater than or equal to 1")]

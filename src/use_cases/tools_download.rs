@@ -180,7 +180,7 @@ fn download_client_mcp(
         && config.selected_provider(Operation::Build) != Provider::Designer
     {
         return Err(AppError::Validation(
-            "`tools download client-mcp` needs the Designer as the build provider because client_mcp.cfe is registered as a tool extension artifact; use `tools download client-mcp --sources` when providers.build names another executor"
+            "`tools download client-mcp` needs the Designer as the push provider because client_mcp.cfe is registered as a tool extension artifact; use `tools download client-mcp --sources` when providers.push names another executor"
                 .to_owned(),
         ));
     }
