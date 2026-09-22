@@ -4387,6 +4387,30 @@ mod tests {
         assert_eq!(no_build_request.build_policy, TestBuildPolicy::Skip);
     }
 
+    /// Формат проекта выбирает ветку и без подкоманды: у EDT это проверка проекта, и
+    /// `--project` доезжает до неё.
+    #[test]
+    fn maps_a_bare_check_to_the_edt_branch_by_format() {
+        let work = tempfile::tempdir().expect("tempdir");
+        let mut config = sample_config(work.path());
+        config.format = SourceFormat::Edt;
+
+        let request = map_syntax_request(
+            &config,
+            &SyntaxArgs {
+                modes: DesignerConfigSyntaxArgs::default(),
+                projects: vec!["main".to_owned()],
+                target: None,
+            },
+        )
+        .expect("request");
+
+        assert!(matches!(
+            request.target,
+            SyntaxTargetRequest::Edt { ref projects } if projects == &["main".to_owned()]
+        ));
+    }
+
     /// Прежнее имя `designer-modules` исполняется `/CheckConfig`: режимы доезжают, а
     /// проверок конфигурации в запросе нет.
     #[test]

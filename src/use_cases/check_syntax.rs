@@ -64,13 +64,15 @@ fn run_syntax_with_context(
     args: &SyntaxArgs,
 ) -> UseCaseResult<SyntaxCheckResult> {
     let started = Instant::now();
+    // Ветка выбирается раньше всего остального: иначе отказ уже отменённой проверки EDT
+    // назвался бы именем проверки конфигурации. У ветки EDT своя такая же проверка.
+    if let SyntaxTarget::Edt { projects } = &args.target {
+        return run_edt_syntax(context, config, projects, started);
+    }
     if let Some(failure) =
         interrupted_syntax_failure(context, CheckName::DesignerConfig, started, None)
     {
         return Err(failure);
-    }
-    if let SyntaxTarget::Edt { projects } = &args.target {
-        return run_edt_syntax(context, config, projects, started);
     }
     // Отказ по предмету спрашивается на ветке платформы: проверку проекта EDT внешние
     // наборы переживают — её выполняет EDT CLI, и предмет у неё свой.
