@@ -1995,6 +1995,24 @@ const COUNTING_WORDS: &[&str] = &[
 /// У решения это заголовок и блок `**Решение.**`; всё остальное в решении — замер,
 /// объясняющий, почему так решили, и верный для своего дня. У правила и контракта
 /// нормативно тело до первого подраздела.
+/// Строки записи вместе с признаком «внутри огороженного блока».
+///
+/// Огороженный пример — часть прозы, но заголовком его строка быть не может: пример умеет
+/// показывать и разметку записи, и тогда `**Решение.**` в нём переставило бы разбор или
+/// сосчиталось вторым блоком. Обе стороны — разбор нормативной прозы и счёт блоков —
+/// смотрят через один этот проход.
+fn lines_outside_fences(text: &str) -> impl Iterator<Item = (&str, bool)> {
+    let mut fenced = false;
+    text.lines().map(move |line| {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            // Сама ограда — не проза и не заголовок ни с какой стороны.
+            return (line, true);
+        }
+        (line, fenced)
+    })
+}
+
 /// Заголовок блока решения: `**Решение.**`, `**Почему.**`, `**Не затрагивает.**` и прочие
 /// — выделение, закрытое точкой, и ничего кроме него в строке до конца выделения.
 fn is_block_heading(line: &str) -> bool {
@@ -2011,14 +2029,14 @@ fn normative_prose(dir: &str, text: &str) -> String {
     let mut kept = Vec::new();
     if dir.ends_with("decisions") {
         let mut inside = false;
-        for line in body.lines() {
-            if line.starts_with("# ") {
+        for (line, fenced) in lines_outside_fences(body) {
+            if !fenced && line.starts_with("# ") {
                 kept.push(line);
                 continue;
             }
             // Заголовком считается только выделенное слово с точкой: абзац блока тоже
             // бывает начат выделением, и обрыв на нём укоротил бы разбор молча.
-            if is_block_heading(line) {
+            if !fenced && is_block_heading(line) {
                 inside = line.starts_with("**Решение.**");
             }
             if inside {
@@ -2026,8 +2044,8 @@ fn normative_prose(dir: &str, text: &str) -> String {
             }
         }
     } else {
-        for line in body.lines() {
-            if line.starts_with("## ") {
+        for (line, fenced) in lines_outside_fences(body) {
+            if !fenced && line.starts_with("## ") {
                 break;
             }
             kept.push(line);
@@ -2356,9 +2374,8 @@ fn every_decision_has_exactly_one_decision_block() {
     let mut wrong = Vec::new();
     for path in record_paths(&root.join("spec/arch/decisions")) {
         let text = std::fs::read_to_string(&path).expect("record is readable");
-        let blocks = text
-            .lines()
-            .filter(|line| line.starts_with("**Решение.**"))
+        let blocks = lines_outside_fences(&text)
+            .filter(|(line, fenced)| !fenced && line.starts_with("**Решение.**"))
             .count();
         if blocks != 1 {
             wrong.push(format!("{}: блоков {blocks}", path.display()));
