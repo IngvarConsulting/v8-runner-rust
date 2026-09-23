@@ -886,6 +886,21 @@ fn clone_preview_names_the_project_it_would_write_and_writes_nothing() {
         "превью не назвало утилиту: {message}"
     );
 
+    // Четыре пути — обещание записи `DEC.2026-09-23.CLONE-SHOWS-THE-PROJECT-IT-WOULD-WRITE`
+    // и контракта: их называют поимённо и проверяют, что ни одного нет. Пятый путь
+    // ответа — `dump_target_path` — цель выгрузки, а не написанный файл.
+    let named = [
+        &payload["data"]["path"],
+        &payload["data"]["local_path"],
+        &payload["data"]["gitignore_path"],
+        &payload["data"]["source_dir"],
+    ];
+    assert_eq!(named.len(), 4);
+    for path in named {
+        let path = std::path::Path::new(path.as_str().expect("path is a string"));
+        assert!(!path.exists(), "превью написало {}", path.display());
+    }
+
     assert!(
         !project_dir.exists(),
         "превью завело каталог проекта: {:?}",
