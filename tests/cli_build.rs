@@ -386,11 +386,9 @@ fn setup_edt_extension_project() -> (tempfile::TempDir, PathBuf, PathBuf) {
     (dir, config_path, work_path)
 }
 
-/// Всё, что лежит в рабочем каталоге, кроме журнала действий: его превью оставляет по
-/// правилу `INV.CLI.PREVIEW-LEAVES-A-LOG-ENTRY`.
+/// Всё, что лежит в рабочем каталоге после превью. Пусто оно быть обязано целиком:
+/// `DEC.2026-09-23.A-PREVIEW-LEAVES-NO-TRACE` не оставляет превью и журнала.
 fn left_in_work_path(work_path: &Path) -> Vec<String> {
-    const LEFT_BY_THE_RULE: &[&str] = &["logs", "logs/mcp", "logs/mcp/actions.log"];
-
     fn walk(root: &Path, dir: &Path, found: &mut Vec<String>) {
         let Ok(read) = fs::read_dir(dir) else {
             return;
@@ -408,7 +406,6 @@ fn left_in_work_path(work_path: &Path) -> Vec<String> {
 
     let mut found = Vec::new();
     walk(work_path, work_path, &mut found);
-    found.retain(|path| !LEFT_BY_THE_RULE.contains(&path.as_str()));
     found.sort();
     found
 }

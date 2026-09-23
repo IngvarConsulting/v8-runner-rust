@@ -82,8 +82,8 @@ fn run_init(
     let mut result = init_result(started, steps, first_error.is_none());
     result.provider_dispatched = !dry_run;
     if dry_run {
-        // Превью не прячется: строка о вызове остаётся в журнале действий, хотя
-        // ни база, ни рабочее пространство не тронуты.
+        // Строка о ходе остаётся в выводе, хотя ни база, ни рабочее пространство не
+        // тронуты: запись о вызове несёт конверт, журнала превью не ведёт.
         log_live_stage("init: preview", "[Init] preview only, nothing created");
     }
     result.provider = Some(receipt);

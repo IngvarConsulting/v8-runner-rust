@@ -12,6 +12,7 @@
 // Поэтому пара «аргументы → лист» остаётся у проверок поведения.
 
 /// Листья, объявившие `Preview::Absent`: ключ превью они обязаны отвергнуть.
+#[allow(dead_code, reason = "список включается в несколько крейтов, каждый берёт своё")]
 const LEAVES_WITHOUT_PREVIEW: &[&str] = &[
     "version",
     "clone",
@@ -27,9 +28,40 @@ const LEAVES_WITHOUT_PREVIEW: &[&str] = &[
     "mcp serve http",
 ];
 
+/// Листья, объявившие `Preview::Runs`: ключ превью они исполняют, и поведение каждого
+/// обязано держать проверка в `tests/contract_previews.rs`. Перечень на семь команд,
+/// живший там прежде, расхождения не видел.
+#[allow(dead_code, reason = "список включается в несколько крейтов, каждый берёт своё")]
+const LEAVES_WITH_PREVIEW: &[&str] = &[
+    "extensions",
+    "extensions list",
+    "extensions info",
+    "extensions create",
+    "extensions delete",
+    "extensions activate",
+    "push",
+    "upload",
+    "pull",
+    "download",
+    "infobase create",
+    "infobase configuration export",
+    "infobase dump",
+    "infobase restore",
+    "convert",
+    "make",
+    "check",
+    "check designer-config",
+    "check designer-modules",
+    "check edt",
+    "launch",
+    "publish",
+];
+
 /// Листья, объявившие `Base::Ignores`: базы они не выбирают и ключ обязаны отвергнуть.
+#[allow(dead_code, reason = "список включается в несколько крейтов, каждый берёт своё")]
 const LEAVES_IGNORING_THE_BASE: &[&str] = &["version", "clone"];
 
 /// Листья, объявившие `Base::Declares`: базу они объявляют сами, поэтому ключ принимает
 /// строку подключения, а имя отвергает.
+#[allow(dead_code, reason = "список включается в несколько крейтов, каждый берёт своё")]
 const LEAVES_DECLARING_THE_BASE: &[&str] = &["init", "config init"];

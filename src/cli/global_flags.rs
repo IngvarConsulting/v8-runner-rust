@@ -380,5 +380,9 @@ mod tests {
             paths_of(|leaf| matches!(leaf.base, Base::Declares)),
             expected(LEAVES_DECLARING_THE_BASE)
         );
+        assert_eq!(
+            paths_of(|leaf| matches!(leaf.preview, Preview::Runs)),
+            expected(LEAVES_WITH_PREVIEW)
+        );
     }
 }
