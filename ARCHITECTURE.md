@@ -6,8 +6,7 @@
 
 `v8-runner` is a Rust CLI for orchestrating local 1C platform operations. The current codebase is organized into eight main layers:
 
-Architecture decisions, invariants and contracts live in one atomic registry: [spec/arch](spec/arch/README.md). Its index is [spec/arch/index.md](spec/arch/index.md); the frozen previous layer and the fate of every old record are in [spec/archive/FATE.md](spec/archive/FATE.md).
-Практический checklist для изменений MCP surface, public command boundary и config contract вынесен в [spec/architecture/change-checklist.md](spec/architecture/change-checklist.md).
+Согласованные гарантии продукта живут правилами в [spec/arch/rules](spec/arch/README.md): одно правило — один файл, и каждое называет проверку, которая падает при нарушении. Этот документ описывает устройство и ничего не обещает.
 
 1. `cli` parses arguments, maps them into transport-neutral requests, and owns command-level text/json rendering.
 2. `config` loads and validates YAML configuration.
@@ -23,7 +22,7 @@ Architecture decisions, invariants and contracts live in one atomic registry: [s
 The platform layer is intentionally split so responsibilities do not bleed into use cases:
 
 - `platform::process` defines `ProcessRunner`, `ProcessExecutor`, `ProcessRequest`, `ProcessResult`, and `SpawnResult`.
-- `platform::locator` resolves concrete executables (`1cv8`, `1cv8c`, `ibcmd`, `1cedtcli`) and caches results per `Locator` instance. Platform component discovery by version mask is governed by [решение 0004 в реестре](spec/arch/index.md).
+- `platform::locator` resolves concrete executables (`1cv8`, `1cv8c`, `ibcmd`, `1cedtcli`) and caches results per `Locator` instance. Platform component discovery by version mask is governed by [правилом о поиске утилит](spec/arch/rules/platform/platform-tools-are-found-by-version-mask.md).
 - `platform::connection` builds reusable V8 connection/auth arguments from the selected infobase's
   `connection` (`infobases.<name>` of the local layer; `origin` unless `--infobase` names another).
 - `platform::utilities` is the current facade used by use cases. It owns the stateful `Locator` and exposes the standard execution path.
@@ -52,10 +51,10 @@ The CLI/runtime boundary is now split explicitly:
 - CLI-only maintenance commands like `convert` live on the same adapter boundary and do not imply a matching MCP tool.
 - `use_cases::{request,context,result}` define the transport-neutral contract that both CLI and future MCP adapters can consume.
 - `use_cases/*.rs` no longer depend on `clap`, `Presenter`, or `Envelope`.
-- Новые public CLI/MCP команды с runtime state под `workPath` должны сохранять этот boundary и проходить checklist из `spec/architecture/change-checklist.md`.
+- Новые public CLI/MCP команды с runtime state под `workPath` должны сохранять этот boundary.
 
 This keeps current CLI behavior intact while reserving a stable internal API for MCP stdio/HTTP adapters.
-Workspace ownership is governed by [решение 0011 в реестре](spec/arch/index.md).
+Workspace ownership is governed by [правилом о границе замка](spec/arch/rules/cli/lock-boundary-is-the-adapter.md).
 
 ## Command Execution Policy
 
@@ -63,17 +62,17 @@ CLI and MCP commands must share the same timeout/cancellation semantics.
 The target contract is that no public command has a deadline: it runs until it reaches a terminal outcome. Cancellation is routed through a transport-neutral execution context, and a cancelled operation is reported only after the underlying operation reaches a terminal state. A bound belongs to a step and only when that step declares one.
 Mutating DB operations must mark critical phases where hard kill is not allowed by default.
 Cancellation representation фиксируется на command boundary: фактическая terminal cancellation использует `ExecutionStatus::Cancelled`, а cancellation/shutdown/timeout внутри successful critical phase возвращается как `Succeeded` с warning, без per-step cancellation state machine.
-This policy is governed by `DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE` в [реестре](spec/arch/index.md).
+This policy is governed by [правилом о пределе шага](spec/arch/rules/use-cases/a-step-is-bounded-only-by-its-own-cap.md).
 
 Runner-like and pipeline-like commands should be assembled in the use-case layer as transport-neutral pipelines of validation, target resolution, workspace preparation, platform execution, output parsing, publication, cleanup, and diagnostics blocks.
 Those blocks exchange typed context/input/output, leave step entries for skipped/degraded/failure behavior, and report domain execution through `ExecutionOutcome<T>`.
-This result grammar is governed by [решение 0016 в реестре](spec/arch/index.md).
+This result grammar is governed by [правилом о типизированных блоках](spec/arch/rules/use-cases/blocks-exchange-typed-context-only.md).
 
 ## Configuration Surface
 
 `v8project.yaml`, loaded into `AppConfig` and accepted by `config::validate`, is the main project configuration contract.
 `source-set.name` is a stable identity for runtime state, generated directories, diagnostics, and source-set selection.
-The supported `source-set[].type` contract and validation boundary are governed by [решение 0017 в реестре](spec/arch/index.md).
+The supported `source-set[].type` contract and validation boundary are governed by [схемой `v8project.yaml`](spec/arch/rules/config/v8project-schema.md).
 `init` must autodetect source-set types only from marker content: Designer `CONFIGURATION` / `EXTENSION` come from `Configuration.xml`, ordinary EDT `CONFIGURATION` / `EXTENSION` come from `.project` natures plus `DT-INF/PROJECT.PMF` (`EXTENSION` also requires `Base-Project`) and `src/Configuration/Configuration.mdo`, while EDT external `.epf`/`.erf` sources are discovered only through homogeneous aggregate roots of valid child projects classified by canonical `src/root.xml`, never through recursive descriptor scans, per-artifact fallback, or phantom source-set generation.
 
 The typed config model now splits MCP knobs into active HTTP/session settings and shared execution guardrails:
@@ -84,7 +83,7 @@ The typed config model now splits MCP knobs into active HTTP/session settings an
 - `tools.client_mcp.wait_ready_timeout_ms` is the per-readiness wait budget for client MCP launch probing; when unset it waits five minutes. Nothing caps it from above: a command carries no deadline.
 
 This keeps the config surface stable while allowing both MCP transports to share the same execution/session infrastructure.
-Новые public config fields, `source-set` types и `infobase` subtrees должны обновлять typed model, validation, `init`, примеры и архитектурную документацию синхронно по checklist из `spec/architecture/change-checklist.md`.
+Новые public config fields, `source-set` types и `infobase` subtrees обновляют typed model, validation, `init`, примеры и архитектурную документацию одним изменением.
 
 ## MCP Boundary
 
@@ -97,8 +96,8 @@ The MCP adapter no longer needs to talk to `cli::execute` or to reuse domain ser
 - `mcp::tool_result` defines the structured transport payload returned by MCP tools for success vs business failure outcomes.
 - `mcp::server::McpToolServer` is the shared rmcp handler used by both transports. It exposes tools-only capabilities, maps incoming `camelCase` params into MCP DTOs, gates every tool call through a global semaphore, calls the synchronous `McpService` via `tokio::task::spawn_blocking` for non-EDT tools, and routes live `check_syntax_edt` through `mcp::edt_syntax` plus the shared `EdtSessionManager`.
 - `mcp::port` owns the MCP workspace lock boundary before dispatching requests into transport-neutral use cases; the global MCP semaphore remains an admission limit, not a replacement for per-`workPath` ownership.
-- Изменение MCP tool surface должно оставаться явным архитектурным событием: список опубликованных tools синхронизируется между `src/mcp/server.rs`, `CTR.MCP.PUBLISHED-TOOL-SURFACE`, правилами реестра и checklist-документом.
-- MCP execution admission and HTTP session capacity are separate guardrails governed by [решение 0013 в реестре](spec/arch/index.md).
+- Изменение MCP tool surface должно оставаться явным архитектурным событием: перечень опубликованных tools сверяется между `src/mcp/server.rs`, [правилом о составе поверхности](spec/arch/rules/mcp/published-tool-surface.md) и сторожем `tests/architecture_guardrails.rs`; что задевает смена состава сверх этих трёх, названо в теле правила.
+- MCP execution admission and HTTP session capacity are separate guardrails governed by [правилом об общем допуске](spec/arch/rules/mcp/admission-is-shared-by-both-transports.md).
 - MCP runtime telemetry is intentionally implemented as structured `tracing` events rather than a separate metrics backend: semaphore acquisition emits `mcp_execution_semaphore_wait`, while the shared EDT actor emits `mcp_edt_queue_depth`, `mcp_edt_startup_failure`, `mcp_edt_session_restart`, and `mcp_edt_shutdown_drain`.
 - The stdio adapter still reserves `stdout` for MCP frames. A bounded EDT syntax call carries `tools.edt_cli.command_timeout_ms` as its own step cap, covering actor-side baseline/reset and the interactive `validate` command; the wait for an execution slot is bounded separately by `mcp.execution.admission_timeout_ms` and does not shorten it.
 - The HTTP adapter is built on `axum` + `rmcp::transport::StreamableHttpService`. A thin wrapper around the rmcp service enforces transport-level overload semantics for new `initialize` requests (`503` when `max_sessions` is exhausted), translates stateful non-`initialize` POSTs without `Mcp-Session-Id` into deterministic `400`, and eagerly releases tracked capacity after `DELETE`.
@@ -111,7 +110,6 @@ Important staging note:
 
 - Shared EDT actor теперь живёт в `platform` и используется всеми поддержанными interactive EDT сценариями: CLI `infobase create`, EDT export в `push`, CLI `check edt` и live MCP `check_syntax_edt`.
 - `tools.edt_cli.auto_start=true` остаётся eager prewarm только для long-lived host process вроде MCP server; short-lived CLI commands всегда стартуют shared EDT lazy и держат session только в рамках current command lifetime.
-- `spec/archive/MCP_IMPLEMENTATION_PLAN_2026-03-21.md` remains the canonical staged MCP rollout history/reference for the closed Stage 1-5 MCP rollout; it is not the active backlog for follow-up EDT work.
 
 ## Provider Dispatch
 
@@ -167,8 +165,8 @@ Important staging note:
 
 Constraints to keep in mind:
 
-- Граница поддержки `ibcmd` как ограниченного исполнителя закреплена в
-  [реестре решений](spec/arch/index.md).
+- Граница поддержки `ibcmd` как ограниченного исполнителя закреплена
+  [матрицей исполнителей](spec/arch/rules/use-cases/provider-defaults-live-in-code.md).
 - `infobase.dbms` нужна только там, где раннер идёт в СУБД сам: создать серверную базу
   через `ibcmd`. Остальные сценарии на серверном подключении её не запрашивают.
 - `infobase.cluster` держит адрес сервера администрирования и два уровня администраторов
@@ -186,7 +184,7 @@ Constraints to keep in mind:
 
 ## Dump And Artifact Publication
 
-Full replacement outputs are published through a staging/backup contract governed by [решение 0015 в реестре](spec/arch/index.md).
+Full replacement outputs are published through a staging/backup contract governed by [правилом о подменном каталоге](spec/arch/rules/use-cases/staging-shares-the-parent-directory.md).
 Full dump writes to a sibling staging directory before replacing the resolved target directory.
 Package artifacts write to a sibling staging file before replacing the output file, and external EPF/ERF publication stages the whole output directory before replacing it.
 Incremental and partial dump modes remain direct non-atomic update modes.
@@ -214,6 +212,6 @@ Use cases now return transport-neutral payloads or structured failures.
 - `workPath/hash-storages/` remains reserved for change detection state.
 - `workPath/designer/<sourceSetName>/` is used by the EDT export/build flow as the generated Designer-format output area for a source-set.
 
-The `source-set` and `workPath` state boundary is formalized in [решение 0002 в реестре](spec/arch/index.md): `DESIGNER` format uses one `designer-<sourceSetName>` change-detection context, while `EDT` format uses both `edt-<sourceSetName>` for export decisions and `designer-<sourceSetName>` for load decisions.
-Exclusive command ownership of `workPath` is governed by [решение 0011 в реестре](spec/arch/index.md).
-On-demand change detection and conservative file-level partial load rules are governed by [решение 0012 в реестре](spec/arch/index.md).
+The `source-set` and `workPath` state boundary is formalized by [правилом о двух контекстах EDT](spec/arch/rules/use-cases/edt-keeps-two-change-contexts.md): `DESIGNER` format uses one `designer-<sourceSetName>` change-detection context, while `EDT` format uses both `edt-<sourceSetName>` for export decisions and `designer-<sourceSetName>` for load decisions.
+Exclusive command ownership of `workPath` is governed by [правилом о границе замка](spec/arch/rules/cli/lock-boundary-is-the-adapter.md).
+On-demand change detection and conservative file-level partial load rules are governed by [правилом о поиске изменений по требованию](spec/arch/rules/use-cases/changes-are-detected-on-demand.md).

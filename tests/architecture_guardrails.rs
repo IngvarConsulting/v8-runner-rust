@@ -102,7 +102,7 @@ fn mcp_surface_snapshot_stays_explicit_and_documented() {
         .map(|capture| capture[1].to_owned())
         .collect::<Vec<_>>();
 
-    let contract = read("spec/arch/contracts/CTR.MCP.PUBLISHED-TOOL-SURFACE.md");
+    let contract = read("spec/arch/rules/mcp/published-tool-surface.md");
     // Числительное прозы сверяется со счётом, а не служит якорем: прежде девятый
     // инструмент с обновлённым перечнем и прежней прозой проходил молча.
     let published = contract
@@ -190,24 +190,6 @@ fn russian_numeral(count: usize) -> &'static str {
         11 => "одиннадцать",
         12 => "двенадцать",
         other => panic!("числительного для {other} в проверке нет — допишите"),
-    }
-}
-
-#[test]
-fn change_checklist_covers_mcp_workspace_lock_and_config_contract() {
-    let checklist = read("spec/architecture/change-checklist.md");
-    for required in [
-        "## Изменение MCP public surface",
-        "## Новая public CLI/MCP команда, работающая с `workPath`",
-        "## Новый public config field, `source-set` type или `infobase` subtree",
-        "src/config/model.rs",
-        "src/config/validate.rs",
-        "spec/arch/README.md",
-    ] {
-        assert!(
-            checklist.contains(required),
-            "checklist must mention '{required}'"
-        );
     }
 }
 

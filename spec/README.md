@@ -1,21 +1,18 @@
 # Spec Guide
 
-`spec/` stores the active internal truth layer for planning, architecture rules, decisions, and
-acceptance.
+`spec/` хранит внутренний слой: согласованные гарантии продукта и его архитектурное
+описание.
 
-## Active Entry Points
+## Что где
 
-- Открытые задачи ведутся в GitHub issues репозитория; сводный план по целевой модели сайта и связи задач — issue #233.
-- `arch/`: атомарный реестр решений, инвариантов и контрактов; читать с `arch/index.md`.
-- `archive/FATE.md`: судьба записей замороженного прежнего слоя.
-- `architecture/change-checklist.md`: required sync/checklist for contract and boundary changes.
-- `architecture/arc42/`: detailed architecture and risk set for maintainers.
-- `acceptance/real-environment-validation.md`: active real-environment acceptance and smoke plan.
+- `arch/rules/`: правила продукта — согласованные гарантии, каждая со своей проверкой.
+  Начинать с [`arch/README.md`](arch/README.md).
+- `architecture/arc42/`: подробное описание архитектуры и набор рисков. Оно рассказывает,
+  как устроено, и ничего не обещает.
+- Открытые задачи ведутся в GitHub issues; сводный план по целевой модели — issue #233.
 
-## Archive
-
-- Historical snapshots and closed delivery records live in `spec/archive/`.
-- Raw external 1C references live in `references/1c/`.
+История правил — в Git. Замеры на живой платформе 1С лежат в
+[`references/1c/`](../references/1c/README.md).
 
 ## Usage Rule
 
