@@ -15,7 +15,6 @@
 #[allow(dead_code, reason = "список включается в несколько крейтов, каждый берёт своё")]
 const LEAVES_WITHOUT_PREVIEW: &[&str] = &[
     "version",
-    "clone",
     "init",
     "config init",
     "tools download yaxunit",
@@ -33,6 +32,7 @@ const LEAVES_WITHOUT_PREVIEW: &[&str] = &[
 /// живший там прежде, расхождения не видел.
 #[allow(dead_code, reason = "список включается в несколько крейтов, каждый берёт своё")]
 const LEAVES_WITH_PREVIEW: &[&str] = &[
+    "clone",
     "extensions",
     "extensions list",
     "extensions info",

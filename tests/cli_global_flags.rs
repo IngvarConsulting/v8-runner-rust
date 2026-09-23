@@ -23,16 +23,6 @@ include!(concat!(
 /// отказ обязан назвать.
 const WITHOUT_PREVIEW: &[(&[&str], &str)] = &[
     (&["version"], "version"),
-    (
-        &[
-            "clone",
-            "--connection",
-            "File=/tmp/ib",
-            "--platform-version",
-            "8.3.24",
-        ],
-        "clone",
-    ),
     (&["init"], "init"),
     (&["config", "init"], "config init"),
     (&["tools", "download", "yaxunit"], "tools download yaxunit"),

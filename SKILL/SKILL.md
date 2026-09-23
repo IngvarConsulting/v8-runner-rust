@@ -54,6 +54,8 @@ Useful global flags:
    `source-set: []`, plus a sibling `v8project.local.yaml` with `infobases.origin.connection`; do not bootstrap project sources that the user did not request.
 4. If it is missing and the current source of truth is an existing infobase that must become
    project sources, run `v8-runner clone --connection <CONNECTION> --platform-version <VERSION>`.
+   Add `--dry-run` first: it names the four paths it would write and the dump utility it found,
+   and creates nothing — not even the project directory.
 5. Inspect generated `v8project.yaml` and keep machine-local overrides in generated `v8project.local.yaml`.
 6. Run `v8-runner infobase create` only when the file infobase or EDT workspace needs to be created.
 7. Run the narrowest validation command that answers the user's goal.
@@ -141,11 +143,11 @@ v8-runner infobase create
   directory git could not read — the command proceeds exactly as it did before this check existed,
   and the guard claims no protection there.
 - `--dry-run` is a global key: it means the same before and after the command. Commands with no
-  preview — `version`, `clone`, `init`, `tools download`, `test`, `mcp serve` — refuse it
+  preview — `version`, `init`, `tools download`, `test`, `mcp serve` — refuse it
   with a named reason instead of running.
 - Before any command that starts the platform or touches the infobase, append `--dry-run` to see
-  what it would do: `infobase create`, `push`, `upload`, `pull`, `convert`, `artifacts`, `launch`,
-  `check`, `infobase restore`, `download` and `infobase dump` accept it. A preview locates the platform first,
+  what it would do: `clone`, `infobase create`, `push`, `upload`, `pull`, `convert`, `artifacts`,
+  `launch`, `check`, `infobase restore`, `download` and `infobase dump` accept it. A preview locates the platform first,
   so a missing one is refused before the plan is approved, and it takes no locks and creates
   nothing — not the target, not `workPath`, not the action log — so a preview also runs under a
   read-only sandbox. The record of the call is the envelope on stdout, not a log file. It

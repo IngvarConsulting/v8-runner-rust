@@ -164,8 +164,9 @@ fn run_dump_selected(
 
     if args.dry_run {
         // Both utilities are located above, so a missing platform refuses in the preview; the
-        // dump lock below is this command's first filesystem write. The preview still leaves
-        // its line in the action log: it hides nothing, even though it changes nothing.
+        // dump lock below is this command's first filesystem write. Следа превью не
+        // оставляет вовсе — ни рабочего каталога, ни журнала действий; запись о вызове
+        // несёт конверт на stdout (`DEC.2026-09-23.A-PREVIEW-LEAVES-NO-TRACE`).
         crate::use_cases::progress::log_live_stage(
             "dump: preview",
             "[Dump] preview only, nothing written",
@@ -188,7 +189,6 @@ fn run_dump_selected(
             )),
         );
         preview.ok = true;
-        preview.provider_dispatched = false;
         return Ok(preview);
     }
 

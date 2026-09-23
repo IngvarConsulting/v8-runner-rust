@@ -359,6 +359,23 @@ pub fn validate(config: &AppConfig) -> Result<(), ConfigValidationError> {
 /// смысловые проверки, и только применение готовит `workPath`.
 pub fn validate_read_only(config: &AppConfig) -> Result<(), ConfigValidationError> {
     validate_base_path(&config.base_path)?;
+    validate_planned_work_path(config)?;
+    validate_project_checks(config)
+}
+
+/// Та же проверка проекта для каталога, которого ещё нет на диске: его пишет сама команда.
+/// От [`validate_read_only`] отличается одним — существования каталога проекта не требует,
+/// потому что проверяемые настройки в него ещё не записаны.
+pub fn validate_planned(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    validate_planned_work_path(config)?;
+    validate_project_checks(config)
+}
+
+/// Рабочий каталог глазами того, кто его не создаёт.
+///
+/// Живёт отдельной функцией, а не строками внутри одного из режимов: режимов без создания
+/// каталога уже два, и повторённый перечень проверок разошёлся бы молча.
+fn validate_planned_work_path(config: &AppConfig) -> Result<(), ConfigValidationError> {
     // Resolve without creating directories, even for Designer sources (which do
     // not enter the EDT overlap checks). Inspect the resolved candidate so a
     // missing component followed by `..` cannot hide an existing non-directory.
@@ -385,7 +402,7 @@ pub fn validate_read_only(config: &AppConfig) -> Result<(), ConfigValidationErro
             )));
         }
     }
-    validate_project_checks(config)
+    Ok(())
 }
 
 fn validate_project_checks(config: &AppConfig) -> Result<(), ConfigValidationError> {

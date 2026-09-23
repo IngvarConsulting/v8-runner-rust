@@ -14,7 +14,9 @@ pub struct DumpResult {
     pub provider: Option<crate::domain::capability::ProviderReceipt>,
 
     pub ok: bool,
-    /// `false` when the run stopped at a preview instead of dispatching the platform.
+    /// `false`, пока платформа не запущена: и под превью, и при отказе раньше выбора
+    /// исполнителя. Поле есть всегда, поэтому отсутствие запуска не выводится из отсутствия
+    /// значения.
     pub provider_dispatched: bool,
     /// `true` when the platform reported the configuration generation unchanged since the
     /// last recorded build or dump and nothing was dumped.

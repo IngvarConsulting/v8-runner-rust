@@ -380,7 +380,10 @@ pub(super) fn empty_result(
 ) -> DumpResult {
     DumpResult {
         provider: None,
-        provider_dispatched: true,
+        // Ответ без исполнения: все одиннадцать мест, которые его строят, лежат выше
+        // запуска платформы — десять отказов и само превью. Настоящий запуск строит ответ
+        // буквально и ставит признак сам.
+        provider_dispatched: false,
         up_to_date: false,
         ok: false,
         source_set,

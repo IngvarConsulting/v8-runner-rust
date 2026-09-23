@@ -9,8 +9,8 @@ use crate::config::schema::{
     validate_local_overlay_schema_boundary, validate_main_config_schema_boundary,
 };
 use crate::config::validate::{
-    validate, validate_infobase_export, validate_prepared_test, validate_read_only,
-    validate_tools_download_bootstrap, ConfigValidationError,
+    validate, validate_infobase_export, validate_planned, validate_prepared_test,
+    validate_read_only, validate_tools_download_bootstrap, ConfigValidationError,
 };
 use crate::support::path::normalize_windows_verbatim_path;
 
@@ -123,9 +123,40 @@ pub fn load_config_for_infobase_export(
     )
 }
 
+/// Два документа проекта одним значением: подряд идущие `&str` переставляются молча, а
+/// перестановка меняет и проверки границы, и итоговые настройки.
+pub struct ProjectText<'a> {
+    /// Содержимое `v8project.yaml`.
+    pub project: &'a str,
+    /// Содержимое `v8project.local.yaml`.
+    pub local_overlay: &'a str,
+}
+
+/// Настройки проекта, которого ещё нет на диске: разбирается тот самый текст, который
+/// боевой прогон записал бы.
+///
+/// Второго описания проекта у превью нет — владелец один, и это тот, кто пишет файл.
+/// `config_path` называет место будущего проектного файла: от него считаются относительные
+/// пути и на него ссылаются сообщения об ошибке.
+pub fn load_planned_config(
+    config_path: &Path,
+    text: ProjectText<'_>,
+    selector: &InfobaseSelector,
+) -> Result<LoadedConfig, ConfigLoadError> {
+    build_config(
+        config_path,
+        serde_yaml::from_str(text.project)?,
+        || Ok(Some(serde_yaml::from_str(text.local_overlay)?)),
+        None,
+        selector,
+        ConfigValidationMode::Planned,
+    )
+}
+
 enum ConfigValidationMode {
     Full,
     Preview,
+    Planned,
     InfobaseExport,
     PreparedTest,
     ToolsDownload,
@@ -140,29 +171,56 @@ fn load_config_with_mode(
     let path = resolve_config_path(config_path)?;
     reject_local_overlay_as_primary_config(&path)?;
     let path = normalize_windows_verbatim_path(&std::fs::canonicalize(&path)?);
+    let root = read_yaml_file(&path)?;
+    let local_path = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(LOCAL_CONFIG_FILE_NAME);
+    build_config(
+        &path,
+        root,
+        || {
+            if local_path.exists() {
+                Ok(Some(read_yaml_file(&local_path)?))
+            } else {
+                Ok(None)
+            }
+        },
+        workdir_override,
+        selector,
+        validation_mode,
+    )
+}
+
+/// Сборка настроек: откуда взялись документы, знает вызывающий, а здесь только разбор,
+/// слияние и проверки. Разрез проходит ровно там, где кончается файловая система: у превью
+/// `clone` файлов ещё нет, а всё остальное у него то же самое.
+///
+/// Местный слой запрашивается отложенно и ровно там, где его читали прежде: проверки
+/// проектного файла идут раньше, и отказ по нему не должен уступать очередь отказу по
+/// слою.
+fn build_config(
+    path: &Path,
+    mut root: serde_yaml::Value,
+    overlay: impl FnOnce() -> Result<Option<serde_yaml::Value>, ConfigLoadError>,
+    workdir_override: Option<&str>,
+    selector: &InfobaseSelector,
+    validation_mode: ConfigValidationMode,
+) -> Result<LoadedConfig, ConfigLoadError> {
     let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut root = read_yaml_file(&path)?;
     reject_legacy_config_keys(&root)?;
     reject_infobases_in_project_file(&root)?;
     let mut warnings = Vec::new();
-    reject_mixed_provider_keys(&root, ConfigFile::Project(&path))?;
-    warnings.extend(fold_push_synonym(&mut root, ConfigFile::Project(&path))?);
-    warnings.extend(fold_infobase_synonym(
-        &mut root,
-        ConfigFile::Project(&path),
-    )?);
+    reject_mixed_provider_keys(&root, ConfigFile::Project(path))?;
+    warnings.extend(fold_push_synonym(&mut root, ConfigFile::Project(path))?);
+    warnings.extend(fold_infobase_synonym(&mut root, ConfigFile::Project(path))?);
 
     // Переопределение провайдера попадает в квитанцию вместе с именем файла, который
     // его поставил: отличать проектный выбор от машинно-локального эксперимента нужно
     // именно там, где читают квитанцию.
     let mut provider_origins = provider_override_keys(&root, DEFAULT_CONFIG_FILE_NAME);
 
-    let local_path = path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(LOCAL_CONFIG_FILE_NAME);
-    if local_path.exists() {
-        let mut overlay = read_yaml_file(&local_path)?;
+    if let Some(mut overlay) = overlay()? {
         reject_legacy_config_keys(&overlay)?;
         reject_local_overlay_keys(&overlay)?;
         validate_local_overlay_schema_boundary(overlay.clone())
@@ -199,6 +257,7 @@ fn load_config_with_mode(
     match validation_mode {
         ConfigValidationMode::Full => validate(&config)?,
         ConfigValidationMode::Preview => validate_read_only(&config)?,
+        ConfigValidationMode::Planned => validate_planned(&config)?,
         ConfigValidationMode::InfobaseExport => validate_infobase_export(&config)?,
         ConfigValidationMode::PreparedTest => validate_prepared_test(&config)?,
         ConfigValidationMode::ToolsDownload => validate_tools_download_bootstrap(&config)?,

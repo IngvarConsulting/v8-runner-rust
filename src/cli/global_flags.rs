@@ -65,7 +65,7 @@ const LEAVES: &[Leaf] = &[
     // дважды нечем, поэтому глобальный ключ здесь отвергается, а не объявляет, как у `init`.
     Leaf {
         path: "clone",
-        preview: Preview::Absent("there is no plan to show before the project exists"),
+        preview: Preview::Runs,
         base: Base::Ignores,
     },
     Leaf {

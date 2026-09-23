@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use crate::config::loader::load_config;
+use crate::config::loader::{load_config, load_planned_config, LoadedConfig, ProjectText};
+use crate::config::model::InfobaseSelector;
 use crate::config::schema::{local_config_schema_url, main_config_schema_url};
 use crate::domain::bootstrap::BootstrapResult;
+use crate::domain::dump::DumpResult;
 use crate::platform::connection::unquote_connection_value;
 use crate::platform::connection::V8Connection;
 use crate::support::error::AppError;
@@ -26,6 +28,8 @@ pub struct BootstrapRequest {
     pub password: Option<String>,
     pub source_dir: PathBuf,
     pub force: bool,
+    /// Превью: проект называется, но не пишется.
+    pub dry_run: bool,
 }
 
 pub fn execute(
@@ -46,33 +50,48 @@ pub fn execute(
         return Err(UseCaseFailure::without_payload(error));
     }
 
-    if let Err(error) = write_bootstrap_files(&paths, request) {
-        return Err(UseCaseFailure::without_payload(error));
+    let main = render_main_config(&paths, request);
+    let local = render_local_config(request);
+    let text = ProjectText {
+        project: &main,
+        local_overlay: &local,
+    };
+
+    // Запись — единственная собственная запись команды, и превью её не делает. Отказ на
+    // ней остаётся отказом записи: подменять его отказом настроек значило бы назвать не ту
+    // причину.
+    if !request.dry_run {
+        if let Err(error) = write_bootstrap_files(&paths, &text) {
+            return Err(UseCaseFailure::without_payload(error));
+        }
     }
 
-    let config = match load_config(
-        Some(&paths.config_path.display().to_string()),
-        None,
-        &crate::config::model::InfobaseSelector::Default,
-    )
-    .map(|loaded| loaded.config)
-    {
-        Ok(config) => config,
+    // Дальше ветки сходятся: боевой прогон читает написанное с диска, превью разбирает тот
+    // же текст в памяти, а выгрузку планирует и выполняет один и тот же `dump_config`.
+    let loaded = match read_project_settings(&paths, &text, request.dry_run) {
+        Ok(loaded) => loaded,
         Err(error) => {
             return Err(UseCaseFailure::with_payload(
-                AppError::from(error),
+                error,
+                // Выгрузки не было, а значит и платформы: отказ настроек приходит раньше
+                // выбора исполнителя.
                 bootstrap_result(
                     started,
                     &paths,
-                    false,
+                    BootstrapOutcome {
+                        ok: false,
+                        dumped: false,
+                        provider_dispatched: false,
+                        message: Some("config load failed".to_owned()),
+                    },
                     Vec::new(),
-                    Some("config load failed"),
                 ),
             ));
         }
     };
+    let LoadedConfig { config, warnings } = loaded;
     let dump_request = DumpRequest {
-        dry_run: false,
+        dry_run: request.dry_run,
         mode: DumpModeRequest::Full,
         source_set: Some("main".to_owned()),
         extension: None,
@@ -83,9 +102,8 @@ pub fn execute(
         Ok(dump) => Ok(bootstrap_result(
             started,
             &paths,
-            true,
-            Vec::new(),
-            dump.message.as_deref(),
+            outcome_of(&dump, dump.message.clone()),
+            warnings,
         )),
         Err(failure) => {
             let error = failure.error;
@@ -97,10 +115,55 @@ pub fn execute(
                 .and_then(|dump| dump.message.as_deref())
                 .map(|value| redact_message(value, request))
                 .or(Some(message));
-            let payload = bootstrap_result(started, &paths, false, Vec::new(), payload_message);
+            // Признак запуска берётся у выгрузки и здесь: отказ тоже знает, дошло ли дело
+            // до платформы. Его отсутствие значит `false` — ответа не было вовсе.
+            let provider_dispatched = failure
+                .payload
+                .as_ref()
+                .is_some_and(|dump| dump.provider_dispatched);
+            let payload = bootstrap_result(
+                started,
+                &paths,
+                BootstrapOutcome {
+                    ok: false,
+                    dumped: false,
+                    provider_dispatched,
+                    message: payload_message,
+                },
+                warnings,
+            );
             Err(UseCaseFailure::with_payload(redacted_error, payload))
         }
     }
+}
+
+/// Настройки проекта: боевой прогон читает их с диска, превью разбирает тот же текст.
+///
+/// Текст у обеих веток один и складывают его одни и те же рендеры, поэтому расходиться
+/// нечему. Предупреждения загрузчика идут дальше в ответ: они одинаково верны и для
+/// написанного проекта, и для запланированного.
+fn read_project_settings(
+    paths: &BootstrapPaths,
+    text: &ProjectText<'_>,
+    dry_run: bool,
+) -> Result<LoadedConfig, AppError> {
+    if dry_run {
+        return load_planned_config(
+            &paths.config_path,
+            ProjectText {
+                project: text.project,
+                local_overlay: text.local_overlay,
+            },
+            &InfobaseSelector::Default,
+        )
+        .map_err(AppError::from);
+    }
+    load_config(
+        Some(&paths.config_path.display().to_string()),
+        None,
+        &InfobaseSelector::Default,
+    )
+    .map_err(AppError::from)
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +189,8 @@ impl BootstrapPaths {
     }
 }
 
+/// Каталог проекта разрешается, но не создаётся: создаёт его запись файлов, а превью не
+/// пишет вовсе. На существующем каталоге ответ дословно тот же, что у `canonicalize`.
 fn resolve_project_dir(path: &Path) -> Result<PathBuf, AppError> {
     if path.exists() && !path.is_dir() {
         return Err(AppError::Validation(format!(
@@ -133,18 +198,16 @@ fn resolve_project_dir(path: &Path) -> Result<PathBuf, AppError> {
             path.display()
         )));
     }
-    std::fs::create_dir_all(path).map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to create project directory '{}': {error}",
-            path.display()
-        ))
-    })?;
-    std::fs::canonicalize(path).map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to resolve project directory '{}': {error}",
-            path.display()
-        ))
-    })
+    // Приставка `\\?\` снимается здесь же: боевой загрузчик снимает её со своего пути, и
+    // без этого превью считало бы относительные пути от текстуально другого корня.
+    crate::support::path::nearest_existing_canonical_path(path)
+        .map(|canonical| crate::support::path::normalize_windows_verbatim_path(&canonical))
+        .map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to resolve project directory '{}': {error}",
+                path.display()
+            ))
+        })
 }
 
 fn preflight_targets(paths: &BootstrapPaths, force: bool) -> Result<(), AppError> {
@@ -166,25 +229,24 @@ fn preflight_targets(paths: &BootstrapPaths, force: bool) -> Result<(), AppError
     Ok(())
 }
 
-fn write_bootstrap_files(
-    paths: &BootstrapPaths,
-    request: &BootstrapRequest,
-) -> Result<(), AppError> {
-    std::fs::create_dir_all(paths.config_path.parent().unwrap_or(Path::new("."))).map_err(
-        |error| {
-            AppError::Runtime(format!(
-                "failed to create project config directory: {error}"
-            ))
-        },
-    )?;
-    std::fs::write(&paths.config_path, render_main_config(paths, request)).map_err(|error| {
+fn write_bootstrap_files(paths: &BootstrapPaths, text: &ProjectText<'_>) -> Result<(), AppError> {
+    let project_dir = paths.config_path.parent().unwrap_or(Path::new("."));
+    // Каталог проекта создаётся здесь, а не при разрешении пути: до этой строки команда
+    // ещё могла отказать, ничего не тронув.
+    std::fs::create_dir_all(project_dir).map_err(|error| {
+        AppError::Runtime(format!(
+            "failed to create project directory '{}': {error}",
+            project_dir.display()
+        ))
+    })?;
+    std::fs::write(&paths.config_path, text.project).map_err(|error| {
         AppError::Runtime(format!(
             "failed to write config file '{}': {error}",
             paths.config_path.display()
         ))
     })?;
     ensure_gitignore(paths)?;
-    std::fs::write(&paths.local_config_path, render_local_config(request)).map_err(|error| {
+    std::fs::write(&paths.local_config_path, text.local_overlay).map_err(|error| {
         AppError::Runtime(format!(
             "failed to write local config file '{}': {error}",
             paths.local_config_path.display()
@@ -344,23 +406,45 @@ fn is_embedded_auth_arg(arg: &str) -> bool {
     matches!(key.to_ascii_lowercase().as_str(), "/n" | "-n" | "/p" | "-p")
 }
 
+/// Исход попытки выгрузки в трёх признаках. Названы полями, а не позициями: три подряд
+/// идущих `bool` переставляются молча, а перестановка здесь меняет ответ.
+struct BootstrapOutcome {
+    ok: bool,
+    dumped: bool,
+    provider_dispatched: bool,
+    message: Option<String>,
+}
+
+/// Исход, выведенный из ответа выгрузки.
+///
+/// `dumped` требует обоих признаков: ответ превью тоже успешен, но выгрузки в нём не было.
+/// Выдумывать это различие не приходится — его называет сама выгрузка.
+fn outcome_of(dump: &DumpResult, message: Option<String>) -> BootstrapOutcome {
+    BootstrapOutcome {
+        ok: dump.ok,
+        dumped: dump.ok && dump.provider_dispatched,
+        provider_dispatched: dump.provider_dispatched,
+        message,
+    }
+}
+
 fn bootstrap_result(
     started: Instant,
     paths: &BootstrapPaths,
-    dumped: bool,
+    outcome: BootstrapOutcome,
     warnings: Vec<String>,
-    message: Option<impl Into<String>>,
 ) -> BootstrapResult {
     BootstrapResult {
-        ok: dumped,
+        ok: outcome.ok,
         path: paths.config_path.clone(),
         local_path: paths.local_config_path.clone(),
         gitignore_path: paths.gitignore_path.clone(),
         source_dir: paths.source_dir.clone(),
         dump_target_path: paths.source_dir.clone(),
-        dumped,
+        dumped: outcome.dumped,
+        provider_dispatched: outcome.provider_dispatched,
         warnings,
-        message: message.map(Into::into),
+        message: outcome.message,
         duration_ms: started.elapsed().as_millis() as u64,
     }
 }
@@ -377,4 +461,73 @@ fn redact_message(message: &str, request: &BootstrapRequest) -> String {
 
 fn escape_yaml(value: &str) -> String {
     value.replace('\'', "''")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(project_dir: &Path, connection: &str) -> BootstrapRequest {
+        BootstrapRequest {
+            project_dir: project_dir.to_path_buf(),
+            connection: connection.to_owned(),
+            platform_version: "8.3.27".to_owned(),
+            platform_path: Some(PathBuf::from("/opt/1cv8")),
+            user: Some("Admin".to_owned()),
+            password: Some("secret".to_owned()),
+            source_dir: PathBuf::from("src/configuration"),
+            force: false,
+            dry_run: true,
+        }
+    }
+
+    /// Два пути сборки настроек дают одно и то же.
+    ///
+    /// Превью разбирает текст в памяти, боевой прогон читает его же с диска. Разойтись они
+    /// могут только в загрузчике — в разрезе между чтением файлов и разбором, — и увидеть
+    /// это можно, лишь сличив оба пути. Сличается весь разобранный документ, а не
+    /// выбранные поля; за его границами остаются `provider_origins` (он `serde(skip)`) и
+    /// предупреждения загрузчика.
+    #[test]
+    fn planned_settings_equal_the_settings_read_back_from_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project_dir = std::fs::canonicalize(dir.path()).expect("canonical");
+        let request = request(&project_dir, "File=/tmp/source ib");
+        let paths = BootstrapPaths::new(&project_dir, &request.source_dir);
+
+        let main = render_main_config(&paths, &request);
+        let local = render_local_config(&request);
+        let text = ProjectText {
+            project: &main,
+            local_overlay: &local,
+        };
+
+        let planned = read_project_settings(&paths, &text, true).expect("planned settings");
+        write_bootstrap_files(&paths, &text).expect("written");
+        let applied = read_project_settings(&paths, &text, false).expect("settings on disk");
+
+        assert_eq!(
+            serde_yaml::to_value(&planned.config).expect("planned as value"),
+            serde_yaml::to_value(&applied.config).expect("applied as value"),
+        );
+    }
+
+    /// Разрешение пути ничего не создаёт: каталог заводит запись файлов, и до неё команда
+    /// ещё вправе отказать, не тронув диска.
+    #[test]
+    fn resolving_a_project_directory_creates_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project_dir = dir.path().join("nested").join("project");
+
+        let resolved = resolve_project_dir(&project_dir).expect("resolved");
+
+        assert!(!project_dir.exists());
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(dir.path())
+                .expect("canonical root")
+                .join("nested")
+                .join("project")
+        );
+    }
 }

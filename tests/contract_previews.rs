@@ -67,13 +67,15 @@ fn write_project(dir: &Path, with_platform: bool) -> PathBuf {
     config_path
 }
 
-fn run(config_path: &Path, arguments: &[&str]) -> (i32, Value) {
+/// Настройки берутся из текущего каталога, а не глобальным ключом: `clone` его отвергает,
+/// а образцу он не нужен — `v8project.yaml` лежит в корне образца. Переменная `V8TR_CONFIG`
+/// снимается вместе с ключом: она объявлена его умолчанием, и чужое окружение увело бы
+/// весь образец в другой проект молча.
+fn run(dir: &Path, arguments: &[String]) -> (i32, Value) {
     let output = v8_runner_command()
-        .args([
-            "--config",
-            &config_path.display().to_string(),
-            "--json-message",
-        ])
+        .current_dir(dir)
+        .env_remove("V8TR_CONFIG")
+        .arg("--json-message")
         .args(arguments)
         .output()
         .expect("run command");
@@ -94,18 +96,60 @@ include!(concat!(
     "/src/cli/global_flags_expected.in"
 ));
 
+/// Строка таблицы: вызов, путь листа и путь, которого после превью быть не должно.
+struct Previewed {
+    arguments: Vec<String>,
+    leaf: &'static str,
+    /// След, который превью оставило бы, если бы работало. У двадцати двух листьев это
+    /// общий рабочий каталог; у `clone` — каталог проекта, которого он ещё не завёл.
+    trace: PathBuf,
+}
+
+fn row(arguments: &[&str], leaf: &'static str, trace: PathBuf) -> Previewed {
+    Previewed {
+        arguments: arguments.iter().map(|value| (*value).to_owned()).collect(),
+        leaf,
+        trace,
+    }
+}
+
 /// Каждый лист с превью: минимальный вызов и путь листа. Состав сверяется с общим
 /// списком `LEAVES_WITH_PREVIEW`, поэтому новый лист с превью обязан появиться и здесь.
-fn with_preview<'a>(artifact: &'a str, snapshot: &'a str) -> Vec<(Vec<&'a str>, &'static str)> {
+fn with_preview(dir: &Path) -> Vec<Previewed> {
+    let work = dir.join("work");
+    let artifact = dir.join("main.cf").display().to_string();
+    let snapshot = dir.join("main.dt").display().to_string();
+    let cloned = dir.join("cloned");
+    let platform = dir.join("platform").display().to_string();
+    let source = format!("File={}", dir.join("ib").display());
     vec![
-        (vec!["extensions"], "extensions"),
-        (vec!["extensions", "list"], "extensions list"),
-        (
-            vec!["extensions", "info", "--name", "client_mcp"],
-            "extensions info",
+        // `clone` проектного файла не читает и глобальный ключ настроек отвергает: адрес,
+        // версию и подсказку платформы он называет своими ключами, а писать будет в свой
+        // каталог. След у него поэтому тоже свой.
+        row(
+            &[
+                "clone",
+                "--project-dir",
+                &cloned.display().to_string(),
+                "--connection",
+                &source,
+                "--platform-version",
+                "8.3.27",
+                "--platform-path",
+                &platform,
+            ],
+            "clone",
+            cloned,
         ),
-        (
-            vec![
+        row(&["extensions"], "extensions", work.clone()),
+        row(&["extensions", "list"], "extensions list", work.clone()),
+        row(
+            &["extensions", "info", "--name", "client_mcp"],
+            "extensions info",
+            work.clone(),
+        ),
+        row(
+            &[
                 "extensions",
                 "create",
                 "--name",
@@ -114,13 +158,15 @@ fn with_preview<'a>(artifact: &'a str, snapshot: &'a str) -> Vec<(Vec<&'a str>, 
                 "Demo",
             ],
             "extensions create",
+            work.clone(),
         ),
-        (
-            vec!["extensions", "delete", "--name", "client_mcp"],
+        row(
+            &["extensions", "delete", "--name", "client_mcp"],
             "extensions delete",
+            work.clone(),
         ),
-        (
-            vec![
+        row(
+            &[
                 "extensions",
                 "activate",
                 "--name",
@@ -129,43 +175,56 @@ fn with_preview<'a>(artifact: &'a str, snapshot: &'a str) -> Vec<(Vec<&'a str>, 
                 "yes",
             ],
             "extensions activate",
+            work.clone(),
         ),
-        (vec!["build"], "push"),
-        (vec!["load", "--path", artifact], "upload"),
-        (vec!["dump", "--mode", "full"], "pull"),
-        (
-            vec!["download", "--state", "working", "--output", artifact],
+        row(&["build"], "push", work.clone()),
+        row(&["load", "--path", &artifact], "upload", work.clone()),
+        row(&["dump", "--mode", "full"], "pull", work.clone()),
+        row(
+            &["download", "--state", "working", "--output", &artifact],
             "download",
+            work.clone(),
         ),
-        (vec!["infobase", "create"], "infobase create"),
-        (
-            vec![
+        row(&["infobase", "create"], "infobase create", work.clone()),
+        row(
+            &[
                 "infobase",
                 "configuration",
                 "export",
                 "--state",
                 "working",
                 "--output",
-                artifact,
+                &artifact,
             ],
             "infobase configuration export",
+            work.clone(),
         ),
-        (
-            vec!["infobase", "dump", "--output", snapshot],
+        row(
+            &["infobase", "dump", "--output", &snapshot],
             "infobase dump",
+            work.clone(),
         ),
-        (
-            vec!["infobase", "restore", "--input", snapshot, "--replace"],
+        row(
+            &["infobase", "restore", "--input", &snapshot, "--replace"],
             "infobase restore",
+            work.clone(),
         ),
-        (vec!["convert"], "convert"),
-        (vec!["make", "--output", artifact], "make"),
-        (vec!["check"], "check"),
-        (vec!["check", "designer-config"], "check designer-config"),
-        (vec!["check", "designer-modules"], "check designer-modules"),
-        (vec!["check", "edt"], "check edt"),
-        (vec!["launch", "designer"], "launch"),
-        (vec!["publish"], "publish"),
+        row(&["convert"], "convert", work.clone()),
+        row(&["make", "--output", &artifact], "make", work.clone()),
+        row(&["check"], "check", work.clone()),
+        row(
+            &["check", "designer-config"],
+            "check designer-config",
+            work.clone(),
+        ),
+        row(
+            &["check", "designer-modules"],
+            "check designer-modules",
+            work.clone(),
+        ),
+        row(&["check", "edt"], "check edt", work.clone()),
+        row(&["launch", "designer"], "launch", work.clone()),
+        row(&["publish"], "publish", work),
     ]
 }
 
@@ -173,6 +232,7 @@ fn with_preview<'a>(artifact: &'a str, snapshot: &'a str) -> Vec<(Vec<&'a str>, 
 /// требовать нулевого кода и сверять содержимое: остальным нужен свой проект — базу,
 /// веб-сервер или формат EDT этот образец не объявляет.
 const SUCCEEDS_HERE: &[&str] = &[
+    "clone",
     "push",
     "upload",
     "pull",
@@ -182,12 +242,13 @@ const SUCCEEDS_HERE: &[&str] = &[
     "launch",
 ];
 
-fn previews(artifact: &str) -> Vec<Vec<&str>> {
-    with_preview(artifact, artifact)
+fn previews(dir: &Path) -> Vec<Vec<String>> {
+    with_preview(dir)
         .into_iter()
-        .filter(|(_, leaf)| SUCCEEDS_HERE.contains(leaf))
-        .map(|(mut arguments, _)| {
-            arguments.push("--dry-run");
+        .filter(|row| SUCCEEDS_HERE.contains(&row.leaf))
+        .map(|row| {
+            let mut arguments = row.arguments;
+            arguments.push("--dry-run".to_owned());
             arguments
         })
         .collect()
@@ -222,9 +283,9 @@ fn entries_under(root: &Path, dir: &Path, found: &mut Vec<String>) {
 /// файл, оставляя договор зелёным.
 #[test]
 fn every_leaf_with_a_preview_is_exercised_here() {
-    let mut covered: Vec<&str> = with_preview("artifact", "snapshot")
+    let mut covered: Vec<&str> = with_preview(Path::new("."))
         .into_iter()
-        .map(|(_, leaf)| leaf)
+        .map(|row| row.leaf)
         .collect();
     covered.sort_unstable();
     let mut named: Vec<&str> = LEAVES_WITH_PREVIEW.to_vec();
@@ -287,40 +348,41 @@ fn a_named_action_log_path_is_not_honoured_by_a_preview() {
 #[test]
 fn no_leaf_with_a_preview_creates_the_work_path() {
     let dir = temp_workspace();
-    let config_path = write_project(dir.path(), true);
+    write_project(dir.path(), true);
     fs::write(dir.path().join("main.cf"), "cf").expect("artifact");
-    let artifact = dir.path().join("main.cf").display().to_string();
-    let snapshot = dir.path().join("main.dt").display().to_string();
-    let work = dir.path().join("work");
 
-    for (arguments, leaf) in with_preview(&artifact, &snapshot) {
-        let _ = fs::remove_dir_all(&work);
-        let mut arguments = arguments;
-        arguments.push("--dry-run");
+    for previewed in with_preview(dir.path()) {
+        let _ = fs::remove_dir_all(&previewed.trace);
+        let mut arguments = previewed.arguments;
+        arguments.push("--dry-run".to_owned());
 
-        let (code, payload) = run(&config_path, &arguments);
+        let (code, payload) = run(dir.path(), &arguments);
+        let leaf = previewed.leaf;
         if SUCCEEDS_HERE.contains(&leaf) {
             assert_eq!(code, 0, "`{leaf}` did not preview: {payload}");
         }
-        assert!(!work.exists(), "`{leaf}` created the work path");
+        assert!(
+            !previewed.trace.exists(),
+            "`{leaf}` left {}",
+            previewed.trace.display()
+        );
     }
 }
 
 #[test]
 fn no_preview_creates_anything_in_the_work_path() {
     let dir = temp_workspace();
-    let config_path = write_project(dir.path(), true);
+    write_project(dir.path(), true);
     fs::write(dir.path().join("main.cf"), "cf").expect("artifact");
-    let artifact = dir.path().join("main.cf").display().to_string();
     let work = dir.path().join("work");
 
-    for preview in previews(&artifact) {
+    for preview in previews(dir.path()) {
         // Каждое превью смотрится на чистом месте: иначе след одного сошёл бы за след
         // другого. Каталог именно удаляется, а не опустошается — превью не должно
         // создавать и его самого.
         let _ = fs::remove_dir_all(&work);
 
-        let (code, payload) = run(&config_path, &preview);
+        let (code, payload) = run(dir.path(), &preview);
         assert_eq!(
             code,
             0,
@@ -364,12 +426,11 @@ fn contents_under(root: &Path) -> Vec<(String, Vec<u8>)> {
 #[test]
 fn no_preview_changes_what_a_real_build_left_in_the_work_path() {
     let dir = temp_workspace();
-    let config_path = write_project(dir.path(), true);
+    write_project(dir.path(), true);
     fs::write(dir.path().join("main.cf"), "cf").expect("artifact");
-    let artifact = dir.path().join("main.cf").display().to_string();
     let work = dir.path().join("work");
 
-    let (code, payload) = run(&config_path, &["build"]);
+    let (code, payload) = run(dir.path(), &["build".to_owned()]);
     assert_eq!(code, 0, "боевая сборка образца не прошла: {payload}");
     // Расширение меняется после засева: иначе переписывать нечего — утечка нашла бы
     // состояние свежим, пропустила подготовку, и страж промолчал бы.
@@ -389,8 +450,8 @@ fn no_preview_changes_what_a_real_build_left_in_the_work_path() {
         "боевая сборка ничего не оставила — сравнивать нечего"
     );
 
-    for preview in previews(&artifact) {
-        let (code, payload) = run(&config_path, &preview);
+    for preview in previews(dir.path()) {
+        let (code, payload) = run(dir.path(), &preview);
         assert_eq!(
             code,
             0,
@@ -427,11 +488,10 @@ fn no_preview_changes_what_a_real_build_left_in_the_work_path() {
 #[test]
 fn a_preview_refuses_before_naming_a_plan_when_the_platform_is_missing() {
     let dir = temp_workspace();
-    let config_path = write_project(dir.path(), false);
-    let artifact = dir.path().join("main.cf").display().to_string();
+    write_project(dir.path(), false);
 
-    for preview in previews(&artifact) {
-        let (code, payload) = run(&config_path, &preview);
+    for preview in previews(dir.path()) {
+        let (code, payload) = run(dir.path(), &preview);
         assert_ne!(
             code,
             0,
@@ -439,6 +499,16 @@ fn a_preview_refuses_before_naming_a_plan_when_the_platform_is_missing() {
             preview.join(" ")
         );
         assert_eq!(payload["ok"], false, "{payload}");
+        // Отказ не вправе сообщать о запуске, которого не было. Отсутствие поля проходит:
+        // часть отказов отвечает общей формой отказа, и утверждения о запуске там нет
+        // вовсе. Ложное «да» не проходит — прежде его никто не ловил, и выгрузка отвечала
+        // `true`, не найдя утилиты (#267).
+        assert_ne!(
+            payload["data"]["provider_dispatched"],
+            true,
+            "`{}` reported a dispatch that did not happen: {payload}",
+            preview.join(" ")
+        );
         assert!(
             payload["data"]["plan"].is_null(),
             "`{}` named a plan it cannot run: {payload}",
