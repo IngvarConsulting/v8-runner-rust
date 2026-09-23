@@ -1094,7 +1094,10 @@ fn empty_result(
     }
     ArtifactsResult {
         provider: None,
-        provider_dispatched: true,
+        // Ответ без исполнения: все шесть мест, которые его строят, — отказы раньше
+        // запуска платформы: матрица, цель, цель выкладки, выбор исполнителя, замок и
+        // чистка. Настоящий запуск строит ответ буквально и ставит признак сам.
+        provider_dispatched: false,
         mode,
         source_set,
         extension,

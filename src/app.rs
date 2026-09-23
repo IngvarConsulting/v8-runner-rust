@@ -396,8 +396,7 @@ fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 
         if presenter.is_json() { "json" } else { "text" },
         color_enabled(cli.no_color),
         &work_path,
-        // Превью у `clone` нет: лист отвергает ключ раньше этого места.
-        false,
+        cli.dry_run,
     ) {
         let message = error.to_string();
         let error = UseCaseError::new(UseCaseErrorKind::Runtime, message.clone());
@@ -414,6 +413,7 @@ fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 
         password: args.password.clone(),
         source_dir: args.source_dir.clone().into(),
         force: args.force,
+        dry_run: cli.dry_run,
     };
     let context = crate::use_cases::context::ExecutionContext::cli(CommandName::Bootstrap);
     match crate::use_cases::bootstrap_project::execute(&context, &request) {
@@ -429,7 +429,7 @@ fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 
                     data: result,
                 });
             } else {
-                render_bootstrap_text(&result, presenter, true);
+                render_bootstrap_text(&result, presenter, true, cli.dry_run);
             }
             0
         }
@@ -455,7 +455,7 @@ fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 
                 }
             } else {
                 if let Some(result) = failure.payload.as_ref() {
-                    render_bootstrap_text(result, presenter, false);
+                    render_bootstrap_text(result, presenter, false, cli.dry_run);
                 }
                 presenter.print_error(&error.to_string());
             }
@@ -602,6 +602,7 @@ fn render_bootstrap_text(
     result: &crate::domain::bootstrap::BootstrapResult,
     presenter: &Presenter,
     succeeded: bool,
+    previewed: bool,
 ) {
     let mut details = vec![
         format!("path: {}", result.path.display()),
@@ -609,6 +610,14 @@ fn render_bootstrap_text(
         format!("gitignore: {}", result.gitignore_path.display()),
         format!("source dir: {}", result.source_dir.display()),
         format!("dumped: {}", if result.dumped { "yes" } else { "no" }),
+        format!(
+            "provider dispatched: {}",
+            if result.provider_dispatched {
+                "yes"
+            } else {
+                "no"
+            }
+        ),
     ];
     if let Some(message) = result.message.as_deref() {
         details.push(format!(
@@ -620,10 +629,14 @@ fn render_bootstrap_text(
         details.push(format!("[warning] {warning}"));
     }
 
-    let label = if succeeded {
-        "Project cloned successfully"
-    } else {
-        "Project clone failed"
+    // Превью проекта не заводит, и называть его заведённым нельзя: пути в ответе — те,
+    // что были бы написаны. Признак берётся у запроса, а не выводится из
+    // `provider_dispatched`: тот говорит о запуске платформы, и однажды успешный боевой
+    // прогон сможет вернуться, её не запустив.
+    let label = match (succeeded, previewed) {
+        (true, false) => "Project cloned successfully",
+        (true, true) => "Project clone planned, nothing written",
+        (false, _) => "Project clone failed",
     };
     let timeline = vec![
         TimelineItem::new(

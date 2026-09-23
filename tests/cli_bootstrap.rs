@@ -175,6 +175,11 @@ fn bootstrap_json_success_keeps_credentials_in_local_overlay_only() {
     // Настоящая база для живой сверки не нужна: харнесс подкладывает утилиты платформы,
     // и команда доходит до собранного ответа.
     assert_data_matches_a_declared_form(&payload, "`clone`");
+    // Вторая половина обоих признаков. Без неё превью и боевой прогон неразличимы на
+    // проводе: подмена `dumped` или `provider_dispatched` на `false` оставила бы весь
+    // набор зелёным, а контракт различает «заведён» и «заведён и выгружен» именно ими.
+    assert_eq!(payload["data"]["dumped"], true);
+    assert_eq!(payload["data"]["provider_dispatched"], true);
     assert!(!String::from_utf8_lossy(&output.stdout).contains("super-secret"));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("super-secret"));
 
@@ -843,4 +848,168 @@ fn top_level_execution_timeout_seconds_is_rejected_in_json_mode() {
     let message = payload["data"]["message"].as_str().expect("message");
     assert!(message.contains("top-level key 'execution_timeout_seconds'"));
     assert!(message.contains("tests.execution_timeout_seconds"));
+}
+
+/// Превью называет проект, которого ещё нет, и не заводит его.
+///
+/// Четыре пути в ответе — те, что были бы написаны; на диске после вызова нет ни одного,
+/// как и самого каталога проекта. Признак `provider_dispatched: false` говорит о том же
+/// вторым полем: вызывающему не приходится выводить отсутствие запуска из отсутствия
+/// значения.
+#[test]
+fn clone_preview_names_the_project_it_would_write_and_writes_nothing() {
+    let dir = temp_workspace();
+    let project_dir = dir.path().join("project");
+    let platform_path = dir.path().join("1cv8");
+    let calls_log = dir.path().join("calls.log");
+    write_designer_dump_script(&platform_path, &calls_log, 0);
+    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+    args.insert(0, "--json-message".to_owned());
+    args.push("--dry-run".to_owned());
+
+    let output = v8_runner_command()
+        .args(args)
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(0));
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["command"], "clone");
+    assert_data_matches_a_declared_form(&payload, "`clone --dry-run`");
+    assert_eq!(payload["data"]["provider_dispatched"], false);
+    assert_eq!(payload["data"]["dumped"], false);
+    assert_eq!(payload["data"]["ok"], true);
+    // Утилиту, которой выгружал бы, превью называет словами: квитанции эта форма не несёт.
+    let message = payload["data"]["message"].as_str().expect("message");
+    assert!(
+        message.contains(&platform_path.display().to_string()),
+        "превью не назвало утилиту: {message}"
+    );
+
+    assert!(
+        !project_dir.exists(),
+        "превью завело каталог проекта: {:?}",
+        fs::read_dir(&project_dir)
+            .map(|entries| entries
+                .flatten()
+                .map(|entry| entry.path())
+                .collect::<Vec<_>>())
+            .unwrap_or_default()
+    );
+    assert!(!calls_log.exists(), "превью запустило платформу");
+}
+
+/// Отсутствие платформы отказывает и у `clone`, и отказ называет искомое.
+///
+/// Поиск утилиты у превью и у боевого прогона один и тот же — его делает `dump_config`, и
+/// превью отличается от применения только признаком в запросе. Здесь проверяется превью;
+/// равенство самих отказов держит не этот тест, а общий шов.
+#[test]
+fn clone_preview_refuses_without_a_platform_and_names_what_it_looked_for() {
+    let dir = temp_workspace();
+    let project_dir = dir.path().join("project");
+    // Каталог есть, утилиты в нём нет: подсказка пути замыкает поиск, и в PATH он не уходит.
+    let platform_dir = dir.path().join("platform");
+    fs::create_dir_all(platform_dir.join("bin")).expect("platform dir");
+    let mut args = bootstrap_args(&project_dir, &platform_dir, "File=/tmp/source-ib");
+    args.insert(0, "--json-message".to_owned());
+    args.push("--dry-run".to_owned());
+
+    let output = v8_runner_command()
+        .args(args)
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(2));
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["ok"], false);
+    assert_eq!(payload["data"]["provider_dispatched"], false);
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(
+        message.contains("1cv8"),
+        "отказ не назвал искомое: {message}"
+    );
+    assert!(!project_dir.exists(), "отказ превью завёл каталог проекта");
+}
+
+/// Текстовый вывод превью не называет проект заведённым: пути он печатает те же, и без
+/// ярлыка их нельзя отличить от написанных. Признак берётся у запроса, поэтому проверка
+/// падает и тогда, когда ярлык начинают выводить из чего-то другого.
+#[test]
+fn clone_preview_text_output_does_not_announce_a_cloned_project() {
+    let dir = temp_workspace();
+    let project_dir = dir.path().join("project");
+    let platform_path = dir.path().join("1cv8");
+    let calls_log = dir.path().join("calls.log");
+    write_designer_dump_script(&platform_path, &calls_log, 0);
+    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+    args.push("--dry-run".to_owned());
+
+    let preview = v8_runner_command()
+        .args(args)
+        .output()
+        .expect("run command");
+
+    assert_eq!(preview.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&preview.stdout);
+    assert!(
+        text.contains("Project clone planned, nothing written"),
+        "превью не назвало себя планом: {text}"
+    );
+    assert!(
+        !text.contains("Project cloned successfully"),
+        "превью назвало проект заведённым: {text}"
+    );
+
+    // Боевой прогон по-прежнему говорит о заведённом проекте: иначе проверка держала бы
+    // не ярлык превью, а его исчезновение у обоих.
+    let real = v8_runner_command()
+        .args(bootstrap_args(
+            &project_dir,
+            &platform_path,
+            "File=/tmp/source-ib",
+        ))
+        .output()
+        .expect("run command");
+    let text = String::from_utf8_lossy(&real.stdout);
+    assert!(
+        text.contains("Project cloned successfully"),
+        "боевой прогон потерял свой ярлык: {text}"
+    );
+}
+
+/// Путь в ответе разрешается так же, как прежде разрешал `canonicalize` после создания:
+/// символьная ссылка раскрывается. Проверка стоит здесь потому, что создание каталога из
+/// разрешения пути ушло, и подмена разрешателя иначе осталась бы незамеченной.
+#[test]
+fn clone_resolves_a_symlinked_project_directory_to_its_target() {
+    let dir = temp_workspace();
+    let target = dir.path().join("target");
+    let link = dir.path().join("link");
+    fs::create_dir_all(&target).expect("target");
+    std::os::unix::fs::symlink(&target, &link).expect("symlink");
+    let platform_path = dir.path().join("1cv8");
+    let calls_log = dir.path().join("calls.log");
+    write_designer_dump_script(&platform_path, &calls_log, 0);
+    let mut args = bootstrap_args(&link, &platform_path, "File=/tmp/source-ib");
+    args.insert(0, "--json-message".to_owned());
+    args.push("--dry-run".to_owned());
+
+    let output = v8_runner_command()
+        .args(args)
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(0));
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    let canonical_target = fs::canonicalize(&target).expect("canonical target");
+    assert_eq!(
+        payload["data"]["path"],
+        Value::from(
+            canonical_target
+                .join("v8project.yaml")
+                .display()
+                .to_string()
+        )
+    );
 }

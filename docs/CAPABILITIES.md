@@ -58,25 +58,26 @@ CLI help, доверяйте текущему коду и затем синхр�
 ## Превью у глаголов, работающих с платформой
 
 `--dry-run` — глобальный ключ: он значит одно и то же перед командой и после неё.
-Исполняют его `push`, `upload`, `pull`, `download`, `make`/`artifacts`, `convert`,
-`launch`, `publish`, `check`, `extensions` со всеми подкомандами и
+Исполняют его `clone`, `push`, `upload`, `pull`, `download`, `make`/`artifacts`,
+`convert`, `launch`, `publish`, `check`, `extensions` со всеми подкомандами и
 `infobase create|dump|restore`.
-У `version`, `clone`, `init`, `tools download`, `test` и `mcp serve` превью нет:
+У `version`, `init`, `tools download`, `test` и `mcp serve` превью нет:
 ключ там отвергается с названной причиной, а не исполняется молча.
 
-**Квитанция об исполнителе одна у всех.** Каждая операция, у которой есть строка в
-матрице провайдеров, кладёт в ответ `provider`: `selected` — кто выбран, `origin` —
+**Квитанция об исполнителе почти у всех.** Каждая операция, у которой есть строка в
+матрице провайдеров, кладёт в ответ `provider` — кроме `clone`, который её не несёт ни
+боевым прогоном, ни превью и называет найденную утилиту словами в `message`. В квитанции: `selected` — кто выбран, `origin` —
 умолчание матрицы или ключ `providers.*` с именем файла, `skipped[]` — кого пропустили
 и почему. Раннер берёт первого готового из цепочки умолчаний; переопределение не
 откатывается: `selected: null` и список пропущенных с причиной.
 
 **Форм превью две, и это не недосмотр.** У `infobase`-экспорта и `restore` превью
 отвечает экспортным конвертом (`mode=preview`, `plan.provider`); у остальных превью
-отвечает парой `provider_dispatched` + предмет глагола. Их превью отвечает парой
-**`provider_dispatched` + предмет глагола**:
+отвечает парой **`provider_dispatched` + предмет глагола**:
 
 | Глагол | Что называет превью |
 |---|---|
+| `clone` | четыре пути, которые были бы написаны, и найденную утилиту выгрузки |
 | `launch` | `plan.program` и составленный `plan.args` с замаскированными credential |
 | `convert` | `outputs` — что и куда было бы сконвертировано |
 | `infobase create` | по шагу `status: planned` с тем, что было бы создано и чем |
@@ -212,7 +213,7 @@ v8-runner init [--force] [--output <FILE>] [--connection <CONNECTION>] [--format
 ### `clone`
 
 ```bash
-v8-runner clone --connection <CONNECTION> --platform-version <VERSION> [--project-dir <DIR>] [--source-dir <DIR>] [--user <USER>] [--password <PASSWORD>] [--platform-path <PATH>] [--force]
+v8-runner clone --connection <CONNECTION> --platform-version <VERSION> [--project-dir <DIR>] [--source-dir <DIR>] [--user <USER>] [--password <PASSWORD>] [--platform-path <PATH>] [--force] [--dry-run]
 ```
 
 - Работает до загрузки `v8project.yaml` и предназначен для пустого project directory.
@@ -222,6 +223,9 @@ v8-runner clone --connection <CONNECTION> --platform-version <VERSION> [--projec
 - `--connection` не должен содержать embedded credentials; используйте `--user` и `--password`.
   Эти значения пишутся только в `v8project.local.yaml`.
 - Не обнаруживает и не выгружает расширения автоматически.
+- `--dry-run` называет четыре пути, которые были бы написаны, и утилиту выгрузки, не
+  создавая ни одного из них и ни самого каталога проекта. Проверки настроек те же, что у
+  боевого прогона: отсутствие платформы отказывает до одобрения плана.
 
 ### `infobase create`
 

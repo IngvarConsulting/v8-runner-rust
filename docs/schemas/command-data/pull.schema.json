@@ -183,7 +183,7 @@
       "description": "Квитанция о выборе исполнителя; `None`, пока выбор не начинался."
     },
     "provider_dispatched": {
-      "description": "`false` when the run stopped at a preview instead of dispatching the platform.",
+      "description": "`false`, пока платформа не запущена: и под превью, и при отказе раньше выбора\nисполнителя. Поле есть всегда, поэтому отсутствие запуска не выводится из отсутствия\nзначения.",
       "type": "boolean"
     },
     "selectors": {

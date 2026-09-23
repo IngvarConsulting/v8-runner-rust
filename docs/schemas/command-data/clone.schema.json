@@ -32,6 +32,10 @@
     "path": {
       "type": "string"
     },
+    "provider_dispatched": {
+      "description": "`false`, пока платформа не запущена: и под превью, и при отказе раньше выбора\nисполнителя. Поле есть всегда, поэтому отсутствие запуска не выводится из\nотсутствия значения.",
+      "type": "boolean"
+    },
     "source_dir": {
       "type": "string"
     },
@@ -50,6 +54,7 @@
     "source_dir",
     "dump_target_path",
     "dumped",
+    "provider_dispatched",
     "duration_ms"
   ],
   "title": "BootstrapResult",

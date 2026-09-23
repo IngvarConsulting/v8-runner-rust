@@ -134,6 +134,32 @@ fn every_previewable_command_answers_in_the_form_declared_for_it() {
         let payload = run(&config_path, &preview);
         assert_data_matches_a_declared_form(&payload, &format!("`{}`", preview.join(" ")));
     }
+
+    // `clone` проектного файла не читает и глобальный ключ настроек отвергает, поэтому
+    // идёт своим вызовом. Перечень выше остаётся названным руками (#268) — эта строка
+    // закрывает не перечень, а конкретную дыру.
+    let cloned = dir.path().join("cloned");
+    let output = v8_runner_command()
+        .args([
+            "--json-message",
+            "clone",
+            "--project-dir",
+            &cloned.display().to_string(),
+            "--connection",
+            &format!("File={}", dir.path().join("ib").display()),
+            "--platform-version",
+            "8.3.27",
+            "--platform-path",
+            &dir.path().join("platform").display().to_string(),
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    // Форма отказа тоже объявлена, поэтому без этой строки проверка прошла бы на отказе,
+    // ничего не сказав о форме превью.
+    assert_eq!(payload["ok"], true, "`clone --dry-run` refused: {payload}");
+    assert_data_matches_a_declared_form(&payload, "`clone --dry-run`");
 }
 
 /// Отказ до диспетчеризации печатает общую форму, и она тоже часть обещания: клиент
