@@ -181,8 +181,18 @@ fn every_named_check_exists() {
                 unresolved.push(format!("{shown}: нет файла {file}"));
                 continue;
             };
-            if !text.contains(&format!("fn {name}(")) {
+            let Some(at) = text.find(&format!("fn {name}(")) else {
                 unresolved.push(format!("{shown}: в {file} нет проверки {name}"));
+                continue;
+            };
+            // Совпадения имени мало: фикстура тоже объявлена `fn`, и ссылка на неё прошла
+            // бы зелёной, ничего не доказывая. Перед объявлением обязан стоять атрибут
+            // теста — его ищут в нескольких строках выше, где помещаются `#[cfg]` и доки.
+            let above = &text[text[..at].rfind("\n\n").map_or(0, |start| start + 2)..at];
+            if !above.contains("#[test]") && !above.contains("#[tokio::test") {
+                unresolved.push(format!(
+                    "{shown}: {file}::{name} — не проверка, а обычная функция"
+                ));
             }
         }
     }
