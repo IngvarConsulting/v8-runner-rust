@@ -4,15 +4,15 @@
 
 Система организована в следующие крупные блоки:
 
-- `cli`: разбор аргументов и CLI-специфичное представление результатов.
-- `config`: загрузка typed YAML-контракта, defaults и ранняя валидация unsafe combinations.
-- `use_cases`: транспортно-нейтральная оркестрация, контекст выполнения, workspace lock helpers и command-specific flows.
-- `mcp`: MCP DTO, сервисная граница, транспорты, параллелизм и управление сессиями.
-- `platform`: поиск внешних инструментов по версии/маске и выполнение команд против утилит 1С.
-- `change_detection`: инкрементальный анализ и сохранённое файловое состояние.
-- `parsers`: преобразование сырых логов и отчётов в структурированные результаты.
-- `domain` и `output`: общие модели результатов, `ExecutionOutcome<T>` и CLI-примитивы представления.
-- `support`: сквозные утилиты для файловой системы, staging/backup publication, логирования, temp и ошибок.
+- [`cli`](../../../src/cli/): разбор аргументов и CLI-специфичное представление результатов.
+- [`config`](../../../src/config/): загрузка typed YAML-контракта, defaults и ранняя валидация unsafe combinations.
+- [`use_cases`](../../../src/use_cases/): транспортно-нейтральная оркестрация, контекст выполнения, workspace lock helpers и command-specific flows.
+- [`mcp`](../../../src/mcp/): MCP DTO, сервисная граница, транспорты, параллелизм и управление сессиями.
+- [`platform`](../../../src/platform/): поиск внешних инструментов по версии/маске и выполнение команд против утилит 1С.
+- [`change_detection`](../../../src/change_detection/): инкрементальный анализ и сохранённое файловое состояние.
+- [`parsers`](../../../src/parsers/): преобразование сырых логов и отчётов в структурированные результаты.
+- [`domain`](../../../src/domain/) и [`output`](../../../src/output/): общие модели результатов, `ExecutionOutcome<T>` и CLI-примитивы представления.
+- [`support`](../../../src/support/): сквозные утилиты для файловой системы, staging/backup publication, логирования, temp и ошибок.
 
 ```mermaid
 flowchart TB
@@ -33,13 +33,13 @@ flowchart TB
 
 ### 5.2 Уровень 2
 
-#### `cli`
+#### [`cli`](../../../src/cli/)
 
 - Преобразует аргументы `clap` в транспортно-нейтральные запросы.
 - Отвечает за разбор аргументов и CLI-специфичный рендеринг результатов.
 - Публикует команды `init`, `clone`, `tools download`, `infobase create`, `extensions`, `push`, `upload`, `test`, `pull`, `download`, `convert`, `make`/`artifacts`, `check`, `launch` и `mcp`.
 
-#### `use_cases`
+#### [`use_cases`](../../../src/use_cases/)
 
 - Центральная оркестрация для `init`, `tools download`, `infobase create`, `extensions`, `push`, `upload`, `test`, `pull`, `download`, `convert`, `artifacts`, `check` и `launch`.
 - Определяет transport-neutral request/result contracts, которые должны оставаться стабильной внутренней опорой для адаптеров и AI-агентов, работающих через эти адаптеры.
@@ -48,14 +48,14 @@ flowchart TB
 - Для `convert` выводит direction из `format`, резолвит `source-set` из `v8project.yaml` и публикует generated output либо под default `workPath/convert/out`, либо под explicit `--output` root с mirror-layout.
 - Для `tools download <tool>` получает latest release metadata выбранного инструмента, скачивает sources/artifact, обновляет `v8project.local.yaml` для Vanessa/client MCP и при `yaxunit --sources` добавляет YAxUnit как project `source-set` `tests`.
 
-#### `mcp`
+#### [`mcp`](../../../src/mcp/)
 
 - Преобразует MCP tool-запросы в запросы use case.
 - Публикует восемь текущих MCP-инструментов.
 - Обрабатывает stdio- и HTTP-транспорты, трекинг сессий, execution admission, HTTP session capacity и общий EDT actor-path.
 - Намеренно не публикует весь CLI: `init`, `clone`, `tools download`, `infobase create`, `extensions`, `upload`, `convert` и `make`/`artifacts` остаются CLI-only сценариями.
 
-#### `platform`
+#### [`platform`](../../../src/platform/)
 
 - Разрешает расположение инструментов.
 - Строит аргументы подключения.
@@ -63,14 +63,14 @@ flowchart TB
 - Изолирует реальную интеграцию с нестабильной внешней средой: файловой системой, процессами и локально установленными утилитами 1С.
 - Возвращает platform-level results так, чтобы use case анализировали доменный итог, а не собирали сырые process arguments.
 
-#### `change_detection`
+#### [`change_detection`](../../../src/change_detection/)
 
 - Сканирует деревья исходников.
 - Отслеживает хеши и timestamp.
 - Группирует изменения по логическим `source-set`.
 - Даёт оркестратору не просто список файлов, а сигнал для выбора partial/full стратегии.
 
-#### `parsers`
+#### [`parsers`](../../../src/parsers/)
 
 - Парсит JUnit XML, runner-log, логи Designer validation и вывод EDT validation в структурированные результаты.
 
@@ -79,7 +79,7 @@ flowchart TB
 - `domain` фиксирует общие структуры результата, включая `ExecutionOutcome<T>`, `ExecutionStatus`, `ExecutionError`, metrics, artifacts и минимальный `StepResult`.
 - `output` содержит только presentation-layer примитивы и не должен становиться бизнес-слоем.
 
-#### `support`
+#### [`support`](../../../src/support/)
 
 - Содержит filesystem helpers для atomic-like replacement через staging/backup.
 - Хранит metadata sidecars для staging/backup cleanup и не должен превращать internal temp naming в публичный API.
