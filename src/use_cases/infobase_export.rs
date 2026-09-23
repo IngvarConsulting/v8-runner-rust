@@ -6,12 +6,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::config::model::AppConfig;
+use crate::domain::capability::{Implementation, Provider, ProviderReceipt};
 use crate::domain::execution::{ExecutionError, ExecutionOutcome, ExecutionStatus, StepResult};
 use crate::domain::infobase_export::{
-    ConfigurationState, ConfigurationSubject, Evidence, ExportConfigurationPackageRequest,
+    ConfigurationState, ConfigurationSubject, ExportConfigurationPackageRequest,
     ExportConfigurationPackageResult, ExportInfobaseSnapshotRequest, ExportInfobaseSnapshotResult,
-    ExportTargetState, Implementation, InfobaseTransferPhase, Provider, ProviderReceipt,
-    RestoreInfobaseSnapshotRequest, RestoreInfobaseSnapshotResult, RestoreTargetMode,
+    ExportTargetState, InfobaseTransferPhase, RestoreInfobaseSnapshotRequest,
+    RestoreInfobaseSnapshotResult, RestoreTargetMode,
 };
 use crate::platform::designer::DesignerDsl;
 use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
@@ -904,7 +905,7 @@ fn select_provider(
             };
             return Err((error, receipt));
         }
-        let (implementation, _evidence, implementation_reason) = capability(intent, provider);
+        let (implementation, implementation_reason) = capability(intent, provider);
         // Экспериментальный адаптер доступен только переопределением: в цепочку умолчаний
         // он не входит, а названный явно — пробуется, потому что за этим и назвали.
         let named_explicitly = matches!(
@@ -914,9 +915,10 @@ fn select_provider(
         // У автономного сервера шлюз — единственный исполнитель: он не эксперимент, а
         // строка матрицы (`GATE_ONLY`), и в цепочку входит сам.
         let gate_only = provider == Provider::Agent && config.infobase.standalone.is_some();
-        // Третьего значения у признака нет: «адаптера нет вовсе» перечислением не
-        // выражалось — его строил только локальный `(_, _)`, и сравнение с ним не
-        // срабатывало ни разу.
+        // Развилка недостижима и оставлена поясом: цепочка умолчаний отфильтрована по
+        // `Implemented`, а названный ключом исполнитель проходит по `named_explicitly`.
+        // Настоящий отказ по неверному ключу даёт проверка настроек — у экспортного
+        // семейства её нет, и это разбирается в #272.
         if implementation == Implementation::Experimental && !named_explicitly && !gate_only {
             skipped.push(SkippedProvider {
                 provider,
@@ -957,60 +959,56 @@ fn select_provider(
     Err((error, receipt))
 }
 
+/// Есть ли у переноса адаптер под этого исполнителя, и словами — почему.
+///
+/// Улику эта таблица не называет: её держит `domain::capability`, и второго мнения о ней
+/// здесь быть не должно. Прежде называла — и расходилась с доменом в пяти строках из
+/// девяти, а читателя у значения не было ни одного. Сама таблица уходит в #272 вместе с
+/// проверкой настроек, которой у экспортного семейства нет.
 fn capability(
     intent: InfobaseTransferIntent,
     provider: Provider,
-) -> (Implementation, Evidence, &'static str) {
+) -> (Implementation, &'static str) {
     match (intent, provider) {
         (InfobaseTransferIntent::Configuration, Provider::Designer) => (
             Implementation::Implemented,
-            Evidence::ArgvTested,
             "Designer CF/CFE adapter is implemented from the documented batch contract",
         ),
         (InfobaseTransferIntent::Configuration, Provider::Ibcmd) => (
             Implementation::Implemented,
-            Evidence::ArgvTested,
             "IBCMD CF/CFE adapter is implemented from the documented config-save contract",
         ),
         (InfobaseTransferIntent::Snapshot, Provider::Designer) => (
             Implementation::Implemented,
-            Evidence::ArgvTested,
             "Designer DT adapter is implemented from the documented batch contract",
         ),
         (InfobaseTransferIntent::Snapshot, Provider::Ibcmd) => (
             Implementation::Experimental,
-            Evidence::Documented,
             "IBCMD DT export is disabled until an exclusive-access preflight is implemented",
         ),
         (InfobaseTransferIntent::SnapshotRestore { .. }, Provider::Designer) => (
             Implementation::Implemented,
-            Evidence::LiveVerified,
             "Designer DT restore is implemented and was verified against a live 8.3.27 file infobase",
         ),
         (InfobaseTransferIntent::SnapshotRestore { .. }, Provider::Ibcmd) => (
             Implementation::Experimental,
-            Evidence::LiveVerified,
             "IBCMD DT restore runs but stays experimental until an exclusive-access preflight is implemented",
         ),
         (InfobaseTransferIntent::Configuration, Provider::Agent) => (
             Implementation::Experimental,
-            Evidence::ArgvTested,
             "agent CF/CFE export runs `config dump-cfg` in the agent session; named by providers.* only",
         ),
         (InfobaseTransferIntent::Snapshot, Provider::Agent) => (
             Implementation::Experimental,
-            Evidence::Documented,
             "agent DT export runs `infobase-tools dump-ib`; named by providers.* only",
         ),
         (InfobaseTransferIntent::SnapshotRestore { .. }, Provider::Agent) => (
             Implementation::Experimental,
-            Evidence::Documented,
             "agent DT restore runs `infobase-tools restore-ib`; the agent drops the session afterwards",
         ),
         // Строка матрицы, опередившая код: исполнитель назван, адаптера у него нет.
         (_, _) => (
             Implementation::Experimental,
-            Evidence::Documented,
             "no export adapter is implemented for this provider in this build of the runner",
         ),
     }
@@ -1026,8 +1024,8 @@ fn provider_utility(config: &AppConfig, provider: Provider) -> Option<UtilityTyp
             Ok(crate::config::model::DesignerAgentMode::Attached { .. }) => None,
             _ => Some(UtilityType::V8),
         },
-        // Только Designer, Agent и ibcmd доходят до готовности: у остальных нет адаптера,
-        // и они отсеиваются выше как нереализованные.
+        // Только Designer, Agent и ibcmd имеют адаптер. Остальных сюда не пускает
+        // проверка настроек, отвергающая ключ без строки в матрице.
         _ => Some(UtilityType::Ibcmd),
     }
 }
@@ -1664,8 +1662,9 @@ mod tests {
     use crate::config::model::{
         AppConfig, BuildConfig, InfobaseConfig, McpConfig, SourceFormat, TestsConfig, ToolsConfig,
     };
+    use crate::domain::capability::{Implementation, Provider};
     use crate::domain::execution::{ExecutionOutcome, ExecutionStatus};
-    use crate::domain::infobase_export::{ConfigurationSubject, Implementation, Provider};
+    use crate::domain::infobase_export::ConfigurationSubject;
     use crate::platform::process::ProcessError;
     use crate::support::error::AppError;
     use crate::use_cases::context::ExecutionContext;
@@ -1722,9 +1721,9 @@ mod tests {
         assert!(validate_snapshot_output(Path::new("dist/base.dt")).is_ok());
         assert!(validate_snapshot_output(Path::new("dist/base.backup")).is_err());
 
-        let (designer, _, _) = capability(InfobaseTransferIntent::Snapshot, Provider::Designer);
+        let (designer, _) = capability(InfobaseTransferIntent::Snapshot, Provider::Designer);
         assert_eq!(designer, Implementation::Implemented);
-        let (ibcmd, _, _) = capability(InfobaseTransferIntent::Snapshot, Provider::Ibcmd);
+        let (ibcmd, _) = capability(InfobaseTransferIntent::Snapshot, Provider::Ibcmd);
         assert_eq!(ibcmd, Implementation::Experimental);
     }
 

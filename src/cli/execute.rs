@@ -24,6 +24,7 @@ use crate::domain::artifact::{
 };
 use crate::domain::artifacts::{ArtifactBuildMetadata, ArtifactBuildMode, ArtifactsResult};
 use crate::domain::build::{BuildMode, BuildResult};
+use crate::domain::capability::ProviderReceipt;
 use crate::domain::convert::{ConvertDirection, ConvertResult, ConvertScope};
 use crate::domain::dump::{DumpMode, DumpResult};
 use crate::domain::execution::{
@@ -33,8 +34,8 @@ use crate::domain::execution::{
 use crate::domain::infobase_export::{
     ConfigurationState, ConfigurationSubject, ExportConfigurationPackageRequest,
     ExportConfigurationPackageResult, ExportInfobaseSnapshotRequest, ExportInfobaseSnapshotResult,
-    InfobaseTransferPhase, ProviderReceipt, RestoreInfobaseSnapshotRequest,
-    RestoreInfobaseSnapshotResult, RestoreTargetMode,
+    InfobaseTransferPhase, RestoreInfobaseSnapshotRequest, RestoreInfobaseSnapshotResult,
+    RestoreTargetMode,
 };
 use crate::domain::init::{InitResult, InitStep, InitStepStatus};
 use crate::domain::issue::{Issue, IssueSeverity};
@@ -2041,9 +2042,7 @@ fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Present
 }
 
 /// Строки квитанции о выборе исполнителя — одни и те же у всех команд.
-fn provider_receipt_details(
-    receipt: Option<&crate::domain::capability::ProviderReceipt>,
-) -> Vec<String> {
+fn provider_receipt_details(receipt: Option<&ProviderReceipt>) -> Vec<String> {
     let Some(receipt) = receipt else {
         return Vec::new();
     };
@@ -3157,7 +3156,7 @@ fn is_reserved_raw_launch_key(raw: &str) -> bool {
 pub(crate) struct LoadJsonData<'a> {
     /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<crate::domain::capability::ProviderReceipt>,
+    pub provider: Option<ProviderReceipt>,
 
     pub ok: bool,
     /// `false` when the run stopped at a preview instead of dispatching the platform.
@@ -3254,7 +3253,7 @@ fn build_load_envelope(result: &LoadResult) -> Envelope<LoadJsonData<'_>> {
 pub(crate) struct ArtifactsJsonData<'a> {
     /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<crate::domain::capability::ProviderReceipt>,
+    pub provider: Option<ProviderReceipt>,
 
     pub ok: bool,
     /// `false` when the run stopped at a preview instead of dispatching the platform.

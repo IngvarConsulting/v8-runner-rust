@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::execution::{ExecutionOutcome, ExecutionStatus, ExecutionStepKind, StepResult};
 
-/// Closed vocabulary for every observable phase of an information-base export,
-/// including failures before provider dispatch.
+/// Closed vocabulary for every observable phase of an information-base transfer — both
+/// directions — including failures before provider dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InfobaseTransferPhase {
     ConfigurationLoad,
@@ -97,9 +97,7 @@ impl ConfigurationSubject {
     }
 }
 
-/// Перенос базы делят с остальными операциями и словарь исполнителей, и признаки
-/// реализованности: второго набора тех же слов у него нет.
-pub use crate::domain::capability::{Evidence, Implementation, Provider, ProviderReceipt};
+use crate::domain::capability::{Provider, ProviderReceipt};
 
 /// Closed file format vocabulary for information-base exports.
 ///
@@ -433,9 +431,10 @@ mod tests {
     use super::{
         ConfigurationState, ConfigurationSubject, ExportConfigurationPackageRequest,
         ExportConfigurationPackageResult, ExportInfobaseSnapshotRequest,
-        ExportInfobaseSnapshotResult, ExportTargetState, Implementation,
-        InfobaseExportArtifactKind, InfobaseTransferPhase, Provider, ProviderReceipt,
+        ExportInfobaseSnapshotResult, ExportTargetState, InfobaseExportArtifactKind,
+        InfobaseTransferPhase, Provider, ProviderReceipt,
     };
+    use crate::domain::capability::Implementation;
     use crate::domain::execution::ExecutionStepKind;
 
     fn chosen(provider: Provider) -> Option<ProviderReceipt> {
@@ -446,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn export_phase_is_the_single_owner_of_step_name_and_kind() {
+    fn transfer_phase_is_the_single_owner_of_step_name_and_kind() {
         assert_eq!(
             InfobaseTransferPhase::ConfigurationLoad.as_str(),
             "configuration load"
