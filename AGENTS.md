@@ -1,5 +1,21 @@
 # Agent Rules for v8-runner
 
+## Where to Look First
+
+Before changing code in an unfamiliar area, read the two sections of
+[`spec/architecture/arc42/`](spec/architecture/arc42/architecture.md) that answer questions
+`rg` cannot:
+
+- [Building blocks](spec/architecture/arc42/05-building-block-view.md) — what each module
+  under `src/` owns and which way the dependencies point. Every block links to its
+  directory, so this is also the route from a responsibility to the code.
+- [Runtime view](spec/architecture/arc42/06-runtime-view.md) — what actually happens during
+  `push`, `test`, `extensions`, `tools download`, MCP EDT syntax, a full replacement, and at
+  the command boundary with admission and cancellation.
+
+These describe the system; they are not commitments and carry no falsifiers. The agreed
+guarantees live in `spec/arch/` and name their checks there.
+
 ## Branches for New GitHub Issues
 
 Every new task that comes from a GitHub issue must start in a separate new branch created from the current `master`.
