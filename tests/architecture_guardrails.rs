@@ -103,12 +103,26 @@ fn mcp_surface_snapshot_stays_explicit_and_documented() {
         .collect::<Vec<_>>();
 
     let contract = read("spec/arch/contracts/CTR.MCP.PUBLISHED-TOOL-SURFACE.md");
+    // Числительное прозы сверяется со счётом, а не служит якорем: прежде девятый
+    // инструмент с обновлённым перечнем и прежней прозой проходил молча.
+    let published = contract
+        .lines()
+        .find(|line| line.starts_with("Опубликованы ") && line.ends_with(" инструментов:"))
+        .expect("contract announces the published tools");
+    let counted = published
+        .trim_start_matches("Опубликованы ")
+        .trim_end_matches(" инструментов:");
     let contract_section = extract_between(
         &contract,
-        "Опубликованы восемь инструментов:",
+        published,
         "Состав меняется только вместе с версией этой формы.",
     );
     let contract_tools = extract_backticked_items(contract_section);
+    assert_eq!(
+        counted,
+        russian_numeral(contract_tools.len()),
+        "проза называет другое число инструментов, чем перечисляет"
+    );
 
     let expected = EXPECTED_MCP_TOOLS
         .iter()
@@ -160,6 +174,22 @@ fn public_command_adapters_keep_workspace_lock_boundary() {
             window.contains("with_workspace_lock("),
             "{function} must keep the MCP workspace-lock boundary"
         );
+    }
+}
+
+/// Числительное для счёта, который эта проверка сверяет с прозой. Перечень короткий
+/// намеренно: он покрывает правдоподобный размер поверхности, а не русский язык.
+fn russian_numeral(count: usize) -> &'static str {
+    match count {
+        5 => "пять",
+        6 => "шесть",
+        7 => "семь",
+        8 => "восемь",
+        9 => "девять",
+        10 => "десять",
+        11 => "одиннадцать",
+        12 => "двенадцать",
+        other => panic!("числительного для {other} в проверке нет — допишите"),
     }
 }
 

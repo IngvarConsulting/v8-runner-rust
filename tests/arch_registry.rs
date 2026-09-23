@@ -1928,3 +1928,463 @@ fn a_field_has_the_shape_the_readme_publishes() {
         wrong.join("\n")
     );
 }
+
+/// Слова, которыми записи называют счёт. Единица не входит: «один» почти всегда значит
+/// «единственный», а не «столько-то».
+///
+/// Перечень неполон намеренно, и пополнять его наугад нельзя: «семью» здесь нет потому,
+/// что в реестре это семья контрактов, а не число («в семью … не входит»), и добавление
+/// дало бы ложное срабатывание. Пропущенная форма — пропущенная строка, и она заметна;
+/// лишняя — шум, который придётся закреплять навсегда.
+const COUNTING_WORDS: &[&str] = &[
+    "два",
+    "две",
+    "двух",
+    "двумя",
+    "двое",
+    "оба",
+    "обе",
+    "обоих",
+    "обеих",
+    "обоими",
+    "обеим",
+    "три",
+    "трёх",
+    "тремя",
+    "трое",
+    "четыре",
+    "четырёх",
+    "четырьмя",
+    "пять",
+    "пяти",
+    "шесть",
+    "шести",
+    "семь",
+    "семи",
+    "восемь",
+    "восьми",
+    "девять",
+    "девяти",
+    "десять",
+    "десяти",
+    "одиннадцать",
+    "двенадцать",
+    "тринадцать",
+    "четырнадцать",
+    "пятнадцать",
+    "шестнадцать",
+    "семнадцать",
+    "восемнадцать",
+    "девятнадцать",
+    "двадцать",
+    "двадцати",
+    "тридцать",
+    "тридцати",
+    "сорок",
+    "сорока",
+    "пятьдесят",
+    "сто",
+    "вдвое",
+    "втрое",
+    "дважды",
+    "трижды",
+];
+
+/// Нормативная часть записи — та, где число значит «столько сейчас».
+///
+/// У решения это заголовок и блок `**Решение.**`; всё остальное в решении — замер,
+/// объясняющий, почему так решили, и верный для своего дня. У правила и контракта
+/// нормативно тело до первого подраздела.
+/// Строки записи вместе с признаком «внутри огороженного блока».
+///
+/// Огороженный пример — часть прозы, но заголовком его строка быть не может: пример умеет
+/// показывать и разметку записи, и тогда `**Решение.**` в нём переставило бы разбор или
+/// сосчиталось вторым блоком. Обе стороны — разбор нормативной прозы и счёт блоков —
+/// смотрят через один этот проход.
+fn lines_outside_fences(text: &str) -> impl Iterator<Item = (&str, bool)> {
+    let mut fenced = false;
+    text.lines().map(move |line| {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            // Сама ограда — не проза и не заголовок ни с какой стороны.
+            return (line, true);
+        }
+        (line, fenced)
+    })
+}
+
+/// Заголовок блока решения: `**Решение.**`, `**Почему.**`, `**Не затрагивает.**` и прочие
+/// — выделение, закрытое точкой, и ничего кроме него в строке до конца выделения.
+fn is_block_heading(line: &str) -> bool {
+    line.strip_prefix("**")
+        .and_then(|rest| rest.split_once("**"))
+        .is_some_and(|(title, _)| title.ends_with('.') && !title.contains("**"))
+}
+
+fn normative_prose(dir: &str, text: &str) -> String {
+    let body = match text.split_once("\n---\n") {
+        Some((_, rest)) => rest,
+        None => text,
+    };
+    let mut kept = Vec::new();
+    if dir.ends_with("decisions") {
+        let mut inside = false;
+        for (line, fenced) in lines_outside_fences(body) {
+            if !fenced && line.starts_with("# ") {
+                kept.push(line);
+                continue;
+            }
+            // Заголовком считается только выделенное слово с точкой: абзац блока тоже
+            // бывает начат выделением, и обрыв на нём укоротил бы разбор молча.
+            if !fenced && is_block_heading(line) {
+                inside = line.starts_with("**Решение.**");
+            }
+            if inside {
+                kept.push(line);
+            }
+        }
+    } else {
+        for (line, fenced) in lines_outside_fences(body) {
+            if !fenced && line.starts_with("## ") {
+                break;
+            }
+            kept.push(line);
+        }
+    }
+    kept.join("\n")
+}
+
+/// Счётные слова нормативной части, все до одного и в порядке появления.
+///
+/// Повторы не схлопываются: у записи бывает несколько счётов одним словом, и схлопнутое
+/// множество не заметило бы ни нового, ни пропавшего.
+fn counting_words_in(prose: &str) -> Vec<String> {
+    prose
+        .split(|ch: char| !ch.is_alphabetic())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .filter(|word| COUNTING_WORDS.contains(&word.as_str()))
+        .collect()
+}
+
+fn normative_numerals(root: &Path) -> Vec<(String, String)> {
+    let mut rows = Vec::new();
+    for dir in [
+        "spec/arch/decisions",
+        "spec/arch/invariants",
+        "spec/arch/contracts",
+    ] {
+        for path in record_paths(&root.join(dir)) {
+            let text = std::fs::read_to_string(&path).expect("record is readable");
+            let words = counting_words_in(&normative_prose(dir, &text));
+            if words.is_empty() {
+                continue;
+            }
+            let name = path.file_name().expect("file name").to_string_lossy();
+            let kind = dir.rsplit('/').next().expect("kind");
+            rows.push((format!("{kind}/{name}"), words.join(",")));
+        }
+    }
+    rows.sort();
+    rows
+}
+
+/// Числительные нормативной части — по записи, где они стоят.
+///
+/// Число в заголовке, в блоке `**Решение.**` и в теле правила значит «столько сейчас»,
+/// то есть это обещание. Обещание держит фальсификатор; перечень требует лишь, чтобы
+/// новое обещание назвали — гейт не решает, верно ли число, он не даёт появиться
+/// неназванному.
+///
+/// Перечнем, а не разбором: русское числительное прозой не разбирается надёжно, и
+/// догадываться, что оно считает, гейт не должен. Тот же приём держит состав листьев
+/// (`src/cli/global_flags_expected.in`) и состав инструментов MCP, а ближайший образец —
+/// `tests/tool_output_contract.rs::PROSE_DEBT`. От него перечень отличается тем, что
+/// расти ему можно: новая запись с числом — обычное дело, а долг по прозе только
+/// сокращают.
+const NORMATIVE_NUMERALS: &[(&str, &str)] = &[
+    ("contracts/CTR.CLI.TEXT-OUTPUT.md", "двух,дважды"),
+    (
+        "contracts/CTR.CONFIG.V8PROJECT-SCHEMA.md",
+        "двумя,обеих,два",
+    ),
+    ("contracts/CTR.MCP.PUBLISHED-TOOL-SURFACE.md", "восемь"),
+    ("contracts/CTR.WIRE.BOOTSTRAP-DATA.md", "два,обоими,четырёх"),
+    (
+        "contracts/CTR.WIRE.COMMAND-ENVELOPE.md",
+        "два,четыре,обоими,два,два",
+    ),
+    ("contracts/CTR.WIRE.INFOBASE-RESTORE-DATA.md", "двумя"),
+    ("contracts/CTR.WIRE.LAUNCH-DATA.md", "двух"),
+    ("contracts/CTR.WIRE.LOAD-DATA.md", "тремя"),
+    ("contracts/CTR.WIRE.SYNTAX-DATA.md", "двумя,три"),
+    (
+        "decisions/2026-04-20-edt-export-keeps-its-own-change-state.md",
+        "две",
+    ),
+    (
+        "decisions/2026-04-20-edt-runs-one-shot-or-in-one-shared-session.md",
+        "два",
+    ),
+    (
+        "decisions/2026-04-20-mcp-limits-execution-and-sessions-separately.md",
+        "два,обоих",
+    ),
+    (
+        "decisions/2026-09-02-export-intents-are-typed-separately.md",
+        "два",
+    ),
+    (
+        "decisions/2026-09-12-a-label-may-only-make-a-verdict-stricter.md",
+        "трёх",
+    ),
+    (
+        "decisions/2026-09-14-a-provider-is-named-by-who-executes.md",
+        "трёх",
+    ),
+    (
+        "decisions/2026-09-14-agent-endpoint-is-managed-or-attached.md",
+        "два",
+    ),
+    (
+        "decisions/2026-09-14-agent-session-lives-with-the-lock.md",
+        "два,два",
+    ),
+    (
+        "decisions/2026-09-14-platform-answers-whether-the-base-changed.md",
+        "две",
+    ),
+    (
+        "decisions/2026-09-14-runner-publishes-to-a-web-server.md",
+        "обе",
+    ),
+    ("decisions/2026-09-14-spec-registry-reset.md", "тремя"),
+    (
+        "decisions/2026-09-14-target-has-two-addresses.md",
+        "два,два",
+    ),
+    (
+        "decisions/2026-09-14-target-kind-is-declared-not-parsed.md",
+        "две",
+    ),
+    (
+        "decisions/2026-09-14-the-target-may-live-on-another-machine.md",
+        "четыре",
+    ),
+    (
+        "decisions/2026-09-16-a-property-update-addresses-an-installed-extension-by-name.md",
+        "двумя,два",
+    ),
+    (
+        "decisions/2026-09-16-a-record-name-survives-a-windows-checkout.md",
+        "обеим",
+    ),
+    (
+        "decisions/2026-09-16-a-supersession-is-recorded-by-both-decisions.md",
+        "обе,двух",
+    ),
+    (
+        "decisions/2026-09-16-a-symbol-and-its-path-spell-each-other.md",
+        "двух",
+    ),
+    (
+        "decisions/2026-09-16-a-thin-client-opens-either-address.md",
+        "двух,два,обоих",
+    ),
+    (
+        "decisions/2026-09-16-front-matter-has-one-reader.md",
+        "оба,двух,двух,оба,двух",
+    ),
+    ("decisions/2026-09-16-governs-is-a-closed-axis.md", "двумя"),
+    ("decisions/2026-09-16-status-is-a-closed-set.md", "тремя"),
+    (
+        "decisions/2026-09-17-a-host-key-is-checked-against-what-was-declared.md",
+        "оба",
+    ),
+    (
+        "decisions/2026-09-17-the-http-listener-answers-only-known-hosts.md",
+        "обоих",
+    ),
+    (
+        "decisions/2026-09-21-a-standalone-target-has-two-gates.md",
+        "два,две,двумя,двух",
+    ),
+    (
+        "decisions/2026-09-21-apply-is-a-separate-step.md",
+        "два,оба,три",
+    ),
+    (
+        "decisions/2026-09-21-default-chains-follow-the-target-kind.md",
+        "семь",
+    ),
+    (
+        "decisions/2026-09-21-init-declares-and-clone-pulls.md",
+        "двух",
+    ),
+    ("decisions/2026-09-21-memory-is-kept-per-infobase.md", "три"),
+    (
+        "decisions/2026-09-21-target-kind-is-answered-by-three-questions.md",
+        "три,тремя",
+    ),
+    (
+        "decisions/2026-09-21-the-cluster-section-holds-ras-and-two-admin-levels.md",
+        "два,три",
+    ),
+    (
+        "decisions/2026-09-21-the-generation-guards-every-exchange.md",
+        "трёх,сорок,два",
+    ),
+    (
+        "decisions/2026-09-21-unrecoverable-work-is-asked-of-version-control.md",
+        "три",
+    ),
+    (
+        "decisions/2026-09-23-clone-shows-the-project-it-would-write.md",
+        "четыре,два",
+    ),
+    (
+        "invariants/INV.CLI.A-REFUSAL-NAMES-THE-MISSING-CREDENTIAL-LEVEL.md",
+        "три",
+    ),
+    (
+        "invariants/INV.CLI.CONCURRENT-PROCESSES-ARE-SERIALIZED.md",
+        "два",
+    ),
+    (
+        "invariants/INV.CLI.VIA-IS-REJECTED-WHERE-THERE-IS-NO-CHOICE.md",
+        "обеих",
+    ),
+    (
+        "invariants/INV.CONFIG.A-PROVIDERS-KEY-IS-NAMED-AFTER-ITS-COMMAND.md",
+        "тринадцать",
+    ),
+    (
+        "invariants/INV.CONFIG.A-STANDALONE-TARGET-ACCEPTS-EITHER-GATE-KEY.md",
+        "двух,оба",
+    ),
+    (
+        "invariants/INV.CONFIG.TARGET-DECLARATIONS-ARE-EXCLUSIVE.md",
+        "три",
+    ),
+    (
+        "invariants/INV.DOCS.A-FIELD-HAS-THE-SHAPE-THE-README-PUBLISHES.md",
+        "обе",
+    ),
+    (
+        "invariants/INV.DOCS.A-SUPERSESSION-IS-RECORDED-BY-BOTH-DECISIONS.md",
+        "обе,оба",
+    ),
+    (
+        "invariants/INV.DOCS.A-SYMBOL-NAMES-EXACTLY-ONE-RECORD.md",
+        "двух",
+    ),
+    (
+        "invariants/INV.DOCS.BOTH-GATES-READ-ONE-FRONT-MATTER-FORM.md",
+        "оба,оба",
+    ),
+    (
+        "invariants/INV.DOCS.CHANGE-CHECKLIST-COVERS-PUBLIC-CONTRACTS.md",
+        "три",
+    ),
+    (
+        "invariants/INV.DOCS.GOVERNS-IS-A-CLOSED-AXIS.md",
+        "трёх,двух",
+    ),
+    ("invariants/INV.DOCS.STATUS-IS-A-CLOSED-SET.md", "трёх,трёх"),
+    (
+        "invariants/INV.MCP.ADMISSION-IS-SHARED-BY-BOTH-TRANSPORTS.md",
+        "обоих",
+    ),
+    ("invariants/INV.MCP.SURFACE-STAYS-EXPLICIT.md", "оба"),
+    (
+        "invariants/INV.USE-CASES.A-PUSH-INTO-A-BASE-THAT-MOVED-AHEAD-IS-REFUSED.md",
+        "оба",
+    ),
+    (
+        "invariants/INV.USE-CASES.REPLACING-A-USER-DIRECTORY-ASKS-FIRST.md",
+        "три",
+    ),
+];
+
+/// Новое число в нормативной части обязано быть названо здесь.
+///
+/// Гейт не судит, верно ли число: он не даёт ему появиться молча. Назвавший строку автор
+/// отвечает на вопрос, обещание это или замер, — и либо заводит фальсификатор, либо
+/// переписывает предложение замером с датой (`spec/arch/README.md`, «Как менять»).
+///
+/// Чего перечень не видит: предложение переписали, слово осталось прежним, а считает оно
+/// теперь другое — «четыре пути» стали «четырьмя шагами». Закрыть это значило бы решать,
+/// что именно числительное считает, а прозой это не разбирается. Дыра у`же, чем кажется:
+/// переписать обещание значит сменить предмет, а смена предмета идёт преемником
+/// (`spec/arch/README.md`, «Как менять»), и у преемника новый файл и новая строка.
+/// Правку на месте, при которой слово осталось, а предмет сменился, реестр запрещает
+/// другим своим правилом.
+#[test]
+fn every_number_in_a_normative_block_is_named_here() {
+    let actual = normative_numerals(&repo_root());
+    let expected: Vec<(String, String)> = NORMATIVE_NUMERALS
+        .iter()
+        .map(|(record, words)| ((*record).to_owned(), (*words).to_owned()))
+        .collect();
+    if actual == expected {
+        return;
+    }
+
+    // Печатается расхождение и готовая строка, а не два перечня по шестьдесят записей:
+    // иначе сообщение нечитаемо ровно тогда, когда его читают.
+    let mut differs = Vec::new();
+    for (record, words) in &actual {
+        match expected.iter().find(|(named, _)| named == record) {
+            None => differs.push(format!("+ (\"{record}\", \"{words}\"),")),
+            Some((_, named)) if named != words => {
+                differs.push(format!("~ (\"{record}\", \"{words}\"), было \"{named}\""));
+            }
+            Some(_) => {}
+        }
+    }
+    for (record, _) in &expected {
+        if !actual.iter().any(|(found, _)| found == record) {
+            differs.push(format!("- (\"{record}\", …),"));
+        }
+    }
+    if differs.is_empty() {
+        // Состав тот же, а порядок другой: перечень отсортирован по пути, и `contracts`
+        // идёт раньше `decisions`, а те — раньше `invariants`. Без этой ветки сообщение
+        // было бы пустым ровно на самой частой ошибке новичка.
+        panic!(
+            "состав перечня NORMATIVE_NUMERALS верен, а порядок строк — нет: \
+             сортировка по пути записи, `contracts` → `decisions` → `invariants`"
+        );
+    }
+
+    panic!(
+        "числа нормативной части разошлись с перечнем NORMATIVE_NUMERALS:\n{}\n",
+        differs.join("\n")
+    );
+}
+
+/// У решения ровно один блок `**Решение.**`.
+///
+/// README требовал этого и прежде, а гейт не проверял. Теперь на блоке держится разбор
+/// нормативной прозы: решение без него отдаёт один заголовок, и число в теле пройдёт
+/// мимо перечня молча.
+#[test]
+fn every_decision_has_exactly_one_decision_block() {
+    let root = repo_root();
+    let mut wrong = Vec::new();
+    for path in record_paths(&root.join("spec/arch/decisions")) {
+        let text = std::fs::read_to_string(&path).expect("record is readable");
+        let blocks = lines_outside_fences(&text)
+            .filter(|(line, fenced)| !fenced && line.starts_with("**Решение.**"))
+            .count();
+        if blocks != 1 {
+            wrong.push(format!("{}: блоков {blocks}", path.display()));
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "у решения обязан быть ровно один блок `**Решение.**`:\n{}",
+        wrong.join("\n")
+    );
+}
