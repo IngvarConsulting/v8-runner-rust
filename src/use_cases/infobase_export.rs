@@ -6,13 +6,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::config::model::AppConfig;
+use crate::domain::capability::{Implementation, Provider, ProviderReceipt};
 use crate::domain::execution::{ExecutionError, ExecutionOutcome, ExecutionStatus, StepResult};
 use crate::domain::infobase_export::{
     ConfigurationState, ConfigurationSubject, ExportConfigurationPackageRequest,
     ExportConfigurationPackageResult, ExportInfobaseSnapshotRequest, ExportInfobaseSnapshotResult,
-    ExportPhase, ExportProvider, ExportTargetState, ProviderEvidence, ProviderImplementation,
-    ProviderReceipt, RestoreInfobaseSnapshotRequest, RestoreInfobaseSnapshotResult,
-    RestoreTargetMode,
+    ExportTargetState, InfobaseTransferPhase, RestoreInfobaseSnapshotRequest,
+    RestoreInfobaseSnapshotResult, RestoreTargetMode,
 };
 use crate::platform::designer::DesignerDsl;
 use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
@@ -45,14 +45,14 @@ const CONFIGURATION_COMMAND: &str = "infobase.configuration.export";
 const SNAPSHOT_COMMAND: &str = "infobase.dump";
 
 #[derive(Debug, Clone)]
-pub struct PreparedExportProvider {
+pub struct PreparedTransferProvider {
     receipt: ProviderReceipt,
-    provider: ExportProvider,
+    provider: Provider,
     /// `None` у исполнителя без утилиты на этой машине — чужого агента.
     executable: Option<PathBuf>,
 }
 
-impl PreparedExportProvider {
+impl PreparedTransferProvider {
     pub fn receipt(&self) -> &ProviderReceipt {
         &self.receipt
     }
@@ -63,7 +63,7 @@ pub fn execute_configuration_export(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &ExportConfigurationPackageRequest,
-    prepared: &PreparedExportProvider,
+    prepared: &PreparedTransferProvider,
 ) -> UseCaseResult<ExportConfigurationPackageResult> {
     let mut result =
         ExportConfigurationPackageResult::new(request.clone(), Some(prepared.receipt.clone()));
@@ -72,13 +72,18 @@ pub fn execute_configuration_export(
             context,
             error,
             result,
-            ExportPhase::Validation,
+            InfobaseTransferPhase::Validation,
         ));
     }
     let provider = prepared.provider;
 
     let output = resolve_output(config, &request.output).map_err(|error| {
-        configuration_failure(context, error, result.clone(), ExportPhase::ResolveTarget)
+        configuration_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::ResolveTarget,
+        )
     })?;
     result.output = output.target.clone();
     let _target_lock = acquire_target_lock(
@@ -88,13 +93,28 @@ pub fn execute_configuration_export(
         TARGET_LOCK_WAIT,
     )
     .map_err(|error| {
-        configuration_failure(context, error, result.clone(), ExportPhase::TargetLock)
+        configuration_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::TargetLock,
+        )
     })?;
     let output_observation = observe_locked_output(&output).map_err(|error| {
-        configuration_failure(context, error, result.clone(), ExportPhase::ResolveTarget)
+        configuration_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::ResolveTarget,
+        )
     })?;
     cleanup_export_orphans(&output, &[".infobase-config-stage-"]).map_err(|error| {
-        configuration_failure(context, error, result.clone(), ExportPhase::OrphanCleanup)
+        configuration_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::OrphanCleanup,
+        )
     })?;
     let publication = StagedPublication::prepare_file(
         &output.target,
@@ -103,7 +123,12 @@ pub fn execute_configuration_export(
         request.subject.artifact_kind().file_extension(),
     )
     .map_err(|error| {
-        configuration_failure(context, error, result.clone(), ExportPhase::PrepareStaging)
+        configuration_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::PrepareStaging,
+        )
     })?;
 
     let provider_started = Instant::now();
@@ -122,7 +147,7 @@ pub fn execute_configuration_export(
                 context,
                 publication.cleanup_failure(error),
                 result,
-                ExportPhase::ProviderCommand,
+                InfobaseTransferPhase::ProviderCommand,
             ))
         }
     };
@@ -131,13 +156,13 @@ pub fn execute_configuration_export(
             context,
             publication.cleanup_failure(error),
             result,
-            ExportPhase::ProviderCommand,
+            InfobaseTransferPhase::ProviderCommand,
         ));
     }
     result.steps.push(
         StepResult::succeeded(
-            ExportPhase::ProviderCommand.as_str(),
-            ExportPhase::ProviderCommand.kind(),
+            InfobaseTransferPhase::ProviderCommand.as_str(),
+            InfobaseTransferPhase::ProviderCommand.kind(),
             provider_started.elapsed().as_millis() as u64,
         )
         .with_target(publication.staging_path().display().to_string()),
@@ -147,7 +172,7 @@ pub fn execute_configuration_export(
             context,
             publication.cleanup_failure(error),
             result,
-            ExportPhase::ValidateProviderOutput,
+            InfobaseTransferPhase::ValidateProviderOutput,
         ));
     }
     record_deferred_process_interruption(
@@ -162,7 +187,7 @@ pub fn execute_configuration_export(
             context,
             publication.cleanup_failure(error),
             result,
-            ExportPhase::BeforePublication,
+            InfobaseTransferPhase::BeforePublication,
         ));
     }
     revalidate_before_publish(&output, &output_observation, &publication).map_err(|error| {
@@ -170,7 +195,7 @@ pub fn execute_configuration_export(
             context,
             error,
             result.clone(),
-            ExportPhase::PublishTargetRevalidation,
+            InfobaseTransferPhase::PublishTargetRevalidation,
         )
     })?;
     let publication_started = Instant::now();
@@ -184,13 +209,13 @@ pub fn execute_configuration_export(
                 context,
                 failure.error,
                 result.clone(),
-                ExportPhase::Publication,
+                InfobaseTransferPhase::Publication,
             )
         })?;
     result.steps.push(
         StepResult::succeeded(
-            ExportPhase::Publication.as_str(),
-            ExportPhase::Publication.kind(),
+            InfobaseTransferPhase::Publication.as_str(),
+            InfobaseTransferPhase::Publication.kind(),
             publication_started.elapsed().as_millis() as u64,
         )
         .with_target(result.output.display().to_string()),
@@ -225,7 +250,7 @@ pub fn execute_infobase_snapshot(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &ExportInfobaseSnapshotRequest,
-    prepared: &PreparedExportProvider,
+    prepared: &PreparedTransferProvider,
 ) -> UseCaseResult<ExportInfobaseSnapshotResult> {
     let mut result =
         ExportInfobaseSnapshotResult::new(request.clone(), Some(prepared.receipt.clone()));
@@ -234,13 +259,18 @@ pub fn execute_infobase_snapshot(
             context,
             error,
             result,
-            ExportPhase::Validation,
+            InfobaseTransferPhase::Validation,
         ));
     }
     let provider = prepared.provider;
 
     let output = resolve_output(config, &request.output).map_err(|error| {
-        snapshot_failure(context, error, result.clone(), ExportPhase::ResolveTarget)
+        snapshot_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::ResolveTarget,
+        )
     })?;
     result.output = output.target.clone();
     let _target_lock = acquire_target_lock(
@@ -249,12 +279,29 @@ pub fn execute_infobase_snapshot(
         SNAPSHOT_COMMAND,
         TARGET_LOCK_WAIT,
     )
-    .map_err(|error| snapshot_failure(context, error, result.clone(), ExportPhase::TargetLock))?;
+    .map_err(|error| {
+        snapshot_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::TargetLock,
+        )
+    })?;
     let output_observation = observe_locked_output(&output).map_err(|error| {
-        snapshot_failure(context, error, result.clone(), ExportPhase::ResolveTarget)
+        snapshot_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::ResolveTarget,
+        )
     })?;
     cleanup_export_orphans(&output, &[".infobase-dt-stage-"]).map_err(|error| {
-        snapshot_failure(context, error, result.clone(), ExportPhase::OrphanCleanup)
+        snapshot_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::OrphanCleanup,
+        )
     })?;
     let publication = StagedPublication::prepare_file(
         &output.target,
@@ -263,7 +310,12 @@ pub fn execute_infobase_snapshot(
         "dt",
     )
     .map_err(|error| {
-        snapshot_failure(context, error, result.clone(), ExportPhase::PrepareStaging)
+        snapshot_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::PrepareStaging,
+        )
     })?;
 
     let provider_started = Instant::now();
@@ -280,7 +332,7 @@ pub fn execute_infobase_snapshot(
                 context,
                 publication.cleanup_failure(error),
                 result,
-                ExportPhase::ProviderCommand,
+                InfobaseTransferPhase::ProviderCommand,
             ))
         }
     };
@@ -289,13 +341,13 @@ pub fn execute_infobase_snapshot(
             context,
             publication.cleanup_failure(error),
             result,
-            ExportPhase::ProviderCommand,
+            InfobaseTransferPhase::ProviderCommand,
         ));
     }
     result.steps.push(
         StepResult::succeeded(
-            ExportPhase::ProviderCommand.as_str(),
-            ExportPhase::ProviderCommand.kind(),
+            InfobaseTransferPhase::ProviderCommand.as_str(),
+            InfobaseTransferPhase::ProviderCommand.kind(),
             provider_started.elapsed().as_millis() as u64,
         )
         .with_target(publication.staging_path().display().to_string()),
@@ -305,7 +357,7 @@ pub fn execute_infobase_snapshot(
             context,
             publication.cleanup_failure(error),
             result,
-            ExportPhase::ValidateProviderOutput,
+            InfobaseTransferPhase::ValidateProviderOutput,
         ));
     }
     record_deferred_process_interruption(
@@ -320,7 +372,7 @@ pub fn execute_infobase_snapshot(
             context,
             publication.cleanup_failure(error),
             result,
-            ExportPhase::BeforePublication,
+            InfobaseTransferPhase::BeforePublication,
         ));
     }
     revalidate_before_publish(&output, &output_observation, &publication).map_err(|error| {
@@ -328,7 +380,7 @@ pub fn execute_infobase_snapshot(
             context,
             error,
             result.clone(),
-            ExportPhase::PublishTargetRevalidation,
+            InfobaseTransferPhase::PublishTargetRevalidation,
         )
     })?;
     let publication_started = Instant::now();
@@ -342,13 +394,13 @@ pub fn execute_infobase_snapshot(
                 context,
                 failure.error,
                 result.clone(),
-                ExportPhase::Publication,
+                InfobaseTransferPhase::Publication,
             )
         })?;
     result.steps.push(
         StepResult::succeeded(
-            ExportPhase::Publication.as_str(),
-            ExportPhase::Publication.kind(),
+            InfobaseTransferPhase::Publication.as_str(),
+            InfobaseTransferPhase::Publication.kind(),
             publication_started.elapsed().as_millis() as u64,
         )
         .with_target(result.output.display().to_string()),
@@ -427,14 +479,14 @@ pub fn prepare_infobase_restore(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &RestoreInfobaseSnapshotRequest,
-) -> Result<PreparedExportProvider, UseCaseFailure<RestoreInfobaseSnapshotResult>> {
+) -> Result<PreparedTransferProvider, UseCaseFailure<RestoreInfobaseSnapshotResult>> {
     if let Err(error) = validate_restore_request(request) {
         let result = RestoreInfobaseSnapshotResult::new(request.clone(), None);
         return Err(restore_failure(
             context,
             error,
             result,
-            ExportPhase::Validation,
+            InfobaseTransferPhase::Validation,
         ));
     }
 
@@ -444,11 +496,11 @@ pub fn prepare_infobase_restore(
             context,
             error,
             result,
-            ExportPhase::Validation,
+            InfobaseTransferPhase::Validation,
         ));
     }
 
-    let intent = ExportIntent::SnapshotRestore {
+    let intent = InfobaseTransferIntent::SnapshotRestore {
         expects_absent_target: request.target_mode == RestoreTargetMode::Create,
     };
     match select_provider(context, config, intent) {
@@ -459,7 +511,7 @@ pub fn prepare_infobase_restore(
                 context,
                 error,
                 result,
-                ExportPhase::ProviderSelection,
+                InfobaseTransferPhase::ProviderSelection,
             ))
         }
     }
@@ -469,7 +521,7 @@ pub fn preview_infobase_restore(
     _context: &ExecutionContext,
     _config: &AppConfig,
     request: &RestoreInfobaseSnapshotRequest,
-    prepared: &PreparedExportProvider,
+    prepared: &PreparedTransferProvider,
 ) -> UseCaseResult<RestoreInfobaseSnapshotResult> {
     let mut result =
         RestoreInfobaseSnapshotResult::new(request.clone(), Some(prepared.receipt().clone()));
@@ -486,7 +538,7 @@ pub fn execute_infobase_restore(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &RestoreInfobaseSnapshotRequest,
-    prepared: &PreparedExportProvider,
+    prepared: &PreparedTransferProvider,
 ) -> UseCaseResult<RestoreInfobaseSnapshotResult> {
     let mut result =
         RestoreInfobaseSnapshotResult::new(request.clone(), Some(prepared.receipt.clone()));
@@ -495,7 +547,7 @@ pub fn execute_infobase_restore(
             context,
             error,
             result,
-            ExportPhase::Validation,
+            InfobaseTransferPhase::Validation,
         ));
     }
     let target_present = match validate_restore_target(config, request.target_mode) {
@@ -505,7 +557,7 @@ pub fn execute_infobase_restore(
                 context,
                 error,
                 result,
-                ExportPhase::ResolveTarget,
+                InfobaseTransferPhase::ResolveTarget,
             ))
         }
     };
@@ -514,7 +566,7 @@ pub fn execute_infobase_restore(
             context,
             error,
             result,
-            ExportPhase::BeforePublication,
+            InfobaseTransferPhase::BeforePublication,
         ));
     }
 
@@ -534,7 +586,7 @@ pub fn execute_infobase_restore(
                 context,
                 error,
                 result,
-                ExportPhase::ProviderCommand,
+                InfobaseTransferPhase::ProviderCommand,
             ));
         }
     };
@@ -547,13 +599,13 @@ pub fn execute_infobase_restore(
             context,
             error,
             result,
-            ExportPhase::ProviderCommand,
+            InfobaseTransferPhase::ProviderCommand,
         ));
     }
     result.steps.push(
         StepResult::succeeded(
-            ExportPhase::ProviderCommand.as_str(),
-            ExportPhase::ProviderCommand.kind(),
+            InfobaseTransferPhase::ProviderCommand.as_str(),
+            InfobaseTransferPhase::ProviderCommand.kind(),
             provider_started.elapsed().as_millis() as u64,
         )
         .with_target(request.input.display().to_string()),
@@ -590,20 +642,20 @@ fn observe_target_infobase(config: &AppConfig) -> Result<bool, AppError> {
 fn run_restore_provider(
     context: &ExecutionContext,
     config: &AppConfig,
-    provider: ExportProvider,
+    provider: Provider,
     executable: Option<&Path>,
     source_file: &Path,
 ) -> Result<PlatformCommandResult, AppError> {
     match provider {
         // Исполнитель без адаптера: отказ, а не паника — строка матрицы опередила код.
-        other @ (ExportProvider::IbcmdRs | ExportProvider::Webinst) => {
+        other @ (Provider::IbcmdRs | Provider::Webinst) => {
             Err(crate::use_cases::unimplemented_provider(
                 crate::domain::capability::Operation::InfobaseRestore,
                 other,
             ))
         }
-        ExportProvider::Agent => agent::restore_snapshot(context, config, executable, source_file),
-        ExportProvider::Designer => {
+        Provider::Agent => agent::restore_snapshot(context, config, executable, source_file),
+        Provider::Designer => {
             let executable = executable_of(executable)?;
             let runner = crate::platform::process::ProcessExecutor;
             let log = provider_log_path(config, "infobase-restore")?;
@@ -619,7 +671,7 @@ fn run_restore_provider(
             .restore_infobase(source_file)
             .map_err(AppError::from)
         }
-        ExportProvider::Ibcmd => Err(AppError::capability(
+        Provider::Ibcmd => Err(AppError::capability(
             "IBCMD DT restore is experimental and cannot be dispatched".to_owned(),
         )),
     }
@@ -629,7 +681,7 @@ fn restore_failure(
     context: &ExecutionContext,
     error: AppError,
     mut result: RestoreInfobaseSnapshotResult,
-    phase: ExportPhase,
+    phase: InfobaseTransferPhase,
 ) -> UseCaseFailure<RestoreInfobaseSnapshotResult> {
     record_execution_failure(context, &error, phase, &mut result.execution);
     result.steps.push(failed_step(phase, &error));
@@ -699,18 +751,18 @@ pub fn prepare_configuration_export(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &ExportConfigurationPackageRequest,
-) -> Result<PreparedExportProvider, UseCaseFailure<ExportConfigurationPackageResult>> {
+) -> Result<PreparedTransferProvider, UseCaseFailure<ExportConfigurationPackageResult>> {
     if let Err(error) = validate_configuration_request(request) {
         let result = ExportConfigurationPackageResult::new(request.clone(), None);
         return Err(configuration_failure(
             context,
             error,
             result,
-            ExportPhase::Validation,
+            InfobaseTransferPhase::Validation,
         ));
     }
 
-    match select_provider(context, config, ExportIntent::Configuration) {
+    match select_provider(context, config, InfobaseTransferIntent::Configuration) {
         Ok(prepared) => Ok(prepared),
         Err((error, receipt)) => {
             let result = ExportConfigurationPackageResult::new(request.clone(), Some(receipt));
@@ -718,7 +770,7 @@ pub fn prepare_configuration_export(
                 context,
                 error,
                 result,
-                ExportPhase::ProviderSelection,
+                InfobaseTransferPhase::ProviderSelection,
             ))
         }
     }
@@ -728,18 +780,18 @@ pub fn prepare_infobase_snapshot(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &ExportInfobaseSnapshotRequest,
-) -> Result<PreparedExportProvider, UseCaseFailure<ExportInfobaseSnapshotResult>> {
+) -> Result<PreparedTransferProvider, UseCaseFailure<ExportInfobaseSnapshotResult>> {
     if let Err(error) = validate_snapshot_output(&request.output) {
         let result = ExportInfobaseSnapshotResult::new(request.clone(), None);
         return Err(snapshot_failure(
             context,
             error,
             result,
-            ExportPhase::Validation,
+            InfobaseTransferPhase::Validation,
         ));
     }
 
-    match select_provider(context, config, ExportIntent::Snapshot) {
+    match select_provider(context, config, InfobaseTransferIntent::Snapshot) {
         Ok(prepared) => Ok(prepared),
         Err((error, receipt)) => {
             let result = ExportInfobaseSnapshotResult::new(request.clone(), Some(receipt));
@@ -747,7 +799,7 @@ pub fn prepare_infobase_snapshot(
                 context,
                 error,
                 result,
-                ExportPhase::ProviderSelection,
+                InfobaseTransferPhase::ProviderSelection,
             ))
         }
     }
@@ -757,13 +809,18 @@ pub fn preview_configuration_export(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &ExportConfigurationPackageRequest,
-    prepared: &PreparedExportProvider,
+    prepared: &PreparedTransferProvider,
 ) -> UseCaseResult<ExportConfigurationPackageResult> {
     let mut result =
         ExportConfigurationPackageResult::new(request.clone(), Some(prepared.receipt().clone()));
     result.mark_preview_failure();
     let output = resolve_output(config, &request.output).map_err(|error| {
-        configuration_failure(context, error, result.clone(), ExportPhase::ResolveTarget)
+        configuration_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::ResolveTarget,
+        )
     })?;
     result.output = output.target;
     result.mark_preview();
@@ -774,13 +831,18 @@ pub fn preview_infobase_snapshot(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &ExportInfobaseSnapshotRequest,
-    prepared: &PreparedExportProvider,
+    prepared: &PreparedTransferProvider,
 ) -> UseCaseResult<ExportInfobaseSnapshotResult> {
     let mut result =
         ExportInfobaseSnapshotResult::new(request.clone(), Some(prepared.receipt().clone()));
     result.mark_preview_failure();
     let output = resolve_output(config, &request.output).map_err(|error| {
-        snapshot_failure(context, error, result.clone(), ExportPhase::ResolveTarget)
+        snapshot_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::ResolveTarget,
+        )
     })?;
     result.output = output.target;
     result.mark_preview();
@@ -788,13 +850,13 @@ pub fn preview_infobase_snapshot(
 }
 
 #[derive(Debug, Clone, Copy)]
-enum ExportIntent {
+enum InfobaseTransferIntent {
     Configuration,
     Snapshot,
     SnapshotRestore { expects_absent_target: bool },
 }
 
-impl ExportIntent {
+impl InfobaseTransferIntent {
     const fn operation(self) -> crate::domain::capability::Operation {
         use crate::domain::capability::Operation;
         match self {
@@ -808,8 +870,8 @@ impl ExportIntent {
 fn select_provider(
     context: &ExecutionContext,
     config: &AppConfig,
-    intent: ExportIntent,
-) -> Result<PreparedExportProvider, (AppError, ProviderReceipt)> {
+    intent: InfobaseTransferIntent,
+) -> Result<PreparedTransferProvider, (AppError, ProviderReceipt)> {
     use crate::domain::capability::SkippedProvider;
 
     // Кандидаты приходят из матрицы: переопределение — один исполнитель без отката,
@@ -843,7 +905,7 @@ fn select_provider(
             };
             return Err((error, receipt));
         }
-        let (implementation, _evidence, implementation_reason) = capability(intent, provider);
+        let (implementation, implementation_reason) = capability(intent, provider);
         // Экспериментальный адаптер доступен только переопределением: в цепочку умолчаний
         // он не входит, а названный явно — пробуется, потому что за этим и назвали.
         let named_explicitly = matches!(
@@ -852,12 +914,12 @@ fn select_provider(
         );
         // У автономного сервера шлюз — единственный исполнитель: он не эксперимент, а
         // строка матрицы (`GATE_ONLY`), и в цепочку входит сам.
-        let gate_only = provider == ExportProvider::Agent && config.infobase.standalone.is_some();
-        if implementation == ProviderImplementation::Unsupported
-            || (implementation == ProviderImplementation::Experimental
-                && !named_explicitly
-                && !gate_only)
-        {
+        let gate_only = provider == Provider::Agent && config.infobase.standalone.is_some();
+        // Развилка недостижима и оставлена поясом: цепочка умолчаний отфильтрована по
+        // `Implemented`, а названный ключом исполнитель проходит по `named_explicitly`.
+        // Настоящий отказ по неверному ключу даёт проверка настроек — у экспортного
+        // семейства её нет, и это разбирается в #272.
+        if implementation == Implementation::Experimental && !named_explicitly && !gate_only {
             skipped.push(SkippedProvider {
                 provider,
                 reason: implementation_reason.to_owned(),
@@ -870,7 +932,7 @@ fn select_provider(
         match readiness(config, &mut utilities, intent, provider, utility) {
             Ok(executable) => {
                 let receipt = plan.receipt_for(provider, skipped);
-                return Ok(PreparedExportProvider {
+                return Ok(PreparedTransferProvider {
                     receipt,
                     provider,
                     executable,
@@ -897,77 +959,73 @@ fn select_provider(
     Err((error, receipt))
 }
 
+/// Есть ли у переноса адаптер под этого исполнителя, и словами — почему.
+///
+/// Улику эта таблица не называет: её держит `domain::capability`, и второго мнения о ней
+/// здесь быть не должно. Прежде называла — и расходилась с доменом в пяти строках из
+/// девяти, а читателя у значения не было ни одного. Сама таблица уходит в #272 вместе с
+/// проверкой настроек, которой у экспортного семейства нет.
 fn capability(
-    intent: ExportIntent,
-    provider: ExportProvider,
-) -> (ProviderImplementation, ProviderEvidence, &'static str) {
+    intent: InfobaseTransferIntent,
+    provider: Provider,
+) -> (Implementation, &'static str) {
     match (intent, provider) {
-        (ExportIntent::Configuration, ExportProvider::Designer) => (
-            ProviderImplementation::Implemented,
-            ProviderEvidence::ArgvTested,
+        (InfobaseTransferIntent::Configuration, Provider::Designer) => (
+            Implementation::Implemented,
             "Designer CF/CFE adapter is implemented from the documented batch contract",
         ),
-        (ExportIntent::Configuration, ExportProvider::Ibcmd) => (
-            ProviderImplementation::Implemented,
-            ProviderEvidence::ArgvTested,
+        (InfobaseTransferIntent::Configuration, Provider::Ibcmd) => (
+            Implementation::Implemented,
             "IBCMD CF/CFE adapter is implemented from the documented config-save contract",
         ),
-        (ExportIntent::Snapshot, ExportProvider::Designer) => (
-            ProviderImplementation::Implemented,
-            ProviderEvidence::ArgvTested,
+        (InfobaseTransferIntent::Snapshot, Provider::Designer) => (
+            Implementation::Implemented,
             "Designer DT adapter is implemented from the documented batch contract",
         ),
-        (ExportIntent::Snapshot, ExportProvider::Ibcmd) => (
-            ProviderImplementation::Experimental,
-            ProviderEvidence::Documented,
+        (InfobaseTransferIntent::Snapshot, Provider::Ibcmd) => (
+            Implementation::Experimental,
             "IBCMD DT export is disabled until an exclusive-access preflight is implemented",
         ),
-        (ExportIntent::SnapshotRestore { .. }, ExportProvider::Designer) => (
-            ProviderImplementation::Implemented,
-            ProviderEvidence::LiveVerified,
+        (InfobaseTransferIntent::SnapshotRestore { .. }, Provider::Designer) => (
+            Implementation::Implemented,
             "Designer DT restore is implemented and was verified against a live 8.3.27 file infobase",
         ),
-        (ExportIntent::SnapshotRestore { .. }, ExportProvider::Ibcmd) => (
-            ProviderImplementation::Experimental,
-            ProviderEvidence::LiveVerified,
+        (InfobaseTransferIntent::SnapshotRestore { .. }, Provider::Ibcmd) => (
+            Implementation::Experimental,
             "IBCMD DT restore runs but stays experimental until an exclusive-access preflight is implemented",
         ),
-        (ExportIntent::Configuration, ExportProvider::Agent) => (
-            ProviderImplementation::Experimental,
-            ProviderEvidence::ArgvTested,
+        (InfobaseTransferIntent::Configuration, Provider::Agent) => (
+            Implementation::Experimental,
             "agent CF/CFE export runs `config dump-cfg` in the agent session; named by providers.* only",
         ),
-        (ExportIntent::Snapshot, ExportProvider::Agent) => (
-            ProviderImplementation::Experimental,
-            ProviderEvidence::Documented,
+        (InfobaseTransferIntent::Snapshot, Provider::Agent) => (
+            Implementation::Experimental,
             "agent DT export runs `infobase-tools dump-ib`; named by providers.* only",
         ),
-        (ExportIntent::SnapshotRestore { .. }, ExportProvider::Agent) => (
-            ProviderImplementation::Experimental,
-            ProviderEvidence::Documented,
+        (InfobaseTransferIntent::SnapshotRestore { .. }, Provider::Agent) => (
+            Implementation::Experimental,
             "agent DT restore runs `infobase-tools restore-ib`; the agent drops the session afterwards",
         ),
         // Строка матрицы, опередившая код: исполнитель назван, адаптера у него нет.
         (_, _) => (
-            ProviderImplementation::Experimental,
-            ProviderEvidence::Documented,
+            Implementation::Experimental,
             "no export adapter is implemented for this provider in this build of the runner",
         ),
     }
 }
 
 /// Утилита исполнителя; `None` — исполнителю на этой машине утилита не нужна.
-fn provider_utility(config: &AppConfig, provider: ExportProvider) -> Option<UtilityType> {
+fn provider_utility(config: &AppConfig, provider: Provider) -> Option<UtilityType> {
     match provider {
-        ExportProvider::Designer => Some(UtilityType::V8),
+        Provider::Designer => Some(UtilityType::V8),
         // Управляемому агенту нужна платформа, чужому и шлюзу автономного сервера — ничего.
-        ExportProvider::Agent if config.infobase.standalone.is_some() => None,
-        ExportProvider::Agent => match config.tools.designer_agent.mode() {
+        Provider::Agent if config.infobase.standalone.is_some() => None,
+        Provider::Agent => match config.tools.designer_agent.mode() {
             Ok(crate::config::model::DesignerAgentMode::Attached { .. }) => None,
             _ => Some(UtilityType::V8),
         },
-        // Только Designer, Agent и ibcmd доходят до готовности: у остальных нет адаптера,
-        // и они отсеиваются выше как нереализованные.
+        // Только Designer, Agent и ibcmd имеют адаптер. Остальных сюда не пускает
+        // проверка настроек, отвергающая ключ без строки в матрице.
         _ => Some(UtilityType::Ibcmd),
     }
 }
@@ -975,8 +1033,8 @@ fn provider_utility(config: &AppConfig, provider: ExportProvider) -> Option<Util
 fn readiness(
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
-    intent: ExportIntent,
-    provider: ExportProvider,
+    intent: InfobaseTransferIntent,
+    provider: Provider,
     utility: Option<UtilityType>,
 ) -> Result<Option<PathBuf>, String> {
     // Автономный сервер обслуживает существующую базу: файловых проверок нет, а
@@ -984,7 +1042,7 @@ fn readiness(
     if config.infobase.standalone.is_some() {
         if matches!(
             intent,
-            ExportIntent::SnapshotRestore {
+            InfobaseTransferIntent::SnapshotRestore {
                 expects_absent_target: true
             }
         ) {
@@ -995,13 +1053,13 @@ fn readiness(
         }
     } else {
         match intent {
-            ExportIntent::SnapshotRestore {
+            InfobaseTransferIntent::SnapshotRestore {
                 expects_absent_target: true,
             } => validate_restore_target_connection(config)?,
             _ => validate_file_infobase_readiness(config)?,
         }
     }
-    if provider == ExportProvider::Ibcmd {
+    if provider == Provider::Ibcmd {
         IbcmdConnection::from_infobase(&config.infobase)
             .map_err(|error| format!("connection is not ready for IBCMD: {error}"))?;
     }
@@ -1073,7 +1131,7 @@ fn configuration_failure(
     context: &ExecutionContext,
     error: AppError,
     mut result: ExportConfigurationPackageResult,
-    phase: ExportPhase,
+    phase: InfobaseTransferPhase,
 ) -> UseCaseFailure<ExportConfigurationPackageResult> {
     record_execution_failure(context, &error, phase, &mut result.execution);
     result.steps.push(failed_step(phase, &error));
@@ -1084,7 +1142,7 @@ fn snapshot_failure(
     context: &ExecutionContext,
     error: AppError,
     mut result: ExportInfobaseSnapshotResult,
-    phase: ExportPhase,
+    phase: InfobaseTransferPhase,
 ) -> UseCaseFailure<ExportInfobaseSnapshotResult> {
     record_execution_failure(context, &error, phase, &mut result.execution);
     result.steps.push(failed_step(phase, &error));
@@ -1103,14 +1161,14 @@ fn infobase_use_case_error(error: AppError) -> UseCaseError {
     }
 }
 
-fn failed_step(phase: ExportPhase, error: &AppError) -> StepResult {
+fn failed_step(phase: InfobaseTransferPhase, error: &AppError) -> StepResult {
     StepResult::failed(phase.as_str(), phase.kind(), 0).with_message(error.to_string())
 }
 
 fn record_execution_failure(
     _context: &ExecutionContext,
     error: &AppError,
-    phase: ExportPhase,
+    phase: InfobaseTransferPhase,
     execution: &mut ExecutionOutcome<()>,
 ) {
     let message = error.to_string();
@@ -1425,7 +1483,7 @@ fn acquire_target_lock(
 fn run_configuration_provider(
     context: &ExecutionContext,
     config: &AppConfig,
-    provider: ExportProvider,
+    provider: Provider,
     executable: Option<&Path>,
     state: ConfigurationState,
     subject: &ConfigurationSubject,
@@ -1438,13 +1496,13 @@ fn run_configuration_provider(
     let runner = crate::platform::process::ProcessExecutor;
     let result = match provider {
         // Исполнитель без адаптера: отказ, а не паника — строка матрицы опередила код.
-        other @ (ExportProvider::IbcmdRs | ExportProvider::Webinst) => {
+        other @ (Provider::IbcmdRs | Provider::Webinst) => {
             return Err(crate::use_cases::unimplemented_provider(
                 crate::domain::capability::Operation::ConfigurationExport,
                 other,
             ));
         }
-        ExportProvider::Agent => {
+        Provider::Agent => {
             return agent::export_configuration(
                 context,
                 config,
@@ -1454,7 +1512,7 @@ fn run_configuration_provider(
                 staging_path,
             );
         }
-        ExportProvider::Designer => {
+        Provider::Designer => {
             let executable = executable_of(executable)?;
             let log = provider_log_path(config, "configuration-export")?;
             let dsl = DesignerDsl::new(
@@ -1472,7 +1530,7 @@ fn run_configuration_provider(
             }
             .map_err(AppError::from)?
         }
-        ExportProvider::Ibcmd => {
+        Provider::Ibcmd => {
             let executable = executable_of(executable)?;
             let connection =
                 IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
@@ -1502,20 +1560,20 @@ fn run_configuration_provider(
 fn run_snapshot_provider(
     context: &ExecutionContext,
     config: &AppConfig,
-    provider: ExportProvider,
+    provider: Provider,
     executable: Option<&Path>,
     staging_path: &Path,
 ) -> Result<PlatformCommandResult, AppError> {
     match provider {
         // Исполнитель без адаптера: отказ, а не паника — строка матрицы опередила код.
-        other @ (ExportProvider::IbcmdRs | ExportProvider::Webinst) => {
+        other @ (Provider::IbcmdRs | Provider::Webinst) => {
             Err(crate::use_cases::unimplemented_provider(
                 crate::domain::capability::Operation::InfobaseDump,
                 other,
             ))
         }
-        ExportProvider::Agent => agent::export_snapshot(context, config, executable, staging_path),
-        ExportProvider::Designer => {
+        Provider::Agent => agent::export_snapshot(context, config, executable, staging_path),
+        Provider::Designer => {
             let executable = executable_of(executable)?;
             let runner = crate::platform::process::ProcessExecutor;
             let log = provider_log_path(config, "infobase-dump")?;
@@ -1531,7 +1589,7 @@ fn run_snapshot_provider(
             .dump_infobase(staging_path)
             .map_err(AppError::from)
         }
-        ExportProvider::Ibcmd => Err(AppError::capability(
+        Provider::Ibcmd => Err(AppError::capability(
             "IBCMD DT export is experimental and cannot be dispatched".to_owned(),
         )),
     }
@@ -1604,10 +1662,9 @@ mod tests {
     use crate::config::model::{
         AppConfig, BuildConfig, InfobaseConfig, McpConfig, SourceFormat, TestsConfig, ToolsConfig,
     };
+    use crate::domain::capability::{Implementation, Provider};
     use crate::domain::execution::{ExecutionOutcome, ExecutionStatus};
-    use crate::domain::infobase_export::{
-        ConfigurationSubject, ExportProvider, ProviderImplementation,
-    };
+    use crate::domain::infobase_export::ConfigurationSubject;
     use crate::platform::process::ProcessError;
     use crate::support::error::AppError;
     use crate::use_cases::context::ExecutionContext;
@@ -1617,7 +1674,7 @@ mod tests {
         acquire_target_lock, capability, cleanup_export_orphans, observe_locked_output,
         record_execution_failure, resolve_output, revalidate_before_publish,
         revalidate_output_observation, validate_configuration_output, validate_snapshot_output,
-        ExportIntent, ExportPhase, SNAPSHOT_COMMAND, TARGET_LOCK_WAIT,
+        InfobaseTransferIntent, InfobaseTransferPhase, SNAPSHOT_COMMAND, TARGET_LOCK_WAIT,
     };
 
     fn config(base: &Path, work: &Path) -> AppConfig {
@@ -1664,10 +1721,10 @@ mod tests {
         assert!(validate_snapshot_output(Path::new("dist/base.dt")).is_ok());
         assert!(validate_snapshot_output(Path::new("dist/base.backup")).is_err());
 
-        let (designer, _, _) = capability(ExportIntent::Snapshot, ExportProvider::Designer);
-        assert_eq!(designer, ProviderImplementation::Implemented);
-        let (ibcmd, _, _) = capability(ExportIntent::Snapshot, ExportProvider::Ibcmd);
-        assert_eq!(ibcmd, ProviderImplementation::Experimental);
+        let (designer, _) = capability(InfobaseTransferIntent::Snapshot, Provider::Designer);
+        assert_eq!(designer, Implementation::Implemented);
+        let (ibcmd, _) = capability(InfobaseTransferIntent::Snapshot, Provider::Ibcmd);
+        assert_eq!(ibcmd, Implementation::Experimental);
     }
 
     #[test]
@@ -1869,7 +1926,7 @@ mod tests {
         record_execution_failure(
             &context,
             &error,
-            ExportPhase::ProviderCommand,
+            InfobaseTransferPhase::ProviderCommand,
             &mut execution,
         );
 
@@ -1890,7 +1947,12 @@ mod tests {
         let mut execution = ExecutionOutcome::new(ExecutionStatus::Failed);
         let error = AppError::Runtime("publication failed".to_owned());
 
-        record_execution_failure(&context, &error, ExportPhase::Publication, &mut execution);
+        record_execution_failure(
+            &context,
+            &error,
+            InfobaseTransferPhase::Publication,
+            &mut execution,
+        );
 
         assert_eq!(execution.status, ExecutionStatus::Failed);
         assert_eq!(execution.errors[0].code, "runtime_failure");

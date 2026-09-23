@@ -24,6 +24,7 @@ use crate::domain::artifact::{
 };
 use crate::domain::artifacts::{ArtifactBuildMetadata, ArtifactBuildMode, ArtifactsResult};
 use crate::domain::build::{BuildMode, BuildResult};
+use crate::domain::capability::ProviderReceipt;
 use crate::domain::convert::{ConvertDirection, ConvertResult, ConvertScope};
 use crate::domain::dump::{DumpMode, DumpResult};
 use crate::domain::execution::{
@@ -33,7 +34,7 @@ use crate::domain::execution::{
 use crate::domain::infobase_export::{
     ConfigurationState, ConfigurationSubject, ExportConfigurationPackageRequest,
     ExportConfigurationPackageResult, ExportInfobaseSnapshotRequest, ExportInfobaseSnapshotResult,
-    ExportPhase, ProviderReceipt, RestoreInfobaseSnapshotRequest, RestoreInfobaseSnapshotResult,
+    InfobaseTransferPhase, RestoreInfobaseSnapshotRequest, RestoreInfobaseSnapshotResult,
     RestoreTargetMode,
 };
 use crate::domain::init::{InitResult, InitStep, InitStepStatus};
@@ -1040,15 +1041,15 @@ fn execute_dump(
 pub enum PreparedInfobaseCommand {
     Configuration {
         request: ExportConfigurationPackageRequest,
-        provider: infobase_export::PreparedExportProvider,
+        provider: infobase_export::PreparedTransferProvider,
     },
     Snapshot {
         request: ExportInfobaseSnapshotRequest,
-        provider: infobase_export::PreparedExportProvider,
+        provider: infobase_export::PreparedTransferProvider,
     },
     Restore {
         request: RestoreInfobaseSnapshotRequest,
-        provider: infobase_export::PreparedExportProvider,
+        provider: infobase_export::PreparedTransferProvider,
     },
 }
 
@@ -1112,7 +1113,7 @@ pub fn render_invalid_infobase_request(
         presenter,
         error,
         "provider selection was not attempted because the request is invalid",
-        ExportPhase::Validation,
+        InfobaseTransferPhase::Validation,
         dry_run,
     )
 }
@@ -1122,7 +1123,7 @@ pub fn render_infobase_pre_dispatch_failure(
     presenter: &Presenter,
     error: UseCaseError,
     _selection_reason: &str,
-    phase: ExportPhase,
+    phase: InfobaseTransferPhase,
     dry_run: bool,
 ) -> UseCaseError {
     // Выбор исполнителя не начинался: квитанции нет, причина — в ошибке конверта.
@@ -1476,7 +1477,7 @@ pub fn preview_prepared_infobase_command(
 fn execute_infobase_restore(
     config: &AppConfig,
     request: RestoreInfobaseSnapshotRequest,
-    prepared: infobase_export::PreparedExportProvider,
+    prepared: infobase_export::PreparedTransferProvider,
     context: &ExecutionContext,
     presenter: &Presenter,
     clean_before_execution: bool,
@@ -1559,7 +1560,7 @@ fn execute_infobase_restore(
 fn execute_infobase_configuration_export(
     config: &AppConfig,
     request: ExportConfigurationPackageRequest,
-    prepared: infobase_export::PreparedExportProvider,
+    prepared: infobase_export::PreparedTransferProvider,
     context: &ExecutionContext,
     presenter: &Presenter,
     clean_before_execution: bool,
@@ -1644,7 +1645,7 @@ fn execute_infobase_configuration_export(
 fn execute_infobase_dump(
     config: &AppConfig,
     request: ExportInfobaseSnapshotRequest,
-    prepared: infobase_export::PreparedExportProvider,
+    prepared: infobase_export::PreparedTransferProvider,
     context: &ExecutionContext,
     presenter: &Presenter,
     clean_before_execution: bool,
@@ -1724,11 +1725,11 @@ fn execute_infobase_dump(
     outcome
 }
 
-fn infobase_pre_dispatch_execution_phase(workspace_lock_acquired: bool) -> ExportPhase {
+fn infobase_pre_dispatch_execution_phase(workspace_lock_acquired: bool) -> InfobaseTransferPhase {
     if workspace_lock_acquired {
-        ExportPhase::WorkspacePreparation
+        InfobaseTransferPhase::WorkspacePreparation
     } else {
-        ExportPhase::WorkspaceLock
+        InfobaseTransferPhase::WorkspaceLock
     }
 }
 
@@ -1768,7 +1769,7 @@ fn configuration_pre_dispatch_failure(
     request: &ExportConfigurationPackageRequest,
     selection: Option<ProviderReceipt>,
     error: &UseCaseError,
-    phase: ExportPhase,
+    phase: InfobaseTransferPhase,
 ) -> ExportConfigurationPackageResult {
     let mut result = ExportConfigurationPackageResult::new(request.clone(), selection);
     annotate_pre_dispatch_failure(&mut result.execution, error);
@@ -1783,7 +1784,7 @@ fn snapshot_pre_dispatch_failure(
     request: &ExportInfobaseSnapshotRequest,
     selection: Option<ProviderReceipt>,
     error: &UseCaseError,
-    phase: ExportPhase,
+    phase: InfobaseTransferPhase,
 ) -> ExportInfobaseSnapshotResult {
     let mut result = ExportInfobaseSnapshotResult::new(request.clone(), selection);
     annotate_pre_dispatch_failure(&mut result.execution, error);
@@ -1798,7 +1799,7 @@ fn restore_pre_dispatch_failure(
     request: &RestoreInfobaseSnapshotRequest,
     selection: Option<ProviderReceipt>,
     error: &UseCaseError,
-    phase: ExportPhase,
+    phase: InfobaseTransferPhase,
 ) -> RestoreInfobaseSnapshotResult {
     let mut result = RestoreInfobaseSnapshotResult::new(request.clone(), selection);
     annotate_pre_dispatch_failure(&mut result.execution, error);
@@ -2041,9 +2042,7 @@ fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Present
 }
 
 /// Строки квитанции о выборе исполнителя — одни и те же у всех команд.
-fn provider_receipt_details(
-    receipt: Option<&crate::domain::capability::ProviderReceipt>,
-) -> Vec<String> {
+fn provider_receipt_details(receipt: Option<&ProviderReceipt>) -> Vec<String> {
     let Some(receipt) = receipt else {
         return Vec::new();
     };
@@ -3157,7 +3156,7 @@ fn is_reserved_raw_launch_key(raw: &str) -> bool {
 pub(crate) struct LoadJsonData<'a> {
     /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<crate::domain::capability::ProviderReceipt>,
+    pub provider: Option<ProviderReceipt>,
 
     pub ok: bool,
     /// `false` when the run stopped at a preview instead of dispatching the platform.
@@ -3254,7 +3253,7 @@ fn build_load_envelope(result: &LoadResult) -> Envelope<LoadJsonData<'_>> {
 pub(crate) struct ArtifactsJsonData<'a> {
     /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<crate::domain::capability::ProviderReceipt>,
+    pub provider: Option<ProviderReceipt>,
 
     pub ok: bool,
     /// `false` when the run stopped at a preview instead of dispatching the platform.
@@ -4253,7 +4252,7 @@ mod tests {
     };
     use crate::domain::artifacts::ArtifactBuildMode;
     use crate::domain::execution::{ExecutionOutcome, ExecutionStatus};
-    use crate::domain::infobase_export::ExportPhase;
+    use crate::domain::infobase_export::InfobaseTransferPhase;
     use crate::domain::load::{
         CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
     };
@@ -5130,11 +5129,11 @@ mod tests {
     fn infobase_pre_dispatch_phase_distinguishes_lock_from_workspace_preparation() {
         assert_eq!(
             infobase_pre_dispatch_execution_phase(false),
-            ExportPhase::WorkspaceLock
+            InfobaseTransferPhase::WorkspaceLock
         );
         assert_eq!(
             infobase_pre_dispatch_execution_phase(true),
-            ExportPhase::WorkspacePreparation
+            InfobaseTransferPhase::WorkspacePreparation
         );
     }
 
