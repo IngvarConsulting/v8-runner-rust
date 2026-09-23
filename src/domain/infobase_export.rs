@@ -7,7 +7,7 @@ use crate::domain::execution::{ExecutionOutcome, ExecutionStatus, ExecutionStepK
 /// Closed vocabulary for every observable phase of an information-base export,
 /// including failures before provider dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExportPhase {
+pub enum InfobaseTransferPhase {
     ConfigurationLoad,
     Validation,
     ProviderSelection,
@@ -24,7 +24,7 @@ pub enum ExportPhase {
     Publication,
 }
 
-impl ExportPhase {
+impl InfobaseTransferPhase {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ConfigurationLoad => "configuration load",
@@ -97,27 +97,9 @@ impl ConfigurationSubject {
     }
 }
 
-/// Whether runner has an adapter for an exact export operation.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderImplementation {
-    Implemented,
-    Experimental,
-    Unsupported,
-}
-
-/// Strongest evidence currently attached to an implementation row.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderEvidence {
-    Documented,
-    ArgvTested,
-    LiveVerified,
-}
-
-/// Исполнитель экспорта — тот же закрытый набор, что у всех операций.
-pub use crate::domain::capability::Provider as ExportProvider;
-pub use crate::domain::capability::ProviderReceipt;
+/// Перенос базы делят с остальными операциями и словарь исполнителей, и признаки
+/// реализованности: второго набора тех же слов у него нет.
+pub use crate::domain::capability::{Evidence, Implementation, Provider, ProviderReceipt};
 
 /// Closed file format vocabulary for information-base exports.
 ///
@@ -175,7 +157,7 @@ pub enum InfobaseExportMode {
 /// Compact machine-facing plan produced by a non-executing preflight.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct InfobaseExportPlan {
-    pub provider: ExportProvider,
+    pub provider: Provider,
     pub artifact_kind: InfobaseExportArtifactKind,
     pub output: PathBuf,
 }
@@ -366,7 +348,7 @@ pub struct RestoreInfobaseSnapshotRequest {
 /// Compact machine-facing plan produced by a non-executing restore preflight.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct InfobaseRestorePlan {
-    pub provider: ExportProvider,
+    pub provider: Provider,
     pub artifact_kind: InfobaseExportArtifactKind,
     pub input: PathBuf,
     pub target_mode: RestoreTargetMode,
@@ -451,12 +433,12 @@ mod tests {
     use super::{
         ConfigurationState, ConfigurationSubject, ExportConfigurationPackageRequest,
         ExportConfigurationPackageResult, ExportInfobaseSnapshotRequest,
-        ExportInfobaseSnapshotResult, ExportPhase, ExportProvider, ExportTargetState,
-        InfobaseExportArtifactKind, ProviderImplementation, ProviderReceipt,
+        ExportInfobaseSnapshotResult, ExportTargetState, Implementation,
+        InfobaseExportArtifactKind, InfobaseTransferPhase, Provider, ProviderReceipt,
     };
     use crate::domain::execution::ExecutionStepKind;
 
-    fn chosen(provider: ExportProvider) -> Option<ProviderReceipt> {
+    fn chosen(provider: Provider) -> Option<ProviderReceipt> {
         Some(ProviderReceipt::new(
             provider,
             crate::domain::capability::ProviderOrigin::Default,
@@ -466,28 +448,31 @@ mod tests {
     #[test]
     fn export_phase_is_the_single_owner_of_step_name_and_kind() {
         assert_eq!(
-            ExportPhase::ConfigurationLoad.as_str(),
+            InfobaseTransferPhase::ConfigurationLoad.as_str(),
             "configuration load"
         );
         assert_eq!(
-            ExportPhase::ConfigurationLoad.kind(),
+            InfobaseTransferPhase::ConfigurationLoad.kind(),
             ExecutionStepKind::Validation
         );
-        assert_eq!(ExportPhase::WorkspaceLock.as_str(), "workspace lock");
         assert_eq!(
-            ExportPhase::WorkspaceLock.kind(),
+            InfobaseTransferPhase::WorkspaceLock.as_str(),
+            "workspace lock"
+        );
+        assert_eq!(
+            InfobaseTransferPhase::WorkspaceLock.kind(),
             ExecutionStepKind::PrepareWorkspace
         );
         assert_eq!(
-            ExportPhase::WorkspacePreparation.as_str(),
+            InfobaseTransferPhase::WorkspacePreparation.as_str(),
             "workspace preparation"
         );
         assert_eq!(
-            ExportPhase::WorkspacePreparation.kind(),
+            InfobaseTransferPhase::WorkspacePreparation.kind(),
             ExecutionStepKind::PrepareWorkspace
         );
         assert_eq!(
-            ExportPhase::ProviderCommand.kind(),
+            InfobaseTransferPhase::ProviderCommand.kind(),
             ExecutionStepKind::PlatformCommand
         );
     }
@@ -511,12 +496,11 @@ mod tests {
             })
         );
         assert_eq!(
-            serde_json::to_value(ExportProvider::Designer).expect("provider json"),
+            serde_json::to_value(Provider::Designer).expect("provider json"),
             json!("designer")
         );
         assert_eq!(
-            serde_json::to_value(ProviderImplementation::Experimental)
-                .expect("implementation json"),
+            serde_json::to_value(Implementation::Experimental).expect("implementation json"),
             json!("experimental")
         );
         assert_eq!(
@@ -532,7 +516,7 @@ mod tests {
             subject: ConfigurationSubject::Main,
             output: PathBuf::from("/tmp/main.cf"),
         };
-        let result = ExportConfigurationPackageResult::new(request, chosen(ExportProvider::Ibcmd));
+        let result = ExportConfigurationPackageResult::new(request, chosen(Provider::Ibcmd));
 
         assert_eq!(result.artifact_kind, InfobaseExportArtifactKind::Cf);
         assert!(!result.published);
@@ -558,8 +542,7 @@ mod tests {
         let request = ExportInfobaseSnapshotRequest {
             output: PathBuf::from("/tmp/base.dt"),
         };
-        let mut result =
-            ExportInfobaseSnapshotResult::new(request, chosen(ExportProvider::Designer));
+        let mut result = ExportInfobaseSnapshotResult::new(request, chosen(Provider::Designer));
         result.published = true;
         result.target_state = ExportTargetState::Created;
         result.mark_succeeded();

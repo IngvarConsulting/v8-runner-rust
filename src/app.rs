@@ -157,7 +157,7 @@ pub fn run() -> i32 {
                     &presenter,
                     error,
                     "provider selection was not attempted because configuration loading failed",
-                    crate::domain::infobase_export::ExportPhase::ConfigurationLoad,
+                    crate::domain::infobase_export::InfobaseTransferPhase::ConfigurationLoad,
                     cli.dry_run,
                 );
                 return error.exit_code();
