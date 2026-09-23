@@ -448,6 +448,9 @@ fn bootstrap_failed_dump_redacts_secrets_in_outputs() {
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["command"], "clone");
     assert_eq!(payload["data"]["dumped"], false);
+    // Упавшая выгрузка — не превью: платформа запускалась и отказала. Без этой строки
+    // подмена признака на `false` сделала бы отказ неотличимым от плана.
+    assert_eq!(payload["data"]["provider_dispatched"], true);
     assert!(payload["data"]["path"]
         .as_str()
         .expect("path")

@@ -1,7 +1,7 @@
 ---
 id: INV.CONFIG.A-PROVIDERS-KEY-IS-NAMED-AFTER-ITS-COMMAND
 check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/270
+gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/201
 ---
 
 # Ключ выбора исполнителя назван именем команды
