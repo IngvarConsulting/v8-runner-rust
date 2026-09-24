@@ -48,7 +48,7 @@ unicode-normalization = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 process-wrap = { version = "9.1.0", default-features = false, features = ["std", "job-object", "creation-flags"] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_WindowsProgramming"] }
 
 [dev-dependencies]
 russh-sftp = "3"
