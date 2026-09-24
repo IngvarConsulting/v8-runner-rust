@@ -5,8 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use guardrail_support::{
-    collect_rust_files, free_function_tokens, production_source, production_tokens,
-    trait_impl_method_tokens,
+    collect_rust_files, free_function_tokens, parse_rust_file, production_source,
+    production_tokens, trait_impl_method_tokens,
 };
 
 const EXPECTED_MCP_TOOLS: &[&str] = &[
@@ -713,4 +713,164 @@ fn a_command_carries_no_deadline_anywhere_it_could_be_put_back() {
         "src/mcp/server.rs computes a remainder of the admission budget: an admitted call must \
          run to its terminal outcome, and a step cap must not be shortened by the queue wait."
     );
+}
+
+#[test]
+fn every_top_level_module_is_a_block_of_the_module_map() {
+    // Корень проблемы: карта модулей жила в двух файлах, на маршруте агента лежал один, и ни
+    // один не был привязан к изменениям кода — три модуля так и не попали ни в один. Владелец
+    // карты один — раздел 5 arc42. Модуль без блока на ней валит этот страж, где бы вторую
+    // карту ни завели.
+    let main = parse_rust_file(&repo_path("src/main.rs"));
+    let modules: Vec<String> = main
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Mod(module) => Some(module.ident.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !modules.is_empty(),
+        "src/main.rs declares no modules: the module list was not read"
+    );
+    let map = read("spec/arc42/05-building-block-view.md");
+    let missing: Vec<&str> = modules
+        .iter()
+        .map(String::as_str)
+        .filter(|name| {
+            !map.contains(&format!("](../../src/{name}/)"))
+                && !map.contains(&format!("](../../src/{name}.rs)"))
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "spec/arc42/05-building-block-view.md links no block for {missing:?}: section 5 is the \
+         module map, and it names every top-level module of src/main.rs"
+    );
+}
+
+#[test]
+fn every_link_on_the_agent_route_resolves() {
+    // Описание устройства называет модули и файлы ссылками, маршрут агента — документы.
+    // Переименованный файл делает адрес ложным молча, и агент, пришедший по нему, остаётся
+    // без ответа. Страж привязывает эти тексты к изменениям дерева. Регистр сверяется точно:
+    // macOS и Windows его прощают, Linux и GitHub — нет.
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut documents: Vec<PathBuf> = [
+        "AGENTS.md",
+        "AI_DEV.md",
+        "spec/README.md",
+        "spec/rules/README.md",
+    ]
+    .iter()
+    .map(|relative| root.join(relative))
+    .collect();
+    let arc42 = root.join("spec/arc42");
+    for entry in fs::read_dir(&arc42).unwrap_or_else(|error| panic!("{}: {error}", arc42.display()))
+    {
+        let path = entry.expect("directory entry").path();
+        if path.extension().is_some_and(|extension| extension == "md") {
+            documents.push(path);
+        }
+    }
+    documents.sort();
+
+    let mut seen = 0usize;
+    let mut broken = Vec::new();
+    for document in &documents {
+        let text = fs::read_to_string(document)
+            .unwrap_or_else(|error| panic!("{}: {error}", document.display()));
+        let base = document
+            .parent()
+            .expect("a document has a parent directory");
+        for target in relative_link_targets(&text) {
+            seen += 1;
+            if !resolves_with_exact_case(&root, base, &target) {
+                let shown = document.strip_prefix(&root).unwrap_or(document);
+                broken.push(format!("{}: {target}", shown.display()));
+            }
+        }
+    }
+    // Разбор, который не нашёл ни одной ссылки, прошёл бы зелёным и ничего не сторожил.
+    assert!(
+        seen >= 50,
+        "only {seen} relative links found on the agent route: the link reader is broken"
+    );
+    assert!(
+        broken.is_empty(),
+        "links on the agent route point at nothing (case is compared exactly):\n{}",
+        broken.join("\n")
+    );
+}
+
+/// Относительные адреса ссылок — встроенных `[текст](адрес)` и сносок `[метка]: адрес` —
+/// вне огороженных блоков и вне кода в строке. Внешние адреса и якоря своей страницы
+/// сторожа не касаются.
+fn relative_link_targets(text: &str) -> Vec<String> {
+    let inline = Regex::new(r"\]\(([^)\s]+)\)").expect("regex");
+    let reference = Regex::new(r"^\s{0,3}\[[^\]]+\]:\s*(\S+)").expect("regex");
+    let code_span = Regex::new(r"`[^`]*`").expect("regex");
+    let mut targets = Vec::new();
+    let mut fenced = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        // Код в строке — не ссылка, даже если похож на неё; текст ссылки в обратных кавычках
+        // при этом пустеет, а сам адрес остаётся.
+        let line = code_span.replace_all(line, "");
+        let found = inline
+            .captures_iter(&line)
+            .map(|capture| capture[1].to_owned())
+            .chain(
+                reference
+                    .captures(&line)
+                    .map(|capture| capture[1].to_owned()),
+            );
+        for target in found {
+            let path = target.split('#').next().unwrap_or_default();
+            if path.is_empty() || path.contains(':') {
+                continue;
+            }
+            targets.push(path.to_owned());
+        }
+    }
+    targets
+}
+
+/// Путь существует с точностью до регистра: `..` сворачивается по тексту, а каждый
+/// компонент сверяется с перечнем своего каталога, а не с ответом файловой системы.
+fn resolves_with_exact_case(root: &Path, base: &Path, target: &str) -> bool {
+    let Ok(relative_base) = base.strip_prefix(root) else {
+        return false;
+    };
+    let mut parts: Vec<std::ffi::OsString> = Vec::new();
+    for component in relative_base.join(target).components() {
+        match component {
+            std::path::Component::Normal(part) => parts.push(part.to_os_string()),
+            std::path::Component::ParentDir => {
+                if parts.pop().is_none() {
+                    return false;
+                }
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => return false,
+        }
+    }
+    let mut current = root.to_path_buf();
+    for part in parts {
+        let Ok(entries) = fs::read_dir(&current) else {
+            return false;
+        };
+        if !entries.flatten().any(|entry| entry.file_name() == part) {
+            return false;
+        }
+        current.push(part);
+    }
+    true
 }

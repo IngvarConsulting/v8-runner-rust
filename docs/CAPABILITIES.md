@@ -49,9 +49,9 @@ CLI help, доверяйте текущему коду и затем синхр�
 других выключателей (флага CLI, переменной окружения, состояния на диске) нет. Что
 включилось, видно по квитанции ответа: `provider.selected` и `provider.origin.kind: override`.
 Экспериментальный исполнитель не откатывается на следующего по цепочке: если он не готов,
-команда отказывает. Сейчас экспериментальны `agent` у `push`, `pull`, `make`, `extensions`
-и `download` на файловой базе и кластере, а также `ibcmd` у
-`infobase dump` и `infobase restore`; у автономного сервера `agent` — единственный
+команда отказывает. Сейчас экспериментальны `agent` у `push`, `pull`, `make`, `extensions`,
+`download`, `infobase dump` и `infobase restore` на файловой базе и кластере, а также `ibcmd`
+у `infobase dump` и `infobase restore`; у автономного сервера `agent` — единственный
 исполнитель, ключ ему не нужен и не разрешён. Подробнее — раздел «Эксперименты» на
 [сайте](https://ingvarconsulting.github.io/v8-runner-rust/architecture.html).
 
@@ -732,11 +732,12 @@ v8-runner mcp serve http
 Важные runtime директории:
 
 - `workPath/hash-storages/`: persisted change-detection state.
-- `workPath/edt-workspace/`: общий EDT workspace для `infobase create`.
+- `workPath/edt-workspace/`: общий EDT workspace всех EDT-сценариев, кроме `convert`.
 - `workPath/convert/edt-workspace/`: отдельный EDT workspace для `convert`.
 - `workPath/ibcmd-data/`: изолированный standalone-server data directory для IBCMD dump; это runtime state `v8-runner`, его можно удалить, когда нет активных CLI/MCP команд проекта.
 - `workPath/logs/platform/`: platform logs.
-- `workPath/logs/mcp/actions.log`: MCP action log.
+- `workPath/logs/mcp/actions.log`: журнал действий; пишется при выводе JSON — у MCP-сервера и
+  у CLI с `--json-message`.
 - `workPath/temp/`: временные run artifacts и диагностические файлы.
 
 ## Пока не поддерживается

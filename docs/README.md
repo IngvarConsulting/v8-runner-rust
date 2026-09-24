@@ -12,8 +12,8 @@ to guess which Markdown file is authoritative.
   `docs/CONFIGURATION.md`, `docs/DEEP_DIVE.md`). Users read them as the contract, so when they
   disagree with the code, the gap is either a defect or a public-contract change — decided as
   "When a Rule and the Code Disagree" in `AGENTS.md` describes — never a silent doc edit.
-- **How it is built**: the module map `ARCHITECTURE.md` and `spec/arc42/`. They
-  describe and promise nothing; when they disagree with the code, they are updated.
+- **How it is built**: `spec/arc42/`; its section 5 is the only module map. It describes
+  and promises nothing; when it disagrees with the code, it is updated.
 - **Raw external 1C references and measurements taken on a live platform**:
   `references/1c/*`.
 

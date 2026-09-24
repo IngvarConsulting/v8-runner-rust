@@ -66,7 +66,8 @@ runtime snapshot commit только указанным source-set.
 `test` и `check` проектируются как часть того же локального цикла, а не как отдельная
 эксплуатационная подсистема.
 
-- `test` всегда сначала делает `push`, затем запускает YaXUnit или Vanessa Automation.
+- `test` сначала делает `push`, затем запускает YaXUnit или Vanessa Automation; с `--no-push`
+  сборки нет, и тесты идут в уже подготовленной базе.
 - `check designer-*` работает только для `DESIGNER` source format.
 - `check edt` использует EDT `validate` и привязан к `format=EDT`.
 - Таймауты и interruption metadata должны проходить через общий command-level contract, а не
