@@ -1,9 +1,10 @@
 //! Reads and changes the extension composition of the configured infobase.
 //!
-//! This is the only family in the runner where the provider choice is settled by the
-//! platform rather than by `builder`: Designer has no batch key that reports installed
-//! extensions, so every operation here is IBCMD-only and says so when IBCMD is absent.
+//! Provider selection chooses the standalone agent or IBCMD. Designer has no
+//! batch key for installed extensions, so it cannot serve this family.
 
+use std::collections::BTreeMap;
+use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -13,9 +14,12 @@ use crate::domain::extensions::{
     ExtensionInventoryResult, ExtensionsResult, ExtensionsStep, InstalledExtension,
     RequestedInventory,
 };
-use crate::platform::extension_inventory::parse_extension_inventory;
-use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
+use crate::platform::extension_inventory::{
+    parse_extension_inventory, read_applied_extension_descriptor,
+};
+use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl, IbcmdError};
 use crate::platform::locator::UtilityType;
+use crate::platform::process::ProcessError;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
@@ -103,15 +107,30 @@ pub fn execute(
                 .with_execution_policy(
                     context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
                 );
+            let subject = inventory_subject(&request.scope);
 
             let platform_result = match &request.scope {
                 ExtensionInventoryScope::All => dsl.infobase_extension_list(),
                 ExtensionInventoryScope::Named { name } => dsl.infobase_extension_info(name),
             }
-            .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+            .map_err(|error| {
+                UseCaseFailure::without_payload(snapshot_dispatch_error(
+                    context, error, "read", &subject,
+                ))
+            })?;
 
-            validate_success(&platform_result).map_err(UseCaseFailure::without_payload)?;
-            read_inventory(&platform_result, request).map_err(UseCaseFailure::without_payload)?
+            validate_snapshot_step(&platform_result, "read", &subject)
+                .map_err(UseCaseFailure::without_payload)?;
+            if context.cancellation().is_cancelled() {
+                return Err(UseCaseFailure::without_payload(AppError::Cancelled(
+                    "extension inventory cancelled".to_owned(),
+                )));
+            }
+            let mut extensions = read_inventory(&platform_result, request)
+                .map_err(UseCaseFailure::without_payload)?;
+            attest_applied_prefixes(context, config, request, &dsl, &mut extensions)
+                .map_err(UseCaseFailure::without_payload)?;
+            extensions
         }
     };
 
@@ -124,6 +143,165 @@ pub fn execute(
         extensions,
         duration_ms: started.elapsed().as_millis() as u64,
     })
+}
+
+/// The list/info command omits NamePrefix. Save the *applied database* CFE for
+/// every returned record, export its descriptor, then verify the list has not
+/// changed while the slower snapshots were read. Never substitute a working
+/// configuration export: upload without apply makes that a different state.
+fn attest_applied_prefixes(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    request: &ExtensionInventoryRequest,
+    dsl: &IbcmdDsl<'_>,
+    extensions: &mut [InstalledExtension],
+) -> Result<(), AppError> {
+    if extensions.is_empty() {
+        return Ok(());
+    }
+    let temp = crate::support::temp::private_temp_dir(&config.work_path)
+        .map_err(|error| AppError::Runtime(format!("cannot create inventory temp: {error}")))?;
+
+    let result = (|| -> Result<(), AppError> {
+        for (index, extension) in extensions.iter_mut().enumerate() {
+            let subject = format!("extension '{}'", extension.name);
+            if context.cancellation().is_cancelled() {
+                return Err(AppError::Cancelled(
+                    "extension inventory cancelled".to_owned(),
+                ));
+            }
+            let entry = temp.path().join(index.to_string());
+            let xml = entry.join("xml");
+            fs::create_dir_all(&xml).map_err(|error| {
+                AppError::Runtime(format!("cannot prepare extension snapshot: {error}"))
+            })?;
+            let saved = entry.join("applied.cfe");
+            let save = dsl
+                .config_save(&saved, true, Some(&extension.name))
+                .map_err(|error| snapshot_dispatch_error(context, error, "save", &subject))?;
+            validate_snapshot_step(&save, "save", &subject)?;
+            if context.cancellation().is_cancelled() {
+                return Err(AppError::Cancelled(
+                    "extension inventory cancelled".to_owned(),
+                ));
+            }
+            let exported = dsl
+                .config_export_file(&saved, &xml)
+                .map_err(|error| snapshot_dispatch_error(context, error, "export", &subject))?;
+            validate_snapshot_step(&exported, "export", &subject)?;
+            if context.cancellation().is_cancelled() {
+                return Err(AppError::Cancelled(
+                    "extension inventory cancelled".to_owned(),
+                ));
+            }
+            let descriptor = read_applied_extension_descriptor(&xml.join("Configuration.xml"))
+                .map_err(|error| {
+                    AppError::InvalidOutput(format!(
+                        "invalid applied extension descriptor for '{}': {error}",
+                        extension.name
+                    ))
+                })?;
+            if !descriptor.name.eq_ignore_ascii_case(&extension.name)
+                || descriptor.version != extension.version
+                || descriptor.purpose != extension.purpose
+            {
+                return Err(AppError::InvalidOutput(format!(
+                    "applied extension '{}' does not agree with the platform inventory",
+                    extension.name
+                )));
+            }
+            extension.name_prefix = Some(descriptor.name_prefix);
+        }
+
+        let subject = inventory_subject(&request.scope);
+        let verified = match &request.scope {
+            ExtensionInventoryScope::All => dsl.infobase_extension_list(),
+            ExtensionInventoryScope::Named { name } => dsl.infobase_extension_info(name),
+        }
+        .map_err(|error| snapshot_dispatch_error(context, error, "re-read inventory", &subject))?;
+        validate_snapshot_step(&verified, "re-read inventory", &subject)?;
+        if context.cancellation().is_cancelled() {
+            return Err(AppError::Cancelled(
+                "extension inventory cancelled".to_owned(),
+            ));
+        }
+        let verified = read_inventory(&verified, request)?;
+        if inventory_identity(extensions)? != inventory_identity(&verified)? {
+            return Err(AppError::InvalidOutput(
+                "extension inventory changed while reading applied prefixes".to_owned(),
+            ));
+        }
+        Ok(())
+    })();
+    let cleanup = temp.close().map_err(|_| {
+        AppError::Runtime("could not remove the private database extension snapshot".to_owned())
+    });
+    match (result, cleanup) {
+        (_, Err(error)) => Err(error),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+fn inventory_subject(scope: &ExtensionInventoryScope) -> String {
+    match scope {
+        ExtensionInventoryScope::All => "all installed extensions".to_owned(),
+        ExtensionInventoryScope::Named { name } => format!("extension '{name}'"),
+    }
+}
+
+fn snapshot_dispatch_error(
+    context: &ExecutionContext,
+    error: IbcmdError,
+    step: &str,
+    subject: &str,
+) -> AppError {
+    if context.cancellation().is_cancelled()
+        || matches!(&error, IbcmdError::Spawn(ProcessError::Cancelled { .. }))
+    {
+        AppError::Cancelled("extension inventory cancelled".to_owned())
+    } else if let IbcmdError::Spawn(ProcessError::TimedOut { timeout_ms, .. }) = error {
+        AppError::TimedOut(format!(
+            "extension inventory {step} timed out after {timeout_ms} ms"
+        ))
+    } else {
+        AppError::Platform(format!("extension inventory {step} failed for {subject}"))
+    }
+}
+
+fn validate_snapshot_step(
+    result: &PlatformCommandResult,
+    step: &str,
+    subject: &str,
+) -> Result<(), AppError> {
+    if result.process.exit_code == 0 {
+        Ok(())
+    } else {
+        // A platform diagnostic may echo connection arguments and passwords.
+        Err(AppError::Platform(format!(
+            "extension inventory {step} failed for {subject} with exit code {}",
+            result.process.exit_code
+        )))
+    }
+}
+
+fn inventory_identity(
+    extensions: &[InstalledExtension],
+) -> Result<BTreeMap<String, InstalledExtension>, AppError> {
+    let mut by_name = BTreeMap::new();
+    for extension in extensions {
+        let mut without_prefix = extension.clone();
+        without_prefix.name_prefix = None;
+        if by_name
+            .insert(extension.name.to_lowercase(), without_prefix)
+            .is_some()
+        {
+            return Err(AppError::InvalidOutput(
+                "platform extension inventory has duplicate names".to_owned(),
+            ));
+        }
+    }
+    Ok(by_name)
 }
 
 fn requested(scope: &ExtensionInventoryScope) -> RequestedInventory {
@@ -185,12 +363,9 @@ fn ensure_requested_record(
     request: &ExtensionInventoryRequest,
 ) -> Result<(), AppError> {
     if let ExtensionInventoryScope::Named { name } = &request.scope {
-        if !extensions
-            .iter()
-            .any(|extension| extension.name.eq_ignore_ascii_case(name))
-        {
+        if extensions.len() != 1 || !extensions[0].name.eq_ignore_ascii_case(name) {
             return Err(AppError::InvalidOutput(format!(
-                "platform reported an extension inventory without the requested '{name}'"
+                "platform did not report exactly the requested extension '{name}'"
             )));
         }
     }
@@ -472,6 +647,20 @@ mod tests {
 
         assert_eq!(extensions.len(), 1);
         assert_eq!(extensions[0].name, "Проба");
+    }
+
+    #[test]
+    fn a_named_read_refuses_a_second_unrequested_record() {
+        let request = ExtensionInventoryRequest {
+            dry_run: false,
+            scope: ExtensionInventoryScope::Named {
+                name: "Проба".to_owned(),
+            },
+        };
+        let extra = ONE.replace("Проба", "Другая");
+        let error = read_inventory(&platform_result(&format!("{ONE}\n{extra}")), &request)
+            .expect_err("named reply must have exactly one record");
+        assert!(error.to_string().contains("exactly"), "{error}");
     }
 
     #[test]
