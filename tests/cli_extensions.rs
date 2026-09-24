@@ -429,22 +429,31 @@ fn extension_inventory_refuses_unattested_prefix_and_cleans_private_snapshots() 
 fn extension_inventory_does_not_echo_initial_platform_credentials() {
     let (_dir, config_path, _calls_log, ibcmd_path) = setup_extensions_project();
     write_script(&ibcmd_path, "printf '%s' 'Pwd=secret' >&2\nexit 17");
-    let output = v8_runner_command()
-        .args([
-            "--config",
-            &config_path.display().to_string(),
-            "--json-message",
-            "extensions",
-            "list",
-        ])
-        .output()
-        .expect("run command");
-    assert!(!output.status.success());
-    let envelope: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("json envelope");
-    let message = envelope["error"]["message"].as_str().expect("error");
-    assert!(message.contains("exit code 17"), "{message}");
-    assert!(!message.contains("Pwd=secret"), "{message}");
+    for (command, subject) in [
+        (&["extensions", "list"][..], "all installed extensions"),
+        (
+            &["extensions", "info", "--name", "A8Probe"][..],
+            "extension 'A8Probe'",
+        ),
+    ] {
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+            ])
+            .args(command)
+            .output()
+            .expect("run command");
+        assert!(!output.status.success());
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("json envelope");
+        let message = envelope["error"]["message"].as_str().expect("error");
+        assert!(message.contains("exit code 17"), "{message}");
+        assert!(message.contains(subject), "{message}");
+        assert!(!message.contains("'requested'"), "{message}");
+        assert!(!message.contains("Pwd=secret"), "{message}");
+    }
 }
 
 /// Пустое имя и имя, не являющееся идентификатором 1С, отклоняются до того, как

@@ -107,6 +107,7 @@ pub fn execute(
                 .with_execution_policy(
                     context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
                 );
+            let subject = inventory_subject(&request.scope);
 
             let platform_result = match &request.scope {
                 ExtensionInventoryScope::All => dsl.infobase_extension_list(),
@@ -114,14 +115,11 @@ pub fn execute(
             }
             .map_err(|error| {
                 UseCaseFailure::without_payload(snapshot_dispatch_error(
-                    context,
-                    error,
-                    "read",
-                    "requested",
+                    context, error, "read", &subject,
                 ))
             })?;
 
-            validate_snapshot_step(&platform_result, "read", "requested")
+            validate_snapshot_step(&platform_result, "read", &subject)
                 .map_err(UseCaseFailure::without_payload)?;
             if context.cancellation().is_cancelled() {
                 return Err(UseCaseFailure::without_payload(AppError::Cancelled(
@@ -166,6 +164,7 @@ fn attest_applied_prefixes(
 
     let result = (|| -> Result<(), AppError> {
         for (index, extension) in extensions.iter_mut().enumerate() {
+            let subject = format!("extension '{}'", extension.name);
             if context.cancellation().is_cancelled() {
                 return Err(AppError::Cancelled(
                     "extension inventory cancelled".to_owned(),
@@ -179,19 +178,17 @@ fn attest_applied_prefixes(
             let saved = entry.join("applied.cfe");
             let save = dsl
                 .config_save(&saved, true, Some(&extension.name))
-                .map_err(|error| {
-                    snapshot_dispatch_error(context, error, "save", &extension.name)
-                })?;
-            validate_snapshot_step(&save, "save", &extension.name)?;
+                .map_err(|error| snapshot_dispatch_error(context, error, "save", &subject))?;
+            validate_snapshot_step(&save, "save", &subject)?;
             if context.cancellation().is_cancelled() {
                 return Err(AppError::Cancelled(
                     "extension inventory cancelled".to_owned(),
                 ));
             }
-            let exported = dsl.config_export_file(&saved, &xml).map_err(|error| {
-                snapshot_dispatch_error(context, error, "export", &extension.name)
-            })?;
-            validate_snapshot_step(&exported, "export", &extension.name)?;
+            let exported = dsl
+                .config_export_file(&saved, &xml)
+                .map_err(|error| snapshot_dispatch_error(context, error, "export", &subject))?;
+            validate_snapshot_step(&exported, "export", &subject)?;
             if context.cancellation().is_cancelled() {
                 return Err(AppError::Cancelled(
                     "extension inventory cancelled".to_owned(),
@@ -216,12 +213,13 @@ fn attest_applied_prefixes(
             extension.name_prefix = Some(descriptor.name_prefix);
         }
 
+        let subject = inventory_subject(&request.scope);
         let verified = match &request.scope {
             ExtensionInventoryScope::All => dsl.infobase_extension_list(),
             ExtensionInventoryScope::Named { name } => dsl.infobase_extension_info(name),
         }
-        .map_err(|error| snapshot_dispatch_error(context, error, "re-read inventory", "all"))?;
-        validate_snapshot_step(&verified, "re-read inventory", "all")?;
+        .map_err(|error| snapshot_dispatch_error(context, error, "re-read inventory", &subject))?;
+        validate_snapshot_step(&verified, "re-read inventory", &subject)?;
         if context.cancellation().is_cancelled() {
             return Err(AppError::Cancelled(
                 "extension inventory cancelled".to_owned(),
@@ -245,11 +243,18 @@ fn attest_applied_prefixes(
     }
 }
 
+fn inventory_subject(scope: &ExtensionInventoryScope) -> String {
+    match scope {
+        ExtensionInventoryScope::All => "all installed extensions".to_owned(),
+        ExtensionInventoryScope::Named { name } => format!("extension '{name}'"),
+    }
+}
+
 fn snapshot_dispatch_error(
     context: &ExecutionContext,
     error: IbcmdError,
     step: &str,
-    extension: &str,
+    subject: &str,
 ) -> AppError {
     if context.cancellation().is_cancelled()
         || matches!(&error, IbcmdError::Spawn(ProcessError::Cancelled { .. }))
@@ -260,23 +265,21 @@ fn snapshot_dispatch_error(
             "extension inventory {step} timed out after {timeout_ms} ms"
         ))
     } else {
-        AppError::Platform(format!(
-            "extension inventory {step} failed for '{extension}'"
-        ))
+        AppError::Platform(format!("extension inventory {step} failed for {subject}"))
     }
 }
 
 fn validate_snapshot_step(
     result: &PlatformCommandResult,
     step: &str,
-    extension: &str,
+    subject: &str,
 ) -> Result<(), AppError> {
     if result.process.exit_code == 0 {
         Ok(())
     } else {
         // A platform diagnostic may echo connection arguments and passwords.
         Err(AppError::Platform(format!(
-            "extension '{extension}' {step} failed with exit code {}",
+            "extension inventory {step} failed for {subject} with exit code {}",
             result.process.exit_code
         )))
     }
