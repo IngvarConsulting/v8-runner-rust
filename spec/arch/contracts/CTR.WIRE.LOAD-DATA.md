@@ -7,7 +7,7 @@ decision: DEC.2026-09-14.RECEIPT-EXPLAINS-PROVIDER-CHOICE
 artifact: docs/schemas/command-data/upload.schema.json
 producer: src/cli/execute.rs
 consumers: [cli, unica]
-check: [src/command_data.rs::generated_command_data_schemas_are_current, tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it]
+check: [src/command_data.rs::generated_command_data_schemas_are_current, tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it, tests/cli_load.rs::upload_update_failure_preserves_the_completed_load_receipt]
 scope: [wire, cli]
 ---
 
@@ -21,6 +21,12 @@ scope: [wire, cli]
 
 Вложенный `execution` несёт машинную часть исхода: статус, ошибки с кодами и полезную
 нагрузку сценария.
+
+После успешной загрузки `.cf` или `.cfe` отказ `/UpdateDBCfg` оставляет общий
+`ok: false`, но `execution.payload.applied: true`: рабочая конфигурация уже
+изменилась. Если платформа вернула ошибку обновления, `update_db_cfg_ran: true`;
+отказ до подтверждённого результата этого вызова оставляет `false`. Эти поля
+не утверждают, что конфигурация базы данных успешно обновлена.
 
 ## Пример
 

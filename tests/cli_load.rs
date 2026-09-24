@@ -195,6 +195,51 @@ fn load_cf_json_success_loads_and_updates_without_asking() {
 }
 
 #[test]
+fn upload_update_failure_preserves_the_completed_load_receipt() {
+    let (_dir, config_path, binary_path, base_path, calls_log) = setup_project();
+    fs::write(base_path.join("release.cf"), "cf").expect("artifact");
+
+    let script = fs::read_to_string(&binary_path).expect("designer script");
+    let final_exit = script.rfind("\nexit 0").expect("final success exit");
+    fs::write(
+        &binary_path,
+        format!(
+            "{}\nif printf '%s' \"$args\" | grep -F -q -- '/UpdateDBCfg'; then exit 23; fi\nexit 0\n",
+            &script[..final_exit]
+        ),
+    )
+    .expect("failing designer script");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "upload",
+            "--path",
+            "release.cf",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!output.status.success());
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["ok"], false);
+    assert_eq!(payload["command"], "upload");
+    let data = &payload["data"];
+    assert_eq!(data["provider"]["selected"], "designer");
+    assert_eq!(data["provider_dispatched"], true);
+    assert_eq!(data["execution"]["status"], "failed");
+    assert_eq!(data["execution"]["payload"]["applied"], true);
+    assert_eq!(data["execution"]["payload"]["update_db_cfg_ran"], true);
+
+    let calls = fs::read_to_string(calls_log).expect("calls");
+    let load = calls.find("/LoadCfg").expect("load ran");
+    let update = calls.find("/UpdateDBCfg").expect("update ran");
+    assert!(load < update, "load must precede failed update: {calls}");
+}
+
+#[test]
 fn first_extension_load_json_reports_absent_and_applies_in_order() {
     let (_dir, config_path, binary_path, base_path, calls_log) = setup_project();
     fs::write(base_path.join("release.cfe"), "cfe").expect("artifact");
