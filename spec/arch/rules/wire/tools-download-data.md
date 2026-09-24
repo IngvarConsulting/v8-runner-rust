@@ -1,0 +1,38 @@
+---
+id: CTR.WIRE.TOOLS-DOWNLOAD-DATA
+version: 1
+artifact: docs/schemas/command-data/tools-download.schema.json
+check:
+  - src/command_data.rs::generated_command_data_schemas_are_current
+  - tests/cli_tools_download.rs::tools_download_answers_in_the_form_declared_for_it
+---
+
+# `data` команды `tools download`
+
+Форма называет каждый скачанный артефакт вместе с тегом выпуска, из которого он взят, и
+ключом конфига, куда записан путь. Тег важнее пути: по нему видно, ту ли версию
+инструмента получил проект, а путь машинно-локален и в репозиторий не едет.
+
+Живой проверки у формы пока нет: команда ходит в сеть. Форму держит сверка с типом.
+
+## Пример
+
+```json
+{
+  "ok": true,
+  "tool": "yaxunit",
+  "mode": "install",
+  "destinations": [
+    {
+      "tool": "yaxunit",
+      "tag": "24.12",
+      "source": "github-release",
+      "path": "tools/yaxunit/YaXUnit.cfe",
+      "config": "tools.yaxunit.path"
+    }
+  ],
+  "config_path": "v8project.yaml",
+  "local_config_path": "v8project.local.yaml",
+  "duration_ms": 8421
+}
+```

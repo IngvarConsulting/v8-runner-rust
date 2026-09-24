@@ -1,0 +1,8 @@
+---
+id: INV.PLATFORM.TARGET-SIDE-PATHS-RESOLVE-ON-THE-TARGET
+check: [tests/cli_agent_standalone.rs::gate_commands_carry_target_side_relative_paths]
+---
+
+# Пути в командах цели разрешаются на её стороне
+
+Каталог выгрузки и имя файла, переданные агенту или шлюзу, разрешаются на стороне цели. Раннер не складывает такой путь из своего рабочего каталога и не читает его напрямую.

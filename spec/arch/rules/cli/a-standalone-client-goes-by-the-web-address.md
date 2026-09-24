@@ -1,0 +1,13 @@
+---
+id: INV.CLI.A-STANDALONE-CLIENT-GOES-BY-THE-WEB-ADDRESS
+check:
+  - tests/cli_agent_standalone.rs::a_thin_client_against_a_standalone_server_asks_for_the_web_address
+  - tests/cli_launch.rs::a_standalone_thin_client_carries_the_address_without_the_gate_credentials
+  - tests/cli_launch.rs::a_thin_client_goes_through_the_web_address_when_asked
+---
+
+# Тонкий клиент к автономному серверу идёт по клиентскому адресу
+
+Умолчание для автономной цели — веб: `launch thin` без всякого ключа открывает базу по
+`infobase.web.url` как ws-соединение. Адрес не объявлен — отказ называет именно его, а не
+платформу: путь разрешается до поиска утилиты.
