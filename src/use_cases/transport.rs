@@ -1,9 +1,11 @@
+use std::future::Future;
+
 use crate::config::model::AppConfig;
 use crate::use_cases::context::CommandName;
-use crate::use_cases::result::UseCaseError;
 #[cfg(test)]
 use crate::use_cases::result::UseCaseFailure;
-use crate::use_cases::workspace_lock::acquire_workspace_lock;
+use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
+use crate::use_cases::workspace_lock::{acquire_workspace_lock, WorkspaceLockGuard};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceBusyPolicy {
@@ -36,20 +38,42 @@ pub(crate) fn dispatch_with_workspace_lock_policy<TResult>(
     before_dispatch: impl FnOnce() -> Result<(), UseCaseError>,
     run: impl FnOnce() -> TResult,
 ) -> Result<TResult, UseCaseError> {
-    let _workspace_lock = acquire_workspace_lock(config, command.as_str())
-        .map_err(UseCaseError::from)
-        .map_err(|error| match (busy_policy, error.kind()) {
-            (
-                WorkspaceBusyPolicy::LegacyRuntime,
-                crate::use_cases::result::UseCaseErrorKind::WorkspaceBusy,
-            ) => UseCaseError::new(
-                crate::use_cases::result::UseCaseErrorKind::Runtime,
-                error.message(),
-            ),
-            _ => error,
-        })?;
+    let _workspace_lock = acquire(config, command, busy_policy)?;
     before_dispatch()?;
     Ok(run())
+}
+
+/// Та же граница для асинхронного сценария: замок держится, пока сценарий не дошёл до
+/// конечного состояния, и снимается вместе с его будущим — раньше, чем вызывающий
+/// отпустит что-то своё. Сценарий создаётся уже под замком.
+pub(crate) async fn dispatch_with_workspace_lock_async<TFuture>(
+    config: &AppConfig,
+    command: CommandName,
+    run: impl FnOnce() -> TFuture,
+) -> Result<TFuture::Output, UseCaseError>
+where
+    TFuture: Future,
+{
+    let _workspace_lock = acquire(config, command, WorkspaceBusyPolicy::LegacyRuntime)?;
+    Ok(run().await)
+}
+
+/// Захват и его отказ по политике команды: занятый каталог прежние команды называют
+/// ошибкой исполнения, новые — своим кодом.
+fn acquire(
+    config: &AppConfig,
+    command: CommandName,
+    busy_policy: WorkspaceBusyPolicy,
+) -> Result<WorkspaceLockGuard, UseCaseError> {
+    acquire_workspace_lock(config, command.as_str()).map_err(|error| {
+        let error = UseCaseError::from(error);
+        match (busy_policy, error.kind()) {
+            (WorkspaceBusyPolicy::LegacyRuntime, UseCaseErrorKind::WorkspaceBusy) => {
+                UseCaseError::new(UseCaseErrorKind::Runtime, error.message())
+            }
+            _ => error,
+        }
+    })
 }
 
 /// Maps a use-case failure payload into a transport-specific response while preserving the

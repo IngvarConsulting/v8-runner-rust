@@ -7,8 +7,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
 use guardrail_support::{
-    collect_rust_files, free_function_tokens, has_cfg_test, parse_rust_file, production_source,
-    production_tokens, trait_impl_method_tokens,
+    collect_rust_files, free_function_tokens, has_cfg_test, item_has_cfg_test, parse_rust_file,
+    production_source, production_tokens,
 };
 
 const EXPECTED_MCP_TOOLS: &[&str] = &[
@@ -135,47 +135,1144 @@ fn mcp_surface_snapshot_stays_explicit_and_documented() {
     assert_eq!(contract_tools, expected);
 }
 
+/// Сценарий уходит в работу только под замком `workPath`, и держит это сам код, а не
+/// перечень адаптеров, записанный руками.
+///
+/// Как читается код:
+/// - сценарий — свободная функция модуля `use_cases` или `mcp::edt_syntax` (единственного
+///   сценария, который живёт в адаптере, — arc42 §5.1, §6.7); ссылка на него — любой путь
+///   в выражении: вызов или указатель на функцию, после разрешения через `use` модуля и
+///   функции, `crate`, `self` и `super`. Типы и их методы (`ExecutionContext::cli`) —
+///   не сценарии;
+/// - помощник замка узнаётся по устройству, а не по имени: он берёт замок
+///   (`acquire_workspace_lock` или функцию, которая зовёт его сама) и зовёт переданное ему
+///   замыкание либо отдаёт его другому помощнику; область под замком — замыкания в
+///   аргументах вызова помощника;
+/// - ссылка вне слоя сценариев лежит в области под замком либо внутри свободной функции,
+///   на которую ссылаются только из областей под замком (одна ступень);
+/// - сценарии, которые по правилу идут без замка, названы ниже поимённо — с причиной.
+///
+/// Не видит: пути внутри макросов, реэкспорт модуля (реэкспорт функции прослежен),
+/// сценарий, вызванный через трейт или метод, и помощника, который отпускает замок до
+/// вызова замыкания. Замыкание, вызванное раньше захвата, помощника не делает. Точный счёт ссылок ловит ссылку, ушедшую в макрос;
+/// как проверка читает код, держит `the_lock_guard_tells_locked_dispatches_from_unlocked_ones`.
 #[test]
-fn public_command_adapters_keep_workspace_lock_boundary() {
-    for function in [
-        "execute_extensions",
-        "execute_init",
-        "execute_build",
-        "execute_test",
-        "execute_load",
-        "execute_dump",
-        "execute_infobase_configuration_export",
-        "execute_infobase_dump",
-        "execute_convert",
-        "execute_artifacts",
-        "execute_syntax",
-        "execute_launch",
+fn every_scenario_is_dispatched_under_the_workspace_lock() {
+    let report = LockBoundaryReport::of(&SourceIndex::of_src(), UNLOCKED_SCENARIOS);
+
+    assert!(
+        report.violations.is_empty(),
+        "a scenario is dispatched outside the workspace lock:\n{}",
+        report.violations.join("\n")
+    );
+    let unused = UNLOCKED_SCENARIOS
+        .iter()
+        .map(|(path, _)| *path)
+        .filter(|path| !report.exempted.contains(*path))
+        .collect::<Vec<_>>();
+    assert!(
+        unused.is_empty(),
+        "an exemption names a scenario no adapter reaches any more: {unused:?}"
+    );
+    assert_eq!(
+        report.accepted, 24,
+        "the number of locked dispatches changed: update it when a command is added or removed, \
+         or find the dispatch that moved out of the guard's sight"
+    );
+    for module in [
+        "crate::app",
+        "crate::cli::execute",
+        "crate::mcp::port",
+        "crate::mcp::server",
     ] {
-        let window = free_function_tokens(repo_path("src/cli/execute.rs").as_path(), function);
         assert!(
-            window.contains("with_cli_workspace_lock(")
-                || window.contains("with_cli_workspace_lock_observed("),
-            "{function} must keep the CLI workspace-lock boundary"
+            report.accepted_in.contains(module),
+            "no locked dispatch seen in {module}: {:?}",
+            report.accepted_in
         );
     }
+}
 
-    for function in [
-        "build_project",
-        "run_tests",
-        "dump_config",
-        "launch_app",
-        "check_syntax",
-    ] {
-        let window = trait_impl_method_tokens(
-            repo_path("src/mcp/port.rs").as_path(),
-            "McpUseCasePort",
-            "DefaultMcpUseCasePort",
-            function,
-        );
-        assert!(
-            window.contains("with_workspace_lock("),
-            "{function} must keep the MCP workspace-lock boundary"
-        );
+/// Как проверка замка читает код — на исходниках, где ответ известен заранее: вызов в
+/// замыкании помощника принят, прямой вызов, вызов через `use … as` и указатель на функцию
+/// — нет; функция, которую зовут только под замком, принята, а зовут ещё и без него — нет;
+/// «помощник», который замка не берёт, никого не прикрывает.
+#[test]
+fn the_lock_guard_tells_locked_dispatches_from_unlocked_ones() {
+    let index = SourceIndex::from_sources(&[
+        (
+            "crate::use_cases::workspace_lock",
+            "pub(crate) fn acquire_workspace_lock() -> Guard { Guard }",
+        ),
+        (
+            "crate::use_cases::transport",
+            "use crate::use_cases::workspace_lock::acquire_workspace_lock;\n\
+             fn acquire() -> Guard { acquire_workspace_lock() }\n\
+             pub fn with_lock<T>(run: impl FnOnce() -> T) -> T { let _guard = acquire(); run() }\n\
+             pub fn with_lock_too<T>(run: impl FnOnce() -> T) -> T { with_lock(run) }\n\
+             pub fn pretends<T>(run: impl FnOnce() -> T) -> T { run() }\n\
+             pub fn runs_first<T>(run: impl FnOnce() -> T) -> T { let value = run(); let _guard = acquire(); value }",
+        ),
+        ("crate::use_cases::dump", "pub fn execute() {}"),
+        (
+            "crate::cli::adapter",
+            "use crate::use_cases::dump;\n\
+             use crate::use_cases::transport::{pretends, runs_first, with_lock, with_lock_too};\n\
+             fn locked() { with_lock(|| dump::execute()); }\n\
+             fn locked_too() { with_lock_too(|| crate::use_cases::dump::execute()); }\n\
+             fn only_under_the_lock() { dump::execute(); }\n\
+             fn caller() { with_lock(|| only_under_the_lock()); }\n\
+             fn also_unlocked() { dump::execute(); }\n\
+             fn first() { with_lock(|| also_unlocked()); }\n\
+             fn second() { also_unlocked(); }\n\
+             fn direct() { dump::execute(); }\n\
+             fn renamed() { use crate::use_cases::dump::execute as run_now; run_now(); }\n\
+             fn pointer() { let run: fn() = dump::execute; with_lock(run); }\n\
+             fn fake() { pretends(|| dump::execute()); }\n\
+             fn early() { runs_first(|| dump::execute()); }\n\
+             fn globbed() { use crate::use_cases::dump::*; execute(); }",
+        ),
+    ]);
+
+    let report = LockBoundaryReport::of(&index, &[]);
+
+    let mut unlocked = report
+        .violations
+        .iter()
+        .map(|violation| {
+            let context = violation.split(['(', ')']).nth(1).unwrap_or_default();
+            let target = violation.split('`').nth(1).unwrap_or_default();
+            format!("{context} {target}")
+        })
+        .collect::<Vec<_>>();
+    unlocked.sort();
+    assert_eq!(
+        unlocked,
+        [
+            "also_unlocked crate::use_cases::dump::execute",
+            "direct crate::use_cases::dump::execute",
+            "early crate::use_cases::dump::execute",
+            "early crate::use_cases::transport::runs_first",
+            "fake crate::use_cases::dump::execute",
+            "fake crate::use_cases::transport::pretends",
+            "globbed crate::use_cases::dump",
+            "pointer crate::use_cases::dump::execute",
+            "renamed crate::use_cases::dump::execute",
+        ]
+    );
+    assert_eq!(report.accepted, 3, "{:?}", report.violations);
+}
+
+/// Сценарии, которые по правилу идут без замка `workPath`, с причиной. Запись, которой
+/// больше никто не пользуется, валит проверку.
+const UNLOCKED_SCENARIOS: &[(&str, &str)] = &[
+    (
+        "crate::use_cases::config_init::execute",
+        "`init` пишет описание проекта, в `workPath` ничего",
+    ),
+    (
+        "crate::use_cases::bootstrap_project::plan",
+        "план клона ничего не пишет; замок берётся по нему",
+    ),
+    (
+        "crate::use_cases::configure_extensions::resolve_targets",
+        "проверка запроса до замка",
+    ),
+    (
+        "crate::use_cases::convert_sources::preflight_validate",
+        "проверка запроса до замка",
+    ),
+    (
+        "crate::use_cases::infobase_export::validate_configuration_request",
+        "проверка запроса до замка",
+    ),
+    (
+        "crate::use_cases::infobase_export::validate_snapshot_output",
+        "проверка запроса до замка",
+    ),
+    (
+        "crate::use_cases::infobase_export::validate_restore_request",
+        "проверка запроса до замка",
+    ),
+    (
+        "crate::use_cases::infobase_export::prepare_configuration_export",
+        "выбор исполнителя до замка: превью возвращается раньше него",
+    ),
+    (
+        "crate::use_cases::infobase_export::prepare_infobase_snapshot",
+        "выбор исполнителя до замка: превью возвращается раньше него",
+    ),
+    (
+        "crate::use_cases::infobase_export::prepare_infobase_restore",
+        "выбор исполнителя до замка: превью возвращается раньше него",
+    ),
+    (
+        "crate::use_cases::infobase_export::preview_configuration_export",
+        "превью замка не берёт",
+    ),
+    (
+        "crate::use_cases::infobase_export::preview_infobase_snapshot",
+        "превью замка не берёт",
+    ),
+    (
+        "crate::use_cases::infobase_export::preview_infobase_restore",
+        "превью замка не берёт",
+    ),
+    (
+        "crate::use_cases::request::effective_test_timeouts",
+        "чистая функция над запросом",
+    ),
+];
+
+/// Подключение `ibcmd` — а с ним требование секции `infobase.dbms` — строится только
+/// там, где сценарий зовёт `ibcmd`: исполнителем после выбора или для пробы. Перечень
+/// мест закрыт: новое место валит проверку, пока ревью не решит, что оно после выбора
+/// исполнителя, а не до него.
+#[test]
+fn an_ibcmd_connection_is_built_only_where_ibcmd_runs() {
+    const BUILT_FOR_IBCMD: &[(&str, &str)] = &[
+        (
+            "crate::use_cases::extension_inventory::Executor::of",
+            "исполнитель `extensions`: ветка `ibcmd` после выбора",
+        ),
+        (
+            "crate::use_cases::load_artifact::installed_extension_state",
+            "проба расширения перед `upload`",
+        ),
+        (
+            "crate::use_cases::infobase_export::readiness",
+            "готовность кандидата `ibcmd` в его же переборе",
+        ),
+        (
+            "crate::use_cases::infobase_export::run_configuration_provider",
+            "ветка `ibcmd` после выбора",
+        ),
+        (
+            "crate::use_cases::init_project::create_infobase_via_ibcmd",
+            "создание базы, когда выбран `ibcmd`",
+        ),
+        (
+            "crate::use_cases::build_project::helpers::build_ibcmd_dsl",
+            "шаг `ibcmd` сборки",
+        ),
+        (
+            "crate::use_cases::dump_config::helpers::build_ibcmd_dsl",
+            "шаг `ibcmd` выгрузки",
+        ),
+        (
+            "crate::use_cases::tool_extension::build_ibcmd_dsl",
+            "расширение-инструмент, когда сборку ведёт `ibcmd`",
+        ),
+    ];
+    let expected = BUILT_FOR_IBCMD
+        .iter()
+        .map(|(site, _)| (*site).to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(
+        ibcmd_connection_sites(&SourceIndex::of_src()),
+        expected,
+        "the places that build an ibcmd connection changed; each must run after ibcmd was selected or be its probe"
+    );
+}
+
+/// Место постройки называет модуль, тип и метод: одноимённые методы разных типов не
+/// сливаются в одно место, модуль внутри файла прочитан вместе с ним, а обёртка через
+/// `Self::` в самом `ibcmd.rs` — тоже место.
+#[test]
+fn the_ibcmd_site_finder_names_the_type_and_reads_nested_modules() {
+    let index = SourceIndex::from_sources(&[
+        (
+            "crate::platform::ibcmd",
+            "pub struct IbcmdConnection;\n\
+             impl IbcmdConnection {\n\
+                 pub fn from_infobase() -> Self { Self }\n\
+                 pub fn wrapped() -> Self { Self::from_infobase() }\n\
+             }",
+        ),
+        (
+            "crate::use_cases::family",
+            "use crate::platform::ibcmd::IbcmdConnection;\n\
+             struct Executor;\n\
+             impl Executor { fn of() { IbcmdConnection::from_infobase(); } }\n\
+             struct Probe;\n\
+             impl Probe { fn of() {} }\n\
+             mod inner { fn eager() { crate::platform::ibcmd::IbcmdConnection::from_infobase(); } }",
+        ),
+    ]);
+
+    assert_eq!(
+        ibcmd_connection_sites(&index),
+        [
+            "crate::platform::ibcmd::IbcmdConnection::wrapped",
+            "crate::use_cases::family::Executor::of",
+            "crate::use_cases::family::inner::eager",
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .collect()
+    );
+}
+
+fn ibcmd_connection_sites(index: &SourceIndex) -> std::collections::BTreeSet<String> {
+    let constructor = path_of("crate::platform::ibcmd::IbcmdConnection::from_infobase");
+    production_bodies(index)
+        .into_iter()
+        .filter(|body| {
+            let mut finder = PathFinder {
+                index,
+                module: &body.module,
+                local_uses: body.local_uses(index),
+                target: &constructor,
+                found: false,
+            };
+            syn::visit::visit_block(&mut finder, body.block);
+            finder.found
+        })
+        .map(|body| format!("{}::{}", body.module.join("::"), body.context))
+        .collect()
+}
+
+fn path_of(path: &str) -> Vec<String> {
+    path.split("::").map(str::to_owned).collect()
+}
+
+/// Итог проверки замка: что нарушено, что принято и где, какие исключения пригодились.
+#[derive(Default)]
+struct LockBoundaryReport {
+    violations: Vec<String>,
+    accepted: usize,
+    accepted_in: std::collections::BTreeSet<String>,
+    exempted: std::collections::BTreeSet<String>,
+}
+
+impl LockBoundaryReport {
+    fn of(index: &SourceIndex, exemptions: &[(&str, &str)]) -> Self {
+        let lock = index.lock_api();
+        let mut scan = DispatchScan::default();
+        for body in production_bodies(index) {
+            if body.unit.in_scenario_layer() {
+                continue;
+            }
+            for glob in body
+                .globs
+                .iter()
+                .chain(&block_uses(index, &body.module, body.block).globs)
+            {
+                if is_scenario_module(glob) {
+                    scan.violations.push(format!(
+                        "{} ({}): a glob import from `{}` hides what it dispatches",
+                        body.unit.file.display(),
+                        body.context,
+                        glob.join("::")
+                    ));
+                }
+            }
+            let mut walker = DispatchWalker {
+                index,
+                helpers: &lock.helpers,
+                body: &body,
+                local_uses: body.local_uses(index),
+                locked: 0,
+                scan: &mut scan,
+            };
+            syn::visit::visit_block(&mut walker, body.block);
+        }
+
+        // Ссылки на каждую функцию: все ли под замком.
+        let mut callers: std::collections::HashMap<&[String], bool> =
+            std::collections::HashMap::new();
+        for (target, locked) in &scan.function_references {
+            *callers.entry(target.as_slice()).or_insert(true) &= *locked;
+        }
+
+        let mut report = Self {
+            violations: std::mem::take(&mut scan.violations),
+            ..Self::default()
+        };
+        for reference in &scan.scenario_references {
+            let target = reference.target.join("::");
+            if exemptions.iter().any(|(path, _)| *path == target) {
+                report.exempted.insert(target);
+                continue;
+            }
+            let covered = reference.locked
+                || reference
+                    .enclosing
+                    .as_deref()
+                    .and_then(|enclosing| callers.get(enclosing))
+                    .copied()
+                    .unwrap_or(false);
+            if covered {
+                report.accepted += 1;
+                report.accepted_in.insert(reference.module.join("::"));
+            } else {
+                report.violations.push(format!(
+                    "{} ({}): `{target}` runs without the workspace lock",
+                    reference.file.display(),
+                    reference.context
+                ));
+            }
+        }
+        report
+    }
+}
+
+/// Один исходный файл программы: его модуль и разобранное дерево.
+struct SourceUnit {
+    file: PathBuf,
+    module: Vec<String>,
+    syntax: syn::File,
+}
+
+impl SourceUnit {
+    fn in_scenario_layer(&self) -> bool {
+        is_scenario_module(&self.module)
+    }
+}
+
+/// Производственный код: модули, их `use` и свободные функции.
+struct SourceIndex {
+    units: Vec<SourceUnit>,
+    /// Импорты модуля: имя → полный путь.
+    uses: std::collections::HashMap<Vec<String>, std::collections::HashMap<String, Vec<String>>>,
+    /// Имена, объявленные в модуле: функции, модули, типы.
+    items: std::collections::HashMap<Vec<String>, std::collections::HashSet<String>>,
+    /// Свободные функции по полному пути.
+    functions: std::collections::HashMap<Vec<String>, IndexedFunction>,
+}
+
+struct IndexedFunction {
+    module: Vec<String>,
+    item: syn::ItemFn,
+}
+
+impl SourceIndex {
+    fn of_src() -> Self {
+        let root = repo_path("src");
+        let units = collect_rust_files(&root)
+            .into_iter()
+            .map(|file| {
+                let relative = file.strip_prefix(&root).expect("under src");
+                let mut parts = relative
+                    .iter()
+                    .map(|part| part.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
+                let last = parts.pop().expect("file name");
+                let mut module = vec!["crate".to_owned()];
+                module.extend(parts);
+                match last.as_str() {
+                    "main.rs" | "mod.rs" => {}
+                    name => module.push(name.trim_end_matches(".rs").to_owned()),
+                }
+                let syntax = parse_rust_file(&file);
+                SourceUnit {
+                    file,
+                    module,
+                    syntax,
+                }
+            })
+            .collect();
+        Self::build(units)
+    }
+
+    /// Индекс исходников, заданных строками: модуль и текст.
+    fn from_sources(sources: &[(&str, &str)]) -> Self {
+        let units = sources
+            .iter()
+            .map(|(module, source)| SourceUnit {
+                file: PathBuf::from(format!("{}.rs", module.replace("::", "/"))),
+                module: path_of(module),
+                syntax: syn::parse_file(source).expect("parse source"),
+            })
+            .collect();
+        Self::build(units)
+    }
+
+    /// Сначала имена всех модулей, затем `use`: относительный `use` разрешается по именам
+    /// своего модуля, где бы они ни стояли.
+    fn build(units: Vec<SourceUnit>) -> Self {
+        let mut index = Self {
+            units: Vec::new(),
+            uses: Default::default(),
+            items: Default::default(),
+            functions: Default::default(),
+        };
+        for unit in &units {
+            index.index_names(&unit.module, &unit.syntax.items);
+        }
+        for unit in &units {
+            index.index_uses(&unit.module, &unit.syntax.items);
+        }
+        index.units = units;
+        index
+    }
+
+    fn index_names(&mut self, module: &[String], items: &[syn::Item]) {
+        for item in items {
+            if item_has_cfg_test(item) {
+                continue;
+            }
+            let name = match item {
+                syn::Item::Fn(item_fn) => {
+                    let name = item_fn.sig.ident.to_string();
+                    self.functions.insert(
+                        [module, std::slice::from_ref(&name)].concat(),
+                        IndexedFunction {
+                            module: module.to_vec(),
+                            item: item_fn.clone(),
+                        },
+                    );
+                    Some(name)
+                }
+                syn::Item::Mod(item_mod) => {
+                    let name = item_mod.ident.to_string();
+                    if let Some((_, nested)) = &item_mod.content {
+                        self.index_names(&[module, std::slice::from_ref(&name)].concat(), nested);
+                    }
+                    Some(name)
+                }
+                syn::Item::Struct(item) => Some(item.ident.to_string()),
+                syn::Item::Enum(item) => Some(item.ident.to_string()),
+                syn::Item::Const(item) => Some(item.ident.to_string()),
+                syn::Item::Static(item) => Some(item.ident.to_string()),
+                syn::Item::Trait(item) => Some(item.ident.to_string()),
+                syn::Item::Type(item) => Some(item.ident.to_string()),
+                _ => None,
+            };
+            if let Some(name) = name {
+                self.items.entry(module.to_vec()).or_default().insert(name);
+            }
+        }
+    }
+
+    fn index_uses(&mut self, module: &[String], items: &[syn::Item]) {
+        for item in items {
+            if item_has_cfg_test(item) {
+                continue;
+            }
+            match item {
+                syn::Item::Use(item_use) => {
+                    for (alias, path) in flatten_use(&item_use.tree).names {
+                        let full = self.absolute(module, &path);
+                        self.uses
+                            .entry(module.to_vec())
+                            .or_default()
+                            .insert(alias, full);
+                    }
+                }
+                syn::Item::Mod(item_mod) => {
+                    if let Some((_, nested)) = &item_mod.content {
+                        let inner = [module, &[item_mod.ident.to_string()]].concat();
+                        self.index_uses(&inner, nested);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Путь из `use` как полный: `crate`, `self`, `super` или имя, объявленное в модуле.
+    fn absolute(&self, module: &[String], path: &[String]) -> Vec<String> {
+        match path.first().map(String::as_str) {
+            Some("crate") => path.to_vec(),
+            Some("self") => [module, &path[1..]].concat(),
+            Some("super") => {
+                let mut base = module.to_vec();
+                let mut rest = path;
+                while rest.first().map(String::as_str) == Some("super") {
+                    base.pop();
+                    rest = &rest[1..];
+                }
+                [base.as_slice(), rest].concat()
+            }
+            Some(first)
+                if self
+                    .items
+                    .get(module)
+                    .is_some_and(|items| items.contains(first)) =>
+            {
+                [module, path].concat()
+            }
+            _ => path.to_vec(),
+        }
+    }
+
+    /// Полный путь выражения: через `use` функции, затем модуля, затем имена модуля. Одно
+    /// слово `self`, `super` или `crate` — значение, а не путь к функции.
+    fn resolve(
+        &self,
+        module: &[String],
+        local_uses: &std::collections::HashMap<String, Vec<String>>,
+        path: &syn::Path,
+    ) -> Option<Vec<String>> {
+        let segments = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        let first = segments.first()?.as_str();
+        match first {
+            "crate" | "self" | "super" if segments.len() == 1 => None,
+            "crate" | "self" | "super" => Some(self.absolute(module, &segments)),
+            _ => {
+                if let Some(prefix) = local_uses
+                    .get(first)
+                    .or_else(|| self.uses.get(module).and_then(|uses| uses.get(first)))
+                {
+                    return Some([prefix.as_slice(), &segments[1..]].concat());
+                }
+                self.items
+                    .get(module)
+                    .is_some_and(|items| items.contains(first))
+                    .then(|| [module, segments.as_slice()].concat())
+            }
+        }
+    }
+
+    /// Путь выражения после реэкспорта функции: помощник или захват под чужим именем —
+    /// всё тот же помощник. Путь не к свободной функции — к методу типа — остаётся как есть.
+    fn resolve_target(
+        &self,
+        module: &[String],
+        local_uses: &std::collections::HashMap<String, Vec<String>>,
+        path: &syn::Path,
+    ) -> Option<Vec<String>> {
+        self.resolve(module, local_uses, path)
+            .map(|path| self.function_at(path.clone()).unwrap_or(path))
+    }
+
+    /// Свободная функция, куда ведёт путь, — через `use` модуля-владельца, если имя в нём
+    /// лишь реэкспорт. Путь к модулю, типу или переменной функцией не считается.
+    fn function_at(&self, path: Vec<String>) -> Option<Vec<String>> {
+        let mut path = path;
+        for _ in 0..4 {
+            if self.functions.contains_key(&path) {
+                return Some(path);
+            }
+            let (name, owner) = path.split_last()?;
+            path = self.uses.get(owner)?.get(name)?.clone();
+        }
+        None
+    }
+
+    /// Замок по устройству кода. Берёт его `acquire_workspace_lock` или функция без
+    /// замыканий, которая зовёт его сама; помощник с замыканием берёт замок и зовёт своё
+    /// замыкание либо отдаёт его другому помощнику. Точка неподвижная: помощники зовут
+    /// друг друга.
+    fn lock_api(&self) -> LockApi {
+        let acquire = path_of("crate::use_cases::workspace_lock::acquire_workspace_lock");
+        let mut acquirers = std::collections::HashSet::from([acquire.clone()]);
+        for (path, function) in &self.functions {
+            if closure_parameters(&function.item.sig).is_empty()
+                && self.body_references(function, &acquire)
+            {
+                acquirers.insert(path.clone());
+            }
+        }
+        let mut helpers = std::collections::HashSet::new();
+        loop {
+            let before = helpers.len();
+            for (path, function) in &self.functions {
+                if helpers.contains(path) {
+                    continue;
+                }
+                let closures = closure_parameters(&function.item.sig);
+                if closures.is_empty() {
+                    continue;
+                }
+                let mut probe = HelperProbe {
+                    index: self,
+                    module: &function.module,
+                    local_uses: block_local_uses(self, &function.module, &function.item.block),
+                    closures: &closures,
+                    helpers: &helpers,
+                    acquirers: &acquirers,
+                    takes_lock: false,
+                    calls_closure: false,
+                    hands_closure_on: false,
+                    inside_helper_call: 0,
+                };
+                syn::visit::visit_block(&mut probe, &function.item.block);
+                if (probe.takes_lock && probe.calls_closure) || probe.hands_closure_on {
+                    helpers.insert(path.clone());
+                }
+            }
+            if helpers.len() == before {
+                return LockApi { acquirers, helpers };
+            }
+        }
+    }
+
+    fn body_references(&self, function: &IndexedFunction, target: &[String]) -> bool {
+        let mut finder = PathFinder {
+            index: self,
+            module: &function.module,
+            local_uses: block_local_uses(self, &function.module, &function.item.block),
+            target,
+            found: false,
+        };
+        syn::visit::visit_block(&mut finder, &function.item.block);
+        finder.found
+    }
+}
+
+/// Кто берёт замок: функции захвата и помощники с замыканием.
+struct LockApi {
+    acquirers: std::collections::HashSet<Vec<String>>,
+    helpers: std::collections::HashSet<Vec<String>>,
+}
+
+/// Тело производственного кода: где лежит, как называется в отчёте, какая свободная
+/// функция его объемлет и какие звёздочки импортирует его модуль.
+struct Body<'a> {
+    unit: &'a SourceUnit,
+    module: Vec<String>,
+    /// Имя функции или `Тип::метод`.
+    context: String,
+    /// Полный путь свободной функции; у метода его нет.
+    enclosing: Option<Vec<String>>,
+    /// Тип, чей это метод: `Self::` в теле ведёт к нему.
+    owner: Option<String>,
+    block: &'a syn::Block,
+    globs: Vec<Vec<String>>,
+}
+
+impl Body<'_> {
+    /// `use` тела и `Self` метода.
+    fn local_uses(&self, index: &SourceIndex) -> std::collections::HashMap<String, Vec<String>> {
+        let mut uses = block_local_uses(index, &self.module, self.block);
+        if let Some(owner) = &self.owner {
+            uses.insert(
+                "Self".to_owned(),
+                [self.module.as_slice(), std::slice::from_ref(owner)].concat(),
+            );
+        }
+        uses
+    }
+}
+
+/// Все тела производственного кода: свободные функции, методы типов и методы трейтов по
+/// умолчанию, в том числе в модулях внутри файла. Один обход на обе проверки.
+fn production_bodies(index: &SourceIndex) -> Vec<Body<'_>> {
+    fn walk<'a>(
+        index: &SourceIndex,
+        unit: &'a SourceUnit,
+        module: &[String],
+        items: &'a [syn::Item],
+        bodies: &mut Vec<Body<'a>>,
+    ) {
+        let globs = items
+            .iter()
+            .filter(|item| !item_has_cfg_test(item))
+            .filter_map(|item| match item {
+                syn::Item::Use(item_use) => Some(flatten_use(&item_use.tree).globs),
+                _ => None,
+            })
+            .flatten()
+            .map(|glob| index.absolute(module, &glob))
+            .collect::<Vec<_>>();
+        let mut push = |context: String,
+                        enclosing: Option<Vec<String>>,
+                        owner: Option<String>,
+                        block: &'a syn::Block| {
+            bodies.push(Body {
+                unit,
+                module: module.to_vec(),
+                context,
+                enclosing,
+                owner,
+                block,
+                globs: globs.clone(),
+            });
+        };
+        let mut nested_modules = Vec::new();
+        for item in items {
+            if item_has_cfg_test(item) {
+                continue;
+            }
+            match item {
+                syn::Item::Fn(item_fn) => {
+                    let name = item_fn.sig.ident.to_string();
+                    push(
+                        name.clone(),
+                        Some([module, &[name]].concat()),
+                        None,
+                        &item_fn.block,
+                    );
+                }
+                syn::Item::Impl(item_impl) => {
+                    let owner = match item_impl.self_ty.as_ref() {
+                        syn::Type::Path(type_path) => type_path
+                            .path
+                            .segments
+                            .last()
+                            .map(|segment| segment.ident.to_string()),
+                        _ => None,
+                    }
+                    .unwrap_or_else(|| "_".to_owned());
+                    for impl_item in &item_impl.items {
+                        if let syn::ImplItem::Fn(method) = impl_item {
+                            if !has_cfg_test(&method.attrs) {
+                                push(
+                                    format!("{owner}::{}", method.sig.ident),
+                                    None,
+                                    Some(owner.clone()),
+                                    &method.block,
+                                );
+                            }
+                        }
+                    }
+                }
+                syn::Item::Trait(item_trait) => {
+                    for trait_item in &item_trait.items {
+                        if let syn::TraitItem::Fn(method) = trait_item {
+                            if let Some(block) = &method.default {
+                                if !has_cfg_test(&method.attrs) {
+                                    push(
+                                        format!("{}::{}", item_trait.ident, method.sig.ident),
+                                        None,
+                                        None,
+                                        block,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                syn::Item::Mod(item_mod) => {
+                    if let Some((_, nested)) = &item_mod.content {
+                        nested_modules
+                            .push(([module, &[item_mod.ident.to_string()]].concat(), nested));
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (inner, nested) in nested_modules {
+            walk(index, unit, &inner, nested, bodies);
+        }
+    }
+
+    let mut bodies = Vec::new();
+    for unit in &index.units {
+        walk(index, unit, &unit.module, &unit.syntax.items, &mut bodies);
+    }
+    bodies
+}
+
+/// Имена и звёздочки одного `use`: `self` в группе — сам префикс, переименование — своим
+/// именем.
+#[derive(Default)]
+struct FlatUse {
+    names: Vec<(String, Vec<String>)>,
+    globs: Vec<Vec<String>>,
+}
+
+fn flatten_use(tree: &syn::UseTree) -> FlatUse {
+    fn walk(tree: &syn::UseTree, prefix: &mut Vec<String>, out: &mut FlatUse) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                walk(&path.tree, prefix, out);
+                prefix.pop();
+            }
+            syn::UseTree::Name(name) if name.ident == "self" => {
+                if let Some(last) = prefix.last() {
+                    out.names.push((last.clone(), prefix.clone()));
+                }
+            }
+            syn::UseTree::Name(name) => {
+                let mut path = prefix.clone();
+                path.push(name.ident.to_string());
+                out.names.push((name.ident.to_string(), path));
+            }
+            syn::UseTree::Rename(rename) => {
+                let mut path = prefix.clone();
+                if rename.ident != "self" {
+                    path.push(rename.ident.to_string());
+                }
+                out.names.push((rename.rename.to_string(), path));
+            }
+            syn::UseTree::Glob(_) => out.globs.push(prefix.clone()),
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    walk(item, prefix, out);
+                }
+            }
+        }
+    }
+    let mut out = FlatUse::default();
+    walk(tree, &mut Vec::new(), &mut out);
+    out
+}
+
+/// `use` внутри тела — на всё тело сразу: область видимости блока проверке не нужна.
+fn block_local_uses(
+    index: &SourceIndex,
+    module: &[String],
+    block: &syn::Block,
+) -> std::collections::HashMap<String, Vec<String>> {
+    block_uses(index, module, block).names
+}
+
+/// Разрешённые `use` тела: имена и звёздочки.
+struct BlockUses {
+    names: std::collections::HashMap<String, Vec<String>>,
+    globs: Vec<Vec<String>>,
+}
+
+fn block_uses(index: &SourceIndex, module: &[String], block: &syn::Block) -> BlockUses {
+    struct Uses<'a> {
+        index: &'a SourceIndex,
+        module: &'a [String],
+        found: BlockUses,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Uses<'_> {
+        fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+            let flat = flatten_use(&node.tree);
+            for (alias, path) in flat.names {
+                let full = self.index.absolute(self.module, &path);
+                self.found.names.insert(alias, full);
+            }
+            for glob in flat.globs {
+                let full = self.index.absolute(self.module, &glob);
+                self.found.globs.push(full);
+            }
+        }
+    }
+    let mut uses = Uses {
+        index,
+        module,
+        found: BlockUses {
+            names: Default::default(),
+            globs: Vec::new(),
+        },
+    };
+    syn::visit::visit_block(&mut uses, block);
+    uses.found
+}
+
+/// Имена параметров-замыканий: `impl Fn*` или параметр типа, ограниченный `Fn*`.
+fn closure_parameters(sig: &syn::Signature) -> Vec<String> {
+    fn is_fn_bound(bound: &syn::TypeParamBound) -> bool {
+        matches!(bound, syn::TypeParamBound::Trait(trait_bound)
+        if trait_bound.path.segments.last().is_some_and(|segment| {
+            matches!(segment.ident.to_string().as_str(), "Fn" | "FnMut" | "FnOnce")
+        }))
+    }
+    let mut closure_types = std::collections::HashSet::new();
+    for param in &sig.generics.params {
+        if let syn::GenericParam::Type(type_param) = param {
+            if type_param.bounds.iter().any(is_fn_bound) {
+                closure_types.insert(type_param.ident.to_string());
+            }
+        }
+    }
+    if let Some(where_clause) = &sig.generics.where_clause {
+        for predicate in &where_clause.predicates {
+            if let syn::WherePredicate::Type(predicate) = predicate {
+                if predicate.bounds.iter().any(is_fn_bound) {
+                    if let syn::Type::Path(bounded) = &predicate.bounded_ty {
+                        if let Some(ident) = bounded.path.get_ident() {
+                            closure_types.insert(ident.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    sig.inputs
+        .iter()
+        .filter_map(|input| match input {
+            syn::FnArg::Typed(typed) => Some(typed),
+            syn::FnArg::Receiver(_) => None,
+        })
+        .filter_map(|typed| {
+            let syn::Pat::Ident(name) = typed.pat.as_ref() else {
+                return None;
+            };
+            let is_closure = match typed.ty.as_ref() {
+                syn::Type::ImplTrait(impl_trait) => impl_trait.bounds.iter().any(is_fn_bound),
+                syn::Type::Path(type_path) => type_path
+                    .path
+                    .get_ident()
+                    .is_some_and(|ident| closure_types.contains(&ident.to_string())),
+                _ => false,
+            };
+            is_closure.then(|| name.ident.to_string())
+        })
+        .collect()
+}
+
+/// Что делает функция с замком и своими замыканиями.
+struct HelperProbe<'a> {
+    index: &'a SourceIndex,
+    module: &'a [String],
+    local_uses: std::collections::HashMap<String, Vec<String>>,
+    closures: &'a [String],
+    helpers: &'a std::collections::HashSet<Vec<String>>,
+    acquirers: &'a std::collections::HashSet<Vec<String>>,
+    takes_lock: bool,
+    calls_closure: bool,
+    hands_closure_on: bool,
+    inside_helper_call: usize,
+}
+
+impl HelperProbe<'_> {
+    fn is_closure_parameter(&self, expr: &syn::Expr) -> bool {
+        matches!(expr, syn::Expr::Path(path)
+            if path.path.get_ident().is_some_and(|ident| self.closures.contains(&ident.to_string())))
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for HelperProbe<'_> {
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if self
+            .index
+            .resolve_target(self.module, &self.local_uses, &node.path)
+            .is_some_and(|target| self.acquirers.contains(&target))
+        {
+            self.takes_lock = true;
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        // Замыкание засчитано, только если зовётся после захвата: код читается в порядке
+        // текста, и вызов до захвата замка ничем не прикрыт.
+        if self.is_closure_parameter(&node.func) {
+            self.calls_closure |= self.takes_lock;
+            if self.inside_helper_call > 0 {
+                self.hands_closure_on = true;
+            }
+        }
+        let calls_helper = matches!(node.func.as_ref(), syn::Expr::Path(path)
+            if self.index.resolve_target(self.module, &self.local_uses, &path.path)
+                .is_some_and(|target| self.helpers.contains(&target)));
+        if calls_helper {
+            if node.args.iter().any(|arg| self.is_closure_parameter(arg)) {
+                self.hands_closure_on = true;
+            }
+            self.inside_helper_call += 1;
+            syn::visit::visit_expr_call(self, node);
+            self.inside_helper_call -= 1;
+        } else {
+            syn::visit::visit_expr_call(self, node);
+        }
+    }
+}
+
+/// Есть ли в теле путь, ведущий к `target`.
+struct PathFinder<'a> {
+    index: &'a SourceIndex,
+    module: &'a [String],
+    local_uses: std::collections::HashMap<String, Vec<String>>,
+    target: &'a [String],
+    found: bool,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for PathFinder<'_> {
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if self
+            .index
+            .resolve_target(self.module, &self.local_uses, &node.path)
+            .is_some_and(|path| path == self.target)
+        {
+            self.found = true;
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+}
+
+/// Ссылка на сценарий: куда ведёт, откуда и под замком ли.
+struct ScenarioReference {
+    target: Vec<String>,
+    file: PathBuf,
+    module: Vec<String>,
+    context: String,
+    enclosing: Option<Vec<String>>,
+    locked: bool,
+}
+
+#[derive(Default)]
+struct DispatchScan {
+    scenario_references: Vec<ScenarioReference>,
+    /// Ссылки на свободные функции программы: куда и под замком ли.
+    function_references: Vec<(Vec<String>, bool)>,
+    violations: Vec<String>,
+}
+
+fn is_scenario_module(path: &[String]) -> bool {
+    path.starts_with(&path_of("crate::use_cases"))
+        || path.starts_with(&path_of("crate::mcp::edt_syntax"))
+}
+
+/// Свободная функция сценария: модульный путь и имя в `snake_case`, без типов.
+fn is_scenario_function(path: &[String]) -> bool {
+    is_scenario_module(path)
+        && path.len() > 2
+        && path[1..].iter().all(|segment| {
+            segment
+                .chars()
+                .next()
+                .is_some_and(|first| first.is_ascii_lowercase())
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        })
+}
+
+struct DispatchWalker<'a, 'b> {
+    index: &'a SourceIndex,
+    helpers: &'a std::collections::HashSet<Vec<String>>,
+    body: &'a Body<'b>,
+    local_uses: std::collections::HashMap<String, Vec<String>>,
+    locked: usize,
+    scan: &'a mut DispatchScan,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for DispatchWalker<'_, '_> {
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if let Some(target) = self
+            .index
+            .resolve(&self.body.module, &self.local_uses, &node.path)
+            .and_then(|path| self.index.function_at(path))
+        {
+            let locked = self.locked > 0;
+            self.scan.function_references.push((target.clone(), locked));
+            if is_scenario_function(&target) && !self.helpers.contains(&target) {
+                self.scan.scenario_references.push(ScenarioReference {
+                    target,
+                    file: self.body.unit.file.clone(),
+                    module: self.body.module.clone(),
+                    context: self.body.context.clone(),
+                    enclosing: self.body.enclosing.clone(),
+                    locked,
+                });
+            }
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        let calls_helper = matches!(node.func.as_ref(), syn::Expr::Path(path)
+            if self.index.resolve_target(&self.body.module, &self.local_uses, &path.path)
+                .is_some_and(|target| self.helpers.contains(&target)));
+        if !calls_helper {
+            syn::visit::visit_expr_call(self, node);
+            return;
+        }
+        self.visit_expr(&node.func);
+        for arg in &node.args {
+            if matches!(arg, syn::Expr::Closure(_)) {
+                self.locked += 1;
+                self.visit_expr(arg);
+                self.locked -= 1;
+            } else {
+                self.visit_expr(arg);
+            }
+        }
     }
 }
 
@@ -198,31 +1295,94 @@ fn russian_numeral(count: usize) -> &'static str {
 /// Вложенные шаги не берут блокировку повторно: замок рабочего каталога живёт на
 /// границе адаптера, а сценарии зовут друг друга через входы без замка. Второй захват
 /// изнутри дал бы «занято» самому себе.
+///
+/// Захват узнаётся по устройству, как у проверки границы: и `acquire_workspace_lock`, и
+/// любой помощник замка, под каким бы именем он ни был.
 #[test]
 fn nested_orchestration_never_acquires_the_workspace_lock_inside_use_cases() {
-    let root = repo_path("src/use_cases");
-    for file in collect_rust_files(&root) {
-        // `workspace_lock.rs` реализует замок, `transport.rs` — граница адаптера, где он
-        // берётся один раз за команду. Всё остальное в слое сценариев работает под ним.
-        if matches!(
-            file.file_name().and_then(|name| name.to_str()),
-            Some("workspace_lock.rs") | Some("transport.rs")
-        ) {
-            continue;
-        }
-        let production = production_tokens(&file);
-        assert!(
-            !production.contains("acquire_workspace_lock("),
-            "{} takes the workspace lock inside a use case; nested steps run under the caller's lock",
-            file.display()
-        );
-    }
+    let relocks = relocks_in_the_scenario_layer(&SourceIndex::of_src());
+    assert!(
+        relocks.is_empty(),
+        "a use case takes the workspace lock; nested steps run under the caller's lock:\n{}",
+        relocks.join("\n")
+    );
 
     // `test` строит перед прогоном тем же сценарием сборки, не выходя на границу адаптера.
     let run_tests = read("src/use_cases/run_tests/coordinator.rs");
     assert!(
         run_tests.contains("build_project::execute("),
         "run_tests must reuse the build use case directly, under the lock already held by the caller"
+    );
+}
+
+/// Ссылки слоя сценариев на захват замка или его помощников. `workspace_lock` замок
+/// реализует, `transport` — граница адаптера, где он берётся один раз за команду.
+fn relocks_in_the_scenario_layer(index: &SourceIndex) -> Vec<String> {
+    let lock = index.lock_api();
+    let boundary = [
+        path_of("crate::use_cases::workspace_lock"),
+        path_of("crate::use_cases::transport"),
+    ];
+    let mut relocks = Vec::new();
+    for body in production_bodies(index) {
+        if !body.unit.in_scenario_layer() || boundary.contains(&body.module) {
+            continue;
+        }
+        for target in lock.acquirers.iter().chain(&lock.helpers) {
+            let mut finder = PathFinder {
+                index,
+                module: &body.module,
+                local_uses: body.local_uses(index),
+                target,
+                found: false,
+            };
+            syn::visit::visit_block(&mut finder, body.block);
+            if finder.found {
+                relocks.push(format!(
+                    "{} ({}): `{}`",
+                    body.unit.file.display(),
+                    body.context,
+                    target.join("::")
+                ));
+            }
+        }
+    }
+    relocks.sort();
+    relocks
+}
+
+/// Проверка повторного захвата видит его и через помощника под любым именем.
+#[test]
+fn the_relock_guard_sees_a_lock_taken_through_a_helper() {
+    let index = SourceIndex::from_sources(&[
+        (
+            "crate::use_cases::workspace_lock",
+            "pub(crate) fn acquire_workspace_lock() -> Guard { Guard }",
+        ),
+        (
+            "crate::use_cases::transport",
+            "use crate::use_cases::workspace_lock::acquire_workspace_lock;\n\
+             pub fn hold<T>(run: impl FnOnce() -> T) -> T { let _guard = acquire_workspace_lock(); run() }",
+        ),
+        (
+            "crate::use_cases",
+            "pub(crate) use self::transport::hold as relock;",
+        ),
+        (
+            "crate::use_cases::nested",
+            "use crate::use_cases::transport::hold;\n\
+             pub fn execute() { hold(|| ()); }\n\
+             pub fn renamed() { crate::use_cases::relock(|| ()); }\n\
+             pub fn plain() {}",
+        ),
+    ]);
+
+    assert_eq!(
+        relocks_in_the_scenario_layer(&index),
+        [
+            "crate/use_cases/nested.rs (execute): `crate::use_cases::transport::hold`",
+            "crate/use_cases/nested.rs (renamed): `crate::use_cases::transport::hold`",
+        ]
     );
 }
 

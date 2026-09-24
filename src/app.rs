@@ -415,8 +415,38 @@ fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 
         force: args.force,
         dry_run: cli.dry_run,
     };
-    let context = crate::use_cases::context::ExecutionContext::cli(CommandName::Bootstrap);
-    match crate::use_cases::bootstrap_project::execute(&context, &request) {
+    // Ctrl+C и SIGTERM — отмена, как у остальных команд: по умолчанию сигнал убил бы
+    // раннер под замком, и файл владельца замка пережил бы его.
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let _signal_guard = crate::cli::signal::CliSignalGuard::install(cancellation.clone());
+    let context = crate::use_cases::context::ExecutionContext::cli(CommandName::Bootstrap)
+        .with_cancellation(cancellation);
+    let outcome = crate::use_cases::bootstrap_project::plan(request).and_then(|plan| {
+        // Замок берётся по настройкам плана до первого файла проекта: занятый каталог
+        // отказывает, пока проекта ещё нет. Внешняя ошибка — только отказ замка, итог
+        // клона внутри.
+        // `--clean-before-execution` клон не чистит: журналов платформы у нового проекта нет.
+        let clean_before_execution = false;
+        let preview = plan.is_preview();
+        execute::with_cli_workspace_lock(
+            plan.config(),
+            presenter,
+            CommandName::Bootstrap,
+            clean_before_execution,
+            preview,
+            || {
+                Ok(crate::use_cases::bootstrap_project::execute(
+                    &context, &plan,
+                ))
+            },
+        )
+        .unwrap_or_else(|error| {
+            Err(crate::use_cases::result::UseCaseFailure::without_payload(
+                error,
+            ))
+        })
+    });
+    match outcome {
         Ok(result) => {
             if presenter.is_json() {
                 presenter.print_envelope(&Envelope {

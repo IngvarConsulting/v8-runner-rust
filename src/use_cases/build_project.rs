@@ -1131,14 +1131,26 @@ mod tests {
         if let Some(parent) = ibcmd.parent() {
             fs::create_dir_all(parent).expect("create ibcmd dir");
         }
+        // Импорт держится, пока тест его не отпустит: отмена приходит, когда запись в базу
+        // уже идёт, — порядок задан рукопожатием, а не отсчётом времени.
+        let import_started = dir.path().join("import-started");
+        let import_release = dir.path().join("import-release");
         fs::write(
             &ibcmd,
             format!(
                 "#!/bin/sh\nargs=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\n\
-                 if printf '%s' \"$args\" | grep -F -q -- 'config import'; then sleep 0.1; fi\n\
-                 if printf '%s' \"$args\" | grep -F -q -- 'config apply'; then sleep 0.07; fi\n\
+                 if printf '%s' \"$args\" | grep -F -q -- 'config import'; then\n\
+                   : > '{}'\n\
+                   waited=0\n\
+                   while [ ! -e '{}' ] && [ \"$waited\" -lt 300 ]; do\n\
+                     sleep 0.1\n\
+                     waited=$((waited + 1))\n\
+                   done\n\
+                 fi\n\
                  exit 0\n",
-                calls_log.display()
+                calls_log.display(),
+                import_started.display(),
+                import_release.display()
             ),
         )
         .expect("write ibcmd script");
@@ -1152,11 +1164,19 @@ mod tests {
             crate::domain::capability::ibcmd_for_every_choice(),
         );
         let cancellation = CancellationToken::new();
-        let delayed_cancel = cancellation.clone();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(20));
-            delayed_cancel.cancel();
-        });
+        let operator = {
+            let cancellation = cancellation.clone();
+            thread::spawn(move || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                while !import_started.exists() && std::time::Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                cancellation.cancel();
+                // Мягкое снятие за это время дошло бы до импорта; критический его ждёт.
+                thread::sleep(Duration::from_millis(500));
+                fs::write(&import_release, "").expect("release the import");
+            })
+        };
 
         let failure = super::execute(
             &ExecutionContext::cli(CommandName::Build).with_cancellation(cancellation),
@@ -1164,6 +1184,7 @@ mod tests {
             &build_args(true),
         )
         .expect_err("build must stop before ibcmd apply");
+        operator.join().expect("operator thread");
 
         assert!(failure
             .error

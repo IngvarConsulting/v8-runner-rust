@@ -6,7 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use support::{temp_workspace, v8_runner_command, write_shell_script as write_script};
+use support::{
+    hold_workspace_lock, temp_workspace, v8_runner_command, write_shell_script as write_script,
+};
 
 const V8_CONFIGURATION_NATURE: &str = "com._1c.g5.v8.dt.core.V8ConfigurationNature";
 const EDT_RUNTIME_VERSION: &str = "8.3.27";
@@ -260,15 +262,7 @@ fn setup_edt_project() -> (
 #[test]
 fn dry_run_neither_takes_nor_waits_for_the_workspace_lock() {
     let (_dir, config_path, _binary_path, work_path, _base_path, _calls_log) = setup_project();
-    fs::create_dir_all(&work_path).expect("work");
-    fs::write(
-        work_path.join(".v8-runner.workspace.lock"),
-        format!(
-            "{{\"tool\":\"v8-runner\",\"pid\":{},\"owner_id\":\"another-owner\",\"created_at\":\"2026-09-12T00:00:00Z\"}}",
-            std::process::id()
-        ),
-    )
-    .expect("foreign workspace lock");
+    hold_workspace_lock(&work_path);
 
     let preview = v8_runner_command()
         .args([

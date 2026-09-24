@@ -1,15 +1,15 @@
 use std::time::Instant;
 
 use crate::config::model::{AppConfig, SourceSetPurpose};
-use crate::domain::capability::Provider;
 use crate::domain::extensions::{ExtensionsResult, ExtensionsStep};
-use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl, IbcmdError};
+use crate::platform::ibcmd::{IbcmdDsl, IbcmdError};
 use crate::platform::locator::UtilityType;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::extension_agent::ExtensionAgent;
 use crate::use_cases::extension_identity::platform_extension_name;
+use crate::use_cases::extension_inventory::Executor;
 use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
 use crate::use_cases::interruption;
 use crate::use_cases::progress::log_live_stage;
@@ -39,19 +39,6 @@ pub fn execute(
         }
     };
 
-    // Подключение `ibcmd` строится только для него: у автономного сервера строки
-    // подключения нет, туда ходит шлюз.
-    let connection = if config.infobase.standalone.is_some() {
-        None
-    } else {
-        match IbcmdConnection::from_infobase(&config.infobase) {
-            Ok(connection) => Some(connection),
-            Err(error) => {
-                return Err(UseCaseFailure::without_payload(AppError::from(error)));
-            }
-        }
-    };
-
     let mut utilities = PlatformUtilities::from_config(config);
     let selected = match crate::use_cases::provider_selection::select(
         config,
@@ -72,18 +59,13 @@ pub fn execute(
         }
     };
     let receipt = selected.receipt;
+    let executor = Executor::of(selected.provider, selected.location, config)
+        .map_err(UseCaseFailure::without_payload)?;
     // Превью называет цели и исполнителя и ничего не трогает: установленное состояние
     // расширения не опрашивается, потому что опрос — это уже запуск платформы.
     if args.dry_run {
-        let executor = selected
-            .location
-            .as_ref()
-            .map(|location| location.path.display().to_string())
-            .unwrap_or_else(|| "the designer agent".to_owned());
-        let target_name = match connection.as_ref() {
-            Some(connection) => connection.describe_target(),
-            None => "the infobase".to_owned(),
-        };
+        let target_name = executor.target_label(config);
+        let executor_label = executor.label();
         return Ok(ExtensionsResult {
             provider: Some(receipt),
             provider_dispatched: false,
@@ -92,7 +74,7 @@ pub fn execute(
                 .into_iter()
                 .map(|target| ExtensionsStep {
                     message: Some(format!(
-                        "would disable safe mode and unsafe action protection for '{target}' in {target_name} via {executor}; installed state is not probed"
+                        "would disable safe mode and unsafe action protection for '{target}' in {target_name} via {executor_label}; installed state is not probed"
                     )),
                     target,
                     action: DISABLE_SAFETY_ACTION.to_owned(),
@@ -104,39 +86,17 @@ pub fn execute(
         });
     }
 
-    let mut setter = match (selected.provider, selected.location) {
-        (Provider::Agent, location) => {
-            match ExtensionAgent::open(context, config, location.map(|l| l.path).as_deref()) {
-                Ok(agent) => SafetySetter::Agent(Box::new(agent)),
-                Err(error) => return Err(UseCaseFailure::without_payload(error)),
-            }
-        }
-        (_, Some(location)) => SafetySetter::Ibcmd(Box::new(
-            IbcmdDsl::new(
-                location.path,
-                match connection {
-                    Some(connection) => connection,
-                    None => {
-                        return Err(UseCaseFailure::without_payload(AppError::Runtime(
-                            "ibcmd was selected for a target without a connection string"
-                                .to_owned(),
-                        )))
-                    }
-                },
-                utilities.runner_for(UtilityType::Ibcmd),
-            )
-            .with_execution_policy(
-                context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
-            ),
-        )),
-        (provider, None) => {
-            return Err(UseCaseFailure::without_payload(
-                crate::use_cases::unimplemented_provider(
-                    crate::domain::capability::Operation::Extensions,
-                    provider,
+    let mut setter = match executor {
+        Executor::Agent { v8 } => match ExtensionAgent::open(context, config, v8.as_deref()) {
+            Ok(agent) => SafetySetter::Agent(Box::new(agent)),
+            Err(error) => return Err(UseCaseFailure::without_payload(error)),
+        },
+        Executor::Ibcmd { binary, connection } => SafetySetter::Ibcmd(Box::new(
+            IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
+                .with_execution_policy(
+                    context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
                 ),
-            ));
-        }
+        )),
     };
 
     let outcome = disable_safety_for(context, &mut setter, targets, started);

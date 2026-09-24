@@ -2343,7 +2343,7 @@ fn execute_launch(
 /// Решение живёт здесь, а не в отдельном помощнике рядом: у границы один владелец,
 /// иначе её легко обойти новым вызовом. Спор превью с очисткой — вопрос не границы, а
 /// двух глобальных ключей, и отвечает на него `app::run` до загрузки конфига.
-fn with_cli_workspace_lock<T>(
+pub(crate) fn with_cli_workspace_lock<T>(
     config: &AppConfig,
     presenter: &Presenter,
     command: CommandName,
@@ -2381,7 +2381,9 @@ fn with_cli_workspace_lock_observed<T>(
 ) -> Result<T, UseCaseError> {
     let busy_policy = if matches!(
         command,
-        CommandName::InfobaseConfigurationExport | CommandName::InfobaseDump
+        CommandName::InfobaseConfigurationExport
+            | CommandName::InfobaseDump
+            | CommandName::Bootstrap
     ) {
         WorkspaceBusyPolicy::Typed
     } else {

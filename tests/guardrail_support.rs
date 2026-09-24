@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use quote::ToTokens;
-use syn::{Attribute, File, ImplItem, Item, ItemImpl, Type};
+use syn::{Attribute, File, ImplItem, Item, ItemImpl};
 
 pub fn collect_rust_files(root: &Path) -> Vec<PathBuf> {
     fn visit(dir: &Path, files: &mut Vec<PathBuf>) {
@@ -55,38 +55,6 @@ pub fn free_function_tokens(path: &Path, fn_name: &str) -> String {
         .unwrap_or_else(|| panic!("missing free function {fn_name}"))
 }
 
-pub fn trait_impl_method_tokens(
-    path: &Path,
-    trait_name: &str,
-    self_ty: &str,
-    fn_name: &str,
-) -> String {
-    let file = parse_rust_file(path);
-    file.items
-        .iter()
-        .find_map(|item| match item {
-            Item::Impl(item_impl)
-                if !has_cfg_test(&item_impl.attrs)
-                    && impl_trait_name(item_impl).as_deref() == Some(trait_name)
-                    && impl_self_type(item_impl).as_deref() == Some(self_ty) =>
-            {
-                item_impl
-                    .items
-                    .iter()
-                    .find_map(|impl_item| match impl_item {
-                        ImplItem::Fn(method)
-                            if !has_cfg_test(&method.attrs) && method.sig.ident == fn_name =>
-                        {
-                            Some(normalize_tokens(method))
-                        }
-                        _ => None,
-                    })
-            }
-            _ => None,
-        })
-        .unwrap_or_else(|| panic!("missing impl method {fn_name}"))
-}
-
 fn normalize_tokens(tokens: impl ToTokens) -> String {
     tokens
         .to_token_stream()
@@ -135,7 +103,8 @@ fn collect_impl_tokens(item_impl: &ItemImpl, tokens: &mut Vec<String>) {
     }
 }
 
-fn item_has_cfg_test(item: &Item) -> bool {
+/// Элемент есть только под `cargo test`: он или его атрибут `cfg` требует `test`.
+pub fn item_has_cfg_test(item: &Item) -> bool {
     match item {
         Item::Const(item) => has_cfg_test(&item.attrs),
         Item::Enum(item) => has_cfg_test(&item.attrs),
@@ -219,25 +188,6 @@ fn split_cfg_args(body: &str) -> Vec<&str> {
         args.push(tail);
     }
     args
-}
-
-fn impl_trait_name(item_impl: &ItemImpl) -> Option<String> {
-    item_impl
-        .trait_
-        .as_ref()
-        .and_then(|(_, path, _)| path.segments.last())
-        .map(|segment| segment.ident.to_string())
-}
-
-fn impl_self_type(item_impl: &ItemImpl) -> Option<String> {
-    match item_impl.self_ty.as_ref() {
-        Type::Path(type_path) => type_path
-            .path
-            .segments
-            .last()
-            .map(|segment| segment.ident.to_string()),
-        _ => None,
-    }
 }
 
 /// Production token text with literals kept verbatim.
