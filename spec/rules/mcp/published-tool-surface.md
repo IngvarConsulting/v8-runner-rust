@@ -32,7 +32,7 @@ check: [tests/mcp_http.rs::mcp_http_initialize_reuses_session_and_lists_tools]
 сверяет со счётом строк, а не принимает за якорь.
 
 Прочие места смена состава задевает тоже, и их держит автор: `src/mcp/request.rs`,
-`src/mcp/service.rs`, `docs/CAPABILITIES.md`, `README.md` и `ARCHITECTURE.md`.
+`src/mcp/service.rs`, `docs/CAPABILITIES.md` и `README.md`.
 Машиночитаемая часть ответа меняется вместе с `src/command_envelope.rs`, а схема конверта
 порождается командой `UPDATE_ENVELOPE_SCHEMA=1 cargo test
 generated_envelope_schema_is_current` и руками не правится.

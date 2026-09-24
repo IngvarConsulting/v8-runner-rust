@@ -66,7 +66,8 @@ runtime snapshot commit только указанным source-set.
 `test` и `check` проектируются как часть того же локального цикла, а не как отдельная
 эксплуатационная подсистема.
 
-- `test` всегда сначала делает `push`, затем запускает YaXUnit или Vanessa Automation.
+- `test` сначала делает `push`, затем запускает YaXUnit или Vanessa Automation; с `--no-push`
+  сборки нет, и тесты идут в уже подготовленной базе.
 - `check designer-*` работает только для `DESIGNER` source format.
 - `check edt` использует EDT `validate` и привязан к `format=EDT`.
 - Таймауты и interruption metadata должны проходить через общий command-level contract, а не
@@ -117,7 +118,8 @@ execution model для CLI и MCP.
 `workPath` является корнем runtime state.
 
 - Логи, temp files, generated outputs и persisted snapshots не должны расползаться по каталогу primary config.
-- Public CLI/MCP команды, работающие с runtime state под `workPath`, должны брать workspace lock.
+- Public CLI/MCP команды, работающие с runtime state под `workPath`, должны брать workspace lock;
+  сегодня без него идут `clone` и EDT-проверка по MCP в интерактивном режиме — #290.
 - Workspace lock сериализует доступ к конкретному runtime root, но не заменяет admission limits и
   не делает multi-step orchestration fully atomic.
 
@@ -125,7 +127,8 @@ Interruption policy:
 
 - timeout/cancellation являются общим CLI/MCP contract;
 - terminal cancellation и deferred interruption должны различаться;
-- critical publish/apply phases не hard-kill by default.
+- critical publish/apply phases не hard-kill by default; `/RestoreIB` Конфигуратора пока
+  снимается как обычный процесс — #290.
 
 ## MCP runtime semantics
 

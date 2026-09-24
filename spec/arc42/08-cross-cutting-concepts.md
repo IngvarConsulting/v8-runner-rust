@@ -1,76 +1,173 @@
 ## 8. Сквозные концепции
 
-Свод правил, которые должны оставаться верными при развитии проекта, вынесен в [правила продукта](../rules/README.md).
+Механизмы, которыми пользуется больше одного сценария. Как это выглядит для пользователя —
+[`docs/CONFIGURATION.md`](../../docs/CONFIGURATION.md) и
+[`docs/CAPABILITIES.md`](../../docs/CAPABILITIES.md).
 
-### 8.1 Модель конфигурации
+### 8.1 Конфигурация
 
-- `v8project.yaml` — главный входной контракт.
-- Валидация конфигурации заранее отклоняет неподдерживаемые комбинации.
-- `source-set` — базовая единица оркестрации.
-- Поддержанные `source-set[].type`: `CONFIGURATION`, `EXTENSION`, `EXTERNAL_DATA_PROCESSORS`, `EXTERNAL_REPORTS`.
-- `source-set.name` — stable identity для runtime state, generated directories, diagnostics и selection logic.
-- Для EDT/external source-set validation должна проверять layout, reserved names и пересечение пользовательских paths с generated work targets.
-- Поддержанный config contract описан в `DEC.2026-04-20.V8PROJECT-YAML-IS-THE-PROJECT-CONTRACT`; legacy YAML keys не должны становиться публичным контрактом без отдельного решения.
-- `ExecutionContext` дополняет конфигурацию invocation-метаданными: команда, transport, correlation metadata и transport-specific flags.
+- `v8project.yaml` лежит в репозитории проекта; местный слой `v8project.local.yaml` — нет,
+  в нём машинные настройки, учётные данные и перечень баз `infobases`.
+- Модель одна: местный слой, `--infobase` и `--workdir` вливаются в один `AppConfig` до
+  проверки — [`config/loader.rs`](../../src/config/loader.rs).
+- База по умолчанию — `infobases.origin`; вид цели — автономная, файловая или кластерная —
+  выводится из конфигурации. Проверка зависит от команды: полная создаёт `workPath`,
+  превью ничего не создаёт — [`config/validate.rs`](../../src/config/validate.rs).
+- Прежние имена команд и флагов — синонимы, скрытые из справки; `artifacts` у `make` в ней
+  пока виден — [правило с пробелом](../rules/cli/a-hidden-synonym-is-absent-from-help.md).
+  Прежние секции конфигурации `build:` и `infobase:` сворачиваются в новые один цикл с
+  предупреждением: в ответе командной строки, у MCP — в журнале.
+- `infobase.dbms` нужна для создания серверной базы и для `ibcmd` на серверной базе —
+  [правило](../rules/config/dbms-is-access-to-the-dbms.md). `extensions` строит подключение
+  `ibcmd` до выбора исполнителя и без секции отказывает и агенту —
+  [правило с пробелом](../rules/use-cases/an-ibcmd-connection-is-built-only-for-ibcmd.md), #290.
 
-### 8.2 Анализ изменений
+Правила — [`config/`](../rules/config/); форма файлов — [схемы](../rules/config/v8project-schema.md).
 
-- Анализ изменений выполняется on-demand во время build/export/load decision.
-- Сканирование файлов использует фильтрацию по timestamp с последующей проверкой хеша.
-- Состояние изолировано по логическим `source-set`.
-- При сбоях система предпочитает безопасную деградацию, а не тихую потерю данных.
-- Персистентное состояние хранится в отдельных `redb`-файлах на source-set, а не в едином глобальном индексе.
-- Для EDT исходный project context и generated Designer context анализируются отдельно; partial load decision принимается по Designer context.
-- Правила on-demand detection и partial load описаны в `DEC.2026-04-20.CHANGES-ARE-DETECTED-ON-DEMAND` и `DEC.2026-04-20.DOUBT-TURNS-A-PARTIAL-LOAD-INTO-A-FULL-ONE`.
+### 8.2 Набор исходников и `workPath`
 
-### 8.3 Обработка ошибок и результаты
+`source-set` — единица работы; его `name` — ключ состояния, каталога в `workPath`, журналов
+и поколения агента. Переименованный набор начинает с пустого состояния.
 
-- Use case возвращают структурированные результаты или `UseCaseFailure<T>` с transport-neutral error metadata.
-- Runner-like/pipeline-like сценарии используют `ExecutionOutcome<T>` как canonical domain outcome для статуса, structured errors, diagnostics, metrics, artifacts и typed payload.
-- Команды рассматриваются как pipeline из стандартных блоков: validation, resolve target, prepare workspace, platform command, parse output, publish, cleanup and diagnostics.
-- Pipeline composition находится в use case слое; adapters не собирают blocks, а только мапят request/response.
-- Blocks должны обмениваться typed context/input/output и оставлять step/outcome trail для skipped/degraded/failure behavior.
-- `ExecutionStatus::TimedOut` и `ExecutionStatus::Cancelled` допустимы только после terminal-state semantics из `DEC.2026-04-20.CANCELLATION-COUNTS-ONLY-AFTER-A-TERMINAL-STATE`.
-- Если cancellation/shutdown/timeout был requested внутри successful `CriticalNonAbortable` phase, итог остаётся `Succeeded`, а result содержит warning/diagnostic о deferred interruption.
-- Degraded success, например cleanup warning после успешного publish, не должен маскироваться как полностью чистый success.
-- CLI решает на адаптерной границе, печатать ли shared command envelope через `--json-message`, text rendering или top-level error.
-- MCP возвращает тот же command envelope в `structured_content`, сохраняя `CallToolResult`/`isError` and transport/internal errors as MCP protocol behavior.
-- CLI output использует единый high-signal contract для человека и AI-агента; `--json-message` выбирает structured output, а `--output` резервируется для user-facing output path flags.
-- MCP дополнительно разделяет `McpBusinessFailure<T>` и `McpInternalError`, чтобы агент видел предсказуемые business failures, но не получал как business-response ошибки неправильного transport/runtime usage.
-- Это разделение является ключевым architectural invariant: orchestration не должна знать про конкретный transport payload format.
-- Outcome/step contract описан в `DEC.2026-04-21.A-COMMAND-IS-A-PIPELINE-OF-TYPED-BLOCKS` и `DEC.2026-04-21.EXECUTION-OUTCOME-IS-THE-CANONICAL-RESULT`.
+`workPath` — каталог раннера, всегда локальный. Верхний уровень:
 
-### 8.4 Наблюдаемость
+| Место | Что там |
+| --- | --- |
+| Файлы замка в корне | Замок каталога и его метаданные — 8.3 |
+| `logs/` | Журналы утилит по операциям и журнал действий |
+| `temp/` | Списки частичной загрузки, прогоны тестов, временные каталоги |
+| `hash-storages/` | Состояние анализа изменений, файл на контекст — 8.5 |
+| `designer/` | Копия формата Конфигуратора для наборов EDT и расширения-инструмента |
+| `edt-workspace/`, `convert/` | Рабочие области EDT; выход `convert` по умолчанию |
+| `ibcmd-data/`, `load-probe/` | Данные `ibcmd` для выгрузки; отчёт пробы `upload` |
+| `agent/` | Базовый каталог своего агента, записи поколений, временный обмен |
 
-- Логи и сгенерированные артефакты хранятся под `workPath`.
-- Телеметрия MCP публикуется как структурированные tracing-события, а не через отдельный metrics-backend.
-- `output::Presenter` является частью CLI presentation, а shared command envelope является adapter-level machine contract для CLI JSON и MCP structured content, но не observability backend.
+Что из этого видно пользователю — CAPABILITIES, «workPath и артефакты выполнения».
+Промежуточные и резервные копии, их метаданные и замки целей лежат рядом с целью, а не в
+`workPath`. Состояние по базам не разделено —
+[правило с пробелом](../rules/use-cases/memory-lives-under-the-base-it-describes.md).
 
-### 8.4.1 Публикация pull/artifacts
+### 8.3 Замки
 
-- Full replacement pull/artifacts сначала пишутся в staging path рядом с target.
-- При замене существующего target старое состояние временно переносится в backup и используется для rollback при publish failure.
-- Cleanup backup/staging после успешной публикации выполняется best-effort и может вернуться как warning.
-- Staging/backup cleanup опирается на metadata sidecar: `tool`, `kind`, `run_id`, `target_path`, `target_identity`, `created_at`.
-- Orphan cleanup не должен удалять malformed, foreign или recent temp paths.
-- Incremental/partial `pull` остаются non-atomic update modes.
-- Правила staging/backup publication описаны в `DEC.2026-04-21.FULL-REPLACEMENT-PUBLISHES-THROUGH-STAGING`.
+- Замок `workPath` — файловый замок ОС на канонический путь, без ожидания: занятый каталог
+  — отказ сразу. Файл владельца `.v8-runner.workspace.lock` создаётся без перезаписи: после
+  жёсткого падения он остаётся, и следующая команда отказывает, пока его не удалят руками.
+  Метаданные `.json` рядом — только для диагностики.
+- Берут замок адаптеры — CLI и порт MCP; вложенный шаг идёт под замком внешней команды.
+  Без замка — превью, `version` и `init`, который объявляет проект (не `infobase create`);
+  `clone` и EDT-проверка по MCP — расхождение, #290.
+- Допуск MCP и ёмкость сессий HTTP ограничивают нагрузку, каталог они не охраняют.
 
-### 8.5 Параллелизм и таймауты
+Правила: [два процесса на одном каталоге](../rules/cli/concurrent-processes-are-serialized.md),
+[сбой метаданных не снимает замок](../rules/cli/sidecar-failure-does-not-release-the-lock.md),
+[вложенные шаги не берут замок повторно](../rules/cli/nested-orchestration-does-not-relock.md).
 
-- MCP tool-вызовы используют общие admission-лимиты.
-- CLI/MCP команды, которые работают с `workPath`, сериализуются через workspace lock по canonical `workPath`.
-- Lock sidecar является diagnostic-only metadata; ошибка sidecar не разрешает конкурентное выполнение.
-- MCP admission limits не заменяют workspace lock: они ограничивают общую нагрузку, а не ownership конкретного рабочего каталога.
-- HTTP MCP session capacity является отдельным transport guardrail и не равна execution admission.
-- Прерывание является общим CLI/MCP целевым command contract; result должен возвращаться только после terminal state underlying operation.
-- Mutating DB operations должны иметь critical phase, где hard kill запрещён по умолчанию.
-- Общего бюджета на команду нет: ограничен только допуск (`mcp.execution.admission_timeout_ms`) и те шаги, которые объявили свой предел сами.
-- Queued cancellation может завершиться до запуска work; running cancellation должна идти через controlled interruption flow.
-- Cancellation policy применяется на command boundary и safe points, без отдельной cancellation state machine на каждом pipeline step.
-- HTTP MCP-сессии ограничены по ёмкости и управляются через TTL.
-- Для интерактивного EDT-исполнения заданы отдельные ограничения на startup и command timeout.
-- Серверные отмены и shutdown строятся вокруг cooperative cancellation и bounded drain, а не вокруг мгновенного прерывания любой внешней работы.
-- Workspace lock contract описан в `DEC.2026-04-20.A-COMMAND-OWNS-THE-WORKPATH-EXCLUSIVELY`.
-- MCP admission/session capacity описаны в `DEC.2026-04-20.MCP-LIMITS-EXECUTION-AND-SESSIONS-SEPARATELY`.
-- Общая политика прерывания описана в `DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE`.
+### 8.4 Исполнители
+
+Кто исполняет операцию, решает пара «операция и вид цели». Матрица — данные в
+[`domain/capability.rs`](../../src/domain/capability.rs): строка — цепочка в порядке
+умолчания, у записи — реализован исполнитель или экспериментален и чем подтверждено.
+Исполнители: `designer`, `ibcmd`, `agent` — агент Конфигуратора или шлюз, `webinst`;
+объявленный `ibcmd-rs` строк и адаптера не имеет.
+Экспериментальный идёт только по ключу `providers.*`. Выбор и квитанция — [6.2](06-runtime-view.md). Таблица
+для пользователя в [`docs/CAPABILITIES.md`](../../docs/CAPABILITIES.md) написана руками.
+
+Правила: [умолчания живут в коде](../rules/use-cases/provider-defaults-live-in-code.md),
+[у кластерной цели исполнитель есть у каждой операции](../rules/use-cases/a-cluster-target-is-served-by-every-operation.md).
+
+### 8.5 Анализ изменений
+
+- Изменения ищут `push` (и сборка перед `test`) и подготовка расширения-инструмента;
+  `pull`, `upload` и `make` состояния не касаются.
+- Обход отсеивает файлы по отметке времени, затем сверяет хеши; хранилище redb — на
+  контекст; запись — после успешного шага.
+- Восстановимый сбой хранилища или обхода ведёт к полной загрузке и назван в ответе;
+  невосстановимый — сбой шага.
+
+Решение о частичной загрузке — [`partial_load.rs`](../../src/change_detection/partial_load.rs), [6.3](06-runtime-view.md).
+
+### 8.6 Ответ
+
+Сценарий возвращает результат или `UseCaseFailure<T>` —
+[`use_cases/result.rs`](../../src/use_cases/result.rs). Адаптер кладёт его в конверт
+[`command_envelope.rs`](../../src/command_envelope.rs) и выводит род и код отказа: CLI —
+[`cli/output.rs`](../../src/cli/output.rs), MCP — [`mcp/error.rs`](../../src/mcp/error.rs),
+где словарь уже. `test`, `upload`, `make`, `download`, `infobase dump` и `restore` отдают
+итог `ExecutionOutcome<T>`, остальные команды — свою форму.
+Рода, коды и коды выхода — в CAPABILITIES, «Рода и коды отказа».
+
+Правила: [конверт](../rules/wire/command-envelope.md), формы `data` — [`wire/`](../rules/wire/),
+[код выхода отражает род](../rules/cli/exit-code-reflects-the-failure-kind.md),
+[пропуск и деградация — в шагах](../rules/use-cases/steps-record-skips-and-degradation.md).
+
+### 8.7 Прерывание и пределы
+
+- Срока у команды нет. Досрочно её заканчивает оператор: Ctrl+C или SIGTERM в командной
+  строке, отмена вызова в MCP. Сигнал только отменяет, процесс раннера он не убивает; у
+  `clone` перехвата нет, и Ctrl+C завершает раннер сразу.
+- Предел есть у шага, который его объявил: EDT, клиент тестов, ожидание клиентского MCP,
+  запуск своего агента, загрузка по HTTP, ожидание слота MCP. Одноразовый EDT в `push`,
+  `make`, `infobase create` и при подготовке расширения-инструмента предела не имеет.
+- Отмену проверяют между шагами. Процесс ведёт себя по классу
+  ([`context.rs`](../../src/use_cases/context.rs)): снимается сразу; мягко — SIGTERM группе,
+  затем SIGKILL; критический — дорабатывает, итог успешен с отложенным прерыванием.
+- Запись в базу — критическая фаза; `/RestoreIB` Конфигуратора снимается мягко —
+  расхождение, #290. `Cancelled` ставится, только когда процесс действительно остановлен;
+  MCP в работе ждёт конечного состояния.
+
+Правила: [шаг ограничен своим пределом](../rules/use-cases/a-step-is-bounded-only-by-its-own-cap.md),
+[класс прерывания объявлен](../rules/use-cases/operations-declare-an-interruption-class.md),
+[запись в базу — критическая фаза](../rules/use-cases/a-database-write-is-a-critical-phase.md),
+[отмена означает состоявшуюся отмену](../rules/use-cases/cancelled-means-terminal-cancellation.md).
+
+### 8.8 Публикация с заменой
+
+`pull`, `make`, `download` и `infobase dump` публикуют через
+[`staged_publication.rs`](../../src/use_cases/staged_publication.rs), `convert` и `tools
+download` — той же заменой из [`support/fs.rs`](../../src/support/fs.rs):
+
+- промежуточная копия — рядом с целью, чтобы перенос не пересекал файловую систему;
+- замена: цель — в резервную копию, промежуточная — на её место, при сбое — откат;
+- у `staged_publication.rs` замена — критическая фаза, а метаданные рядом называют
+  раннер, прогон и цель, и уборка следов прошлых запусков трогает только свои.
+
+Каталог человека — выгрузка `pull`, выход `convert` — перед заменой проверяется через git
+([`destruction_guard.rs`](../../src/use_cases/destruction_guard.rs)): правка поверх индекса,
+файл вне учёта или в игноре, незавершённое слияние — отказ без `--force`. Каталог без git не
+защищён.
+
+Правила: [уборка трогает только свои следы](../rules/use-cases/cleanup-touches-only-its-own-artefacts.md),
+[замена каталога человека спрашивает заранее](../rules/use-cases/replacing-a-user-directory-asks-first.md).
+
+### 8.9 Общая сессия EDT
+
+EDT работает одноразовым `1cedtcli` или одной интерактивной сессией
+(`tools.edt_cli.interactive-mode`). Сессия — актор
+[`edt_session.rs`](../../src/platform/edt_session.rs) над долгим процессом
+[`interactive.rs`](../../src/platform/interactive.rs): очередь, проверка рабочей области
+перед каждой командой, перезапуск после сбоя. MCP-сервер держит одну сессию всё время
+работы; командная строка и сценарии заводят свою на команду.
+
+Правила: [у EDT два режима](../rules/platform/edt-has-two-execution-modes.md),
+[прогревает только долгоживущий хост](../rules/platform/only-a-long-lived-host-prewarms-edt.md).
+
+### 8.10 Наблюдаемость
+
+Журналы утилит — `workPath/logs`, файл на операцию. Журнал действий пишется при выводе
+JSON и когда задан `V8TR_ACTION_LOG_FILE`. В текстовом выводе — живая лента. MCP шлёт события `tracing` —
+[`mcp/telemetry.rs`](../../src/mcp/telemetry.rs); хранилища метрик нет. Правило:
+[предупреждение называет путь к диагностике](../rules/cli/diagnostic-path-is-visible.md).
+
+### 8.11 Секреты
+
+Пароли лежат в местном слое, `init` и `clone` держат его вне git. В утилиту пароль уходит
+аргументом, агенту и шлюзу — аутентификацией SSH. Маскирование — только при показе
+([`secrets.rs`](../../src/platform/secrets.rs)). HTTP-сервер MCP клиента не
+аутентифицирует. Правила: [пароль не появляется в выводе](../rules/cli/secrets-never-reach-the-output.md),
+[учётные данные — в местном слое](../rules/config/credentials-stay-in-the-overlay.md).
+
+### 8.12 Порождаемые формы
+
+Схемы конверта, данных команд, конфигурации, поверхность MCP и словарь текстового вывода
+порождаются из типов, тесты сверяют их со свежими. Правят их порождением. Какое правило
+закрепляет форму, говорит его поле `artifact`.

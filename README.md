@@ -294,7 +294,8 @@ v8-runner extensions --installed-name YAXUNIT
   model (модель выполнения), lock/publication behavior (поведение блокировок и публикации).
 - [docs/README.md](docs/README.md): какой источник на что отвечает — код, правила,
   описания.
-- [ARCHITECTURE.md](ARCHITECTURE.md): module map (карта модулей) и границы для контрибьюторов.
+- [spec/arc42/](spec/arc42/architecture.md): устройство — карта модулей (раздел 5), потоки,
+  сквозные механизмы; для контрибьюторов.
 - [spec/README.md](spec/README.md): внутренний слой — правила продукта (architecture rules)
   и архитектурное описание.
 - [references/1c/README.md](references/1c/README.md): сырой внешний reference corpus

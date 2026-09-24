@@ -1,35 +1,38 @@
-## 7. Представление развёртывания
-
-Основная цель развёртывания — одна рабочая станция разработчика или локальный automation-host с доступом к файловой системе и установленными утилитами 1С.
+## 7. Развёртывание
 
 ```mermaid
 flowchart TB
-    subgraph Host["Машина разработчика / локальный automation-host"]
-        Binary["Бинарь v8-runner"]
-        Config["v8project.yaml"]
-        Sources["Исходники проекта"]
-        Work["workPath\nлоги, temp, хеши, locks, edt-workspace"]
-        Targets["Публикуемые target paths\ndump, cf/cfe, epf/erf"]
-        Binary --> Config
-        Binary --> Sources
-        Binary --> Work
-        Binary --> Targets
-        Binary --> Tools["Локальные утилиты 1С\n1cv8 / 1cv8c / ibcmd / 1cedtcli"]
-        Binary --> HTTP["Опциональный MCP HTTP listener"]
+    subgraph Host["Машина разработчика или агента"]
+        Bin["v8-runner"]
+        Files["v8project.yaml, местный слой, исходники"]
+        Work["workPath"]
+        Targets["Цели выгрузки и пакеты"]
+        Tools["Утилиты платформы и EDT"]
+        Own["Свой агент Конфигуратора"]
+        Listener["MCP по HTTP"]
+        Bin --> Files & Work & Targets & Tools
+        Bin -->|SSH| Own
+        Bin --- Listener
     end
-
-    Assistant["MCP-клиент / AI-ассистент"] --> HTTP
-    Developer["Пользователь терминала"] --> Binary
-    Tools --> Infobase["Файловая или серверная ИБ"]
+    Client["MCP-клиент"] --> Listener
+    Tools --> IB["Файловая или кластерная база"]
+    Own --> IB
+    Bin -->|SSH| Attached["Чужой агент Конфигуратора"]
+    Bin -->|"SSH, SFTP"| Gate["Шлюз автономного сервера"]
 ```
 
-Предположения по развёртыванию:
+- Процессы: сам раннер; утилиты — дочерними процессами в своих группах, клиент `launch`
+  без ожидания — отсоединённым; свой агент
+  Конфигуратора — на время команды, на петлевом адресе; общая сессия EDT — на время
+  команды или всё время работы MCP-сервера.
+- Чужого агента и шлюз раннер не запускает. Пути в командах шлюза разрешаются на его
+  стороне, файлы идут объявленным каналом, `workPath` остаётся локальным.
+- Раннер пишет в `workPath`, в каталог, где лежит цель, — промежуточная и резервная копии
+  создаются рядом с ней, — и в каталог обмена чужого агента или шлюза.
+- MCP по HTTP слушает `mcp.http.bind_address` и клиента не аутентифицирует — [8.11](08-cross-cutting-concepts.md).
+- Своей СУБД и службы у раннера нет.
 
-- процесс может запускать дочерние процессы;
-- настроенный `workPath` доступен на запись;
-- деревья исходников доступны локально, а целевая ИБ доступна как файловая база или как серверное подключение;
-- workspace lock является local advisory file lock внутри `workPath`, а не distributed lock для нескольких машин;
-- full replacement staging/backup paths создаются рядом с target path, поэтому parent directory target должен быть доступен на запись;
-- отдельный database service самому `v8-runner` не нужен;
-- HTTP listener нужен только для MCP transport и не участвует в обычном CLI path;
-- HTTP session capacity ограничивает stateful MCP sessions, но не является лимитом внешних platform processes.
+Правила: [`workPath` всегда локален](../rules/config/workpath-is-always-local.md),
+[пути цели разрешаются на её стороне](../rules/platform/target-side-paths-resolve-on-the-target.md),
+[свой агент — только на локальной точке входа](../rules/platform/managed-mode-requires-a-local-endpoint.md),
+[агенту файловой и кластерной цели нужна локальная платформа](../rules/platform/an-agent-for-a-file-or-cluster-target-needs-the-local-platform.md).

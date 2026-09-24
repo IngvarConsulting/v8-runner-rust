@@ -7,11 +7,11 @@ Before changing code in an unfamiliar area, read the two sections of
 `rg` cannot:
 
 - [Building blocks](spec/arc42/05-building-block-view.md) — what each module
-  under `src/` owns and which way the dependencies point. Every block links to its
-  directory, so this is also the route from a responsibility to the code.
-- [Runtime view](spec/arc42/06-runtime-view.md) — what actually happens during
-  `push`, `test`, `extensions`, `tools download`, MCP EDT syntax, a full replacement, and at
-  the command boundary with admission and cancellation.
+  under `src/` owns and which way the dependencies point. Every block links to its code,
+  so this is also the route from a responsibility to the code.
+- [Runtime view](spec/arc42/06-runtime-view.md) — what actually happens, step by step,
+  when a command crosses several modules, and at the command boundary with admission and
+  cancellation.
 
 These describe the system; they are not commitments and name no checks.
 

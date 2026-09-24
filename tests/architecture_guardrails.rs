@@ -1,12 +1,14 @@
 mod guardrail_support;
 
 use regex::Regex;
+use std::ffi::OsString;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::LazyLock;
 
 use guardrail_support::{
-    collect_rust_files, free_function_tokens, production_source, production_tokens,
-    trait_impl_method_tokens,
+    collect_rust_files, free_function_tokens, has_cfg_test, parse_rust_file, production_source,
+    production_tokens, trait_impl_method_tokens,
 };
 
 const EXPECTED_MCP_TOOLS: &[&str] = &[
@@ -713,4 +715,369 @@ fn a_command_carries_no_deadline_anywhere_it_could_be_put_back() {
         "src/mcp/server.rs computes a remainder of the admission budget: an admitted call must \
          run to its terminal outcome, and a step cap must not be shortened by the queue wait."
     );
+}
+
+#[test]
+fn every_top_level_module_is_a_block_of_the_module_map() {
+    // Корень проблемы: карта модулей жила в двух файлах, на маршруте агента лежал один, и ни
+    // один не был привязан к изменениям кода — три модуля так и не попали ни в один. Владелец
+    // карты один — таблица 5.1 раздела 5 arc42. Модуль без строки в ней валит этот страж, где
+    // бы вторую карту ни завели; ссылка в прозе рядом строки не заменяет.
+    let main = parse_rust_file(&repo_path("src/main.rs"));
+    let modules: Vec<String> = main
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Mod(module) if !has_cfg_test(&module.attrs) => {
+                Some(module.ident.to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !modules.is_empty(),
+        "src/main.rs declares no modules: the module list was not read"
+    );
+    let map = read("spec/arc42/05-building-block-view.md");
+    // Строку модуля называет её первая ячейка: ссылка в чужой строке таблицы или в прозе
+    // строку не заменяет.
+    let first_cells: Vec<&str> = extract_between(&map, "### 5.1", "### 5.2")
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix('|'))
+        .filter_map(|row| row.split('|').next())
+        .collect();
+    let missing: Vec<&str> = modules
+        .iter()
+        .map(String::as_str)
+        .filter(|name| {
+            let as_dir = format!("](../../src/{name}/)");
+            let as_file = format!("](../../src/{name}.rs)");
+            !first_cells
+                .iter()
+                .any(|cell| cell.contains(&as_dir) || cell.contains(&as_file))
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "table 5.1 of spec/arc42/05-building-block-view.md has no row linking {missing:?}: the \
+         module map names every top-level module of src/main.rs"
+    );
+}
+
+/// Документы маршрута агента, чьи ссылки сторожит `every_link_on_the_agent_route_resolves`;
+/// к ним — каждый файл `spec/arc42/`.
+const AGENT_ROUTE_DOCUMENTS: &[&str] = &[
+    "AGENTS.md",
+    "AI_DEV.md",
+    "README.md",
+    "docs/README.md",
+    "spec/README.md",
+    "spec/rules/README.md",
+];
+
+#[test]
+fn every_link_on_the_agent_route_resolves() {
+    // Описание устройства называет модули и файлы ссылками, маршрут агента — документы.
+    // Переименованный файл делает адрес ложным молча, и агент, пришедший по нему, остаётся
+    // без ответа. Страж привязывает эти тексты к изменениям дерева. Регистр сверяется точно:
+    // macOS и Windows его прощают, Linux и GitHub — нет.
+    let root = repo_path("");
+    let arc42 = repo_path("spec/arc42");
+    let mut documents: Vec<PathBuf> = AGENT_ROUTE_DOCUMENTS
+        .iter()
+        .map(|relative| repo_path(relative))
+        .collect();
+    documents.extend(
+        fs::read_dir(&arc42)
+            .unwrap_or_else(|error| panic!("{}: {error}", arc42.display()))
+            .map(|entry| entry.expect("directory entry").path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "md")),
+    );
+    documents.sort();
+
+    let mut seen = 0usize;
+    let mut broken = Vec::new();
+    for document in &documents {
+        let text = fs::read_to_string(document)
+            .unwrap_or_else(|error| panic!("{}: {error}", document.display()));
+        let base = document
+            .parent()
+            .expect("a document has a parent directory");
+        for target in relative_link_targets(&text) {
+            seen += 1;
+            if !resolves_with_exact_case(&root, base, &target) {
+                broken.push(format!("{}: {target}", repo_relative(document)));
+            }
+        }
+    }
+    // Разбор, который не нашёл ни одной ссылки, прошёл бы зелёным и ничего не сторожил.
+    assert!(
+        seen >= 50,
+        "only {seen} relative links found on the agent route: the link reader is broken"
+    );
+    assert!(
+        broken.is_empty(),
+        "links on the agent route point at nothing (case is compared exactly):\n{}",
+        broken.join("\n")
+    );
+}
+
+/// Путь от корня репозитория, всегда через косую черту: `Path::display()` на Windows дал бы
+/// обратную.
+fn repo_relative(path: &Path) -> String {
+    path.strip_prefix(repo_path(""))
+        .unwrap_or(path)
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Встроенная ссылка `[текст](адрес)` или `[текст](<адрес>)`, с заголовком или без. Голый
+/// адрес может нести парные скобки: `guide(v2).md`.
+static INLINE_LINK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"\]\((?:<([^>]*)>|((?:[^()\s]|\([^()\s]*\))+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)"#,
+    )
+    .expect("regex")
+});
+/// Сноска `[метка]: адрес` или `[метка]: <адрес>`; `[^метка]:` — примечание, а не ссылка.
+static REFERENCE_LINK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^ {0,3}\[[^\]^][^\]]*\]:\s*(?:<([^>]*)>|(\S+))").expect("regex")
+});
+/// Строка, с которой начинается новый блок: пункт списка или строка таблицы. Код в строке
+/// через границу блока не переходит.
+static BLOCK_START: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\s*(?:[-*+]\s|\d+[.)]\s|\|)").expect("regex"));
+
+/// Относительные адреса ссылок — встроенных и сносок — вне огороженных блоков и вне кода в
+/// строке. Внешние адреса и якоря своей страницы сторожа не касаются.
+fn relative_link_targets(text: &str) -> Vec<String> {
+    // Огороженный блок выпадает целиком, а его строки остаются пустыми, чтобы соседние абзацы
+    // не склеились.
+    let mut prose = String::with_capacity(text.len());
+    let mut fence: Option<(char, usize)> = None;
+    for line in text.lines() {
+        match (fence, fence_marker(line)) {
+            (None, Some(opened)) => fence = Some(opened),
+            // Ограду закрывает тот же знак, серия не короче открывшей и ничего после неё.
+            (Some((open, length)), Some((close, run)))
+                if close == open && run >= length && closes_alone(line, run) =>
+            {
+                fence = None;
+            }
+            // Строка внутри ограды, в том числе с чужим или коротким знаком.
+            (Some(_), _) => {}
+            (None, None) => prose.push_str(line),
+        }
+        prose.push('\n');
+    }
+    let mut targets = Vec::new();
+    for block in blocks(&prose) {
+        let paragraph = without_code_spans(&block);
+        let inline = INLINE_LINK
+            .captures_iter(&paragraph)
+            .filter_map(|capture| capture.get(1).or_else(|| capture.get(2)));
+        let reference = REFERENCE_LINK
+            .captures_iter(&paragraph)
+            .filter_map(|capture| capture.get(1).or_else(|| capture.get(2)));
+        for found in inline.chain(reference) {
+            let path = found.as_str().split('#').next().unwrap_or_default();
+            if !path.is_empty() && !path.contains(':') {
+                targets.push(path.to_owned());
+            }
+        }
+    }
+    targets
+}
+
+/// Знак ограды CommonMark: не больше трёх пробелов отступа, затем серия не короче трёх
+/// одинаковых знаков — обратных кавычек или тильд. Четыре пробела отступа делают строку
+/// кодом с отступом, а не оградой.
+fn fence_marker(line: &str) -> Option<(char, usize)> {
+    let rest = line.trim_start_matches(' ');
+    if line.len() - rest.len() > 3 {
+        return None;
+    }
+    let mark = rest.chars().next().filter(|ch| *ch == '`' || *ch == '~')?;
+    let run = rest.chars().take_while(|ch| *ch == mark).count();
+    (run >= 3).then_some((mark, run))
+}
+
+/// Строка закрытия ограды: после серии знаков — только пробелы.
+fn closes_alone(line: &str, run: usize) -> bool {
+    line.trim_start_matches(' ')[run..].trim().is_empty()
+}
+
+/// Блоки текста, в пределах которых живёт код в строке: абзацы между пустыми строками, а
+/// внутри них — пункты списка и строки таблицы.
+fn blocks(prose: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current = String::new();
+    for line in prose.lines() {
+        let starts_block = line.trim().is_empty() || BLOCK_START.is_match(line);
+        if starts_block && !current.is_empty() {
+            blocks.push(std::mem::take(&mut current));
+        }
+        current.push_str(line);
+        current.push('\n');
+    }
+    if !current.is_empty() {
+        blocks.push(current);
+    }
+    blocks
+}
+
+/// Блок без кода в строке — так, как его читает CommonMark: код открывает серия обратных
+/// кавычек и закрывает серия той же длины в том же блоке, а серия без пары и кавычка после
+/// обратной косой черты — просто знаки. Поэтому лишняя кавычка не прячет ни одной ссылки, а
+/// текст ссылки в кавычках пустеет, но её адрес остаётся. Переводы строк из кода
+/// сохраняются: сноска должна остаться в начале своей строки.
+fn without_code_spans(paragraph: &str) -> String {
+    let mut kept = String::with_capacity(paragraph.len());
+    let mut rest = paragraph;
+    while let Some(open) = rest.find('`') {
+        let slashes = rest[..open]
+            .bytes()
+            .rev()
+            .take_while(|&byte| byte == b'\\')
+            .count();
+        if slashes % 2 == 1 {
+            kept.push_str(&rest[..=open]);
+            rest = &rest[open + 1..];
+            continue;
+        }
+        kept.push_str(&rest[..open]);
+        let run = backtick_run(&rest[open..]);
+        let body = &rest[open + run..];
+        match closing_run(body, run) {
+            Some(close) => {
+                kept.extend(body[..close].chars().filter(|&ch| ch == '\n'));
+                rest = &body[close + run..];
+            }
+            None => {
+                kept.push_str(&rest[open..open + run]);
+                rest = body;
+            }
+        }
+    }
+    kept.push_str(rest);
+    kept
+}
+
+/// Длина серии обратных кавычек в начале строки, в байтах: знак однобайтовый.
+fn backtick_run(text: &str) -> usize {
+    text.bytes().take_while(|&byte| byte == b'`').count()
+}
+
+/// Начало первой серии ровно из `run` обратных кавычек.
+fn closing_run(text: &str, run: usize) -> Option<usize> {
+    let mut offset = 0;
+    while let Some(found) = text[offset..].find('`') {
+        let start = offset + found;
+        let length = backtick_run(&text[start..]);
+        if length == run {
+            return Some(start);
+        }
+        offset = start + length;
+    }
+    None
+}
+
+#[test]
+fn the_link_reader_sees_what_markdown_renders() {
+    // Страж ссылок стоит на этом разборе: пропущенная им ссылка не проверяется вовсе, и
+    // страж остаётся зелёным. Здесь — случаи, на которых разбор уже ошибался.
+    let text = "\
+[a](one.md) и [`b`](two.md \"заголовок\") и [c](<three four.md>)
+
+```
+[x](fenced.md)
+```
+
+~~~
+[y](tilde.md)
+~~~
+
+Нажмите клавишу ` — [d](five.md)
+
+``код с ` внутри [z](code.md)`` и затем [e](six.md)
+
+- пункт с лишней ` кавычкой
+- следующий пункт: [g](nine.md 'заголовок')
+
+| ` | ячейка |
+| --- | [h](ten.md (заголовок)) |
+
+Экранированная \\` кавычка и [i](eleven.md)
+
+[j](guide(v2).md)
+
+[angle ref]: <twelve thirteen.md>
+
+    ```
+[k](fourteen.md)
+
+````
+```
+[w](inside-long-fence.md)
+````
+
+[ref]: seven.md
+[^note]: примечание, а не ссылка
+
+[ext](https://example.com) [якорь](#here) [f](eight.md#part)
+";
+    let mut found = relative_link_targets(text);
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            "eight.md",
+            "eleven.md",
+            "five.md",
+            "fourteen.md",
+            "guide(v2).md",
+            "nine.md",
+            "one.md",
+            "seven.md",
+            "six.md",
+            "ten.md",
+            "three four.md",
+            "twelve thirteen.md",
+            "two.md"
+        ]
+    );
+}
+
+/// Путь существует с точностью до регистра: `..` сворачивается по тексту, а каждый
+/// компонент сверяется с перечнем своего каталога, а не с ответом файловой системы.
+fn resolves_with_exact_case(root: &Path, base: &Path, target: &str) -> bool {
+    let Ok(relative_base) = base.strip_prefix(root) else {
+        return false;
+    };
+    let mut parts: Vec<OsString> = Vec::new();
+    for component in relative_base.join(target).components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_os_string()),
+            Component::ParentDir => {
+                if parts.pop().is_none() {
+                    return false;
+                }
+            }
+            Component::CurDir => {}
+            Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    let mut current = root.to_path_buf();
+    for part in parts {
+        let Ok(entries) = fs::read_dir(&current) else {
+            return false;
+        };
+        if !entries.flatten().any(|entry| entry.file_name() == part) {
+            return false;
+        }
+        current.push(part);
+    }
+    true
 }

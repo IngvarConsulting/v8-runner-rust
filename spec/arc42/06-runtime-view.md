@@ -1,150 +1,173 @@
-## 6. Представление времени выполнения
+## 6. Время выполнения
 
-### 6.1 Сценарий `push`
+Потоки, которые проходят несколько модулей: кто за кем идёт и где принимается решение.
+Что видит пользователь, описывает [`docs/DEEP_DIVE.md`](../../docs/DEEP_DIVE.md); команда,
+которая живёт в одном файле сценария, здесь не разобрана — её файл назван в [5.3](05-building-block-view.md).
 
-```mermaid
-sequenceDiagram
-    participant User as Вызывающая сторона CLI или MCP
-    participant Adapter as Адаптер CLI/MCP
-    participant UC as Use case сборки
-    participant CD as Анализ изменений
-    participant PF as Платформенный адаптер
-    participant IB as Информационная база 1С
+### 6.1 Граница команды
 
-    User->>Adapter: запрос push
-    Adapter->>UC: нормализованный запрос
-    UC->>CD: определить изменённые source-set
-    CD-->>UC: изменённые файлы и подсказки по режиму
-    alt Изменений нет
-        UC-->>Adapter: skipped/success результат
-    else Найдены изменения
-        UC->>PF: выполнить загрузку через Designer или IBCMD
-        PF->>IB: import/apply изменений
-        IB-->>PF: результат платформы
-        PF-->>UC: структурированный итог исполнения
-        UC-->>Adapter: результат push
-    end
-```
+Командная строка — [`app.rs`](../../src/app.rs), затем [`cli/execute.rs`](../../src/cli/execute.rs):
 
-Ключевые свойства выполнения:
+1. Разбор аргументов; прежние имена команд приводятся к новым; несовместимые глобальные
+   ключи, например `--dry-run` у команды без превью, отказывают сразу.
+2. Конфигурация загружается так, как нужно команде, — [8.1](08-cross-cutting-concepts.md). `download`, `infobase dump` и
+   `restore` здесь же выбирают исполнителя, и их превью возвращается до замка.
+3. Журнал действий открывается при `--json-message` или заданном `V8TR_ACTION_LOG_FILE`;
+   Ctrl+C и SIGTERM становятся отменой — [8.7](08-cross-cutting-concepts.md).
+4. Адаптер собирает запрос. Превью идёт без замка, иначе берётся замок `workPath` — [8.3](08-cross-cutting-concepts.md).
+5. Сценарий получает `ExecutionContext` и возвращает результат или ошибку; адаптер
+   печатает текст или конверт — [8.6](08-cross-cutting-concepts.md).
 
-- Public CLI/MCP boundary должен владеть workspace lock для canonical `workPath` до dispatch use case.
-- `CONFIGURATION` обрабатывается раньше расширений.
-- Выбор между partial и full строится по анализу изменений и возможностям backend.
-- Состояние сохраняется только после успешного выполнения.
-- Для EDT source-set export decision и generated Designer load decision используют разные change-detection contexts.
+`version` и `init` исполняет сам `app`, без замка. `clone` тоже исполняет `app` и выгружает
+базу без замка — это расхождение с [правилом о замке](../rules/cli/lock-boundary-is-the-adapter.md), #290.
 
-### 6.2 Сценарий `test`
+MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 
-- `test` всегда начинается с `push`.
-- Внешний command boundary владеет workspace lock, а вложенный `push` вызывается через explicit unlocked entrypoint.
-- Если сборка завершилась ошибкой, тесты не запускаются.
-- Генерируется временный JSON-конфиг YaXUnit.
-- Затем запускается Enterprise, а JUnit XML и runner-log разбираются в структурированные результаты.
-- При сбое выполнения или разбора артефакты не уничтожаются молча: они сохраняются под `workPath/temp/yaxunit/runs/<run-id>/`.
-- Итог тестового runner-like сценария должен выражаться через `ExecutionOutcome<TestReport>` и сохранять structured errors, diagnostics, metrics and retained artifacts.
+1. По HTTP — сверка заголовка `Host` и учёт сессии. Сверка `Host` защищает от подмены имени
+   через браузер, но не аутентифицирует: инструменты доступны всякому, кто достаёт до адреса
+   слушателя, — [8.11](08-cross-cutting-concepts.md). По stdio клиент один, и stdout несёт
+   только кадры протокола: отказы запуска уходят в stderr, предупреждения — в журнал.
+2. Допуск: один семафор на сервер. Отмена или истечение ожидания в очереди — ошибка
+   протокола, инструмент не запускался.
+3. [`service.rs`](../../src/mcp/service.rs) переводит вход в запрос сценария;
+   [`port.rs`](../../src/mcp/port.rs) берёт тот же замок `workPath`; сценарий идёт в
+   отдельном потоке.
+4. Ответ — тот же конверт в `structured_content`; отказ сценария помечен `isError`.
 
-### 6.3 Сценарий `extensions`
+Правила: [замок берёт адаптер](../rules/cli/lock-boundary-is-the-adapter.md),
+[превью без замка](../rules/cli/preview-takes-no-lock.md),
+[допуск общий для обоих транспортов](../rules/mcp/admission-is-shared-by-both-transports.md),
+[перегрузка и запрос без сессии](../rules/mcp/overload-answers-503-and-stateless-post-400.md).
 
-```mermaid
-sequenceDiagram
-    participant User as CLI пользователь
-    participant CLI as cli::execute
-    participant UC as configure_extensions
-    participant PF as Platform adapter
-    participant IB as Информационная база
+### 6.2 Выбор исполнителя и превью
 
-    User->>CLI: extensions [--name ...]
-    CLI->>UC: ConfigureExtensionsRequest
-    UC->>UC: выбрать extension source-set
-    UC->>PF: обновить свойства расширений
-    PF->>IB: extension update
-    IB-->>PF: результат платформы
-    PF-->>UC: шаги и диагностика
-    UC-->>CLI: ExtensionsResult
-```
+[`provider_selection.rs`](../../src/use_cases/provider_selection.rs) по матрице
+[`capability.rs`](../../src/domain/capability.rs):
 
-Ключевые свойства выполнения:
+1. План. Ключ `providers.<операция>` назначает одного исполнителя без отката к умолчанию;
+   без ключа — цепочка умолчаний строки матрицы для вида цели. Ключа командной строки или
+   поля вызова MCP для выбора нет.
+2. Готовность — найдена утилита исполнителя. Подключённому агенту и шлюзу локальная
+   утилита не требуется. Первый готовый выбран, прежние попадают в `skipped` с причиной.
+3. Квитанция `provider` — `selected`, `origin`, `skipped` — входит в ответ при успехе и в
+   отказ после выбора, если отказ несёт данные.
+4. `push` на неудачный выбор не обрывается: неизменённым наборам платформа не нужна.
+5. `download`, `infobase dump` и `restore` берут план той же матрицы, но перебирают сами:
+   своя таблица адаптеров и более глубокая проверка готовности.
+6. Превью `--dry-run` не берёт замка, не создаёт `workPath`, не пишет журнала; находит
+   утилиты, выбирает исполнителя и возвращает план с `provider_dispatched: false`.
 
-- Сценарий остаётся CLI-only и не публикуется как MCP tool.
-- Работает только с `source-set` типа `EXTENSION`.
-- Используется как более узкий operational path по сравнению с `push`, когда нужно синхронизировать свойства расширений без полной загрузки исходников.
-- Так как операция мутирует ИБ, будущая общая execution policy должна помечать соответствующий platform step как critical DB phase.
+Правила: [умолчания живут в коде](../rules/use-cases/provider-defaults-live-in-code.md),
+[исполнителя не выбирают флагом](../rules/cli/provider-is-not-a-flag.md),
+[превью не запускает исполнителя](../rules/cli/preview-dispatches-nothing.md),
+[превью не оставляет следов](../rules/cli/preview-leaves-no-trace.md).
 
-### 6.4 Сценарий `tools download`
+### 6.3 `push`
 
-- CLI adapter получает workspace lock, потому что команда меняет primary config, local overlay и
-  локальные tool directories.
-- Use case читает latest release metadata для выбранной команды: `yaxunit`, `vanessa` или
-  `client-mcp`.
-- Для `yaxunit --sources` распаковывается source subtree в `tests`; primary config получает
-  `source-set` `tests`, если его ещё нет. Без `--sources` скачивается `.cfe` в `build/tools`.
-- Для `client-mcp --sources` распаковывается source subtree в
-  `build/tools/onec-client-mcp-devkit/exts/client-mcp`; без `--sources` команда требует
-  исполнителя `designer` и скачивает `.cfe` в `build/tools`.
-- Vanessa Automation single материализуется командой `vanessa` как
-  `build/tools/vanessa-automation-single.epf`.
-- `v8project.local.yaml` обновляется machine-local настройками `tools.va.epf_path` для
-  `vanessa` и `tools.client_mcp.extension` для `client-mcp`; загрузка не устанавливает
-  расширения в ИБ, не подменяет `push` и при `--force` заменяет только managed targets,
-  созданные этой командой.
-- Managed target фиксируется sidecar marker-файлом до publish phase. Если публикация скачанного
-  файла или каталога завершается ошибкой, новый marker очищается, чтобы следующий запуск не считал
-  неуспешный target управляемым.
-- HTTP download path ограничивает response body 512 MiB и прерывает сценарий до распаковки или
-  публикации, если release asset или source archive превышает лимит.
+[`build_project.rs`](../../src/use_cases/build_project.rs) и
+[`build_project/`](../../src/use_cases/build_project/):
 
-### 6.5 Сценарий MCP EDT Syntax
+1. Выбор исполнителя — 6.2.
+2. Наборы по порядку: конфигурация, расширения, внешние обработки, внешние отчёты;
+   `--source-set` оставляет один.
+3. Анализ изменений — [8.5](08-cross-cutting-concepts.md). Формат EDT: сперва контекст `edt-<набор>`.
+4. Для конфигурации и расширения: изменений нет — шаг `skipped`. Иначе: [EDT — экспорт в
+   `workPath/designer/<набор>`, запись состояния `edt-`, анализ `designer-`]; решение о
+   частичной загрузке; загрузка и применение к базе — критической фазой у любого
+   исполнителя; запись состояния `designer-` сразу после успеха. Внешние обработки и
+   отчёты в базу не идут: формат Конфигуратора их только проверяет, формат EDT выгружает в
+   файлы Конфигуратора, а `make` готовит их заново.
+5. Сбой шага: у него `ok: false`, остальные наборы пропускаются с пометкой, что цепочка
+   прервана; записанное раньше остаётся.
+6. После наборов — расширение-инструмент клиентского MCP, если объявлено.
 
-- MCP-запрос приходит через stdio или HTTP.
-- Глобальный admission control ограничивает параллельные tool-вызовы.
-- `check_syntax_edt` идёт через общий `platform::edt_session` manager вместо one-shot исполнения; тот же actor также используется CLI interactive EDT use cases.
-- Ожидание в очереди, baseline reset/probe и выполнение команды используют один и тот же ограниченный бюджет таймаута.
-- Host policy различается: MCP может отпустить caller после running cancel/timeout и дождаться terminal state асинхронно внутри shared actor, а CLI blocking adapter ждёт terminal cleanup или завершает собственный short-lived manager принудительно перед возвратом.
+Частичную загрузку делает полной `--full`, порог, изменённый `Configuration.xml`,
+удаление, сомнительный путь, расширение формата EDT или восстановимый сбой хранилища и
+обхода. Полный режим виден в ответе; причину он называет у `--full`, расширения EDT и сбоя
+хранилища.
 
-### 6.6 Full Replacement `pull` / `artifacts` Publication
+Правила: [изменения ищет та команда, которой нужен ответ](../rules/use-cases/changes-are-detected-on-demand.md),
+[у EDT две ступени состояния](../rules/use-cases/edt-keeps-two-change-contexts.md),
+[сомнение делает загрузку полной](../rules/use-cases/doubt-turns-a-partial-load-into-a-full-one.md),
+[переход к полному режиму назван](../rules/use-cases/degradation-is-visible.md).
 
-```mermaid
-sequenceDiagram
-    participant User as CLI пользователь
-    participant UC as Use case pull/artifacts
-    participant PF as Platform adapter
-    participant Stage as Sibling staging path
-    participant Target as User target path
-    participant Backup as Sibling backup path
+### 6.4 Сессия агента Конфигуратора
 
-    User->>UC: pull/artifacts request
-    UC->>Stage: подготовить staging рядом с target
-    UC->>PF: записать результат в staging
-    PF-->>UC: platform result
-    alt platform failed
-        UC-->>User: failure, старый target не изменён
-    else platform succeeded
-        UC->>Target: re-canonicalize target
-        UC->>Backup: move existing target to backup
-        UC->>Target: move staging to target
-        alt publish failed
-            UC->>Target: rollback backup -> target
-            UC-->>User: failure with rollback context
-        else publish succeeded
-            UC->>Backup: best-effort cleanup
-            UC-->>User: success or degraded cleanup warning
-        end
-    end
-```
+[`agent_session.rs`](../../src/use_cases/agent_session.rs), [`platform/agent.rs`](../../src/platform/agent.rs):
 
-Ключевые свойства выполнения:
+1. На том конце: у автономной цели — шлюз `infobase.standalone.gate`; с ключом
+   `tools.designer_agent.attach` — чужой агент; иначе раннер запускает агента сам и ждёт
+   успешной аутентификации.
+2. SSH встроенным клиентом. Ключ хоста сверяется с объявленным, а у своего агента — с
+   файлом ключа, который раннер отдал платформе. Ключа для сверки нет — принимается любой, и
+   его отпечаток называется, чтобы ключ можно было закрепить; подмену хоста в сети раннер
+   тогда не заметит — [11](11-risks-and-technical-debt.md). Первая команда переводит сессию
+   в JSON, затем подключение к базе.
+3. Сессия одна на команду: `push` открывает её при первой настоящей загрузке и ведёт через
+   все наборы, остальные команды — одну на операцию.
+4. Файлы идут каналом: общим каталогом или SFTP шлюза. В общий каталог раннер выставляет
+   исходники ссылкой, а где ссылки нет и у внешних обработок `make` — копией; файл —
+   жёсткой ссылкой или копией. Полную выгрузку агент пишет в отдельный подкаталог;
+   инкрементальную и пообъектную — в общем каталоге сквозь ссылку в цель, по SFTP —
+   возвратом изменённого поверх цели. Автономной цели без объявленного канала раннер
+   отказывает до сессии.
+5. Изменяющие команды ждут конца в критической фазе.
+6. Поколение: `push` после применения записывает ответ `config generation-id`; `pull`
+   спрашивает его до выгрузки и при совпадении не выгружает, иначе выгружает и записывает.
+   Выгрузка с перечнем объектов идёт всегда.
+7. Закрытие: свой агент получает `common shutdown`; от чужого и от шлюза раннер отключается.
 
-- Staging и backup находятся рядом с target, чтобы не переходить границу файловой системы при rename.
-- Orphan cleanup может удалять только stale staging/backup paths с metadata `tool=v8-runner` и matching target identity.
-- `pull incremental` и `pull partial` не получают full replacement guarantee и остаются non-atomic update modes.
-- Publication phase после переноса старого target в backup является filesystem critical phase.
+Правила: [готовность — аутентификация](../rules/platform/agent-readiness-is-authentication.md),
+[сессия открывается в JSON](../rules/platform/agent-session-opens-in-json-mode.md),
+[сессия живёт, пока жив замок](../rules/platform/agent-session-lives-with-the-lock.md),
+[файлы удалённой цели — объявленным каналом](../rules/platform/remote-files-travel-by-a-declared-channel.md),
+[неизменившееся поколение не выгружается](../rules/use-cases/an-unchanged-generation-is-not-dumped.md).
 
-### 6.7 Command Boundary, Admission и Cancellation
+### 6.5 `test`
 
-- CLI и MCP используют разные public surfaces, но сходятся в transport-neutral use case boundary.
-- MCP tool call сначала проходит execution admission; HTTP session capacity проверяется отдельно на transport lifecycle.
-- После admission команда, работающая с `workPath`, должна получить workspace lock до запуска use case.
-- Общего бюджета на команду нет: ожидание слота ограничивает `mcp.execution.admission_timeout_ms`, а подготовку, platform work, сбор логов, cleanup и mapping результата не ограничивает ничто, кроме собственных пределов шагов.
-- Nested orchestration не получает предела сверху: шаг ограничен только тем, что объявил сам.
-- Mutating DB operations после входа в critical phase не должны получать default hard kill; cancellation/timeout записывается как requested и команда ждёт terminal outcome.
+[`run_tests.rs`](../../src/use_cases/run_tests.rs), [`run_tests/`](../../src/use_cases/run_tests/):
+
+1. Сборка — вложенный `push` тем же сценарием под замком внешней команды; сбой — тесты не
+   идут. С `--no-push` сборки нет, база проверяется на готовность. По MCP сборка всегда.
+2. Каталог прогона под `workPath/temp` — конфигурация YaXUnit или параметры Vanessa.
+3. Клиент Предприятия со своим пределом.
+4. JUnit и журнал раннера разбираются в `ExecutionOutcome<TestReport>`.
+5. Успешный прогон удаляет свой каталог, неуспешный оставляет для разбора.
+
+Правило: [вложенные шаги не берут замок повторно](../rules/cli/nested-orchestration-does-not-relock.md).
+
+### 6.6 `pull` и публикация с заменой
+
+[`dump_config.rs`](../../src/use_cases/dump_config.rs), [`staged_publication.rs`](../../src/use_cases/staged_publication.rs):
+
+1. Проверка запроса, цель, исполнитель; превью останавливается здесь.
+2. Замок цели рядом с ней; уборка своих следов прошлых запусков.
+3. Выгрузка: агент сперва сверяет поколение (6.4). Полная — в промежуточный каталог рядом
+   с целью; у агента — через его каталог и `workPath/agent/exchange`. Инкрементальная и пообъектная формата Конфигуратора — прямо в каталог, не
+   атомарно. Формат EDT — снимок в `workPath/designer/<набор>`, затем `1cedtcli import` в
+   промежуточный каталог; любой режим EDT кончается полной заменой проекта.
+4. Цель сверяется заново; перед заменой каталога человека — вопрос к git ([8.8](08-cross-cutting-concepts.md)).
+5. Критической фазой: цель — в резервный каталог, промежуточный — на её место; сбой —
+   откат и отказ с состоянием отката; неудачная уборка резервного — предупреждение.
+
+`make` публикует тем же способом — файл пакета или каталог внешних обработок — и без
+вопроса к git; цель он сверяет один раз, до выбора исполнителя.
+
+Правила: [промежуточный каталог — рядом с целью](../rules/use-cases/staging-shares-the-parent-directory.md),
+[неудачный откат называет себя](../rules/use-cases/a-failed-rollback-is-named.md),
+[замена каталога человека спрашивает заранее](../rules/use-cases/replacing-a-user-directory-asks-first.md);
+пока не выполнены — [`--force` называет уничтоженное](../rules/use-cases/force-names-what-it-destroyed.md),
+[выгрузка ложится поверх каталога](../rules/cli/pull-lays-the-dump-over-the-directory.md).
+
+### 6.7 EDT-проверка по MCP
+
+[`mcp/edt_syntax.rs`](../../src/mcp/edt_syntax.rs) над [`edt_session.rs`](../../src/platform/edt_session.rs):
+
+- При `tools.edt_cli.interactive-mode` проверка идёт в общую сессию EDT сервера — [8.9](08-cross-cutting-concepts.md);
+  иначе обычным путём через порт.
+- После допуска одно время на всё — очередь сессии, проверку рабочей области и проверку
+  проектов: `tools.edt_cli.command_timeout_ms`.
+- Отмена или превышение во время работы: сервер дожидается конечного состояния и отвечает
+  им; после превышения сессия перезапускается.
+- Путь идёт мимо порта и замка `workPath` не берёт — расхождение с
+  [правилом о замке](../rules/cli/lock-boundary-is-the-adapter.md), #290.

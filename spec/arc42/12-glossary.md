@@ -1,22 +1,36 @@
 ## 12. Глоссарий
 
-| Термин | Значение |
-| --- | --- |
-| 1С | Локальная корпоративная платформа и утилиты, которыми управляет система |
-| Designer | Конфигуратор 1С и соответствующий формат исходников / backend |
-| EDT | 1C:Enterprise Development Tools и формат EDT-проектов |
-| MCP | Model Context Protocol, через который ассистенты вызывают инструменты |
-| `source-set` | Логическая группа исходников; поддержанные типы: `CONFIGURATION`, `EXTENSION`, `EXTERNAL_DATA_PROCESSORS`, `EXTERNAL_REPORTS` |
-| External source-set | `source-set` типа `EXTERNAL_DATA_PROCESSORS` или `EXTERNAL_REPORTS`, используемый для публикации внешних `.epf`/`.erf` артефактов |
-| YaXUnit | Фреймворк тестирования, используемый для запуска и отчётности по unit-тестам 1С |
-| `workPath` | Каталог времени выполнения для логов, temp-файлов, состояния и сгенерированных артефактов |
-| Workspace lock | Advisory lock по canonical `workPath`, который сериализует публичные CLI/MCP команды над одним runtime root |
-| IBCMD | Командная утилита 1С, используемая как альтернативный backend для части операций |
-| Структурированная бизнес-ошибка | Контролируемая ошибка, возвращаемая как часть контракта CLI/MCP-операции |
-| Execution Context | Transport-neutral invocation metadata, описывающая команду, transport и дополнительные execution flags |
-| Execution Outcome | `ExecutionOutcome<T>`, доменная форма результата runner-like/pipeline-like сценария со статусом, errors, diagnostics, metrics, artifacts и typed payload |
-| Pipeline block | Крупный шаг use-case pipeline: validation, resolve target, prepare workspace, platform command, parse output, publish, cleanup или diagnostics |
-| MCP execution admission | Лимит одновременных MCP tool executions, общий для stdio и HTTP transport |
-| HTTP session capacity | Отдельный лимит tracked stateful HTTP sessions, не равный execution admission |
-| Critical phase | Участок mutating operation, где default hard kill запрещён и cancellation/timeout ждёт terminal outcome |
-| Staging/backup publication | Контракт публикации full replacement target через sibling staging path, backup старого target, rollback attempt и metadata-based cleanup |
+Термины правил и документов и их имена в коде. Словарь целевой модели 1.0 — на
+[сайте](../../docs/site/index.html).
+
+| Термин | Что значит | В коде |
+| --- | --- | --- |
+| Набор исходников | Единица работы: конфигурация, расширение, внешние обработки или отчёты | `source-set`, `SourceSetConfig`, `SourceSetContext` |
+| Рабочий каталог | Каталог раннера под журналы, временное и состояние | `workPath` |
+| Местный слой | Файл машины рядом с проектом, вне git | `v8project.local.yaml` |
+| База по умолчанию | База, к которой идёт команда без `--infobase` | `infobases.origin`, `DEFAULT_INFOBASE_NAME` |
+| Вид цели | Файловая, кластерная или автономная база | `TargetKind` |
+| Исполнитель | Кто делает операцию: Конфигуратор, `ibcmd`, агент, `webinst`; `ibcmd-rs` объявлен без адаптера | `Provider` |
+| Матрица исполнителей | Операция и вид цели → цепочка исполнителей | `capabilities`, `domain/capability.rs` |
+| Цепочка умолчаний | Исполнители строки в порядке пробы без ключа `providers.*` | `default_chain` |
+| Квитанция | Кто выбран, откуда выбор, кого пропустили | `ProviderReceipt`, поле `provider` |
+| Агент Конфигуратора | Конфигуратор в режиме агента, команды по SSH | `platform::agent`, `AgentSession` |
+| Свой и чужой агент | Запущенный раннером и объявленный ключом `attach` | `DesignerAgentMode::Managed`, `Attached` |
+| Шлюз | Вход SSH автономного сервера | `infobase.standalone.gate` |
+| Канал обмена | Как файлы идут к агенту и шлюзу | `Exchange` |
+| Поколение | Ответ `config generation-id`, по которому видно, менялась ли база | `agent/generation` |
+| Превью | Показ плана без запуска | `--dry-run`, `provider_dispatched: false` |
+| Замок | Исключительное владение `workPath` на время команды | `acquire_workspace_lock` |
+| Допуск | Ограничение одновременных вызовов MCP | `mcp.execution.max_concurrent_calls` |
+| Конверт | Общая форма ответа CLI и MCP | `Envelope<T>` |
+| Род и код отказа | Класс ошибки и её код в конверте | `ErrorKind`, `ErrorCode` |
+| Следующий шаг | Команда, которую отказ предлагает выполнить | `NextStep`, `error.next` |
+| Итог прогона | Статус, ошибки, метрики, артефакты и данные сценария-прогона | `ExecutionOutcome<T>` |
+| Класс прерывания | Как снимается процесс при отмене | `InterruptionSafetyClass` |
+| Критическая фаза | Запись, которую отмена не прерывает, а откладывает | `CriticalNonAbortable` |
+| Предел шага | Время, которое шаг объявил себе сам | `edt_timeout`, ключи `…timeout…` |
+| Публикация с заменой | Промежуточная копия рядом с целью, затем замена с откатом | `StagedPublication` |
+| Защита каталога | Вопрос к git перед заменой каталога человека | `destruction_guard` |
+| Контекст изменений | Хранилище состояния одного набора в одном формате | `designer-<набор>`, `edt-<набор>` |
+| Общая сессия EDT | Один долгий `1cedtcli` для многих команд | `EdtSessionManager` |
+| Расширение-инструмент | Расширение клиентского MCP, которое раннер ставит сам | `tool_extension` |
