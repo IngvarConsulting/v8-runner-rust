@@ -27,7 +27,7 @@ flowchart TD
     M --> Q
     Q -.->|"работа продолжается из issue"| I["Issue с комментариями, связанные PR, сводный план #233"]
     Q -.->|"область кода незнакома"| ARC["arc42: §5 строительные блоки, §6 время выполнения"]
-    Q -->|"до выбора решения"| R["Правила области в spec/arch/rules/"]
+    Q -->|"до выбора решения"| R["Правила области в spec/rules/"]
     I --> WORK["Контекст конкретной задачи"]
     ARC --> WORK
     R --> WORK
@@ -99,7 +99,7 @@ flowchart TD
 3. Найти правило по имени проверки:
 
    ```sh
-   rg -n -F '::an_ignored_file_is_at_risk_although_the_tree_looks_clean' spec/arch/rules/
+   rg -n -F '::an_ignored_file_is_at_risk_although_the_tree_looks_clean' spec/rules/
    ```
 
    Поиск находит `use-cases/replacing-a-user-directory-asks-first.md`. Что адрес в `check`
@@ -145,7 +145,7 @@ flowchart TD
 
 v8-runner сам — MCP-сервер (`v8-runner mcp serve stdio|http`) и в MCP-сценариях служит
 проверяемым продуктом. Состав его инструментов держит правило
-[`CTR.MCP.PUBLISHED-TOOL-SURFACE`](spec/arch/rules/mcp/published-tool-surface.md): оно
+[`CTR.MCP.PUBLISHED-TOOL-SURFACE`](spec/rules/mcp/published-tool-surface.md): оно
 перечисляет инструменты и места, которые правятся вместе при смене состава; схема входа
 каждого — `docs/schemas/mcp-tools.json`.
 
@@ -159,9 +159,9 @@ v8-runner сам — MCP-сервер (`v8-runner mcp serve stdio|http`) и в M
 | --- | --- | --- |
 | `CLAUDE.md` | Подключить `AGENTS.md` для Claude Code | Хостом, автоматически |
 | `AGENTS.md` | Вход: что читать сначала и по ходу задачи, классы задач, проходы проверки, расхождение правила с кодом, формат коммита | Хостом, на старте |
-| `spec/arch/rules/**` | Согласованные гарантии продукта | До выбора решения — по области; после падения — по `check` |
-| `spec/arch/README.md`, `tests/arch_rules.rs` | Как устроено правило; гейт реестра | Из `AGENTS.md`; гейт падает сам |
-| `spec/architecture/arc42/` | Описание устройства: блоки, время выполнения, риски | Из `AGENTS.md` — для незнакомой области |
+| `spec/rules/**` | Согласованные гарантии продукта | До выбора решения — по области; после падения — по `check` |
+| `spec/rules/README.md`, `tests/arch_rules.rs` | Как устроено правило; гейт реестра | Из `AGENTS.md`; гейт падает сам |
+| `spec/arc42/` | Описание устройства: блоки, время выполнения, риски | Из `AGENTS.md` — для незнакомой области |
 | `ARCHITECTURE.md` | Карта модулей и границ для контрибьютора | Из `README.md` и `docs/README.md`; маршрут агента ведёт в arc42 §5, а сюда — нет |
 | `docs/README.md`, `spec/README.md` | Какой источник на что отвечает — для людей | Из `README.md` |
 | `README.md`, `docs/CAPABILITIES.md`, `docs/CONFIGURATION.md`, `docs/DEEP_DIVE.md` | Публичное описание команд, конфига и работы | Из `AGENTS.md` — при смене формы, ключей, конфига |

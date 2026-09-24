@@ -11,6 +11,6 @@ check: [src/config/validate.rs::the_cluster_section_is_rejected_for_a_file_base_
 `standalone` — ошибка валидации: конфиг не должен выглядеть кластерным, когда база не в
 кластере.
 
-Источник: [`cli.html#map`](../../../../docs/site/cli.html#map),
-[`deployments.html#d-which`](../../../../docs/site/deployments.html#d-which),
-[`platform.html#t60`](../../../../docs/site/platform.html#t60).
+Источник: [`cli.html#map`](../../../docs/site/cli.html#map),
+[`deployments.html#d-which`](../../../docs/site/deployments.html#d-which),
+[`platform.html#t60`](../../../docs/site/platform.html#t60).

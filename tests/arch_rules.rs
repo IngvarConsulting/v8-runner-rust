@@ -1,4 +1,4 @@
-//! Гейт правил продукта: `spec/arch/rules/`.
+//! Гейт правил продукта: `spec/rules/`.
 //!
 //! Проверяется не форма прозы, а то, без чего запись перестаёт быть обязательством:
 //! у неё есть имя, это имя одно на весь реестр, названные проверки существуют, а набор
@@ -34,7 +34,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn rules_root() -> PathBuf {
-    repo_root().join("spec/arch/rules")
+    repo_root().join("spec/rules")
 }
 
 /// Имя записи для отчётов и перечней — всегда через косую черту.
@@ -729,7 +729,7 @@ fn every_number_in_a_normative_block_is_named_here() {
         // `rules/`. Без этой ветки сообщение было бы пустым ровно на самой частой ошибке.
         panic!(
             "состав перечня NORMATIVE_NUMERALS верен, а порядок строк — нет: \
-             сортировка по пути правила внутри `spec/arch/rules/`"
+             сортировка по пути правила внутри `spec/rules/`"
         );
     }
 
@@ -787,7 +787,7 @@ fn old_adr_numbers_address_nothing() {
     offenders.sort();
     assert!(
         offenders.is_empty(),
-        "номер ADR не адресует ничего; назовите правило из spec/arch/rules/:\n{}",
+        "номер ADR не адресует ничего; назовите правило из spec/rules/:\n{}",
         offenders.join("\n")
     );
 }

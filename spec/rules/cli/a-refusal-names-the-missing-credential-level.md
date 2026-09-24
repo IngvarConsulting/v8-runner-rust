@@ -14,5 +14,5 @@ gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/233
 ключ секции, а не «неверный пароль». Проверки допишут `sessions` (#212) и
 `infobase create` (#204).
 
-Источник: [`cli.html#map`](../../../../docs/site/cli.html#map),
-[`platform.html#t59`](../../../../docs/site/platform.html#t59).
+Источник: [`cli.html#map`](../../../docs/site/cli.html#map),
+[`platform.html#t59`](../../../docs/site/platform.html#t59).
