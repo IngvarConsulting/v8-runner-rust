@@ -14,7 +14,7 @@
 4. `use_cases` owns transport-neutral requests, `ExecutionContext`, structured failures, and business orchestration.
 5. `mcp` now contains both the MCP-facing service boundary and the stdio/HTTP transport adapters: it maps raw tool inputs into use-case requests, returns MCP-specific DTOs plus structured business/internal failures, and publishes the live MCP tool servers.
 6. `platform` contains process execution, utility discovery, connection argument building, and low-level 1C adapters.
-7. `output` contains CLI presentation primitives such as `Presenter` and `Envelope`.
+7. `output` contains CLI presentation primitives such as `Presenter`; the response `Envelope` lives in `command_envelope`.
 8. `change_detection`, `parsers`, and `support` provide shared subsystems and utilities.
 
 ## Current Platform Layer
@@ -22,7 +22,7 @@
 The platform layer is intentionally split so responsibilities do not bleed into use cases:
 
 - `platform::process` defines `ProcessRunner`, `ProcessExecutor`, `ProcessRequest`, `ProcessResult`, and `SpawnResult`.
-- `platform::locator` resolves concrete executables (`1cv8`, `1cv8c`, `ibcmd`, `1cedtcli`) and caches results per `Locator` instance. Platform component discovery by version mask is governed by [правилом о поиске утилит](spec/arch/rules/platform/platform-tools-are-found-by-version-mask.md).
+- `platform::locator` resolves concrete executables (`1cv8`, `1cv8c`, `ibcmd`, `1cedtcli`) and caches results per `Locator` instance. Platform component discovery by version mask is governed by [`INV.PLATFORM.PLATFORM-TOOLS-ARE-FOUND-BY-VERSION-MASK`](spec/arch/rules/platform/platform-tools-are-found-by-version-mask.md).
 - `platform::connection` builds reusable V8 connection/auth arguments from the selected infobase's
   `connection` (`infobases.<name>` of the local layer; `origin` unless `--infobase` names another).
 - `platform::utilities` is the current facade used by use cases. It owns the stateful `Locator` and exposes the standard execution path.
@@ -54,7 +54,7 @@ The CLI/runtime boundary is now split explicitly:
 - Новые public CLI/MCP команды с runtime state под `workPath` должны сохранять этот boundary.
 
 This keeps current CLI behavior intact while reserving a stable internal API for MCP stdio/HTTP adapters.
-Workspace ownership is governed by [правилом о границе замка](spec/arch/rules/cli/lock-boundary-is-the-adapter.md).
+Workspace ownership is governed by [`INV.CLI.LOCK-BOUNDARY-IS-THE-ADAPTER`](spec/arch/rules/cli/lock-boundary-is-the-adapter.md), [`INV.CLI.NESTED-ORCHESTRATION-DOES-NOT-RELOCK`](spec/arch/rules/cli/nested-orchestration-does-not-relock.md) and [`INV.CLI.LOCK-CONFLICT-IS-ONE-ERROR`](spec/arch/rules/cli/lock-conflict-is-one-error.md).
 
 ## Command Execution Policy
 
@@ -62,18 +62,19 @@ CLI and MCP commands must share the same timeout/cancellation semantics.
 The target contract is that no public command has a deadline: it runs until it reaches a terminal outcome. Cancellation is routed through a transport-neutral execution context, and a cancelled operation is reported only after the underlying operation reaches a terminal state. A bound belongs to a step and only when that step declares one.
 Mutating DB operations must mark critical phases where hard kill is not allowed by default.
 Cancellation representation фиксируется на command boundary: фактическая terminal cancellation использует `ExecutionStatus::Cancelled`, а cancellation/shutdown/timeout внутри successful critical phase возвращается как `Succeeded` с warning, без per-step cancellation state machine.
-This policy is governed by [правилом о пределе шага](spec/arch/rules/use-cases/a-step-is-bounded-only-by-its-own-cap.md).
+This policy is governed by [`INV.USE-CASES.A-STEP-IS-BOUNDED-ONLY-BY-ITS-OWN-CAP`](spec/arch/rules/use-cases/a-step-is-bounded-only-by-its-own-cap.md), [`INV.USE-CASES.CANCELLED-MEANS-TERMINAL-CANCELLATION`](spec/arch/rules/use-cases/cancelled-means-terminal-cancellation.md) and [`INV.USE-CASES.OPERATIONS-DECLARE-AN-INTERRUPTION-CLASS`](spec/arch/rules/use-cases/operations-declare-an-interruption-class.md).
 
 Runner-like and pipeline-like commands should be assembled in the use-case layer as transport-neutral pipelines of validation, target resolution, workspace preparation, platform execution, output parsing, publication, cleanup, and diagnostics blocks.
 Those blocks exchange typed context/input/output, leave step entries for skipped/degraded/failure behavior, and report domain execution through `ExecutionOutcome<T>`.
-This result grammar is governed by [правилом о типизированных блоках](spec/arch/rules/use-cases/blocks-exchange-typed-context-only.md).
+This result grammar is governed by [`INV.USE-CASES.BLOCKS-EXCHANGE-TYPED-CONTEXT-ONLY`](spec/arch/rules/use-cases/blocks-exchange-typed-context-only.md) and [`INV.USE-CASES.STEPS-RECORD-SKIPS-AND-DEGRADATION`](spec/arch/rules/use-cases/steps-record-skips-and-degradation.md).
 
 ## Configuration Surface
 
 `v8project.yaml`, loaded into `AppConfig` and accepted by `config::validate`, is the main project configuration contract.
+There is one model: the local overlay, `--infobase` and the workdir override all feed the same `AppConfig` before validation, and a new input does the same rather than opening a second model.
 `source-set.name` is a stable identity for runtime state, generated directories, diagnostics, and source-set selection.
-The supported `source-set[].type` contract and validation boundary are governed by [схемой `v8project.yaml`](spec/arch/rules/config/v8project-schema.md).
-`init` must autodetect source-set types only from marker content: Designer `CONFIGURATION` / `EXTENSION` come from `Configuration.xml`, ordinary EDT `CONFIGURATION` / `EXTENSION` come from `.project` natures plus `DT-INF/PROJECT.PMF` (`EXTENSION` also requires `Base-Project`) and `src/Configuration/Configuration.mdo`, while EDT external `.epf`/`.erf` sources are discovered only through homogeneous aggregate roots of valid child projects classified by canonical `src/root.xml`, never through recursive descriptor scans, per-artifact fallback, or phantom source-set generation.
+The supported `source-set[].type` contract and validation boundary are governed by [`CTR.CONFIG.V8PROJECT-SCHEMA`](spec/arch/rules/config/v8project-schema.md) and [`INV.CONFIG.UNSAFE-COMBINATIONS-ARE-REJECTED-BEFORE-DISPATCH`](spec/arch/rules/config/unsafe-combinations-are-rejected-before-dispatch.md).
+`init` must autodetect source-set types only from marker content ([`INV.CONFIG.TYPE-COMES-FROM-MARKER-CONTENT`](spec/arch/rules/config/type-comes-from-marker-content.md)): Designer `CONFIGURATION` / `EXTENSION` come from `Configuration.xml`, ordinary EDT `CONFIGURATION` / `EXTENSION` come from `.project` natures plus `DT-INF/PROJECT.PMF` (`EXTENSION` also requires `Base-Project`) and `src/Configuration/Configuration.mdo`, while EDT external `.epf`/`.erf` sources are discovered only through homogeneous aggregate roots of valid child projects classified by canonical `src/root.xml`, never through recursive descriptor scans, per-artifact fallback, or phantom source-set generation.
 
 The typed config model now splits MCP knobs into active HTTP/session settings and shared execution guardrails:
 
@@ -96,8 +97,8 @@ The MCP adapter no longer needs to talk to `cli::execute` or to reuse domain ser
 - `mcp::tool_result` defines the structured transport payload returned by MCP tools for success vs business failure outcomes.
 - `mcp::server::McpToolServer` is the shared rmcp handler used by both transports. It exposes tools-only capabilities, maps incoming `camelCase` params into MCP DTOs, gates every tool call through a global semaphore, calls the synchronous `McpService` via `tokio::task::spawn_blocking` for non-EDT tools, and routes live `check_syntax_edt` through `mcp::edt_syntax` plus the shared `EdtSessionManager`.
 - `mcp::port` owns the MCP workspace lock boundary before dispatching requests into transport-neutral use cases; the global MCP semaphore remains an admission limit, not a replacement for per-`workPath` ownership.
-- Изменение MCP tool surface должно оставаться явным архитектурным событием: перечень опубликованных tools сверяется между `src/mcp/server.rs`, [правилом о составе поверхности](spec/arch/rules/mcp/published-tool-surface.md) и сторожем `tests/architecture_guardrails.rs`; что задевает смена состава сверх этих трёх, названо в теле правила.
-- MCP execution admission and HTTP session capacity are separate guardrails governed by [правилом об общем допуске](spec/arch/rules/mcp/admission-is-shared-by-both-transports.md).
+- Изменение MCP tool surface должно оставаться явным архитектурным событием: перечень опубликованных tools сверяется между `src/mcp/server.rs`, [`CTR.MCP.PUBLISHED-TOOL-SURFACE`](spec/arch/rules/mcp/published-tool-surface.md) и сторожем `tests/architecture_guardrails.rs`; что задевает смена состава сверх этих трёх, названо в теле правила.
+- MCP execution admission and HTTP session capacity are separate guardrails governed by [`INV.MCP.ADMISSION-IS-SHARED-BY-BOTH-TRANSPORTS`](spec/arch/rules/mcp/admission-is-shared-by-both-transports.md), [`INV.MCP.SESSION-LIFECYCLE-IS-DETERMINISTIC`](spec/arch/rules/mcp/session-lifecycle-is-deterministic.md) and [`INV.MCP.OVERLOAD-ANSWERS-503-AND-STATELESS-POST-400`](spec/arch/rules/mcp/overload-answers-503-and-stateless-post-400.md).
 - MCP runtime telemetry is intentionally implemented as structured `tracing` events rather than a separate metrics backend: semaphore acquisition emits `mcp_execution_semaphore_wait`, while the shared EDT actor emits `mcp_edt_queue_depth`, `mcp_edt_startup_failure`, `mcp_edt_session_restart`, and `mcp_edt_shutdown_drain`.
 - The stdio adapter still reserves `stdout` for MCP frames. A bounded EDT syntax call carries `tools.edt_cli.command_timeout_ms` as its own step cap, covering actor-side baseline/reset and the interactive `validate` command; the wait for an execution slot is bounded separately by `mcp.execution.admission_timeout_ms` and does not shorten it.
 - The HTTP adapter is built on `axum` + `rmcp::transport::StreamableHttpService`. A thin wrapper around the rmcp service enforces transport-level overload semantics for new `initialize` requests (`503` when `max_sessions` is exhausted), translates stateful non-`initialize` POSTs without `Mcp-Session-Id` into deterministic `400`, and eagerly releases tracked capacity after `DELETE`.
@@ -165,8 +166,9 @@ Important staging note:
 
 Constraints to keep in mind:
 
-- Граница поддержки `ibcmd` как ограниченного исполнителя закреплена
-  [матрицей исполнителей](spec/arch/rules/use-cases/provider-defaults-live-in-code.md).
+- Граница поддержки `ibcmd` как ограниченного исполнителя закреплена матрицей
+  исполнителей в `src/domain/capability.rs`; что матрица — данные, а не настройка, держит
+  [`INV.USE-CASES.PROVIDER-DEFAULTS-LIVE-IN-CODE`](spec/arch/rules/use-cases/provider-defaults-live-in-code.md).
 - `infobase.dbms` нужна только там, где раннер идёт в СУБД сам: создать серверную базу
   через `ibcmd`. Остальные сценарии на серверном подключении её не запрашивают.
 - `infobase.cluster` держит адрес сервера администрирования и два уровня администраторов
@@ -184,7 +186,7 @@ Constraints to keep in mind:
 
 ## Dump And Artifact Publication
 
-Full replacement outputs are published through a staging/backup contract governed by [правилом о подменном каталоге](spec/arch/rules/use-cases/staging-shares-the-parent-directory.md).
+Full replacement outputs are published through a staging/backup contract governed by [`INV.USE-CASES.STAGING-SHARES-THE-PARENT-DIRECTORY`](spec/arch/rules/use-cases/staging-shares-the-parent-directory.md), [`INV.USE-CASES.A-FAILED-ROLLBACK-IS-NAMED`](spec/arch/rules/use-cases/a-failed-rollback-is-named.md) and [`INV.USE-CASES.CLEANUP-TOUCHES-ONLY-ITS-OWN-ARTEFACTS`](spec/arch/rules/use-cases/cleanup-touches-only-its-own-artefacts.md).
 Full dump writes to a sibling staging directory before replacing the resolved target directory.
 Package artifacts write to a sibling staging file before replacing the output file, and external EPF/ERF publication stages the whole output directory before replacing it.
 Incremental and partial dump modes remain direct non-atomic update modes.
@@ -212,6 +214,6 @@ Use cases now return transport-neutral payloads or structured failures.
 - `workPath/hash-storages/` remains reserved for change detection state.
 - `workPath/designer/<sourceSetName>/` is used by the EDT export/build flow as the generated Designer-format output area for a source-set.
 
-The `source-set` and `workPath` state boundary is formalized by [правилом о двух контекстах EDT](spec/arch/rules/use-cases/edt-keeps-two-change-contexts.md): `DESIGNER` format uses one `designer-<sourceSetName>` change-detection context, while `EDT` format uses both `edt-<sourceSetName>` for export decisions and `designer-<sourceSetName>` for load decisions.
-Exclusive command ownership of `workPath` is governed by [правилом о границе замка](spec/arch/rules/cli/lock-boundary-is-the-adapter.md).
-On-demand change detection and conservative file-level partial load rules are governed by [правилом о поиске изменений по требованию](spec/arch/rules/use-cases/changes-are-detected-on-demand.md).
+The `source-set` and `workPath` state boundary is formalized by [`INV.USE-CASES.EDT-KEEPS-TWO-CHANGE-CONTEXTS`](spec/arch/rules/use-cases/edt-keeps-two-change-contexts.md): `DESIGNER` format uses one `designer-<sourceSetName>` change-detection context, while `EDT` format uses both `edt-<sourceSetName>` for export decisions and `designer-<sourceSetName>` for load decisions.
+Exclusive command ownership of `workPath` is governed by [`INV.CLI.CONCURRENT-PROCESSES-ARE-SERIALIZED`](spec/arch/rules/cli/concurrent-processes-are-serialized.md) and [`INV.CLI.SIDECAR-FAILURE-DOES-NOT-RELEASE-THE-LOCK`](spec/arch/rules/cli/sidecar-failure-does-not-release-the-lock.md).
+On-demand change detection is governed by [`INV.USE-CASES.CHANGES-ARE-DETECTED-ON-DEMAND`](spec/arch/rules/use-cases/changes-are-detected-on-demand.md); the conservative file-level partial load rules by [`INV.USE-CASES.DOUBT-TURNS-A-PARTIAL-LOAD-INTO-A-FULL-ONE`](spec/arch/rules/use-cases/doubt-turns-a-partial-load-into-a-full-one.md); and a fallback to a fuller mode is named in the answer by [`INV.USE-CASES.DEGRADATION-IS-VISIBLE`](spec/arch/rules/use-cases/degradation-is-visible.md).

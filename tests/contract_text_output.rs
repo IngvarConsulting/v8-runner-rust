@@ -95,7 +95,11 @@ fn write_project(dir: &Path) -> PathBuf {
 }
 
 fn run(config_path: &Path, arguments: &[&str]) -> Run {
+    // Окружение оболочки сюда не проходит: заданная у разработчика `FORCE_COLOR` уронила бы
+    // проверку перенаправленного вывода, а `NO_COLOR` сделала бы её пустой.
     let output = v8_runner_command()
+        .env_remove("FORCE_COLOR")
+        .env_remove("NO_COLOR")
         .args(["--config", &config_path.display().to_string()])
         .args(arguments)
         .output()

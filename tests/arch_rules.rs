@@ -8,11 +8,15 @@
 //! нашло бы ноль записей и прошло зелёным. Поэтому здесь же стоит пол по числу записей:
 //! страж, который нечего проверять, — не страж.
 
-use std::collections::BTreeMap;
+mod guardrail_support;
+
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-/// Ниже этого числа реестр правил не опускался ни разу с переноса. Пол ловит не убыль
-/// обязательств, а поломку обхода: неверный корень или нерекурсивное чтение дают ноль.
+use syn::visit::Visit;
+
+/// Пол заведомо ниже числа правил. Он ловит не убыль обязательств, а поломку обхода:
+/// неверный корень или нерекурсивное чтение дают ноль.
 const AT_LEAST: usize = 140;
 
 /// Поля записи закрыты. `id` и `check` обязательны; `gap` называет задачу, пока
@@ -189,24 +193,41 @@ fn a_rule_carries_only_the_fields_the_readme_publishes() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
-/// Стоит ли над объявлением по адресу `at` атрибут теста.
+/// Функции файла, поделённые на тесты и прочие, — по синтаксическому дереву.
 ///
-/// Разбор идёт вверх по строкам и останавливается на пустой строке или на строке,
-/// закрывающей предыдущий элемент. Без второго условия фикстура, объявленная сразу за
-/// телом теста, наследовала бы его атрибут: поиска ближайшей пустой строки хватало,
-/// чтобы дюжина обычных функций прошла проверкой.
-fn is_preceded_by_a_test_attribute(text: &str, at: usize) -> bool {
-    let line_start = text[..at].rfind('\n').map_or(0, |found| found + 1);
-    for line in text[..line_start].lines().rev() {
-        let line = line.trim();
-        if line.is_empty() || line.ends_with('}') || line.ends_with(';') {
-            return false;
+/// Разбор строк здесь был и проигрывал: фикстура сразу за телом теста, помощник первой
+/// строкой внутри теста, атрибут в комментарии — каждый раз находилась новая форма,
+/// которую он принимал за тест. Синтаксис отвечает точно, а разборщик у тестов уже есть —
+/// `tests/guardrail_support.rs`. Вложенная функция видна тоже: она — не тест, пока у неё
+/// нет своего атрибута.
+#[derive(Default)]
+struct Functions {
+    tests: BTreeSet<String>,
+    plain: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for Functions {
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        let name = item.sig.ident.to_string();
+        let is_test = item.attrs.iter().any(|attr| {
+            attr.path()
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "test")
+        });
+        if is_test {
+            self.tests.insert(name);
+        } else {
+            self.plain.insert(name);
         }
-        if line.starts_with("#[test]") || line.starts_with("#[tokio::test") {
-            return true;
-        }
+        syn::visit::visit_item_fn(self, item);
     }
-    false
+}
+
+fn functions_of(source: &Path) -> Functions {
+    let mut functions = Functions::default();
+    functions.visit_file(&guardrail_support::parse_rust_file(source));
+    functions
 }
 
 /// Названная проверка существует. Гейт не судит, что она доказывает, — он не даёт
@@ -222,21 +243,22 @@ fn every_named_check_exists() {
                 continue;
             };
             let source = root.join(file);
-            let Ok(text) = std::fs::read_to_string(&source) else {
+            if !source.is_file() {
                 unresolved.push(format!("{shown}: нет файла {file}"));
                 continue;
-            };
-            let Some(at) = text.find(&format!("fn {name}(")) else {
-                unresolved.push(format!("{shown}: в {file} нет проверки {name}"));
-                continue;
-            };
+            }
             // Совпадения имени мало: фикстура тоже объявлена `fn`, и ссылка на неё прошла
-            // бы зелёной, ничего не доказывая. Перед объявлением обязан стоять атрибут
-            // теста.
-            if !is_preceded_by_a_test_attribute(&text, at) {
+            // бы зелёной, ничего не доказывая. Проверка — функция с атрибутом теста.
+            let functions = functions_of(&source);
+            if functions.tests.contains(name) {
+                continue;
+            }
+            if functions.plain.contains(name) {
                 unresolved.push(format!(
                     "{shown}: {file}::{name} — не проверка, а обычная функция"
                 ));
+            } else {
+                unresolved.push(format!("{shown}: в {file} нет проверки {name}"));
             }
         }
     }
@@ -271,7 +293,7 @@ fn a_rule_without_checks_names_its_gap() {
 
 /// Запись, закрепляющая форму данных, называет свой артефакт и номер формы.
 ///
-/// Номер растёт вместе с составом полей; что он вырос, гейт не доказывает — это разбор.
+/// Номер растёт, когда меняется сама форма; что он вырос, гейт не доказывает — это разбор.
 /// Здесь держится меньшее и проверяемое: артефакт лежит на диске, номер — целое от единицы.
 #[test]
 fn a_pinned_form_names_an_artifact_that_exists() {
@@ -485,9 +507,10 @@ fn every_pinned_example_passes_its_own_form() {
 
 /// Счётные слова, которые перечень ловит в нормативной части.
 ///
-/// «Семью» здесь нет намеренно: в реестре это творительный падеж семьи, а не числа, и
-/// слово стоит ровно в том значении. Цифрами записанное число перечень тоже не видит —
-/// отделить обещание от номера версии, кода выхода и пути прозой нельзя.
+/// «Семью» здесь нет намеренно: в реестре это винительный падеж «семьи» («в семью»), а не
+/// творительный числа, и слово стоит ровно в том значении. Цифрами записанное число
+/// перечень тоже не видит — отделить обещание от номера версии, кода выхода и пути прозой
+/// нельзя.
 const COUNTING_WORDS: &[&str] = &[
     "два",
     "две",
@@ -646,6 +669,10 @@ const NORMATIVE_NUMERALS: &[(&str, &str)] = &[
     ("platform/agent-session-lives-with-the-lock.md", "два,два"),
     ("platform/edt-has-two-execution-modes.md", "два"),
     ("platform/prose-debt-only-shrinks.md", "трёх"),
+    (
+        "use-cases/a-generation-token-is-compared-within-its-own-tool.md",
+        "сорок,сорок,двух",
+    ),
     (
         "use-cases/a-push-into-a-base-that-moved-ahead-is-refused.md",
         "оба",
@@ -807,34 +834,41 @@ fn an_area_and_its_directory_name_each_other() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
-/// Имя файла правила переживает выгрузку на Windows.
+/// Имя файла правила переживает клонирование на Windows.
 ///
-/// DOS оставила полтора десятка имён, которые Windows занимает под устройства: файл с
-/// таким именем там не создаётся, и выгрузка всего дерева падает целиком. Прежде эта
-/// проверка дремала — имена файлов начинались с `DEC.`, `INV.` или `CTR.`. Теперь имя
-/// называет тему свободным словом, и `aux.md` или `con.md` — правдоподобный слог.
+/// Windows занимает под устройства имена, оставшиеся от DOS: файл с таким именем там не
+/// создаётся, и git не может развернуть дерево целиком. Прежде эта проверка дремала —
+/// имена файлов начинались с `DEC.`, `INV.` или `CTR.`. Теперь имя называет тему свободным
+/// словом, и `aux.md` или `con.md` — правдоподобный слог.
+///
+/// Перечень и правило разбора — по руководству Microsoft «Naming Files, Paths, and
+/// Namespaces»: имя считается до первой точки (`NUL.tar.gz` — то же, что `NUL`), цифры у
+/// `COM` и `LPT` — от единицы до девяти и надстрочные ¹, ², ³. `COM0` и `LPT0` в перечне нет.
+/// Каталог — такое же имя, как файл.
 #[test]
 fn a_rule_name_survives_a_windows_checkout() {
-    const RESERVED: &[&str] = &[
-        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
-        "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
-    ];
+    const RESERVED: &[&str] = &["con", "prn", "aux", "nul"];
+    const NUMBERED: &[&str] = &["com", "lpt"];
+    const DIGITS: &[&str] = &["1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³"];
+    let is_reserved = |base: &str| {
+        RESERVED.contains(&base)
+            || NUMBERED.iter().any(|prefix| {
+                base.strip_prefix(prefix)
+                    .is_some_and(|digit| DIGITS.contains(&digit))
+            })
+    };
     let mut wrong = Vec::new();
     for path in rule_paths(&rules_root()) {
-        // Каталог области — такое же имя на диске, как файл, и Windows занимает оба.
         for part in path
             .strip_prefix(rules_root())
             .unwrap_or(&path)
             .components()
         {
-            let name = part.as_os_str().to_string_lossy();
-            let stem = name
-                .rsplit_once('.')
-                .map_or(name.as_ref(), |(before, _)| before)
-                .to_lowercase();
-            if RESERVED.contains(&stem.as_str()) {
+            let name = part.as_os_str().to_string_lossy().to_lowercase();
+            let base = name.split('.').next().unwrap_or_default();
+            if is_reserved(base) {
                 wrong.push(format!(
-                    "{}: Windows занимает `{stem}` под устройство",
+                    "{}: Windows занимает `{base}` под устройство",
                     shown(&path)
                 ));
             }

@@ -4,7 +4,16 @@ use std::path::Path;
 
 use guardrail_support::{collect_rust_files, production_tokens};
 
-const FORBIDDEN_PATTERNS: &[&str] = &["clap::", "crate::cli::", "crate::output::", "crate::mcp::"];
+// Конверт ответа — тоже представление, но живёт отдельно от `output`: без своей строки он
+// прошёл бы мимо стража. Образцы ловят путь с `::` — импорт модуля целиком тем же способом
+// не виден, как и у остальных строк списка.
+const FORBIDDEN_PATTERNS: &[&str] = &[
+    "clap::",
+    "crate::cli::",
+    "crate::output::",
+    "crate::command_envelope::",
+    "crate::mcp::",
+];
 
 fn assert_missing(path: &Path, forbidden: &str) {
     let production = production_tokens(path);

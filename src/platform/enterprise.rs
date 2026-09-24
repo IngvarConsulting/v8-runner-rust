@@ -234,6 +234,9 @@ fn filtered_raw_launch_args(args: &[String]) -> Vec<String> {
     filtered
 }
 
+// Известный предел: ключей соединения здесь нет. Пользовательский `/WS` или
+// `/IBConnectionString` из `additional-launch-keys` допишется после нашего, и какой из двух
+// возьмёт платформа, решает она сама. Резервирование ключей соединения — отдельный предмет.
 fn reserved_launch_key(arg: &str) -> Option<(bool, bool)> {
     let reserved_key = [
         "c",
