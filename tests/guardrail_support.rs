@@ -166,7 +166,7 @@ fn impl_item_has_cfg_test(item: &ImplItem) -> bool {
     }
 }
 
-fn has_cfg_test(attrs: &[Attribute]) -> bool {
+pub fn has_cfg_test(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| {
         if !attr.path().is_ident("cfg") {
             return false;

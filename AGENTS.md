@@ -7,8 +7,8 @@ Before changing code in an unfamiliar area, read the two sections of
 `rg` cannot:
 
 - [Building blocks](spec/arc42/05-building-block-view.md) — what each module
-  under `src/` owns and which way the dependencies point. Every block links to its
-  directory, so this is also the route from a responsibility to the code.
+  under `src/` owns and which way the dependencies point. Every block links to its code,
+  so this is also the route from a responsibility to the code.
 - [Runtime view](spec/arc42/06-runtime-view.md) — what actually happens, step by step,
   when a command crosses several modules, and at the command boundary with admission and
   cancellation.
@@ -49,7 +49,9 @@ divergence is known and its issue owns the fix.
 The public docs — `README.md`, `docs/CAPABILITIES.md`, `docs/CONFIGURATION.md`,
 `docs/DEEP_DIVE.md` — are the users' contract and follow the same order. When they disagree
 with the code, decide which side is wrong: a defect in either is fixed; changing documented
-behavior is a public-contract change under Task Classification.
+behavior is a public-contract change under Task Classification. A known divergence users can
+run into — a rule with a `gap`, a defect waiting in an issue — is named, with its issue, in the
+public doc that describes that behavior.
 
 If keeping a rule blocks the task, ask the owner in the session and show:
 

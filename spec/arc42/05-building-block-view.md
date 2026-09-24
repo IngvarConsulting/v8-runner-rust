@@ -11,10 +11,10 @@
 | [`app`](../../src/app.rs) | Старт процесса: разбор командной строки, прежние имена команд, отказ несовместимых глобальных ключей, загрузка конфигурации по виду команды, запуск MCP-сервера. Сам исполняет и выводит `version`, `clone`, `init` | `run` |
 | [`cli`](../../src/cli/) | Дерево команд, перевод аргументов в запросы, замок `workPath` командной строки, текст и конверт ответа, Ctrl+C и SIGTERM как отмена | [`execute.rs`](../../src/cli/execute.rs), [`global_flags.rs`](../../src/cli/global_flags.rs) — у каких команд есть превью |
 | [`mcp`](../../src/mcp/) | Сервер по stdio и HTTP: допуск вызовов, сессии, входные DTO, сервисный слой над сценариями, замок `workPath` для MCP, живая EDT-проверка, телеметрия | [`server.rs`](../../src/mcp/server.rs), [`service.rs`](../../src/mcp/service.rs), [`port.rs`](../../src/mcp/port.rs) |
-| [`use_cases`](../../src/use_cases/) | Сценарии всех команд, общие для CLI и MCP, и то, что нужно нескольким сценариям сразу — 5.4 | [`context.rs`](../../src/use_cases/context.rs), [`request.rs`](../../src/use_cases/request.rs), [`result.rs`](../../src/use_cases/result.rs) |
+| [`use_cases`](../../src/use_cases/) | Сценарии команд — одни и те же для CLI и MCP — и то, что нужно нескольким сценариям сразу — 5.4 | [`context.rs`](../../src/use_cases/context.rs), [`request.rs`](../../src/use_cases/request.rs), [`result.rs`](../../src/use_cases/result.rs) |
 | [`domain`](../../src/domain/) | Результаты команд и часть запросов; грамматика исполнения `ExecutionOutcome<T>`, `StepResult`; матрица исполнителей | [`execution.rs`](../../src/domain/execution.rs), [`capability.rs`](../../src/domain/capability.rs) |
 | [`config`](../../src/config/) | Чтение `v8project.yaml` и местного слоя, модель `AppConfig`, схемы, проверка по виду команды | [`loader.rs`](../../src/config/loader.rs), [`validate.rs`](../../src/config/validate.rs) |
-| [`platform`](../../src/platform/) | Всё за пределами процесса — 5.5 | [`utilities.rs`](../../src/platform/utilities.rs) |
+| [`platform`](../../src/platform/) | Процессы, SSH, загрузка по HTTP, git, браузер — 5.5 | [`utilities.rs`](../../src/platform/utilities.rs) |
 | [`change_detection`](../../src/change_detection/) | Обход дерева, отметки времени и хеши, хранилище redb на контекст, решение о частичной загрузке | [`analyzer.rs`](../../src/change_detection/analyzer.rs), [`partial_load.rs`](../../src/change_detection/partial_load.rs) |
 | [`parsers`](../../src/parsers/) | JUnit, журналы YaXUnit и Vanessa, журналы проверки Конфигуратора и EDT. Ответы `ibcmd` и агента разбирают `platform` и сценарии | [`mod.rs`](../../src/parsers/mod.rs) |
 | [`output`](../../src/output/) | Вывод командной строки: `Presenter`, словарь текстовой ленты | [`text.rs`](../../src/output/text.rs) |
@@ -39,13 +39,13 @@ flowchart TB
     platform & config & domain --> support
 ```
 
-Против направления идут рёбра ниже, и из-за них большая часть модулей связана в один цикл:
+Против направления идут рёбра ниже, и из-за них модули связаны в один большой цикл:
 `support → platform` и `support → config` — `AppError` оборачивает их ошибки;
 `support → use_cases` — нормализация ввода возвращает типы запросов; `support → output` —
 журнал берёт знак статуса из словаря ленты; одно из пары `config ↔ platform` — модель
 строит подключение платформы, а платформа читает модель. Мимо сценариев идут
-`mcp → platform` и `mcp → parsers` — живая EDT-проверка ([6.7](06-runtime-view.md)). `command_data` смотрит в `app`,
-`cli` и `mcp` ради схем их данных.
+`mcp → platform` и `mcp → parsers` — живая EDT-проверка ([6.7](06-runtime-view.md)). Ради порождаемых
+схем `command_data` смотрит в `app`, `cli` и `mcp`, а `command_envelope` — в `command_data`.
 
 Границы, которые держат правила: сценарии не знают транспорта и вывода
 ([правило](../rules/use-cases/no-transport-types-in-the-use-case-layer.md)); процесс
@@ -62,7 +62,8 @@ flowchart TB
 `artifacts`, `clone` — `bootstrap_project`, `init` — `config_init`, `infobase create` —
 `init_project` (в `CommandName` — `Init`), `download`, `infobase dump` и `restore` —
 `infobase_export`, `extensions` — `configure_extensions` и `extension_inventory`, `test` —
-`run_tests`. Инструменты MCP зовут те же сценарии через `mcp/service.rs`; их состав держит
+`run_tests`; остальные названы по команде: `convert_sources`, `launch_app`, `publish_infobase`,
+`tools_download`. Инструменты MCP зовут те же сценарии через `mcp/service.rs`; их состав держит
 [правило](../rules/mcp/published-tool-surface.md).
 
 ### 5.4 Общее в `use_cases`
@@ -83,7 +84,8 @@ flowchart TB
 | Файл | Что в нём |
 | --- | --- |
 | [`utilities.rs`](../../src/platform/utilities.rs), [`locator.rs`](../../src/platform/locator.rs) | Вход для сценариев; поиск утилит по маске версии — [правило](../rules/platform/platform-tools-are-found-by-version-mask.md) |
-| [`process.rs`](../../src/platform/process.rs) | Процесс в своей группе, класс прерывания, снятие группы |
+| [`process.rs`](../../src/platform/process.rs) | Процесс в своей группе, класс прерывания, снятие группы; клиент `launch` без ожидания — отсоединённым |
+| [`connection.rs`](../../src/platform/connection.rs) | Строка подключения выбранной базы и аргументы подключения утилит |
 | [`designer.rs`](../../src/platform/designer.rs), [`ibcmd.rs`](../../src/platform/ibcmd.rs), [`edt.rs`](../../src/platform/edt.rs), [`enterprise.rs`](../../src/platform/enterprise.rs), [`webinst.rs`](../../src/platform/webinst.rs) | Команды утилит; итог — [`PlatformCommandResult`](../../src/platform/result.rs) |
 | [`agent.rs`](../../src/platform/agent.rs), [`sftp.rs`](../../src/platform/sftp.rs) | Агент Конфигуратора и шлюз по встроенному SSH; SFTP поверх того же соединения |
 | [`interactive.rs`](../../src/platform/interactive.rs), [`edt_session.rs`](../../src/platform/edt_session.rs) | Долгий процесс `1cedtcli` и общая сессия EDT над ним — [8.9](08-cross-cutting-concepts.md) |

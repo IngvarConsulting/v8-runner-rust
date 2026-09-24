@@ -31,7 +31,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `test --no-push` | Подготовленная file/server ИБ; source-set и build tooling не требуются | Запускает выбранный test engine без `push` |
 | `pull` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.pull: agent` при `format=DESIGNER` | Полная, инкрементальная или object-scoped partial выгрузка; у `ibcmd` `partial` деградирует в incremental с warning; у `agent` `incremental` и `partial` обновляют цель на месте через ссылку в `AgentBaseDir`, `full` публикуется через staging; перед `full` и `incremental` агента спрашивают поколение конфигурации, и равное записанному после последней сборки или выгрузки через агента означает «выгружать нечего»; при `format=EDT` — reverse sync через internal Designer snapshot и EDT import; перед заменой каталога цели раннер спрашивает git, что в нём не восстановить, и найдя незафиксированное, файл вне учёта или в игноре, отказывает с выходом 2 и называет потери, а `--force` уничтожает их без копии; там, где git не отвечает, поведение прежнее и защиты нет |
 | `download` | цепочка `designer` → `ibcmd`; `agent` только по `providers.download: agent` | Выгружает working/database configuration в `.cf` или named extension в `.cfe`; раннер берёт первого готового до spawn, квитанция называет пропущенных; у `agent` только `working` (`config dump-cfg`, команды для конфигурации базы данных у агента нет — `database` отказывает до сессии), файл пишется в каталог агента и переносится в staging |
-| `infobase dump` | провайдер `designer`; `ibcmd` только по `providers.infobase.dump`; `agent` только по `providers.infobase.dump: agent` | Выгружает полную ИБ в переносимый `.dt`; это не backup; `ibcmd` остаётся experimental до exclusive-access preflight; у `agent` — `infobase-tools dump-ib` в каталог агента и перенос в staging |
+| `infobase dump` | провайдер `designer`; `ibcmd` только по `providers.infobase.dump`; `agent` только по `providers.infobase.dump: agent` | Выгружает полную ИБ в переносимый `.dt`; это не backup; у `ibcmd` адаптера для DT нет — названный ключом, он отказывает при запуске; у `agent` — `infobase-tools dump-ib` в каталог агента и перенос в staging |
 | `convert` | CLI-only repo-aware конвертация текущих `source-set` | Строки в матрице провайдеров не имеет и не требует ИБ |
 | `upload` | `format=DESIGNER`, провайдер только `designer` | Загрузка `.cf` / `.cfe` артефактов в ИБ |
 | `make` / `artifacts` | `format=DESIGNER`, провайдер `designer`; `agent` только по `providers.make: agent` | Экспорт `.cf` / `.cfe` и публикация `.epf` / `.erf`; у `agent` `.cf`/`.cfe` — `config dump-cfg` в каталог агента, `.epf`/`.erf` — исходники копируются в каталог агента (файловые параметры через ссылку агент не разрешает), сборка `load-external-…-from-files` и обратная выгрузка для сверки вида и имени, как у Конфигуратора |
@@ -520,8 +520,8 @@ v8-runner infobase dump --output <FILE.dt> [--dry-run]
 ```
 
 - Сохраняет полную ИБ с данными в переносимый DT-файл. DT не является резервной копией.
-- Умолчание — Designer. `ibcmd` для DT остаётся experimental: в цепочку умолчаний не входит и
-  назначается только `providers.infobase.dump: ibcmd`.
+- Умолчание — Designer. `ibcmd` для DT стоит в матрице experimental: в цепочку умолчаний не
+  входит, а названный `providers.infobase.dump: ibcmd` отказывает при запуске — адаптера нет.
 - Если implemented provider есть, но binary/version/connection не готовы, возвращается
   `environment_unavailable`; `capability_unavailable` означает отсутствие implemented adapter.
 - Для файловой ИБ readiness обоих process providers требует существующий файл
@@ -553,8 +553,8 @@ v8-runner infobase restore --input <FILE.dt> --create  [--dry-run]
   прямо в ИБ, staging-шага здесь нет, и отменить загрузку нечем.
 - `--input` проверяется до выбора провайдера: суффикс `.dt` и читаемый непустой файл.
 - Implemented provider — Designer (`/RestoreIB`), подтверждён живым прогоном на 8.3.27.
-  IBCMD `infobase restore` тоже запускается вживую, но остаётся `experimental`, пока нет
-  проверки отсутствия активных сеансов — как и IBCMD DT export.
+  IBCMD `infobase restore` стоит в матрице `experimental`, но адаптера у него нет: названный
+  ключом, он отказывает при запуске — как и IBCMD DT export.
 - `target_state` различает `created` и `replaced`. Если провайдер упал, `target_state` —
   `uncertain`: сколько данных он успел заменить, отсюда не видно.
 - `restored=true` означает, что провайдер сообщил о завершённой загрузке.

@@ -1,11 +1,13 @@
 mod guardrail_support;
 
 use regex::Regex;
+use std::ffi::OsString;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::LazyLock;
 
 use guardrail_support::{
-    collect_rust_files, free_function_tokens, parse_rust_file, production_source,
+    collect_rust_files, free_function_tokens, has_cfg_test, parse_rust_file, production_source,
     production_tokens, trait_impl_method_tokens,
 };
 
@@ -719,14 +721,16 @@ fn a_command_carries_no_deadline_anywhere_it_could_be_put_back() {
 fn every_top_level_module_is_a_block_of_the_module_map() {
     // Корень проблемы: карта модулей жила в двух файлах, на маршруте агента лежал один, и ни
     // один не был привязан к изменениям кода — три модуля так и не попали ни в один. Владелец
-    // карты один — раздел 5 arc42. Модуль без блока на ней валит этот страж, где бы вторую
-    // карту ни завели.
+    // карты один — таблица 5.1 раздела 5 arc42. Модуль без строки в ней валит этот страж, где
+    // бы вторую карту ни завели; ссылка в прозе рядом строки не заменяет.
     let main = parse_rust_file(&repo_path("src/main.rs"));
     let modules: Vec<String> = main
         .items
         .iter()
         .filter_map(|item| match item {
-            syn::Item::Mod(module) => Some(module.ident.to_string()),
+            syn::Item::Mod(module) if !has_cfg_test(&module.attrs) => {
+                Some(module.ident.to_string())
+            }
             _ => None,
         })
         .collect();
@@ -735,20 +739,32 @@ fn every_top_level_module_is_a_block_of_the_module_map() {
         "src/main.rs declares no modules: the module list was not read"
     );
     let map = read("spec/arc42/05-building-block-view.md");
+    let table = extract_between(&map, "### 5.1", "### 5.2");
     let missing: Vec<&str> = modules
         .iter()
         .map(String::as_str)
         .filter(|name| {
-            !map.contains(&format!("](../../src/{name}/)"))
-                && !map.contains(&format!("](../../src/{name}.rs)"))
+            !table.contains(&format!("](../../src/{name}/)"))
+                && !table.contains(&format!("](../../src/{name}.rs)"))
         })
         .collect();
     assert!(
         missing.is_empty(),
-        "spec/arc42/05-building-block-view.md links no block for {missing:?}: section 5 is the \
-         module map, and it names every top-level module of src/main.rs"
+        "table 5.1 of spec/arc42/05-building-block-view.md has no row linking {missing:?}: the \
+         module map names every top-level module of src/main.rs"
     );
 }
+
+/// Документы маршрута агента, чьи ссылки сторожит `every_link_on_the_agent_route_resolves`;
+/// к ним — каждый файл `spec/arc42/`.
+const AGENT_ROUTE_DOCUMENTS: &[&str] = &[
+    "AGENTS.md",
+    "AI_DEV.md",
+    "README.md",
+    "docs/README.md",
+    "spec/README.md",
+    "spec/rules/README.md",
+];
 
 #[test]
 fn every_link_on_the_agent_route_resolves() {
@@ -756,24 +772,18 @@ fn every_link_on_the_agent_route_resolves() {
     // Переименованный файл делает адрес ложным молча, и агент, пришедший по нему, остаётся
     // без ответа. Страж привязывает эти тексты к изменениям дерева. Регистр сверяется точно:
     // macOS и Windows его прощают, Linux и GitHub — нет.
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let mut documents: Vec<PathBuf> = [
-        "AGENTS.md",
-        "AI_DEV.md",
-        "spec/README.md",
-        "spec/rules/README.md",
-    ]
-    .iter()
-    .map(|relative| root.join(relative))
-    .collect();
-    let arc42 = root.join("spec/arc42");
-    for entry in fs::read_dir(&arc42).unwrap_or_else(|error| panic!("{}: {error}", arc42.display()))
-    {
-        let path = entry.expect("directory entry").path();
-        if path.extension().is_some_and(|extension| extension == "md") {
-            documents.push(path);
-        }
-    }
+    let root = repo_path("");
+    let arc42 = repo_path("spec/arc42");
+    let mut documents: Vec<PathBuf> = AGENT_ROUTE_DOCUMENTS
+        .iter()
+        .map(|relative| repo_path(relative))
+        .collect();
+    documents.extend(
+        fs::read_dir(&arc42)
+            .unwrap_or_else(|error| panic!("{}: {error}", arc42.display()))
+            .map(|entry| entry.expect("directory entry").path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "md")),
+    );
     documents.sort();
 
     let mut seen = 0usize;
@@ -787,8 +797,7 @@ fn every_link_on_the_agent_route_resolves() {
         for target in relative_link_targets(&text) {
             seen += 1;
             if !resolves_with_exact_case(&root, base, &target) {
-                let shown = document.strip_prefix(&root).unwrap_or(document);
-                broken.push(format!("{}: {target}", shown.display()));
+                broken.push(format!("{}: {target}", repo_relative(document)));
             }
         }
     }
@@ -804,43 +813,58 @@ fn every_link_on_the_agent_route_resolves() {
     );
 }
 
-/// Относительные адреса ссылок — встроенных `[текст](адрес)` и сносок `[метка]: адрес` —
-/// вне огороженных блоков и вне кода в строке. Внешние адреса и якоря своей страницы
-/// сторожа не касаются.
+/// Путь от корня репозитория, всегда через косую черту: `Path::display()` на Windows дал бы
+/// обратную.
+fn repo_relative(path: &Path) -> String {
+    path.strip_prefix(repo_path(""))
+        .unwrap_or(path)
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Встроенная ссылка `[текст](адрес)` или `[текст](адрес "заголовок")`.
+static INLINE_LINK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"\]\(([^)\s]+)(?:\s+"[^"]*")?\)"#).expect("regex"));
+/// Сноска `[метка]: адрес`; `[^метка]:` — примечание, а не ссылка.
+static REFERENCE_LINK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^ {0,3}\[[^\]^][^\]]*\]:\s*(\S+)").expect("regex"));
+/// Код в строке, в том числе перенесённый на следующую строку абзаца.
+static CODE_SPAN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`[^`]*`").expect("regex"));
+
+/// Относительные адреса ссылок — встроенных и сносок — вне огороженных блоков и вне кода в
+/// строке. Внешние адреса и якоря своей страницы сторожа не касаются.
 fn relative_link_targets(text: &str) -> Vec<String> {
-    let inline = Regex::new(r"\]\(([^)\s]+)\)").expect("regex");
-    let reference = Regex::new(r"^\s{0,3}\[[^\]]+\]:\s*(\S+)").expect("regex");
-    let code_span = Regex::new(r"`[^`]*`").expect("regex");
-    let mut targets = Vec::new();
-    let mut fenced = false;
+    let mut prose = String::with_capacity(text.len());
+    let mut fence: Option<&str> = None;
     for line in text.lines() {
-        if line.trim_start().starts_with("```") {
-            fenced = !fenced;
-            continue;
+        let trimmed = line.trim_start();
+        let marker = ["```", "~~~"]
+            .into_iter()
+            .find(|marker| trimmed.starts_with(marker));
+        match (fence, marker) {
+            (None, Some(opened)) => fence = Some(opened),
+            (Some(open), Some(closed)) if open == closed => fence = None,
+            (None, None) => prose.push_str(line),
+            _ => {}
         }
-        if fenced {
-            continue;
-        }
-        // Код в строке — не ссылка, даже если похож на неё; текст ссылки в обратных кавычках
-        // при этом пустеет, а сам адрес остаётся.
-        let line = code_span.replace_all(line, "");
-        let found = inline
-            .captures_iter(&line)
-            .map(|capture| capture[1].to_owned())
-            .chain(
-                reference
-                    .captures(&line)
-                    .map(|capture| capture[1].to_owned()),
-            );
-        for target in found {
-            let path = target.split('#').next().unwrap_or_default();
-            if path.is_empty() || path.contains(':') {
-                continue;
-            }
-            targets.push(path.to_owned());
-        }
+        prose.push('\n');
     }
-    targets
+    // Код в строке — не ссылка, даже если похож на неё. Строки абзаца сохраняются, чтобы
+    // сноска осталась в начале своей строки; текст ссылки в обратных кавычках пустеет, а
+    // сам адрес остаётся.
+    let prose = CODE_SPAN.replace_all(&prose, |span: &regex::Captures<'_>| {
+        "\n".repeat(span[0].matches('\n').count())
+    });
+    INLINE_LINK
+        .captures_iter(&prose)
+        .chain(REFERENCE_LINK.captures_iter(&prose))
+        .filter_map(|capture| {
+            let path = capture[1].split('#').next().unwrap_or_default();
+            (!path.is_empty() && !path.contains(':')).then(|| path.to_owned())
+        })
+        .collect()
 }
 
 /// Путь существует с точностью до регистра: `..` сворачивается по тексту, а каждый
@@ -849,17 +873,17 @@ fn resolves_with_exact_case(root: &Path, base: &Path, target: &str) -> bool {
     let Ok(relative_base) = base.strip_prefix(root) else {
         return false;
     };
-    let mut parts: Vec<std::ffi::OsString> = Vec::new();
+    let mut parts: Vec<OsString> = Vec::new();
     for component in relative_base.join(target).components() {
         match component {
-            std::path::Component::Normal(part) => parts.push(part.to_os_string()),
-            std::path::Component::ParentDir => {
+            Component::Normal(part) => parts.push(part.to_os_string()),
+            Component::ParentDir => {
                 if parts.pop().is_none() {
                     return false;
                 }
             }
-            std::path::Component::CurDir => {}
-            std::path::Component::RootDir | std::path::Component::Prefix(_) => return false,
+            Component::CurDir => {}
+            Component::RootDir | Component::Prefix(_) => return false,
         }
     }
     let mut current = root.to_path_buf();
