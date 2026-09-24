@@ -13,8 +13,54 @@ Before changing code in an unfamiliar area, read the two sections of
   `push`, `test`, `extensions`, `tools download`, MCP EDT syntax, a full replacement, and at
   the command boundary with admission and cancellation.
 
-These describe the system; they are not commitments and carry no falsifiers. The agreed
-guarantees live in [`spec/arch/rules/`](spec/arch/README.md) and name their checks there.
+These describe the system; they are not commitments and name no checks.
+
+The agreed guarantees live in [`spec/arch/rules/`](spec/arch/README.md). Read the rules of
+the area you touch **before choosing a solution**: search `spec/arch/rules/` with `rg` by
+source path, subject and test name. A rule names its checks as `path::test_name`, or a `gap`
+issue while it is not yet fulfilled.
+
+Read next when the task reaches it:
+
+| When | Read |
+| --- | --- |
+| Work continues from an issue | The issue **with its comments**, linked PRs; the umbrella plan #233 when the issue belongs to it |
+| A test fails | Its rule: `rg -n -F '::<test_name>' spec/arch/rules/`. Most tests have none, and a missing rule does not permit changing the behavior or deleting a meaningful test |
+| A response form, a CLI flag, a config key or the MCP surface changes | `spec/arch/rules/{wire,cli,config,mcp}/`; `README.md`, `docs/CAPABILITIES.md`, `docs/CONFIGURATION.md`, `docs/DEEP_DIVE.md` |
+| Work touches a 1C platform adapter | [`references/1c/`](references/1c/README.md) — hidden from plain `rg` except the measurements file; use `rg -uu` or `git grep` |
+| CI is red or does not start | The failed job's log if there is one, then [`scripts/test/README.md`](scripts/test/README.md) |
+| The site under `docs/site/` changes | [`docs/site/README.md`](docs/site/README.md) |
+| You need why something was chosen | Git history — it explains and does not bind. The removed decisions are at `4639a92~1:spec/arch/decisions/`; `DEC.<date>.<NAME>` is the file `<date>-<name>.md` in lower case |
+| The fork's migration history or a `quarantine/*` branch | [`docs/provenance/upstream-migration/README.md`](docs/provenance/upstream-migration/README.md) — those branches are a locked record; never delete them |
+| A skill this file requires is not available | Its source in [`AI_DEV.md`](AI_DEV.md), section 4 |
+| These routes themselves change | [`AI_DEV.md`](AI_DEV.md) — update it in the same change |
+
+A document written for agents that no route reaches is useless: link it from a route or
+remove it. Knowledge every agent needs goes into a routed file, not into personal memory.
+
+## When a Rule and the Code Disagree
+
+Code and tests show what happens; a rule states what must keep holding. When they disagree,
+find the cause: an implementation defect, a missing or weak check, or an obligation that has
+to change. Fix the first two in code and tests. Never weaken a test or rewrite a rule to match
+the current behavior without the owner's decision. If the rule already carries a `gap`, the
+divergence is known and its issue owns the fix.
+
+The public docs — `README.md`, `docs/CAPABILITIES.md`, `docs/CONFIGURATION.md`,
+`docs/DEEP_DIVE.md` — are the users' contract and follow the same order. When they disagree
+with the code, decide which side is wrong: a defect in either is fixed; changing documented
+behavior is a public-contract change under Task Classification.
+
+If keeping a rule blocks the task, ask the owner in the session and show:
+
+1. the rule and its exact wording;
+2. the cost of keeping it;
+3. the cost of changing it — which guarantees and consumers are affected;
+4. both options, with a recommendation.
+
+Do not start work that depends on the answer before it arrives; independent work may continue.
+A decision the owner already made in this work needs no second approval. Record the answer as
+a rule edit; while the code does not follow, the rule carries `check: []` and a `gap` issue.
 
 ## Branches for New GitHub Issues
 
@@ -66,7 +112,7 @@ Apply this gate at the stated phase for non-trivial changes, especially when the
 2. Before implementation begins, run `skeptic-review` for non-trivial plans, rule/spec changes, architecture changes, public-contract changes, broad refactoring, or workflow/rule changes. Critical or high skeptic findings block implementation until fixed or accepted by skeptic re-check; they cannot be waived by the agent alone.
 3. For non-trivial, cross-module, or output-contract changes, run a fresh reviewer subagent on the current repository state before marking the task complete or committing. Findings must be fixed, re-reviewed, or explicitly recorded as non-actionable for the current task.
 4. Accepted waivers or accepted risks require explicit user/maintainer approval or an existing rule. Record them in the final response or task notes; if they affect a public contract or an architecture invariant, record them in the relevant rule under `spec/arch/rules/` before commit.
-5. Before completing a non-trivial implementation that changes interfaces, adapters, public contracts, shared behavior, or multiple modules, review the actual diff with `mattpocock-skills:codebase-design`: verify that added modules, interfaces, seams, and adapters remain deep, match the approved plan or decision, and do not introduce shallow pass-through layers.
+5. Before completing a non-trivial implementation that changes interfaces, adapters, public contracts, shared behavior, or multiple modules, review the actual diff with `codebase-design`: verify that added modules, interfaces, seams, and adapters remain deep, match the approved plan or decision, and do not introduce shallow pass-through layers.
 6. Treat these as blocking codebase-design findings when they duplicate an existing owner or public contract shape in the touched area: one-field wrappers, mirrored DTOs or enums, compatibility adapters without real external translation, duplicate registries or mappings, repeated readers/parsers/normalizers/loaders/scanners, alternate barrel/re-export surfaces with duplicate ownership, and multi-hop conversion chains. Exceptions are allowed only for a concrete external contract, a distinct invariant, an intentional crate-facade re-export, or a recorded project decision.
 7. For cleanup work that removes duplication, enforces an invariant, or closes a documented regression in an area governed by a rule, a cleanup note, an issue/PR note, or a guardrail test, require a `Reintroduction guard`. The guard must name the root cause, the single owner, and a way to detect the same problem reappearing under a different name. The guard may be a test, architecture guardrail, lint/check, fixture/snapshot, or explicit review checklist entry.
 8. Before completion or commit, reconcile only against artifacts explicitly cited by the task or directly relevant to touched files/public contracts: approved plan, the rules in `spec/arch/rules/` that govern the touched area, other relevant `spec/` architecture documents, issue/PR notes, skeptic review, or explicit task notes. Compare the actual diff against the stated contracts, invariants, ownership rules, data-flow paths, conversions, mappings, registries, and public re-exports; verify that promised deletions happened. An unlisted addition or retained duplicate requires updating the relevant plan or decision and repeating review before commit.
