@@ -15,15 +15,14 @@ to guess which Markdown file is authoritative.
    - `ARCHITECTURE.md`
 4. Active internal spec and architecture docs:
    - `spec/README.md`
-   - `spec/arch/*`
+   - `spec/arch/rules/*` — the agreed guarantees, each naming its check
    - `spec/architecture/*`
-   - `spec/acceptance/*`
-5. Historical notes and closed plans:
-   - `spec/archive/*`
-6. Raw external 1C references:
+5. Raw external 1C references and measurements taken on a live platform:
    - `references/1c/*`
 
 ## Search Hygiene
 
-Default `rg` searches ignore `spec/archive/` and `references/1c/` through `.rgignore`.
-Use `rg -uu` only when you intentionally need archived history or raw upstream references.
+Default `rg` searches ignore the raw 1C corpus under `references/1c/` through `.rgignore`,
+with one exception: `references/1c/confirmed-runtime-measurements.md` stays searchable,
+because facts measured on a live platform exist nowhere else and are meant to be found.
+Use `rg -uu` when you need the raw upstream command reference itself.

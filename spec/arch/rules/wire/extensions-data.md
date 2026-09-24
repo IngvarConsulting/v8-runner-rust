@@ -13,7 +13,7 @@ check:
 подкоманды, `create`, `delete`, `activate`. Шаг называет расширение и действие над ним,
 поэтому один вызов над несколькими расширениями отчитывается по каждому отдельно.
 
-Чтение состава отвечает другой формой — [`CTR.WIRE.EXTENSIONS-INVENTORY-DATA`](CTR.WIRE.EXTENSIONS-INVENTORY-DATA.md):
+Чтение состава отвечает другой формой — [`CTR.WIRE.EXTENSIONS-INVENTORY-DATA`](extensions-inventory-data.md):
 у чтения есть список расширений, которого у изменения нет.
 
 ## Пример

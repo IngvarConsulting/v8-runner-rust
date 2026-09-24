@@ -240,7 +240,7 @@ v8-runner infobase create [--dry-run]
 - При `ibcmd` неудачное создание считается «база уже есть» только если сама база
   после этого читается: спрашивается `config generation-id`, и ноль она отвечает
   лишь когда база существует и эти учётные данные её читают. Формулировка отказа
-  в решении не участвует (DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES), поэтому отказ авторизации и незаписываемый
+  в решении не участвует (INV.PLATFORM.PROSE-DEBT-ONLY-SHRINKS), поэтому отказ авторизации и незаписываемый
   путь остаются ошибкой, а не «уже есть».
 - Для `format=EDT` использует `workPath/edt-workspace` и импортирует `CONFIGURATION`, затем
   `EXTENSION`.
@@ -498,7 +498,7 @@ v8-runner download --state <working|database> --extension <NAME> --output <FILE.
 - Target lock сериализует cooperating запуски runner. Параллельный внешний writer обязан
   использовать тот же lock или быть остановлен: path revalidation не является filesystem CAS.
 - Ожидание чужого target lock ограничено пятью минутами. Это предел шага, а не срок команды
-  (`DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE`): цель держит другой прогон, и дальнейшее
+  (`INV.USE-CASES.A-STEP-IS-BOUNDED-ONLY-BY-ITS-OWN-CAP`): цель держит другой прогон, и дальнейшее
   ожидание ничего не изменит. По истечении окна отказ приходит как `workspace_busy`
   (`error.kind: workspace`, `execution.status: failed`, код возврата CLI `3`), а не как
   `timed_out` — раньше это окно задавал общий срок и отказ назывался таймаутом.
@@ -577,7 +577,7 @@ v8-runner upload --path <FILE> [--mode <load|combine>] [--settings <FILE>] [--ex
 - Состояние совместимости имеет три публичных значения: `supported` — вопрос задан
   и доказан; `absent` — расширение доказано отсутствует в ИБ; `not_established` —
   вопрос задан и не доказан; `not_probed` — вопрос не задавался. Формулировки
-  платформы на значение не влияют (DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES): у расширения состав читается
+  платформы на значение не влияют (INV.PLATFORM.PROSE-DEBT-ONLY-SHRINKS): у расширения состав читается
   структурно через `ibcmd config extension list`, у конфигурации сравнение считается
   состоявшимся только по нулевому коду выхода.
 - Первая загрузка отсутствующего в ИБ расширения возвращает
@@ -741,7 +741,7 @@ v8-runner mcp serve http
 
 ## Пока не поддерживается
 
-- Публикация CLI-only команд в MCP без отдельного ADR.
+- Публикация CLI-only команд в MCP без отдельного решения владельца.
 - Object-scoped partial dump через `ibcmd`.
 - `upload` через `ibcmd`.
 - Arbitrary path-based `convert source -> target` contract.

@@ -88,7 +88,7 @@
       "type": "object"
     },
     "CompatibilityState": {
-      "description": "What the compatibility probe established, and nothing more.\n\nThe probe asks the platform to compare the target with its counterpart, and the only part\nof the answer the platform guarantees is whether the comparison ran: exit code zero, and\nexactly then a comparison report appears. Why it did not run is said in prose, and prose is\nnot a contract — see DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES — so this enum has no variant for a reason.",
+      "description": "What the compatibility probe established, and nothing more.\n\nThe probe asks the platform to compare the target with its counterpart, and the only part\nof the answer the platform guarantees is whether the comparison ran: exit code zero, and\nexactly then a comparison report appears. Why it did not run is said in prose, and prose is\nnot a contract — see INV.PLATFORM.PROSE-DEBT-ONLY-SHRINKS — so this enum has no variant for a reason.",
       "oneOf": [
         {
           "const": "supported",

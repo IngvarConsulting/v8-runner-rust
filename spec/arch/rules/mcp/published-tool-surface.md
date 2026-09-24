@@ -25,6 +25,21 @@ check: [tests/mcp_http.rs::mcp_http_initialize_reuses_session_and_lists_tools]
 
 Состав меняется только вместе с версией этой формы.
 
+Сторож
+`tests/architecture_guardrails.rs::mcp_surface_snapshot_stays_explicit_and_documented`
+сверяет три перечня между собой: этот, `src/mcp/server.rs` и свой собственный
+`EXPECTED_MCP_TOOLS`. Расхождение любой пары валит проверку, и числительное прозы он
+сверяет со счётом строк, а не принимает за якорь.
+
+Прочие места смена состава задевает тоже, и их держит автор: `src/mcp/request.rs`,
+`src/mcp/service.rs`, `docs/CAPABILITIES.md`, `README.md` и `ARCHITECTURE.md`.
+Машиночитаемая часть ответа меняется вместе с `src/command_envelope.rs`, а схема конверта
+порождается командой `UPDATE_ENVELOPE_SCHEMA=1 cargo test
+generated_envelope_schema_is_current` и руками не правится.
+
+Сценарий, доступный только в командной строке, не публикуется инструментом MCP по
+умолчанию: наличие команды доступности инструмента не означает.
+
 ## Пример
 
 Фрагмент закреплённой поверхности — схема входа одного инструмента:

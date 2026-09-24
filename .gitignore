@@ -34,6 +34,9 @@ kotlin-example/
 .agents
 1cv8/
 ai-artefacts/
-references/
+# Корпус 1С отслеживается целиком: правило пряталось за тем, что уже добавленные файлы
+# из-под него не выпадают, а новый файл рядом с ними — выпадал молча.
+references/*
+!references/1c/
 !SKILL/references/
 !SKILL/references/**

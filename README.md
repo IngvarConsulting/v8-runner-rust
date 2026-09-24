@@ -295,7 +295,7 @@ v8-runner extensions --installed-name YAXUNIT
 - [docs/README.md](docs/README.md): порядок чтения документации и source-of-truth (источник
   истины).
 - [ARCHITECTURE.md](ARCHITECTURE.md): module map (карта модулей) и границы для контрибьюторов.
-- [spec/README.md](spec/README.md): внутренние ADR, architecture rules (архитектурные правила),
-  acceptance (приемка) и implementation backlog (план реализации).
+- [spec/README.md](spec/README.md): внутренний слой — правила продукта (architecture rules)
+  и архитектурное описание.
 - [references/1c/README.md](references/1c/README.md): сырой внешний reference corpus
   (корпус справочных материалов) по 1С, не source of truth проекта.

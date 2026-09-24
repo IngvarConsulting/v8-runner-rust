@@ -1410,6 +1410,10 @@ fn default_platform_roots() -> Vec<PathBuf> {
         ]
     }
 
+    // Осознанный пробел: линтер запускается только на `ubuntu-latest` и
+    // `windows-latest` (`.github/workflows/ci.yml`), а эта ветка берёт всякую цель,
+    // кроме этих двух. Компилируется и выполняется она на macOS, но линтером не покрыта
+    // нигде. Остаток известен и принят, а не просмотрен.
     #[cfg(all(not(windows), not(target_os = "linux")))]
     {
         vec![PathBuf::from("/opt/1cv8")]
