@@ -408,7 +408,7 @@ fn run_load_selected(
             let message = error.to_string();
             return Err(LoadExecutionFailure::with_payload(
                 error,
-                empty_result_from_resolved(
+                with_loaded_artifact(empty_result_from_resolved(
                     dispatched,
                     &resolved,
                     compatibility_state,
@@ -418,7 +418,7 @@ fn run_load_selected(
                         .or(apply_result.platform_log_path)
                         .or(probe_log_path),
                     false,
-                ),
+                )),
             ));
         }
     };
@@ -437,7 +437,7 @@ fn run_load_selected(
             let message = error.to_string();
             return Err(LoadExecutionFailure::with_payload(
                 error,
-                empty_result_from_resolved(
+                with_loaded_artifact(empty_result_from_resolved(
                     dispatched,
                     &resolved,
                     compatibility_state,
@@ -445,7 +445,7 @@ fn run_load_selected(
                     Some(message),
                     apply_result.platform_log_path.or(probe_log_path),
                     false,
-                ),
+                )),
             ));
         }
     };
@@ -454,7 +454,7 @@ fn run_load_selected(
         let message = error.to_string();
         return Err(LoadExecutionFailure::with_payload(
             error,
-            empty_result_from_resolved(
+            with_loaded_artifact(empty_result_from_resolved(
                 dispatched,
                 &resolved,
                 compatibility_state,
@@ -464,8 +464,8 @@ fn run_load_selected(
                     .platform_log_path
                     .or(apply_result.platform_log_path)
                     .or(probe_log_path),
-                false,
-            ),
+                true,
+            )),
         ));
     }
 
@@ -1041,6 +1041,18 @@ fn interrupted_result_from_resolved(
 
 fn deferred_interruption_warning(action: &str, result: &PlatformCommandResult) -> Option<String> {
     deferred_process_interruption_warning(&format!("{action} completed successfully"), result)
+}
+
+// The artifact has already been loaded. A later database update failure must not
+// erase that effect from the receipt.
+fn with_loaded_artifact(mut result: LoadResult) -> LoadResult {
+    result
+        .execution
+        .payload
+        .as_mut()
+        .expect("load failure always carries execution metadata")
+        .applied = true;
+    result
 }
 
 fn empty_result_from_resolved(
