@@ -3,20 +3,20 @@
 ## Where to Look First
 
 Before changing code in an unfamiliar area, read the two sections of
-[`spec/architecture/arc42/`](spec/architecture/arc42/architecture.md) that answer questions
+[`spec/arc42/`](spec/arc42/architecture.md) that answer questions
 `rg` cannot:
 
-- [Building blocks](spec/architecture/arc42/05-building-block-view.md) — what each module
+- [Building blocks](spec/arc42/05-building-block-view.md) — what each module
   under `src/` owns and which way the dependencies point. Every block links to its
   directory, so this is also the route from a responsibility to the code.
-- [Runtime view](spec/architecture/arc42/06-runtime-view.md) — what actually happens during
+- [Runtime view](spec/arc42/06-runtime-view.md) — what actually happens during
   `push`, `test`, `extensions`, `tools download`, MCP EDT syntax, a full replacement, and at
   the command boundary with admission and cancellation.
 
 These describe the system; they are not commitments and name no checks.
 
-The agreed guarantees live in [`spec/arch/rules/`](spec/arch/README.md). Read the rules of
-the area you touch **before choosing a solution**: search `spec/arch/rules/` with `rg` by
+The agreed guarantees live in [`spec/rules/`](spec/rules/README.md). Read the rules of
+the area you touch **before choosing a solution**: search `spec/rules/` with `rg` by
 source path, subject and test name. A rule names its checks as `path::test_name`, or a `gap`
 issue while it is not yet fulfilled.
 
@@ -25,8 +25,8 @@ Read next when the task reaches it:
 | When | Read |
 | --- | --- |
 | Work continues from an issue | The issue **with its comments**, linked PRs; the umbrella plan #233 when the issue belongs to it |
-| A test fails | Its rule: `rg -n -F '::<test_name>' spec/arch/rules/`. Most tests have none, and a missing rule does not permit changing the behavior or deleting a meaningful test |
-| A response form, a CLI flag, a config key or the MCP surface changes | `spec/arch/rules/{wire,cli,config,mcp}/`; `README.md`, `docs/CAPABILITIES.md`, `docs/CONFIGURATION.md`, `docs/DEEP_DIVE.md` |
+| A test fails | Its rule: `rg -n -F '::<test_name>' spec/rules/`. Most tests have none, and a missing rule does not permit changing the behavior or deleting a meaningful test |
+| A response form, a CLI flag, a config key or the MCP surface changes | `spec/rules/{wire,cli,config,mcp}/`; `README.md`, `docs/CAPABILITIES.md`, `docs/CONFIGURATION.md`, `docs/DEEP_DIVE.md` |
 | Work touches a 1C platform adapter | [`references/1c/`](references/1c/README.md) — hidden from plain `rg` except the measurements file; use `rg -uu` or `git grep` |
 | CI is red or does not start | The failed job's log if there is one, then [`scripts/test/README.md`](scripts/test/README.md) |
 | The site under `docs/site/` changes | [`docs/site/README.md`](docs/site/README.md) |
@@ -88,7 +88,7 @@ Use these categories to decide which review gates apply.
 | Simple cosmetic edit | One file; spelling, formatting, wording, or comment-only cleanup; no semantic change to rules, specs, public contracts, command behavior, examples, fixtures, or tests. | Self-review is enough. |
 | Non-cosmetic docs or rules | Documentation that changes agent obligations, user workflows, CLI/MCP/config contracts, `SKILL/SKILL.md`, `AGENTS.md`, `spec/`, architecture docs, examples, or acceptance criteria. | Reviewer subagent; skeptic subagent when the edit changes rules, specs, architecture descriptions, or public contracts. |
 | Rust implementation | Any `.rs` change, generated Rust, or test/fixture change that affects behavior. | Tester subagent for meaningful behavior risk; reviewer subagent; Rust expert review when Rust review/refactoring/API/error/performance is involved. |
-| Public contract or architecture change | Changes to CLI/MCP surface, `v8project.yaml`, output/error contracts, `workPath`, source-set behavior, platform adapters, parsers, change detection, or documented invariants. | Explorer, skeptic before implementation, tester, reviewer, and reconciliation against the rules in `spec/arch/rules/`. |
+| Public contract or architecture change | Changes to CLI/MCP surface, `v8project.yaml`, output/error contracts, `workPath`, source-set behavior, platform adapters, parsers, change detection, or documented invariants. | Explorer, skeptic before implementation, tester, reviewer, and reconciliation against the rules in `spec/rules/`. |
 
 If a task fits multiple rows, apply the strictest row. If subagent tooling is unavailable, the main agent must perform the check locally and explicitly record the fallback.
 
@@ -111,11 +111,11 @@ Apply this gate at the stated phase for non-trivial changes, especially when the
 1. Keep deterministic operations in the main session: project rule and specification updates, final verification, reconciliation of findings, staging, commits, and accepted-waiver records.
 2. Before implementation begins, run `skeptic-review` for non-trivial plans, rule/spec changes, architecture changes, public-contract changes, broad refactoring, or workflow/rule changes. Critical or high skeptic findings block implementation until fixed or accepted by skeptic re-check; they cannot be waived by the agent alone.
 3. For non-trivial, cross-module, or output-contract changes, run a fresh reviewer subagent on the current repository state before marking the task complete or committing. Findings must be fixed, re-reviewed, or explicitly recorded as non-actionable for the current task.
-4. Accepted waivers or accepted risks require explicit user/maintainer approval or an existing rule. Record them in the final response or task notes; if they affect a public contract or an architecture invariant, record them in the relevant rule under `spec/arch/rules/` before commit.
+4. Accepted waivers or accepted risks require explicit user/maintainer approval or an existing rule. Record them in the final response or task notes; if they affect a public contract or an architecture invariant, record them in the relevant rule under `spec/rules/` before commit.
 5. Before completing a non-trivial implementation that changes interfaces, adapters, public contracts, shared behavior, or multiple modules, review the actual diff with `codebase-design`: verify that added modules, interfaces, seams, and adapters remain deep, match the approved plan or decision, and do not introduce shallow pass-through layers.
 6. Treat these as blocking codebase-design findings when they duplicate an existing owner or public contract shape in the touched area: one-field wrappers, mirrored DTOs or enums, compatibility adapters without real external translation, duplicate registries or mappings, repeated readers/parsers/normalizers/loaders/scanners, alternate barrel/re-export surfaces with duplicate ownership, and multi-hop conversion chains. Exceptions are allowed only for a concrete external contract, a distinct invariant, an intentional crate-facade re-export, or a recorded project decision.
 7. For cleanup work that removes duplication, enforces an invariant, or closes a documented regression in an area governed by a rule, a cleanup note, an issue/PR note, or a guardrail test, require a `Reintroduction guard`. The guard must name the root cause, the single owner, and a way to detect the same problem reappearing under a different name. The guard may be a test, architecture guardrail, lint/check, fixture/snapshot, or explicit review checklist entry.
-8. Before completion or commit, reconcile only against artifacts explicitly cited by the task or directly relevant to touched files/public contracts: approved plan, the rules in `spec/arch/rules/` that govern the touched area, other relevant `spec/` architecture documents, issue/PR notes, skeptic review, or explicit task notes. Compare the actual diff against the stated contracts, invariants, ownership rules, data-flow paths, conversions, mappings, registries, and public re-exports; verify that promised deletions happened. An unlisted addition or retained duplicate requires updating the relevant plan or decision and repeating review before commit.
+8. Before completion or commit, reconcile only against artifacts explicitly cited by the task or directly relevant to touched files/public contracts: approved plan, the rules in `spec/rules/` that govern the touched area, other relevant `spec/` architecture documents, issue/PR notes, skeptic review, or explicit task notes. Compare the actual diff against the stated contracts, invariants, ownership rules, data-flow paths, conversions, mappings, registries, and public re-exports; verify that promised deletions happened. An unlisted addition or retained duplicate requires updating the relevant plan or decision and repeating review before commit.
 9. Actionable non-trivial findings must be fixed, re-reviewed, waived by the rule above, or marked out of scope only when they are unrelated to the current task. When worker subagents are available, use at most one focused worker/fix pass per related finding group before re-review.
 
 ## Repo-Local Skill

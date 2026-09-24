@@ -10,7 +10,7 @@ gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/167
 получен записанный. Токен другого инструмента и сорок нулей пустой базы — отсутствие
 ответа, а не расхождение и не совпадение: токен одного и того же расширения у
 Конфигуратора и `ibcmd` различается
-([замер](../../../../references/1c/confirmed-runtime-measurements.md)), а сорок нулей у
+([замер](../../../references/1c/confirmed-runtime-measurements.md)), а сорок нулей у
 двух разных пустых баз одинаковы.
 
 Сегодня учёт `workPath/agent/generation/<набор>.json` пишет только агент, и сравнение

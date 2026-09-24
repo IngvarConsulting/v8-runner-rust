@@ -102,7 +102,7 @@ fn mcp_surface_snapshot_stays_explicit_and_documented() {
         .map(|capture| capture[1].to_owned())
         .collect::<Vec<_>>();
 
-    let contract = read("spec/arch/rules/mcp/published-tool-surface.md");
+    let contract = read("spec/rules/mcp/published-tool-surface.md");
     // Числительное прозы сверяется со счётом, а не служит якорем: прежде девятый
     // инструмент с обновлённым перечнем и прежней прозой проходил молча.
     let published = contract

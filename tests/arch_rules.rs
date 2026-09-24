@@ -1,4 +1,4 @@
-//! Гейт правил продукта: `spec/arch/rules/`.
+//! Гейт правил продукта: `spec/rules/`.
 //!
 //! Проверяется не форма прозы, а то, без чего запись перестаёт быть обязательством:
 //! у неё есть имя, это имя одно на весь реестр, названные проверки существуют, а набор
@@ -29,12 +29,15 @@ const ALLOWED: &[&str] = &["id", "check", "gap", "version", "artifact"];
 /// `id: [A, B]` прошло бы молча, назвав два имени там, где обещано одно.
 const SCALAR: &[&str] = &["id", "gap", "version", "artifact"];
 
+/// Корень реестра от корня репозитория. Им же названы места в сообщениях.
+const RULES_DIR: &str = "spec/rules";
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
 fn rules_root() -> PathBuf {
-    repo_root().join("spec/arch/rules")
+    repo_root().join(RULES_DIR)
 }
 
 /// Имя записи для отчётов и перечней — всегда через косую черту.
@@ -50,7 +53,8 @@ fn shown(path: &Path) -> String {
         .join("/")
 }
 
-/// Все записи правил, в устойчивом порядке. README областей записью не является.
+/// Все записи правил, в устойчивом порядке. README записью не является — ни корневой,
+/// ни областей.
 fn rule_paths(dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let entries = std::fs::read_dir(dir).expect("rules directory is readable");
@@ -729,7 +733,7 @@ fn every_number_in_a_normative_block_is_named_here() {
         // `rules/`. Без этой ветки сообщение было бы пустым ровно на самой частой ошибке.
         panic!(
             "состав перечня NORMATIVE_NUMERALS верен, а порядок строк — нет: \
-             сортировка по пути правила внутри `spec/arch/rules/`"
+             сортировка по пути правила внутри `{RULES_DIR}/`"
         );
     }
 
@@ -787,9 +791,69 @@ fn old_adr_numbers_address_nothing() {
     offenders.sort();
     assert!(
         offenders.is_empty(),
-        "номер ADR не адресует ничего; назовите правило из spec/arch/rules/:\n{}",
+        "номер ADR не адресует ничего; назовите правило из {RULES_DIR}/:\n{}",
         offenders.join("\n")
     );
+}
+
+/// Правило лежит только в реестре.
+///
+/// Гейт читает один корень. Прежде реестр жил в `spec/arch/rules/`, и ветка, начатая до
+/// переезда, или агент со старой памятью заведёт запись по прежнему адресу. Её не увидит
+/// ни одна проверка этого файла: обязательство будет числиться, не будучи проверенным.
+/// Поэтому весь `spec/` вне реестра обходится в поисках блока полей с именем правила.
+#[test]
+fn every_rule_lives_in_the_registry() {
+    let registry = rules_root();
+    let mut strays = Vec::new();
+    let mut pending = vec![repo_root().join("spec")];
+    while let Some(dir) = pending.pop() {
+        let entries =
+            std::fs::read_dir(&dir).unwrap_or_else(|error| panic!("{}: {error}", dir.display()));
+        for entry in entries {
+            let path = entry.expect("directory entry").path();
+            if path == registry {
+                continue;
+            }
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|value| value != "md") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            if let Some(id) = rule_id_in(&text) {
+                let shown = path.strip_prefix(repo_root()).unwrap_or(&path);
+                strays.push(format!("{}: {id}", shown.display()));
+            }
+        }
+    }
+    strays.sort();
+    assert!(
+        strays.is_empty(),
+        "правило вне реестра не проверяет никто; перенесите его в {RULES_DIR}/:\n{}",
+        strays.join("\n")
+    );
+}
+
+/// Имя правила из блока полей, прочитанного снисходительно.
+///
+/// Строгий разбор гейта здесь не годится: запись, которую он отверг бы — с BOM, с именем в
+/// кавычках, с комментарием в блоке, — прошла бы мимо стража молча. Вне реестра перевод
+/// строки git не держит, поэтому принимается и CRLF.
+fn rule_id_in(text: &str) -> Option<String> {
+    let text = text.trim_start_matches('\u{feff}').replace("\r\n", "\n");
+    let block = text.strip_prefix("---\n")?;
+    let block = block.split_once("\n---").map_or(block, |(head, _)| head);
+    block.lines().find_map(|line| {
+        let value = line
+            .strip_prefix("id:")?
+            .trim()
+            .trim_matches(|ch| ch == '"' || ch == '\'');
+        (value.starts_with("INV.") || value.starts_with("CTR.")).then(|| value.to_owned())
+    })
 }
 
 /// Область имени и каталог называют друг друга.

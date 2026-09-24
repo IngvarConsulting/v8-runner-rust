@@ -5,4 +5,4 @@ FORK_NOTICE.md text eol=lf
 # Правила читаются побайтно: `tests/arch_rules.rs` ищет блок полей по `"---\n"`. В клоне
 # на Windows с `core.autocrlf=true` записи пришли бы с CRLF, блока полей гейт не нашёл бы
 # ни у одной, и проверка правил упала бы целиком. Перевод строки держит поэтому git.
-spec/arch/rules/**/*.md text eol=lf
+spec/rules/**/*.md text eol=lf
