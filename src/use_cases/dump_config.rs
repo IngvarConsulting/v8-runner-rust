@@ -1005,7 +1005,7 @@ mod tests {
         build_designer_dsl, cleanup_orphan_dirs, cleanup_staging_on_interruption,
         create_dump_object_list_file_with, finalize_edt_dump, metadata_sidecar_path,
         parse_external_dump_descriptor, resolve_target, run_dump, run_external_dump_designer,
-        validate_publish_target, validate_supported_matrix, DUMP_COMMAND,
+        validate_publish_target, validate_supported_matrix, DUMP_BACKUP_PREFIX, DUMP_COMMAND,
         NON_PARTIAL_OBJECTS_ERROR, ORPHAN_TTL, PARTIAL_OBJECTS_REQUIRED_ERROR,
         PARTIAL_OBJECT_BLANK_ERROR, PARTIAL_OBJECT_CONTROL_ERROR,
     };
@@ -1023,6 +1023,7 @@ mod tests {
     use crate::support::error::AppError;
     use crate::support::fs::{
         acquire_advisory_lock, read_temp_dir_metadata, write_temp_dir_metadata, TempDirKind,
+        TempDirMetadata,
     };
     use crate::support::path::{nearest_existing_canonical_path, stable_path_identity};
     use crate::use_cases::context::ExecutionContext;
@@ -1776,36 +1777,82 @@ exit 0"#,
         );
     }
 
-    #[test]
-    fn cleanup_orphan_dirs_ignores_malformed_metadata() {
-        let dir = tempdir().expect("tempdir");
-        let target = dir.path().join("main");
+    /// Цель `main` в `dir` такой, какой её видит уборка: те же канонический путь и
+    /// опознание, что своя выгрузка пишет в метаданные следа.
+    fn resolved_dump_target(dir: &Path) -> super::ResolvedDumpTarget {
+        let target = dir.join("main");
         fs::create_dir_all(&target).expect("target");
         let canonical = std::fs::canonicalize(&target).expect("canonical");
         let identity = stable_path_identity(&canonical);
-        let stage_dir = target
-            .parent()
-            .expect("parent")
-            .join(".dump-stage-malformed");
-        fs::create_dir_all(&stage_dir).expect("stage");
-        fs::write(metadata_sidecar_path(&stage_dir), b"not json").expect("metadata");
-
-        let resolved = super::ResolvedDumpTarget {
+        let canonical_dir = std::fs::canonicalize(dir).expect("canonical dir");
+        super::ResolvedDumpTarget {
             source_set_name: "main".to_owned(),
             source_set_purpose: SourceSetPurpose::Configuration,
             extension: None,
             target_path: target.clone(),
             canonical_target_path: canonical.clone(),
-            platform_target_path: target.clone(),
-            canonical_platform_target_path: canonical.clone(),
-            canonical_base_path: std::fs::canonicalize(dir.path()).expect("canonical base"),
-            canonical_work_path: std::fs::canonicalize(dir.path()).expect("canonical work"),
+            platform_target_path: target,
+            canonical_platform_target_path: canonical,
+            canonical_base_path: canonical_dir.clone(),
+            canonical_work_path: canonical_dir,
             target_identity: identity.clone(),
-            platform_target_identity: identity.clone(),
-            lock_path: target.parent().expect("parent").join(".lock"),
+            platform_target_identity: identity,
+            lock_path: dir.join(".lock"),
             edt_base_project_name: None,
             consent: DestructionConsent::RunnerOwned,
+        }
+    }
+
+    /// Промежуточный или резервный каталог выгрузки в `resolved` рядом с целью — с именем
+    /// `<префикс>-<запуск>` и метаданными, какими их пишет сама выгрузка.
+    fn temp_dir_of(resolved: &super::ResolvedDumpTarget, kind: TempDirKind) -> PathBuf {
+        let prefix = match kind {
+            TempDirKind::Stage => ".dump-stage",
+            TempDirKind::Backup => DUMP_BACKUP_PREFIX,
         };
+        let path = resolved
+            .target_path
+            .parent()
+            .expect("parent")
+            .join(format!("{prefix}-run"));
+        fs::create_dir_all(&path).expect("temp dir");
+        write_temp_dir_metadata(
+            &path,
+            kind,
+            "run",
+            &resolved.target_path,
+            &resolved.target_identity,
+        )
+        .expect("write metadata");
+        path
+    }
+
+    /// Тот же каталог, но старше срока уборки; `edit` правит его метаданные.
+    fn stale_temp_dir(
+        resolved: &super::ResolvedDumpTarget,
+        kind: TempDirKind,
+        edit: impl FnOnce(&mut TempDirMetadata),
+    ) -> PathBuf {
+        let path = temp_dir_of(resolved, kind);
+        let mut metadata = read_temp_dir_metadata(&path).expect("read metadata");
+        metadata.created_at = chrono::Utc::now()
+            - chrono::Duration::from_std(ORPHAN_TTL + Duration::from_secs(1)).expect("duration");
+        edit(&mut metadata);
+        fs::write(
+            metadata_sidecar_path(&path),
+            serde_json::to_vec(&metadata).expect("json"),
+        )
+        .expect("rewrite metadata");
+        path
+    }
+
+    #[test]
+    fn cleanup_orphan_dirs_ignores_malformed_metadata() {
+        let dir = tempdir().expect("tempdir");
+        let resolved = resolved_dump_target(dir.path());
+        let stage_dir = dir.path().join(".dump-stage-run");
+        fs::create_dir_all(&stage_dir).expect("stage");
+        fs::write(metadata_sidecar_path(&stage_dir), b"not json").expect("metadata");
 
         cleanup_orphan_dirs(&resolved).expect("cleanup");
         assert!(stage_dir.exists());
@@ -1814,37 +1861,9 @@ exit 0"#,
     #[test]
     fn cleanup_orphan_dirs_removes_old_valid_metadata() {
         let dir = tempdir().expect("tempdir");
-        let target = dir.path().join("main");
-        fs::create_dir_all(&target).expect("target");
-        let canonical = std::fs::canonicalize(&target).expect("canonical");
-        let identity = stable_path_identity(&canonical);
-        let stage_dir = target.parent().expect("parent").join(".dump-stage-old");
-        fs::create_dir_all(&stage_dir).expect("stage");
-        write_temp_dir_metadata(&stage_dir, TempDirKind::Stage, "run", &target, &identity)
-            .expect("metadata");
+        let resolved = resolved_dump_target(dir.path());
+        let stage_dir = stale_temp_dir(&resolved, TempDirKind::Stage, |_| {});
         let meta_path = metadata_sidecar_path(&stage_dir);
-        let mut metadata = read_temp_dir_metadata(&stage_dir).expect("metadata");
-        metadata.created_at = chrono::Utc::now()
-            - chrono::Duration::from_std(ORPHAN_TTL + Duration::from_secs(1)).expect("duration");
-        fs::write(&meta_path, serde_json::to_vec(&metadata).expect("json"))
-            .expect("write metadata");
-
-        let resolved = super::ResolvedDumpTarget {
-            source_set_name: "main".to_owned(),
-            source_set_purpose: SourceSetPurpose::Configuration,
-            extension: None,
-            target_path: target.clone(),
-            canonical_target_path: canonical.clone(),
-            platform_target_path: target.clone(),
-            canonical_platform_target_path: canonical.clone(),
-            canonical_base_path: std::fs::canonicalize(dir.path()).expect("canonical base"),
-            canonical_work_path: std::fs::canonicalize(dir.path()).expect("canonical work"),
-            target_identity: identity.clone(),
-            platform_target_identity: identity.clone(),
-            lock_path: target.parent().expect("parent").join(".lock"),
-            edt_base_project_name: None,
-            consent: DestructionConsent::RunnerOwned,
-        };
 
         cleanup_orphan_dirs(&resolved).expect("cleanup");
         assert!(!stage_dir.exists());
@@ -1854,31 +1873,8 @@ exit 0"#,
     #[test]
     fn cleanup_orphan_dirs_ignores_recent_metadata() {
         let dir = tempdir().expect("tempdir");
-        let target = dir.path().join("main");
-        fs::create_dir_all(&target).expect("target");
-        let canonical = std::fs::canonicalize(&target).expect("canonical");
-        let identity = stable_path_identity(&canonical);
-        let backup_dir = target.parent().expect("parent").join(".dump-backup-recent");
-        fs::create_dir_all(&backup_dir).expect("backup");
-        write_temp_dir_metadata(&backup_dir, TempDirKind::Backup, "run", &target, &identity)
-            .expect("metadata");
-
-        let resolved = super::ResolvedDumpTarget {
-            source_set_name: "main".to_owned(),
-            source_set_purpose: SourceSetPurpose::Configuration,
-            extension: None,
-            target_path: target.clone(),
-            canonical_target_path: canonical.clone(),
-            platform_target_path: target.clone(),
-            canonical_platform_target_path: canonical.clone(),
-            canonical_base_path: std::fs::canonicalize(dir.path()).expect("canonical base"),
-            canonical_work_path: std::fs::canonicalize(dir.path()).expect("canonical work"),
-            target_identity: identity.clone(),
-            platform_target_identity: identity.clone(),
-            lock_path: target.parent().expect("parent").join(".lock"),
-            edt_base_project_name: None,
-            consent: DestructionConsent::RunnerOwned,
-        };
+        let resolved = resolved_dump_target(dir.path());
+        let backup_dir = temp_dir_of(&resolved, TempDirKind::Backup);
 
         cleanup_orphan_dirs(&resolved).expect("cleanup");
 
@@ -1889,38 +1885,11 @@ exit 0"#,
     #[test]
     fn cleanup_orphan_dirs_ignores_foreign_metadata() {
         let dir = tempdir().expect("tempdir");
-        let target = dir.path().join("main");
-        fs::create_dir_all(&target).expect("target");
-        let canonical = std::fs::canonicalize(&target).expect("canonical");
-        let identity = stable_path_identity(&canonical);
-        let stage_dir = target.parent().expect("parent").join(".dump-stage-foreign");
-        fs::create_dir_all(&stage_dir).expect("stage");
-        write_temp_dir_metadata(&stage_dir, TempDirKind::Stage, "run", &target, &identity)
-            .expect("metadata");
+        let resolved = resolved_dump_target(dir.path());
+        let stage_dir = stale_temp_dir(&resolved, TempDirKind::Stage, |metadata| {
+            metadata.tool = "foreign-tool".to_owned();
+        });
         let meta_path = metadata_sidecar_path(&stage_dir);
-        let mut metadata = read_temp_dir_metadata(&stage_dir).expect("metadata");
-        metadata.tool = "foreign-tool".to_owned();
-        metadata.created_at = chrono::Utc::now()
-            - chrono::Duration::from_std(ORPHAN_TTL + Duration::from_secs(1)).expect("duration");
-        fs::write(&meta_path, serde_json::to_vec(&metadata).expect("json"))
-            .expect("write metadata");
-
-        let resolved = super::ResolvedDumpTarget {
-            source_set_name: "main".to_owned(),
-            source_set_purpose: SourceSetPurpose::Configuration,
-            extension: None,
-            target_path: target.clone(),
-            canonical_target_path: canonical.clone(),
-            platform_target_path: target.clone(),
-            canonical_platform_target_path: canonical.clone(),
-            canonical_base_path: std::fs::canonicalize(dir.path()).expect("canonical base"),
-            canonical_work_path: std::fs::canonicalize(dir.path()).expect("canonical work"),
-            target_identity: identity.clone(),
-            platform_target_identity: identity.clone(),
-            lock_path: target.parent().expect("parent").join(".lock"),
-            edt_base_project_name: None,
-            consent: DestructionConsent::RunnerOwned,
-        };
 
         cleanup_orphan_dirs(&resolved).expect("cleanup");
 
@@ -1928,17 +1897,47 @@ exit 0"#,
         assert!(meta_path.exists());
     }
 
+    /// След своей выгрузки, но другой цели в том же каталоге, — не свой для этой цели.
+    #[test]
+    fn cleanup_orphan_dirs_ignores_metadata_of_another_target() {
+        let dir = tempdir().expect("tempdir");
+        let resolved = resolved_dump_target(dir.path());
+        let backup_dir = stale_temp_dir(&resolved, TempDirKind::Backup, |metadata| {
+            metadata.target_identity = "another target".to_owned();
+        });
+
+        cleanup_orphan_dirs(&resolved).expect("cleanup");
+
+        assert!(backup_dir.exists());
+        assert!(metadata_sidecar_path(&backup_dir).exists());
+    }
+
+    /// Свой устаревший каталог с именем вне договора уборка не трогает: своё она опознаёт
+    /// и по метаданным, и по имени.
+    #[test]
+    fn cleanup_orphan_dirs_ignores_a_directory_named_outside_the_contract() {
+        let dir = tempdir().expect("tempdir");
+        let resolved = resolved_dump_target(dir.path());
+        let stale = stale_temp_dir(&resolved, TempDirKind::Backup, |_| {});
+        let renamed = dir.path().join("backup-copy");
+        fs::rename(&stale, &renamed).expect("rename dir");
+        fs::rename(
+            metadata_sidecar_path(&stale),
+            metadata_sidecar_path(&renamed),
+        )
+        .expect("rename sidecar");
+
+        cleanup_orphan_dirs(&resolved).expect("cleanup");
+
+        assert!(renamed.exists());
+        assert!(metadata_sidecar_path(&renamed).exists());
+    }
+
     #[test]
     fn cleanup_staging_on_interruption_removes_stage_dir_and_sidecar() {
         let dir = tempdir().expect("tempdir");
-        let target = dir.path().join("main");
-        fs::create_dir_all(&target).expect("target");
-        let canonical = std::fs::canonicalize(&target).expect("canonical");
-        let identity = stable_path_identity(&canonical);
-        let stage_dir = target.parent().expect("parent").join(".dump-stage-run");
-        fs::create_dir_all(&stage_dir).expect("stage");
-        write_temp_dir_metadata(&stage_dir, TempDirKind::Stage, "run", &target, &identity)
-            .expect("metadata");
+        let resolved = resolved_dump_target(dir.path());
+        let stage_dir = temp_dir_of(&resolved, TempDirKind::Stage);
         let meta_path = metadata_sidecar_path(&stage_dir);
 
         let error = cleanup_staging_on_interruption(
@@ -2406,6 +2405,9 @@ exit 0"#,
             fs::read_to_string(base.join("main").join("old.txt")).expect("old"),
             "keep me"
         );
+        // Конфигуратору назван промежуточный каталог, а не цель.
+        let calls = fs::read_to_string(&calls).expect("calls");
+        assert!(calls.contains(".dump-stage-"), "{calls}");
     }
 
     #[test]

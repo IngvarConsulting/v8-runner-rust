@@ -181,3 +181,81 @@ fn is_ignored_dir(entry: &walkdir::DirEntry) -> bool {
     };
     IGNORED_DIRS.contains(&name)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{scan, ScanSnapshot, COARSE_MARGIN_NS};
+    use crate::change_detection::file_state::mtime_nanos;
+    use std::collections::HashSet;
+    use std::fs::{self, File};
+    use std::path::Path;
+    use std::time::{Duration, SystemTime};
+    use tempfile::tempdir;
+
+    fn write_touched(path: &Path, contents: &str, modified: SystemTime) {
+        fs::write(path, contents).expect("write");
+        File::options()
+            .write(true)
+            .open(path)
+            .expect("open")
+            .set_modified(modified)
+            .expect("set mtime");
+    }
+
+    fn candidates(snapshot: &ScanSnapshot) -> Vec<&str> {
+        let mut names: Vec<&str> = snapshot
+            .candidates
+            .iter()
+            .map(|candidate| candidate.rel_path.as_str())
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// Известный прошлому снимку файл хешируется, только если тронут не раньше водяного
+    /// знака за вычетом запаса: грубые часы файловой системы правку не прячут, а нетронутое
+    /// не читается. Новый файл хешируется всегда.
+    #[test]
+    fn a_known_file_is_hashed_only_when_touched_within_the_margin() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        let margin = Duration::from_nanos(COARSE_MARGIN_NS);
+        let watermark = SystemTime::now() - 10 * margin;
+        write_touched(&root.join("Old.bsl"), "old", watermark - 2 * margin);
+        write_touched(&root.join("Near.bsl"), "near", watermark - margin / 2);
+        write_touched(&root.join("New.bsl"), "new", watermark - 2 * margin);
+        let known: HashSet<String> = ["Old.bsl", "Near.bsl"].map(str::to_owned).into();
+        let watermark_ns = mtime_nanos(watermark, root).expect("watermark");
+
+        let snapshot = scan(root, Some(watermark_ns), &known).expect("scan");
+
+        assert_eq!(snapshot.seen_files.len(), 3);
+        assert_eq!(candidates(&snapshot), ["Near.bsl", "New.bsl"]);
+    }
+
+    /// Служебные и порождённые каталоги и файл состояния выгрузки в обход не входят.
+    #[test]
+    fn service_and_generated_paths_are_never_scanned() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(root.join("Module.bsl"), "module").expect("module");
+        fs::write(root.join("ConfigDumpInfo.xml"), "<info/>").expect("dump info");
+        for ignored in [
+            ".git", ".gradle", "build", "target", "temp", "tmp", ".yaxunit",
+        ] {
+            let nested = root.join(ignored).join("nested");
+            fs::create_dir_all(&nested).expect("ignored dir");
+            fs::write(nested.join("File.bsl"), "generated").expect("ignored file");
+        }
+
+        let snapshot = scan(root, None, &HashSet::new()).expect("scan");
+
+        let seen: Vec<&str> = snapshot
+            .seen_files
+            .iter()
+            .map(|file| file.rel_path.as_str())
+            .collect();
+        assert_eq!(seen, ["Module.bsl"]);
+        assert_eq!(candidates(&snapshot), ["Module.bsl"]);
+    }
+}

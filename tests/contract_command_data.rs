@@ -18,7 +18,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use support::command_data::{
-    assert_data_matches_a_declared_form, form_index, form_schema, repo_root, slug_list,
+    assert_data_matches_its_command_form, assert_data_matches_one_of, form_index, repo_root,
+    slug_list,
 };
 use support::{temp_workspace, v8_runner_command, write_shell_script};
 
@@ -130,9 +131,12 @@ fn every_previewable_command_answers_in_the_form_declared_for_it() {
         ],
     ];
 
+    // Сверка — только с формами самой команды: общая форма отказа тоже объявлена, и отказ до
+    // диспетчеризации иначе прошёл бы за форму команды. Отказ, напечатанный формой самой
+    // команды, проверку проходит: форма у него та же.
     for preview in previews {
         let payload = run(&config_path, &preview);
-        assert_data_matches_a_declared_form(&payload, &format!("`{}`", preview.join(" ")));
+        assert_data_matches_its_command_form(&payload, &format!("`{}`", preview.join(" ")));
     }
 
     // `clone` проектного файла не читает и глобальный ключ настроек отвергает, поэтому
@@ -156,10 +160,8 @@ fn every_previewable_command_answers_in_the_form_declared_for_it() {
         .output()
         .expect("run command");
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
-    // Форма отказа тоже объявлена, поэтому без этой строки проверка прошла бы на отказе,
-    // ничего не сказав о форме превью.
     assert_eq!(payload["ok"], true, "`clone --dry-run` refused: {payload}");
-    assert_data_matches_a_declared_form(&payload, "`clone --dry-run`");
+    assert_data_matches_its_command_form(&payload, "`clone --dry-run`");
 }
 
 /// Отказ до диспетчеризации печатает общую форму, и она тоже часть обещания: клиент
@@ -171,16 +173,7 @@ fn a_refusal_before_dispatch_answers_in_the_shared_form() {
 
     let payload = run(&config_path, &["extensions", "info", "--name", ""]);
     assert_eq!(payload["ok"], false, "an empty name must be refused");
-    assert_data_matches_a_declared_form(&payload, "a refusal before dispatch");
-
-    let index = form_index();
-    let shared = slug_list(&index["shared"]);
-    let schema = form_schema(shared.first().expect("a shared form is declared"));
-    let validator = jsonschema::validator_for(&schema).expect("form compiles");
-    assert!(
-        validator.is_valid(&payload["data"]),
-        "the refusal must answer in the shared form, not in a command form: {payload}"
-    );
+    assert_data_matches_one_of(&payload["data"], "a refusal before dispatch", &["refusal"]);
 }
 
 /// Форма объявлена для каждой команды, которая её печатает. Без этой проверки новая

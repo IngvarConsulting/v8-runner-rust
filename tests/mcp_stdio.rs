@@ -14,6 +14,7 @@ use rmcp::{
     ServiceError, ServiceExt,
 };
 use serde_json::{json, Value};
+use support::command_data::{assert_data_matches_its_command_form, assert_data_matches_one_of};
 use support::{
     hold_workspace_lock, read_line_count, temp_workspace, v8_runner_binary, v8_runner_command,
     wait_for_line_count as wait_for_invocation_count, write_shell_script as write_script,
@@ -44,20 +45,7 @@ fn assert_envelope_business_failure(payload: &Value, command: &str) {
 /// Клиент разбирает его до того, как узнал об отказе, поэтому состав полей — такое же
 /// обещание, как и состав успешного ответа.
 fn assert_matches_the_mcp_refusal_form(data: &Value) {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("docs/schemas/command-data/mcp-refusal.schema.json");
-    let text = fs::read_to_string(&path).expect("refusal form artefact is present");
-    let schema: Value = serde_json::from_str(&text).expect("refusal form is valid json");
-    let validator = jsonschema::validator_for(&schema).expect("refusal form compiles");
-    let errors: Vec<String> = validator
-        .iter_errors(data)
-        .map(|error| format!("{} at {}", error, error.instance_path))
-        .collect();
-    assert!(
-        errors.is_empty(),
-        "the refusal does not match the pinned form:\n{}",
-        errors.join("\n")
-    );
+    assert_data_matches_one_of(data, "the MCP refusal", &["mcp-refusal"]);
 }
 
 fn assert_launch_platform_resolution(data: &Value) {
@@ -955,6 +943,109 @@ async fn mcp_stdio_structured_content_matches_cli_json_envelope() {
         syntax_payload["data"]["issues"][0]["path"],
         cli_syntax["data"]["issues"][0]["path"]
     );
+
+    client.cancel().await.expect("cancel client");
+}
+
+/// Инструменты MCP отвечают теми же формами `data`, что и их команды в CLI. Сверка идёт
+/// только с формами самой команды: общая форма отказа тоже объявлена, и ответ без предмета
+/// команды иначе прошёл бы проверку. Перечень вызовов сверяется с поверхностью сервера, так
+/// что новый инструмент без вызова здесь тест валит.
+#[tokio::test]
+async fn mcp_stdio_tools_answer_in_the_forms_of_their_commands() {
+    // Живую проверку EDT проект Конфигуратора не поднимет; её форму держит
+    // `mcp_stdio_the_live_edt_check_answers_in_the_form_of_check`.
+    const CHECKED_ELSEWHERE: &[&str] = &["check_syntax_edt"];
+    let (_dir, config_path, _designer_calls_log, _enterprise_calls_log, _captured_config) =
+        setup_designer_suite_project();
+    let client = serve_stdio(&config_path).await;
+
+    // Инструмент, команда, чьей формой он отвечает, и аргументы вызова.
+    let calls = [
+        ("run_all_tests", "test", json!({})),
+        (
+            "run_module_tests",
+            "test",
+            json!({ "moduleName": "Billing" }),
+        ),
+        ("build_project", "push", json!({ "fullRebuild": true })),
+        ("dump_config", "pull", json!({ "mode": "FULL" })),
+        (
+            "dump_config",
+            "pull",
+            json!({ "mode": "PARTIAL", "objects": ["Catalog.Items"] }),
+        ),
+        ("launch_app", "launch", json!({ "utilityType": "thin" })),
+        ("check_syntax_designer_config", "check", json!({})),
+        (
+            "check_syntax_designer_modules",
+            "check",
+            json!({ "server": true }),
+        ),
+    ];
+    let mut published: Vec<String> = client
+        .peer()
+        .list_all_tools()
+        .await
+        .expect("list tools")
+        .into_iter()
+        .map(|tool| tool.name.into_owned())
+        .collect();
+    published.sort_unstable();
+    let mut called: Vec<&str> = calls
+        .iter()
+        .map(|(tool, _, _)| *tool)
+        .chain(CHECKED_ELSEWHERE.iter().copied())
+        .collect();
+    called.sort_unstable();
+    called.dedup();
+    assert_eq!(
+        called, published,
+        "every published tool must be called here or named as checked elsewhere"
+    );
+
+    for (tool, command, arguments) in calls {
+        let response = client
+            .peer()
+            .call_tool(
+                CallToolRequestParams::new(tool)
+                    .with_arguments(serde_json::from_value(arguments).expect("arguments")),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{tool}: {error}"));
+        let Some(payload) = response.structured_content else {
+            panic!("{tool}: no structured payload");
+        };
+        assert_eq!(payload["command"], command, "{tool}: {payload}");
+        assert_data_matches_its_command_form(&payload, tool);
+    }
+
+    client.cancel().await.expect("cancel client");
+}
+
+/// Живая проверка EDT собирает `data` своим кодом, мимо сценария CLI, — и отвечает той же
+/// формой `check`, вместе с замечанием вида EDT.
+#[tokio::test]
+async fn mcp_stdio_the_live_edt_check_answers_in_the_form_of_check() {
+    let validate_handler = "if [ -n \"$out\" ]; then printf 'ERROR\\tCatalogs.Items\\t1\\t2\\tUnusedVariables\\tunused variable\\n' > \"$out\"; fi\nprompt";
+    let (_dir, config_path) = setup_edt_project_with_options(
+        validate_handler,
+        MCP_ADMISSION_TIMEOUT_MS,
+        EDT_COMMAND_TIMEOUT_MS,
+        1,
+    );
+    let client = serve_stdio(&config_path).await;
+
+    let response = client
+        .peer()
+        .call_tool(check_syntax_edt_call())
+        .await
+        .expect("edt syntax call");
+
+    let payload = response.structured_content.expect("structured payload");
+    assert_eq!(payload["data"]["status"], "issues_found", "{payload}");
+    assert_eq!(payload["data"]["issues"][0]["kind"], "edt", "{payload}");
+    assert_data_matches_its_command_form(&payload, "check_syntax_edt");
 
     client.cancel().await.expect("cancel client");
 }

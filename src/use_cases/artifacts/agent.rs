@@ -157,11 +157,7 @@ pub(super) fn run_agent_export(
     Ok((
         dump_result,
         published_artifacts,
-        publication_message(
-            context,
-            publish_phase.cleanup_warning,
-            publish_phase.deferred_interruption,
-        ),
+        publication_message(context, publish_phase),
     ))
 }
 
@@ -365,11 +361,7 @@ fn run_external_agent_export(
     Ok((
         last_result,
         artifacts,
-        publication_message(
-            context,
-            publish_phase.cleanup_warning,
-            publish_phase.deferred_interruption,
-        ),
+        publication_message(context, publish_phase),
     ))
 }
 

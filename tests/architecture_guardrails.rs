@@ -1878,6 +1878,118 @@ fn a_command_carries_no_deadline_anywhere_it_could_be_put_back() {
 }
 
 #[test]
+fn a_reply_is_checked_against_its_form_through_one_reader() {
+    // Корень проблемы: тесты сверяли `data` с формами своими копиями чтения схемы, и копии
+    // расходились с общей — одна брала первую из общих форм, другая жёстко записанный путь,
+    // и ни одна не знала, что общая форма отказа проходит за любую. Владелец один —
+    // `tests/support/command_data.rs`; схему конверта и примеры правил сверяют свои
+    // проверки. Страж стоит на имени крейта: без него схему не прочитать.
+    const SCHEMA_READERS: &[&str] = &[
+        "tests/support/command_data.rs",
+        "tests/contract_envelope.rs",
+        "tests/arch_rules.rs",
+        // Сам страж называет искомое имя.
+        "tests/architecture_guardrails.rs",
+    ];
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for file in collect_rust_files(&repo_path("tests")) {
+        let relative = file.strip_prefix(repo_root).expect("relative path");
+        if SCHEMA_READERS
+            .iter()
+            .any(|reader| relative == Path::new(reader))
+        {
+            continue;
+        }
+        if fs::read_to_string(&file)
+            .expect("read test source")
+            .contains("jsonschema")
+        {
+            offenders.push(relative.display().to_string());
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these tests read a data form themselves; check a reply through \
+         tests/support/command_data.rs instead:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn change_detection_has_no_background_watcher() {
+    // Изменения ищет та команда, которой нужен ответ; фонового наблюдателя нет. Наблюдатель —
+    // это поток рядом с командой или крейт слежения за файловой системой: слой анализа
+    // потоков не заводит, а раннер такого крейта не тянет.
+    const WATCHER_CRATES: &[&str] = &["notify", "notify-debouncer-mini", "hotwatch"];
+    const BACKGROUND_WORK: &[&str] = &["spawn", "thread::"];
+
+    let manifest = read("Cargo.toml");
+    let watchers: Vec<&str> = manifest
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(name, _)| name.trim())
+        .filter(|name| WATCHER_CRATES.contains(name))
+        .collect();
+    assert!(
+        watchers.is_empty(),
+        "Cargo.toml depends on a file-system watcher {watchers:?}: change detection runs when \
+         a command needs the answer, not in the background"
+    );
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for file in collect_rust_files(&repo_path("src/change_detection")) {
+        let relative = file.strip_prefix(repo_root).expect("relative path");
+        let production = without_doc_attributes(&production_tokens(&file));
+        for marker in BACKGROUND_WORK {
+            if production.contains(marker) {
+                offenders.push(format!("{} names `{marker}`", relative.display()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "change detection starts background work; it must run only when a command asks:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn change_detection_never_reads_the_executor_choice() {
+    // Анализ изменений отвечает, нужен ли шаг; чем его выполнить, решает выбор исполнителя.
+    // Прочитай слой анализа этот выбор — и ответ «что делать» начал бы зависеть от того,
+    // кто делает: смена исполнителя меняла бы решение о загрузке. Страж стоит на именах:
+    // слой не называет ни ключей выбора, ни матрицы исполнителей, ни адаптеров платформы.
+    // Конфигурацию слой читать вправе — наборы, формат и `workPath` берутся из неё.
+    const EXECUTOR_CHOICE: &[&str] = &["provider", "Provider", "capability", "platform::"];
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let files = collect_rust_files(&repo_path("src/change_detection"));
+    assert!(
+        !files.is_empty(),
+        "the change-detection layer is not where it was"
+    );
+    let mut offenders = Vec::new();
+    for file in files {
+        let relative = file.strip_prefix(repo_root).expect("relative path");
+        let production = without_doc_attributes(&production_tokens(&file));
+        for name in EXECUTOR_CHOICE {
+            if production.contains(name) {
+                offenders.push(format!("{} names `{name}`", relative.display()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "change detection reads the executor choice; whether a step is needed must not depend \
+         on who performs it:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn every_top_level_module_is_a_block_of_the_module_map() {
     // Корень проблемы: карта модулей жила в двух файлах, на маршруте агента лежал один, и ни
     // один не был привязан к изменениям кода — три модуля так и не попали ни в один. Владелец

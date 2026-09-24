@@ -43,6 +43,7 @@ use crate::use_cases::source_inventory::SourceSetInventory;
 
 use super::staged_publication::{
     cleanup_owned_orphan_files, interruption_before_publish, StagedPublication,
+    StagedPublicationOutcome,
 };
 
 const SUPPORTED_ARTIFACTS_ERROR: &str =
@@ -296,24 +297,7 @@ fn run_artifacts_selected(
                 file_names: published_file_names(&artifacts),
                 published: true,
             };
-            let diagnostics = message.message.clone().into_iter().collect::<Vec<_>>();
-            let mut execution = ExecutionOutcome::new(ExecutionStatus::Succeeded)
-                .with_diagnostics(diagnostics)
-                .with_artifacts(artifacts.clone())
-                .with_payload(metadata);
-            if let Some(interruption) = message.deferred_interruption {
-                execution =
-                    execution.with_interruptions(vec![deferred_command_interruption_details(
-                        interruption,
-                        "publish",
-                        publication_warning(context.command(), Some(interruption)).unwrap_or_else(
-                            || {
-                                "artifact publication completed after deferred interruption"
-                                    .to_owned()
-                            },
-                        ),
-                    )]);
-            }
+            let execution = published_execution(context, artifacts, metadata, message);
             Ok(ArtifactsResult {
                 provider: None,
                 provider_dispatched: true,
@@ -521,11 +505,7 @@ fn run_designer_export(
     Ok((
         dump_result,
         published_artifacts,
-        publication_message(
-            context,
-            publish_phase.cleanup_warning,
-            publish_phase.deferred_interruption,
-        ),
+        publication_message(context, publish_phase),
     ))
 }
 
@@ -707,11 +687,7 @@ fn run_external_designer_export(
     Ok((
         last_result,
         artifacts,
-        publication_message(
-            context,
-            publish_phase.cleanup_warning,
-            publish_phase.deferred_interruption,
-        ),
+        publication_message(context, publish_phase),
     ))
 }
 
@@ -1126,31 +1102,65 @@ struct PublicationOutcome {
     deferred_interruption: Option<crate::use_cases::context::ExecutionInterruption>,
 }
 
+/// Итог публикации берётся целиком: предупреждение уборки не может потеряться у места
+/// вызова, и успех с неубранной копией не выглядит чистым. Разбор полный, без `..`:
+/// новое поле итога не пройдёт мимо, пока здесь не решат, что с ним делать.
 fn publication_message(
     context: &ExecutionContext,
-    cleanup_warning: Option<String>,
-    deferred_interruption: Option<crate::use_cases::context::ExecutionInterruption>,
+    published: StagedPublicationOutcome,
 ) -> PublicationOutcome {
+    let StagedPublicationOutcome {
+        cleanup_warning,
+        deferred_interruption,
+        previous_target_present: _,
+    } = published;
     PublicationOutcome {
         message: merge_optional_messages(
             cleanup_warning,
-            publication_warning(context.command(), deferred_interruption),
+            deferred_interruption
+                .map(|interruption| publication_warning(context.command(), interruption)),
         ),
         deferred_interruption,
     }
 }
 
+/// Итог успешного `make`: сообщение публикации уходит в диагностику ответа, отложенное
+/// прерывание — в прерывания. Здесь предупреждение уборки становится частью ответа.
+fn published_execution(
+    context: &ExecutionContext,
+    artifacts: ArtifactSet,
+    metadata: ArtifactBuildMetadata,
+    publication: PublicationOutcome,
+) -> ExecutionOutcome<ArtifactBuildMetadata> {
+    let PublicationOutcome {
+        message,
+        deferred_interruption,
+    } = publication;
+    let execution = ExecutionOutcome::new(ExecutionStatus::Succeeded)
+        .with_diagnostics(message.into_iter().collect())
+        .with_artifacts(artifacts)
+        .with_payload(metadata);
+    match deferred_interruption {
+        Some(interruption) => {
+            execution.with_interruptions(vec![deferred_command_interruption_details(
+                interruption,
+                "publish",
+                publication_warning(context.command(), interruption),
+            )])
+        }
+        None => execution,
+    }
+}
+
 fn publication_warning(
     command: crate::use_cases::context::CommandName,
-    deferred_interruption: Option<crate::use_cases::context::ExecutionInterruption>,
-) -> Option<String> {
-    deferred_interruption.map(|interruption| {
-        deferred_interruption_warning_for_command(
-            "artifact publication completed",
-            command,
-            interruption,
-        )
-    })
+    interruption: crate::use_cases::context::ExecutionInterruption,
+) -> String {
+    deferred_interruption_warning_for_command(
+        "artifact publication completed",
+        command,
+        interruption,
+    )
 }
 
 fn map_mode(mode: ArtifactsModeRequest) -> ArtifactBuildMode {
@@ -1219,8 +1229,9 @@ fn published_file_names(artifacts: &ArtifactSet) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_orphan_files, publication_message, publication_warning, resolve_target,
-        run_artifacts, run_designer_export, validate_supported_matrix, ResolvedArtifactsTarget,
+        cleanup_orphan_files, publication_message, publication_warning, published_execution,
+        resolve_target, run_artifacts, run_designer_export, validate_supported_matrix,
+        ResolvedArtifactsTarget, StagedPublicationOutcome,
     };
     use crate::config::model::{
         AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
@@ -1620,9 +1631,8 @@ mod tests {
     fn publication_warning_reports_an_interrupted_context() {
         let warning = publication_warning(
             CommandName::Artifacts,
-            Some(crate::use_cases::context::ExecutionInterruption::Cancelled),
-        )
-        .expect("warning");
+            crate::use_cases::context::ExecutionInterruption::Cancelled,
+        );
 
         assert!(warning.contains("cancel"));
         assert!(warning.contains("critical phase"));
@@ -1631,18 +1641,38 @@ mod tests {
     #[test]
     fn publication_message_keeps_cleanup_warning_in_result_contract() {
         let context = ExecutionContext::cli(CommandName::Artifacts);
-
-        let outcome = publication_message(
+        let publication = publication_message(
             &context,
-            Some("cleanup warning".to_owned()),
-            Some(crate::use_cases::context::ExecutionInterruption::Cancelled),
+            StagedPublicationOutcome {
+                cleanup_warning: Some("cleanup warning".to_owned()),
+                deferred_interruption: Some(
+                    crate::use_cases::context::ExecutionInterruption::Cancelled,
+                ),
+                previous_target_present: true,
+            },
         );
-        let message = outcome.message.expect("message");
+        let metadata = ArtifactBuildMetadata {
+            artifact_type: ArtifactBuildMode::ConfigurationCf,
+            output_path: PathBuf::from("dist/main.cf"),
+            file_names: vec!["main.cf".to_owned()],
+            published: true,
+        };
 
-        assert!(message.contains("cleanup warning"));
-        assert!(message.contains("cancellation request"));
+        let execution =
+            published_execution(&context, ArtifactSet::default(), metadata, publication);
+
+        // Предупреждение уборки доходит до ответа, и успех чистым не выглядит.
+        assert_eq!(execution.status, ExecutionStatus::Succeeded);
+        let [message] = execution.diagnostics.as_slice() else {
+            panic!("one diagnostic expected: {:?}", execution.diagnostics);
+        };
+        assert!(message.contains("cleanup warning"), "{message}");
+        assert!(message.contains("cancellation request"), "{message}");
         // The fact travels beside the text, so nobody has to read the text to recover it.
-        assert!(outcome.deferred_interruption.is_some());
+        let [interruption] = execution.interruptions.as_slice() else {
+            panic!("one interruption expected: {:?}", execution.interruptions);
+        };
+        assert!(interruption.deferred);
     }
 
     #[cfg(unix)]
@@ -1827,6 +1857,43 @@ mod tests {
         assert!(!payload.execution.errors[0].message.is_empty());
     }
 
+    /// Каталог внешних обработок `output` в `dir` — цель, которую уборка сверяет со следами.
+    fn external_output_target(dir: &Path, output: &Path) -> ResolvedArtifactsTarget {
+        ResolvedArtifactsTarget {
+            mode: ArtifactBuildMode::ExternalDataProcessorEpf,
+            source_set_name: "external".to_owned(),
+            extension: None,
+            output_path: output.to_path_buf(),
+            source_path: dir.join("external"),
+            is_directory_output: true,
+            canonical_output_path: output.to_path_buf(),
+            canonical_base_path: dir.to_path_buf(),
+            canonical_work_path: dir.to_path_buf(),
+            target_identity: "identity".to_owned(),
+            lock_path: dir.join("lock"),
+        }
+    }
+
+    #[test]
+    fn cleanup_orphan_files_ignores_malformed_metadata() {
+        let dir = tempdir().expect("tempdir");
+        let output = dir.path().join("dist/external");
+        fs::create_dir_all(&output).expect("output");
+        let backup_dir = output
+            .parent()
+            .expect("parent")
+            .join(".artifacts-backup-run-1");
+        fs::create_dir_all(&backup_dir).expect("backup");
+        let meta_path = metadata_sidecar_path(&backup_dir);
+        fs::write(&meta_path, b"not json").expect("metadata");
+        let resolved = external_output_target(dir.path(), &output);
+
+        cleanup_orphan_files(&resolved).expect("cleanup");
+
+        assert!(backup_dir.exists());
+        assert!(meta_path.exists());
+    }
+
     #[test]
     fn cleanup_orphan_files_scans_directory_output_root() {
         let dir = tempdir().expect("tempdir");
@@ -1849,19 +1916,7 @@ mod tests {
             serde_json::to_vec_pretty(&metadata).expect("json"),
         )
         .expect("rewrite metadata");
-        let resolved = ResolvedArtifactsTarget {
-            mode: ArtifactBuildMode::ExternalDataProcessorEpf,
-            source_set_name: "external".to_owned(),
-            extension: None,
-            output_path: output.clone(),
-            source_path: dir.path().join("external"),
-            is_directory_output: true,
-            canonical_output_path: output.clone(),
-            canonical_base_path: dir.path().to_path_buf(),
-            canonical_work_path: dir.path().to_path_buf(),
-            target_identity: "identity".to_owned(),
-            lock_path: dir.path().join("lock"),
-        };
+        let resolved = external_output_target(dir.path(), &output);
 
         cleanup_orphan_files(&resolved).expect("cleanup");
 
@@ -1888,19 +1943,7 @@ mod tests {
             serde_json::to_vec_pretty(&metadata).expect("json"),
         )
         .expect("rewrite metadata");
-        let resolved = ResolvedArtifactsTarget {
-            mode: ArtifactBuildMode::ExternalDataProcessorEpf,
-            source_set_name: "external".to_owned(),
-            extension: None,
-            output_path: output.clone(),
-            source_path: dir.path().join("external"),
-            is_directory_output: true,
-            canonical_output_path: output.clone(),
-            canonical_base_path: dir.path().to_path_buf(),
-            canonical_work_path: dir.path().to_path_buf(),
-            target_identity: "identity".to_owned(),
-            lock_path: dir.path().join("lock"),
-        };
+        let resolved = external_output_target(dir.path(), &output);
 
         cleanup_orphan_files(&resolved).expect("cleanup");
 
@@ -1933,19 +1976,7 @@ mod tests {
             serde_json::to_vec_pretty(&metadata).expect("json"),
         )
         .expect("rewrite metadata");
-        let resolved = ResolvedArtifactsTarget {
-            mode: ArtifactBuildMode::ExternalDataProcessorEpf,
-            source_set_name: "external".to_owned(),
-            extension: None,
-            output_path: output.clone(),
-            source_path: dir.path().join("external"),
-            is_directory_output: true,
-            canonical_output_path: output.clone(),
-            canonical_base_path: dir.path().to_path_buf(),
-            canonical_work_path: dir.path().to_path_buf(),
-            target_identity: "identity".to_owned(),
-            lock_path: dir.path().join("lock"),
-        };
+        let resolved = external_output_target(dir.path(), &output);
 
         cleanup_orphan_files(&resolved).expect("cleanup");
 
@@ -1979,19 +2010,7 @@ mod tests {
             serde_json::to_vec_pretty(&metadata).expect("json"),
         )
         .expect("rewrite metadata");
-        let resolved = ResolvedArtifactsTarget {
-            mode: ArtifactBuildMode::ExternalDataProcessorEpf,
-            source_set_name: "external".to_owned(),
-            extension: None,
-            output_path: output.clone(),
-            source_path: dir.path().join("external"),
-            is_directory_output: true,
-            canonical_output_path: output.clone(),
-            canonical_base_path: dir.path().to_path_buf(),
-            canonical_work_path: dir.path().to_path_buf(),
-            target_identity: "identity".to_owned(),
-            lock_path: dir.path().join("lock"),
-        };
+        let resolved = external_output_target(dir.path(), &output);
 
         cleanup_orphan_files(&resolved).expect("cleanup");
 
@@ -2011,19 +2030,7 @@ mod tests {
         fs::create_dir_all(&recent).expect("stage");
         write_temp_dir_metadata(&recent, TempDirKind::Stage, "run-1", &output, "identity")
             .expect("metadata");
-        let resolved = ResolvedArtifactsTarget {
-            mode: ArtifactBuildMode::ExternalDataProcessorEpf,
-            source_set_name: "external".to_owned(),
-            extension: None,
-            output_path: output.clone(),
-            source_path: dir.path().join("external"),
-            is_directory_output: true,
-            canonical_output_path: output.clone(),
-            canonical_base_path: dir.path().to_path_buf(),
-            canonical_work_path: dir.path().to_path_buf(),
-            target_identity: "identity".to_owned(),
-            lock_path: dir.path().join("lock"),
-        };
+        let resolved = external_output_target(dir.path(), &output);
 
         cleanup_orphan_files(&resolved).expect("cleanup");
 
@@ -2052,19 +2059,7 @@ mod tests {
             serde_json::to_vec_pretty(&metadata).expect("json"),
         )
         .expect("rewrite metadata");
-        let resolved = ResolvedArtifactsTarget {
-            mode: ArtifactBuildMode::ExternalDataProcessorEpf,
-            source_set_name: "external".to_owned(),
-            extension: None,
-            output_path: output.clone(),
-            source_path: dir.path().join("external"),
-            is_directory_output: true,
-            canonical_output_path: output.clone(),
-            canonical_base_path: dir.path().to_path_buf(),
-            canonical_work_path: dir.path().to_path_buf(),
-            target_identity: "identity".to_owned(),
-            lock_path: dir.path().join("lock"),
-        };
+        let resolved = external_output_target(dir.path(), &output);
 
         cleanup_orphan_files(&resolved).expect("cleanup");
 
