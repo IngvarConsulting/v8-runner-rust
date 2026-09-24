@@ -120,7 +120,7 @@ fn write_inventory_ibcmd(ibcmd_path: &Path, calls_log: &Path, inventory: &str) {
     write_script(
         ibcmd_path,
         &format!(
-            "printf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  *\"extension list\"*|*\"extension info\"*) printf '%s' '{}' ;;\nesac\nexit 0",
+            "printf '%s\\n' \"$*\" >> '{}'\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$*\" in\n  *\"extension list\"*|*\"extension info\"*) printf '%s' '{}' ;;\n  *\" save \"*) printf 'saved database extension' > \"$last\" ;;\n  *\" export \"*) mkdir -p \"$last\"; printf '%s' '<MetaDataObject><Configuration><Properties><Name>Проба</Name><Version/><ConfigurationExtensionPurpose>AddOn</ConfigurationExtensionPurpose><NamePrefix>Пр_</NamePrefix></Properties></Configuration></MetaDataObject>' > \"$last/Configuration.xml\" ;;\nesac\nexit 0",
             calls_log.display(),
             inventory
         ),
@@ -286,7 +286,7 @@ fn extension_preview_never_echoes_the_infobase_password() {
 
 #[test]
 fn extensions_list_reports_the_installed_composition() {
-    let (_dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
+    let (dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
     write_inventory_ibcmd(&ibcmd_path, &calls_log, MEASURED_INVENTORY);
 
     let output = v8_runner_command()
@@ -320,11 +320,131 @@ fn extensions_list_reports_the_installed_composition() {
     assert_eq!(extensions[0]["name"], "Проба");
     assert_eq!(extensions[0]["purpose"], "add-on");
     assert_eq!(extensions[0]["active"], true);
+    assert_eq!(extensions[0]["name_prefix"], "Пр_");
     // An empty platform field is an absent value, not an empty string.
     assert!(extensions[0].get("version").is_none());
-    assert!(fs::read_to_string(calls_log)
-        .expect("calls")
-        .contains("extension list"));
+    let calls = fs::read_to_string(calls_log).expect("calls");
+    let calls = calls.lines().collect::<Vec<_>>();
+    assert_eq!(calls.len(), 4, "{calls:?}");
+    assert!(calls[0].contains("extension list"), "{calls:?}");
+    assert!(
+        calls[1].contains(" save --db --extension Проба"),
+        "{calls:?}"
+    );
+    assert!(calls[2].contains(" export --file="), "{calls:?}");
+    assert!(calls[3].contains("extension list"), "{calls:?}");
+    let saved = calls[1].split_whitespace().last().expect("saved path");
+    assert!(calls[2].contains(&format!("--file={saved}")), "{calls:?}");
+    let temp = dir.path().join("work/temp");
+    assert_eq!(fs::read_dir(temp).expect("temp root").count(), 0);
+}
+
+#[test]
+fn extension_inventory_refuses_a_drifted_applied_record() {
+    let (dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
+    let state = dir.path().join("read-count");
+    let drifted = MEASURED_INVENTORY.replace("9hfFb6YVX2OwLKZaL1L69Eq0Vrg=", "changed-hash");
+    write_script(
+        &ibcmd_path,
+        &format!(
+            "printf '%s\\n' \"$*\" >> '{}'\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$*\" in\n  *\"extension list\"*) if test -e '{}'; then printf '%s' '{}'; else touch '{}'; printf '%s' '{}'; fi ;;\n  *\" save \"*) printf 'applied' > \"$last\" ;;\n  *\" export \"*) mkdir -p \"$last\"; printf '%s' '<MetaDataObject><Configuration><Properties><Name>Проба</Name><Version/><ConfigurationExtensionPurpose>AddOn</ConfigurationExtensionPurpose><NamePrefix>Пр_</NamePrefix></Properties></Configuration></MetaDataObject>' > \"$last/Configuration.xml\" ;;\nesac\nexit 0",
+            calls_log.display(),
+            state.display(),
+            drifted,
+            state.display(),
+            MEASURED_INVENTORY,
+        ),
+    );
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "extensions",
+            "list",
+        ])
+        .output()
+        .expect("run command");
+    assert!(!output.status.success());
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("json envelope");
+    assert!(envelope["error"]["message"]
+        .as_str()
+        .expect("error")
+        .contains("changed while reading applied prefixes"));
+    assert_eq!(
+        fs::read_dir(dir.path().join("work/temp"))
+            .expect("temp root")
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn extension_inventory_refuses_unattested_prefix_and_cleans_private_snapshots() {
+    for failure in ["save", "export", "descriptor"] {
+        let (dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
+        let descriptor = if failure == "descriptor" {
+            "<MetaDataObject><Configuration><Properties><Name>Wrong</Name><Version/><ConfigurationExtensionPurpose>AddOn</ConfigurationExtensionPurpose><NamePrefix>Пр_</NamePrefix></Properties></Configuration></MetaDataObject>"
+        } else {
+            "<MetaDataObject><Configuration><Properties><Name>Проба</Name><Version/><ConfigurationExtensionPurpose>AddOn</ConfigurationExtensionPurpose><NamePrefix>Пр_</NamePrefix></Properties></Configuration></MetaDataObject>"
+        };
+        write_script(
+            &ibcmd_path,
+            &format!(
+                "printf '%s\\n' \"$*\" >> '{}'\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$*\" in\n  *\"extension list\"*) printf '%s' '{}' ;;\n  *\" save \"*) if test '{}' = save; then printf '%s' 'Pwd=secret' >&2; exit 7; fi; printf 'applied' > \"$last\" ;;\n  *\" export \"*) if test '{}' = export; then printf '%s' 'Pwd=secret' >&2; exit 7; fi; mkdir -p \"$last\"; printf '%s' '{}' > \"$last/Configuration.xml\" ;;\nesac\nexit 0",
+                calls_log.display(),
+                MEASURED_INVENTORY,
+                failure,
+                failure,
+                descriptor,
+            ),
+        );
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "extensions",
+                "list",
+            ])
+            .output()
+            .expect("run command");
+        assert!(!output.status.success(), "{failure}: {output:?}");
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("json envelope");
+        let message = envelope["error"]["message"].as_str().expect("error");
+        assert!(!message.contains("Pwd=secret"), "{failure}: {message}");
+        assert_eq!(
+            fs::read_dir(dir.path().join("work/temp"))
+                .expect("temp root")
+                .count(),
+            0,
+            "{failure}"
+        );
+    }
+}
+
+#[test]
+fn extension_inventory_does_not_echo_initial_platform_credentials() {
+    let (_dir, config_path, _calls_log, ibcmd_path) = setup_extensions_project();
+    write_script(&ibcmd_path, "printf '%s' 'Pwd=secret' >&2\nexit 17");
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "extensions",
+            "list",
+        ])
+        .output()
+        .expect("run command");
+    assert!(!output.status.success());
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("json envelope");
+    let message = envelope["error"]["message"].as_str().expect("error");
+    assert!(message.contains("exit code 17"), "{message}");
+    assert!(!message.contains("Pwd=secret"), "{message}");
 }
 
 /// Пустое имя и имя, не являющееся идентификатором 1С, отклоняются до того, как

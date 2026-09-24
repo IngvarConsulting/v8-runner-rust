@@ -24,15 +24,18 @@ pub struct ExtensionsStep {
 
 /// One extension installed in the target infobase, as reported by the platform.
 ///
-/// Field set mirrors `ibcmd config extension list` on 8.3.27 exactly. The name
-/// prefix is deliberately absent: the platform does not report it on read, it lives
-/// only in the extension's own `Configuration.xml`.
+/// `ibcmd` reads the applied name prefix from a saved DB configuration.
+/// The agent provider cannot attest that property and reports `None`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct InstalledExtension {
     pub name: String,
     /// `None` when the platform reported the field empty.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// `None` means the selected provider cannot attest the applied prefix;
+    /// `Some("")` is a known empty prefix.
+    #[schemars(required, extend("type" = ["string", "null"]))]
+    pub name_prefix: Option<String>,
     pub active: bool,
     pub purpose: String,
     pub safe_mode: bool,
