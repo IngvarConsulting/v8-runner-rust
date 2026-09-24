@@ -824,18 +824,22 @@ fn repo_relative(path: &Path) -> String {
         .join("/")
 }
 
-/// Встроенная ссылка `[текст](адрес)` или `[текст](адрес "заголовок")`.
-static INLINE_LINK: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"\]\(([^)\s]+)(?:\s+"[^"]*")?\)"#).expect("regex"));
+/// Встроенная ссылка `[текст](адрес)`, `[текст](<адрес>)`, с заголовком или без.
+static INLINE_LINK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"\]\((?:<([^>]*)>|([^)\s]+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)"#)
+        .expect("regex")
+});
 /// Сноска `[метка]: адрес`; `[^метка]:` — примечание, а не ссылка.
 static REFERENCE_LINK: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^ {0,3}\[[^\]^][^\]]*\]:\s*(\S+)").expect("regex"));
-/// Код в строке, в том числе перенесённый на следующую строку абзаца.
-static CODE_SPAN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`[^`]*`").expect("regex"));
+/// Граница абзаца: строка без текста.
+static BLANK_LINE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n[ \t]*\n").expect("regex"));
 
 /// Относительные адреса ссылок — встроенных и сносок — вне огороженных блоков и вне кода в
 /// строке. Внешние адреса и якоря своей страницы сторожа не касаются.
 fn relative_link_targets(text: &str) -> Vec<String> {
+    // Огороженный блок выпадает целиком, а его строки остаются пустыми, чтобы соседние абзацы
+    // не склеились.
     let mut prose = String::with_capacity(text.len());
     let mut fence: Option<&str> = None;
     for line in text.lines() {
@@ -845,26 +849,117 @@ fn relative_link_targets(text: &str) -> Vec<String> {
             .find(|marker| trimmed.starts_with(marker));
         match (fence, marker) {
             (None, Some(opened)) => fence = Some(opened),
+            // Ограду закрывает только её собственный знак.
             (Some(open), Some(closed)) if open == closed => fence = None,
+            // Строка внутри ограды, в том числе с чужим знаком.
+            (Some(_), _) => {}
             (None, None) => prose.push_str(line),
-            _ => {}
         }
         prose.push('\n');
     }
-    // Код в строке — не ссылка, даже если похож на неё. Строки абзаца сохраняются, чтобы
-    // сноска осталась в начале своей строки; текст ссылки в обратных кавычках пустеет, а
-    // сам адрес остаётся.
-    let prose = CODE_SPAN.replace_all(&prose, |span: &regex::Captures<'_>| {
-        "\n".repeat(span[0].matches('\n').count())
-    });
-    INLINE_LINK
-        .captures_iter(&prose)
-        .chain(REFERENCE_LINK.captures_iter(&prose))
-        .filter_map(|capture| {
-            let path = capture[1].split('#').next().unwrap_or_default();
-            (!path.is_empty() && !path.contains(':')).then(|| path.to_owned())
-        })
-        .collect()
+    let mut targets = Vec::new();
+    for paragraph in BLANK_LINE.split(&prose) {
+        let paragraph = without_code_spans(paragraph);
+        let inline = INLINE_LINK
+            .captures_iter(&paragraph)
+            .filter_map(|capture| capture.get(1).or_else(|| capture.get(2)));
+        let reference = REFERENCE_LINK
+            .captures_iter(&paragraph)
+            .filter_map(|capture| capture.get(1));
+        for found in inline.chain(reference) {
+            let path = found.as_str().split('#').next().unwrap_or_default();
+            if !path.is_empty() && !path.contains(':') {
+                targets.push(path.to_owned());
+            }
+        }
+    }
+    targets
+}
+
+/// Абзац без кода в строке — так, как его читает CommonMark: код открывает серия обратных
+/// кавычек и закрывает серия той же длины в том же абзаце, а серия без пары — просто знаки.
+/// Поэтому лишняя кавычка не прячет ни одной ссылки, а текст ссылки в кавычках пустеет, но
+/// её адрес остаётся. Переводы строк из кода сохраняются: сноска должна остаться в начале
+/// своей строки.
+fn without_code_spans(paragraph: &str) -> String {
+    let mut kept = String::with_capacity(paragraph.len());
+    let mut rest = paragraph;
+    while let Some(open) = rest.find('`') {
+        kept.push_str(&rest[..open]);
+        let run = backtick_run(&rest[open..]);
+        let body = &rest[open + run..];
+        match closing_run(body, run) {
+            Some(close) => {
+                kept.extend(body[..close].chars().filter(|&ch| ch == '\n'));
+                rest = &body[close + run..];
+            }
+            None => {
+                kept.push_str(&rest[open..open + run]);
+                rest = body;
+            }
+        }
+    }
+    kept.push_str(rest);
+    kept
+}
+
+/// Длина серии обратных кавычек в начале строки, в байтах: знак однобайтовый.
+fn backtick_run(text: &str) -> usize {
+    text.bytes().take_while(|&byte| byte == b'`').count()
+}
+
+/// Начало первой серии ровно из `run` обратных кавычек.
+fn closing_run(text: &str, run: usize) -> Option<usize> {
+    let mut offset = 0;
+    while let Some(found) = text[offset..].find('`') {
+        let start = offset + found;
+        let length = backtick_run(&text[start..]);
+        if length == run {
+            return Some(start);
+        }
+        offset = start + length;
+    }
+    None
+}
+
+#[test]
+fn the_link_reader_sees_what_markdown_renders() {
+    // Страж ссылок стоит на этом разборе: пропущенная им ссылка не проверяется вовсе, и
+    // страж остаётся зелёным. Здесь — случаи, на которых разбор уже ошибался.
+    let text = "\
+[a](one.md) и [`b`](two.md \"заголовок\") и [c](<three four.md>)
+
+```
+[x](fenced.md)
+```
+
+~~~
+[y](tilde.md)
+~~~
+
+Нажмите клавишу ` — [d](five.md)
+
+``код с ` внутри [z](code.md)`` и затем [e](six.md)
+
+[ref]: seven.md
+[^note]: примечание, а не ссылка
+
+[ext](https://example.com) [якорь](#here) [f](eight.md#part)
+";
+    let mut found = relative_link_targets(text);
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            "eight.md",
+            "five.md",
+            "one.md",
+            "seven.md",
+            "six.md",
+            "three four.md",
+            "two.md"
+        ]
+    );
 }
 
 /// Путь существует с точностью до регистра: `..` сворачивается по тексту, а каждый

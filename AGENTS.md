@@ -49,9 +49,7 @@ divergence is known and its issue owns the fix.
 The public docs — `README.md`, `docs/CAPABILITIES.md`, `docs/CONFIGURATION.md`,
 `docs/DEEP_DIVE.md` — are the users' contract and follow the same order. When they disagree
 with the code, decide which side is wrong: a defect in either is fixed; changing documented
-behavior is a public-contract change under Task Classification. A known divergence users can
-run into — a rule with a `gap`, a defect waiting in an issue — is named, with its issue, in the
-public doc that describes that behavior.
+behavior is a public-contract change under Task Classification.
 
 If keeping a rule blocks the task, ask the owner in the session and show:
 
