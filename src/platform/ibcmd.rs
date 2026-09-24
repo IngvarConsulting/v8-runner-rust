@@ -422,6 +422,26 @@ impl<'a> IbcmdDsl<'a> {
         self.run(&args)
     }
 
+    /// Exports a saved CF/CFE file using the `config` mode's target context.
+    ///
+    /// This is deliberately distinct from `config_export_full`, which reads the
+    /// working configuration rather than the saved applied DB snapshot. Platform
+    /// 8.3.27 still requires database connection arguments even with `--file`.
+    pub fn config_export_file(
+        &self,
+        source_file: &Path,
+        target_dir: &Path,
+    ) -> Result<PlatformCommandResult, IbcmdError> {
+        let mut args = vec!["config".to_owned()];
+        args.extend(self.base_args());
+        args.push("export".to_owned());
+        args.extend(self.connection.auth_args());
+        args.extend(self.connection.dbms_auth_args());
+        args.push(format!("--file={}", source_file.display()));
+        args.push(target_dir.display().to_string());
+        self.run(&args)
+    }
+
     /// Exports changes in sync mode relative to an existing target directory.
     pub fn config_export_incremental(
         &self,
@@ -691,6 +711,39 @@ mod tests {
         let args = fs::read_to_string(args_log).expect("args");
         assert!(args.contains("export"));
         assert!(args.contains("--force"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_export_file_uses_config_mode_and_the_target_context() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("ibcmd");
+        let args_log = dir.path().join("args.log");
+        let source = dir.path().join("database.cfe");
+        let target = dir.path().join("xml");
+        write_script(
+            &script,
+            &format!("printf '%s\\n' \"$@\" > \"{}\"\nexit 0", args_log.display()),
+        );
+        let runner = ProcessExecutor;
+        let dsl = IbcmdDsl::new(script, file_connection("File=/ib"), &runner);
+
+        dsl.config_export_file(&source, &target)
+            .expect("offline export");
+
+        let args = fs::read_to_string(args_log).expect("args");
+        let args = args.lines().collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "config",
+                "--db-path",
+                "/ib",
+                "export",
+                format!("--file={}", source.display()).as_str(),
+                target.to_str().expect("utf8 target"),
+            ]
+        );
     }
 
     #[cfg(unix)]

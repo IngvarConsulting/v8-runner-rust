@@ -192,6 +192,7 @@ fn parse_properties(reply: &AgentReply) -> Result<Vec<InstalledExtension>, AppEr
             Ok(InstalledExtension {
                 name: text("name")?,
                 version: optional("version")?,
+                name_prefix: None,
                 active: flag("active")?,
                 purpose: text("purpose")?,
                 safe_mode: flag("safe-mode")?,

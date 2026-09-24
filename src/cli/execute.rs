@@ -723,7 +723,7 @@ fn render_extension_inventory_text(
         .iter()
         .map(|extension| {
             format!(
-                "{}: purpose={}, active={}, safe mode={}, unsafe action protection={}, scope={}, version={}, hash={}",
+                "{}: purpose={}, active={}, safe mode={}, unsafe action protection={}, scope={}, version={}, prefix={}, hash={}",
                 extension.name,
                 extension.purpose,
                 extension.active,
@@ -731,6 +731,7 @@ fn render_extension_inventory_text(
                 extension.unsafe_action_protection,
                 extension.scope,
                 extension.version.as_deref().unwrap_or("none"),
+                extension.name_prefix.as_deref().unwrap_or("unavailable"),
                 extension.hash_sum,
             )
         })
