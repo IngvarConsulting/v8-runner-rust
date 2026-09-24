@@ -31,7 +31,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `test --no-push` | Подготовленная file/server ИБ; source-set и build tooling не требуются | Запускает выбранный test engine без `push` |
 | `pull` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.pull: agent` при `format=DESIGNER` | Полная, инкрементальная или object-scoped partial выгрузка; у `ibcmd` `partial` деградирует в incremental с warning; у `agent` `incremental` и `partial` обновляют цель на месте через ссылку в `AgentBaseDir`, `full` публикуется через staging; перед `full` и `incremental` агента спрашивают поколение конфигурации, и равное записанному после последней сборки или выгрузки через агента означает «выгружать нечего»; при `format=EDT` — reverse sync через internal Designer snapshot и EDT import; перед заменой каталога цели раннер спрашивает git, что в нём не восстановить, и найдя незафиксированное, файл вне учёта или в игноре, отказывает с выходом 2 и называет потери, а `--force` уничтожает их без копии; там, где git не отвечает, поведение прежнее и защиты нет |
 | `download` | цепочка `designer` → `ibcmd`; `agent` только по `providers.download: agent` | Выгружает working/database configuration в `.cf` или named extension в `.cfe`; раннер берёт первого готового до spawn, квитанция называет пропущенных; у `agent` только `working` (`config dump-cfg`, команды для конфигурации базы данных у агента нет — `database` отказывает до сессии), файл пишется в каталог агента и переносится в staging |
-| `infobase dump` | провайдер `designer`; `ibcmd` только по `providers.infobase.dump`; `agent` только по `providers.infobase.dump: agent` | Выгружает полную ИБ в переносимый `.dt`; это не backup; у `ibcmd` адаптера для DT нет — названный ключом, он отказывает при запуске; у `agent` — `infobase-tools dump-ib` в каталог агента и перенос в staging |
+| `infobase dump` | провайдер `designer`; `ibcmd` только по `providers.infobase.dump`; `agent` только по `providers.infobase.dump: agent`; у автономного сервера (`infobase.standalone`) строки нет | Выгружает полную ИБ в переносимый `.dt`; это не backup; у `ibcmd` адаптера для DT нет — названный ключом, он отказывает при запуске; у `agent` — `infobase-tools dump-ib` в каталог агента и перенос в staging |
 | `convert` | CLI-only repo-aware конвертация текущих `source-set` | Строки в матрице провайдеров не имеет и не требует ИБ |
 | `upload` | `format=DESIGNER`, провайдер только `designer` | Загрузка `.cf` / `.cfe` артефактов в ИБ |
 | `make` / `artifacts` | `format=DESIGNER`, провайдер `designer`; `agent` только по `providers.make: agent` | Экспорт `.cf` / `.cfe` и публикация `.epf` / `.erf`; у `agent` `.cf`/`.cfe` — `config dump-cfg` в каталог агента, `.epf`/`.erf` — исходники копируются в каталог агента (файловые параметры через ссылку агент не разрешает), сборка `load-external-…-from-files` и обратная выгрузка для сверки вида и имени, как у Конфигуратора |
@@ -51,8 +51,9 @@ CLI help, доверяйте текущему коду и затем синхр�
 Экспериментальный исполнитель не откатывается на следующего по цепочке: если он не готов,
 команда отказывает. Сейчас экспериментальны `agent` у `push`, `pull`, `make`, `extensions`,
 `download`, `infobase dump` и `infobase restore` на файловой базе и кластере, а также `ibcmd`
-у `infobase dump` и `infobase restore`; у автономного сервера `agent` — единственный
-исполнитель, ключ ему не нужен и не разрешён. Подробнее — раздел «Эксперименты» на
+у `infobase dump` и `infobase restore`. У автономного сервера `agent` — единственный
+исполнитель `push`, `pull`, `make`, `extensions` и `download`, ключ ему не нужен и не
+разрешён; `infobase dump` и `infobase restore` у такой цели строки не имеют. Подробнее — раздел «Эксперименты» на
 [сайте](https://ingvarconsulting.github.io/v8-runner-rust/architecture.html).
 
 ## Превью у глаголов, работающих с платформой
@@ -528,7 +529,8 @@ v8-runner infobase dump --output <FILE.dt> [--dry-run]
   `<infobase>/1Cv8.1CD`; один каталог или найденный бинарник не считаются готовой ИБ.
 - Selection показывает каждого кандидата через независимые `implementation`, `readiness` и
   `evidence`; `argv_tested` не выдаётся за live proof.
-- Безопасный IBCMD path требует проверки отсутствия активных сеансов.
+- Когда у IBCMD появится адаптер DT, безопасный путь потребует проверки отсутствия активных
+  сеансов.
 - Обе операции требуют существующий `v8project.yaml`, но используют infobase-only validation:
   отсутствующий `source-set` равнозначен `source-set: []`, а сломанные project sources не блокируют чтение ИБ.
   Push/source/test/EDT/client-MCP настройки для этих команд не валидируются.
@@ -561,8 +563,8 @@ v8-runner infobase restore --input <FILE.dt> --create  [--dry-run]
 - `--dry-run` проверяет запрос и цель, выбирает провайдера и возвращает `mode=preview`,
   `provider_dispatched=false`, `restored=false` и compact `plan` с `provider`, `input` и
   `target_mode`, но процесс не запускает.
-- Принудительного завершения сеансов пока нет: ключ IBCMD `--force` не проброшен, у Designer
-  такого ключа нет. Занятая ИБ отвечает ошибкой платформы.
+- Принудительного завершения сеансов пока нет: у Designer такого ключа нет, а адаптера IBCMD,
+  через который прошёл бы его `--force`, нет вовсе. Занятая ИБ отвечает ошибкой платформы.
 
 ### `upload`
 

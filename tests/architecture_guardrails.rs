@@ -739,13 +739,22 @@ fn every_top_level_module_is_a_block_of_the_module_map() {
         "src/main.rs declares no modules: the module list was not read"
     );
     let map = read("spec/arc42/05-building-block-view.md");
-    let table = extract_between(&map, "### 5.1", "### 5.2");
+    // Строку модуля называет её первая ячейка: ссылка в чужой строке таблицы или в прозе
+    // строку не заменяет.
+    let first_cells: Vec<&str> = extract_between(&map, "### 5.1", "### 5.2")
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix('|'))
+        .filter_map(|row| row.split('|').next())
+        .collect();
     let missing: Vec<&str> = modules
         .iter()
         .map(String::as_str)
         .filter(|name| {
-            !table.contains(&format!("](../../src/{name}/)"))
-                && !table.contains(&format!("](../../src/{name}.rs)"))
+            let as_dir = format!("](../../src/{name}/)");
+            let as_file = format!("](../../src/{name}.rs)");
+            !first_cells
+                .iter()
+                .any(|cell| cell.contains(&as_dir) || cell.contains(&as_file))
         })
         .collect();
     assert!(
@@ -824,14 +833,18 @@ fn repo_relative(path: &Path) -> String {
         .join("/")
 }
 
-/// Встроенная ссылка `[текст](адрес)`, `[текст](<адрес>)`, с заголовком или без.
+/// Встроенная ссылка `[текст](адрес)` или `[текст](<адрес>)`, с заголовком или без. Голый
+/// адрес может нести парные скобки: `guide(v2).md`.
 static INLINE_LINK: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"\]\((?:<([^>]*)>|([^)\s]+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)"#)
-        .expect("regex")
+    Regex::new(
+        r#"\]\((?:<([^>]*)>|((?:[^()\s]|\([^()\s]*\))+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)"#,
+    )
+    .expect("regex")
 });
-/// Сноска `[метка]: адрес`; `[^метка]:` — примечание, а не ссылка.
-static REFERENCE_LINK: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?m)^ {0,3}\[[^\]^][^\]]*\]:\s*(\S+)").expect("regex"));
+/// Сноска `[метка]: адрес` или `[метка]: <адрес>`; `[^метка]:` — примечание, а не ссылка.
+static REFERENCE_LINK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^ {0,3}\[[^\]^][^\]]*\]:\s*(?:<([^>]*)>|(\S+))").expect("regex")
+});
 /// Строка, с которой начинается новый блок: пункт списка или строка таблицы. Код в строке
 /// через границу блока не переходит.
 static BLOCK_START: LazyLock<Regex> =
@@ -843,17 +856,17 @@ fn relative_link_targets(text: &str) -> Vec<String> {
     // Огороженный блок выпадает целиком, а его строки остаются пустыми, чтобы соседние абзацы
     // не склеились.
     let mut prose = String::with_capacity(text.len());
-    let mut fence: Option<&str> = None;
+    let mut fence: Option<(char, usize)> = None;
     for line in text.lines() {
-        let trimmed = line.trim_start();
-        let marker = ["```", "~~~"]
-            .into_iter()
-            .find(|marker| trimmed.starts_with(marker));
-        match (fence, marker) {
+        match (fence, fence_marker(line)) {
             (None, Some(opened)) => fence = Some(opened),
-            // Ограду закрывает только её собственный знак.
-            (Some(open), Some(closed)) if open == closed => fence = None,
-            // Строка внутри ограды, в том числе с чужим знаком.
+            // Ограду закрывает тот же знак, серия не короче открывшей и ничего после неё.
+            (Some((open, length)), Some((close, run)))
+                if close == open && run >= length && closes_alone(line, run) =>
+            {
+                fence = None;
+            }
+            // Строка внутри ограды, в том числе с чужим или коротким знаком.
             (Some(_), _) => {}
             (None, None) => prose.push_str(line),
         }
@@ -867,7 +880,7 @@ fn relative_link_targets(text: &str) -> Vec<String> {
             .filter_map(|capture| capture.get(1).or_else(|| capture.get(2)));
         let reference = REFERENCE_LINK
             .captures_iter(&paragraph)
-            .filter_map(|capture| capture.get(1));
+            .filter_map(|capture| capture.get(1).or_else(|| capture.get(2)));
         for found in inline.chain(reference) {
             let path = found.as_str().split('#').next().unwrap_or_default();
             if !path.is_empty() && !path.contains(':') {
@@ -876,6 +889,24 @@ fn relative_link_targets(text: &str) -> Vec<String> {
         }
     }
     targets
+}
+
+/// Знак ограды CommonMark: не больше трёх пробелов отступа, затем серия не короче трёх
+/// одинаковых знаков — обратных кавычек или тильд. Четыре пробела отступа делают строку
+/// кодом с отступом, а не оградой.
+fn fence_marker(line: &str) -> Option<(char, usize)> {
+    let rest = line.trim_start_matches(' ');
+    if line.len() - rest.len() > 3 {
+        return None;
+    }
+    let mark = rest.chars().next().filter(|ch| *ch == '`' || *ch == '~')?;
+    let run = rest.chars().take_while(|ch| *ch == mark).count();
+    (run >= 3).then_some((mark, run))
+}
+
+/// Строка закрытия ограды: после серии знаков — только пробелы.
+fn closes_alone(line: &str, run: usize) -> bool {
+    line.trim_start_matches(' ')[run..].trim().is_empty()
 }
 
 /// Блоки текста, в пределах которых живёт код в строке: абзацы между пустыми строками, а
@@ -980,6 +1011,18 @@ fn the_link_reader_sees_what_markdown_renders() {
 
 Экранированная \\` кавычка и [i](eleven.md)
 
+[j](guide(v2).md)
+
+[angle ref]: <twelve thirteen.md>
+
+    ```
+[k](fourteen.md)
+
+````
+```
+[w](inside-long-fence.md)
+````
+
 [ref]: seven.md
 [^note]: примечание, а не ссылка
 
@@ -993,12 +1036,15 @@ fn the_link_reader_sees_what_markdown_renders() {
             "eight.md",
             "eleven.md",
             "five.md",
+            "fourteen.md",
+            "guide(v2).md",
             "nine.md",
             "one.md",
             "seven.md",
             "six.md",
             "ten.md",
             "three four.md",
+            "twelve thirteen.md",
             "two.md"
         ]
     );
