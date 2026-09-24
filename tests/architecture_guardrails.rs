@@ -832,8 +832,10 @@ static INLINE_LINK: LazyLock<Regex> = LazyLock::new(|| {
 /// Сноска `[метка]: адрес`; `[^метка]:` — примечание, а не ссылка.
 static REFERENCE_LINK: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^ {0,3}\[[^\]^][^\]]*\]:\s*(\S+)").expect("regex"));
-/// Граница абзаца: строка без текста.
-static BLANK_LINE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n[ \t]*\n").expect("regex"));
+/// Строка, с которой начинается новый блок: пункт списка или строка таблицы. Код в строке
+/// через границу блока не переходит.
+static BLOCK_START: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\s*(?:[-*+]\s|\d+[.)]\s|\|)").expect("regex"));
 
 /// Относительные адреса ссылок — встроенных и сносок — вне огороженных блоков и вне кода в
 /// строке. Внешние адреса и якоря своей страницы сторожа не касаются.
@@ -858,8 +860,8 @@ fn relative_link_targets(text: &str) -> Vec<String> {
         prose.push('\n');
     }
     let mut targets = Vec::new();
-    for paragraph in BLANK_LINE.split(&prose) {
-        let paragraph = without_code_spans(paragraph);
+    for block in blocks(&prose) {
+        let paragraph = without_code_spans(&block);
         let inline = INLINE_LINK
             .captures_iter(&paragraph)
             .filter_map(|capture| capture.get(1).or_else(|| capture.get(2)));
@@ -876,15 +878,44 @@ fn relative_link_targets(text: &str) -> Vec<String> {
     targets
 }
 
-/// Абзац без кода в строке — так, как его читает CommonMark: код открывает серия обратных
-/// кавычек и закрывает серия той же длины в том же абзаце, а серия без пары — просто знаки.
-/// Поэтому лишняя кавычка не прячет ни одной ссылки, а текст ссылки в кавычках пустеет, но
-/// её адрес остаётся. Переводы строк из кода сохраняются: сноска должна остаться в начале
-/// своей строки.
+/// Блоки текста, в пределах которых живёт код в строке: абзацы между пустыми строками, а
+/// внутри них — пункты списка и строки таблицы.
+fn blocks(prose: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current = String::new();
+    for line in prose.lines() {
+        let starts_block = line.trim().is_empty() || BLOCK_START.is_match(line);
+        if starts_block && !current.is_empty() {
+            blocks.push(std::mem::take(&mut current));
+        }
+        current.push_str(line);
+        current.push('\n');
+    }
+    if !current.is_empty() {
+        blocks.push(current);
+    }
+    blocks
+}
+
+/// Блок без кода в строке — так, как его читает CommonMark: код открывает серия обратных
+/// кавычек и закрывает серия той же длины в том же блоке, а серия без пары и кавычка после
+/// обратной косой черты — просто знаки. Поэтому лишняя кавычка не прячет ни одной ссылки, а
+/// текст ссылки в кавычках пустеет, но её адрес остаётся. Переводы строк из кода
+/// сохраняются: сноска должна остаться в начале своей строки.
 fn without_code_spans(paragraph: &str) -> String {
     let mut kept = String::with_capacity(paragraph.len());
     let mut rest = paragraph;
     while let Some(open) = rest.find('`') {
+        let slashes = rest[..open]
+            .bytes()
+            .rev()
+            .take_while(|&byte| byte == b'\\')
+            .count();
+        if slashes % 2 == 1 {
+            kept.push_str(&rest[..=open]);
+            rest = &rest[open + 1..];
+            continue;
+        }
         kept.push_str(&rest[..open]);
         let run = backtick_run(&rest[open..]);
         let body = &rest[open + run..];
@@ -941,6 +972,14 @@ fn the_link_reader_sees_what_markdown_renders() {
 
 ``код с ` внутри [z](code.md)`` и затем [e](six.md)
 
+- пункт с лишней ` кавычкой
+- следующий пункт: [g](nine.md 'заголовок')
+
+| ` | ячейка |
+| --- | [h](ten.md (заголовок)) |
+
+Экранированная \\` кавычка и [i](eleven.md)
+
 [ref]: seven.md
 [^note]: примечание, а не ссылка
 
@@ -952,10 +991,13 @@ fn the_link_reader_sees_what_markdown_renders() {
         found,
         [
             "eight.md",
+            "eleven.md",
             "five.md",
+            "nine.md",
             "one.md",
             "seven.md",
             "six.md",
+            "ten.md",
             "three four.md",
             "two.md"
         ]
