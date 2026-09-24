@@ -40,3 +40,5 @@ references/*
 !references/1c/
 !SKILL/references/
 !SKILL/references/**
+# Личные инструкции Claude Code — у каждого свои, в репозиторий они не попадают.
+CLAUDE.local.md

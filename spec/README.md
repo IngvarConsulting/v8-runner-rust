@@ -5,7 +5,8 @@
 
 ## Что где
 
-- `arch/rules/`: правила продукта — согласованные гарантии, каждая со своей проверкой.
+- `arch/rules/`: правила продукта — согласованные гарантии; каждая называет свою проверку,
+  а пока не выполнена — задачу в `gap`.
   Начинать с [`arch/README.md`](arch/README.md).
 - `architecture/arc42/`: подробное описание архитектуры и набор рисков. Оно рассказывает,
   как устроено, и ничего не обещает.
@@ -14,7 +15,8 @@
 История правил — в Git. Замеры на живой платформе 1С лежат в
 [`references/1c/`](../references/1c/README.md).
 
-## Usage Rule
+## Как применять
 
-If a statement here conflicts with current code, CLI help, or the public docs layer, trust the
-current code first and then update the active doc layer.
+Описание, разошедшееся с кодом или справкой командной строки, правят вслед за кодом. Правило
+под код не переписывают: порядок разбора — в разделе «When a Rule and the Code Disagree»
+файла [`AGENTS.md`](../AGENTS.md).

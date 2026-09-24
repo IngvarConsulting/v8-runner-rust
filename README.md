@@ -292,8 +292,8 @@ v8-runner extensions --installed-name YAXUNIT
   (ключи) и validation rules (правила валидации).
 - [docs/DEEP_DIVE.md](docs/DEEP_DIVE.md): execution semantics (семантика выполнения), runtime
   model (модель выполнения), lock/publication behavior (поведение блокировок и публикации).
-- [docs/README.md](docs/README.md): порядок чтения документации и source-of-truth (источник
-  истины).
+- [docs/README.md](docs/README.md): какой источник на что отвечает — код, правила,
+  описания.
 - [ARCHITECTURE.md](ARCHITECTURE.md): module map (карта модулей) и границы для контрибьюторов.
 - [spec/README.md](spec/README.md): внутренний слой — правила продукта (architecture rules)
   и архитектурное описание.
