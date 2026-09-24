@@ -2,7 +2,7 @@
   "$defs": {
     "InstalledExtension": {
       "additionalProperties": false,
-      "description": "One extension installed in the target infobase, as reported by the platform.\n\nField set mirrors `ibcmd config extension list` on 8.3.27 exactly. The name\nprefix is deliberately absent: the platform does not report it on read, it lives\nonly in the extension's own `Configuration.xml`.",
+      "description": "One extension installed in the target infobase, as reported by the platform.\n\n`ibcmd` reads the applied name prefix from a saved DB configuration.\nThe agent provider cannot attest that property and reports `None`.",
       "properties": {
         "active": {
           "type": "boolean"
@@ -12,6 +12,13 @@
         },
         "name": {
           "type": "string"
+        },
+        "name_prefix": {
+          "description": "`None` means the selected provider cannot attest the applied prefix;\n`Some(\"\")` is a known empty prefix.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "purpose": {
           "type": "string"
@@ -44,6 +51,7 @@
       },
       "required": [
         "name",
+        "name_prefix",
         "active",
         "purpose",
         "safe_mode",

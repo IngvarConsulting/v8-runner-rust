@@ -142,10 +142,12 @@ v8-runner init
 - Need to know which extensions are installed in an infobase, or to change that composition:
   use `v8-runner extensions list|info|create|delete|activate`. These subcommands address the
   infobase, not the workspace — bare `v8-runner extensions` still means "update the security
-  properties of the configured extension source-sets". The family is IBCMD-only because Designer
-  cannot report installed extensions, and the platform does not report a name prefix on read.
-  Every subcommand, reads included, accepts `--dry-run`: reading the composition starts the
-  platform, authenticates and leaves a journal trace, so it is an action. The preview names the
+  properties of the configured extension source-sets". For `ibcmd`, a successful read
+  reports `name_prefix` from the applied DB configuration; for the standalone agent it is
+  `null` until that provider can attest the applied prefix. Never fill it from source files
+  or the working configuration after `upload` without `apply`.
+  Every subcommand of this family, reads included, accepts `--dry-run`: reading the composition
+  starts the platform, authenticates and leaves a journal trace, so it is an action. The preview names the
   target infobase, the account and the utility, and never echoes the connection string.
 - Need a 1C UI session: use `v8-runner launch designer`, `launch thin`, `launch thick`, or `launch ordinary`.
 - Need the thin client against a published base: `launch thin --via web` opens `infobase.web.url` as a ws connection. A standalone-server target takes that path by default — it has no other address — while `launch web` still opens the same address in a browser. `--via` is accepted only where the client is thin.
