@@ -46,6 +46,11 @@ to change. Fix the first two in code and tests. Never weaken a test or rewrite a
 the current behavior without the owner's decision. If the rule already carries a `gap`, the
 divergence is known and its issue owns the fix.
 
+The public docs — `README.md`, `docs/CAPABILITIES.md`, `docs/CONFIGURATION.md`,
+`docs/DEEP_DIVE.md` — are the users' contract and follow the same order. When they disagree
+with the code, decide which side is wrong: a defect in either is fixed; changing documented
+behavior is a public-contract change under Task Classification.
+
 If keeping a rule blocks the task, ask the owner in the session and show:
 
 1. the rule and its exact wording;

@@ -10,8 +10,8 @@ to guess which Markdown file is authoritative.
   `gap` issue while it is not yet fulfilled.
 - **How to use it**: the public docs (`README.md`, `docs/CAPABILITIES.md`,
   `docs/CONFIGURATION.md`, `docs/DEEP_DIVE.md`). Users read them as the contract, so when they
-  disagree with the code, the gap is either a defect or a public-contract change — classified
-  as such in `AGENTS.md` — never a silent doc edit.
+  disagree with the code, the gap is either a defect or a public-contract change — decided as
+  "When a Rule and the Code Disagree" in `AGENTS.md` describes — never a silent doc edit.
 - **How it is built**: the module map `ARCHITECTURE.md` and `spec/architecture/arc42/`. They
   describe and promise nothing; when they disagree with the code, they are updated.
 - **Raw external 1C references and measurements taken on a live platform**:
