@@ -129,6 +129,61 @@ fn write_inventory_ibcmd(ibcmd_path: &Path, calls_log: &Path, inventory: &str) {
 
 const MEASURED_INVENTORY: &str = "name                         : \"Проба\"\nversion                      : \nactive                       : yes\npurpose                      : add-on\nsafe-mode                    : yes\nsecurity-profile-name        : \nunsafe-action-protection     : yes\nused-in-distributed-infobase : no\nscope                        : infobase\nhash-sum                     : \"9hfFb6YVX2OwLKZaL1L69Eq0Vrg=\"\n";
 
+/// Исполнителю `ibcmd` секция `infobase.dbms` нужна по-прежнему: в СУБД он идёт сам.
+/// Подключение строится уже после выбора исполнителя, и отказ называет секцию, не
+/// запуская платформу, — у свойств, у состава и у его изменения.
+#[test]
+fn ibcmd_on_a_server_base_without_dbms_is_refused_naming_the_section() {
+    let (_dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+    let config = fs::read_to_string(&config_path).expect("config");
+    let file_connection = config
+        .lines()
+        .find(|line| line.trim_start().starts_with("connection: 'File="))
+        .expect("file connection line")
+        .to_owned();
+    let indent = &file_connection[..file_connection.len() - file_connection.trim_start().len()];
+    fs::write(
+        &config_path,
+        config.replacen(
+            &file_connection,
+            &format!("{indent}connection: 'Srvr=127.0.0.1:1541;Ref=demo'"),
+            1,
+        ),
+    )
+    .expect("server config");
+
+    for arguments in [
+        vec!["extensions"],
+        vec!["extensions", "list"],
+        vec![
+            "extensions",
+            "create",
+            "--name",
+            "Проба",
+            "--name-prefix",
+            "Пр_",
+        ],
+    ] {
+        let output = v8_runner_command()
+            .args(["--config", config_path.to_str().expect("utf-8 path")])
+            .arg("--json-message")
+            .args(&arguments)
+            .output()
+            .expect("run command");
+
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}");
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("json envelope");
+        assert!(
+            envelope["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("infobase.dbms")),
+            "{arguments:?}: {envelope}"
+        );
+    }
+    assert!(!calls_log.exists(), "ibcmd must not be started");
+}
+
 #[test]
 fn extensions_read_is_previewed_because_it_starts_the_platform() {
     let (_dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();

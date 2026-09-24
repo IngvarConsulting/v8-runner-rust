@@ -15,7 +15,7 @@ use rmcp::{
 };
 use serde_json::{json, Value};
 use support::{
-    read_line_count, temp_workspace, v8_runner_binary, v8_runner_command,
+    hold_workspace_lock, read_line_count, temp_workspace, v8_runner_binary, v8_runner_command,
     wait_for_line_count as wait_for_invocation_count, write_shell_script as write_script,
 };
 
@@ -1533,6 +1533,119 @@ async fn mcp_stdio_edt_syntax_resets_interactive_state_before_each_call() {
     assert_eq!(lines[4], "cd");
     assert!(lines[5].starts_with("validate --file "));
     assert!(lines[0].contains("work/edt-workspace"));
+
+    client.cancel().await.expect("cancel client");
+}
+
+/// Файл, которым тест отпускает двойника, — и на выходе из теста, как бы он ни кончился.
+struct ReleaseOnDrop(PathBuf);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        let _ = fs::write(&self.0, "");
+    }
+}
+
+/// Сервер MCP по stdio над проектом из `config_path`.
+async fn serve_stdio(config_path: &Path) -> rmcp::service::RunningService<rmcp::RoleClient, ()> {
+    let transport = TokioChildProcess::new(
+        tokio::process::Command::new(v8_runner_binary()).configure(|cmd| {
+            cmd.arg("--config")
+                .arg(config_path.as_os_str())
+                .arg("mcp")
+                .arg("serve")
+                .arg("stdio");
+        }),
+    )
+    .expect("spawn stdio transport");
+    ().serve(transport).await.expect("connect rmcp client")
+}
+
+fn check_syntax_edt_call() -> CallToolRequestParams {
+    CallToolRequestParams::new("check_syntax_edt").with_arguments(
+        serde_json::from_value(json!({ "projectName": "main" })).expect("arguments"),
+    )
+}
+
+/// Отказ занятого каталога: один конверт отказа, названа команда, и EDT не спрашивали.
+fn assert_refused_as_busy(response: &rmcp::model::CallToolResult) {
+    assert_eq!(response.is_error, Some(true));
+    let payload = response
+        .structured_content
+        .as_ref()
+        .expect("structured payload");
+    assert_envelope_business_failure(payload, "check");
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("cannot start check")),
+        "{payload}"
+    );
+    assert_matches_the_mcp_refusal_form(&payload["data"]);
+}
+
+/// Живая EDT-проверка берёт замок `workPath`, как любой инструмент порта: занятый каталог —
+/// отказ сразу, и до EDT вызов не доходит.
+#[tokio::test]
+async fn mcp_stdio_edt_syntax_refuses_a_busy_workspace() {
+    let (dir, config_path) = setup_edt_project();
+    hold_workspace_lock(&dir.path().join("work"));
+    let client = serve_stdio(&config_path).await;
+
+    let response = client
+        .peer()
+        .call_tool(check_syntax_edt_call())
+        .await
+        .expect("edt syntax call");
+
+    assert_refused_as_busy(&response);
+    let commands = fs::read_to_string(dir.path().join("edt-commands.log")).unwrap_or_default();
+    assert!(
+        !commands.lines().any(|line| line.starts_with("validate")),
+        "{commands}"
+    );
+
+    client.cancel().await.expect("cancel client");
+}
+
+/// При двух слотах допуска вторая проверка на том же `workPath` не встаёт в очередь сессии
+/// EDT, а отказывает сразу, как любой инструмент порта: каталог держит первая. Двойник EDT
+/// держит первую проверку, пока тест не отпустит её, — порядок задан, а не угадан.
+#[tokio::test]
+async fn mcp_stdio_a_second_edt_syntax_call_on_a_busy_workspace_is_refused_at_once() {
+    // Рабочая область EDT ещё может не существовать, поэтому корень стенда берётся от её
+    // имени строкой, а не путём `../..`.
+    let validate_handler = "if [ \"$validate_count\" -eq 1 ]; then\n  root=$(dirname \"$(dirname \"$workspace\")\")\n  : > \"$root/validate-started\"\n  waited=0\n  while [ ! -e \"$root/validate-release\" ] && [ \"$waited\" -lt 600 ]; do\n    sleep 0.05\n    waited=$((waited + 1))\n  done\nfi\nif [ -n \"$out\" ]; then : > \"$out\"; fi\nprompt";
+    let (dir, config_path) =
+        setup_edt_project_with_options(validate_handler, MCP_ADMISSION_TIMEOUT_MS, 60_000, 2);
+    let client = serve_stdio(&config_path).await;
+    // Первую проверку отпускает и упавшее утверждение: двойник EDT не ждёт до конца срока.
+    let release = ReleaseOnDrop(dir.path().join("validate-release"));
+
+    let first = tokio::spawn({
+        let peer = client.peer().clone();
+        async move { peer.call_tool(check_syntax_edt_call()).await }
+    });
+    let started = dir.path().join("validate-started");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !started.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the first check never reached EDT"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let second = client
+        .peer()
+        .call_tool(check_syntax_edt_call())
+        .await
+        .expect("second call");
+    assert_refused_as_busy(&second);
+
+    drop(release);
+    let first = first.await.expect("first call task").expect("first call");
+    assert_eq!(first.is_error, Some(false));
 
     client.cancel().await.expect("cancel client");
 }

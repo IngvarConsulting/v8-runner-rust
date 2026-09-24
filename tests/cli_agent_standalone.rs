@@ -527,6 +527,14 @@ fn make_and_extensions_go_through_the_gate() {
         payload["data"]["extensions"][0]["name"], "Зонд",
         "{payload}"
     );
+
+    // Превью свойств называет шлюз: строки подключения у автономного сервера нет.
+    let (code, payload) = run(&harness, &["extensions", "--dry-run"]);
+    assert_eq!(code, 0, "{payload}");
+    let message = payload["data"]["steps"][0]["message"]
+        .as_str()
+        .expect("step message");
+    assert!(message.contains("standalone server at"), "{message}");
 }
 
 /// Без объявленного канала обмена шлюз не вызывается: отказ до сессии называет ключ.

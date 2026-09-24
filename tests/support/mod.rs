@@ -19,6 +19,20 @@ pub fn temp_workspace() -> TempDir {
     tempdir().expect("tempdir")
 }
 
+/// Чужой владелец замка `workPath`: его файл уже лежит в каталоге, и команда, которая
+/// берёт замок, отказывает `workspace_busy`.
+pub fn hold_workspace_lock(work: &Path) {
+    fs::create_dir_all(work).expect("work");
+    fs::write(
+        work.join(".v8-runner.workspace.lock"),
+        format!(
+            "{{\"tool\":\"v8-runner\",\"pid\":{},\"owner_id\":\"test-owner\",\"created_at\":\"2026-09-02T00:00:00Z\"}}",
+            std::process::id()
+        ),
+    )
+    .expect("workspace lock");
+}
+
 pub fn v8_runner_command() -> Command {
     Command::cargo_bin("v8-runner").expect("binary")
 }

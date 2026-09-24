@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use support::{temp_workspace, v8_runner_command, write_shell_script};
+use support::{hold_workspace_lock, temp_workspace, v8_runner_command, write_shell_script};
 
 /// Прежний глобальный `builder` в тестовых конфигах: `DESIGNER` — умолчания матрицы,
 /// `IBCMD` — `ibcmd` всюду, где у операции есть развилка.
@@ -400,18 +400,6 @@ fn malformed_config_keeps_the_typed_infobase_failure_payload() {
     assert_eq!(envelope["data"]["execution"]["status"], "failed");
     assert_eq!(envelope["steps"][0]["name"], "configuration load");
     assert!(!output.exists());
-}
-
-fn hold_workspace_lock(work: &Path) {
-    fs::create_dir_all(work).expect("work");
-    fs::write(
-        work.join(".v8-runner.workspace.lock"),
-        format!(
-            "{{\"tool\":\"v8-runner\",\"pid\":{},\"owner_id\":\"test-owner\",\"created_at\":\"2026-09-02T00:00:00Z\"}}",
-            std::process::id()
-        ),
-    )
-    .expect("workspace lock");
 }
 
 fn setup(builder: &str) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {

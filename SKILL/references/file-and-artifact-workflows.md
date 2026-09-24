@@ -87,7 +87,9 @@ mode is the only protection the caller gets. A failed restore reports
 `target_state: uncertain`, because how much data the provider had already replaced is not
 observable. Restore shares the export provider posture: Designer `/RestoreIB` is implemented and
 live-verified, IBCMD `infobase restore` stays experimental. Terminating active sessions is not
-exposed yet, so a busy infobase fails with the platform's own error.
+exposed yet, so a busy infobase fails with the platform's own error. The load is a critical
+phase: Ctrl+C or SIGTERM does not stop it — the runner waits for the platform and reports the
+deferred interruption in `execution.interruptions`.
 
 ## Convert
 

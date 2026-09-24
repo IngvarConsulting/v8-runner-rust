@@ -6,7 +6,10 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use support::command_data::assert_data_matches_a_declared_form;
-use support::{temp_workspace, v8_runner_command, write_shell_script as write_script};
+use support::{
+    hold_workspace_lock, temp_workspace, v8_runner_command, wait_for_file, wait_until,
+    write_shell_script as write_script,
+};
 
 const LOCAL_CONFIG_SCHEMA_MODEL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.local.schema.json";
 
@@ -462,6 +465,145 @@ fn bootstrap_failed_dump_redacts_secrets_in_outputs() {
     let log = fs::read_to_string(action_log).expect("action log");
     assert!(!log.contains("Admin"));
     assert!(!log.contains("super-secret"));
+}
+
+/// `clone` берёт замок `workPath` нового проекта раньше первой записи: занятый каталог —
+/// отказ `workspace_busy` одним сообщением, проекта нет и платформа не запускалась.
+#[test]
+fn clone_refuses_a_busy_workspace_before_writing_the_project() {
+    let dir = temp_workspace();
+    let project_dir = dir.path().join("project");
+    let platform_path = dir.path().join("1cv8");
+    let calls_log = dir.path().join("calls.log");
+    write_designer_dump_script(&platform_path, &calls_log, 0);
+    hold_workspace_lock(&project_dir.join("build"));
+
+    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+    args.insert(0, "--json-message".to_owned());
+    let output = v8_runner_command()
+        .args(&args)
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(3));
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("one json document");
+    assert_eq!(payload["command"], "clone");
+    assert_eq!(payload["error"]["code"], "workspace_busy");
+    assert!(payload["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("cannot start clone")));
+    assert!(!project_dir.join("v8project.yaml").exists());
+    assert!(!project_dir.join("v8project.local.yaml").exists());
+    assert!(!calls_log.exists(), "the platform must not be started");
+
+    let output = v8_runner_command()
+        .args(bootstrap_args(
+            &project_dir,
+            &platform_path,
+            "File=/tmp/source-ib",
+        ))
+        .output()
+        .expect("run command");
+    assert_eq!(output.status.code(), Some(3));
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        printed.matches("cannot start clone").count(),
+        1,
+        "{printed}"
+    );
+}
+
+/// Раннер, которого тест снимет сам, если не дождётся его конца: брошенный процесс
+/// пережил бы временный каталог.
+struct RunnerGuard(std::process::Child);
+
+impl Drop for RunnerGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// SIGTERM посреди выгрузки — отмена, как у остальных команд: раннер снимает выгрузку,
+/// отпускает замок и отвечает. Без перехвата сигнал убил бы раннер, и файл
+/// владельца замка остался бы в `build` — следующая команда проекта отказывала бы до
+/// ручной чистки.
+#[test]
+fn an_interrupted_clone_leaves_no_workspace_lock_behind() {
+    let dir = temp_workspace();
+    let project_dir = dir.path().join("project");
+    let platform_path = dir.path().join("1cv8");
+    let started = dir.path().join("dump-started");
+    let release = dir.path().join("dump-release");
+    let stderr = dir.path().join("stderr.log");
+    write_script(
+        &platform_path,
+        &format!(
+            "trap 'exit 143' TERM INT\n\
+             printf started > '{started}'\n\
+             waited=0\n\
+             while [ ! -e '{release}' ] && [ \"$waited\" -lt 300 ]; do\n\
+               sleep 0.1\n\
+               waited=$((waited + 1))\n\
+             done\n\
+             exit 0",
+            started = started.display(),
+            release = release.display(),
+        ),
+    );
+
+    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+    args.insert(0, "--json-message".to_owned());
+    let mut runner = RunnerGuard(
+        v8_runner_command()
+            .args(&args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(fs::File::create(&stderr).expect("stderr log"))
+            .spawn()
+            .expect("spawn clone"),
+    );
+    let timeout = std::time::Duration::from_secs(30);
+    assert!(wait_for_file(&started, timeout), "the dump never started");
+    let signalled = std::process::Command::new("kill")
+        .args(["-TERM", &runner.0.id().to_string()])
+        .status()
+        .expect("kill");
+    assert!(signalled.success());
+    let stopped = wait_until(timeout, std::time::Duration::from_millis(20), || {
+        runner.0.try_wait().expect("wait clone").is_some()
+    });
+    fs::write(&release, "").expect("release a stray dump");
+    assert!(
+        stopped,
+        "clone did not stop after SIGTERM: {}",
+        fs::read_to_string(&stderr).unwrap_or_default()
+    );
+
+    assert!(
+        !project_dir
+            .join("build")
+            .join(".v8-runner.workspace.lock")
+            .exists(),
+        "the lock owner file must not outlive the command"
+    );
+    let status = runner.0.wait().expect("clone status");
+    let mut stdout = String::new();
+    std::io::Read::read_to_string(runner.0.stdout.as_mut().expect("piped stdout"), &mut stdout)
+        .expect("stdout");
+    // Ответ есть — значит, сигнал раннер не убил, а отменил: выгрузка снята и названа.
+    let payload: Value = serde_json::from_str(&stdout).expect("one json document");
+    assert_eq!(payload["ok"], false, "{payload}");
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("process cancelled")),
+        "{payload}"
+    );
+    assert_eq!(status.code(), Some(4), "{payload}");
 }
 
 fn write_minimal_config(dir: &Path) -> PathBuf {

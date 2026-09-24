@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::config::model::InfobaseConfig;
-use crate::platform::connection::V8Connection;
+use crate::platform::connection::{file_infobase, name_the_account, V8Connection};
 use crate::platform::process::{
     ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessRunner,
 };
@@ -74,7 +74,7 @@ impl IbcmdConnection {
                 database_path,
                 user,
                 ..
-            } => (format!("file infobase '{}'", database_path.display()), user),
+            } => (file_infobase(database_path.display()), user),
             Self::Server {
                 dbms_kind,
                 database_server,
@@ -86,10 +86,7 @@ impl IbcmdConnection {
                 user,
             ),
         };
-        match user.as_deref().filter(|user| !user.is_empty()) {
-            Some(user) => format!("{target} as '{user}'"),
-            None => format!("{target} with no configured infobase user"),
-        }
+        name_the_account(&target, user.as_deref())
     }
 
     #[cfg(test)]

@@ -28,6 +28,11 @@ struct Harness {
 }
 
 fn harness_with(providers: &str) -> Harness {
+    harness_for(None, providers)
+}
+
+/// Стенд с базой по адресу `connection`; без него — файловая база самого стенда.
+fn harness_for(connection: Option<&str>, providers: &str) -> Harness {
     let dir = temp_workspace();
     let root = dir.path().to_path_buf();
     let project = root.join("project");
@@ -78,13 +83,16 @@ fn harness_with(providers: &str) -> Harness {
         &designer_pid_file,
         &base_dir_file,
     );
+    let connection = connection.map_or_else(
+        || format!("File={}", root.join("ib").display()),
+        str::to_owned,
+    );
     let config_path = root.join("v8project.yaml");
     fs::write(
         &config_path,
         format!(
-            "workPath: {work}\nformat: DESIGNER\nproviders:\n{providers}infobase:\n  connection: 'File={ib}'\n  password: '{password}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\n  - name: Зонд\n    type: EXTENSION\n    path: project/ext\n  - name: tools\n    type: EXTERNAL_DATA_PROCESSORS\n    path: project/tools\ntools:\n  platform:\n    path: {platform}\n    strict: true\n    version: '8.3.27'\n  designer_agent:\n    port: {port}\n",
+            "workPath: {work}\nformat: DESIGNER\nproviders:\n{providers}infobase:\n  connection: '{connection}'\n  password: '{password}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\n  - name: Зонд\n    type: EXTENSION\n    path: project/ext\n  - name: tools\n    type: EXTERNAL_DATA_PROCESSORS\n    path: project/tools\ntools:\n  platform:\n    path: {platform}\n    strict: true\n    version: '8.3.27'\n  designer_agent:\n    port: {port}\n",
             work = work_path.display(),
-            ib = root.join("ib").display(),
             password = AGENT_PASSWORD,
             platform = root.join("platform").display(),
         ),
@@ -389,6 +397,79 @@ fn infobase_restore_through_the_agent_survives_the_agent_closing_the_session() {
                 .map(|entries| entries.count() == 0)
                 .unwrap_or(true),
         "the DT copy is withdrawn"
+    );
+}
+
+/// Агенту секция `infobase.dbms` не нужна: подключение `ibcmd` строится только для
+/// `ibcmd`, и серверная база без секции обслуживается всем семейством `extensions` —
+/// свойствами, составом и его изменением. Превью называет базу в кластере, а не в СУБД.
+#[test]
+fn a_server_base_without_dbms_serves_extensions_through_the_agent() {
+    let harness = harness_for(
+        Some("Srvr=127.0.0.1:1541;Ref=demo"),
+        "  extensions: agent\n",
+    );
+
+    let (code, payload) = run(&harness, &["extensions", "list", "--dry-run"]);
+    assert_eq!(code, 0, "{payload}");
+    let plan = payload["data"]["plan"].as_str().expect("plan");
+    assert!(
+        plan.contains("server infobase 'demo' on '127.0.0.1:1541'"),
+        "{plan}"
+    );
+    for arguments in [
+        &["extensions", "--dry-run"][..],
+        &[
+            "extensions",
+            "create",
+            "--name",
+            "Проба",
+            "--name-prefix",
+            "Пр_",
+            "--dry-run",
+        ][..],
+    ] {
+        let (code, payload) = run(&harness, arguments);
+        assert_eq!(code, 0, "{payload}");
+        let message = payload["data"]["steps"][0]["message"]
+            .as_str()
+            .expect("step message");
+        assert!(
+            message.contains("server infobase 'demo' on '127.0.0.1:1541'")
+                && message.contains("via the designer agent"),
+            "{message}"
+        );
+    }
+
+    let (code, payload) = run(&harness, &["extensions", "list"]);
+    assert_eq!(code, 0, "{payload}");
+    let (code, payload) = run(&harness, &["extensions"]);
+    assert_eq!(code, 0, "{payload}");
+    let (code, payload) = run(
+        &harness,
+        &[
+            "extensions",
+            "create",
+            "--name",
+            "Проба",
+            "--name-prefix",
+            "Пр_",
+        ],
+    );
+    assert_eq!(code, 0, "{payload}");
+
+    let lines = commands(&harness);
+    for expected in [
+        "config extensions properties get --all-extensions",
+        "config extensions properties set --extension=Зонд --safe-mode=no --unsafe-action-protection=no",
+    ] {
+        assert!(lines.iter().any(|line| line == expected), "{lines:?}");
+    }
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("config extensions create --extension=Проба")),
+        "{lines:?}"
     );
 }
 

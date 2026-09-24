@@ -595,6 +595,15 @@ pub fn execute_infobase_restore(
         // here can tell how much, so the target state is reported as uncertain.
         result.target_state = ExportTargetState::Uncertain;
         record_uncertain_target_warning(&mut result.warnings, result.target_state);
+        // Отмена, отложенная до конца критической фазы, названа и у неудачной загрузки:
+        // оператор просил остановить, и ответ говорит, почему его не послушали.
+        record_deferred_process_interruption(
+            &platform_result,
+            "provider command",
+            "infobase DT restore",
+            &mut result.execution,
+            &mut result.warnings,
+        );
         return Err(restore_failure(
             context,
             error,
@@ -659,6 +668,9 @@ fn run_restore_provider(
             let executable = executable_of(executable)?;
             let runner = crate::platform::process::ProcessExecutor;
             let log = provider_log_path(config, "infobase-restore")?;
+            // Загрузка снимка подменяет базу целиком: фаза критическая, как у `restore-ib`
+            // агента. Снятый посреди записи Конфигуратор оставил бы базу в состоянии,
+            // которое не назовёт никто.
             DesignerDsl::new(
                 executable.to_path_buf(),
                 config.v8_connection(),
@@ -666,7 +678,7 @@ fn run_restore_provider(
                 Some(log),
             )
             .with_execution_policy(
-                context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+                context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
             )
             .restore_infobase(source_file)
             .map_err(AppError::from)
@@ -2041,5 +2053,154 @@ mod tests {
         let error =
             revalidate_output_observation(&output, &observation).expect_err("parent replacement");
         assert!(error.to_string().contains("output parent changed"));
+    }
+
+    /// Двойник `1cv8` для `/RestoreIB`, который пишет базу, пока его не отпустят.
+    ///
+    /// Он кладёт `started`, ждёт файла `release` (не дольше 30 с) и кладёт `finished`;
+    /// сигнал снятия он записывает в `terminated`. Оператор отменяет команду, когда запись
+    /// уже идёт, и отпускает двойника на полсекунды позже: мягкое снятие за это время
+    /// дошло бы до процесса, а критическая фаза его не посылает.
+    #[cfg(unix)]
+    fn restore_cancelled_while_the_platform_writes(
+        exit_code: i32,
+    ) -> (
+        tempfile::TempDir,
+        crate::use_cases::result::UseCaseResult<
+            crate::domain::infobase_export::RestoreInfobaseSnapshotResult,
+        >,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+
+        use crate::domain::capability::{ProviderOrigin, ProviderReceipt};
+        use crate::domain::infobase_export::{RestoreInfobaseSnapshotRequest, RestoreTargetMode};
+        use crate::use_cases::context::CommandName;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let base = root.join("base");
+        let infobase = root.join("ib");
+        std::fs::create_dir_all(&base).expect("base");
+        std::fs::create_dir_all(&infobase).expect("infobase");
+        std::fs::write(infobase.join("1Cv8.1CD"), "data").expect("existing infobase");
+        let input = root.join("snapshot.dt");
+        std::fs::write(&input, "snapshot").expect("snapshot");
+        let designer = root.join("1cv8");
+        std::fs::write(
+            &designer,
+            format!(
+                "#!/bin/sh\n\
+                 trap \"printf terminated > '{root}/terminated'; exit 143\" TERM INT\n\
+                 printf started > '{root}/started'\n\
+                 waited=0\n\
+                 while [ ! -e '{root}/release' ] && [ \"$waited\" -lt 300 ]; do\n\
+                   sleep 0.1\n\
+                   waited=$((waited + 1))\n\
+                 done\n\
+                 printf finished > '{root}/finished'\n\
+                 exit {exit_code}\n",
+                root = root.display(),
+            ),
+        )
+        .expect("fake designer");
+        std::fs::set_permissions(&designer, std::fs::Permissions::from_mode(0o755))
+            .expect("executable");
+
+        let mut config = config(&base, &root.join("work"));
+        config.infobase = InfobaseConfig::file(format!("File={}", infobase.display()));
+        let request = RestoreInfobaseSnapshotRequest {
+            input,
+            target_mode: RestoreTargetMode::Replace,
+        };
+        let prepared = super::PreparedTransferProvider {
+            receipt: ProviderReceipt::new(Provider::Designer, ProviderOrigin::Default),
+            provider: Provider::Designer,
+            executable: Some(designer),
+        };
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let context = ExecutionContext::cli(CommandName::InfobaseRestore)
+            .with_cancellation(cancellation.clone());
+        let operator = {
+            let root = root.clone();
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while !root.join("started").exists() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                cancellation.cancel();
+                std::thread::sleep(Duration::from_millis(500));
+                std::fs::write(root.join("release"), "").expect("release");
+            })
+        };
+
+        let outcome = super::execute_infobase_restore(&context, &config, &request, &prepared);
+        operator.join().expect("operator thread");
+        (dir, outcome)
+    }
+
+    /// Запись в базу — критическая фаза: отмена посреди `/RestoreIB` не снимает
+    /// Конфигуратор, раннер дожидается конца загрузки и называет отмену отложенной.
+    #[cfg(unix)]
+    #[test]
+    fn a_cancelled_designer_restore_runs_to_its_end_and_names_the_deferral() {
+        let (dir, outcome) = restore_cancelled_while_the_platform_writes(0);
+
+        let result = outcome.expect("the restore finishes despite the cancellation");
+        assert!(
+            !dir.path().join("terminated").exists(),
+            "the platform must not be signalled during a critical phase"
+        );
+        assert!(dir.path().join("finished").exists());
+        assert!(result.restored);
+        assert_eq!(result.execution.status, ExecutionStatus::Succeeded);
+        assert_eq!(result.execution.interruptions.len(), 1, "{result:?}");
+        let interruption = &result.execution.interruptions[0];
+        assert_eq!(
+            interruption.kind,
+            crate::domain::execution::ExecutionInterruptionKind::Cancelled
+        );
+        assert!(interruption.deferred);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("unsafe interruption was not performed")),
+            "{:?}",
+            result.warnings
+        );
+    }
+
+    /// Загрузка, неудачная уже после отложенной отмены, называет и отмену: оператор
+    /// просил остановить, и отказ говорит, почему его не послушали.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_restore_after_a_deferred_cancellation_still_names_it() {
+        let (dir, outcome) = restore_cancelled_while_the_platform_writes(1);
+
+        let failure = outcome.expect_err("the platform reported a failure");
+        assert!(!dir.path().join("terminated").exists());
+        assert!(dir.path().join("finished").exists());
+        let result = failure.payload.expect("typed payload");
+        assert!(!result.restored);
+        assert_eq!(
+            result.execution.interruptions.len(),
+            1,
+            "{:?}",
+            result.execution.interruptions
+        );
+        let interruption = &result.execution.interruptions[0];
+        assert_eq!(
+            interruption.kind,
+            crate::domain::execution::ExecutionInterruptionKind::Cancelled
+        );
+        assert!(interruption.deferred);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("unsafe interruption was not performed")),
+            "{:?}",
+            result.warnings
+        );
     }
 }

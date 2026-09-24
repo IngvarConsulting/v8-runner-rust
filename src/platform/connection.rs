@@ -107,6 +107,36 @@ impl V8Connection {
         self.file_path()
             .map(|path| format!("File='{}'", path.replace('\'', "''")))
     }
+
+    /// Базу и учётную запись называет без секретов: сырая строка бывает с `Pwd=`, поэтому
+    /// файловая база названа путём, серверная — именем в кластере и сервером, иная форма
+    /// строки — общим словом.
+    pub fn describe_target(&self) -> String {
+        let target = if let Some(path) = self.file_path() {
+            file_infobase(path)
+        } else if let Some(address) = declared_server_address(&self.raw) {
+            format!(
+                "server infobase '{}' on '{}'",
+                address.reference, address.server
+            )
+        } else {
+            "the infobase".to_owned()
+        };
+        name_the_account(&target, self.user.as_deref())
+    }
+}
+
+/// Файловая база по пути — одно имя у всех, кто её называет.
+pub(crate) fn file_infobase(path: impl std::fmt::Display) -> String {
+    format!("file infobase '{path}'")
+}
+
+/// Учётная запись к уже названной цели: имя пользователя, но не пароль.
+pub(crate) fn name_the_account(target: &str, user: Option<&str>) -> String {
+    match user.filter(|user| !user.is_empty()) {
+        Some(user) => format!("{target} as '{user}'"),
+        None => format!("{target} with no configured infobase user"),
+    }
 }
 
 /// Серверный адрес объявленной строки: `Srvr` и `Ref` без кавычек и число частей строки.
@@ -394,5 +424,35 @@ mod tests {
 
         assert_eq!(connection.args(), vec!["/F", "/tmp/ib"]);
         assert_eq!(connection.file_path(), Some("/tmp/ib"));
+    }
+
+    /// Цель называется без секретов: путь файловой базы, имя в кластере и сервер —
+    /// серверной, общее слово — у формы, которую назвать нечем; пароль не попадает никуда.
+    #[test]
+    fn a_target_is_named_without_its_secrets() {
+        let mut file = V8Connection::from_connection_string("File=/srv/ib");
+        file.user = Some("Admin".to_owned());
+        assert_eq!(file.describe_target(), "file infobase '/srv/ib' as 'Admin'");
+
+        let keyed = V8Connection::from_connection_string("/F /srv/ib");
+        assert_eq!(
+            keyed.describe_target(),
+            "file infobase '/srv/ib' with no configured infobase user"
+        );
+
+        let mut server = V8Connection::from_connection_string(
+            "Srvr=\"srv:1541\";Ref='demo';Usr=reader;Pwd=hidden-secret;",
+        );
+        server.user = Some("Admin".to_owned());
+        server.password = Some("another-secret".to_owned());
+        let named = server.describe_target();
+        assert_eq!(named, "server infobase 'demo' on 'srv:1541' as 'Admin'");
+        assert!(!named.contains("secret"), "{named}");
+
+        let raw = V8Connection::from_connection_string("/S srv\\demo");
+        assert_eq!(
+            raw.describe_target(),
+            "the infobase with no configured infobase user"
+        );
     }
 }

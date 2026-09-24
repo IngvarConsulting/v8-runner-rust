@@ -49,6 +49,9 @@ use crate::mcp::telemetry::{
     McpEdtSessionObserver, McpTelemetry, SemaphoreWaitErrorKind, SemaphoreWaitOutcome,
 };
 use crate::support::authority::{host_of_authority, host_of_url, Host};
+use crate::use_cases::context::CommandName;
+use crate::use_cases::result::UseCaseFailure;
+use crate::use_cases::transport::dispatch_with_workspace_lock_async;
 
 use crate::platform::edt_session::{
     EdtSessionHostOptions, EdtSessionManager, EdtSessionShutdownError,
@@ -435,14 +438,32 @@ impl McpToolServer {
         // другим именем — см. DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE.
         let edt_timeout = Duration::from_millis(self.config.tools.edt_cli.command_timeout_ms);
         let use_case_request = normalize_check_syntax_edt_request(&request);
-        let result = edt_syntax::execute(
-            self.edt_session.as_ref(),
+        // Замок `workPath` берётся после допуска, как у порта: ожидая слота, вызов его не
+        // держит. Снимается он с конечным состоянием проверки — раньше слота, иначе
+        // следующий допущенный вызов застал бы каталог занятым.
+        let result = match dispatch_with_workspace_lock_async(
             self.config.as_ref(),
-            &use_case_request,
-            edt_timeout,
-            cancellation,
+            CommandName::Syntax,
+            || {
+                edt_syntax::execute(
+                    self.edt_session.as_ref(),
+                    self.config.as_ref(),
+                    &use_case_request,
+                    edt_timeout,
+                    cancellation,
+                )
+            },
         )
-        .await;
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                permit.take();
+                return map_tool_result(map_syntax_use_case_result(Err(
+                    UseCaseFailure::without_payload(error),
+                )));
+            }
+        };
 
         match result {
             Ok(use_case_result) => {

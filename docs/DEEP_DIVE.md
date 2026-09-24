@@ -118,8 +118,7 @@ execution model для CLI и MCP.
 `workPath` является корнем runtime state.
 
 - Логи, temp files, generated outputs и persisted snapshots не должны расползаться по каталогу primary config.
-- Public CLI/MCP команды, работающие с runtime state под `workPath`, должны брать workspace lock;
-  сегодня без него идут `clone` и EDT-проверка по MCP в интерактивном режиме — #290.
+- Public CLI/MCP команды, работающие с runtime state под `workPath`, должны брать workspace lock.
 - Workspace lock сериализует доступ к конкретному runtime root, но не заменяет admission limits и
   не делает multi-step orchestration fully atomic.
 
@@ -127,8 +126,8 @@ Interruption policy:
 
 - timeout/cancellation являются общим CLI/MCP contract;
 - terminal cancellation и deferred interruption должны различаться;
-- critical publish/apply phases не hard-kill by default; `/RestoreIB` Конфигуратора пока
-  снимается как обычный процесс — #290.
+- critical publish/apply phases не hard-kill by default; запись в базу, и `/RestoreIB` тоже,
+  дорабатывает до конца.
 
 ## MCP runtime semantics
 
