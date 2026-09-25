@@ -25,11 +25,13 @@ pub struct ConvertOutput {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ConvertResult {
     pub ok: bool,
-    /// `false` when the run stopped at a preview instead of dispatching the EDT CLI.
+    /// Whether the EDT CLI got this command's work: a process was started to do it, or the
+    /// request's command was handed to a running EDT session. Starting the session and its
+    /// own service commands are not work. `false` whenever it got none — a preview, a refusal
+    /// or interruption before any work, or a process that could not be started.
     ///
-    /// Always present, so an absent field never has to be read as "nothing ran". In a
-    /// preview `outputs` names what would be written; the flag is what separates planned
-    /// from produced.
+    /// Always present, so an absent field never has to be read as "no work was given". In a
+    /// preview `outputs` names what would be written.
     pub provider_dispatched: bool,
     pub direction: ConvertDirection,
     pub scope: ConvertScope,

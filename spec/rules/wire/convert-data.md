@@ -18,13 +18,18 @@ check:
 
 ```json
 {
-  "ok": false,
+  "ok": true,
   "provider_dispatched": true,
   "direction": "DESIGNER_TO_EDT",
   "scope": "ALL",
   "workspace_path": "build/convert/edt-workspace",
-  "outputs": [],
-  "duration_ms": 0,
-  "message": "platform error: utility '1cedtcli' was not found"
+  "outputs": [
+    {
+      "source_set": "main",
+      "source_path": "src/cf",
+      "target_path": "build/convert/out/main/edt"
+    }
+  ],
+  "duration_ms": 4210
 }
 ```

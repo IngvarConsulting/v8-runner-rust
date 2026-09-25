@@ -27,7 +27,7 @@ use crate::use_cases::external_artifacts::{
     discover_designer_external_artifacts, prepare_edt_external_artifacts, source_set_external_kind,
 };
 use crate::use_cases::request::BuildRequest as BuildArgs;
-use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{payload_mut, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::tool_extension;
 use tempfile::NamedTempFile;
@@ -85,13 +85,8 @@ pub(crate) fn run_build_unlocked(
     let mut outcome = run_build_branch(context, config, args);
     // One place decides the flag for every branch, so a new branch cannot forget it.
     if args.dry_run {
-        match &mut outcome {
-            Ok(result) => result.provider_dispatched = false,
-            Err(failure) => {
-                if let Some(result) = failure.payload.as_mut() {
-                    result.provider_dispatched = false;
-                }
-            }
+        if let Some(result) = payload_mut(&mut outcome) {
+            result.provider_dispatched = false;
         }
     }
     outcome

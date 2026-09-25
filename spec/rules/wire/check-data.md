@@ -5,6 +5,7 @@ artifact: docs/schemas/command-data/check.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
+  - tests/cli_syntax.rs::a_preview_that_cannot_find_the_platform_still_reports_no_dispatch
   - tests/mcp_stdio.rs::mcp_stdio_tools_answer_in_the_forms_of_their_commands
   - tests/mcp_stdio.rs::mcp_stdio_the_live_edt_check_answers_in_the_form_of_check
 ---
@@ -36,9 +37,10 @@ check:
 журналов платформы не создаётся, и файла не будет. Через MCP `planned` не приходит:
 превью в опубликованной поверхности сервера не предлагается.
 
-`provider_dispatched` отделяет запланированное от выполненного: `false` ровно тогда, когда
-прогон остановился на превью. Ветка EDT квитанции `provider` не несёт ни в превью, ни в
-боевом прогоне — выбирать там не из чего, EDT CLI ищется напрямую.
+Превью отвечает `provider_dispatched: false`, а план превью называет `status: planned`; что
+значит признак, говорит [общее правило](provider-dispatched-says-whether-an-executor-got-work.md).
+Ветка EDT квитанции `provider` не несёт ни в превью, ни в боевом прогоне — выбирать там не
+из чего, EDT CLI ищется напрямую.
 
 Необязательное поле `message` называет предмет словами: превью говорит им, что было бы
 выполнено — команду платформы с режимами и найденную утилиту.

@@ -28,7 +28,7 @@ use crate::use_cases::external_artifacts::{
 use crate::use_cases::interruption;
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::{ConvertRequest, ConvertScopeRequest};
-use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{payload_mut, UseCaseFailure, UseCaseResult};
 
 const CONVERT_BACKUP_PREFIX: &str = ".convert-backup";
 
@@ -78,7 +78,15 @@ pub fn execute(
     config: &AppConfig,
     request: &ConvertRequest,
 ) -> UseCaseResult<ConvertResult> {
-    run_convert_with_context(context, config, request)
+    let mut outcome = run_convert_with_context(context, config, request);
+    // Под превью признак решает одно место за все ветки: превью, даже отказавшее, работы
+    // EDT CLI не давало, и новая ветка об этом не забудет.
+    if request.dry_run {
+        if let Some(result) = payload_mut(&mut outcome) {
+            result.provider_dispatched = false;
+        }
+    }
+    outcome
 }
 
 pub fn preflight_validate(config: &AppConfig, request: &ConvertRequest) -> Result<(), AppError> {
@@ -172,7 +180,8 @@ fn run_convert_with_context(
                 target_path: item.target_path.clone(),
             })
             .collect();
-        let mut preview = result_snapshot(
+        // `provider_dispatched` превью ставит `execute` — одно место за все ветки.
+        let preview = result_snapshot(
             true,
             resolved.direction,
             resolved.scope,
@@ -185,7 +194,6 @@ fn run_convert_with_context(
                 location.path.display()
             )),
         );
-        preview.provider_dispatched = false;
         return Ok(preview);
     }
 
@@ -1609,7 +1617,9 @@ mod tests {
         AppConfig, InfobaseConfig, McpConfig, SourceFormat, TestsConfig, ToolsConfig,
     };
 
-    use super::{convert_session_host_options, convert_workspace_path};
+    use super::{convert_session_host_options, convert_workspace_path, execute};
+    use crate::use_cases::context::{CommandName, ExecutionContext};
+    use crate::use_cases::request::{ConvertRequest, ConvertScopeRequest};
 
     fn sample_config() -> AppConfig {
         AppConfig {
@@ -1627,6 +1637,27 @@ mod tests {
             mcp: McpConfig::default(),
             tests: TestsConfig::default(),
         }
+    }
+
+    /// Превью работы EDT CLI не даёт ни на одной ветке, и отказ превью тоже: признак ставит
+    /// одно место, `execute`. Прерывание здесь — ветка, до которой доходит любой запрос,
+    /// раньше поиска EDT CLI, так что проверка не зависит от машины.
+    #[test]
+    fn an_interrupted_preview_reports_no_work_for_the_edt_cli() {
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
+        let context = ExecutionContext::cli(CommandName::Convert).with_cancellation(cancellation);
+        let request = ConvertRequest {
+            scope: ConvertScopeRequest::All,
+            output_root: None,
+            dry_run: true,
+            discard_uncommitted: false,
+        };
+
+        let failure = execute(&context, &sample_config(), &request)
+            .expect_err("an interrupted preview refuses");
+        let payload = failure.payload.expect("the refusal carries the form");
+        assert!(!payload.provider_dispatched, "{payload:?}");
     }
 
     #[test]

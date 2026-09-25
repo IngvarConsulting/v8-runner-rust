@@ -195,6 +195,8 @@ pub struct ExportConfigurationPackageRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExportConfigurationPackageResult {
     pub mode: InfobaseExportMode,
+    /// Present only in a preview, and then `false`: no executor got work. An apply answer
+    /// omits it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_dispatched: Option<bool>,
     pub state: ConfigurationState,
@@ -273,6 +275,8 @@ pub struct ExportInfobaseSnapshotRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExportInfobaseSnapshotResult {
     pub mode: InfobaseExportMode,
+    /// Present only in a preview, and then `false`: no executor got work. An apply answer
+    /// omits it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_dispatched: Option<bool>,
     pub subject: InfobaseSnapshotSubject,
@@ -379,6 +383,8 @@ pub struct InfobaseRestorePlan {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct RestoreInfobaseSnapshotResult {
     pub mode: InfobaseExportMode,
+    /// Present only in a preview, and then `false`: no executor got work. An apply answer
+    /// omits it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_dispatched: Option<bool>,
     pub subject: InfobaseSnapshotSubject,

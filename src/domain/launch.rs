@@ -24,7 +24,9 @@ pub struct LaunchResult {
     /// Any userinfo password in it is masked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// `false` when the run stopped at a preview instead of dispatching the client process.
+    /// Whether the program in `binary` was started: the client, or the system URL opener
+    /// for `launch web`. `false` in a preview; a refusal or a start that failed answers the
+    /// shared refusal form, without this field.
     pub provider_dispatched: bool,
     /// Compact machine-facing plan produced by a non-executing preview.
     #[serde(skip_serializing_if = "Option::is_none")]

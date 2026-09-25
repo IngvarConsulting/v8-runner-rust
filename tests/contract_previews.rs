@@ -43,10 +43,13 @@ fn write_project(dir: &Path, with_platform: bool) -> PathBuf {
     if with_platform {
         write_shell_script(&install_dir.join("bin").join("1cv8"), "exit 0");
         write_shell_script(&install_dir.join("bin").join("ibcmd"), "exit 0");
+        write_shell_script(&install_dir.join("bin").join("1cedtcli"), "exit 0");
     }
 
     // Без платформы поиск обязан отказать, а не уйти в PATH или в корни по умолчанию:
-    // строгий режим с версией не даёт локатору найти что-то за пределами каталога.
+    // строгий режим с версией не даёт локатору найти платформу за пределами каталога.
+    // EDT CLI строгого режима не знает и ищется ещё в PATH и корнях по умолчанию, поэтому
+    // `convert` в `SUCCEEDS_HERE` нет: без стаба на машине с EDT его превью прошло бы.
     let strictness = if with_platform {
         ""
     } else {
@@ -56,10 +59,11 @@ fn write_project(dir: &Path, with_platform: bool) -> PathBuf {
     fs::write(
         &config_path,
         format!(
-            "workPath: {}\nformat: DESIGNER\ninfobase:\n  connection: 'File={}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: {}\n{strictness}  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: {}\n",
+            "workPath: {}\nformat: DESIGNER\ninfobase:\n  connection: 'File={}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: {}\n{strictness}  edt_cli:\n    path: {}\n    interactive-mode: false\n  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: {}\n",
             work_path.display(),
             dir.join("ib").display(),
             install_dir.display(),
+            install_dir.join("bin").join("1cedtcli").display(),
             extension_source.display()
         ),
     )
@@ -218,7 +222,7 @@ fn with_preview(dir: &Path) -> Vec<Previewed> {
             work.clone(),
         ),
         row(
-            &["check", "designer-modules"],
+            &["check", "designer-modules", "--thin-client"],
             "check designer-modules",
             work.clone(),
         ),
@@ -239,6 +243,7 @@ const SUCCEEDS_HERE: &[&str] = &[
     "infobase create",
     "make",
     "check",
+    "check designer-modules",
     "launch",
 ];
 
@@ -480,6 +485,40 @@ fn no_preview_changes_what_a_real_build_left_in_the_work_path() {
             "`{}` changed the work path: {differs:?}",
             preview.join(" ")
         );
+    }
+}
+
+/// Превью работы исполнителю не даёт, поэтому никакой его ответ — ни план, ни отказ — не
+/// говорит `provider_dispatched: true`. Проверяются все листья с превью на обоих образцах,
+/// с платформой и без неё; утверждение не зависит от исхода. Листья, чьё превью на образце
+/// доходит до плана, обязаны назвать признак прямо: `false`, а не молчание. Остальные
+/// могут ответить общей формой отказа без признака — так отвечает `publish`, которому
+/// образец не объявляет веб-сервер.
+#[test]
+fn no_preview_claims_that_an_executor_got_work() {
+    for with_platform in [true, false] {
+        let dir = temp_workspace();
+        write_project(dir.path(), with_platform);
+        // Артефакт на месте, чтобы превью `upload` доходило до плана, а не до отказа.
+        fs::write(dir.path().join("main.cf"), "cf").expect("artifact");
+        for previewed in with_preview(dir.path()) {
+            let leaf = previewed.leaf;
+            let mut arguments = previewed.arguments;
+            arguments.push("--dry-run".to_owned());
+            let (code, payload) = run(dir.path(), &arguments);
+            let dispatched = &payload["data"]["provider_dispatched"];
+            // С платформой `convert` тоже доходит до плана: путь к EDT CLI в образце явный,
+            // и стаб на месте.
+            if with_platform && (SUCCEEDS_HERE.contains(&leaf) || leaf == "convert") {
+                assert_eq!(code, 0, "`{leaf}` did not preview: {payload}");
+                assert_eq!(dispatched, false, "`{leaf}` preview: {payload}");
+            } else {
+                assert_ne!(
+                    dispatched, true,
+                    "`{leaf}` (platform present: {with_platform}) claimed work in a preview: {payload}"
+                );
+            }
+        }
     }
 }
 
