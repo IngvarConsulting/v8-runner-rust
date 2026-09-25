@@ -475,8 +475,9 @@ fn run_designer_export(
         ));
     }
 
-    if let Some(error) = interruption_before_publish(
+    if let Some(error) = refusal_before_publication(
         context,
+        resolved,
         format!(
             "artifact publication for source-set '{}' and output '{}'",
             resolved.source_set_name,
@@ -644,8 +645,9 @@ fn run_external_designer_export(
         })?;
     }
 
-    if let Some(error) = interruption_before_publish(
+    if let Some(error) = refusal_before_publication(
         context,
+        resolved,
         format!(
             "external artifact publication for source-set '{}' and output '{}'",
             resolved.source_set_name,
@@ -932,6 +934,19 @@ fn resolve_single_configuration_source_set<'a>(
     Ok(configuration_source_sets[0])
 }
 
+/// Последний шаг перед публикацией: прерывание и цель. Цель сверена при разрешении, но за
+/// время работы исполнителя путь мог начать указывать в другое место — тогда публикация
+/// останавливается, а промежуточная копия остаётся, как и при прерывании.
+#[must_use = "a refusal must stop the publication"]
+fn refusal_before_publication(
+    context: &ExecutionContext,
+    resolved: &ResolvedArtifactsTarget,
+    safe_point: impl Into<String>,
+) -> Option<AppError> {
+    interruption_before_publish(context, safe_point)
+        .or_else(|| validate_publish_target(resolved).err())
+}
+
 fn validate_publish_target(resolved: &ResolvedArtifactsTarget) -> Result<(), AppError> {
     if resolved.canonical_output_path
         != nearest_existing_canonical_path(&resolved.output_path).map_err(|error| {
@@ -939,7 +954,7 @@ fn validate_publish_target(resolved: &ResolvedArtifactsTarget) -> Result<(), App
         })?
     {
         return Err(AppError::Validation(format!(
-            "output path changed during artifacts resolution: {}",
+            "output path changed since the target was resolved: {}",
             resolved.output_path.display()
         )));
     }
@@ -1247,6 +1262,7 @@ mod tests {
         ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessResult, ProcessRunner,
         SpawnResult,
     };
+    use crate::support::error::AppError;
     use crate::support::fs::{
         metadata_sidecar_path, read_temp_dir_metadata, write_temp_dir_metadata, TempDirKind,
     };
@@ -1294,10 +1310,18 @@ mod tests {
         result.execution.artifacts.as_ref().expect("artifacts")
     }
 
-    struct CancelAfterDumpRunner;
+    /// Подставной Конфигуратор: выгружает `.cf` и журнал, а затем делает то, что задал тест, —
+    /// отменяет команду или подменяет цель.
+    #[cfg(unix)]
+    struct DumpThen<F>(F);
 
-    impl CancelAfterDumpRunner {
-        fn write_success(request: &ProcessRequest) -> Result<ProcessResult, ProcessError> {
+    #[cfg(unix)]
+    impl<F: Fn(&ProcessExecutionPolicy)> ProcessRunner for DumpThen<F> {
+        fn run_with_policy(
+            &self,
+            request: &ProcessRequest,
+            policy: &ProcessExecutionPolicy,
+        ) -> Result<ProcessResult, ProcessError> {
             let mut previous = "";
             for arg in &request.args {
                 if previous == "/DumpCfg" {
@@ -1314,6 +1338,7 @@ mod tests {
                 }
                 previous = arg;
             }
+            (self.0)(policy);
             Ok(ProcessResult {
                 exit_code: 0,
                 stdout: String::new(),
@@ -1321,23 +1346,9 @@ mod tests {
                 interruption: None,
             })
         }
-    }
-
-    impl ProcessRunner for CancelAfterDumpRunner {
-        fn run_with_policy(
-            &self,
-            request: &ProcessRequest,
-            policy: &ProcessExecutionPolicy,
-        ) -> Result<ProcessResult, ProcessError> {
-            let result = Self::write_success(request)?;
-            policy.cancellation.cancel();
-            Ok(result)
-        }
 
         fn spawn(&self, _request: &ProcessRequest) -> Result<SpawnResult, ProcessError> {
-            Err(ProcessError::Cancelled {
-                cmd: "unused".to_owned(),
-            })
+            unreachable!("the export runs to its end and never spawns")
         }
     }
 
@@ -1612,7 +1623,7 @@ mod tests {
             &config,
             &resolved,
             Path::new("/tmp/fake-1cv8"),
-            &CancelAfterDumpRunner,
+            &DumpThen(|policy: &ProcessExecutionPolicy| policy.cancellation.cancel()),
         )
         .expect_err("interrupted before publish");
         let (error, artifacts, _platform_log_path) = failure;
@@ -1625,6 +1636,62 @@ mod tests {
             .contains("before entering artifact publication"));
         assert!(stage_path.is_file());
         assert!(!resolved.output_path.exists());
+    }
+
+    /// Цель перепроверяется перед публикацией: путь, который за время работы исполнителя
+    /// стал указывать в другое место, публикацию останавливает, цель не трогается, а
+    /// промежуточная копия остаётся, как при прерывании.
+    #[cfg(unix)]
+    #[test]
+    fn designer_export_rechecks_the_target_before_publishing() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        fs::create_dir_all(base.join("configuration")).expect("base config");
+        fs::create_dir_all(&work).expect("work");
+        let elsewhere = dir.path().join("elsewhere.cf");
+        fs::write(&elsewhere, "someone else's package").expect("elsewhere");
+        let config = sample_config(
+            &base,
+            &work,
+            Path::new("/tmp/fake-1cv8"),
+            SourceFormat::Designer,
+        );
+        let target = dir.path().join("dist/release.cf");
+        let request = cf_request(&target.display().to_string());
+        let resolved = resolve_target(&config, &request).expect("resolved");
+        let context = ExecutionContext::cli(CommandName::Artifacts);
+        // Пока исполнитель работает, на месте цели появляется ссылка в чужое место.
+        let runner = DumpThen(|_: &ProcessExecutionPolicy| {
+            std::os::unix::fs::symlink(&elsewhere, &target).expect("plant a link");
+        });
+
+        let (error, artifacts, _platform_log_path) = run_designer_export(
+            &context,
+            &config,
+            &resolved,
+            Path::new("/tmp/fake-1cv8"),
+            &runner,
+        )
+        .expect_err("a moved target must stop the publication");
+
+        assert!(matches!(error, AppError::Validation(_)), "{error}");
+        assert!(error.to_string().contains("output path changed"), "{error}");
+        assert!(
+            fs::symlink_metadata(&target)
+                .expect("target")
+                .file_type()
+                .is_symlink(),
+            "the planted link must stay in place"
+        );
+        assert_eq!(
+            fs::read_to_string(&elsewhere).expect("elsewhere"),
+            "someone else's package"
+        );
+        let stage_path = artifacts
+            .get_by_role(ARTIFACT_ROLE_STAGE_FILE)
+            .expect("stage artifact");
+        assert!(stage_path.is_file());
     }
 
     #[test]

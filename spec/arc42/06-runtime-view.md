@@ -39,7 +39,10 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 Правила: [замок берёт адаптер](../rules/cli/lock-boundary-is-the-adapter.md),
 [превью без замка](../rules/cli/preview-takes-no-lock.md),
 [допуск общий для обоих транспортов](../rules/mcp/admission-is-shared-by-both-transports.md),
-[перегрузка и запрос без сессии](../rules/mcp/overload-answers-503-and-stateless-post-400.md).
+[недопущенный вызов — ошибка протокола](../rules/mcp/an-unadmitted-call-is-a-protocol-error.md),
+[перегрузка и запрос без сессии](../rules/mcp/overload-answers-503-and-stateless-post-400.md),
+[ёмкость сессий не превышается](../rules/mcp/session-capacity-is-never-exceeded.md),
+[stdout по stdio — только кадры протокола](../rules/mcp/stdio-stdout-carries-only-protocol-frames.md).
 
 ### 6.2 Выбор исполнителя и превью
 
@@ -121,7 +124,7 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
 
 Правила: [готовность — аутентификация](../rules/platform/agent-readiness-is-authentication.md),
 [сессия открывается в JSON](../rules/platform/agent-session-opens-in-json-mode.md),
-[сессия живёт, пока жив замок](../rules/platform/agent-session-lives-with-the-lock.md),
+[сессия не живёт дольше замка](../rules/platform/agent-session-lives-with-the-lock.md),
 [файлы удалённой цели — объявленным каналом](../rules/platform/remote-files-travel-by-a-declared-channel.md),
 [неизменившееся поколение не выгружается](../rules/use-cases/an-unchanged-generation-is-not-dumped.md).
 
@@ -153,9 +156,10 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
    откат и отказ с состоянием отката; неудачная уборка резервного — предупреждение.
 
 `make` публикует тем же способом — файл пакета или каталог внешних обработок — и без
-вопроса к git; цель он сверяет один раз, до выбора исполнителя.
+вопроса к git; цель он сверяет при разрешении и заново перед публикацией.
 
 Правила: [промежуточный каталог — рядом с целью](../rules/use-cases/staging-shares-the-parent-directory.md),
+[цель перепроверяется перед публикацией](../rules/use-cases/a-target-is-rechecked-before-publication.md),
 [неудачный откат называет себя](../rules/use-cases/a-failed-rollback-is-named.md),
 [замена каталога человека спрашивает заранее](../rules/use-cases/replacing-a-user-directory-asks-first.md);
 пока не выполнены — [`--force` называет уничтоженное](../rules/use-cases/force-names-what-it-destroyed.md),

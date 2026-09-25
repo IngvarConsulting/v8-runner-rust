@@ -1544,6 +1544,77 @@ mod tests {
         assert!(matches!(err, ProcessError::TimedOut { .. }));
     }
 
+    /// Статус прерывания приходит, когда процесс уже подобран: ответ «отменено» или «предел
+    /// истёк» при живом процессе врал бы, что работа прекращена. Подобранный процесс не
+    /// отвечает на нулевой сигнал, а зомби ещё отвечал бы.
+    #[cfg(unix)]
+    #[test]
+    fn an_interrupted_process_is_reaped_before_the_answer() {
+        for safety in [
+            ProcessInterruptionSafety::Interruptible,
+            ProcessInterruptionSafety::GracefulThenKill,
+        ] {
+            for by_timeout in [true, false] {
+                let dir = tempdir().expect("tempdir");
+                let pid_file = dir.path().join("pid");
+                let script = dir.path().join("sleep.sh");
+                write_script(
+                    &script,
+                    &format!("echo $$ > '{}'\nexec sleep 10", pid_file.display()),
+                );
+                let cancellation = CancellationToken::new();
+                let timeout = by_timeout.then_some(Duration::from_secs(3));
+                let canceller = (!by_timeout).then(|| {
+                    let cancellation = cancellation.clone();
+                    let pid_file = pid_file.clone();
+                    // Отмена приходит, когда процесс записал номер, и в любом случае: иначе
+                    // тест ждал бы конца `sleep` и падал бы не там.
+                    thread::spawn(move || {
+                        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                        while std::time::Instant::now() < deadline
+                            && fs::read_to_string(&pid_file)
+                                .ok()
+                                .and_then(|text| text.trim().parse::<i32>().ok())
+                                .is_none()
+                        {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        cancellation.cancel();
+                    })
+                });
+
+                let err = ProcessExecutor
+                    .run_with_policy(
+                        &ProcessRequest {
+                            program: script,
+                            args: vec![],
+                            workdir: None,
+                            stdout_log_path: None,
+                            stderr_log_path: None,
+                            startup_probe: None,
+                        },
+                        &ProcessExecutionPolicy::new(timeout, cancellation, safety),
+                    )
+                    .expect_err("the process must be interrupted");
+                if let Some(canceller) = canceller {
+                    canceller.join().expect("canceller");
+                }
+
+                let expected = if by_timeout {
+                    matches!(err, ProcessError::TimedOut { .. })
+                } else {
+                    matches!(err, ProcessError::Cancelled { .. })
+                };
+                assert!(expected, "{safety:?}, by timeout {by_timeout}: {err:?}");
+                let pid = read_pid(&pid_file);
+                assert!(
+                    !process_exists(pid),
+                    "{safety:?}, by timeout {by_timeout}: the interrupted process {pid} is still there"
+                );
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn run_with_policy_cancels_interruptible_process() {
@@ -1648,8 +1719,12 @@ mod tests {
     fn read_pid(path: &Path) -> i32 {
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         while std::time::Instant::now() < deadline {
-            if let Ok(pid) = fs::read_to_string(path) {
-                return pid.trim().parse().expect("child pid");
+            // Оболочка создаёт файл раньше, чем пишет в него номер: пустой ещё не записан.
+            if let Some(pid) = fs::read_to_string(path)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                return pid;
             }
             thread::sleep(Duration::from_millis(10));
         }

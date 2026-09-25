@@ -365,6 +365,7 @@ fn read_orphan_metadata(
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
+#[must_use = "an interruption must stop the publication"]
 pub(super) fn interruption_before_publish(
     context: &ExecutionContext,
     safe_point: impl Into<String>,

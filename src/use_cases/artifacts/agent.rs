@@ -23,11 +23,11 @@ use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::dump_config::verify_external_dump_descriptor;
 use crate::use_cases::interruption::interruption_before_safe_point;
 use crate::use_cases::progress::log_live_stage;
-use crate::use_cases::staged_publication::{interruption_before_publish, StagedPublication};
+use crate::use_cases::staged_publication::StagedPublication;
 
 use super::{
-    ensure_platform_success, external_descriptors, publication_message, sanitize_file_stem,
-    PublicationOutcome, ResolvedArtifactsTarget, ARTIFACTS_BACKUP_PREFIX,
+    ensure_platform_success, external_descriptors, publication_message, refusal_before_publication,
+    sanitize_file_stem, PublicationOutcome, ResolvedArtifactsTarget, ARTIFACTS_BACKUP_PREFIX,
     ARTIFACT_ROLE_PACKAGE_FILE, ARTIFACT_ROLE_PLATFORM_LOG, ARTIFACT_ROLE_STAGE_FILE,
 };
 
@@ -134,8 +134,9 @@ pub(super) fn run_agent_export(
         .with_role(ARTIFACT_ROLE_STAGE_FILE),
     );
 
-    if let Some(error) = interruption_before_publish(
+    if let Some(error) = refusal_before_publication(
         context,
+        resolved,
         format!(
             "artifact publication for source-set '{}' and output '{}'",
             resolved.source_set_name,
@@ -328,8 +329,9 @@ fn run_external_agent_export(
     ensure_platform_success(&resolved.source_set_name, &last_result)
         .map_err(|error| (error, artifacts.clone(), Some(log.clone())))?;
 
-    if let Some(error) = interruption_before_publish(
+    if let Some(error) = refusal_before_publication(
         context,
+        resolved,
         format!(
             "external artifact publication for source-set '{}' and output '{}'",
             resolved.source_set_name,

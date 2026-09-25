@@ -7,8 +7,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
 use guardrail_support::{
-    collect_rust_files, free_function_tokens, has_cfg_test, item_has_cfg_test, parse_rust_file,
-    production_source, production_tokens,
+    collect_rust_files, free_function_tokens, has_cfg_test, item_has_cfg_test, normalize_tokens,
+    parse_rust_file, production_source, production_tokens,
 };
 
 const EXPECTED_MCP_TOOLS: &[&str] = &[
@@ -1915,6 +1915,137 @@ fn a_reply_is_checked_against_its_form_through_one_reader() {
          tests/support/command_data.rs instead:\n{}",
         offenders.join("\n")
     );
+}
+
+#[test]
+fn every_staged_publication_rechecks_its_target_first() {
+    // Корень проблемы: цель сверялась при разрешении, а публикация шла после работы
+    // исполнителя; у `make` путь, который за это время стал указывать в другое место,
+    // публиковался молча. Перепроверку ставит каждое место публикации само — единого
+    // владельца у неё пока нет (#300), — поэтому страж смотрит на каждое место: в теле
+    // сценария вызов публикации через промежуточную копию идёт после перепроверки цели, а
+    // перепроверка — после подготовки копии и после проверки исхода исполнителя, если та
+    // стоит между ними. Страж держится на именах перепроверок, а их тела держат
+    // поведенческие тесты правила `INV.USE-CASES.A-TARGET-IS-RECHECKED-BEFORE-PUBLICATION`.
+    const RECHECKS: &[&str] = &[
+        "refusal_before_publication(",
+        "validate_platform_target(",
+        "validate_publish_target(",
+        "revalidate_before_publish(",
+    ];
+    // Проверки исхода исполнителя: перепроверка, поставленная раньше них, сверяла бы цель до
+    // работы исполнителя.
+    const EXECUTOR_OUTCOME: &[&str] = &[
+        "ensure_platform_success(",
+        "ensure_import_success(",
+        "validate_platform_success(",
+    ];
+    // Места публикации названы: вызов, ушедший туда, где страж его не видит, не пройдёт
+    // молча, а новое место попадёт в перечень осознанно.
+    const SITES: &[&str] = &[
+        "crate::use_cases::artifacts::agent::run_agent_export",
+        "crate::use_cases::artifacts::agent::run_external_agent_export",
+        "crate::use_cases::artifacts::run_designer_export",
+        "crate::use_cases::artifacts::run_external_designer_export",
+        "crate::use_cases::dump_config::agent::publish_full",
+        "crate::use_cases::dump_config::finalize_edt_dump",
+        "crate::use_cases::dump_config::run_full_dump_designer",
+        "crate::use_cases::dump_config::run_full_dump_ibcmd",
+        "crate::use_cases::infobase_export::execute_configuration_export",
+        "crate::use_cases::infobase_export::execute_infobase_snapshot",
+    ];
+
+    let index = SourceIndex::of_src();
+    let owner = path_of("crate::use_cases::staged_publication");
+    let (publish, prepare) = staged_publication_methods(&index, &owner);
+    let scenarios = path_of("crate::use_cases");
+    let mut sites = Vec::new();
+    let mut offenders = Vec::new();
+    for body in production_bodies(&index) {
+        if !body.module.starts_with(&scenarios) || body.module == owner {
+            continue;
+        }
+        let tokens = normalize_tokens(body.block);
+        let site = format!("{}::{}", body.module.join("::"), body.context);
+        for at in publish
+            .iter()
+            .flat_map(|needle| tokens.match_indices(needle.as_str()).map(|(at, _)| at))
+        {
+            sites.push(site.clone());
+            let prepared = prepare
+                .iter()
+                .filter_map(|needle| tokens[..at].rfind(needle.as_str()))
+                .max()
+                .unwrap_or(0);
+            let executed = EXECUTOR_OUTCOME
+                .iter()
+                .filter_map(|needle| tokens[prepared..at].rfind(needle).map(|i| prepared + i))
+                .max()
+                .unwrap_or(prepared);
+            if !RECHECKS
+                .iter()
+                .any(|needle| tokens[executed..at].contains(needle))
+            {
+                offenders.push(site.clone());
+            }
+        }
+    }
+    sites.sort();
+    assert!(
+        offenders.is_empty(),
+        "these scenarios publish without re-checking the target after the executor ran:\n{}",
+        offenders.join("\n")
+    );
+    assert_eq!(
+        sites, SITES,
+        "the staged publications changed; name each one here after it re-checks its target"
+    );
+}
+
+/// Вызовы публикации и подготовки у владельца промежуточной копии — в виде, в котором их
+/// ищут в теле сценария: методом (`.publish_dir(`) и путём (`::publish_dir(`). Имена берутся
+/// из самого `impl StagedPublication`, поэтому новый метод попадёт под страж сам.
+fn staged_publication_methods(index: &SourceIndex, owner: &[String]) -> (Vec<String>, Vec<String>) {
+    let unit = index
+        .units
+        .iter()
+        .find(|unit| unit.module == owner)
+        .expect("the staged publication owner is indexed");
+    let mut publish = Vec::new();
+    let mut prepare = Vec::new();
+    for item in &unit.syntax.items {
+        let syn::Item::Impl(item_impl) = item else {
+            continue;
+        };
+        let is_owner = matches!(
+            item_impl.self_ty.as_ref(),
+            syn::Type::Path(type_path)
+                if type_path.path.segments.last().is_some_and(|segment| segment.ident == "StagedPublication")
+        );
+        if !is_owner || item_impl.trait_.is_some() {
+            continue;
+        }
+        for impl_item in &item_impl.items {
+            let syn::ImplItem::Fn(method) = impl_item else {
+                continue;
+            };
+            if matches!(method.vis, syn::Visibility::Inherited) {
+                continue;
+            }
+            let name = method.sig.ident.to_string();
+            let needles = [format!(".{name}("), format!("::{name}(")];
+            if name.starts_with("publish") {
+                publish.extend(needles);
+            } else if name.starts_with("prepare") {
+                prepare.extend(needles);
+            }
+        }
+    }
+    assert!(
+        !publish.is_empty() && !prepare.is_empty(),
+        "StagedPublication no longer names its publish and prepare methods"
+    );
+    (publish, prepare)
 }
 
 #[test]

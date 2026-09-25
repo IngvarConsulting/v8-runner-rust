@@ -1628,6 +1628,118 @@ async fn mcp_stdio_edt_syntax_resets_interactive_state_before_each_call() {
     client.cancel().await.expect("cancel client");
 }
 
+/// Читает stdout сервера до ответа с номером `id`; всё прочитанное остаётся в `seen`.
+async fn read_until_reply(
+    lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    id: u64,
+    seen: &mut Vec<String>,
+) {
+    let reply = async {
+        loop {
+            let line = lines
+                .next_line()
+                .await
+                .expect("read stdout")
+                .unwrap_or_else(|| panic!("stdout closed before reply {id}"));
+            let is_reply =
+                serde_json::from_str::<Value>(&line).is_ok_and(|frame| frame["id"] == id);
+            seen.push(line);
+            if is_reply {
+                return;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), reply)
+        .await
+        .unwrap_or_else(|_| panic!("no reply {id} in time; stdout so far: {seen:?}"));
+}
+
+/// stdout сервера по stdio занят протоколом: на нём только кадры JSON-RPC, а предупреждение
+/// загрузки конфигурации — прежний ключ `infobase` в проектном файле — уходит в журнал
+/// действий. Сервер читается сырым, без клиента, который мог бы простить лишнюю строку.
+#[tokio::test]
+async fn mcp_stdio_stdout_carries_only_protocol_frames() {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+    let (dir, config_path) = setup_project();
+    let mut server = tokio::process::Command::new(v8_runner_binary())
+        .arg("--config")
+        .arg(&config_path)
+        .args(["mcp", "serve", "stdio"])
+        .env_remove("V8TR_ACTION_LOG_FILE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn server");
+    let mut stdin = server.stdin.take().expect("stdin");
+    let mut lines = tokio::io::BufReader::new(server.stdout.take().expect("stdout")).lines();
+    let mut seen = Vec::new();
+
+    let requests = [
+        (
+            1,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "raw-stdio-test", "version": "1.0.0"}
+            }}),
+        ),
+        (
+            2,
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+        ),
+        (
+            3,
+            json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+                "name": "run_module_tests",
+                "arguments": {"moduleName": "   "}
+            }}),
+        ),
+    ];
+    for (id, request) in requests {
+        if id == 2 {
+            let initialized = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+            stdin
+                .write_all(format!("{initialized}\n").as_bytes())
+                .await
+                .expect("write notification");
+        }
+        stdin
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .expect("write request");
+        stdin.flush().await.expect("flush");
+        read_until_reply(&mut lines, id, &mut seen).await;
+    }
+    drop(stdin);
+    let drained = async {
+        while let Some(line) = lines.next_line().await.expect("read stdout") {
+            seen.push(line);
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), drained)
+        .await
+        .expect("server closes stdout after stdin");
+    tokio::time::timeout(Duration::from_secs(10), server.wait())
+        .await
+        .expect("server exits after stdin closes")
+        .expect("wait server");
+
+    for line in &seen {
+        let frame: Value = serde_json::from_str(line)
+            .unwrap_or_else(|error| panic!("stdout carries a non-JSON line {line:?}: {error}"));
+        assert_eq!(frame["jsonrpc"], "2.0", "not a JSON-RPC frame: {line}");
+    }
+    let action_log = fs::read_to_string(dir.path().join("work/logs/mcp/actions.log"))
+        .expect("the action log is written");
+    assert!(
+        action_log.contains("moves to v8project.local.yaml"),
+        "the load warning did not reach the action log:\n{action_log}"
+    );
+}
+
 /// Файл, которым тест отпускает двойника, — и на выходе из теста, как бы он ни кончился.
 struct ReleaseOnDrop(PathBuf);
 
