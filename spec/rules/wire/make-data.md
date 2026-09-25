@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.MAKE-DATA
-version: 2
+version: 3
 artifact: docs/schemas/command-data/make.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -15,6 +15,13 @@ check:
 
 `published: false` при успешном исполнении означает превью: артефакт спланирован, но не
 выложен.
+
+**Что изменила версия 3.** Фаза прерывания `execution.interruptions[].phase` стала закрытым
+набором значений в `snake_case`, общим для всех форм с итогом исполнения; набор перечисляет
+`$defs/ExecutionInterruptionPhase` схемы. `publish` стал `publication`, `export_or_publish` —
+`export_or_publication`. Последнее значение получает любой отказ, пришедший, когда прерывание
+уже запрошено, и остановку на безопасной точке перед экспортом тоже: какую работу прервали,
+ответ не различает ([#308](https://github.com/IngvarConsulting/v8-runner-rust/issues/308)).
 
 ## Пример
 

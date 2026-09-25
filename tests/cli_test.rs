@@ -444,7 +444,7 @@ fn test_all_full_json_runs_build_first_and_returns_report() {
     assert_eq!(payload["ok"], true);
     // Самая крупная форма раннера — разобранный отчёт, исход и артефакты в одном
     // объекте; без живой сверки её держала только сверка схемы с типом.
-    support::command_data::assert_data_matches_a_declared_form(&payload, "`test --full`");
+    support::command_data::assert_data_matches_its_command_form(&payload, "`test --full`");
     assert_eq!(payload["data"]["report"]["summary"]["total"], 1);
     assert_eq!(
         payload["data"]["report"]["suites"][0]["cases"][0]["name"],

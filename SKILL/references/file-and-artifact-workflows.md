@@ -89,7 +89,7 @@ observable. Restore shares the export provider posture: Designer `/RestoreIB` is
 live-verified, IBCMD `infobase restore` stays experimental. Terminating active sessions is not
 exposed yet, so a busy infobase fails with the platform's own error. The load is a critical
 phase: Ctrl+C or SIGTERM does not stop it — the runner waits for the platform and reports the
-deferred interruption in `execution.interruptions`.
+deferred interruption in `execution.interruptions` with `phase: provider_command`.
 
 ## Convert
 
@@ -152,6 +152,6 @@ Behavior:
 - main configuration exports to `.cf`;
 - extension export uses `.cfe`;
 - external data processors and reports publish `.epf` / `.erf` into the output directory;
-- `make` is Designer-only.
+- `make` runs through Designer; select `agent` via `providers.make: agent`, except on a standalone server, where it is the only executor.
 
 A full `pull` and package/external artifact publication use staged publication with backup/rollback semantics. Incremental and partial pulls are non-atomic update modes.

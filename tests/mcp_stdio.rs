@@ -14,6 +14,7 @@ use rmcp::{
     ServiceError, ServiceExt,
 };
 use serde_json::{json, Value};
+use support::command_data::{assert_data_matches_its_command_form, assert_data_matches_one_of};
 use support::{
     hold_workspace_lock, read_line_count, temp_workspace, v8_runner_binary, v8_runner_command,
     wait_for_line_count as wait_for_invocation_count, write_shell_script as write_script,
@@ -44,20 +45,7 @@ fn assert_envelope_business_failure(payload: &Value, command: &str) {
 /// Клиент разбирает его до того, как узнал об отказе, поэтому состав полей — такое же
 /// обещание, как и состав успешного ответа.
 fn assert_matches_the_mcp_refusal_form(data: &Value) {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("docs/schemas/command-data/mcp-refusal.schema.json");
-    let text = fs::read_to_string(&path).expect("refusal form artefact is present");
-    let schema: Value = serde_json::from_str(&text).expect("refusal form is valid json");
-    let validator = jsonschema::validator_for(&schema).expect("refusal form compiles");
-    let errors: Vec<String> = validator
-        .iter_errors(data)
-        .map(|error| format!("{} at {}", error, error.instance_path))
-        .collect();
-    assert!(
-        errors.is_empty(),
-        "the refusal does not match the pinned form:\n{}",
-        errors.join("\n")
-    );
+    assert_data_matches_one_of(data, "the MCP refusal", &["mcp-refusal"]);
 }
 
 fn assert_launch_platform_resolution(data: &Value) {
@@ -959,6 +947,109 @@ async fn mcp_stdio_structured_content_matches_cli_json_envelope() {
     client.cancel().await.expect("cancel client");
 }
 
+/// Инструменты MCP отвечают теми же формами `data`, что и их команды в CLI. Сверка идёт
+/// только с формами самой команды: общая форма отказа тоже объявлена, и ответ без предмета
+/// команды иначе прошёл бы проверку. Перечень вызовов сверяется с поверхностью сервера, так
+/// что новый инструмент без вызова здесь тест валит.
+#[tokio::test]
+async fn mcp_stdio_tools_answer_in_the_forms_of_their_commands() {
+    // Живую проверку EDT проект Конфигуратора не поднимет; её форму держит
+    // `mcp_stdio_the_live_edt_check_answers_in_the_form_of_check`.
+    const CHECKED_ELSEWHERE: &[&str] = &["check_syntax_edt"];
+    let (_dir, config_path, _designer_calls_log, _enterprise_calls_log, _captured_config) =
+        setup_designer_suite_project();
+    let client = serve_stdio(&config_path).await;
+
+    // Инструмент, команда, чьей формой он отвечает, и аргументы вызова.
+    let calls = [
+        ("run_all_tests", "test", json!({})),
+        (
+            "run_module_tests",
+            "test",
+            json!({ "moduleName": "Billing" }),
+        ),
+        ("build_project", "push", json!({ "fullRebuild": true })),
+        ("dump_config", "pull", json!({ "mode": "FULL" })),
+        (
+            "dump_config",
+            "pull",
+            json!({ "mode": "PARTIAL", "objects": ["Catalog.Items"] }),
+        ),
+        ("launch_app", "launch", json!({ "utilityType": "thin" })),
+        ("check_syntax_designer_config", "check", json!({})),
+        (
+            "check_syntax_designer_modules",
+            "check",
+            json!({ "server": true }),
+        ),
+    ];
+    let mut published: Vec<String> = client
+        .peer()
+        .list_all_tools()
+        .await
+        .expect("list tools")
+        .into_iter()
+        .map(|tool| tool.name.into_owned())
+        .collect();
+    published.sort_unstable();
+    let mut called: Vec<&str> = calls
+        .iter()
+        .map(|(tool, _, _)| *tool)
+        .chain(CHECKED_ELSEWHERE.iter().copied())
+        .collect();
+    called.sort_unstable();
+    called.dedup();
+    assert_eq!(
+        called, published,
+        "every published tool must be called here or named as checked elsewhere"
+    );
+
+    for (tool, command, arguments) in calls {
+        let response = client
+            .peer()
+            .call_tool(
+                CallToolRequestParams::new(tool)
+                    .with_arguments(serde_json::from_value(arguments).expect("arguments")),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{tool}: {error}"));
+        let Some(payload) = response.structured_content else {
+            panic!("{tool}: no structured payload");
+        };
+        assert_eq!(payload["command"], command, "{tool}: {payload}");
+        assert_data_matches_its_command_form(&payload, tool);
+    }
+
+    client.cancel().await.expect("cancel client");
+}
+
+/// Живая проверка EDT собирает `data` своим кодом, мимо сценария CLI, — и отвечает той же
+/// формой `check`, вместе с замечанием вида EDT.
+#[tokio::test]
+async fn mcp_stdio_the_live_edt_check_answers_in_the_form_of_check() {
+    let validate_handler = "if [ -n \"$out\" ]; then printf 'ERROR\\tCatalogs.Items\\t1\\t2\\tUnusedVariables\\tunused variable\\n' > \"$out\"; fi\nprompt";
+    let (_dir, config_path) = setup_edt_project_with_options(
+        validate_handler,
+        MCP_ADMISSION_TIMEOUT_MS,
+        EDT_COMMAND_TIMEOUT_MS,
+        1,
+    );
+    let client = serve_stdio(&config_path).await;
+
+    let response = client
+        .peer()
+        .call_tool(check_syntax_edt_call())
+        .await
+        .expect("edt syntax call");
+
+    let payload = response.structured_content.expect("structured payload");
+    assert_eq!(payload["data"]["status"], "issues_found", "{payload}");
+    assert_eq!(payload["data"]["issues"][0]["kind"], "edt", "{payload}");
+    assert_data_matches_its_command_form(&payload, "check_syntax_edt");
+
+    client.cancel().await.expect("cancel client");
+}
+
 #[tokio::test]
 async fn mcp_stdio_returns_structured_business_failure() {
     let (_dir, config_path) = setup_project();
@@ -1535,6 +1626,118 @@ async fn mcp_stdio_edt_syntax_resets_interactive_state_before_each_call() {
     assert!(lines[0].contains("work/edt-workspace"));
 
     client.cancel().await.expect("cancel client");
+}
+
+/// Читает stdout сервера до ответа с номером `id`; всё прочитанное остаётся в `seen`.
+async fn read_until_reply(
+    lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    id: u64,
+    seen: &mut Vec<String>,
+) {
+    let reply = async {
+        loop {
+            let line = lines
+                .next_line()
+                .await
+                .expect("read stdout")
+                .unwrap_or_else(|| panic!("stdout closed before reply {id}"));
+            let is_reply =
+                serde_json::from_str::<Value>(&line).is_ok_and(|frame| frame["id"] == id);
+            seen.push(line);
+            if is_reply {
+                return;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), reply)
+        .await
+        .unwrap_or_else(|_| panic!("no reply {id} in time; stdout so far: {seen:?}"));
+}
+
+/// stdout сервера по stdio занят протоколом: на нём только кадры JSON-RPC, а предупреждение
+/// загрузки конфигурации — прежний ключ `infobase` в проектном файле — уходит в журнал
+/// действий. Сервер читается сырым, без клиента, который мог бы простить лишнюю строку.
+#[tokio::test]
+async fn mcp_stdio_stdout_carries_only_protocol_frames() {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+    let (dir, config_path) = setup_project();
+    let mut server = tokio::process::Command::new(v8_runner_binary())
+        .arg("--config")
+        .arg(&config_path)
+        .args(["mcp", "serve", "stdio"])
+        .env_remove("V8TR_ACTION_LOG_FILE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn server");
+    let mut stdin = server.stdin.take().expect("stdin");
+    let mut lines = tokio::io::BufReader::new(server.stdout.take().expect("stdout")).lines();
+    let mut seen = Vec::new();
+
+    let requests = [
+        (
+            1,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "raw-stdio-test", "version": "1.0.0"}
+            }}),
+        ),
+        (
+            2,
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+        ),
+        (
+            3,
+            json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+                "name": "run_module_tests",
+                "arguments": {"moduleName": "   "}
+            }}),
+        ),
+    ];
+    for (id, request) in requests {
+        if id == 2 {
+            let initialized = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+            stdin
+                .write_all(format!("{initialized}\n").as_bytes())
+                .await
+                .expect("write notification");
+        }
+        stdin
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .expect("write request");
+        stdin.flush().await.expect("flush");
+        read_until_reply(&mut lines, id, &mut seen).await;
+    }
+    drop(stdin);
+    let drained = async {
+        while let Some(line) = lines.next_line().await.expect("read stdout") {
+            seen.push(line);
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), drained)
+        .await
+        .expect("server closes stdout after stdin");
+    tokio::time::timeout(Duration::from_secs(10), server.wait())
+        .await
+        .expect("server exits after stdin closes")
+        .expect("wait server");
+
+    for line in &seen {
+        let frame: Value = serde_json::from_str(line)
+            .unwrap_or_else(|error| panic!("stdout carries a non-JSON line {line:?}: {error}"));
+        assert_eq!(frame["jsonrpc"], "2.0", "not a JSON-RPC frame: {line}");
+    }
+    let action_log = fs::read_to_string(dir.path().join("work/logs/mcp/actions.log"))
+        .expect("the action log is written");
+    assert!(
+        action_log.contains("moves to v8project.local.yaml"),
+        "the load warning did not reach the action log:\n{action_log}"
+    );
 }
 
 /// Файл, которым тест отпускает двойника, — и на выходе из теста, как бы он ни кончился.

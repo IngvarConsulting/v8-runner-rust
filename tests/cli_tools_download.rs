@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use support::command_data::assert_data_matches_a_declared_form;
+use support::command_data::assert_data_matches_its_command_form;
 use support::{temp_workspace, v8_runner_command};
 
 /// Прежний глобальный `builder` в тестовых конфигах: `DESIGNER` — умолчания матрицы,
@@ -612,7 +612,7 @@ fn tools_download_answers_in_the_form_declared_for_it() {
     );
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json envelope");
     assert_eq!(payload["command"], "tools download", "{payload}");
-    assert_data_matches_a_declared_form(&payload, "`tools download client-mcp`");
+    assert_data_matches_its_command_form(&payload, "`tools download client-mcp`");
 }
 
 #[test]

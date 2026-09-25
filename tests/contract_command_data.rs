@@ -18,7 +18,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use support::command_data::{
-    assert_data_matches_a_declared_form, form_index, form_schema, repo_root, slug_list,
+    assert_data_matches_its_command_form, assert_data_matches_one_of, form_index, repo_root,
+    slug_list,
 };
 use support::{temp_workspace, v8_runner_command, write_shell_script};
 
@@ -83,56 +84,82 @@ fn every_previewable_command_answers_in_the_form_declared_for_it() {
     let artifact_argument = artifact.display().to_string();
     let snapshot_argument = snapshot.display().to_string();
 
-    let previews: Vec<Vec<&str>> = vec![
-        vec!["version"],
-        vec!["build", "--dry-run"],
-        vec!["dump", "--mode", "full", "--dry-run"],
-        vec!["convert", "--dry-run"],
-        vec!["make", "--output", &artifact_argument, "--dry-run"],
-        vec!["load", "--path", &artifact_argument, "--dry-run"],
-        vec!["infobase", "create", "--dry-run"],
-        vec!["launch", "designer", "--dry-run"],
-        vec!["extensions", "list", "--dry-run"],
-        vec![
+    // Превью и команда, чьим именем и формой оно обязано ответить.
+    let previews: Vec<(&str, Vec<&str>)> = vec![
+        ("version", vec!["version"]),
+        ("push", vec!["build", "--dry-run"]),
+        ("pull", vec!["dump", "--mode", "full", "--dry-run"]),
+        ("convert", vec!["convert", "--dry-run"]),
+        (
+            "make",
+            vec!["make", "--output", &artifact_argument, "--dry-run"],
+        ),
+        (
+            "upload",
+            vec!["load", "--path", &artifact_argument, "--dry-run"],
+        ),
+        ("infobase create", vec!["infobase", "create", "--dry-run"]),
+        ("launch", vec!["launch", "designer", "--dry-run"]),
+        ("extensions", vec!["extensions", "list", "--dry-run"]),
+        (
             "extensions",
-            "create",
-            "--name",
-            "Demo",
-            "--name-prefix",
-            "Demo",
-            "--dry-run",
-        ],
-        vec!["syntax", "designer-config", "--thin-client"],
-        vec!["check", "--dry-run"],
-        vec![
-            "infobase",
-            "configuration",
-            "export",
-            "--state",
-            "working",
-            "--output",
-            &artifact_argument,
-            "--dry-run",
-        ],
-        vec![
-            "infobase",
-            "dump",
-            "--output",
-            &snapshot_argument,
-            "--dry-run",
-        ],
-        vec![
-            "infobase",
-            "restore",
-            "--input",
-            &snapshot_argument,
-            "--dry-run",
-        ],
+            vec![
+                "extensions",
+                "create",
+                "--name",
+                "Demo",
+                "--name-prefix",
+                "Demo",
+                "--dry-run",
+            ],
+        ),
+        ("check", vec!["syntax", "designer-config", "--thin-client"]),
+        ("check", vec!["check", "--dry-run"]),
+        (
+            "download",
+            vec![
+                "infobase",
+                "configuration",
+                "export",
+                "--state",
+                "working",
+                "--output",
+                &artifact_argument,
+                "--dry-run",
+            ],
+        ),
+        (
+            "infobase.dump",
+            vec![
+                "infobase",
+                "dump",
+                "--output",
+                &snapshot_argument,
+                "--dry-run",
+            ],
+        ),
+        (
+            "infobase.restore",
+            vec![
+                "infobase",
+                "restore",
+                "--input",
+                &snapshot_argument,
+                "--dry-run",
+            ],
+        ),
     ];
 
-    for preview in previews {
+    // Сверка — только с формами самой команды: общая форма отказа тоже объявлена, и отказ до
+    // диспетчеризации иначе прошёл бы за форму команды. Отказ, напечатанный формой самой
+    // команды, проверку проходит: форма у него та же.
+    for (command, preview) in previews {
         let payload = run(&config_path, &preview);
-        assert_data_matches_a_declared_form(&payload, &format!("`{}`", preview.join(" ")));
+        let context = format!("`{}`", preview.join(" "));
+        // Имя команды сверяется до формы: ответ под чужим именем прошёл бы сверку с формой
+        // той, чужой команды.
+        assert_eq!(payload["command"], command, "{context}: {payload}");
+        assert_data_matches_its_command_form(&payload, &context);
     }
 
     // `clone` проектного файла не читает и глобальный ключ настроек отвергает, поэтому
@@ -156,10 +183,9 @@ fn every_previewable_command_answers_in_the_form_declared_for_it() {
         .output()
         .expect("run command");
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
-    // Форма отказа тоже объявлена, поэтому без этой строки проверка прошла бы на отказе,
-    // ничего не сказав о форме превью.
     assert_eq!(payload["ok"], true, "`clone --dry-run` refused: {payload}");
-    assert_data_matches_a_declared_form(&payload, "`clone --dry-run`");
+    assert_eq!(payload["command"], "clone", "{payload}");
+    assert_data_matches_its_command_form(&payload, "`clone --dry-run`");
 }
 
 /// Отказ до диспетчеризации печатает общую форму, и она тоже часть обещания: клиент
@@ -171,16 +197,7 @@ fn a_refusal_before_dispatch_answers_in_the_shared_form() {
 
     let payload = run(&config_path, &["extensions", "info", "--name", ""]);
     assert_eq!(payload["ok"], false, "an empty name must be refused");
-    assert_data_matches_a_declared_form(&payload, "a refusal before dispatch");
-
-    let index = form_index();
-    let shared = slug_list(&index["shared"]);
-    let schema = form_schema(shared.first().expect("a shared form is declared"));
-    let validator = jsonschema::validator_for(&schema).expect("form compiles");
-    assert!(
-        validator.is_valid(&payload["data"]),
-        "the refusal must answer in the shared form, not in a command form: {payload}"
-    );
+    assert_data_matches_one_of(&payload["data"], "a refusal before dispatch", &["refusal"]);
 }
 
 /// Форма объявлена для каждой команды, которая её печатает. Без этой проверки новая

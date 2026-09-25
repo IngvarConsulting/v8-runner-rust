@@ -382,9 +382,14 @@ fn map_scan_error(context: &SourceSetContext, err: ScanError) -> ChangeDetection
 
 #[cfg(test)]
 mod tests {
-    use super::{rescan_and_commit_full, ChangeDetectionError, ChangeKind, FileChange};
+    use super::{
+        analyze_context, rescan_and_commit_full, AnalysisOutcome, ChangeDetectionError, ChangeKind,
+        FileChange,
+    };
     use crate::change_detection::partial_load::decide;
     use crate::domain::source_set::SourceSetContext;
+    use std::fs::File;
+    use std::time::SystemTime;
     use tempfile::tempdir;
 
     #[test]
@@ -426,5 +431,50 @@ mod tests {
         let error = rescan_and_commit_full(&context, &work_path).expect_err("expected hard error");
 
         assert!(matches!(error, ChangeDetectionError::StorageHard { .. }));
+    }
+
+    /// Кандидата подтверждает хеш: файл, переписанный тем же содержимым, изменением не
+    /// считается, а изменённый рядом с ним — считается. Время изменения у обоих одно, так
+    /// что в кандидаты они попадают вместе, и найденная правка соседа доказывает, что
+    /// переписанный файл тоже хешировали.
+    #[test]
+    fn a_file_rewritten_with_the_same_content_is_not_a_change() {
+        let dir = tempdir().expect("tempdir");
+        let source_root = dir.path().join("src");
+        let work_path = dir.path().join("work");
+        std::fs::create_dir_all(&source_root).expect("source");
+        let same = source_root.join("Same.bsl");
+        let edited = source_root.join("Edited.bsl");
+        std::fs::write(&same, "Процедура А() КонецПроцедуры").expect("same");
+        std::fs::write(&edited, "Процедура Б() КонецПроцедуры").expect("edited");
+        let context = SourceSetContext::new("main", source_root, "designer-main");
+        rescan_and_commit_full(&context, &work_path).expect("prime");
+
+        std::fs::write(&same, "Процедура А() КонецПроцедуры").expect("rewrite");
+        std::fs::write(&edited, "Процедура Б() Возврат; КонецПроцедуры").expect("edit");
+        let touched = SystemTime::now();
+        for path in [&same, &edited] {
+            File::options()
+                .write(true)
+                .open(path)
+                .expect("open")
+                .set_modified(touched)
+                .expect("set mtime");
+        }
+
+        let analysis = analyze_context(&context, &work_path);
+
+        let Ok(AnalysisOutcome::Changes {
+            changes,
+            prepared: _,
+        }) = analysis.outcome
+        else {
+            panic!("the edited file must be a change: {:?}", analysis.outcome);
+        };
+        let changed: Vec<_> = changes
+            .into_iter()
+            .map(|change| (change.path, change.kind))
+            .collect();
+        assert_eq!(changed, [(edited, ChangeKind::Modified)]);
     }
 }

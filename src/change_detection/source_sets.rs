@@ -97,14 +97,14 @@ mod tests {
         AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
         ToolsConfig,
     };
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
-    #[test]
-    fn designer_contexts_absolutize_relative_base_path() {
-        let config = AppConfig {
-            base_path: std::path::PathBuf::from("."),
-            work_path: std::path::PathBuf::from("target/tmp-work"),
-            format: SourceFormat::Designer,
+    /// Проект с одним набором `main` в `src` и рабочим каталогом `work_path`.
+    fn single_set_config(format: SourceFormat, work_path: &str) -> AppConfig {
+        AppConfig {
+            base_path: PathBuf::from("."),
+            work_path: PathBuf::from(work_path),
+            format,
             providers: Default::default(),
             provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
@@ -113,13 +113,18 @@ mod tests {
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
-                path: std::path::PathBuf::from("src"),
+                path: PathBuf::from("src"),
             }],
             build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
-        };
+        }
+    }
+
+    #[test]
+    fn designer_contexts_absolutize_relative_base_path() {
+        let config = single_set_config(SourceFormat::Designer, "target/tmp-work");
 
         let service = SourceSetsService::new(&config);
         let contexts = service.designer_contexts();
@@ -131,25 +136,7 @@ mod tests {
 
     #[test]
     fn edt_designer_contexts_use_nested_designer_directory() {
-        let config = AppConfig {
-            base_path: std::path::PathBuf::from("."),
-            work_path: std::path::PathBuf::from("target/tmp-work"),
-            format: SourceFormat::Edt,
-            providers: Default::default(),
-            provider_origins: Default::default(),
-            infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
-            infobases: Default::default(),
-            infobase_name: None,
-            source_sets: vec![SourceSetConfig {
-                name: "main".to_owned(),
-                purpose: SourceSetPurpose::Configuration,
-                path: std::path::PathBuf::from("src"),
-            }],
-            build: BuildConfig::default(),
-            tools: ToolsConfig::default(),
-            mcp: Default::default(),
-            tests: TestsConfig::default(),
-        };
+        let config = single_set_config(SourceFormat::Edt, "target/tmp-work");
 
         let service = SourceSetsService::new(&config);
         let contexts = service.designer_contexts();
@@ -158,5 +145,29 @@ mod tests {
         assert!(contexts[0]
             .path()
             .ends_with(Path::new("target/tmp-work/designer/main")));
+    }
+
+    /// Состояние анализа лежит под `workPath`, у каждого логического контекста набора своё:
+    /// у набора EDT контекстов два, и хранилища у них разные.
+    #[test]
+    fn analysis_state_lies_under_the_work_path_by_logical_context() {
+        let config = single_set_config(SourceFormat::Edt, "/tmp/work");
+        let service = SourceSetsService::new(&config);
+
+        let storages: Vec<PathBuf> = service
+            .designer_contexts()
+            .into_iter()
+            .chain(service.edt_contexts())
+            .map(|context| context.storage_path(&config.work_path))
+            .collect();
+
+        let storage_root = config.work_path.join("hash-storages");
+        assert_eq!(
+            storages,
+            [
+                storage_root.join("designer-main.redb"),
+                storage_root.join("edt-main.redb"),
+            ]
+        );
     }
 }

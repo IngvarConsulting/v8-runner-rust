@@ -919,10 +919,13 @@ fn invalid_configured_selector_in_a_mixed_request_fails_before_clean_or_platform
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["error"]["code"], "invalid_argument");
-    assert!(payload["error"]["message"]
-        .as_str()
-        .expect("message")
-        .contains("unknown extension source-set 'missing'"));
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(
+        message.contains("unknown extension source-set 'missing'"),
+        "{message}"
+    );
+    // Имя установленного расширения выбирает другой селектор, и отказ его называет.
+    assert!(message.contains("--installed-name"), "{message}");
     assert_eq!(
         fs::read_to_string(sentinel).expect("preserved log"),
         "preserve prior diagnostics"

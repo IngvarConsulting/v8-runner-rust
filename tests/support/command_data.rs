@@ -5,6 +5,7 @@
 //! стоит там, где для неё уже есть окружение, — а форма у всех одна и та же.
 #![allow(dead_code)]
 
+use std::fmt::Debug;
 use std::fs;
 use std::path::PathBuf;
 
@@ -20,7 +21,7 @@ pub fn form_index() -> Value {
     serde_json::from_str(&text).expect("index is valid json")
 }
 
-pub fn form_schema(slug: &str) -> Value {
+fn form_schema(slug: &str) -> Value {
     let path = repo_root().join(format!("docs/schemas/command-data/{slug}.schema.json"));
     let text = fs::read_to_string(&path).expect("form artefact is present");
     serde_json::from_str(&text).expect("form is valid json")
@@ -38,26 +39,30 @@ pub fn slug_list(value: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Сверяет `data` с формой, объявленной для названного командой имени.
+/// Сверяет `data` с формами самой команды, без общих форм отказа.
 ///
 /// Команда может отвечать несколькими формами (`extensions` читает состав одной, меняет
-/// другой), а отказ до диспетчеризации печатает общую для всех команд, — поэтому годится
-/// любая из объявленных, но хотя бы одна обязана подойти.
-pub fn assert_data_matches_a_declared_form(payload: &Value, context: &str) {
+/// другой), поэтому годится любая из её форм, но хотя бы одна обязана подойти. Общие формы
+/// отказа сюда не входят: иначе ответ без предмета команды прошёл бы проверку, ничего не
+/// сказав о её форме.
+pub fn assert_data_matches_its_command_form(payload: &Value, context: &str) {
     let command = payload["command"]
         .as_str()
         .unwrap_or_else(|| panic!("{context}: the reply names no command: {payload}"));
-    let index = form_index();
-    let mut slugs = slug_list(&index["forms"][command]);
-    slugs.extend(slug_list(&index["shared"]));
-    assert!(
-        !slugs.is_empty(),
-        "{context}: command `{command}` declares no data form"
+    assert_data_matches_one_of(
+        &payload["data"],
+        &format!("{context} (`{command}`)"),
+        &declared_forms(command),
     );
+}
 
-    let data = &payload["data"];
+/// Сверяет `data` с названными формами: хотя бы одна обязана подойти. Единственное место,
+/// где тесты читают формы `data` и сверяют с ними ответ.
+pub fn assert_data_matches_one_of<S: AsRef<str> + Debug>(data: &Value, context: &str, slugs: &[S]) {
+    assert!(!slugs.is_empty(), "{context}: no data form is declared");
     let mut failures = Vec::new();
-    for slug in &slugs {
+    for slug in slugs {
+        let slug = slug.as_ref();
         let schema = form_schema(slug);
         let validator = jsonschema::validator_for(&schema).expect("form compiles");
         let errors: Vec<String> = validator
@@ -69,7 +74,7 @@ pub fn assert_data_matches_a_declared_form(payload: &Value, context: &str) {
         }
         failures.push(format!("{slug}:\n{}", errors.join("\n")));
     }
-    panic!("{context}: data matches none of the forms declared for `{command}`\n{failures:#?}");
+    panic!("{context}: data matches none of the forms {slugs:?}\n{failures:#?}");
 }
 
 /// Формы, объявленные для команды, без общих.

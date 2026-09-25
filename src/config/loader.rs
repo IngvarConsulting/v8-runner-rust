@@ -1579,6 +1579,10 @@ mod tests {
             "the refusal must say why the key is gone: {message}"
         );
         assert!(
+            message.contains("tools.edt_cli.command_timeout_ms"),
+            "the refusal must name a step bound: {message}"
+        );
+        assert!(
             message.contains("mcp.execution.admission_timeout_ms"),
             "the refusal must name where a bound still belongs: {message}"
         );

@@ -1,5 +1,6 @@
 use crate::domain::execution::{
-    ExecutionInterruptionDetails, ExecutionInterruptionKind, ExecutionStatus,
+    ExecutionInterruptionDetails, ExecutionInterruptionKind, ExecutionInterruptionPhase,
+    ExecutionStatus,
 };
 use crate::platform::process::ProcessInterruptionReason;
 use crate::platform::result::PlatformCommandResult;
@@ -15,7 +16,7 @@ pub(crate) fn command_interruption_status(interruption: ExecutionInterruption) -
 
 pub(crate) fn command_interruption_details(
     interruption: ExecutionInterruption,
-    phase: &str,
+    phase: ExecutionInterruptionPhase,
     message: impl Into<String>,
 ) -> ExecutionInterruptionDetails {
     command_interruption_details_with_deferred(interruption, phase, false, message)
@@ -23,7 +24,7 @@ pub(crate) fn command_interruption_details(
 
 pub(crate) fn deferred_command_interruption_details(
     interruption: ExecutionInterruption,
-    phase: &str,
+    phase: ExecutionInterruptionPhase,
     message: impl Into<String>,
 ) -> ExecutionInterruptionDetails {
     command_interruption_details_with_deferred(interruption, phase, true, message)
@@ -31,7 +32,7 @@ pub(crate) fn deferred_command_interruption_details(
 
 pub(crate) fn process_interruption_details(
     interruption: ProcessInterruptionReason,
-    phase: &str,
+    phase: ExecutionInterruptionPhase,
     deferred: bool,
     message: impl Into<String>,
 ) -> ExecutionInterruptionDetails {
@@ -40,18 +41,18 @@ pub(crate) fn process_interruption_details(
         .with_message(message)
 }
 
-pub(crate) fn deferred_process_interruption_details(
-    phase: &str,
+/// Прерывание, которое процесс отложил и пережил: предупреждение и запись о прерывании,
+/// собранные из одного факта одними словами.
+pub(crate) fn deferred_process_interruption(
+    phase: ExecutionInterruptionPhase,
     completed_action: &str,
     result: &PlatformCommandResult,
-) -> Option<ExecutionInterruptionDetails> {
+) -> Option<(String, ExecutionInterruptionDetails)> {
     result.process.interruption.map(|interruption| {
-        process_interruption_details(
-            interruption.reason,
-            phase,
-            true,
-            deferred_process_interruption_message(completed_action, interruption.reason),
-        )
+        let warning = deferred_process_interruption_message(completed_action, interruption.reason);
+        let details =
+            process_interruption_details(interruption.reason, phase, true, warning.clone());
+        (warning, details)
     })
 }
 
@@ -146,7 +147,7 @@ pub(crate) fn interruption_before_safe_point(
 
 fn command_interruption_details_with_deferred(
     interruption: ExecutionInterruption,
-    phase: &str,
+    phase: ExecutionInterruptionPhase,
     deferred: bool,
     message: impl Into<String>,
 ) -> ExecutionInterruptionDetails {
@@ -210,6 +211,7 @@ fn format_deferred_interruption_warning(
 
 #[cfg(test)]
 mod tests {
+    use crate::domain::execution::ExecutionInterruptionPhase;
     use crate::platform::process::ProcessInterruptionReason;
     use crate::use_cases::context::{CommandName, ExecutionInterruption};
 
@@ -249,13 +251,13 @@ mod tests {
     fn process_details_preserve_deferred_flag() {
         let details = process_interruption_details(
             ProcessInterruptionReason::Cancelled,
-            "run",
+            ExecutionInterruptionPhase::Run,
             true,
             "deferred",
         );
 
         assert!(details.deferred);
-        assert_eq!(details.phase.as_deref(), Some("run"));
+        assert_eq!(details.phase, Some(ExecutionInterruptionPhase::Run));
         assert_eq!(details.message.as_deref(), Some("deferred"));
     }
 }

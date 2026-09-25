@@ -607,7 +607,8 @@ Validation rules:
 
 - `name` должен быть уникальным и безопасным path segment;
 - `EXTENSION` требует хотя бы один `CONFIGURATION`, но external-only config допустим;
-- для `format=DESIGNER` ordinary source-set должен указывать на корректный Designer root;
+- для `format=DESIGNER` раскладка ordinary source-set при чтении конфигурации не проверяется:
+  его каталога может ещё не быть;
 - для `format=DESIGNER` external source-set должен быть aggregate root с top-level XML
   descriptors matching declared `type`;
 - для `format=EDT` ordinary `CONFIGURATION`/`EXTENSION` path должен быть valid EDT project root:

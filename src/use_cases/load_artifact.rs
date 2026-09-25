@@ -7,7 +7,9 @@ use crate::config::model::{AppConfig, SourceFormat};
 use crate::domain::artifact::{ArtifactKind, ArtifactRef, ArtifactSet, ARTIFACT_ROLE_PLATFORM_LOG};
 use crate::domain::artifacts::ArtifactBuildMode;
 use crate::domain::capability::{Operation, Provider};
-use crate::domain::execution::{ExecutionError, ExecutionOutcome, ExecutionStatus};
+use crate::domain::execution::{
+    ExecutionError, ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus,
+};
 use crate::domain::load::{
     CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
 };
@@ -24,8 +26,7 @@ use crate::support::temp::platform_logs_dir;
 use crate::use_cases::context::{ExecutionContext, ExecutionInterruption, InterruptionSafetyClass};
 use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
 use crate::use_cases::interruption::{
-    command_interruption_details, command_interruption_status,
-    deferred_process_interruption_details, deferred_process_interruption_warning,
+    command_interruption_details, command_interruption_status, deferred_process_interruption,
     interruption_before_safe_point_message,
 };
 use crate::use_cases::progress::log_live_stage;
@@ -142,6 +143,7 @@ fn run_load(
         return Err(LoadExecutionFailure::with_payload(
             AppError::Runtime(message.clone()),
             interrupted_result_from_resolved(
+                dispatched,
                 &resolved,
                 CompatibilityState::NotProbed,
                 started,
@@ -379,19 +381,32 @@ fn run_load_selected(
         ));
     }
 
+    let apply_deferral = deferred_process_interruption(
+        ExecutionInterruptionPhase::Apply,
+        "apply completed successfully",
+        &apply_result,
+    );
     if let Some(interruption) = context.interruption() {
         let message =
             interruption_before_safe_point_message(context, interruption, "update_db_cfg");
+        let mut result = with_loaded_artifact(interrupted_result_from_resolved(
+            dispatched,
+            &resolved,
+            compatibility_state,
+            started,
+            interruption,
+            message.clone(),
+            apply_result.platform_log_path.or(probe_log_path),
+        ));
+        // Если отмена пришла во время загрузки, загрузка её отложила и довела дело до конца;
+        // ответ называет это раньше остановки на безопасной точке.
+        if let Some((warning, details)) = apply_deferral {
+            result.execution.diagnostics.insert(0, warning);
+            result.execution.interruptions.insert(0, details);
+        }
         return Err(LoadExecutionFailure::with_payload(
-            AppError::Runtime(message.clone()),
-            interrupted_result_from_resolved(
-                &resolved,
-                compatibility_state,
-                started,
-                interruption,
-                message,
-                apply_result.platform_log_path.or(probe_log_path),
-            ),
+            AppError::Runtime(message),
+            result,
         ));
     }
 
@@ -469,28 +484,16 @@ fn run_load_selected(
         ));
     }
 
-    let deferred_warnings = [
-        deferred_interruption_warning("apply", &apply_result),
-        deferred_interruption_warning("update_db_cfg", &update_result),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
-    let deferred_interruptions = [
-        deferred_process_interruption_details(
-            "apply",
-            "apply completed successfully",
-            &apply_result,
-        ),
-        deferred_process_interruption_details(
-            "update_db_cfg",
-            "update_db_cfg completed successfully",
-            &update_result,
-        ),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
+    let update_deferral = deferred_process_interruption(
+        ExecutionInterruptionPhase::UpdateDbCfg,
+        "update_db_cfg completed successfully",
+        &update_result,
+    );
+    let (deferred_warnings, deferred_interruptions): (Vec<_>, Vec<_>) =
+        [apply_deferral, update_deferral]
+            .into_iter()
+            .flatten()
+            .unzip();
     let mut execution =
         ExecutionOutcome::new(ExecutionStatus::Succeeded).with_payload(LoadExecutionMetadata {
             applied: true,
@@ -1000,7 +1003,10 @@ fn target_label(resolved: &ResolvedLoadRequest) -> String {
     }
 }
 
+/// Итог прерывания на безопасной точке. Запускалась ли платформа, говорит `dispatched`
+/// сценария; что пакет уже загружен, отмечает `with_loaded_artifact` у места вызова.
 fn interrupted_result_from_resolved(
+    provider_dispatched: bool,
     resolved: &ResolvedLoadRequest,
     compatibility_state: CompatibilityState,
     started: Instant,
@@ -1010,7 +1016,7 @@ fn interrupted_result_from_resolved(
 ) -> LoadResult {
     LoadResult {
         provider: None,
-        provider_dispatched: true,
+        provider_dispatched,
         mode: resolved.mode,
         artifact_path: resolved.artifact_path.clone(),
         artifact_type: resolved.artifact_type,
@@ -1025,11 +1031,11 @@ fn interrupted_result_from_resolved(
                 )])
                 .with_interruptions(vec![command_interruption_details(
                     interruption,
-                    "update_db_cfg_safe_point",
+                    ExecutionInterruptionPhase::CommandBoundary,
                     message,
                 )])
                 .with_payload(LoadExecutionMetadata {
-                    applied: true,
+                    applied: false,
                     target_kind: resolved.target_kind,
                     compatibility_state,
                     update_db_cfg_ran: false,
@@ -1039,12 +1045,8 @@ fn interrupted_result_from_resolved(
     }
 }
 
-fn deferred_interruption_warning(action: &str, result: &PlatformCommandResult) -> Option<String> {
-    deferred_process_interruption_warning(&format!("{action} completed successfully"), result)
-}
-
-// The artifact has already been loaded. A later database update failure must not
-// erase that effect from the receipt.
+// The artifact has already been loaded. A later database update failure, or an interruption
+// before the update, must not erase that effect from the receipt.
 fn with_loaded_artifact(mut result: LoadResult) -> LoadResult {
     result
         .execution
@@ -1146,17 +1148,21 @@ mod tests {
         AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, TestsConfig, ToolsConfig,
     };
     use crate::domain::artifacts::ArtifactBuildMode;
-    use crate::domain::execution::ExecutionStatus;
+    use crate::domain::execution::{
+        ExecutionInterruptionKind, ExecutionInterruptionPhase, ExecutionStatus,
+    };
     use crate::domain::load::{
         CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
     };
-    use crate::platform::process::ProcessResult;
+    use crate::platform::process::{DeferralWatch, ProcessResult};
     use crate::platform::result::PlatformCommandResult;
     use crate::use_cases::context::{CommandName, ExecutionContext};
     use crate::use_cases::request::LoadRequest;
     use crate::use_cases::result::UseCaseErrorKind;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::thread;
+    use std::time::{Duration, Instant};
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
 
@@ -1401,18 +1407,14 @@ mod tests {
 
     #[cfg(unix)]
     fn write_designer_script(path: &Path, calls_log: &Path) {
-        write_designer_script_with_merge_failure(path, calls_log, false);
+        write_designer_script_with(path, calls_log, "");
     }
 
+    /// Подставной Конфигуратор; `extra` — строки оболочки перед его успешным выходом.
     #[cfg(unix)]
-    fn write_designer_script_with_merge_failure(path: &Path, calls_log: &Path, fail_merge: bool) {
-        let merge_block = if fail_merge {
-            "if printf '%s' \"$*\" | grep -F -q -- '/MergeCfg'; then\n  printf 'merge failed\\n' >&2\n  exit 23\nfi\n"
-        } else {
-            ""
-        };
+    fn write_designer_script_with(path: &Path, calls_log: &Path, extra: &str) {
         let body = format!(
-            "args=\"$*\"\nout=\"\"\nreport=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"-ReportFile\" ]; then report=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"{}\"\nif [ -n \"$out\" ]; then mkdir -p \"$(dirname \"$out\")\"; : > \"$out\"; fi\nif printf '%s' \"$args\" | grep -F -q -- '/CompareCfg'; then\n  if printf '%s' \"$args\" | grep -F -q -- 'VendorConfiguration'; then\n    printf 'Configuration Vendor configuration is not available\\n' > \"$out\"\n    exit 17\n  fi\n  if printf '%s' \"$args\" | grep -F -q -- 'ExtensionDBConfiguration'; then\n    if printf '%s' \"$args\" | grep -F -q -- 'ExistingExt'; then\n      : > \"$report\"\n      exit 0\n    fi\n    if printf '%s' \"$args\" | grep -F -q -- 'UnsupportedExt'; then\n      printf 'Configuration extension is not supported\\n' > \"$out\"\n      exit 18\n    fi\n    printf 'extension not found\\n' > \"$out\"\n    exit 19\n  fi\nfi\n{merge_block}exit 0",
+            "args=\"$*\"\nout=\"\"\nreport=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"-ReportFile\" ]; then report=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"{}\"\nif [ -n \"$out\" ]; then mkdir -p \"$(dirname \"$out\")\"; : > \"$out\"; fi\nif printf '%s' \"$args\" | grep -F -q -- '/CompareCfg'; then\n  if printf '%s' \"$args\" | grep -F -q -- 'VendorConfiguration'; then\n    printf 'Configuration Vendor configuration is not available\\n' > \"$out\"\n    exit 17\n  fi\n  if printf '%s' \"$args\" | grep -F -q -- 'ExtensionDBConfiguration'; then\n    if printf '%s' \"$args\" | grep -F -q -- 'ExistingExt'; then\n      : > \"$report\"\n      exit 0\n    fi\n    if printf '%s' \"$args\" | grep -F -q -- 'UnsupportedExt'; then\n      printf 'Configuration extension is not supported\\n' > \"$out\"\n      exit 18\n    fi\n    printf 'extension not found\\n' > \"$out\"\n    exit 19\n  fi\nfi\n{extra}exit 0",
             calls_log.display()
         );
         fs::write(path, format!("#!/bin/sh\n{body}\n")).expect("write script");
@@ -1795,10 +1797,132 @@ mod tests {
         let payload = failure.payload.expect("payload");
 
         assert_eq!(payload.execution.status, ExecutionStatus::Cancelled);
-        assert_eq!(payload.execution.interruptions.len(), 1);
         assert!(payload.execution.errors[0]
             .message
             .contains("before entering load probe"));
+        // До проверки базы исполнитель не выбран и ничего не загружено.
+        let [interruption] = payload.execution.interruptions.as_slice() else {
+            panic!(
+                "one interruption expected: {:?}",
+                payload.execution.interruptions
+            );
+        };
+        assert!(!interruption.deferred);
+        assert_eq!(
+            interruption.phase,
+            Some(ExecutionInterruptionPhase::CommandBoundary)
+        );
+        assert!(!payload.provider_dispatched);
+        assert!(!load_payload(&payload).applied);
+    }
+
+    /// Отмена, пришедшая во время загрузки, её не рвёт: пакет догружается, ответ называет
+    /// отложенное прерывание, и команда останавливается на безопасной точке перед обновлением
+    /// конфигурации базы данных. Порядок задан рукопожатиями: отмена приходит, когда загрузка
+    /// уже идёт, а загрузка кончается, когда раннер уже отложил отмену (`DeferralWatch`).
+    #[cfg(unix)]
+    #[test]
+    fn execute_reports_cancelled_status_at_update_db_cfg_safe_point() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("work")).expect("work");
+        let binary = root.join("1cv8");
+        let calls = root.join("calls.log");
+        let load_started = root.join("load-started");
+        let load_release = root.join("load-release");
+        fs::write(root.join("main.cf"), "cf").expect("artifact");
+        write_designer_script_with(
+            &binary,
+            &calls,
+            &format!(
+                "if printf '%s' \"$args\" | grep -F -q -- '/LoadCfg'; then\n\
+                   : > '{}'\n\
+                   waited=0\n\
+                   while [ ! -e '{}' ] && [ \"$waited\" -lt 300 ]; do\n\
+                     sleep 0.1\n\
+                     waited=$((waited + 1))\n\
+                   done\n\
+                 fi\n",
+                load_started.display(),
+                load_release.display()
+            ),
+        );
+        let config = sample_config(root, &binary);
+        let request = LoadRequest {
+            vendor_name: None,
+            dry_run: false,
+            mode: LoadMode::Load,
+            artifact_path: "main.cf".to_owned(),
+            settings_path: None,
+            extension: None,
+        };
+        let cancellation = CancellationToken::new();
+        let watch = DeferralWatch::default();
+        let operator = {
+            let cancellation = cancellation.clone();
+            let watch = watch.clone();
+            thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while !load_started.exists() && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                cancellation.cancel();
+                while !watch.observed() && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                fs::write(&load_release, "").expect("release the load");
+                watch.observed()
+            })
+        };
+
+        let failure = watch
+            .during(|| {
+                execute(
+                    &ExecutionContext::cli(CommandName::Load).with_cancellation(cancellation),
+                    &config,
+                    &request,
+                )
+            })
+            .expect_err("the command stops before update_db_cfg");
+        assert!(
+            operator.join().expect("operator thread"),
+            "the runner never logged that it deferred the cancellation"
+        );
+        let payload = failure.payload.expect("payload");
+
+        assert_eq!(payload.execution.status, ExecutionStatus::Cancelled);
+        assert!(payload.execution.errors[0]
+            .message
+            .contains("before entering update_db_cfg safe point"));
+        // Сначала отложенная отмена загрузки, затем остановка на безопасной точке.
+        let [deferred, boundary] = payload.execution.interruptions.as_slice() else {
+            panic!(
+                "two interruptions expected: {:?}",
+                payload.execution.interruptions
+            );
+        };
+        assert!(deferred.deferred);
+        assert_eq!(deferred.kind, ExecutionInterruptionKind::Cancelled);
+        assert_eq!(deferred.phase, Some(ExecutionInterruptionPhase::Apply));
+        assert!(!boundary.deferred);
+        assert_eq!(
+            boundary.phase,
+            Some(ExecutionInterruptionPhase::CommandBoundary)
+        );
+        assert!(
+            payload.execution.diagnostics[0].contains(
+                "apply completed successfully after cancellation request during critical phase"
+            ),
+            "{:?}",
+            payload.execution.diagnostics
+        );
+        // Платформа запускалась, и пакет уже загружен; до обновления базы дело не дошло.
+        assert!(payload.provider_dispatched);
+        assert!(load_payload(&payload).applied);
+        assert!(!load_payload(&payload).update_db_cfg_ran);
+        let calls_text = fs::read_to_string(&calls).expect("calls");
+        assert!(calls_text.contains("/LoadCfg"), "{calls_text}");
+        assert!(!calls_text.contains("/UpdateDBCfg"), "{calls_text}");
     }
 
     #[cfg(unix)]

@@ -146,6 +146,10 @@ CLI help, доверяйте текущему коду и затем синхр�
 заполнятся `base_generation` и `local_generation`. Код `subject` таблица называет, но ни
 один отказ пока им не отвечает.
 
+Занятый рабочий каталог сегодня отвечает `workspace_busy` только у `download`,
+`infobase dump` и `clone`, а у `clone` — без шага `workspace lock`; остальные команды
+отвечают `runtime_failure` ([#295](https://github.com/IngvarConsulting/v8-runner-rust/issues/295)).
+
 У MCP словарь уже: рода там сводятся к `validation`, `runtime` и `platform`, поэтому кода
 возможности в ответе инструмента не бывает. Поле `next` едет обоими транспортами.
 
@@ -277,6 +281,8 @@ v8-runner tools download client-mcp [--sources] [--force]
   каталога не завершилась, новый marker очищается и target не считается управляемым.
 - Каждый HTTP response body ограничен 512 MiB; превышение лимита возвращает ошибку до публикации
   target.
+- Сигнал во время публикации её не прерывает, но ответ пока не называет отложенное прерывание,
+  а неудачная уборка резервной копии не называется вовсе ([#301](https://github.com/IngvarConsulting/v8-runner-rust/issues/301)).
 
 ### `extensions`
 
@@ -286,7 +292,8 @@ v8-runner extensions --name TESTS --installed-name YAXUNIT
 ```
 
 - Отключает безопасный режим и защиту от опасных действий через IBCMD.
-- `--name` выбирает только `source-set` с `type=EXTENSION`; неизвестное имя — ошибка.
+- `--name` выбирает только `source-set` с `type=EXTENSION`; неизвестное имя — ошибка,
+  и она подсказывает `--installed-name` для расширения, установленного в базе.
 - `--installed-name` передаёт платформенное имя установленного расширения без требования
   соответствующего `source-set`. Валидный конфиг проекта всё равно нужен.
 - Без обоих селекторов обрабатывает все extension `source-set` из конфига. При наличии
@@ -607,7 +614,8 @@ v8-runner artifacts --output <TARGET> [--source-set <NAME>] [--extension <NAME>]
 - `.cf` используется для основной конфигурации.
 - `.cfe` используется для extension export.
 - Каталог output используется для external `.epf` / `.erf` publication.
-- Исполнитель — только Конфигуратор.
+- Исполнитель — Конфигуратор; `agent` — по `providers.make: agent`, у автономного сервера —
+  единственный.
 
 ## `publish`
 
@@ -750,5 +758,8 @@ v8-runner mcp serve http
 - Публикация CLI-only команд в MCP без отдельного решения владельца.
 - Object-scoped partial dump через `ibcmd`.
 - `upload` через `ibcmd`.
+- `check` через `ibcmd`.
+- `make` через `ibcmd`.
+- `extensions` через `designer`.
 - Arbitrary path-based `convert source -> target` contract.
 - Отдельная пользовательская настройка EDT `working-directory`.

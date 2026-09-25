@@ -60,7 +60,8 @@
 
 Правила: [два процесса на одном каталоге](../rules/cli/concurrent-processes-are-serialized.md),
 [сбой метаданных не снимает замок](../rules/cli/sidecar-failure-does-not-release-the-lock.md),
-[вложенные шаги не берут замок повторно](../rules/cli/nested-orchestration-does-not-relock.md).
+[вложенные шаги не берут замок повторно](../rules/cli/nested-orchestration-does-not-relock.md);
+пока не выполнено — [занятый каталог отвечает `workspace_busy`](../rules/wire/a-busy-workspace-answers-workspace-busy.md).
 
 ### 8.4 Исполнители
 
@@ -111,13 +112,13 @@
 - Отмену проверяют между шагами. Процесс ведёт себя по классу
   ([`context.rs`](../../src/use_cases/context.rs)): снимается сразу; мягко — SIGTERM группе,
   затем SIGKILL; критический — дорабатывает, итог успешен с отложенным прерыванием.
-- Запись в базу — критическая фаза, у `/RestoreIB` тоже. `Cancelled` ставится, только когда
-  процесс действительно остановлен; MCP в работе ждёт конечного состояния.
+- Запись в базу — критическая фаза, у `/RestoreIB` тоже. `Cancelled` и `TimedOut` ставятся,
+  только когда процесс действительно остановлен; MCP в работе ждёт конечного состояния.
 
 Правила: [шаг ограничен своим пределом](../rules/use-cases/a-step-is-bounded-only-by-its-own-cap.md),
 [класс прерывания объявлен](../rules/use-cases/operations-declare-an-interruption-class.md),
 [запись в базу — критическая фаза](../rules/use-cases/a-database-write-is-a-critical-phase.md),
-[отмена означает состоявшуюся отмену](../rules/use-cases/cancelled-means-terminal-cancellation.md).
+[отмена и истечение предела означают состоявшийся исход](../rules/use-cases/an-interruption-status-means-a-terminal-outcome.md).
 
 ### 8.8 Публикация с заменой
 
@@ -128,7 +129,10 @@ download` — той же заменой из [`support/fs.rs`](../../src/suppor
 - промежуточная копия — рядом с целью, чтобы перенос не пересекал файловую систему;
 - замена: цель — в резервную копию, промежуточная — на её место, при сбое — откат;
 - у `staged_publication.rs` замена — критическая фаза, а метаданные рядом называют
-  раннер, прогон и цель, и уборка следов прошлых запусков трогает только свои.
+  раннер, прогон и цель, и уборка следов прошлых запусков трогает только свои;
+- у этих четырёх команд цель перепроверяется после работы исполнителя, перед заменой, —
+  каждая своей проверкой в своём сценарии; у `convert` и `tools download` такой перепроверки
+  нет (#300, #301).
 
 Каталог человека — выгрузка `pull`, выход `convert` — перед заменой проверяется через git
 ([`destruction_guard.rs`](../../src/use_cases/destruction_guard.rs)): правка поверх индекса,
@@ -136,6 +140,7 @@ download` — той же заменой из [`support/fs.rs`](../../src/suppor
 защищён.
 
 Правила: [уборка трогает только свои следы](../rules/use-cases/cleanup-touches-only-its-own-artefacts.md),
+[цель перепроверяется перед публикацией](../rules/use-cases/a-target-is-rechecked-before-publication.md),
 [замена каталога человека спрашивает заранее](../rules/use-cases/replacing-a-user-directory-asks-first.md).
 
 ### 8.9 Общая сессия EDT

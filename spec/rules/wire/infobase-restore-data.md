@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.INFOBASE-RESTORE-DATA
-version: 3
+version: 4
 artifact: docs/schemas/command-data/infobase-restore.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -13,6 +13,13 @@ check:
 говорит об этом двумя разными полями: `target_mode` — что просили сделать с целью
 (создать или заместить), `restored` — сделано ли. `target_state` остаётся `unchanged`,
 пока платформа не отработала: превью цель не трогает.
+
+**Что изменила версия 4.** Фаза прерывания `execution.interruptions[].phase` стала закрытым
+набором значений в `snake_case`, общим для всех форм с итогом исполнения; набор перечисляет
+`$defs/ExecutionInterruptionPhase` схемы. Прежде фаза повторяла имя шага словами. Теперь
+`provider command` стал `provider_command`, а прерывание, замеченное на остальных шагах,
+называется `command_boundary`. Не всякая остановка на безопасной точке даёт запись: часть
+отвечает отказом без неё ([#308](https://github.com/IngvarConsulting/v8-runner-rust/issues/308)). Имена шагов в `steps[]` прежние.
 
 ## Пример
 
