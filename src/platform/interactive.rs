@@ -713,9 +713,10 @@ impl InteractiveProcessExecutor {
             return Ok(Some(exit_status_unavailable()));
         };
         let status = child.try_wait();
-        // Подобран или потерян (`ECHILD`: подобрал кто-то другой) — сигналить по этому номеру
-        // больше нельзя.
-        if !matches!(status, Ok(None)) {
+        // Подобранный процесс уходит из исполнителя, и подобранный кем-то другим (`ECHILD`)
+        // тоже: сигналить по его номеру больше нельзя. При прочих ошибках ручка остаётся,
+        // чтобы снятие и `Drop` ещё могли процесс подобрать.
+        if matches!(status, Ok(Some(_))) || status.as_ref().is_err_and(reaped_elsewhere) {
             self.child = None;
         }
         status.map_err(|source| InteractiveProcessError::WaitFailed { source })
@@ -730,8 +731,11 @@ impl InteractiveProcessExecutor {
                 kill_process_group(child)
                     .map_err(|source| InteractiveProcessError::KillFailed { source })?;
                 let waited = child.wait();
-                // Ожидание, удачное или нет, процесс из исполнителя убирает.
-                self.child = None;
+                // Как и в `try_wait_child`: подобранный — здесь или кем-то другим — уходит,
+                // при прочих ошибках ручка остаётся для следующей попытки.
+                if waited.as_ref().map_or_else(reaped_elsewhere, |_| true) {
+                    self.child = None;
+                }
                 Some(waited.map_err(|source| InteractiveProcessError::WaitFailed { source })?)
             }
             None => None,
@@ -1030,6 +1034,19 @@ fn configure_process_group(command: &mut Command) {
 
 #[cfg(not(unix))]
 fn configure_process_group(_command: &mut Command) {}
+
+/// `ECHILD`: процесс подобрал кто-то другой, и его номер уже не наш.
+fn reaped_elsewhere(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(libc::ECHILD)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
 
 /// Снимает группу неподобранного процесса. `ESRCH` значит, что группы уже нет. `EPERM`
 /// macOS отвечает, когда сигнал в группе принять некому: ведущий уже выходит или стал
@@ -1483,6 +1500,33 @@ mod tests {
         assert!(
             executor.kill_internal().expect("kill").is_none(),
             "nothing is left to signal"
+        );
+    }
+
+    /// Процесс, которого подобрал кто-то другой, тоже уходит из исполнителя: его номер
+    /// свободен. Прочие ошибки ожидания ручку оставляют.
+    #[cfg(unix)]
+    #[test]
+    fn a_leader_reaped_elsewhere_leaves_the_executor() {
+        let dir = tempdir().expect("tempdir");
+        let mut executor = executor_with_an_exited_leader(dir.path());
+        let pid = libc::pid_t::try_from(executor.pid().expect("pid")).expect("pid fits pid_t");
+        let mut raw_status = 0;
+        // SAFETY: `raw_status` — живая локальная переменная; процесс подбирается мимо
+        // исполнителя, как это сделал бы чужой обработчик `SIGCHLD`.
+        assert_eq!(unsafe { libc::waitpid(pid, &mut raw_status, 0) }, pid);
+
+        let error = executor
+            .try_wait_child()
+            .expect_err("the process is already reaped elsewhere");
+        assert!(
+            matches!(&error, InteractiveProcessError::WaitFailed { source } if source.raw_os_error() == Some(libc::ECHILD)),
+            "{error:?}"
+        );
+        assert_eq!(
+            executor.pid(),
+            None,
+            "a leader reaped elsewhere must leave the executor"
         );
     }
 
