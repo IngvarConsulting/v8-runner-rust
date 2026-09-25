@@ -1023,8 +1023,8 @@ fn build_designer_dsl<'a>(
         config.v8_connection(),
         runner,
         Some(log_file),
-    )
-    .with_execution_policy(context.process_policy(InterruptionSafetyClass::GracefulThenKill, None)))
+        context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+    ))
 }
 
 fn ensure_platform_success(
@@ -1224,8 +1224,6 @@ fn external_descriptors(
                 location.path,
                 config.work_path.join("edt-workspace"),
                 utilities.runner_for(UtilityType::EdtCli),
-            )
-            .with_execution_policy(
                 context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
             );
             prepare_edt_external_artifacts(config, source_set, &edt)

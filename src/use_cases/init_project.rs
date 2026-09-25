@@ -529,10 +529,9 @@ fn ensure_edt_workspace(
                 Arc::new(manager),
                 Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
                 Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
+                context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
             ) {
-                Ok(dsl) => dsl.with_execution_policy(
-                    context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-                ),
+                Ok(dsl) => dsl,
                 Err(error) => {
                     return StepOutcome::failed(
                         "edt_workspace",
@@ -556,8 +555,6 @@ fn ensure_edt_workspace(
             binary,
             workspace.clone(),
             utilities.runner_for(UtilityType::EdtCli),
-        )
-        .with_execution_policy(
             context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
         )
     };
@@ -644,8 +641,6 @@ fn create_infobase_via_designer(
         config.v8_connection(),
         utilities.runner_for(UtilityType::V8),
         None,
-    )
-    .with_execution_policy(
         context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
     )
     .create_infobase()
@@ -670,12 +665,14 @@ fn create_infobase_via_ibcmd(
         .map_err(AppError::from)?
         .path;
     let connection = IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
-    IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
-        .with_execution_policy(
-            context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
-        )
-        .ensure_infobase_create()
-        .map_err(AppError::from)
+    IbcmdDsl::new(
+        binary,
+        connection,
+        utilities.runner_for(UtilityType::Ibcmd),
+        context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
+    )
+    .ensure_infobase_create()
+    .map_err(AppError::from)
 }
 
 /// Locates the utility that would create the infobase, without creating it.

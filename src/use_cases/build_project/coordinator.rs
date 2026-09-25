@@ -699,11 +699,12 @@ pub(super) fn run_build_edt(
                                 Arc::new(manager),
                                 Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
                                 Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
-                            ) {
-                                Ok(dsl) => dsl.with_execution_policy(context.process_policy(
+                                context.process_policy(
                                     InterruptionSafetyClass::GracefulThenKill,
                                     None,
-                                )),
+                                ),
+                            ) {
+                                Ok(dsl) => dsl,
                                 Err(error) => {
                                     let app_error = AppError::from(error);
                                     let result = fail_from_source_set_index(
@@ -746,8 +747,6 @@ pub(super) fn run_build_edt(
                     edt.clone(),
                     config.work_path.join("edt-workspace"),
                     utilities.runner_for(UtilityType::EdtCli),
-                )
-                .with_execution_policy(
                     context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
                 );
                 prepare_edt_external_artifacts(config, source_set, &one_shot_edt)
@@ -914,11 +913,12 @@ pub(super) fn run_build_edt(
                                     Arc::new(manager),
                                     Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
                                     Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
-                                ) {
-                                    Ok(dsl) => dsl.with_execution_policy(context.process_policy(
+                                    context.process_policy(
                                         InterruptionSafetyClass::GracefulThenKill,
                                         None,
-                                    )),
+                                    ),
+                                ) {
+                                    Ok(dsl) => dsl,
                                     Err(error) => {
                                         let app_error = AppError::from(error);
                                         let result = fail_from_source_set_index(
@@ -967,8 +967,6 @@ pub(super) fn run_build_edt(
                         edt.clone(),
                         config.work_path.join("edt-workspace"),
                         utilities.runner_for(UtilityType::EdtCli),
-                    )
-                    .with_execution_policy(
                         context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
                     );
                     execute_edt_export_step(

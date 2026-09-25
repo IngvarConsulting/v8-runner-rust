@@ -49,13 +49,20 @@ pub struct EdtDsl<'a> {
 
 impl<'a> EdtDsl<'a> {
     /// Create a new EDT DSL bound to one executable path and runner.
-    pub fn new(binary: PathBuf, workspace: PathBuf, runner: &'a dyn ProcessRunner) -> Self {
+    ///
+    /// The policy is required: it carries the command's interrupt and its work mark.
+    pub fn new(
+        binary: PathBuf,
+        workspace: PathBuf,
+        runner: &'a dyn ProcessRunner,
+        execution_policy: ProcessExecutionPolicy,
+    ) -> Self {
         Self {
             binary,
             workspace,
             backend: EdtBackend::OneShot { runner },
             timeout: None,
-            execution_policy: ProcessExecutionPolicy::default(),
+            execution_policy,
             budget_started_at: Instant::now(),
         }
     }
@@ -67,6 +74,7 @@ impl<'a> EdtDsl<'a> {
         workspace: PathBuf,
         startup_timeout: Duration,
         command_timeout: Duration,
+        execution_policy: ProcessExecutionPolicy,
     ) -> Result<Self, EdtError> {
         std::fs::create_dir_all(&workspace).map_err(|source| EdtError::PrepareWorkspace {
             path: workspace.clone(),
@@ -98,7 +106,7 @@ impl<'a> EdtDsl<'a> {
                 shutdown_timeout: command_timeout.min(Duration::from_secs(5)),
             },
             timeout: None,
-            execution_policy: ProcessExecutionPolicy::default(),
+            execution_policy,
             budget_started_at: Instant::now(),
         })
     }
@@ -110,6 +118,7 @@ impl<'a> EdtDsl<'a> {
         manager: Arc<EdtSessionManager>,
         startup_timeout: Duration,
         command_timeout: Duration,
+        execution_policy: ProcessExecutionPolicy,
     ) -> Result<Self, EdtError> {
         std::fs::create_dir_all(&workspace).map_err(|source| EdtError::PrepareWorkspace {
             path: workspace.clone(),
@@ -125,7 +134,7 @@ impl<'a> EdtDsl<'a> {
                 command_timeout,
             },
             timeout: None,
-            execution_policy: ProcessExecutionPolicy::default(),
+            execution_policy,
             budget_started_at: Instant::now(),
         })
     }
@@ -133,13 +142,6 @@ impl<'a> EdtDsl<'a> {
     /// Overrides the timeout cap used for EDT command execution.
     pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.timeout = timeout;
-        self.budget_started_at = Instant::now();
-        self
-    }
-
-    /// Overrides the shared execution policy for EDT command execution.
-    pub fn with_execution_policy(mut self, execution_policy: ProcessExecutionPolicy) -> Self {
-        self.execution_policy = execution_policy;
         self.budget_started_at = Instant::now();
         self
     }
@@ -877,7 +879,12 @@ mod tests {
         );
 
         let runner = ProcessExecutor;
-        let dsl = EdtDsl::new(script, dir.path().join("ws"), &runner as &dyn ProcessRunner);
+        let dsl = EdtDsl::new(
+            script,
+            dir.path().join("ws"),
+            &runner as &dyn ProcessRunner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        );
 
         let result = dsl
             .export_project("project", Path::new("/tmp/out"))
@@ -906,7 +913,12 @@ mod tests {
         );
 
         let runner = ProcessExecutor;
-        let dsl = EdtDsl::new(script, dir.path().join("ws"), &runner as &dyn ProcessRunner);
+        let dsl = EdtDsl::new(
+            script,
+            dir.path().join("ws"),
+            &runner as &dyn ProcessRunner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        );
 
         let result = dsl
             .export_project_path(Path::new("/tmp/project"), Path::new("/tmp/out"))
@@ -938,7 +950,12 @@ mod tests {
         let out_log = dir.path().join("validate.log");
 
         let runner = ProcessExecutor;
-        let dsl = EdtDsl::new(script, dir.path().join("ws"), &runner as &dyn ProcessRunner);
+        let dsl = EdtDsl::new(
+            script,
+            dir.path().join("ws"),
+            &runner as &dyn ProcessRunner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        );
         let result = dsl
             .validate_project(Path::new("/tmp/project"), &out_log)
             .expect("validate project");
@@ -963,7 +980,12 @@ mod tests {
         let out_log = dir.path().join("missing").join("validate.log");
 
         let runner = ProcessExecutor;
-        let dsl = EdtDsl::new(script, dir.path().join("ws"), &runner as &dyn ProcessRunner);
+        let dsl = EdtDsl::new(
+            script,
+            dir.path().join("ws"),
+            &runner as &dyn ProcessRunner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        );
         let result = dsl
             .validate_project(Path::new("/tmp/project"), &out_log)
             .expect("validate project");
@@ -990,7 +1012,12 @@ mod tests {
         let workspace = dir.path().join("missing").join("ws");
 
         let runner = ProcessExecutor;
-        let dsl = EdtDsl::new(script, workspace.clone(), &runner as &dyn ProcessRunner);
+        let dsl = EdtDsl::new(
+            script,
+            workspace.clone(),
+            &runner as &dyn ProcessRunner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        );
         let result = dsl
             .export_project("project", Path::new("/tmp/out"))
             .expect("export project");
@@ -1011,7 +1038,12 @@ mod tests {
         );
 
         let runner = ProcessExecutor;
-        let dsl = EdtDsl::new(script, dir.path().join("ws"), &runner as &dyn ProcessRunner);
+        let dsl = EdtDsl::new(
+            script,
+            dir.path().join("ws"),
+            &runner as &dyn ProcessRunner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        );
 
         let result = dsl
             .import_project(Path::new("/tmp/project"))
@@ -1037,7 +1069,12 @@ mod tests {
         );
 
         let runner = ProcessExecutor;
-        let dsl = EdtDsl::new(script, dir.path().join("ws"), &runner as &dyn ProcessRunner);
+        let dsl = EdtDsl::new(
+            script,
+            dir.path().join("ws"),
+            &runner as &dyn ProcessRunner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        );
 
         let result = dsl
             .import_configuration_files(
@@ -1104,6 +1141,7 @@ mod tests {
             PathBuf::from("/tmp/1cedtcli"),
             PathBuf::from("/tmp/ws"),
             &runner as &dyn ProcessRunner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
         )
         .with_timeout(Some(Duration::from_secs(7)));
 
@@ -1180,6 +1218,7 @@ mod tests {
             dir.path().join("ws"),
             TEST_INTERACTIVE_STARTUP_TIMEOUT,
             TEST_INTERACTIVE_COMMAND_TIMEOUT,
+            crate::platform::process::ProcessExecutionPolicy::default(),
         )
         .expect("interactive dsl");
 
@@ -1218,6 +1257,7 @@ mod tests {
             manager.clone(),
             Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
             Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
+            crate::platform::process::ProcessExecutionPolicy::default(),
         )
         .expect("first dsl");
         let second = EdtDsl::new_shared_session(
@@ -1226,6 +1266,7 @@ mod tests {
             manager,
             Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
             Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
+            crate::platform::process::ProcessExecutionPolicy::default(),
         )
         .expect("second dsl");
 
@@ -1283,6 +1324,7 @@ OUT\n\
             dir.path().join("ws"),
             TEST_INTERACTIVE_STARTUP_TIMEOUT,
             TEST_INTERACTIVE_COMMAND_TIMEOUT,
+            crate::platform::process::ProcessExecutionPolicy::default(),
         )
         .expect("interactive dsl");
 
@@ -1328,13 +1370,14 @@ OUT\n\
             dir.path().join("ws"),
             TEST_INTERACTIVE_STARTUP_TIMEOUT,
             TEST_INTERACTIVE_COMMAND_TIMEOUT,
+            ProcessExecutionPolicy::new(
+                Some(Duration::from_millis(50)),
+                CancellationToken::new(),
+                ProcessInterruptionSafety::GracefulThenKill,
+                crate::platform::process::WorkGiven::for_command(),
+            ),
         )
-        .expect("interactive dsl")
-        .with_execution_policy(ProcessExecutionPolicy::new(
-            Some(Duration::from_millis(50)),
-            CancellationToken::new(),
-            ProcessInterruptionSafety::GracefulThenKill,
-        ));
+        .expect("interactive dsl");
 
         let error = dsl
             .export_project("project", Path::new("/tmp/out"))
@@ -1381,13 +1424,14 @@ OUT\n\
             dir.path().join("ws"),
             TEST_INTERACTIVE_STARTUP_TIMEOUT,
             TEST_INTERACTIVE_COMMAND_TIMEOUT,
+            ProcessExecutionPolicy::new(
+                Some(Duration::from_millis(100)),
+                CancellationToken::new(),
+                ProcessInterruptionSafety::GracefulThenKill,
+                crate::platform::process::WorkGiven::for_command(),
+            ),
         )
-        .expect("interactive dsl")
-        .with_execution_policy(ProcessExecutionPolicy::new(
-            Some(Duration::from_millis(100)),
-            CancellationToken::new(),
-            ProcessInterruptionSafety::GracefulThenKill,
-        ));
+        .expect("interactive dsl");
 
         let error = dsl
             .export_project("project", Path::new("/tmp/out"))
@@ -1438,13 +1482,14 @@ OUT\n\
             dir.path().join("ws"),
             TEST_INTERACTIVE_STARTUP_TIMEOUT,
             TEST_INTERACTIVE_COMMAND_TIMEOUT,
+            ProcessExecutionPolicy::new(
+                Some(Duration::from_millis(400)),
+                CancellationToken::new(),
+                ProcessInterruptionSafety::GracefulThenKill,
+                crate::platform::process::WorkGiven::for_command(),
+            ),
         )
-        .expect("interactive dsl")
-        .with_execution_policy(ProcessExecutionPolicy::new(
-            Some(Duration::from_millis(400)),
-            CancellationToken::new(),
-            ProcessInterruptionSafety::GracefulThenKill,
-        ));
+        .expect("interactive dsl");
 
         dsl.export_project("first", Path::new("/tmp/out1"))
             .expect("first export");
@@ -1499,13 +1544,14 @@ OUT\n\
             dir.path().join("ws"),
             TEST_INTERACTIVE_STARTUP_TIMEOUT,
             TEST_INTERACTIVE_COMMAND_TIMEOUT,
+            ProcessExecutionPolicy::new(
+                Some(Duration::from_secs(1)),
+                cancellation,
+                ProcessInterruptionSafety::GracefulThenKill,
+                crate::platform::process::WorkGiven::for_command(),
+            ),
         )
-        .expect("interactive dsl")
-        .with_execution_policy(ProcessExecutionPolicy::new(
-            Some(Duration::from_secs(1)),
-            cancellation,
-            ProcessInterruptionSafety::GracefulThenKill,
-        ));
+        .expect("interactive dsl");
 
         let error = dsl
             .export_project("project", Path::new("/tmp/out"))
@@ -1551,13 +1597,14 @@ OUT\n\
             dir.path().join("ws"),
             TEST_INTERACTIVE_STARTUP_TIMEOUT,
             TEST_INTERACTIVE_COMMAND_TIMEOUT,
+            ProcessExecutionPolicy::new(
+                Some(Duration::from_millis(250)),
+                CancellationToken::new(),
+                ProcessInterruptionSafety::CriticalNonAbortable,
+                crate::platform::process::WorkGiven::for_command(),
+            ),
         )
-        .expect("interactive dsl")
-        .with_execution_policy(ProcessExecutionPolicy::new(
-            Some(Duration::from_millis(250)),
-            CancellationToken::new(),
-            ProcessInterruptionSafety::CriticalNonAbortable,
-        ));
+        .expect("interactive dsl");
 
         let result = dsl
             .export_project("project", Path::new("/tmp/out"))

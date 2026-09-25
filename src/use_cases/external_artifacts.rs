@@ -487,7 +487,12 @@ mod tests {
             fs::set_permissions(&binary, perms).expect("chmod");
         }
         let config = config(&base, &work, &binary, SourceFormat::Edt);
-        let dsl = EdtDsl::new(binary.clone(), work.join("edt-workspace"), &ProcessExecutor);
+        let dsl = EdtDsl::new(
+            binary.clone(),
+            work.join("edt-workspace"),
+            &ProcessExecutor,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        );
 
         let artifacts =
             prepare_edt_external_artifacts(&config, &config.source_sets[1], &dsl).expect("prepare");

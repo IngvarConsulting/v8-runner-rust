@@ -35,25 +35,23 @@ pub struct DesignerDsl<'a> {
 
 impl<'a> DesignerDsl<'a> {
     /// Create a new Designer DSL bound to one executable path and runner.
+    ///
+    /// The policy is required: it carries the command's interrupt and its work mark, and a
+    /// DSL on a policy of its own would lose both.
     pub fn new(
         binary: PathBuf,
         connection: V8Connection,
         runner: &'a dyn ProcessRunner,
         log_file: Option<PathBuf>,
+        execution_policy: ProcessExecutionPolicy,
     ) -> Self {
         Self {
             binary,
             connection,
             runner,
             log_file,
-            execution_policy: ProcessExecutionPolicy::default(),
+            execution_policy,
         }
-    }
-
-    /// Overrides the shared execution policy for process-level cancellation and deadlines.
-    pub fn with_execution_policy(mut self, execution_policy: ProcessExecutionPolicy) -> Self {
-        self.execution_policy = execution_policy;
-        self
     }
 
     /// `/LoadConfigFromFiles <dir> -updateConfigDumpInfo`
@@ -443,6 +441,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             Some(log_path),
+            crate::platform::process::ProcessExecutionPolicy::default(),
         );
 
         let error = dsl
@@ -470,6 +469,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             None,
+            crate::platform::process::ProcessExecutionPolicy::default(),
         );
 
         let result = dsl.check_config(&[]).expect("check config");
@@ -495,6 +495,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             Some(log_path.clone()),
+            crate::platform::process::ProcessExecutionPolicy::default(),
         );
 
         let result = dsl.check_config(&["-Server"]).expect("check config");
@@ -518,6 +519,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             Some(log_path.clone()),
+            crate::platform::process::ProcessExecutionPolicy::default(),
         );
 
         let result = dsl.check_config(&["-Server"]).expect("check config");
@@ -548,6 +550,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             None,
+            crate::platform::process::ProcessExecutionPolicy::default(),
         );
 
         dsl.dump_config_to_files(dir.path().join("out").as_path(), None)
@@ -575,6 +578,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             None,
+            crate::platform::process::ProcessExecutionPolicy::default(),
         );
 
         dsl.dump_config_to_files_incremental(dir.path().join("out").as_path(), Some("ExtName"))
@@ -604,6 +608,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             None,
+            crate::platform::process::ProcessExecutionPolicy::default(),
         );
 
         dsl.dump_config_to_files_partial(
@@ -639,6 +644,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/my ib"),
             &runner as &dyn ProcessRunner,
             None,
+            crate::platform::process::ProcessExecutionPolicy::default(),
         );
 
         dsl.create_infobase().expect("create infobase");
@@ -669,6 +675,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             Some(log_path.clone()),
+            crate::platform::process::ProcessExecutionPolicy::default(),
         );
 
         let result = dsl.dump_cfg(&target, Some("SalesAddon")).expect("dump cfg");
@@ -698,6 +705,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             None,
+            crate::platform::process::ProcessExecutionPolicy::default(),
         );
 
         dsl.dump_db_cfg(&target, Some("SalesAddon"))
@@ -741,6 +749,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             None,
+            crate::platform::process::ProcessExecutionPolicy::default(),
         );
 
         dsl.dump_infobase(&target).expect("dump infobase");
@@ -780,6 +789,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             None,
+            crate::platform::process::ProcessExecutionPolicy::default(),
         );
 
         dsl.load_cfg(&dir.path().join("release.cf"), None)
@@ -818,6 +828,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             None,
+            crate::platform::process::ProcessExecutionPolicy::default(),
         );
 
         dsl.compare_cfg(
@@ -856,6 +867,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             None,
+            crate::platform::process::ProcessExecutionPolicy::default(),
         );
 
         dsl.dump_external_data_processor_or_report_to_files(

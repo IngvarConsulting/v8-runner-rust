@@ -173,8 +173,8 @@ fn run_syntax_branch(
         config.v8_connection(),
         runner,
         Some(log_path.clone()),
-    )
-    .with_execution_policy(context.process_policy(InterruptionSafetyClass::GracefulThenKill, None));
+        context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+    );
 
     let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
     let stage_label = "check: designer-config";
@@ -605,14 +605,12 @@ fn run_edt_syntax(
                 Arc::new(manager),
                 Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
                 Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
-            ) {
-                Ok(dsl) => Some(
-                    dsl.with_timeout(context.edt_timeout())
-                        .with_execution_policy(context.process_policy(
-                            InterruptionSafetyClass::GracefulThenKill,
-                            context.edt_timeout(),
-                        )),
+                context.process_policy(
+                    InterruptionSafetyClass::GracefulThenKill,
+                    context.edt_timeout(),
                 ),
+            ) {
+                Ok(dsl) => Some(dsl.with_timeout(context.edt_timeout())),
                 Err(error) => {
                     let app_error = AppError::from(error);
                     let message = app_error.to_string();
@@ -679,12 +677,12 @@ fn run_edt_syntax(
                 edt_binary.clone(),
                 config.work_path.join("edt-workspace"),
                 utilities.runner_for(UtilityType::EdtCli),
+                context.process_policy(
+                    InterruptionSafetyClass::GracefulThenKill,
+                    context.edt_timeout(),
+                ),
             )
             .with_timeout(context.edt_timeout())
-            .with_execution_policy(context.process_policy(
-                InterruptionSafetyClass::GracefulThenKill,
-                context.edt_timeout(),
-            ))
             .validate_project(&source_path, &log_path)
         } {
             Ok(result) => result,

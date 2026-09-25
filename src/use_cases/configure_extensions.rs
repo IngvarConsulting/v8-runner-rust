@@ -91,12 +91,12 @@ pub fn execute(
             Ok(agent) => SafetySetter::Agent(Box::new(agent)),
             Err(error) => return Err(UseCaseFailure::without_payload(error)),
         },
-        Executor::Ibcmd { binary, connection } => SafetySetter::Ibcmd(Box::new(
-            IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
-                .with_execution_policy(
-                    context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
-                ),
-        )),
+        Executor::Ibcmd { binary, connection } => SafetySetter::Ibcmd(Box::new(IbcmdDsl::new(
+            binary,
+            connection,
+            utilities.runner_for(UtilityType::Ibcmd),
+            context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
+        ))),
     };
 
     let outcome = disable_safety_for(context, &mut setter, targets, started);

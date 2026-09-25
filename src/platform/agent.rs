@@ -1287,12 +1287,13 @@ impl ManagedAgent {
             session.shutdown(policy);
         }
         if let Some(process) = self.process.take() {
-            let grace = crate::platform::process::ProcessExecutionPolicy {
-                timeout: Some(Duration::from_secs(15)),
-                cancellation: CancellationToken::new(),
-                safety: crate::platform::process::ProcessInterruptionSafety::Interruptible,
-                graceful_shutdown_timeout: Duration::from_millis(250),
-            };
+            // Ожидание выхода агента — служебное: работы команды оно не отмечает.
+            let grace = crate::platform::process::ProcessExecutionPolicy::new(
+                Some(Duration::from_secs(15)),
+                CancellationToken::new(),
+                crate::platform::process::ProcessInterruptionSafety::Interruptible,
+                crate::platform::process::WorkGiven::detached(),
+            );
             match process.wait_for_exit(&grace) {
                 Ok(outcome) if outcome.timed_out => {
                     warn!("designer agent ignored shutdown and was terminated")

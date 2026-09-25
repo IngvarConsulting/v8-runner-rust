@@ -494,8 +494,8 @@ pub(super) fn build_designer_dsl<'a>(
         config.v8_connection(),
         runner,
         Some(log_file),
-    )
-    .with_execution_policy(context.process_policy(safety, None)))
+        context.process_policy(safety, None),
+    ))
 }
 
 pub(super) fn build_ibcmd_dsl<'a>(
@@ -507,8 +507,12 @@ pub(super) fn build_ibcmd_dsl<'a>(
 ) -> Result<IbcmdDsl<'a>, AppError> {
     let connection = IbcmdConnection::from_infobase(&config.infobase).map_err(map_ibcmd_error)?;
 
-    Ok(IbcmdDsl::new(binary.to_path_buf(), connection, runner)
-        .with_execution_policy(context.process_policy(safety, None)))
+    Ok(IbcmdDsl::new(
+        binary.to_path_buf(),
+        connection,
+        runner,
+        context.process_policy(safety, None),
+    ))
 }
 
 pub(super) fn map_ibcmd_error(error: IbcmdError) -> AppError {

@@ -97,10 +97,12 @@ pub fn execute(
             extensions
         }
         Executor::Ibcmd { binary, connection } => {
-            let dsl = IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
-                .with_execution_policy(
-                    context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-                );
+            let dsl = IbcmdDsl::new(
+                binary,
+                connection,
+                utilities.runner_for(UtilityType::Ibcmd),
+                context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+            );
             let subject = inventory_subject(&request.scope);
 
             let platform_result = match &request.scope {
@@ -540,10 +542,12 @@ pub fn change(
             })
         }
         Executor::Ibcmd { binary, connection } => {
-            let dsl = IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
-                .with_execution_policy(
-                    context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
-                );
+            let dsl = IbcmdDsl::new(
+                binary,
+                connection,
+                utilities.runner_for(UtilityType::Ibcmd),
+                context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
+            );
             let platform_result = match request {
                 ExtensionChangeRequest::Create {
                     name,

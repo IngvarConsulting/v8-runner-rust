@@ -673,8 +673,6 @@ fn run_restore_provider(
                 config.v8_connection(),
                 &runner,
                 Some(log),
-            )
-            .with_execution_policy(
                 context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
             )
             .restore_infobase(source_file)
@@ -1527,8 +1525,6 @@ fn run_configuration_provider(
                 config.v8_connection(),
                 &runner,
                 Some(log),
-            )
-            .with_execution_policy(
                 context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
             );
             match state {
@@ -1548,17 +1544,19 @@ fn run_configuration_provider(
                     data_path.display()
                 ))
             })?;
-            IbcmdDsl::new(executable.to_path_buf(), connection, &runner)
-                .with_data_path(data_path)
-                .with_execution_policy(
-                    context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-                )
-                .config_save(
-                    staging_path,
-                    state == ConfigurationState::Database,
-                    extension,
-                )
-                .map_err(AppError::from)?
+            IbcmdDsl::new(
+                executable.to_path_buf(),
+                connection,
+                &runner,
+                context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+            )
+            .with_data_path(data_path)
+            .config_save(
+                staging_path,
+                state == ConfigurationState::Database,
+                extension,
+            )
+            .map_err(AppError::from)?
         }
     };
     Ok(result)
@@ -1589,8 +1587,6 @@ fn run_snapshot_provider(
                 config.v8_connection(),
                 &runner,
                 Some(log),
-            )
-            .with_execution_policy(
                 context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
             )
             .dump_infobase(staging_path)

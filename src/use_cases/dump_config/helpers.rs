@@ -214,8 +214,8 @@ pub(super) fn build_designer_dsl<'a>(
         config.v8_connection(),
         runner,
         Some(log_file),
-    )
-    .with_execution_policy(context.process_policy(InterruptionSafetyClass::GracefulThenKill, None)))
+        context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+    ))
 }
 
 pub(super) fn build_ibcmd_dsl<'a>(
@@ -234,11 +234,13 @@ pub(super) fn build_ibcmd_dsl<'a>(
         ))
     })?;
 
-    Ok(IbcmdDsl::new(binary.to_path_buf(), connection, runner)
-        .with_data_path(data_path)
-        .with_execution_policy(
-            context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-        ))
+    Ok(IbcmdDsl::new(
+        binary.to_path_buf(),
+        connection,
+        runner,
+        context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+    )
+    .with_data_path(data_path))
 }
 
 pub(super) fn map_ibcmd_error(error: IbcmdError) -> AppError {

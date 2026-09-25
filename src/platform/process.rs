@@ -194,6 +194,38 @@ pub struct ProcessInterruption {
     pub action: ProcessInterruptionAction,
 }
 
+/// Получил ли исполнитель работу этой команды. Отмечает её платформа в тот миг, когда работа
+/// передаётся: запущен процесс, который выполняет запрос, или работающей сессии отдана
+/// команда запроса. Подъём сессии и её служебные команды отметки не ставят. Читает её
+/// сценарий, когда собирает ответ; клоны делят одну отметку.
+///
+/// `Default` нет нарочно: отметка, созданная мимо команды, молча теряла бы работу.
+#[derive(Debug, Clone)]
+pub struct WorkGiven(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl WorkGiven {
+    /// Отметка одной команды: её заводит контекст команды.
+    pub fn for_command() -> Self {
+        Self(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )))
+    }
+
+    /// Отметка, которую никто не читает: для служебной работы самой платформы.
+    pub(crate) fn detached() -> Self {
+        Self::for_command()
+    }
+
+    /// Работа передана исполнителю.
+    pub(crate) fn mark_work_given(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn given(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
 /// Shared execution policy passed from transport-neutral command context into the runner.
 #[derive(Debug, Clone)]
 pub struct ProcessExecutionPolicy {
@@ -201,16 +233,21 @@ pub struct ProcessExecutionPolicy {
     pub cancellation: CancellationToken,
     pub safety: ProcessInterruptionSafety,
     pub graceful_shutdown_timeout: Duration,
+    /// Куда отметить, что процесс запущен: запуск разового процесса — работа команды.
+    pub work: WorkGiven,
 }
 
+/// Только для тестов: в работе политику строит контекст команды, и отметка работы у неё
+/// своя, а не пустая.
+#[cfg(test)]
 impl Default for ProcessExecutionPolicy {
     fn default() -> Self {
-        Self {
-            timeout: None,
-            cancellation: CancellationToken::new(),
-            safety: ProcessInterruptionSafety::Interruptible,
-            graceful_shutdown_timeout: Duration::from_millis(250),
-        }
+        Self::new(
+            None,
+            CancellationToken::new(),
+            ProcessInterruptionSafety::Interruptible,
+            WorkGiven::for_command(),
+        )
     }
 }
 
@@ -219,12 +256,14 @@ impl ProcessExecutionPolicy {
         timeout: Option<Duration>,
         cancellation: CancellationToken,
         safety: ProcessInterruptionSafety,
+        work: WorkGiven,
     ) -> Self {
         Self {
             timeout,
             cancellation,
             safety,
-            ..Self::default()
+            graceful_shutdown_timeout: Duration::from_millis(250),
+            work,
         }
     }
 }
@@ -266,6 +305,10 @@ pub enum ProcessError {
 /// Boundary for synchronous and detached process execution.
 pub trait ProcessRunner {
     /// Execute a process under the caller's execution policy.
+    ///
+    /// Right after the process has started, the implementation marks `policy.work`: a
+    /// started request process is the command's work, whatever happens to it later. A run
+    /// refused before the start marks nothing.
     ///
     /// No default: an implementation must answer for the whole policy, not just its
     /// timeout. Since a command carries no deadline
@@ -376,6 +419,7 @@ impl ProcessExecutor {
             });
         }
         let spawned = spawn_command(request, ProcessIoMode::Captured, &rendered_command)?;
+        policy.work.mark_work_given();
         let output = wait_for_output(spawned, &rendered_command, policy)?;
         debug!(
             command = rendered_command.as_str(),
@@ -1588,6 +1632,7 @@ mod tests {
                     Some(Duration::from_millis(100)),
                     CancellationToken::new(),
                     ProcessInterruptionSafety::Interruptible,
+                    crate::platform::process::WorkGiven::for_command(),
                 ),
             )
             .expect_err("expected timeout");
@@ -1644,7 +1689,12 @@ mod tests {
                             stderr_log_path: None,
                             startup_probe: None,
                         },
-                        &ProcessExecutionPolicy::new(timeout, cancellation, safety),
+                        &ProcessExecutionPolicy::new(
+                            timeout,
+                            cancellation,
+                            safety,
+                            crate::platform::process::WorkGiven::for_command(),
+                        ),
                     )
                     .expect_err("the process must be interrupted");
                 if let Some(canceller) = canceller {
@@ -1694,6 +1744,7 @@ mod tests {
                     None,
                     cancellation,
                     ProcessInterruptionSafety::Interruptible,
+                    crate::platform::process::WorkGiven::for_command(),
                 ),
             )
             .expect_err("expected cancellation");
@@ -1723,6 +1774,7 @@ mod tests {
                     Some(Duration::from_millis(10)),
                     CancellationToken::new(),
                     ProcessInterruptionSafety::CriticalNonAbortable,
+                    crate::platform::process::WorkGiven::for_command(),
                 ),
             )
             .expect("critical process must reach terminal success");

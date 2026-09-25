@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::platform::process::{ProcessExecutionPolicy, ProcessInterruptionSafety};
+use crate::platform::process::{ProcessExecutionPolicy, ProcessInterruptionSafety, WorkGiven};
 
 /// Identifies the logical command being executed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +115,8 @@ pub struct ExecutionContext {
     transport: ExecutionTransport,
     edt_timeout: Option<Duration>,
     cancellation: CancellationToken,
+    /// Получил ли исполнитель работу этой команды; отмечает платформа, читает ответ.
+    work: WorkGiven,
 }
 
 impl ExecutionContext {
@@ -125,6 +127,7 @@ impl ExecutionContext {
             transport,
             edt_timeout: None,
             cancellation: CancellationToken::new(),
+            work: WorkGiven::for_command(),
         }
     }
 
@@ -187,7 +190,17 @@ impl ExecutionContext {
         safety: InterruptionSafetyClass,
         timeout_cap: Option<Duration>,
     ) -> ProcessExecutionPolicy {
-        ProcessExecutionPolicy::new(timeout_cap, self.cancellation(), safety.process_safety())
+        ProcessExecutionPolicy::new(
+            timeout_cap,
+            self.cancellation(),
+            safety.process_safety(),
+            self.work.clone(),
+        )
+    }
+
+    /// Отметка работы исполнителя для этой команды: `provider_dispatched` ответа.
+    pub fn work(&self) -> &WorkGiven {
+        &self.work
     }
 
     /// Returns the pending command-boundary interruption, if any.

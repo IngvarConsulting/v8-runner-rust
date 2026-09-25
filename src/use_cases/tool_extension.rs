@@ -604,8 +604,6 @@ fn build_designer_dsl<'a>(
         config.v8_connection(),
         runner,
         Some(log_file),
-    )
-    .with_execution_policy(
         context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
     ))
 }
@@ -618,11 +616,12 @@ fn build_ibcmd_dsl<'a>(
 ) -> Result<IbcmdDsl<'a>, AppError> {
     let connection = IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
 
-    Ok(
-        IbcmdDsl::new(binary.to_path_buf(), connection, runner).with_execution_policy(
-            context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
-        ),
-    )
+    Ok(IbcmdDsl::new(
+        binary.to_path_buf(),
+        connection,
+        runner,
+        context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
+    ))
 }
 
 fn build_edt_dsl<'a>(
@@ -632,7 +631,8 @@ fn build_edt_dsl<'a>(
     utilities: &'a mut PlatformUtilities,
 ) -> Result<EdtDsl<'a>, AppError> {
     let workspace = config.work_path.join("edt-workspace");
-    let dsl = if config.tools.edt_cli.interactive_mode {
+    let policy = context.process_policy(InterruptionSafetyClass::GracefulThenKill, None);
+    if config.tools.edt_cli.interactive_mode {
         let manager =
             EdtSessionManager::for_config(config, EdtSessionHostOptions::for_cli_command(config))
                 .map_err(AppError::from)?;
@@ -642,18 +642,17 @@ fn build_edt_dsl<'a>(
             Arc::new(manager),
             Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
             Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
+            policy,
         )
-        .map_err(AppError::from)?
+        .map_err(AppError::from)
     } else {
-        EdtDsl::new(
+        Ok(EdtDsl::new(
             binary.to_path_buf(),
             workspace,
             utilities.runner_for(UtilityType::EdtCli),
-        )
-    };
-    Ok(dsl.with_execution_policy(
-        context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-    ))
+            policy,
+        ))
+    }
 }
 
 fn resolve_edt_project_name(

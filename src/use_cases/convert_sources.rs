@@ -226,6 +226,7 @@ fn run_convert_with_context(
             Arc::new(manager),
             Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
             Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
+            policy,
         )
         .map_err(|error| {
             let app_error = AppError::from(error);
@@ -244,17 +245,16 @@ fn run_convert_with_context(
                 ),
             )
         })?
-        .with_timeout(context.edt_timeout())
-        .with_execution_policy(policy);
+        .with_timeout(context.edt_timeout());
         execute_with_dsl(context, &dsl, &resolved, started)
     } else {
         let dsl = EdtDsl::new(
             location.path.clone(),
             resolved.workspace_path.clone(),
             utilities.runner_for(UtilityType::EdtCli),
+            policy,
         )
-        .with_timeout(context.edt_timeout())
-        .with_execution_policy(policy);
+        .with_timeout(context.edt_timeout());
         execute_with_dsl(context, &dsl, &resolved, started)
     }
 }

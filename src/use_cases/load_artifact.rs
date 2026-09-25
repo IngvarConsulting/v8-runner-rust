@@ -657,10 +657,12 @@ fn installed_extension_state(
         Ok(location) => location.path,
         Err(error) => return ExtensionPresence::NotEstablished(error.to_string(), false),
     };
-    let dsl = IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
-        .with_execution_policy(
-            context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-        );
+    let dsl = IbcmdDsl::new(
+        binary,
+        connection,
+        utilities.runner_for(UtilityType::Ibcmd),
+        context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+    );
     let result = match dsl.infobase_extension_list() {
         Ok(result) => result,
         // The spawn itself failed, so nothing ran.
@@ -964,8 +966,8 @@ fn build_designer_dsl<'a>(
         config.v8_connection(),
         runner,
         Some(log_file),
-    )
-    .with_execution_policy(context.process_policy(safety, None)))
+        context.process_policy(safety, None),
+    ))
 }
 
 fn ensure_platform_success(

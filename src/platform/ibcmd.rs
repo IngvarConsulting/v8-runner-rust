@@ -201,16 +201,19 @@ pub struct IbcmdDsl<'a> {
 
 impl<'a> IbcmdDsl<'a> {
     /// Creates a new DSL bound to a resolved `ibcmd` binary and target infobase.
+    ///
+    /// The policy is required: it carries the command's interrupt and its work mark.
     pub fn new(
         binary: PathBuf,
         connection: IbcmdConnection,
         runner: &'a dyn ProcessRunner,
+        execution_policy: ProcessExecutionPolicy,
     ) -> Self {
         Self {
             binary,
             connection,
             runner,
-            execution_policy: ProcessExecutionPolicy::default(),
+            execution_policy,
             data_path: None,
         }
     }
@@ -218,12 +221,6 @@ impl<'a> IbcmdDsl<'a> {
     /// Uses an isolated standalone-server data directory for every IBCMD call.
     pub fn with_data_path(mut self, data_path: PathBuf) -> Self {
         self.data_path = Some(data_path);
-        self
-    }
-
-    /// Overrides the shared execution policy for process-level cancellation and deadlines.
-    pub fn with_execution_policy(mut self, execution_policy: ProcessExecutionPolicy) -> Self {
-        self.execution_policy = execution_policy;
         self
     }
 
@@ -628,7 +625,12 @@ mod tests {
         );
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        );
 
         dsl.config_import_full(dir.path(), Some("Ext"))
             .expect("import");
@@ -652,7 +654,12 @@ mod tests {
         );
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        );
         let files = vec![PathBuf::from("Catalogs/Items.xml")];
 
         dsl.config_import_partial(dir.path(), &files, None)
@@ -678,7 +685,12 @@ mod tests {
         );
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        );
 
         dsl.config_apply(None, DynamicUpdateMode::Auto)
             .expect("apply");
@@ -701,7 +713,12 @@ mod tests {
         );
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        );
 
         dsl.config_export_full(dir.path(), None).expect("export");
 
@@ -723,7 +740,12 @@ mod tests {
             &format!("printf '%s\\n' \"$@\" > \"{}\"\nexit 0", args_log.display()),
         );
         let runner = ProcessExecutor;
-        let dsl = IbcmdDsl::new(script, file_connection("File=/ib"), &runner);
+        let dsl = IbcmdDsl::new(
+            script,
+            file_connection("File=/ib"),
+            &runner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        );
 
         dsl.config_export_file(&source, &target)
             .expect("offline export");
@@ -756,7 +778,12 @@ mod tests {
         );
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        );
 
         dsl.config_save(&target, true, Some("SalesAddon"))
             .expect("save database extension");
@@ -800,8 +827,13 @@ mod tests {
                 .with_credentials(Some("admin".to_owned()), Some("secret".to_owned())),
         )
         .expect("connection");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner)
-            .with_data_path(data_path.clone());
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        )
+        .with_data_path(data_path.clone());
 
         dsl.config_save(&target, false, None)
             .expect("save working configuration");
@@ -843,8 +875,13 @@ mod tests {
         );
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner)
-            .with_data_path(data_path.clone());
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        )
+        .with_data_path(data_path.clone());
 
         dsl.config_export_full(dir.path(), None).expect("export");
 
@@ -879,7 +916,12 @@ mod tests {
             );
             let runner = ProcessExecutor;
             let conn = file_connection("File=/ib");
-            let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+            let dsl = IbcmdDsl::new(
+                script,
+                conn,
+                &runner as &dyn ProcessRunner,
+                crate::platform::process::ProcessExecutionPolicy::default(),
+            );
 
             dsl.config_export_full(dir.path(), None).expect("export");
 
@@ -901,7 +943,12 @@ mod tests {
         );
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        );
 
         dsl.config_export_incremental(dir.path(), None)
             .expect("export");
@@ -919,7 +966,12 @@ mod tests {
         write_script(&script, "echo out; echo err 1>&2; exit 7");
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        );
 
         let result = dsl
             .config_apply(None, DynamicUpdateMode::Auto)
@@ -945,7 +997,12 @@ mod tests {
         );
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        );
 
         let outcome = dsl.ensure_infobase_create().expect("create");
 
@@ -978,7 +1035,12 @@ mod tests {
                 .with_credentials(Some("postgres".to_owned()), Some("secret".to_owned())),
         ))
         .expect("connection");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        );
 
         let outcome = dsl.ensure_infobase_create().expect("ensure");
 
@@ -1012,7 +1074,12 @@ mod tests {
         );
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        );
 
         let outcome = dsl.ensure_infobase_create().expect("create outcome");
 
@@ -1034,7 +1101,12 @@ mod tests {
         write_script(&script, "exit 255");
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        );
 
         let outcome = dsl.ensure_infobase_create().expect("create outcome");
 
@@ -1053,7 +1125,12 @@ mod tests {
         );
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        );
 
         dsl.infobase_extension_update_properties("client_mcp", false, false)
             .expect("update");

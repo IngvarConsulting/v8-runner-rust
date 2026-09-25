@@ -731,16 +731,13 @@ fn build_edt_dsl<'a>(
             Arc::new(manager),
             Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
             Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
+            policy,
         )
         .map_err(AppError::from)
-        .map(|dsl| {
-            dsl.with_timeout(context.edt_timeout())
-                .with_execution_policy(policy)
-        })
+        .map(|dsl| dsl.with_timeout(context.edt_timeout()))
     } else {
-        Ok(EdtDsl::new(binary.to_path_buf(), workspace, runner)
-            .with_timeout(context.edt_timeout())
-            .with_execution_policy(policy))
+        Ok(EdtDsl::new(binary.to_path_buf(), workspace, runner, policy)
+            .with_timeout(context.edt_timeout()))
     }
 }
 
