@@ -1274,6 +1274,8 @@ fn launch_mcp_wait_ready_returns_client_mcp_tools_without_vanessa_requirements()
     );
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["data"]["mode"], "mcp");
+    // Клиент, запущенный с ручкой ради ожидания готовности, — работа команды.
+    assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
     assert_eq!(payload["data"]["mcp_readiness"]["ok"], true);
     assert_eq!(
         payload["data"]["mcp_readiness"]["url"],
@@ -1320,6 +1322,8 @@ fn launch_mcp_wait_ready_fails_when_endpoint_never_starts() {
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], false);
     assert_eq!(payload["data"]["ok"], false);
+    // Клиент стартовал и снят после неудачного ожидания: работу он получил.
+    assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
     assert_eq!(payload["data"]["mcp_readiness"]["ok"], false);
     assert_eq!(
         payload["data"]["mcp_readiness"]["url"],
@@ -1479,6 +1483,8 @@ fn thin_external_epf_wait_returns_structured_exit_and_artifacts() {
         String::from_utf8_lossy(&command_output.stderr)
     );
     let payload: Value = serde_json::from_slice(&command_output.stdout).expect("json");
+    // Клиент, которого ждали до выхода, — работа команды, каким бы ни был код выхода.
+    assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
     let wait = &payload["data"]["external_epf_wait"];
     assert!(wait["pid"].as_u64().is_some());
     assert_eq!(wait["execute_path"], epf.display().to_string());

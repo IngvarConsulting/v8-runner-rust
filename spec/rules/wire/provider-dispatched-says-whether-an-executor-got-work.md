@@ -7,8 +7,13 @@ check:
   - tests/contract_previews.rs::no_preview_claims_that_an_executor_got_work
   - src/platform/process.rs::only_a_started_process_marks_the_work
   - src/platform/process.rs::a_process_cancelled_after_its_start_still_got_the_work
+  - src/platform/process.rs::a_managed_process_marks_the_work_once_started
+  - src/platform/browser.rs::only_a_started_opener_marks_the_work
   - src/platform/edt_session.rs::only_a_delivered_work_request_marks_the_work
   - src/platform/edt_session.rs::a_work_request_cancelled_during_the_baseline_marks_nothing
+  - src/platform/edt_session.rs::a_request_refused_by_a_full_queue_marks_nothing
+  - src/platform/edt.rs::an_interactive_session_marks_only_the_request_command
+  - tests/mcp_stdio.rs::mcp_stdio_tools_answer_in_the_forms_of_their_commands
   - tests/mcp_stdio.rs::mcp_stdio_the_live_edt_check_answers_in_the_form_of_check
   - tests/mcp_stdio.rs::mcp_stdio_a_live_edt_check_whose_session_never_started_reports_no_work
   - tests/cli_agent_scenarios.rs::a_server_base_without_dbms_serves_extensions_through_the_agent
