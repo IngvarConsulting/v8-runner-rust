@@ -8,6 +8,7 @@ check:
   - src/platform/edt_session.rs::execute_blocking_running_cancellation_preserves_cancelled_result_after_forced_cleanup
   - src/platform/edt_session.rs::execute_blocking_running_timeout_preserves_timeout_result_after_forced_cleanup
   - src/use_cases/infobase_export.rs::a_cancelled_designer_restore_runs_to_its_end_and_names_the_deferral
+  - src/use_cases/load_artifact.rs::execute_reports_cancelled_status_at_update_db_cfg_safe_point
   - src/platform/process.rs::run_with_policy_defers_timeout_for_critical_process
   - src/use_cases/context.rs::no_process_critical_phase_reports_deferred_cancellation
 ---

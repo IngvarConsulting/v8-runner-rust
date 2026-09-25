@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 use crate::config::model::AppConfig;
 use crate::domain::artifact::ArtifactSet;
 use crate::domain::execution::{
-    ExecutionInterruptionDetails, ExecutionOutcome, ExecutionStatus, ExecutionStepKind,
-    ExecutionStepStatus, StepResult,
+    ExecutionInterruptionDetails, ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus,
+    ExecutionStepKind, ExecutionStepStatus, StepResult,
 };
 use crate::domain::runner::{LaunchClientModeRequest, LaunchOptions, RunnerKind};
 use crate::domain::test::{TestErrorKind, TestOutputMode, TestReport, TestRunResult, TestTarget};
@@ -101,7 +101,7 @@ pub(super) fn interrupted_test_failure(
         .with_diagnostics(vec![message.clone()])
         .with_interruptions(vec![command_interruption_details(
             interruption,
-            "command_boundary",
+            ExecutionInterruptionPhase::CommandBoundary,
             message.clone(),
         )]);
     let result = make_test_result(
@@ -326,7 +326,7 @@ pub(super) fn enterprise_error_kind(
             AppError::Runtime("enterprise test run cancelled".to_owned()),
             Some(process_interruption_details(
                 ProcessInterruptionReason::Cancelled,
-                "run",
+                ExecutionInterruptionPhase::Run,
                 false,
                 "enterprise test run cancelled",
             )),
@@ -337,7 +337,7 @@ pub(super) fn enterprise_error_kind(
             AppError::Runtime("enterprise test run timed out".to_owned()),
             Some(process_interruption_details(
                 ProcessInterruptionReason::TimedOut,
-                "run",
+                ExecutionInterruptionPhase::Run,
                 false,
                 "enterprise test run timed out",
             )),
@@ -387,7 +387,9 @@ mod tests {
     use std::path::PathBuf;
 
     use super::enterprise_error_kind;
-    use crate::domain::execution::ExecutionStatus;
+    use crate::domain::execution::{
+        ExecutionInterruptionKind, ExecutionInterruptionPhase, ExecutionStatus,
+    };
     use crate::domain::test::TestErrorKind;
     use crate::platform::enterprise::EnterpriseError;
     use crate::platform::process::ProcessError;
@@ -486,7 +488,10 @@ mod tests {
 
         assert_eq!(kind, None);
         assert!(matches!(app_error, AppError::Runtime(_)));
-        assert!(interruption.is_some());
+        let interruption = interruption.expect("a timed-out run is an interruption");
+        assert_eq!(interruption.kind, ExecutionInterruptionKind::TimedOut);
+        assert!(!interruption.deferred);
+        assert_eq!(interruption.phase, Some(ExecutionInterruptionPhase::Run));
         assert_eq!(status, ExecutionStatus::TimedOut);
     }
 }

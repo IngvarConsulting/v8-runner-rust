@@ -158,7 +158,7 @@
     },
     "ExecutionInterruptionDetails": {
       "additionalProperties": false,
-      "description": "Structured interruption metadata for actual or deferred command-boundary interruptions.",
+      "description": "Structured metadata of an actual or deferred interruption.",
       "properties": {
         "deferred": {
           "type": "boolean"
@@ -173,9 +173,13 @@
           ]
         },
         "phase": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionInterruptionPhase"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       },
@@ -192,6 +196,46 @@
         "timed_out"
       ],
       "type": "string"
+    },
+    "ExecutionInterruptionPhase": {
+      "description": "What was interrupted: one closed vocabulary shared by every form that carries an execution\noutcome. Each command uses the values that name its own work.",
+      "oneOf": [
+        {
+          "const": "command_boundary",
+          "description": "A safe point of the command: no platform work or publication was cut short.",
+          "type": "string"
+        },
+        {
+          "const": "provider_command",
+          "description": "The platform command of `download`, `infobase dump` or `infobase restore`: a process of\nits own or a command of an agent session.",
+          "type": "string"
+        },
+        {
+          "const": "run",
+          "description": "The test run in the 1C client (`test`).",
+          "type": "string"
+        },
+        {
+          "const": "apply",
+          "description": "Loading or merging the package into the infobase (`upload`).",
+          "type": "string"
+        },
+        {
+          "const": "update_db_cfg",
+          "description": "Updating the database configuration (`upload`).",
+          "type": "string"
+        },
+        {
+          "const": "publication",
+          "description": "Publishing the result through a staged copy (`make`, `download`, `infobase dump`).",
+          "type": "string"
+        },
+        {
+          "const": "export_or_publication",
+          "description": "`make` only: any failure that arrived while an interruption was pending — at the safe\npoint before export, during export or during publication. The answer does not tell which\n(issue #308).",
+          "type": "string"
+        }
+      ]
     },
     "ExecutionMetrics": {
       "additionalProperties": false,

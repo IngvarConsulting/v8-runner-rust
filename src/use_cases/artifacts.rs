@@ -11,7 +11,9 @@ use crate::domain::artifact::{
 };
 use crate::domain::artifacts::{ArtifactBuildMetadata, ArtifactBuildMode, ArtifactsResult};
 use crate::domain::capability::{Operation, Provider};
-use crate::domain::execution::{ExecutionError, ExecutionOutcome, ExecutionStatus};
+use crate::domain::execution::{
+    ExecutionError, ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus,
+};
 use crate::domain::runner::RunnerKind;
 use crate::platform::designer::DesignerDsl;
 use crate::platform::locator::UtilityType;
@@ -341,7 +343,7 @@ fn run_artifacts_selected(
                     .with_diagnostics(vec![message.clone()])
                     .with_interruptions(vec![command_interruption_details(
                         interruption,
-                        "export_or_publish",
+                        ExecutionInterruptionPhase::ExportOrPublication,
                         message.clone(),
                     )]);
             } else {
@@ -1159,7 +1161,7 @@ fn published_execution(
         Some(interruption) => {
             execution.with_interruptions(vec![deferred_command_interruption_details(
                 interruption,
-                "publish",
+                ExecutionInterruptionPhase::Publication,
                 publication_warning(context.command(), interruption),
             )])
         }
@@ -1257,7 +1259,7 @@ mod tests {
         ARTIFACT_ROLE_STAGE_FILE,
     };
     use crate::domain::artifacts::{ArtifactBuildMetadata, ArtifactBuildMode, ArtifactsResult};
-    use crate::domain::execution::ExecutionStatus;
+    use crate::domain::execution::{ExecutionInterruptionPhase, ExecutionStatus};
     use crate::platform::process::{
         ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessResult, ProcessRunner,
         SpawnResult,
@@ -1557,7 +1559,18 @@ mod tests {
 
         assert!(error_text.contains("before entering artifact export"));
         assert_eq!(payload.execution.status, ExecutionStatus::Cancelled);
-        assert_eq!(payload.execution.interruptions.len(), 1);
+        let [interruption] = payload.execution.interruptions.as_slice() else {
+            panic!(
+                "one interruption expected: {:?}",
+                payload.execution.interruptions
+            );
+        };
+        // Известный разрыв #308: до экспорта ничего не выгружено, и по смыслу это
+        // `command_boundary`. Когда #308 закроют, ожидание здесь сменится.
+        assert_eq!(
+            interruption.phase,
+            Some(ExecutionInterruptionPhase::ExportOrPublication)
+        );
     }
 
     #[cfg(unix)]
@@ -1740,6 +1753,10 @@ mod tests {
             panic!("one interruption expected: {:?}", execution.interruptions);
         };
         assert!(interruption.deferred);
+        assert_eq!(
+            interruption.phase,
+            Some(ExecutionInterruptionPhase::Publication)
+        );
     }
 
     #[cfg(unix)]

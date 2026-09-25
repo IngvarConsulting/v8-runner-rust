@@ -13,6 +13,9 @@ const EXECUTABLE_BUSY_MAX_RETRIES: usize = 5;
 const EXECUTABLE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(10);
 #[cfg(any(windows, test))]
 const WINDOWS_ERROR_INVALID_HANDLE: i32 = 6;
+/// Строка журнала, с которой раннер откладывает прерывание критического процесса.
+const CRITICAL_INTERRUPTION_DEFERRED: &str =
+    "interruption requested during critical process phase; waiting for terminal outcome";
 
 /// Request for launching an external utility.
 #[derive(Debug, Clone)]
@@ -855,7 +858,8 @@ fn interrupt_child(
             warn!(
                 command = rendered_command,
                 reason = ?reason,
-                "interruption requested during critical process phase; waiting for terminal outcome"
+                "{}",
+                CRITICAL_INTERRUPTION_DEFERRED
             );
             Ok(None)
         }
@@ -980,6 +984,53 @@ fn terminate_windows_process_tree(pid: u32) {
 /// [`crate::platform::secrets`] — единственный владелец правила.
 fn render_command(request: &ProcessRequest) -> String {
     render_masked_command(&request.program, &request.args)
+}
+
+/// Тестовая отметка: раннер отложил прерывание критического процесса. Тест ждёт её, а не
+/// отсчёта времени, прежде чем отпустить подставной процесс.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct DeferralWatch(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+#[cfg(test)]
+impl DeferralWatch {
+    pub(crate) fn observed(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Выполняет `operation` на этом потоке и отмечает строку журнала об отложенном
+    /// прерывании. Процесс ждёт раннер на вызывающем потоке, поэтому подписчика хватает.
+    pub(crate) fn during<T>(&self, operation: impl FnOnce() -> T) -> T {
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(self.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, operation)
+    }
+}
+
+#[cfg(test)]
+impl std::io::Write for DeferralWatch {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if String::from_utf8_lossy(buf).contains(CRITICAL_INTERRUPTION_DEFERRED) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for DeferralWatch {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
 }
 
 #[cfg(test)]

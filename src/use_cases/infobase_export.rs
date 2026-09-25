@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use crate::config::model::AppConfig;
 use crate::domain::capability::{Implementation, Provider, ProviderReceipt};
-use crate::domain::execution::{ExecutionError, ExecutionOutcome, ExecutionStatus, StepResult};
+use crate::domain::execution::{
+    ExecutionError, ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus, StepResult,
+};
 use crate::domain::infobase_export::{
     ConfigurationState, ConfigurationSubject, ExportConfigurationPackageRequest,
     ExportConfigurationPackageResult, ExportInfobaseSnapshotRequest, ExportInfobaseSnapshotResult,
@@ -33,8 +35,7 @@ use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
 
 use super::interruption::{
     command_interruption_details, deferred_command_interruption_details,
-    deferred_process_interruption_details, deferred_process_interruption_warning,
-    process_interruption_details,
+    deferred_process_interruption, process_interruption_details,
 };
 use super::staged_publication::{
     cleanup_owned_orphan_files, interruption_before_publish, PublicationFailureState,
@@ -177,7 +178,6 @@ pub fn execute_configuration_export(
     }
     record_deferred_process_interruption(
         &platform_result,
-        "provider command",
         "configuration export",
         &mut result.execution,
         &mut result.warnings,
@@ -238,7 +238,7 @@ pub fn execute_configuration_export(
             .interruptions
             .push(deferred_command_interruption_details(
                 interruption,
-                "publication",
+                ExecutionInterruptionPhase::Publication,
                 message,
             ));
     }
@@ -362,7 +362,6 @@ pub fn execute_infobase_snapshot(
     }
     record_deferred_process_interruption(
         &platform_result,
-        "provider command",
         "infobase DT export",
         &mut result.execution,
         &mut result.warnings,
@@ -423,7 +422,7 @@ pub fn execute_infobase_snapshot(
             .interruptions
             .push(deferred_command_interruption_details(
                 interruption,
-                "publication",
+                ExecutionInterruptionPhase::Publication,
                 message,
             ));
     }
@@ -599,7 +598,6 @@ pub fn execute_infobase_restore(
         // оператор просил остановить, и ответ говорит, почему его не послушали.
         record_deferred_process_interruption(
             &platform_result,
-            "provider command",
             "infobase DT restore",
             &mut result.execution,
             &mut result.warnings,
@@ -621,7 +619,6 @@ pub fn execute_infobase_restore(
     );
     record_deferred_process_interruption(
         &platform_result,
-        "provider command",
         "infobase DT restore",
         &mut result.execution,
         &mut result.warnings,
@@ -1189,7 +1186,7 @@ fn record_execution_failure(
         Some(ProcessError::Cancelled { .. }) => {
             interruption_details = Some(process_interruption_details(
                 ProcessInterruptionReason::Cancelled,
-                phase.as_str(),
+                phase.interruption_phase(),
                 false,
                 &message,
             ));
@@ -1198,7 +1195,7 @@ fn record_execution_failure(
         Some(ProcessError::TimedOut { .. }) => {
             interruption_details = Some(process_interruption_details(
                 ProcessInterruptionReason::TimedOut,
-                phase.as_str(),
+                phase.interruption_phase(),
                 false,
                 &message,
             ));
@@ -1208,7 +1205,7 @@ fn record_execution_failure(
             AppError::Cancelled(_) => {
                 interruption_details = Some(command_interruption_details(
                     crate::use_cases::context::ExecutionInterruption::Cancelled,
-                    phase.as_str(),
+                    phase.interruption_phase(),
                     &message,
                 ));
                 (ExecutionStatus::Cancelled, "cancelled")
@@ -1219,7 +1216,7 @@ fn record_execution_failure(
             AppError::TimedOut(_) => {
                 interruption_details = Some(process_interruption_details(
                     ProcessInterruptionReason::TimedOut,
-                    phase.as_str(),
+                    phase.interruption_phase(),
                     false,
                     &message,
                 ));
@@ -1271,18 +1268,16 @@ fn execution_error_code(error: &AppError) -> &'static str {
 
 fn record_deferred_process_interruption(
     platform_result: &PlatformCommandResult,
-    phase: &str,
     completed_action: &str,
     execution: &mut ExecutionOutcome<()>,
     warnings: &mut Vec<String>,
 ) {
-    if let Some(details) =
-        deferred_process_interruption_details(phase, completed_action, platform_result)
-    {
+    if let Some((warning, details)) = deferred_process_interruption(
+        ExecutionInterruptionPhase::ProviderCommand,
+        completed_action,
+        platform_result,
+    ) {
         execution.interruptions.push(details);
-    }
-    if let Some(warning) = deferred_process_interruption_warning(completed_action, platform_result)
-    {
         warnings.push(warning);
     }
 }
@@ -1675,7 +1670,9 @@ mod tests {
         AppConfig, BuildConfig, InfobaseConfig, McpConfig, SourceFormat, TestsConfig, ToolsConfig,
     };
     use crate::domain::capability::{Implementation, Provider};
-    use crate::domain::execution::{ExecutionOutcome, ExecutionStatus};
+    use crate::domain::execution::{
+        ExecutionInterruptionKind, ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus,
+    };
     use crate::domain::infobase_export::ConfigurationSubject;
     use crate::platform::process::ProcessError;
     use crate::support::error::AppError;
@@ -1884,6 +1881,22 @@ mod tests {
         let result = failure.payload.expect("typed payload");
         assert_eq!(result.execution.status, ExecutionStatus::Cancelled);
         assert_eq!(result.execution.errors[0].code, "cancelled");
+        // Прерывание замечено на безопасной точке команды; шаг выбора называет `steps[]`.
+        let [interruption] = result.execution.interruptions.as_slice() else {
+            panic!(
+                "one interruption expected: {:?}",
+                result.execution.interruptions
+            );
+        };
+        assert_eq!(
+            interruption.phase,
+            Some(ExecutionInterruptionPhase::CommandBoundary)
+        );
+        let failed = result.steps.last().expect("the failed step");
+        assert_eq!(
+            failed.name,
+            InfobaseTransferPhase::ProviderSelection.as_str()
+        );
     }
 
     #[test]
@@ -1945,7 +1958,14 @@ mod tests {
         assert_eq!(execution.status, ExecutionStatus::Cancelled);
         assert_eq!(execution.errors[0].code, "cancelled");
         assert!(!execution.errors[0].retryable);
-        assert_eq!(execution.interruptions.len(), 1);
+        let [interruption] = execution.interruptions.as_slice() else {
+            panic!("one interruption expected: {:?}", execution.interruptions);
+        };
+        assert!(!interruption.deferred);
+        assert_eq!(
+            interruption.phase,
+            Some(ExecutionInterruptionPhase::ProviderCommand)
+        );
     }
 
     #[test]
@@ -2120,21 +2140,31 @@ mod tests {
         let cancellation = tokio_util::sync::CancellationToken::new();
         let context = ExecutionContext::cli(CommandName::InfobaseRestore)
             .with_cancellation(cancellation.clone());
+        // Конфигуратор отпускают, когда раннер уже отложил отмену, а не через отсчёт времени.
+        let watch = crate::platform::process::DeferralWatch::default();
         let operator = {
             let root = root.clone();
+            let watch = watch.clone();
             std::thread::spawn(move || {
                 let deadline = Instant::now() + Duration::from_secs(30);
                 while !root.join("started").exists() && Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(10));
                 }
                 cancellation.cancel();
-                std::thread::sleep(Duration::from_millis(500));
+                while !watch.observed() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
                 std::fs::write(root.join("release"), "").expect("release");
+                watch.observed()
             })
         };
 
-        let outcome = super::execute_infobase_restore(&context, &config, &request, &prepared);
-        operator.join().expect("operator thread");
+        let outcome = watch
+            .during(|| super::execute_infobase_restore(&context, &config, &request, &prepared));
+        assert!(
+            operator.join().expect("operator thread"),
+            "the runner never logged that it deferred the cancellation"
+        );
         (dir, outcome)
     }
 
@@ -2155,11 +2185,12 @@ mod tests {
         assert_eq!(result.execution.status, ExecutionStatus::Succeeded);
         assert_eq!(result.execution.interruptions.len(), 1, "{result:?}");
         let interruption = &result.execution.interruptions[0];
-        assert_eq!(
-            interruption.kind,
-            crate::domain::execution::ExecutionInterruptionKind::Cancelled
-        );
+        assert_eq!(interruption.kind, ExecutionInterruptionKind::Cancelled);
         assert!(interruption.deferred);
+        assert_eq!(
+            interruption.phase,
+            Some(ExecutionInterruptionPhase::ProviderCommand)
+        );
         assert!(
             result
                 .warnings
@@ -2189,11 +2220,12 @@ mod tests {
             result.execution.interruptions
         );
         let interruption = &result.execution.interruptions[0];
-        assert_eq!(
-            interruption.kind,
-            crate::domain::execution::ExecutionInterruptionKind::Cancelled
-        );
+        assert_eq!(interruption.kind, ExecutionInterruptionKind::Cancelled);
         assert!(interruption.deferred);
+        assert_eq!(
+            interruption.phase,
+            Some(ExecutionInterruptionPhase::ProviderCommand)
+        );
         assert!(
             result
                 .warnings

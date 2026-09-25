@@ -62,7 +62,8 @@ pub struct LoadResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<crate::domain::capability::ProviderReceipt>,
 
-    /// `false` when the run stopped at a preview instead of dispatching the platform.
+    /// Whether the platform was started at all: `false` when the command stopped before the
+    /// first platform call — at a preview, a refusal or an interruption.
     pub provider_dispatched: bool,
     pub mode: LoadMode,
     pub artifact_path: PathBuf,

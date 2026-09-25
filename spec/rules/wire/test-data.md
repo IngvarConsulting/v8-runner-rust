@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.TEST-DATA
-version: 1
+version: 2
 artifact: docs/schemas/command-data/test.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -15,6 +15,11 @@ check:
 
 Живой проверки у формы пока нет: прогон требует настоящей платформы и установленного
 YaXUnit. Форму держит сверка с типом, который её сериализует.
+
+**Что изменила версия 2.** Фаза прерывания `execution.interruptions[].phase` стала закрытым
+набором значений в `snake_case`, общим для всех форм с итогом исполнения; набор перечисляет
+`$defs/ExecutionInterruptionPhase` схемы. Значения `test` — `command_boundary` и `run` —
+прежние.
 
 ## Пример
 

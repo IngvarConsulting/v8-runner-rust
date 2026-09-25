@@ -342,43 +342,12 @@ mod schema_tests {
     #[test]
     fn every_error_kind_and_code_is_named_by_the_schema_and_by_a_table() {
         let schema = generated_envelope_schema();
-        // `schemars` раскладывает перечисление на ветку со списком и по ветке `const` на
-        // каждый вариант с пояснением, поэтому имена собираются из обеих форм.
-        fn names(value: &serde_json::Value, found: &mut Vec<String>) {
-            match value {
-                serde_json::Value::Object(object) => {
-                    if let Some(serde_json::Value::String(name)) = object.get("const") {
-                        found.push(name.clone());
-                    }
-                    if let Some(serde_json::Value::Array(members)) = object.get("enum") {
-                        found.extend(
-                            members
-                                .iter()
-                                .filter_map(serde_json::Value::as_str)
-                                .map(ToOwned::to_owned),
-                        );
-                    }
-                    for nested in object.values() {
-                        names(nested, found);
-                    }
-                }
-                serde_json::Value::Array(items) => {
-                    for nested in items {
-                        names(nested, found);
-                    }
-                }
-                _ => {}
-            }
-        }
         let named = |definition: &str| -> Vec<String> {
-            let mut found = Vec::new();
-            names(
+            crate::support::schema::enum_values(
                 schema
                     .pointer(&format!("/$defs/{definition}"))
                     .unwrap_or_else(|| panic!("{definition} is defined by the schema")),
-                &mut found,
-            );
-            found
+            )
         };
 
         let kinds = named("ErrorKind");
