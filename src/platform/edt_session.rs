@@ -1033,6 +1033,11 @@ mod tests {
         FatalProcessExitAfter {
             delay: Duration,
         },
+        /// Предел команды истекает не по часам, а когда тест отпустит `release`: так тест
+        /// успевает поставить в очередь следующий вызов, как бы ни был загружен прогон.
+        TimeOutWhenReleased {
+            release: Arc<AtomicBool>,
+        },
     }
 
     struct FakeSession {
@@ -1221,6 +1226,29 @@ mod tests {
                         }
                         Ok(InteractiveCommandOutput { stdout, stderr })
                     }
+                }
+                CommandBehavior::TimeOutWhenReleased { release } => {
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while !release.load(Ordering::SeqCst) {
+                        assert!(
+                            Instant::now() < deadline,
+                            "the test never released the command"
+                        );
+                        if self.killed.load(Ordering::SeqCst) {
+                            return Err(InteractiveProcessError::ProcessExited {
+                                exit_code: 9,
+                                stdout: String::new(),
+                                stderr: String::new(),
+                            });
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(InteractiveProcessError::CommandTimeout {
+                        command: command.to_owned(),
+                        timeout_ms: timeout.as_millis() as u64,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    })
                 }
                 CommandBehavior::FatalProcessExitAfter { delay } => {
                     if sleep_until_finished_or_killed(self.killed.as_ref(), delay) {
@@ -2106,11 +2134,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn fatal_baseline_timeout_under_internal_cap_restarts_and_drains_queue() {
         let workspace = PathBuf::from("/tmp/edt workspace");
+        // Сброс упирается во внутренний предел только после того, как второй вызов встал в
+        // очередь: иначе на загруженном прогоне предел истекал раньше, чем вызов успевал
+        // встать, и дренировать было нечего.
+        let release = Arc::new(AtomicBool::new(false));
         let inner = FakeSessionFactory::new(vec![
-            SessionPlan::Session(vec![CommandBehavior::CompleteAfter {
-                delay: Duration::from_millis(300),
-                stdout: String::new(),
-                stderr: String::new(),
+            SessionPlan::Session(vec![CommandBehavior::TimeOutWhenReleased {
+                release: release.clone(),
             }]),
             SessionPlan::Session(vec![
                 CommandBehavior::CompleteAfter {
@@ -2147,6 +2177,7 @@ mod tests {
             async move { manager.execute(request("cmd-2", 10_000)).await }
         });
         wait_until("cmd-2 to reach the queue", || queued_len(&manager) == 1).await;
+        release.store(true, Ordering::SeqCst);
 
         let first_result = first.await.expect("first join");
         assert!(matches!(

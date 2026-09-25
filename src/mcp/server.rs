@@ -1295,6 +1295,9 @@ mod tests {
                 Some(Duration::from_millis(300_000))
             )
         );
+        let wire = serde_json::to_value(&error).expect("serialize MCP error data");
+        assert_eq!(wire["data"]["reason"], "cancelled");
+        assert_eq!(wire["data"]["stage"], "queued");
         assert_eq!(started.load(Ordering::SeqCst), 0);
         assert_eq!(execution_telemetry.snapshot().cancelled_total, 1);
     }

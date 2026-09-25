@@ -7,8 +7,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
 use guardrail_support::{
-    collect_rust_files, free_function_tokens, has_cfg_test, item_has_cfg_test, parse_rust_file,
-    production_source, production_tokens,
+    collect_rust_files, free_function_tokens, has_cfg_test, item_has_cfg_test, normalize_tokens,
+    parse_rust_file, production_source, production_tokens,
 };
 
 const EXPECTED_MCP_TOOLS: &[&str] = &[
@@ -1874,6 +1874,249 @@ fn a_command_carries_no_deadline_anywhere_it_could_be_put_back() {
         !server.contains("remaining_timeout"),
         "src/mcp/server.rs computes a remainder of the admission budget: an admitted call must \
          run to its terminal outcome, and a step cap must not be shortened by the queue wait."
+    );
+}
+
+#[test]
+fn a_reply_is_checked_against_its_form_through_one_reader() {
+    // Корень проблемы: тесты сверяли `data` с формами своими копиями чтения схемы, и копии
+    // расходились с общей — одна брала первую из общих форм, другая жёстко записанный путь,
+    // и ни одна не знала, что общая форма отказа проходит за любую. Владелец один —
+    // `tests/support/command_data.rs`; схему конверта и примеры правил сверяют свои
+    // проверки. Страж стоит на имени крейта: без него схему не прочитать.
+    const SCHEMA_READERS: &[&str] = &[
+        "tests/support/command_data.rs",
+        "tests/contract_envelope.rs",
+        "tests/arch_rules.rs",
+        // Сам страж называет искомое имя.
+        "tests/architecture_guardrails.rs",
+    ];
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for file in collect_rust_files(&repo_path("tests")) {
+        let relative = file.strip_prefix(repo_root).expect("relative path");
+        if SCHEMA_READERS
+            .iter()
+            .any(|reader| relative == Path::new(reader))
+        {
+            continue;
+        }
+        if fs::read_to_string(&file)
+            .expect("read test source")
+            .contains("jsonschema")
+        {
+            offenders.push(relative.display().to_string());
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these tests read a data form themselves; check a reply through \
+         tests/support/command_data.rs instead:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn every_staged_publication_rechecks_its_target_first() {
+    // Корень проблемы: цель сверялась при разрешении, а публикация шла после работы
+    // исполнителя; у `make` путь, который за это время стал указывать в другое место,
+    // публиковался молча. Перепроверку ставит каждое место публикации само — единого
+    // владельца у неё пока нет (#300), — поэтому страж смотрит на каждое место: в теле
+    // сценария вызов публикации через промежуточную копию идёт после перепроверки цели, а
+    // перепроверка — после подготовки копии и после проверки исхода исполнителя, если та
+    // стоит между ними. Страж держится на именах перепроверок, а их тела держат
+    // поведенческие тесты правила `INV.USE-CASES.A-TARGET-IS-RECHECKED-BEFORE-PUBLICATION`.
+    const RECHECKS: &[&str] = &[
+        "refusal_before_publication(",
+        "validate_platform_target(",
+        "validate_publish_target(",
+        "revalidate_before_publish(",
+    ];
+    // Проверки исхода исполнителя: перепроверка, поставленная раньше них, сверяла бы цель до
+    // работы исполнителя.
+    const EXECUTOR_OUTCOME: &[&str] = &[
+        "ensure_platform_success(",
+        "ensure_import_success(",
+        "validate_platform_success(",
+    ];
+    // Места публикации названы: вызов, ушедший туда, где страж его не видит, не пройдёт
+    // молча, а новое место попадёт в перечень осознанно.
+    const SITES: &[&str] = &[
+        "crate::use_cases::artifacts::agent::run_agent_export",
+        "crate::use_cases::artifacts::agent::run_external_agent_export",
+        "crate::use_cases::artifacts::run_designer_export",
+        "crate::use_cases::artifacts::run_external_designer_export",
+        "crate::use_cases::dump_config::agent::publish_full",
+        "crate::use_cases::dump_config::finalize_edt_dump",
+        "crate::use_cases::dump_config::run_full_dump_designer",
+        "crate::use_cases::dump_config::run_full_dump_ibcmd",
+        "crate::use_cases::infobase_export::execute_configuration_export",
+        "crate::use_cases::infobase_export::execute_infobase_snapshot",
+    ];
+
+    let index = SourceIndex::of_src();
+    let owner = path_of("crate::use_cases::staged_publication");
+    let (publish, prepare) = staged_publication_methods(&index, &owner);
+    let scenarios = path_of("crate::use_cases");
+    let mut sites = Vec::new();
+    let mut offenders = Vec::new();
+    for body in production_bodies(&index) {
+        if !body.module.starts_with(&scenarios) || body.module == owner {
+            continue;
+        }
+        let tokens = normalize_tokens(body.block);
+        let site = format!("{}::{}", body.module.join("::"), body.context);
+        for at in publish
+            .iter()
+            .flat_map(|needle| tokens.match_indices(needle.as_str()).map(|(at, _)| at))
+        {
+            sites.push(site.clone());
+            let prepared = prepare
+                .iter()
+                .filter_map(|needle| tokens[..at].rfind(needle.as_str()))
+                .max()
+                .unwrap_or(0);
+            let executed = EXECUTOR_OUTCOME
+                .iter()
+                .filter_map(|needle| tokens[prepared..at].rfind(needle).map(|i| prepared + i))
+                .max()
+                .unwrap_or(prepared);
+            if !RECHECKS
+                .iter()
+                .any(|needle| tokens[executed..at].contains(needle))
+            {
+                offenders.push(site.clone());
+            }
+        }
+    }
+    sites.sort();
+    assert!(
+        offenders.is_empty(),
+        "these scenarios publish without re-checking the target after the executor ran:\n{}",
+        offenders.join("\n")
+    );
+    assert_eq!(
+        sites, SITES,
+        "the staged publications changed; name each one here after it re-checks its target"
+    );
+}
+
+/// Вызовы публикации и подготовки у владельца промежуточной копии — в виде, в котором их
+/// ищут в теле сценария: методом (`.publish_dir(`) и путём (`::publish_dir(`). Имена берутся
+/// из самого `impl StagedPublication`, поэтому новый метод попадёт под страж сам.
+fn staged_publication_methods(index: &SourceIndex, owner: &[String]) -> (Vec<String>, Vec<String>) {
+    let unit = index
+        .units
+        .iter()
+        .find(|unit| unit.module == owner)
+        .expect("the staged publication owner is indexed");
+    let mut publish = Vec::new();
+    let mut prepare = Vec::new();
+    for item in &unit.syntax.items {
+        let syn::Item::Impl(item_impl) = item else {
+            continue;
+        };
+        let is_owner = matches!(
+            item_impl.self_ty.as_ref(),
+            syn::Type::Path(type_path)
+                if type_path.path.segments.last().is_some_and(|segment| segment.ident == "StagedPublication")
+        );
+        if !is_owner || item_impl.trait_.is_some() {
+            continue;
+        }
+        for impl_item in &item_impl.items {
+            let syn::ImplItem::Fn(method) = impl_item else {
+                continue;
+            };
+            if matches!(method.vis, syn::Visibility::Inherited) {
+                continue;
+            }
+            let name = method.sig.ident.to_string();
+            let needles = [format!(".{name}("), format!("::{name}(")];
+            if name.starts_with("publish") {
+                publish.extend(needles);
+            } else if name.starts_with("prepare") {
+                prepare.extend(needles);
+            }
+        }
+    }
+    assert!(
+        !publish.is_empty() && !prepare.is_empty(),
+        "StagedPublication no longer names its publish and prepare methods"
+    );
+    (publish, prepare)
+}
+
+#[test]
+fn change_detection_has_no_background_watcher() {
+    // Изменения ищет та команда, которой нужен ответ; фонового наблюдателя нет. Наблюдатель —
+    // это поток рядом с командой или крейт слежения за файловой системой: слой анализа
+    // потоков не заводит, а раннер такого крейта не тянет.
+    const WATCHER_CRATES: &[&str] = &["notify", "notify-debouncer-mini", "hotwatch"];
+    const BACKGROUND_WORK: &[&str] = &["spawn", "thread::"];
+
+    let manifest = read("Cargo.toml");
+    let watchers: Vec<&str> = manifest
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(name, _)| name.trim())
+        .filter(|name| WATCHER_CRATES.contains(name))
+        .collect();
+    assert!(
+        watchers.is_empty(),
+        "Cargo.toml depends on a file-system watcher {watchers:?}: change detection runs when \
+         a command needs the answer, not in the background"
+    );
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for file in collect_rust_files(&repo_path("src/change_detection")) {
+        let relative = file.strip_prefix(repo_root).expect("relative path");
+        let production = without_doc_attributes(&production_tokens(&file));
+        for marker in BACKGROUND_WORK {
+            if production.contains(marker) {
+                offenders.push(format!("{} names `{marker}`", relative.display()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "change detection starts background work; it must run only when a command asks:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn change_detection_never_reads_the_executor_choice() {
+    // Анализ изменений отвечает, нужен ли шаг; чем его выполнить, решает выбор исполнителя.
+    // Прочитай слой анализа этот выбор — и ответ «что делать» начал бы зависеть от того,
+    // кто делает: смена исполнителя меняла бы решение о загрузке. Страж стоит на именах:
+    // слой не называет ни ключей выбора, ни матрицы исполнителей, ни адаптеров платформы.
+    // Конфигурацию слой читать вправе — наборы, формат и `workPath` берутся из неё.
+    const EXECUTOR_CHOICE: &[&str] = &["provider", "Provider", "capability", "platform::"];
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let files = collect_rust_files(&repo_path("src/change_detection"));
+    assert!(
+        !files.is_empty(),
+        "the change-detection layer is not where it was"
+    );
+    let mut offenders = Vec::new();
+    for file in files {
+        let relative = file.strip_prefix(repo_root).expect("relative path");
+        let production = without_doc_attributes(&production_tokens(&file));
+        for name in EXECUTOR_CHOICE {
+            if production.contains(name) {
+                offenders.push(format!("{} names `{name}`", relative.display()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "change detection reads the executor choice; whether a step is needed must not depend \
+         on who performs it:\n{}",
+        offenders.join("\n")
     );
 }
 

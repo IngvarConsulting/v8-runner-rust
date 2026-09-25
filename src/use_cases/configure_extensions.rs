@@ -345,8 +345,10 @@ pub(crate) fn resolve_targets(
             .iter()
             .find(|(name, _)| *name == requested.as_str())
         else {
+            // Селекторы принимают одну и ту же строку, и перепутать их легко: отказ
+            // называет селектор установленного расширения.
             return Err(AppError::Validation(format!(
-                "unknown extension source-set '{requested}'"
+                "unknown extension source-set '{requested}'; an extension installed in the infobase is selected with --installed-name"
             )));
         };
         if !targets.contains(resolved) {

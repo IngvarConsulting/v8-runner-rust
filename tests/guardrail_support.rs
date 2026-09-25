@@ -55,7 +55,8 @@ pub fn free_function_tokens(path: &Path, fn_name: &str) -> String {
         .unwrap_or_else(|| panic!("missing free function {fn_name}"))
 }
 
-fn normalize_tokens(tokens: impl ToTokens) -> String {
+/// Токены без пробелов: так их сравнивают стражи, не завися от форматирования.
+pub fn normalize_tokens(tokens: impl ToTokens) -> String {
     tokens
         .to_token_stream()
         .to_string()

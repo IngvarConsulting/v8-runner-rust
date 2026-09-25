@@ -5,6 +5,8 @@ artifact: docs/schemas/command-data/check.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
+  - tests/mcp_stdio.rs::mcp_stdio_tools_answer_in_the_forms_of_their_commands
+  - tests/mcp_stdio.rs::mcp_stdio_the_live_edt_check_answers_in_the_form_of_check
 ---
 # `data` команды `check`
 

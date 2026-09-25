@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::execution::{ExecutionOutcome, ExecutionStatus, ExecutionStepKind, StepResult};
+use crate::domain::execution::{
+    ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus, ExecutionStepKind, StepResult,
+};
 
 /// Closed vocabulary for every observable phase of an information-base transfer — both
 /// directions — including failures before provider dispatch.
@@ -41,6 +43,27 @@ impl InfobaseTransferPhase {
             Self::BeforePublication => "before publication",
             Self::PublishTargetRevalidation => "publish target revalidation",
             Self::Publication => "publication",
+        }
+    }
+
+    /// Что было прервано на этой фазе переноса. Шаг называет `steps[]`; фаза прерывания —
+    /// только прерванную работу: процесс исполнителя, публикацию или границу команды.
+    pub const fn interruption_phase(self) -> ExecutionInterruptionPhase {
+        match self {
+            Self::ProviderCommand => ExecutionInterruptionPhase::ProviderCommand,
+            Self::Publication => ExecutionInterruptionPhase::Publication,
+            Self::ConfigurationLoad
+            | Self::Validation
+            | Self::ProviderSelection
+            | Self::WorkspaceLock
+            | Self::WorkspacePreparation
+            | Self::ResolveTarget
+            | Self::TargetLock
+            | Self::OrphanCleanup
+            | Self::PrepareStaging
+            | Self::ValidateProviderOutput
+            | Self::BeforePublication
+            | Self::PublishTargetRevalidation => ExecutionInterruptionPhase::CommandBoundary,
         }
     }
 

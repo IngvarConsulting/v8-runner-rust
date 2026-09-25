@@ -1316,14 +1316,16 @@ mod tests {
         assert!(matches!(err, InteractiveProcessError::SpawnFailed { .. }));
     }
 
+    /// Жив ли процесс — по нулевому сигналу: он отвечает и за зомби, так что «не жив» значит
+    /// «подобран». Отказ в правах — тоже живой процесс.
     #[cfg(unix)]
     fn is_process_alive(pid: u32) -> bool {
-        Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
+        let pid = libc::pid_t::try_from(pid).expect("pid fits pid_t");
+        // SAFETY: нулевой сигнал ничего не посылает, `kill` лишь проверяет процесс.
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
 
     #[cfg(unix)]
@@ -1678,6 +1680,7 @@ mod tests {
         let script = dir.path().join("repl.sh");
         repl_script(&script, &dir.path().join("child.pid"));
         let mut executor = spawn_executor(&script, TEST_STARTUP_TIMEOUT);
+        let pid = executor.pid().expect("pid");
 
         let err = executor
             .execute("hang", Duration::from_millis(50))
@@ -1687,6 +1690,11 @@ mod tests {
             err,
             InteractiveProcessError::CommandTimeout { .. }
         ));
+        // Таймаут приходит, когда процесс уже подобран: зомби на нулевой сигнал ещё отвечал бы.
+        assert!(
+            !is_process_alive(pid),
+            "the timed-out process {pid} is still there"
+        );
         assert!(matches!(
             executor.execute("pid", Duration::from_millis(50)),
             Err(InteractiveProcessError::Poisoned | InteractiveProcessError::Terminated)

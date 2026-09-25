@@ -67,7 +67,7 @@ matrix, and `providers.<operation>` names one explicitly.
 - `convert` is CLI-only, repo-aware, uses configured `source-set`, takes no `providers` key, and does not require an infobase.
 - `upload` supports `.cf` and `.cfe` only for `format=DESIGNER`.
 - `tools.client_mcp.extension.source` is prepared during `push`, skipped when unchanged, and refreshed by `push --full`; `.artifact.path` must point to `.cfe` and currently needs the Designer executor.
-- `make` / `artifacts` are Designer-only and publish `.cf`, `.cfe`, `.epf`, or `.erf` depending on target/source-set.
+- `make` / `artifacts` run through Designer (`agent` only via `providers.make: agent`; on a standalone server the agent is the only executor) and publish `.cf`, `.cfe`, `.epf`, or `.erf` depending on target/source-set.
 
 ## Source-Set Notes
 

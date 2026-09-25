@@ -3,7 +3,7 @@ mod support;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
-use support::command_data::assert_data_matches_a_declared_form;
+use support::command_data::assert_data_matches_its_command_form;
 use support::{temp_workspace, v8_runner_command};
 
 const V8_EXTERNAL_OBJECTS_NATURE: &str = "com._1c.g5.v8.dt.core.V8ExternalObjectsNature";
@@ -139,7 +139,7 @@ fn config_init_uses_json_envelope_and_output_override() {
     assert_eq!(payload["command"], "init");
     // Живая сверка формы: схема держит состав `data` только вместе с прогоном, иначе
     // команда вправе печатать не то, что за ней объявлено.
-    assert_data_matches_a_declared_form(&payload, "`config init --output`");
+    assert_data_matches_its_command_form(&payload, "`config init --output`");
     let canonical_dir = fs::canonicalize(dir.path()).expect("canonical project dir");
     assert_eq!(
         payload["data"]["local_path"],

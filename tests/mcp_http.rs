@@ -230,28 +230,32 @@ fn write_edt_configuration_source(path: &Path, project_name: &str) {
     .expect("module marker");
 }
 
-// Принятый waiver: тестовый помощник пишет конфиг по полям, и перечисление полей —
-// это и есть его смысл.
-#[allow(clippy::too_many_arguments)]
+/// Поднимает ли сервер общую сессию EDT сам, при старте (`tools.edt_cli.auto-start`).
+#[derive(Clone, Copy)]
+enum AutoStart {
+    Off,
+    On,
+}
+
 fn write_http_edt_config(
     path: &Path,
-    _base_path: &Path,
     work_path: &Path,
     edt_path: &Path,
     bind_address: &str,
-    max_sessions: usize,
-    idle_ttl_secs: u64,
-    max_concurrent_calls: usize,
     command_timeout_ms: u64,
+    auto_start: AutoStart,
 ) {
+    // Без прогрева ключа в конфиге нет — как у пользователя, который его не задал.
+    let auto_start = match auto_start {
+        AutoStart::Off => "",
+        AutoStart::On => "    auto-start: true\n",
+    };
     let config = format!(
-        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main-edt\nmcp:\n  http:\n    bind_address: {}\n    path: /mcp\n    stateful_sessions: true\n    max_sessions: {}\n    idle_ttl_secs: {}\n  execution:\n    max_concurrent_calls: {}\ntools:\n  edt_cli:\n    path: '{}'\n    interactive-mode: true\n    command_timeout_ms: {}\n",
+        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main-edt\nmcp:\n  http:\n    bind_address: {}\n    path: /mcp\n    stateful_sessions: true\n    max_sessions: 4\n    idle_ttl_secs: 900\n  execution:\n    max_concurrent_calls: 1\ntools:\n  edt_cli:\n    path: '{}'\n    interactive-mode: true\n{}    command_timeout_ms: {}\n",
         work_path.display(),
         bind_address,
-        max_sessions,
-        idle_ttl_secs,
-        max_concurrent_calls,
         edt_path.display(),
+        auto_start,
         command_timeout_ms,
     );
     fs::write(path, config).expect("edt config");
@@ -352,10 +356,8 @@ fn setup_http_ibcmd_dump_project_with_infobase(
 
 fn setup_http_edt_project(
     validate_handler: &str,
-    max_sessions: usize,
-    idle_ttl_secs: u64,
-    max_concurrent_calls: usize,
     command_timeout_ms: u64,
+    auto_start: AutoStart,
 ) -> (tempfile::TempDir, PathBuf, String, PathBuf) {
     let dir = temp_workspace();
     let base_path = dir.path().join("project");
@@ -379,14 +381,11 @@ fn setup_http_edt_project(
     );
     write_http_edt_config(
         &config_path,
-        &base_path,
         &work_path,
         &edt_path,
         &bind_address,
-        max_sessions,
-        idle_ttl_secs,
-        max_concurrent_calls,
         command_timeout_ms,
+        auto_start,
     );
 
     (
@@ -422,6 +421,9 @@ impl HttpServerProcess {
             .arg("mcp")
             .arg("serve")
             .arg("http")
+            // Упавший тест не доходит до `shutdown`: без этого сервер переживал бы его и
+            // держал порт и вывод прогона.
+            .kill_on_drop(true)
             .spawn()
             .expect("spawn http server");
 
@@ -1244,7 +1246,7 @@ async fn mcp_http_parallel_initialize_respects_max_sessions() {
 async fn mcp_http_reuses_one_edt_process_across_sessions_and_shares_capacity() {
     let validate_handler = "printf 'start\\n' >> \"$lifecycle_log\"\nif [ -n \"$out\" ]; then : > \"$out\"; fi\nsleep 0.15\nprintf 'finish\\n' >> \"$lifecycle_log\"\nprompt";
     let (_dir, config_path, url, lifecycle_log) =
-        setup_http_edt_project(validate_handler, 4, 900, 1, EDT_COMMAND_TIMEOUT_MS);
+        setup_http_edt_project(validate_handler, EDT_COMMAND_TIMEOUT_MS, AutoStart::Off);
     let mut server = HttpServerProcess::spawn(&config_path, &url).await;
     let client = reqwest::Client::builder()
         .timeout(HTTP_CLIENT_TIMEOUT)
@@ -1288,11 +1290,51 @@ async fn mcp_http_reuses_one_edt_process_across_sessions_and_shares_capacity() {
     server.shutdown().await;
 }
 
+/// Сервер MCP живёт между вызовами, поэтому с `auto-start` поднимает общую сессию EDT сам,
+/// ещё до первого вызова, — и первый вызов идёт уже в неё, второго запуска EDT нет.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_http_prewarms_the_shared_edt_session_before_the_first_call() {
+    let validate_handler = "if [ -n \"$out\" ]; then : > \"$out\"; fi\nprompt";
+    let (_dir, config_path, url, lifecycle_log) =
+        setup_http_edt_project(validate_handler, EDT_COMMAND_TIMEOUT_MS, AutoStart::On);
+    let mut server = HttpServerProcess::spawn(&config_path, &url).await;
+
+    let prewarmed = support::wait_until_async(200, Duration::from_millis(50), || {
+        fs::read_to_string(&lifecycle_log).is_ok_and(|log| log.lines().eq(["startup"]))
+    })
+    .await;
+    assert!(prewarmed, "EDT was not started before the first call");
+
+    let client = reqwest::Client::builder()
+        .timeout(HTTP_CLIENT_TIMEOUT)
+        .build()
+        .expect("http client");
+    let (session, _) = initialize_session(&client, &url).await;
+    send_initialized(&client, &url, &session).await;
+    let response = call_tool(
+        &client,
+        &url,
+        &session,
+        "check_syntax_edt",
+        json!({ "projectName": "main" }),
+        10,
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let payload = extract_sse_json(&response.text().await.expect("edt body"));
+    assert_envelope_success(&payload["result"]["structuredContent"], "check");
+
+    let lifecycle = fs::read_to_string(&lifecycle_log).expect("lifecycle log");
+    assert_eq!(lifecycle.lines().collect::<Vec<_>>(), ["startup"]);
+
+    server.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_http_returns_terminal_business_failure_for_edt_syntax_timeout() {
     let validate_handler = "if [ \"$validate_count\" -eq 1 ]; then\n  if [ -n \"$out\" ]; then : > \"$out\"; fi\n  prompt\nelse\n  sleep 8\n  prompt\nfi";
     let (_dir, config_path, url, _lifecycle_log) =
-        setup_http_edt_project(validate_handler, 4, 900, 1, EDT_TIMEOUT_TEST_MS);
+        setup_http_edt_project(validate_handler, EDT_TIMEOUT_TEST_MS, AutoStart::Off);
     let mut server = HttpServerProcess::spawn(&config_path, &url).await;
     let client = reqwest::Client::builder()
         .timeout(HTTP_CLIENT_TIMEOUT)
@@ -1341,7 +1383,7 @@ async fn mcp_http_returns_terminal_business_failure_for_edt_syntax_timeout() {
 async fn mcp_http_edt_action_log_contains_runtime_telemetry_events() {
     let validate_handler = "if [ -n \"$out\" ]; then : > \"$out\"; fi\nsleep 0.05\nprompt";
     let (dir, config_path, url, _lifecycle_log) =
-        setup_http_edt_project(validate_handler, 4, 900, 1, EDT_COMMAND_TIMEOUT_MS);
+        setup_http_edt_project(validate_handler, EDT_COMMAND_TIMEOUT_MS, AutoStart::Off);
     let action_log = dir
         .path()
         .join("work")

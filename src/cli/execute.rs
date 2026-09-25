@@ -28,8 +28,8 @@ use crate::domain::capability::ProviderReceipt;
 use crate::domain::convert::{ConvertDirection, ConvertResult, ConvertScope};
 use crate::domain::dump::{DumpMode, DumpResult};
 use crate::domain::execution::{
-    ExecutionError, ExecutionInterruptionDetails, ExecutionOutcome, ExecutionStatus,
-    ExecutionStepStatus, StepResult,
+    ExecutionError, ExecutionInterruptionDetails, ExecutionInterruptionKind,
+    ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus, ExecutionStepStatus, StepResult,
 };
 use crate::domain::infobase_export::{
     ConfigurationState, ConfigurationSubject, ExportConfigurationPackageRequest,
@@ -3162,7 +3162,8 @@ pub(crate) struct LoadJsonData<'a> {
     pub provider: Option<ProviderReceipt>,
 
     pub ok: bool,
-    /// `false` when the run stopped at a preview instead of dispatching the platform.
+    /// Whether the platform was started at all: `false` when the command stopped before the
+    /// first platform call — at a preview, a refusal or an interruption.
     pub provider_dispatched: bool,
     pub mode: LoadMode,
     pub artifact_path: &'a Path,
@@ -3506,10 +3507,12 @@ fn append_interruptions(details: &mut Vec<String>, interruptions: &[ExecutionInt
         }
 
         let kind = match interruption.kind {
-            crate::domain::execution::ExecutionInterruptionKind::Cancelled => "cancelled",
-            crate::domain::execution::ExecutionInterruptionKind::TimedOut => "timed_out",
+            ExecutionInterruptionKind::Cancelled => "cancelled",
+            ExecutionInterruptionKind::TimedOut => "timed_out",
         };
-        let phase = interruption.phase.as_deref().unwrap_or("unknown_phase");
+        let phase = interruption
+            .phase
+            .map_or("unknown_phase", ExecutionInterruptionPhase::as_str);
         let detail = if interruption.deferred {
             format!("deferred {kind} interruption during {phase}")
         } else {
@@ -4236,10 +4239,10 @@ fn status_label(status: &TestStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_load_envelope, command_name, execute_command, infobase_pre_dispatch_execution_phase,
-        map_artifacts_request_with_config, map_build_request, map_designer_config_request,
-        map_dump_request, map_extensions_request, map_launch_request, map_load_request,
-        map_syntax_request, map_test_request,
+        append_interruptions, build_load_envelope, command_name, execute_command,
+        infobase_pre_dispatch_execution_phase, map_artifacts_request_with_config,
+        map_build_request, map_designer_config_request, map_dump_request, map_extensions_request,
+        map_launch_request, map_load_request, map_syntax_request, map_test_request,
     };
     use crate::cli::args::{
         ArtifactsArgs, BuildArgs, Command, DesignerConfigSyntaxArgs, DesignerModulesSyntaxArgs,
@@ -4254,7 +4257,10 @@ mod tests {
         ToolsConfig,
     };
     use crate::domain::artifacts::ArtifactBuildMode;
-    use crate::domain::execution::{ExecutionOutcome, ExecutionStatus};
+    use crate::domain::execution::{
+        ExecutionInterruptionDetails, ExecutionInterruptionKind, ExecutionInterruptionPhase,
+        ExecutionOutcome, ExecutionStatus,
+    };
     use crate::domain::infobase_export::InfobaseTransferPhase;
     use crate::domain::load::{
         CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
@@ -4274,6 +4280,27 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
+
+    #[test]
+    fn interruption_without_message_is_rendered_from_its_phase() {
+        let mut details = Vec::new();
+        append_interruptions(
+            &mut details,
+            &[
+                ExecutionInterruptionDetails::new(ExecutionInterruptionKind::Cancelled, true)
+                    .with_phase(ExecutionInterruptionPhase::ProviderCommand),
+                ExecutionInterruptionDetails::new(ExecutionInterruptionKind::TimedOut, false),
+            ],
+        );
+
+        assert_eq!(
+            details,
+            vec![
+                "[warning] deferred cancelled interruption during provider_command".to_owned(),
+                "[warning] timed_out interruption during unknown_phase".to_owned(),
+            ]
+        );
+    }
 
     #[test]
     fn maps_test_module_request() {

@@ -5,7 +5,7 @@ mod support;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
-use support::command_data::assert_data_matches_a_declared_form;
+use support::command_data::assert_data_matches_its_command_form;
 use support::{
     hold_workspace_lock, temp_workspace, v8_runner_command, wait_for_file, wait_until,
     write_shell_script as write_script,
@@ -177,7 +177,7 @@ fn bootstrap_json_success_keeps_credentials_in_local_overlay_only() {
     assert_eq!(payload["command"], "clone");
     // Настоящая база для живой сверки не нужна: харнесс подкладывает утилиты платформы,
     // и команда доходит до собранного ответа.
-    assert_data_matches_a_declared_form(&payload, "`clone`");
+    assert_data_matches_its_command_form(&payload, "`clone`");
     // Вторая половина обоих признаков. Без неё превью и боевой прогон неразличимы на
     // проводе: подмена `dumped` или `provider_dispatched` на `false` оставила бы весь
     // набор зелёным, а контракт различает «заведён» и «заведён и выгружен» именно ими.
@@ -1020,7 +1020,7 @@ fn clone_preview_names_the_project_it_would_write_and_writes_nothing() {
     assert_eq!(output.status.code(), Some(0));
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["command"], "clone");
-    assert_data_matches_a_declared_form(&payload, "`clone --dry-run`");
+    assert_data_matches_its_command_form(&payload, "`clone --dry-run`");
     assert_eq!(payload["data"]["provider_dispatched"], false);
     assert_eq!(payload["data"]["dumped"], false);
     assert_eq!(payload["data"]["ok"], true);

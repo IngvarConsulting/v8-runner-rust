@@ -13,7 +13,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use serde_json::Value;
-use support::command_data::form_schema;
+use support::command_data::assert_data_matches_one_of;
 use support::fake_agent::{
     read_or_empty, start_fake_agent, write_fake_designer, FakeAgent, AGENT_PASSWORD,
 };
@@ -494,9 +494,11 @@ fn extensions_list_and_info_through_the_agent_read_the_structured_reply() {
         "{payload}"
     );
     assert!(payload["data"]["extensions"][0]["name_prefix"].is_null());
-    let schema = form_schema("extensions-inventory");
-    let validator = jsonschema::validator_for(&schema).expect("inventory form compiles");
-    assert!(validator.is_valid(&payload["data"]), "{payload}");
+    assert_data_matches_one_of(
+        &payload["data"],
+        "`extensions list`",
+        &["extensions-inventory"],
+    );
     assert!(
         commands(&harness)
             .contains(&"config extensions properties get --all-extensions".to_owned()),
@@ -511,7 +513,11 @@ fn extensions_list_and_info_through_the_agent_read_the_structured_reply() {
         "{payload}"
     );
     assert!(payload["data"]["extensions"][0]["name_prefix"].is_null());
-    assert!(validator.is_valid(&payload["data"]), "{payload}");
+    assert_data_matches_one_of(
+        &payload["data"],
+        "`extensions info`",
+        &["extensions-inventory"],
+    );
 
     let (code, payload) = run(&harness, &["extensions", "info", "--name", "Нет"]);
     assert_ne!(code, 0, "{payload}");
