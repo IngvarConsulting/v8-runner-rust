@@ -63,7 +63,7 @@
       "type": "array"
     },
     "provider_dispatched": {
-      "description": "`false` when the run stopped at a preview instead of dispatching the EDT CLI.\n\nAlways present, so an absent field never has to be read as \"nothing ran\". In a\npreview `outputs` names what would be written; the flag is what separates planned\nfrom produced.",
+      "description": "Whether the EDT CLI got this command's work: a process was started to do it, or the\nrequest's command was handed to a running EDT session. Starting the session and its\nown service commands are not work. `false` whenever it got none — a preview, a refusal\nor interruption before any work, or a process that could not be started.\n\nAlways present, so an absent field never has to be read as \"no work was given\". In a\npreview `outputs` names what would be written.",
       "type": "boolean"
     },
     "scope": {

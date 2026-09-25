@@ -7,7 +7,11 @@ pub struct ExtensionsResult {
     pub provider: Option<crate::domain::capability::ProviderReceipt>,
 
     pub ok: bool,
-    /// `false` when the run stopped at a preview instead of dispatching the platform.
+    /// Whether an executor got this command's work: a process was started to do it, or the
+    /// request's command was handed to a running session. Starting or opening a session and
+    /// its own service commands are not work. `false` whenever the executor got none — a
+    /// preview, a refusal or interruption before any work, a run with nothing to do, or a
+    /// process that could not be started.
     pub provider_dispatched: bool,
     pub steps: Vec<ExtensionsStep>,
     pub duration_ms: u64,
@@ -69,7 +73,10 @@ pub struct ExtensionInventoryResult {
     pub provider: Option<crate::domain::capability::ProviderReceipt>,
 
     pub ok: bool,
-    /// `false` when the run stopped at a preview instead of dispatching the platform.
+    /// Whether an executor got this command's work: a process was started to do it, or the
+    /// request's command was handed to a running session. Starting or opening a session and
+    /// its own service commands are not work. `false` in a preview; any failure answers the
+    /// shared refusal form, without this field.
     ///
     /// Reading the composition is an action, not a look: the platform starts, a session
     /// opens, the account authenticates and a journal trace is left. So the read has a

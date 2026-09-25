@@ -194,6 +194,14 @@ impl<T> UseCaseFailure<T> {
 /// The transport-neutral result contract for use-case execution.
 pub type UseCaseResult<T> = Result<T, UseCaseFailure<T>>;
 
+/// Полезная нагрузка любого исхода: сам результат или тот, что несёт отказ.
+pub(crate) fn payload_mut<T>(outcome: &mut UseCaseResult<T>) -> Option<&mut T> {
+    match outcome {
+        Ok(result) => Some(result),
+        Err(failure) => failure.payload.as_mut(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{UseCaseError, UseCaseErrorKind};

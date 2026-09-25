@@ -152,9 +152,10 @@ v8-runner infobase create
   nothing — not the target, not `workPath`, not the action log — so a preview also runs under a
   read-only sandbox. The record of the call is the envelope on stdout, not a log file. It
   neither takes nor waits for the workspace lock, so a preview works while
-  another command holds it. Proof that nothing ran: `provider_dispatched: false` for the
-  launch-shaped verbs, `mode: preview` for the export-shaped ones — each form carries its own
-  closed signal. Two limits are named
+  another command holds it. `provider_dispatched: false` means no executor got the
+  command's work; export-shaped verbs also answer `mode: preview`. The flag is not a preview
+  marker — refusals before any work and runs with nothing to do answer `false` too — so know
+  the preview from your own `--dry-run`. Two limits are named
   rather than guessed: `upload` reports `compatibility_state: not_probed` because the probe is
   itself a Designer run, and `infobase create` against a server infobase cannot tell "created" from
   "already existed" without creating it.

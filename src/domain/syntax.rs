@@ -56,7 +56,11 @@ pub struct SyntaxCheckResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<crate::domain::capability::ProviderReceipt>,
 
-    /// `false`, когда прогон остановился на превью и платформу не запускал.
+    /// Получил ли исполнитель — платформа или EDT CLI — работу этой команды: запущен
+    /// процесс, который её выполняет, либо работающей сессии EDT отдана команда запроса.
+    /// Подъём сессии и её служебные команды работой не считаются. `false`, если работы не
+    /// было: превью, отказ или прерывание до передачи работы, процесс, который не удалось
+    /// запустить.
     pub provider_dispatched: bool,
 
     pub status: SyntaxCheckStatus,

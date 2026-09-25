@@ -145,19 +145,11 @@ carries_receipt!(
 /// Кладёт квитанцию и в успешный ответ, и в типизированный отказ с полезной нагрузкой:
 /// вызывающий видит, кто исполнял, независимо от исхода.
 pub fn attach<T: CarriesReceipt>(
-    outcome: crate::use_cases::result::UseCaseResult<T>,
+    mut outcome: crate::use_cases::result::UseCaseResult<T>,
     receipt: &ProviderReceipt,
 ) -> crate::use_cases::result::UseCaseResult<T> {
-    match outcome {
-        Ok(mut result) => {
-            result.attach_receipt(receipt.clone());
-            Ok(result)
-        }
-        Err(mut failure) => {
-            if let Some(payload) = failure.payload.as_mut() {
-                payload.attach_receipt(receipt.clone());
-            }
-            Err(failure)
-        }
+    if let Some(payload) = crate::use_cases::result::payload_mut(&mut outcome) {
+        payload.attach_receipt(receipt.clone());
     }
+    outcome
 }

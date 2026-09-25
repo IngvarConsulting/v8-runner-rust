@@ -19,7 +19,7 @@
 | Шлюз | Вход SSH автономного сервера | `infobase.standalone.gate` |
 | Канал обмена | Как файлы идут к агенту и шлюзу | `Exchange` |
 | Поколение | Ответ `config generation-id`, по которому видно, менялась ли база | `agent/generation` |
-| Превью | Показ плана без запуска | `--dry-run`, `provider_dispatched: false` |
+| Превью | Показ плана без запуска | `--dry-run` |
 | Замок | Исключительное владение `workPath` на время команды | `acquire_workspace_lock` |
 | Допуск | Ограничение одновременных вызовов MCP | `mcp.execution.max_concurrent_calls` |
 | Конверт | Общая форма ответа CLI и MCP | `Envelope<T>` |

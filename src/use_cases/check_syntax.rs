@@ -27,7 +27,7 @@ use crate::use_cases::request::{
     DesignerConfigSyntaxRequest as DesignerConfigSyntaxArgs, ExtendedModulesPolicy,
     SyntaxExtensionScope, SyntaxRequest as SyntaxArgs, SyntaxTargetRequest as SyntaxTarget,
 };
-use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{payload_mut, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 use tracing::debug;
 
@@ -68,13 +68,8 @@ fn run_syntax_with_context(
     // запускает, чем бы оно ни кончилось — планом или отказом поиска утилиты. Иначе отказ
     // превью сообщал бы о запуске, которого не было.
     if args.dry_run {
-        match &mut outcome {
-            Ok(result) => result.provider_dispatched = false,
-            Err(failure) => {
-                if let Some(result) = failure.payload.as_mut() {
-                    result.provider_dispatched = false;
-                }
-            }
+        if let Some(result) = payload_mut(&mut outcome) {
+            result.provider_dispatched = false;
         }
     }
     outcome

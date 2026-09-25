@@ -205,7 +205,7 @@
       "description": "Квитанция о выборе исполнителя; `None`, пока выбор не начинался."
     },
     "provider_dispatched": {
-      "description": "`false` when the run stopped at a preview instead of dispatching the platform.\n\nAlways present. In a preview each step's `mode` is the mode that would be used and\nits message says so; the flag is what separates planned from performed.",
+      "description": "Whether an executor got this command's work: a process was started to do it, or the\nrequest's command was handed to a running session. Starting or opening a session and\nits own service commands are not work. `false` whenever the executor got none — a\npreview, a refusal or interruption before any work, a run with nothing to do, or a\nprocess that could not be started.\n\nAlways present. In a preview each step's `mode` is the mode that would be used and\nits message says so.",
       "type": "boolean"
     },
     "steps": {

@@ -526,6 +526,7 @@
       "description": "Квитанция о выборе исполнителя; `None`, пока выбор не начинался."
     },
     "provider_dispatched": {
+      "description": "Present only in a preview, and then `false`: no executor got work. An apply answer\nomits it.",
       "type": [
         "boolean",
         "null"

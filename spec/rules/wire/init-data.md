@@ -5,6 +5,7 @@ artifact: docs/schemas/command-data/infobase-create.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
+  - tests/cli_init.rs::init_dry_run_plans_the_infobase_without_creating_it
 ---
 
 # `data` команды `infobase create`
@@ -13,8 +14,9 @@ check:
 формата EDT, рабочее пространство. Форма перечисляет шаги со статусом каждого, поэтому
 пропущенный шаг виден так же явно, как сделанный, и не притворяется успехом.
 
-`provider_dispatched: false` означает превью: план построен, платформа найдена, но ничего
-не создано.
+Под превью шаг, который был бы выполнен, отвечает `status: planned`, а `provider_dispatched` —
+`false`: план построен, платформа найдена, но ничего не создано. Что значит признак, говорит
+[общее правило](provider-dispatched-says-whether-an-executor-got-work.md).
 
 ## Пример
 

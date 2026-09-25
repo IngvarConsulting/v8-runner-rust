@@ -47,7 +47,11 @@ pub struct ArtifactsResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<crate::domain::capability::ProviderReceipt>,
 
-    /// `false` when the run stopped at a preview instead of dispatching the platform.
+    /// Whether an executor got this command's work: a process was started to do it, or the
+    /// request's command was handed to a running session. Starting or opening a session and
+    /// its own service commands are not work. `false` whenever the executor got none — a
+    /// preview, a refusal or interruption before any work, a run with nothing to do, or a
+    /// process that could not be started.
     pub provider_dispatched: bool,
     pub mode: ArtifactBuildMode,
     #[serde(skip_serializing_if = "Option::is_none")]
