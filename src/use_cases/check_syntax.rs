@@ -27,7 +27,7 @@ use crate::use_cases::request::{
     DesignerConfigSyntaxRequest as DesignerConfigSyntaxArgs, ExtendedModulesPolicy,
     SyntaxExtensionScope, SyntaxRequest as SyntaxArgs, SyntaxTargetRequest as SyntaxTarget,
 };
-use crate::use_cases::result::{payload_mut, UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 use tracing::debug;
 
@@ -47,7 +47,9 @@ pub fn execute(
         transport = ?context.transport(),
         "executing syntax use case"
     );
-    run_syntax_with_context(context, config, args)
+    let mut outcome = run_syntax_with_context(context, config, args);
+    stamp_dispatch(&mut outcome, context.work());
+    outcome
 }
 
 type SyntaxExecutionFailure = UseCaseFailure<SyntaxCheckResult>;
@@ -63,16 +65,7 @@ fn run_syntax_with_context(
     config: &AppConfig,
     args: &SyntaxArgs,
 ) -> UseCaseResult<SyntaxCheckResult> {
-    let mut outcome = run_syntax_branch(context, config, args);
-    // Признак решается в одном месте за обе ветки и за оба исхода: превью платформу не
-    // запускает, чем бы оно ни кончилось — планом или отказом поиска утилиты. Иначе отказ
-    // превью сообщал бы о запуске, которого не было.
-    if args.dry_run {
-        if let Some(result) = payload_mut(&mut outcome) {
-            result.provider_dispatched = false;
-        }
-    }
-    outcome
+    run_syntax_branch(context, config, args)
 }
 
 fn run_syntax_branch(
@@ -759,7 +752,7 @@ fn run_edt_syntax(
     let log_read_warning = (!log_warnings.is_empty()).then_some(log_warnings.join("\n"));
     let result = SyntaxCheckResult {
         provider: None,
-        provider_dispatched: true,
+        provider_dispatched: false,
         message: None,
         status,
         exit_code,
@@ -922,7 +915,7 @@ fn build_result(
 
     SyntaxCheckResult {
         provider: None,
-        provider_dispatched: true,
+        provider_dispatched: false,
         message: None,
         status,
         exit_code,
@@ -948,7 +941,7 @@ fn failed_result(
 ) -> SyntaxCheckResult {
     SyntaxCheckResult {
         provider: None,
-        provider_dispatched: true,
+        provider_dispatched: false,
         message: None,
         status,
         exit_code,

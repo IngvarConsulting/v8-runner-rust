@@ -27,7 +27,7 @@ use crate::use_cases::external_artifacts::{
     discover_designer_external_artifacts, prepare_edt_external_artifacts, source_set_external_kind,
 };
 use crate::use_cases::request::BuildRequest as BuildArgs;
-use crate::use_cases::result::{payload_mut, UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::tool_extension;
 use tempfile::NamedTempFile;
@@ -62,7 +62,9 @@ pub fn execute(
         transport = ?context.transport(),
         "executing build use case"
     );
-    run_build_unlocked(context, config, args)
+    let mut outcome = run_build_unlocked(context, config, args);
+    stamp_dispatch(&mut outcome, context.work());
+    outcome
 }
 
 pub(crate) type BuildExecutionFailure = UseCaseFailure<BuildResult>;
@@ -77,19 +79,12 @@ pub(crate) fn run_build(config: &AppConfig, args: &BuildArgs) -> UseCaseResult<B
 }
 
 /// Caller must ensure exclusive ownership of `config.work_path`.
-pub(crate) fn run_build_unlocked(
+fn run_build_unlocked(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &BuildArgs,
 ) -> UseCaseResult<BuildResult> {
-    let mut outcome = run_build_branch(context, config, args);
-    // One place decides the flag for every branch, so a new branch cannot forget it.
-    if args.dry_run {
-        if let Some(result) = payload_mut(&mut outcome) {
-            result.provider_dispatched = false;
-        }
-    }
-    outcome
+    run_build_branch(context, config, args)
 }
 
 fn run_build_branch(
@@ -129,7 +124,7 @@ fn run_build_selected(
             error,
             BuildResult {
                 provider: None,
-                provider_dispatched: true,
+                provider_dispatched: false,
                 ok: false,
                 steps: vec![],
                 duration_ms: 0,

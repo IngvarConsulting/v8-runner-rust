@@ -28,7 +28,7 @@ use crate::use_cases::external_artifacts::{
 use crate::use_cases::interruption;
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::{ConvertRequest, ConvertScopeRequest};
-use crate::use_cases::result::{payload_mut, UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 
 const CONVERT_BACKUP_PREFIX: &str = ".convert-backup";
 
@@ -79,13 +79,7 @@ pub fn execute(
     request: &ConvertRequest,
 ) -> UseCaseResult<ConvertResult> {
     let mut outcome = run_convert_with_context(context, config, request);
-    // Под превью признак решает одно место за все ветки: превью, даже отказавшее, работы
-    // EDT CLI не давало, и новая ветка об этом не забудет.
-    if request.dry_run {
-        if let Some(result) = payload_mut(&mut outcome) {
-            result.provider_dispatched = false;
-        }
-    }
+    stamp_dispatch(&mut outcome, context.work());
     outcome
 }
 
@@ -180,7 +174,6 @@ fn run_convert_with_context(
                 target_path: item.target_path.clone(),
             })
             .collect();
-        // `provider_dispatched` превью ставит `execute` — одно место за все ветки.
         let preview = result_snapshot(
             true,
             resolved.direction,
@@ -1400,7 +1393,7 @@ fn result_snapshot(
 ) -> ConvertResult {
     ConvertResult {
         ok,
-        provider_dispatched: true,
+        provider_dispatched: false,
         direction,
         scope,
         source_set,

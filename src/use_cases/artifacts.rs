@@ -40,7 +40,7 @@ use crate::use_cases::interruption::{
 };
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::{ArtifactsModeRequest, ArtifactsRequest};
-use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 
 use super::staged_publication::{
@@ -65,7 +65,9 @@ pub fn execute(
         extension = args.extension.as_deref().unwrap_or("<none>"),
         "executing artifacts use case"
     );
-    run_artifacts(context, config, args)
+    let mut outcome = run_artifacts(context, config, args);
+    stamp_dispatch(&mut outcome, context.work());
+    outcome
 }
 
 type ArtifactsExecutionFailure = UseCaseFailure<ArtifactsResult>;
@@ -302,7 +304,7 @@ fn run_artifacts_selected(
             let execution = published_execution(context, artifacts, metadata, message);
             Ok(ArtifactsResult {
                 provider: None,
-                provider_dispatched: true,
+                provider_dispatched: false,
                 mode: resolved.mode,
                 source_set: Some(resolved.source_set_name),
                 extension: resolved.extension,
@@ -357,7 +359,7 @@ fn run_artifacts_selected(
             }
             let payload = ArtifactsResult {
                 provider: None,
-                provider_dispatched: true,
+                provider_dispatched: false,
                 mode: resolved.mode,
                 source_set: Some(resolved.source_set_name),
                 extension: resolved.extension,

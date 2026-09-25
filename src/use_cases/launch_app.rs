@@ -25,14 +25,25 @@ use crate::use_cases::request::{
     ClientMcpAddonRequest, ClientMcpMode, ClientMcpOptionsRequest, EnterpriseLaunchTarget,
     LaunchRequest as LaunchArgs, LaunchTargetRequest,
 };
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
-use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
 use crate::use_cases::tool_extension;
 use tracing::debug;
 
 const LAUNCH_STARTUP_PROBE: Duration = Duration::from_millis(250);
 
+/// Единственный выход сценария: `provider_dispatched` ответа ставит отметка работы команды.
 pub fn execute(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &LaunchArgs,
+) -> UseCaseResult<LaunchResult> {
+    let mut outcome = run_launch(context, config, args);
+    stamp_dispatch(&mut outcome, context.work());
+    outcome
+}
+
+fn run_launch(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &LaunchArgs,
@@ -196,6 +207,7 @@ pub fn execute(
         let managed = runner
             .spawn_managed(&process_request, ManagedSpawnMode::Wait)
             .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+        context.work().mark_work_given();
         let pid = managed.pid();
         let outcome = managed
             .wait_for_exit(&context.process_policy(
@@ -222,7 +234,7 @@ pub fn execute(
             binary: location.path,
             platform_resolution,
             url: reported_url.clone(),
-            provider_dispatched: true,
+            provider_dispatched: false,
             plan: None,
             message: Some(message.clone()),
             mcp_readiness: None,
@@ -248,6 +260,7 @@ pub fn execute(
         let managed = runner
             .spawn_managed(&process_request, ManagedSpawnMode::Detached)
             .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+        context.work().mark_work_given();
         let pid = managed.pid();
         let binary = managed.binary().clone();
         let mut result = LaunchResult {
@@ -258,7 +271,7 @@ pub fn execute(
             binary: binary.clone(),
             platform_resolution: platform_resolution.clone(),
             url: reported_url.clone(),
-            provider_dispatched: true,
+            provider_dispatched: false,
             plan: None,
             message: Some(launch_message(config, args, &binary, pid)),
             mcp_readiness: None,
@@ -301,6 +314,9 @@ pub fn execute(
     let spawned = runner
         .spawn(&process_request)
         .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+    // Запуск программы у `launch` идёт мимо политики процесса, и работу отмечает сам
+    // сценарий — сразу, как программа запущена.
+    context.work().mark_work_given();
 
     Ok(LaunchResult {
         ok: true,
@@ -310,7 +326,7 @@ pub fn execute(
         binary: spawned.binary.clone(),
         platform_resolution,
         url: reported_url.clone(),
-        provider_dispatched: true,
+        provider_dispatched: false,
         plan: None,
         message: Some(launch_message(config, args, &spawned.binary, spawned.pid)),
         mcp_readiness: None,
@@ -572,6 +588,7 @@ fn execute_web(
     log_live_stage("launch: web", "[Launch] opening the published infobase");
     let pid = crate::platform::browser::open_url(&program, &leading, url)
         .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+    context.work().mark_work_given();
     Ok(LaunchResult {
         ok: true,
         mode: LaunchMode::Web,
@@ -580,7 +597,7 @@ fn execute_web(
         binary: program,
         platform_resolution: None,
         url: Some(reported_url.clone()),
-        provider_dispatched: true,
+        provider_dispatched: false,
         plan: None,
         message: Some(format!("Opened веб-клиент at {reported_url} (pid {pid})")),
         mcp_readiness: None,

@@ -603,7 +603,7 @@ pub(super) fn fail_with_remaining_steps(
 
     BuildResult {
         provider: None,
-        provider_dispatched: true,
+        provider_dispatched: false,
         ok: false,
         steps: completed_steps,
         duration_ms: started.elapsed().as_millis() as u64,

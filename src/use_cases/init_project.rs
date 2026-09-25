@@ -22,7 +22,7 @@ use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::interruption;
 use crate::use_cases::progress::{log_live_stage, log_live_stage_status, LiveStageStatus};
 use crate::use_cases::request::InitRequest;
-use crate::use_cases::result::{UseCaseError, UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
 use crate::use_cases::tool_extension;
 
 pub fn execute(
@@ -35,7 +35,9 @@ pub fn execute(
         transport = ?context.transport(),
         "executing init use case"
     );
-    run_init(context, config, args.dry_run)
+    let mut outcome = run_init(context, config, args.dry_run);
+    stamp_dispatch(&mut outcome, context.work());
+    outcome
 }
 
 pub(crate) type InitExecutionFailure = UseCaseFailure<InitResult>;
@@ -80,7 +82,6 @@ fn run_init(
     );
 
     let mut result = init_result(started, steps, first_error.is_none());
-    result.provider_dispatched = !dry_run;
     if dry_run {
         // Строка о ходе остаётся в выводе, хотя ни база, ни рабочее пространство не
         // тронуты: запись о вызове несёт конверт, журнала превью не ведёт.
@@ -98,7 +99,7 @@ fn init_result(started: Instant, steps: Vec<InitStep>, ok: bool) -> InitResult {
     InitResult {
         provider: None,
         ok,
-        provider_dispatched: true,
+        provider_dispatched: false,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,
     }

@@ -26,10 +26,21 @@ use crate::support::error::AppError;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::extension_agent::ExtensionAgent;
 use crate::use_cases::request::{ExtensionInventoryRequest, ExtensionInventoryScope};
-use crate::use_cases::result::{UseCaseError, UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
 use tracing::debug;
 
+/// Единственный выход сценария: `provider_dispatched` ответа ставит отметка работы команды.
 pub fn execute(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    request: &ExtensionInventoryRequest,
+) -> UseCaseResult<ExtensionInventoryResult> {
+    let mut outcome = run_read(context, config, request);
+    stamp_dispatch(&mut outcome, context.work());
+    outcome
+}
+
+fn run_read(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &ExtensionInventoryRequest,
@@ -133,7 +144,7 @@ pub fn execute(
     Ok(ExtensionInventoryResult {
         provider: Some(receipt),
         ok: true,
-        provider_dispatched: true,
+        provider_dispatched: false,
         requested: requested(&request.scope),
         plan: None,
         extensions,
@@ -478,7 +489,19 @@ impl ExtensionChangeRequest {
 }
 
 /// Applies one change to the extension composition of the configured infobase.
+/// Единственный выход сценария: `provider_dispatched` ответа ставит отметка работы команды.
 pub fn change(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    request: &ExtensionChangeRequest,
+    dry_run: bool,
+) -> UseCaseResult<ExtensionsResult> {
+    let mut outcome = run_change(context, config, request, dry_run);
+    stamp_dispatch(&mut outcome, context.work());
+    outcome
+}
+
+fn run_change(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &ExtensionChangeRequest,
@@ -576,7 +599,7 @@ pub fn change(
         Ok(()) => Ok(ExtensionsResult {
             provider: Some(receipt.clone()),
             ok: true,
-            provider_dispatched: true,
+            provider_dispatched: false,
             steps: vec![ExtensionsStep {
                 target: request.target().to_owned(),
                 action: request.action().to_owned(),
@@ -590,7 +613,7 @@ pub fn change(
             let payload = ExtensionsResult {
                 provider: Some(receipt.clone()),
                 ok: false,
-                provider_dispatched: true,
+                provider_dispatched: false,
                 steps: vec![ExtensionsStep {
                     target: request.target().to_owned(),
                     action: request.action().to_owned(),

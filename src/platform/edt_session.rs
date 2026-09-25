@@ -15,6 +15,7 @@ use crate::config::model::AppConfig;
 use crate::platform::edt::{
     render_interactive_change_dir_command, render_interactive_probe_workdir_command,
 };
+use crate::platform::process::WorkGiven;
 
 mod runtime;
 
@@ -31,15 +32,31 @@ pub struct EdtSessionRequest {
     pub deadline: Instant,
     /// Cooperative cancellation token observed while queued and by the caller while running.
     pub cancellation: CancellationToken,
+    /// Куда отметить работу команды, когда запрос доставлен в процесс; у служебной команды
+    /// сессии — `None`.
+    pub work: Option<WorkGiven>,
 }
 
 impl EdtSessionRequest {
-    /// Creates a request with an uncancelled token.
-    pub fn new(command: impl Into<String>, deadline: Instant) -> Self {
+    /// Команда запроса: её доставка в процесс — работа команды. Конструктора по умолчанию нет,
+    /// чтобы новая команда запроса не забыла отметить работу.
+    pub fn for_work(command: impl Into<String>, deadline: Instant, work: WorkGiven) -> Self {
         Self {
             command: command.into(),
             deadline,
             cancellation: CancellationToken::new(),
+            work: Some(work),
+        }
+    }
+
+    /// Служебная команда самой сессии — переход в рабочее пространство перед первым запросом:
+    /// работы команды не отмечает.
+    pub fn service(command: impl Into<String>, deadline: Instant) -> Self {
+        Self {
+            command: command.into(),
+            deadline,
+            cancellation: CancellationToken::new(),
+            work: None,
         }
     }
 
@@ -884,6 +901,7 @@ mod tests {
     use crate::platform::interactive::{
         InteractiveCommandOutput, InteractiveProcessError, ShutdownOutcome,
     };
+    use crate::platform::process::WorkGiven;
     use std::collections::VecDeque;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1182,11 +1200,16 @@ mod tests {
             &mut self,
             command: &str,
             timeout: Duration,
+            delivered: Option<&WorkGiven>,
         ) -> Result<InteractiveCommandOutput, InteractiveProcessError> {
             self.commands
                 .lock()
                 .expect("commands lock")
                 .push(command.to_owned());
+            // Поддельная сессия принимает команду сразу: доставка — это вызов.
+            if let Some(work) = delivered {
+                work.mark_work_given();
+            }
             let behavior = self
                 .behaviors
                 .lock()
@@ -1342,7 +1365,7 @@ mod tests {
     }
 
     fn request(command: &str, after_ms: u64) -> EdtSessionRequest {
-        EdtSessionRequest::new(command, Instant::now() + Duration::from_millis(after_ms))
+        EdtSessionRequest::service(command, Instant::now() + Duration::from_millis(after_ms))
     }
 
     async fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {

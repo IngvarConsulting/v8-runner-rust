@@ -118,7 +118,7 @@ fn run_build_with(
                     error,
                     BuildResult {
                         provider: None,
-                        provider_dispatched: true,
+                        provider_dispatched: false,
                         ok: false,
                         steps: vec![],
                         duration_ms: started.elapsed().as_millis() as u64,
@@ -295,7 +295,7 @@ fn run_build_with(
 
     Ok(BuildResult {
         provider: None,
-        provider_dispatched: true,
+        provider_dispatched: false,
         ok: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,
@@ -323,7 +323,7 @@ pub(super) fn run_build_ibcmd(
                     error,
                     BuildResult {
                         provider: None,
-                        provider_dispatched: true,
+                        provider_dispatched: false,
                         ok: false,
                         steps: vec![],
                         duration_ms: started.elapsed().as_millis() as u64,
@@ -482,7 +482,7 @@ pub(super) fn run_build_ibcmd(
 
     Ok(BuildResult {
         provider: None,
-        provider_dispatched: true,
+        provider_dispatched: false,
         ok: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,
@@ -542,7 +542,7 @@ pub(super) fn run_build_edt(
             error,
             BuildResult {
                 provider: None,
-                provider_dispatched: true,
+                provider_dispatched: false,
                 ok: false,
                 steps: vec![],
                 duration_ms: 0,
@@ -560,7 +560,7 @@ pub(super) fn run_build_edt(
                     error,
                     BuildResult {
                         provider: None,
-                        provider_dispatched: true,
+                        provider_dispatched: false,
                         ok: false,
                         steps: vec![],
                         duration_ms: started.elapsed().as_millis() as u64,
@@ -1174,7 +1174,7 @@ pub(super) fn run_build_edt(
 
     Ok(BuildResult {
         provider: None,
-        provider_dispatched: true,
+        provider_dispatched: false,
         ok: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,

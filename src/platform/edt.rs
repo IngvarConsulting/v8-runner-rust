@@ -295,6 +295,7 @@ impl<'a> EdtDsl<'a> {
                         &change_dir_command,
                         remaining_interactive_timeout(deadline),
                         &execution_policy,
+                        None,
                     )
                     .map_err(|error| {
                         map_interactive_command_error(
@@ -318,6 +319,7 @@ impl<'a> EdtDsl<'a> {
                         interactive_command,
                         remaining_interactive_timeout(deadline),
                         &execution_policy,
+                        Some(&execution_policy.work),
                     )
                     .map_err(|error| {
                         map_interactive_command_error(
@@ -359,7 +361,7 @@ impl<'a> EdtDsl<'a> {
                 if !manager.has_live_session() {
                     manager
                         .execute_blocking(
-                            EdtSessionRequest::new(
+                            EdtSessionRequest::service(
                                 render_interactive_change_dir_command(&self.workspace),
                                 Instant::now() + *startup_timeout,
                             )
@@ -392,9 +394,10 @@ impl<'a> EdtDsl<'a> {
                 );
                 let output = manager
                     .execute_blocking(
-                        EdtSessionRequest::new(
+                        EdtSessionRequest::for_work(
                             interactive_command.to_owned(),
                             Instant::now() + effective_timeout,
+                            self.execution_policy.work.clone(),
                         )
                         .with_cancellation(self.execution_policy.cancellation.clone()),
                     )

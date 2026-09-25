@@ -29,7 +29,7 @@ use crate::use_cases::external_artifacts::ExternalArtifactKind;
 use crate::use_cases::interruption;
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::{DumpModeRequest, DumpRequest as DumpArgs};
-use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use tracing::debug;
 
 mod agent;
@@ -71,7 +71,9 @@ pub fn execute(
         transport = ?context.transport(),
         "executing dump use case"
     );
-    run_dump_with_context(context, config, args)
+    let mut outcome = run_dump_with_context(context, config, args);
+    stamp_dispatch(&mut outcome, context.work());
+    outcome
 }
 
 type DumpExecutionFailure = UseCaseFailure<DumpResult>;

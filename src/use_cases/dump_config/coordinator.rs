@@ -459,7 +459,7 @@ fn run_dump_selected(
     match result {
         Ok((platform_result, cleanup_message)) => Ok(DumpResult {
             provider: None,
-            provider_dispatched: true,
+            provider_dispatched: false,
             up_to_date,
             ok: true,
             source_set: Some(resolved.source_set_name),
@@ -478,7 +478,7 @@ fn run_dump_selected(
                 error,
                 DumpResult {
                     provider: None,
-                    provider_dispatched: true,
+                    provider_dispatched: false,
                     up_to_date: false,
                     ok: false,
                     source_set: Some(resolved.source_set_name),

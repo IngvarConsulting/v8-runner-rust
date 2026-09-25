@@ -135,6 +135,7 @@ pub(crate) fn wait_policy(context: &ExecutionContext) -> WaitPolicy {
         deadline: policy.timeout.map(|timeout| Instant::now() + timeout),
         cancellation: policy.cancellation.clone(),
         safety: policy.safety,
+        work: policy.work.clone(),
     }
 }
 

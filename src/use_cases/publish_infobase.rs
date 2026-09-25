@@ -21,7 +21,7 @@ use crate::support::error::AppError;
 use crate::support::temp::platform_logs_dir;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::progress::log_live_stage;
-use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishRequest {
@@ -30,7 +30,18 @@ pub struct PublishRequest {
 }
 
 #[allow(clippy::result_large_err)] // Failure payload preserves the typed result.
+/// Единственный выход сценария: `provider_dispatched` ответа ставит отметка работы команды.
 pub fn execute(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    request: &PublishRequest,
+) -> UseCaseResult<PublishResult> {
+    let mut outcome = run_publish(context, config, request);
+    stamp_dispatch(&mut outcome, context.work());
+    outcome
+}
+
+fn run_publish(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &PublishRequest,
@@ -86,10 +97,10 @@ pub fn execute(
         &config.infobase.connection,
     );
     let secrets: Vec<&str> = config.infobase.password.as_deref().into_iter().collect();
-    let result = |provider_dispatched: bool, plan: Option<PublishPlan>| PublishResult {
+    let result = |plan: Option<PublishPlan>| PublishResult {
         provider: Some(receipt.clone()),
         ok: true,
-        provider_dispatched,
+        provider_dispatched: false,
         action: request.action,
         server: server.as_str().to_owned(),
         wsdir: wsdir.clone(),
@@ -106,14 +117,11 @@ pub fn execute(
             "publish: preview",
             "[webinst] preview only, web server not touched",
         );
-        let mut preview = result(
-            false,
-            Some(PublishPlan {
-                program: location.path.clone(),
-                // `-connstr` несёт строку соединения целиком, а в ней бывает `Pwd=`.
-                args: mask_preview_args(&args, &secrets),
-            }),
-        );
+        let mut preview = result(Some(PublishPlan {
+            program: location.path.clone(),
+            // `-connstr` несёт строку соединения целиком, а в ней бывает `Pwd=`.
+            args: mask_preview_args(&args, &secrets),
+        }));
         preview.message = Some(format!(
             "would {} '{}' on {} via {}; web server not touched",
             request.action.as_str(),
@@ -160,7 +168,7 @@ pub fn execute(
         )
         .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
 
-    let mut done = result(true, None);
+    let mut done = result(None);
     done.platform_log_path = Some(log_path);
     if outcome.exit_code == 0 {
         done.message = Some(format!(

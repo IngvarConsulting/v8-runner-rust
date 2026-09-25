@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::platform::process::{ProcessInterruptionReason, ProcessInterruptionSafety};
+use crate::platform::process::{ProcessInterruptionReason, ProcessInterruptionSafety, WorkGiven};
 
 use russh::client;
 use russh::keys::ssh_key::{Fingerprint, HashAlg};
@@ -375,6 +375,9 @@ pub struct WaitPolicy {
     pub deadline: Option<Instant>,
     pub cancellation: CancellationToken,
     pub safety: ProcessInterruptionSafety,
+    /// Куда отметить, что команда запроса отправлена агенту. У служебных команд сессии —
+    /// подключения, закрытия — своя, никем не читаемая отметка (`service`, `cleanup`).
+    pub work: WorkGiven,
 }
 
 impl WaitPolicy {
@@ -389,6 +392,17 @@ impl WaitPolicy {
             // Очистка не наследует критический класс: иначе она перестала бы слушать
             // собственный срок и завершение могло бы не закончиться никогда.
             safety: ProcessInterruptionSafety::Interruptible,
+            // Закрытие сессии — служебная команда, работы команды оно не отмечает.
+            work: WorkGiven::detached(),
+            ..self.clone()
+        }
+    }
+
+    /// Та же политика для служебных команд открытия сессии — режима ответа и подключения к
+    /// базе: они работы команды не отмечают.
+    pub fn service(&self) -> Self {
+        Self {
+            work: WorkGiven::detached(),
             ..self.clone()
         }
     }
@@ -404,12 +418,15 @@ impl WaitPolicy {
     }
 }
 
+/// Только для тестов: в работе политику ожидания строит контекст команды.
+#[cfg(test)]
 impl Default for WaitPolicy {
     fn default() -> Self {
         Self {
             deadline: None,
             cancellation: CancellationToken::new(),
             safety: ProcessInterruptionSafety::Interruptible,
+            work: WorkGiven::for_command(),
         }
     }
 }
@@ -666,8 +683,9 @@ impl AgentSession {
             ended: false,
             deferred_interruption: None,
         };
-        session.run(JSON_MODE_COMMAND, policy)?.outcome()?;
-        session.run(CONNECT_COMMAND, policy)?.outcome()?;
+        let service = policy.service();
+        session.run(JSON_MODE_COMMAND, &service)?.outcome()?;
+        session.run(CONNECT_COMMAND, &service)?.outcome()?;
         Ok(session)
     }
 
@@ -676,6 +694,9 @@ impl AgentSession {
     /// (замер 15.09.2026: `load-config-from-files` — `progress`, `progress`, …, `success`).
     pub fn run(&mut self, command: &str, policy: &WaitPolicy) -> Result<AgentReply, AgentError> {
         self.send(command)?;
+        // Команда ушла агенту: это работа команды, чем бы она ни кончилась. Служебные
+        // команды сессии приходят с отметкой, которую никто не читает.
+        policy.work.mark_work_given();
         let mut messages = Vec::new();
         let mut deferred_interruption = None;
         loop {
@@ -1376,6 +1397,7 @@ mod tests {
             deadline: Some(deadline),
             cancellation: cancellation.clone(),
             safety: ProcessInterruptionSafety::GracefulThenKill,
+            work: WorkGiven::for_command(),
         };
 
         let critical = base.critical();
@@ -1427,6 +1449,7 @@ mod tests {
             deadline: Some(soon),
             cancellation: CancellationToken::new(),
             safety: ProcessInterruptionSafety::GracefulThenKill,
+            work: WorkGiven::for_command(),
         }
         .cleanup();
         assert_eq!(
@@ -1440,6 +1463,7 @@ mod tests {
             deadline: Some(far),
             cancellation: CancellationToken::new(),
             safety: ProcessInterruptionSafety::GracefulThenKill,
+            work: WorkGiven::for_command(),
         }
         .cleanup();
         let bounded = bounded.deadline.expect("cleanup always has a deadline");
@@ -1504,6 +1528,7 @@ mod tests {
             deadline: Some(Instant::now() + Duration::from_secs(60)),
             cancellation: CancellationToken::new(),
             safety: ProcessInterruptionSafety::Interruptible,
+            work: WorkGiven::for_command(),
         };
         let mut session = AgentSession::open(&request, &wait).expect("open");
         eprintln!(
