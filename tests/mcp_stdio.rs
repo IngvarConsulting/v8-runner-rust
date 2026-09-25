@@ -1071,8 +1071,11 @@ async fn mcp_stdio_a_live_edt_check_whose_session_never_started_reports_no_work(
         1,
     );
     // Тот же файл, права прежние: EDT CLI выходит, не выдав подсказки.
-    fs::write(dir.path().join("edt").join("1cedtcli"), "#!/bin/sh\nexit 1\n")
-        .expect("broken edt cli");
+    fs::write(
+        dir.path().join("edt").join("1cedtcli"),
+        "#!/bin/sh\nexit 1\n",
+    )
+    .expect("broken edt cli");
     let client = serve_stdio(&config_path).await;
 
     let response = client
