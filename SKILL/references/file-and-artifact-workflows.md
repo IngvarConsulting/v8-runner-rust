@@ -152,6 +152,6 @@ Behavior:
 - main configuration exports to `.cf`;
 - extension export uses `.cfe`;
 - external data processors and reports publish `.epf` / `.erf` into the output directory;
-- `make` runs through Designer; `agent` only via `providers.make: agent`.
+- `make` runs through Designer; select `agent` via `providers.make: agent`, except on a standalone server, where it is the only executor.
 
 A full `pull` and package/external artifact publication use staged publication with backup/rollback semantics. Incremental and partial pulls are non-atomic update modes.
