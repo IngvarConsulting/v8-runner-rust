@@ -1216,6 +1216,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn write_script(path: &Path, body: &str) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("create dirs");
