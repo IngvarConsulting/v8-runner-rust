@@ -248,7 +248,7 @@ fn execute_publish(
                         result,
                     ));
                 } else {
-                    render_publish_text(&result, presenter, true);
+                    render_publish_text(&result, presenter, true, dry_run);
                 }
                 Ok(())
             }
@@ -269,7 +269,7 @@ fn execute_publish(
                     }
                 } else {
                     if let Some(result) = failure.payload.as_ref() {
-                        render_publish_text(result, presenter, false);
+                        render_publish_text(result, presenter, false, dry_run);
                     }
                     presenter.print_error(&error.to_string());
                 }
@@ -283,14 +283,15 @@ fn render_publish_text(
     result: &crate::domain::publish::PublishResult,
     presenter: &Presenter,
     succeeded: bool,
+    previewed: bool,
 ) {
     let verb = match result.action {
         crate::domain::publish::PublishAction::Publish => "Publication",
         crate::domain::publish::PublishAction::Delete => "Publication removal",
     };
-    // «Запланировано» — не стандартный исход, у него своя подпись.
-    let planned_label =
-        (succeeded && !result.provider_dispatched).then(|| format!("{verb} planned"));
+    // «Запланировано» — не стандартный исход, у него своя подпись. Превью называет запрос:
+    // `provider_dispatched` говорит о работе исполнителя, а не о превью.
+    let planned_label = (succeeded && previewed).then(|| format!("{verb} planned"));
     let mut details = vec![
         format!("server: {}", result.server),
         format!("wsdir: {}", result.wsdir),
@@ -514,8 +515,8 @@ fn execute_extensions(
                         result.duration_ms,
                         result,
                     ));
-                } else if !result.provider_dispatched {
-                    render_extensions_text(&result, presenter);
+                } else if dry_run {
+                    render_extensions_text(&result, presenter, true);
                 }
                 Ok(())
             }
@@ -667,7 +668,7 @@ fn run_extension_change(
                     result,
                 ));
             } else {
-                render_extensions_text(&result, presenter);
+                render_extensions_text(&result, presenter, dry_run);
             }
             Ok(())
         }
@@ -752,6 +753,7 @@ fn render_extension_inventory_text(
 fn render_extensions_text(
     result: &crate::domain::extensions::ExtensionsResult,
     presenter: &Presenter,
+    previewed: bool,
 ) {
     let details = result
         .steps
@@ -762,10 +764,10 @@ fn render_extensions_text(
                 step.target,
                 step.action,
                 // A preview performed nothing, so the step must not read as done.
-                match (result.provider_dispatched, step.ok) {
-                    (false, _) => "planned",
-                    (true, true) => "ok",
-                    (true, false) => "failed",
+                match (previewed, step.ok) {
+                    (true, _) => "planned",
+                    (false, true) => "ok",
+                    (false, false) => "failed",
                 },
                 step.message
                     .as_deref()
@@ -779,10 +781,10 @@ fn render_extensions_text(
     } else {
         TimelineStatus::Failed
     };
-    let label = if result.provider_dispatched {
-        "Infobase extension change"
-    } else {
+    let label = if previewed {
         "Infobase extension change preview"
+    } else {
+        "Infobase extension change"
     };
     let mut details = details;
     details.extend(provider_receipt_details(result.provider.as_ref()));
@@ -960,10 +962,10 @@ fn execute_load(
         || match load_artifact::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
-                    let envelope = build_load_envelope(&result);
+                    let envelope = build_load_envelope(&result, dry_run);
                     presenter.print_envelope(&envelope);
                 } else {
-                    render_load_text(&result, presenter, true);
+                    render_load_text(&result, presenter, true, dry_run);
                 }
                 Ok(())
             }
@@ -971,12 +973,13 @@ fn execute_load(
                 let error = failure.error;
                 if presenter.is_json() {
                     if let Some(result) = failure.payload {
-                        let envelope = with_cli_error(build_load_envelope(&result), &error);
+                        let envelope =
+                            with_cli_error(build_load_envelope(&result, dry_run), &error);
                         presenter.print_envelope(&envelope);
                     }
                 } else {
                     if let Some(result) = failure.payload.as_ref() {
-                        render_load_text(result, presenter, false);
+                        render_load_text(result, presenter, false, dry_run);
                     }
                     presenter.print_error(&error.to_string());
                 }
@@ -2238,7 +2241,7 @@ fn execute_syntax(
                         result,
                     ));
                 } else {
-                    render_syntax_text(&result, presenter);
+                    render_syntax_text(&result, presenter, dry_run);
                 }
                 Ok(())
             }
@@ -2255,7 +2258,7 @@ fn execute_syntax(
                     }
                 } else {
                     if let Some(result) = failure.payload.as_ref() {
-                        render_syntax_text(result, presenter);
+                        render_syntax_text(result, presenter, dry_run);
                     }
                     presenter.print_error(&error.to_string());
                 }
@@ -2292,7 +2295,7 @@ fn execute_launch(
                         result,
                     ));
                 } else {
-                    render_launch_text(&result, presenter);
+                    render_launch_text(&result, presenter, dry_run);
                 }
                 Ok(())
             }
@@ -3184,7 +3187,7 @@ pub(crate) struct LoadJsonData<'a> {
 }
 
 impl<'a> LoadJsonData<'a> {
-    fn from_result(result: &'a LoadResult) -> Self {
+    fn from_result(result: &'a LoadResult, previewed: bool) -> Self {
         let metadata = load_metadata(result);
         Self {
             provider: result.provider.clone(),
@@ -3202,7 +3205,7 @@ impl<'a> LoadJsonData<'a> {
             extension: result.extension.as_deref(),
             platform_log_path: platform_log_path_from_artifacts(&result.execution.artifacts),
             duration_ms: result.duration_ms,
-            message: load_message(result),
+            message: load_message(result, previewed),
             execution: &result.execution,
         }
     }
@@ -3212,7 +3215,7 @@ fn load_metadata(result: &LoadResult) -> Option<&LoadExecutionMetadata> {
     result.execution.payload.as_ref()
 }
 
-fn load_message(result: &LoadResult) -> Option<String> {
+fn load_message(result: &LoadResult, previewed: bool) -> Option<String> {
     if !result.execution.is_ok() {
         return execution_message(&result.execution);
     }
@@ -3224,17 +3227,18 @@ fn load_message(result: &LoadResult) -> Option<String> {
         LoadMode::Update => "update",
     };
     // A preview applied nothing, so it must not claim a successful apply; its own
-    // diagnostics below say what it would have done.
-    let mut message = if result.provider_dispatched {
+    // diagnostics below say what it would have done. The request says it was a preview:
+    // `provider_dispatched` tells whether an executor got work, not whether it previewed.
+    let mut message = if previewed {
+        format!(
+            "{mode} {} previewed; nothing applied",
+            result.artifact_path.display()
+        )
+    } else {
         format!(
             "{mode} {} applied successfully after {:?} compatibility probe",
             result.artifact_path.display(),
             metadata.compatibility_state
-        )
-    } else {
-        format!(
-            "{mode} {} previewed; nothing applied",
-            result.artifact_path.display()
         )
     };
     if !result.execution.diagnostics.is_empty() {
@@ -3244,7 +3248,7 @@ fn load_message(result: &LoadResult) -> Option<String> {
     Some(message)
 }
 
-fn build_load_envelope(result: &LoadResult) -> Envelope<LoadJsonData<'_>> {
+fn build_load_envelope(result: &LoadResult, previewed: bool) -> Envelope<LoadJsonData<'_>> {
     Envelope {
         ok: result.execution.is_ok(),
         command: CommandName::Load.as_str().to_owned(),
@@ -3252,7 +3256,7 @@ fn build_load_envelope(result: &LoadResult) -> Envelope<LoadJsonData<'_>> {
         warnings: Vec::new(),
         steps: Vec::new(),
         error: None,
-        data: LoadJsonData::from_result(result),
+        data: LoadJsonData::from_result(result, previewed),
     }
 }
 
@@ -3690,7 +3694,7 @@ fn render_artifact_mode(mode: ArtifactBuildMode) -> &'static str {
     }
 }
 
-fn render_load_text(result: &LoadResult, presenter: &Presenter, succeeded: bool) {
+fn render_load_text(result: &LoadResult, presenter: &Presenter, succeeded: bool, previewed: bool) {
     let mode = match result.mode {
         LoadMode::Load => "load",
         LoadMode::Merge => "combine",
@@ -3726,7 +3730,7 @@ fn render_load_text(result: &LoadResult, presenter: &Presenter, succeeded: bool)
         let prefix = if succeeded { "warning" } else { "error" };
         append_if_present(
             &mut details,
-            load_message(result).map(|message| bracketed_detail(prefix, message)),
+            load_message(result, previewed).map(|message| bracketed_detail(prefix, message)),
         );
         append_error_details(&mut details, &result.execution.errors);
         append_diagnostics(&mut details, &result.execution.diagnostics);
@@ -3974,7 +3978,7 @@ fn render_convert_scope(scope: ConvertScope, source_set: Option<&str>) -> String
     }
 }
 
-fn render_syntax_text(result: &SyntaxCheckResult, presenter: &Presenter) {
+fn render_syntax_text(result: &SyntaxCheckResult, presenter: &Presenter, previewed: bool) {
     // Превью — исход успешный: проверка не выполнялась, значит и приговора нет.
     let succeeded = matches!(
         result.status,
@@ -3984,10 +3988,10 @@ fn render_syntax_text(result: &SyntaxCheckResult, presenter: &Presenter) {
     // слово выбирает presenter. Непрочитанный журнал больше не остаётся одним
     // предупреждением среди подробностей: он делает вердикт неизвестным, то есть
     // `tool_failed`, и подпись следует за знаком сама.
-    let subject = if result.provider_dispatched {
-        format!("Syntax check {}", result.check_name)
-    } else {
+    let subject = if previewed {
         format!("Syntax check {} preview", result.check_name)
+    } else {
+        format!("Syntax check {}", result.check_name)
     };
     let issues_label = matches!(result.status, SyntaxCheckStatus::IssuesFound)
         .then(|| format!("{subject} found issues"));
@@ -4062,11 +4066,11 @@ fn render_syntax_status(status: SyntaxCheckStatus) -> &'static str {
     }
 }
 
-fn render_launch_text(result: &LaunchResult, presenter: &Presenter) {
-    let subject = if result.provider_dispatched {
-        "Launch"
-    } else {
+fn render_launch_text(result: &LaunchResult, presenter: &Presenter, previewed: bool) {
+    let subject = if previewed {
         "Launch preview"
+    } else {
+        "Launch"
     };
     render_launch_text_with_status(result, presenter, TimelineStatus::Succeeded, subject);
 }
@@ -5208,7 +5212,7 @@ mod tests {
                 }),
         };
 
-        let json = serde_json::to_value(build_load_envelope(&result)).expect("json");
+        let json = serde_json::to_value(build_load_envelope(&result, false)).expect("json");
         let message = json["data"]["message"].as_str().expect("message");
 
         assert_eq!(json["ok"], true);
