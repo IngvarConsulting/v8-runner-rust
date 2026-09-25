@@ -62,29 +62,18 @@ pub fn execute(
         transport = ?context.transport(),
         "executing build use case"
     );
-    let mut outcome = run_build_unlocked(context, config, args);
-    stamp_dispatch(&mut outcome, context.work());
-    outcome
+    stamp_dispatch(run_build_branch(context, config, args), context.work())
 }
 
 pub(crate) type BuildExecutionFailure = UseCaseFailure<BuildResult>;
 
 #[cfg(test)]
 pub(crate) fn run_build(config: &AppConfig, args: &BuildArgs) -> UseCaseResult<BuildResult> {
-    run_build_unlocked(
+    execute(
         &ExecutionContext::cli(crate::use_cases::context::CommandName::Build),
         config,
         args,
     )
-}
-
-/// Caller must ensure exclusive ownership of `config.work_path`.
-fn run_build_unlocked(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    args: &BuildArgs,
-) -> UseCaseResult<BuildResult> {
-    run_build_branch(context, config, args)
 }
 
 fn run_build_branch(

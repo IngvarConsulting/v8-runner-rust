@@ -35,9 +35,7 @@ pub fn execute(
     config: &AppConfig,
     request: &ExtensionInventoryRequest,
 ) -> UseCaseResult<ExtensionInventoryResult> {
-    let mut outcome = run_read(context, config, request);
-    stamp_dispatch(&mut outcome, context.work());
-    outcome
+    stamp_dispatch(run_read(context, config, request), context.work())
 }
 
 fn run_read(
@@ -496,9 +494,10 @@ pub fn change(
     request: &ExtensionChangeRequest,
     dry_run: bool,
 ) -> UseCaseResult<ExtensionsResult> {
-    let mut outcome = run_change(context, config, request, dry_run);
-    stamp_dispatch(&mut outcome, context.work());
-    outcome
+    stamp_dispatch(
+        run_change(context, config, request, dry_run),
+        context.work(),
+    )
 }
 
 fn run_change(

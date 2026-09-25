@@ -71,9 +71,7 @@ pub fn execute(
         transport = ?context.transport(),
         "executing dump use case"
     );
-    let mut outcome = run_dump_with_context(context, config, args);
-    stamp_dispatch(&mut outcome, context.work());
-    outcome
+    stamp_dispatch(run_dump_with_context(context, config, args), context.work())
 }
 
 type DumpExecutionFailure = UseCaseFailure<DumpResult>;
@@ -1272,12 +1270,20 @@ exit 0"#,
         fn run_with_policy(
             &self,
             request: &ProcessRequest,
-            _policy: &ProcessExecutionPolicy,
+            policy: &ProcessExecutionPolicy,
         ) -> Result<ProcessResult, ProcessError> {
+            // Как настоящий исполнитель, двойник отмечает работу, едва «запустил» процесс.
+            if let Some(work) = &policy.work {
+                work.mark_work_given();
+            }
             self.run_request(request)
         }
 
-        fn spawn(&self, _request: &ProcessRequest) -> Result<SpawnResult, ProcessError> {
+        fn spawn(
+            &self,
+            _request: &ProcessRequest,
+            _work: &crate::platform::process::WorkGiven,
+        ) -> Result<SpawnResult, ProcessError> {
             panic!("spawn must not be used in dump_config tests")
         }
     }

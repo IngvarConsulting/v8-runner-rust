@@ -27,9 +27,7 @@ pub fn execute(
     config: &AppConfig,
     args: &ConfigureExtensionsRequest,
 ) -> UseCaseResult<ExtensionsResult> {
-    let mut outcome = run_configure(context, config, args);
-    stamp_dispatch(&mut outcome, context.work());
-    outcome
+    stamp_dispatch(run_configure(context, config, args), context.work())
 }
 
 fn run_configure(

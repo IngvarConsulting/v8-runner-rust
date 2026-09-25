@@ -290,12 +290,16 @@ impl<'a> EdtDsl<'a> {
                     timeout_ms = effective_timeout.as_millis() as u64,
                     "running interactive edt command"
                 );
+                // Переход в рабочее пространство — служебная команда: работы он не отмечает.
+                let service_policy = ProcessExecutionPolicy {
+                    work: None,
+                    ..execution_policy.clone()
+                };
                 let change_dir = session
                     .execute_with_policy(
                         &change_dir_command,
                         remaining_interactive_timeout(deadline),
-                        &execution_policy,
-                        None,
+                        &service_policy,
                     )
                     .map_err(|error| {
                         map_interactive_command_error(
@@ -319,7 +323,6 @@ impl<'a> EdtDsl<'a> {
                         interactive_command,
                         remaining_interactive_timeout(deadline),
                         &execution_policy,
-                        Some(&execution_policy.work),
                     )
                     .map_err(|error| {
                         map_interactive_command_error(
@@ -361,9 +364,10 @@ impl<'a> EdtDsl<'a> {
                 if !manager.has_live_session() {
                     manager
                         .execute_blocking(
-                            EdtSessionRequest::service(
+                            EdtSessionRequest::new(
                                 render_interactive_change_dir_command(&self.workspace),
                                 Instant::now() + *startup_timeout,
+                                None,
                             )
                             .with_cancellation(self.execution_policy.cancellation.clone()),
                         )
@@ -394,7 +398,7 @@ impl<'a> EdtDsl<'a> {
                 );
                 let output = manager
                     .execute_blocking(
-                        EdtSessionRequest::for_work(
+                        EdtSessionRequest::new(
                             interactive_command.to_owned(),
                             Instant::now() + effective_timeout,
                             self.execution_policy.work.clone(),
@@ -763,7 +767,7 @@ mod tests {
     use crate::platform::process::{
         ProcessError, ProcessExecutionPolicy, ProcessExecutor, ProcessInterruptionAction,
         ProcessInterruptionReason, ProcessInterruptionSafety, ProcessRequest, ProcessResult,
-        ProcessRunner, SpawnResult,
+        ProcessRunner, SpawnResult, WorkGiven,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -886,7 +890,7 @@ mod tests {
             script,
             dir.path().join("ws"),
             &runner as &dyn ProcessRunner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         );
 
         let result = dsl
@@ -920,7 +924,7 @@ mod tests {
             script,
             dir.path().join("ws"),
             &runner as &dyn ProcessRunner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         );
 
         let result = dsl
@@ -957,7 +961,7 @@ mod tests {
             script,
             dir.path().join("ws"),
             &runner as &dyn ProcessRunner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         );
         let result = dsl
             .validate_project(Path::new("/tmp/project"), &out_log)
@@ -987,7 +991,7 @@ mod tests {
             script,
             dir.path().join("ws"),
             &runner as &dyn ProcessRunner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         );
         let result = dsl
             .validate_project(Path::new("/tmp/project"), &out_log)
@@ -1019,7 +1023,7 @@ mod tests {
             script,
             workspace.clone(),
             &runner as &dyn ProcessRunner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         );
         let result = dsl
             .export_project("project", Path::new("/tmp/out"))
@@ -1045,7 +1049,7 @@ mod tests {
             script,
             dir.path().join("ws"),
             &runner as &dyn ProcessRunner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         );
 
         let result = dsl
@@ -1076,7 +1080,7 @@ mod tests {
             script,
             dir.path().join("ws"),
             &runner as &dyn ProcessRunner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         );
 
         let result = dsl
@@ -1124,6 +1128,10 @@ mod tests {
                 });
             }
             *self.timeout.lock().expect("timeout lock") = policy.timeout;
+            // Как настоящий исполнитель, двойник отмечает работу, едва «запустил» процесс.
+            if let Some(work) = &policy.work {
+                work.mark_work_given();
+            }
             Ok(ProcessResult {
                 exit_code: 0,
                 stdout: String::new(),
@@ -1132,7 +1140,11 @@ mod tests {
             })
         }
 
-        fn spawn(&self, _request: &ProcessRequest) -> Result<SpawnResult, ProcessError> {
+        fn spawn(
+            &self,
+            _request: &ProcessRequest,
+            _work: &WorkGiven,
+        ) -> Result<SpawnResult, ProcessError> {
             panic!("spawn must not be called in EDT DSL tests")
         }
     }
@@ -1144,7 +1156,7 @@ mod tests {
             PathBuf::from("/tmp/1cedtcli"),
             PathBuf::from("/tmp/ws"),
             &runner as &dyn ProcessRunner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         )
         .with_timeout(Some(Duration::from_secs(7)));
 
@@ -1221,7 +1233,7 @@ mod tests {
             dir.path().join("ws"),
             TEST_INTERACTIVE_STARTUP_TIMEOUT,
             TEST_INTERACTIVE_COMMAND_TIMEOUT,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         )
         .expect("interactive dsl");
 
@@ -1235,6 +1247,59 @@ mod tests {
         assert!(commands.contains("export --project-name project --configuration-files /tmp/out"));
         assert!(commands.contains("import --project /tmp/project"));
         assert!(!commands.contains("-command"));
+    }
+
+    /// Переход в рабочее пространство — служебная команда интерактивной сессии: работу
+    /// команды отмечает только доставка самой команды запроса. Сессия, которая выходит на
+    /// `cd`, до команды запроса не доходит, и отметка остаётся пустой.
+    #[cfg(unix)]
+    #[test]
+    fn an_interactive_session_marks_only_the_request_command() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("1cedtcli");
+        let refuse = dir.path().join("refuse-cd");
+        let body = format!(
+            "prompt() {{ printf '1C:EDT>'; }}\n\
+             prompt\n\
+             while IFS= read -r line; do\n\
+               case \"$line\" in\n\
+                 cd*) if [ -e '{}' ]; then exit 3; fi; prompt ;;\n\
+                 *) prompt ;;\n\
+               esac\n\
+             done\n",
+            refuse.display()
+        );
+        write_script(&script, &body);
+        let session = |work: &WorkGiven| {
+            EdtDsl::new_interactive(
+                script.clone(),
+                dir.path().join("ws"),
+                TEST_INTERACTIVE_STARTUP_TIMEOUT,
+                TEST_INTERACTIVE_COMMAND_TIMEOUT,
+                ProcessExecutionPolicy {
+                    work: Some(work.clone()),
+                    ..ProcessExecutionPolicy::default()
+                },
+            )
+            .expect("interactive dsl")
+        };
+
+        let refused = WorkGiven::for_command();
+        let dsl = session(&refused);
+        fs::write(&refuse, "").expect("refuse the cd");
+        dsl.import_project(Path::new("/tmp/project"))
+            .expect_err("the session exits on cd");
+        assert!(!refused.given(), "the cd prelude is not the command's work");
+
+        fs::remove_file(&refuse).expect("accept the cd");
+        let delivered = WorkGiven::for_command();
+        session(&delivered)
+            .import_project(Path::new("/tmp/project"))
+            .expect("import");
+        assert!(
+            delivered.given(),
+            "the delivered request is the command's work"
+        );
     }
 
     #[cfg(unix)]
@@ -1260,7 +1325,7 @@ mod tests {
             manager.clone(),
             Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
             Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         )
         .expect("first dsl");
         let second = EdtDsl::new_shared_session(
@@ -1269,7 +1334,7 @@ mod tests {
             manager,
             Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
             Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         )
         .expect("second dsl");
 
@@ -1327,7 +1392,7 @@ OUT\n\
             dir.path().join("ws"),
             TEST_INTERACTIVE_STARTUP_TIMEOUT,
             TEST_INTERACTIVE_COMMAND_TIMEOUT,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         )
         .expect("interactive dsl");
 
@@ -1377,7 +1442,7 @@ OUT\n\
                 Some(Duration::from_millis(50)),
                 CancellationToken::new(),
                 ProcessInterruptionSafety::GracefulThenKill,
-                crate::platform::process::WorkGiven::for_command(),
+                Some(WorkGiven::for_command()),
             ),
         )
         .expect("interactive dsl");
@@ -1431,7 +1496,7 @@ OUT\n\
                 Some(Duration::from_millis(100)),
                 CancellationToken::new(),
                 ProcessInterruptionSafety::GracefulThenKill,
-                crate::platform::process::WorkGiven::for_command(),
+                Some(WorkGiven::for_command()),
             ),
         )
         .expect("interactive dsl");
@@ -1489,7 +1554,7 @@ OUT\n\
                 Some(Duration::from_millis(400)),
                 CancellationToken::new(),
                 ProcessInterruptionSafety::GracefulThenKill,
-                crate::platform::process::WorkGiven::for_command(),
+                Some(WorkGiven::for_command()),
             ),
         )
         .expect("interactive dsl");
@@ -1551,7 +1616,7 @@ OUT\n\
                 Some(Duration::from_secs(1)),
                 cancellation,
                 ProcessInterruptionSafety::GracefulThenKill,
-                crate::platform::process::WorkGiven::for_command(),
+                Some(WorkGiven::for_command()),
             ),
         )
         .expect("interactive dsl");
@@ -1604,7 +1669,7 @@ OUT\n\
                 Some(Duration::from_millis(250)),
                 CancellationToken::new(),
                 ProcessInterruptionSafety::CriticalNonAbortable,
-                crate::platform::process::WorkGiven::for_command(),
+                Some(WorkGiven::for_command()),
             ),
         )
         .expect("interactive dsl");

@@ -133,9 +133,9 @@ pub(crate) fn wait_policy(context: &ExecutionContext) -> WaitPolicy {
     let policy = context.process_policy(InterruptionSafetyClass::GracefulThenKill, None);
     WaitPolicy {
         deadline: policy.timeout.map(|timeout| Instant::now() + timeout),
-        cancellation: policy.cancellation.clone(),
+        cancellation: policy.cancellation,
         safety: policy.safety,
-        work: policy.work.clone(),
+        work: policy.work,
     }
 }
 

@@ -65,9 +65,7 @@ pub fn execute(
         extension = args.extension.as_deref().unwrap_or("<none>"),
         "executing artifacts use case"
     );
-    let mut outcome = run_artifacts(context, config, args);
-    stamp_dispatch(&mut outcome, context.work());
-    outcome
+    stamp_dispatch(run_artifacts(context, config, args), context.work())
 }
 
 type ArtifactsExecutionFailure = UseCaseFailure<ArtifactsResult>;
@@ -1324,6 +1322,10 @@ mod tests {
             request: &ProcessRequest,
             policy: &ProcessExecutionPolicy,
         ) -> Result<ProcessResult, ProcessError> {
+            // Как настоящий исполнитель, двойник отмечает работу, едва «запустил» процесс.
+            if let Some(work) = &policy.work {
+                work.mark_work_given();
+            }
             let mut previous = "";
             for arg in &request.args {
                 if previous == "/DumpCfg" {
@@ -1349,7 +1351,11 @@ mod tests {
             })
         }
 
-        fn spawn(&self, _request: &ProcessRequest) -> Result<SpawnResult, ProcessError> {
+        fn spawn(
+            &self,
+            _request: &ProcessRequest,
+            _work: &crate::platform::process::WorkGiven,
+        ) -> Result<SpawnResult, ProcessError> {
             unreachable!("the export runs to its end and never spawns")
         }
     }

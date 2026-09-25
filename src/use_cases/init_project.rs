@@ -35,9 +35,7 @@ pub fn execute(
         transport = ?context.transport(),
         "executing init use case"
     );
-    let mut outcome = run_init(context, config, args.dry_run);
-    stamp_dispatch(&mut outcome, context.work());
-    outcome
+    stamp_dispatch(run_init(context, config, args.dry_run), context.work())
 }
 
 pub(crate) type InitExecutionFailure = UseCaseFailure<InitResult>;

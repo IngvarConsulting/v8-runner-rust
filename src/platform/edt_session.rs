@@ -27,36 +27,27 @@ use self::runtime::{run_worker, wait_for_worker, DefaultSessionFactory, SessionF
 #[derive(Debug, Clone)]
 pub struct EdtSessionRequest {
     /// Raw command line sent into the interactive `1cedtcli` prompt.
-    pub command: String,
+    command: String,
     /// Absolute deadline covering both queue wait and execution time.
-    pub deadline: Instant,
+    deadline: Instant,
     /// Cooperative cancellation token observed while queued and by the caller while running.
-    pub cancellation: CancellationToken,
+    cancellation: CancellationToken,
     /// Куда отметить работу команды, когда запрос доставлен в процесс; у служебной команды
     /// сессии — `None`.
-    pub work: Option<WorkGiven>,
+    work: Option<WorkGiven>,
 }
 
 impl EdtSessionRequest {
-    /// Команда запроса: её доставка в процесс — работа команды. Конструктора по умолчанию нет,
-    /// чтобы новая команда запроса не забыла отметить работу.
-    pub fn for_work(command: impl Into<String>, deadline: Instant, work: WorkGiven) -> Self {
+    /// Команда для общей сессии. С отметкой это команда запроса: её доставка в процесс —
+    /// работа команды. `None` — служебная команда самой сессии, переход в рабочее
+    /// пространство перед первым запросом: работы команды она не отмечает. Значения по
+    /// умолчанию у отметки нет, чтобы новая команда запроса не забыла её передать.
+    pub fn new(command: impl Into<String>, deadline: Instant, work: Option<WorkGiven>) -> Self {
         Self {
             command: command.into(),
             deadline,
             cancellation: CancellationToken::new(),
-            work: Some(work),
-        }
-    }
-
-    /// Служебная команда самой сессии — переход в рабочее пространство перед первым запросом:
-    /// работы команды не отмечает.
-    pub fn service(command: impl Into<String>, deadline: Instant) -> Self {
-        Self {
-            command: command.into(),
-            deadline,
-            cancellation: CancellationToken::new(),
-            work: None,
+            work,
         }
     }
 
@@ -1056,6 +1047,12 @@ mod tests {
         TimeOutWhenReleased {
             release: Arc<AtomicBool>,
         },
+        /// Команда кончается успехом, когда тест отпустит `release`: тест успевает посмотреть
+        /// на состояние посреди неё, как бы ни был загружен прогон.
+        CompleteWhenReleased {
+            release: Arc<AtomicBool>,
+            stdout: String,
+        },
     }
 
     struct FakeSession {
@@ -1251,25 +1248,30 @@ mod tests {
                     }
                 }
                 CommandBehavior::TimeOutWhenReleased { release } => {
-                    let deadline = Instant::now() + Duration::from_secs(10);
-                    while !release.load(Ordering::SeqCst) {
-                        assert!(
-                            Instant::now() < deadline,
-                            "the test never released the command"
-                        );
-                        if self.killed.load(Ordering::SeqCst) {
-                            return Err(InteractiveProcessError::ProcessExited {
-                                exit_code: 9,
-                                stdout: String::new(),
-                                stderr: String::new(),
-                            });
-                        }
-                        thread::sleep(Duration::from_millis(5));
+                    if !wait_until_released(&release, self.killed.as_ref()) {
+                        return Err(InteractiveProcessError::ProcessExited {
+                            exit_code: 9,
+                            stdout: String::new(),
+                            stderr: String::new(),
+                        });
                     }
                     Err(InteractiveProcessError::CommandTimeout {
                         command: command.to_owned(),
                         timeout_ms: timeout.as_millis() as u64,
                         stdout: String::new(),
+                        stderr: String::new(),
+                    })
+                }
+                CommandBehavior::CompleteWhenReleased { release, stdout } => {
+                    if !wait_until_released(&release, self.killed.as_ref()) {
+                        return Err(InteractiveProcessError::ProcessExited {
+                            exit_code: 9,
+                            stdout: String::new(),
+                            stderr: String::new(),
+                        });
+                    }
+                    Ok(InteractiveCommandOutput {
+                        stdout,
                         stderr: String::new(),
                     })
                 }
@@ -1302,6 +1304,23 @@ mod tests {
             self.killed.store(true, Ordering::SeqCst);
             Ok(())
         }
+    }
+
+    /// Ждёт, пока тест отпустит команду; `false` — если сессию сняли раньше. Срок в десять
+    /// секунд — не условие теста, а страховка от теста, который забыл отпустить.
+    fn wait_until_released(release: &AtomicBool, killed: &AtomicBool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !release.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < deadline,
+                "the test never released the command"
+            );
+            if killed.load(Ordering::SeqCst) {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        true
     }
 
     fn sleep_until_finished_or_killed(killed: &AtomicBool, total: Duration) -> bool {
@@ -1365,7 +1384,11 @@ mod tests {
     }
 
     fn request(command: &str, after_ms: u64) -> EdtSessionRequest {
-        EdtSessionRequest::service(command, Instant::now() + Duration::from_millis(after_ms))
+        EdtSessionRequest::new(
+            command,
+            Instant::now() + Duration::from_millis(after_ms),
+            None,
+        )
     }
 
     async fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
@@ -1508,67 +1531,69 @@ mod tests {
         );
     }
 
-    /// Работу команды отмечает доставка её запроса. Сброс базового состояния перед ним и
-    /// служебная команда сессии работы не отмечают: у служебной отметки нет вовсе, а сброс
-    /// идёт без неё.
+    /// Работу команды отмечает доставка её запроса. Подъём сессии и сброс базового
+    /// состояния перед ним работы не отмечают: пока идёт сброс, отметка запроса пуста.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn only_a_delivered_work_request_marks_the_work() {
         let workspace = PathBuf::from("/tmp/edt workspace");
-        let complete = |stdout: String| CommandBehavior::CompleteAfter {
-            delay: Duration::from_millis(1),
-            stdout,
-            stderr: String::new(),
-        };
+        let release = Arc::new(AtomicBool::new(false));
         let inner = FakeSessionFactory::new(vec![SessionPlan::Session(vec![
-            complete(String::new()),
-            complete(format!("{}\n", workspace.display())),
-            complete("service".to_owned()),
-            complete(String::new()),
-            complete(format!("{}\n", workspace.display())),
-            complete("work".to_owned()),
+            CommandBehavior::CompleteWhenReleased {
+                release: release.clone(),
+                stdout: String::new(),
+            },
+            CommandBehavior::CompleteAfter {
+                delay: Duration::from_millis(1),
+                stdout: format!("{}\n", workspace.display()),
+                stderr: String::new(),
+            },
+            CommandBehavior::CompleteAfter {
+                delay: Duration::from_millis(1),
+                stdout: "work".to_owned(),
+                stderr: String::new(),
+            },
         ])]);
-        let factory = ResettingSessionFactory::new(
-            inner.clone(),
-            workspace.clone(),
-            Duration::from_millis(20),
-        );
+        let factory =
+            ResettingSessionFactory::new(inner.clone(), workspace.clone(), Duration::from_secs(5));
         let manager = manager(factory, 2, Duration::from_millis(100));
         let work = WorkGiven::for_command();
 
-        manager
-            .execute(EdtSessionRequest::service(
-                "cd",
-                Instant::now() + Duration::from_millis(200),
-            ))
-            .await
-            .expect("service command");
-        assert!(
-            !work.given(),
-            "a service command and its baseline give no work"
-        );
+        let request = tokio::spawn({
+            let manager = manager.clone();
+            let work = work.clone();
+            async move {
+                manager
+                    .execute(EdtSessionRequest::new(
+                        "validate",
+                        Instant::now() + Duration::from_secs(10),
+                        Some(work),
+                    ))
+                    .await
+            }
+        });
+        wait_for_commands(&inner, 1).await;
+        let during_baseline = work.given();
+        release.store(true, Ordering::SeqCst);
+        let reply = request.await.expect("join").expect("work request");
 
-        let reply = manager
-            .execute(EdtSessionRequest::for_work(
-                "validate",
-                Instant::now() + Duration::from_millis(200),
-                work.clone(),
-            ))
-            .await
-            .expect("work request");
+        assert!(
+            !during_baseline,
+            "the session start and its baseline reset are not the command's work"
+        );
         assert_eq!(reply.stdout, "work");
         assert!(work.given(), "the delivered request is the command's work");
     }
 
     /// Запрос, отменённый во время сброса базового состояния, в процесс не попал: сброс
-    /// выполнялся, а работы команда не дала.
+    /// выполнялся, а работы команда не дала. Отмена приходит, пока сброс держит тест.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_work_request_cancelled_during_the_baseline_marks_nothing() {
         let workspace = PathBuf::from("/tmp/edt workspace");
+        let release = Arc::new(AtomicBool::new(false));
         let inner = FakeSessionFactory::new(vec![SessionPlan::Session(vec![
-            CommandBehavior::CompleteAfter {
-                delay: Duration::from_millis(30),
+            CommandBehavior::CompleteWhenReleased {
+                release: release.clone(),
                 stdout: String::new(),
-                stderr: String::new(),
             },
             CommandBehavior::CompleteAfter {
                 delay: Duration::from_millis(1),
@@ -1576,11 +1601,8 @@ mod tests {
                 stderr: String::new(),
             },
         ])]);
-        let factory = ResettingSessionFactory::new(
-            inner.clone(),
-            workspace.clone(),
-            Duration::from_millis(50),
-        );
+        let factory =
+            ResettingSessionFactory::new(inner.clone(), workspace.clone(), Duration::from_secs(5));
         let manager = manager(factory, 2, Duration::from_millis(100));
         let cancellation = CancellationToken::new();
         let work = WorkGiven::for_command();
@@ -1592,10 +1614,10 @@ mod tests {
             async move {
                 manager
                     .execute(
-                        EdtSessionRequest::for_work(
+                        EdtSessionRequest::new(
                             "validate",
-                            Instant::now() + Duration::from_millis(200),
-                            work,
+                            Instant::now() + Duration::from_secs(10),
+                            Some(work),
                         )
                         .with_cancellation(cancellation),
                     )
@@ -1604,6 +1626,7 @@ mod tests {
         });
         wait_for_commands(&inner, 1).await;
         cancellation.cancel();
+        release.store(true, Ordering::SeqCst);
 
         assert_eq!(
             request.await.expect("join"),
@@ -1725,6 +1748,41 @@ mod tests {
         assert_eq!(telemetry.restart_total, 1);
         assert_eq!(telemetry.drain_restart_total, 1);
         assert_eq!(telemetry.last_drained_jobs, 1);
+    }
+
+    /// Запрос, которому отказала полная очередь, в процесс не попал: работы он не дал.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_request_refused_by_a_full_queue_marks_nothing() {
+        let release = Arc::new(AtomicBool::new(false));
+        let factory = FakeSessionFactory::new(vec![SessionPlan::Session(vec![
+            CommandBehavior::CompleteWhenReleased {
+                release: release.clone(),
+                stdout: "ok".to_owned(),
+            },
+        ])]);
+        let manager = manager(factory.clone(), 1, Duration::from_millis(100));
+        let first = tokio::spawn({
+            let manager = manager.clone();
+            async move { manager.execute(request("cmd-1", 10_000)).await }
+        });
+        wait_for_commands(&factory, 1).await;
+        let work = WorkGiven::for_command();
+
+        let refused = manager
+            .execute(EdtSessionRequest::new(
+                "cmd-2",
+                Instant::now() + Duration::from_secs(10),
+                Some(work.clone()),
+            ))
+            .await;
+        release.store(true, Ordering::SeqCst);
+
+        assert_eq!(refused, Err(EdtSessionError::QueueFull));
+        assert!(
+            !work.given(),
+            "a request the queue refused never reached the process"
+        );
+        assert!(first.await.expect("first join").is_ok());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

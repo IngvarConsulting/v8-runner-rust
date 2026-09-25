@@ -38,10 +38,7 @@ pub async fn execute(
     let work = WorkGiven::for_command();
     run(manager, config, request, timeout, cancellation, &work)
         .await
-        .map(|mut outcome| {
-            stamp_dispatch(&mut outcome, &work);
-            outcome
-        })
+        .map(|outcome| stamp_dispatch(outcome, &work))
 }
 
 async fn run(
@@ -158,7 +155,7 @@ async fn run(
         let command = render_interactive_validate_command(&source_path, &log_path);
         let execution = manager
             .execute_observed(
-                EdtSessionRequest::for_work(command, deadline, work.clone())
+                EdtSessionRequest::new(command, deadline, Some(work.clone()))
                     .with_cancellation(cancellation.clone()),
             )
             .await;

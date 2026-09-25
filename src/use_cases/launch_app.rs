@@ -38,9 +38,7 @@ pub fn execute(
     config: &AppConfig,
     args: &LaunchArgs,
 ) -> UseCaseResult<LaunchResult> {
-    let mut outcome = run_launch(context, config, args);
-    stamp_dispatch(&mut outcome, context.work());
-    outcome
+    stamp_dispatch(run_launch(context, config, args), context.work())
 }
 
 fn run_launch(
@@ -205,9 +203,12 @@ fn run_launch(
 
     if let Some(plan) = external_epf_wait {
         let managed = runner
-            .spawn_managed(&process_request, ManagedSpawnMode::Wait)
+            .spawn_managed(
+                &process_request,
+                ManagedSpawnMode::Wait,
+                Some(context.work()),
+            )
             .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
-        context.work().mark_work_given();
         let pid = managed.pid();
         let outcome = managed
             .wait_for_exit(&context.process_policy(
@@ -258,9 +259,12 @@ fn run_launch(
 
     if let Some(url) = readiness_url {
         let managed = runner
-            .spawn_managed(&process_request, ManagedSpawnMode::Detached)
+            .spawn_managed(
+                &process_request,
+                ManagedSpawnMode::Detached,
+                Some(context.work()),
+            )
             .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
-        context.work().mark_work_given();
         let pid = managed.pid();
         let binary = managed.binary().clone();
         let mut result = LaunchResult {
@@ -312,11 +316,8 @@ fn run_launch(
     }
 
     let spawned = runner
-        .spawn(&process_request)
+        .spawn(&process_request, context.work())
         .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
-    // Запуск программы у `launch` идёт мимо политики процесса, и работу отмечает сам
-    // сценарий — сразу, как программа запущена.
-    context.work().mark_work_given();
 
     Ok(LaunchResult {
         ok: true,
@@ -586,9 +587,8 @@ fn execute_web(
     }
 
     log_live_stage("launch: web", "[Launch] opening the published infobase");
-    let pid = crate::platform::browser::open_url(&program, &leading, url)
+    let pid = crate::platform::browser::open_url(&program, &leading, url, context.work())
         .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
-    context.work().mark_work_given();
     Ok(LaunchResult {
         ok: true,
         mode: LaunchMode::Web,

@@ -47,9 +47,7 @@ pub fn execute(
         transport = ?context.transport(),
         "executing syntax use case"
     );
-    let mut outcome = run_syntax_with_context(context, config, args);
-    stamp_dispatch(&mut outcome, context.work());
-    outcome
+    stamp_dispatch(run_syntax_branch(context, config, args), context.work())
 }
 
 type SyntaxExecutionFailure = UseCaseFailure<SyntaxCheckResult>;
@@ -57,15 +55,7 @@ type SyntaxExecutionFailure = UseCaseFailure<SyntaxCheckResult>;
 #[cfg(test)]
 fn run_syntax(config: &AppConfig, args: &SyntaxArgs) -> UseCaseResult<SyntaxCheckResult> {
     let context = ExecutionContext::cli(CommandName::Syntax);
-    run_syntax_with_context(&context, config, args)
-}
-
-fn run_syntax_with_context(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    args: &SyntaxArgs,
-) -> UseCaseResult<SyntaxCheckResult> {
-    run_syntax_branch(context, config, args)
+    execute(&context, config, args)
 }
 
 fn run_syntax_branch(
@@ -1080,8 +1070,7 @@ fn fallback_edt_issue(
 #[cfg(test)]
 mod tests {
     use super::{
-        edt_status_from_result, normalize_config_flags, run_syntax, run_syntax_with_context,
-        status_from_exit_code,
+        edt_status_from_result, execute, normalize_config_flags, run_syntax, status_from_exit_code,
     };
     use crate::config::model::{
         AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
@@ -1730,8 +1719,7 @@ mod tests {
         let context = ExecutionContext::mcp_stdio(CommandName::Syntax)
             .with_edt_timeout(Some(Duration::from_millis(20)));
 
-        let failure =
-            run_syntax_with_context(&context, &config, &args).expect_err("expected timeout");
+        let failure = execute(&context, &config, &args).expect_err("expected timeout");
         let message = failure.error.to_string();
         let payload = failure
             .payload
@@ -1765,8 +1753,7 @@ mod tests {
         let context = ExecutionContext::mcp_stdio(CommandName::Syntax)
             .with_edt_timeout(Some(Duration::from_millis(20)));
 
-        let failure =
-            run_syntax_with_context(&context, &config, &args).expect_err("expected timeout");
+        let failure = execute(&context, &config, &args).expect_err("expected timeout");
         let message = failure.error.to_string();
         let payload = failure
             .payload

@@ -376,8 +376,8 @@ pub struct WaitPolicy {
     pub cancellation: CancellationToken,
     pub safety: ProcessInterruptionSafety,
     /// Куда отметить, что команда запроса отправлена агенту. У служебных команд сессии —
-    /// подключения, закрытия — своя, никем не читаемая отметка (`service`, `cleanup`).
-    pub work: WorkGiven,
+    /// подключения к базе, закрытия — отметки нет: `None`.
+    pub work: Option<WorkGiven>,
 }
 
 impl WaitPolicy {
@@ -393,16 +393,7 @@ impl WaitPolicy {
             // собственный срок и завершение могло бы не закончиться никогда.
             safety: ProcessInterruptionSafety::Interruptible,
             // Закрытие сессии — служебная команда, работы команды оно не отмечает.
-            work: WorkGiven::detached(),
-            ..self.clone()
-        }
-    }
-
-    /// Та же политика для служебных команд открытия сессии — режима ответа и подключения к
-    /// базе: они работы команды не отмечают.
-    pub fn service(&self) -> Self {
-        Self {
-            work: WorkGiven::detached(),
+            work: None,
             ..self.clone()
         }
     }
@@ -426,7 +417,7 @@ impl Default for WaitPolicy {
             deadline: None,
             cancellation: CancellationToken::new(),
             safety: ProcessInterruptionSafety::Interruptible,
-            work: WorkGiven::for_command(),
+            work: Some(WorkGiven::for_command()),
         }
     }
 }
@@ -683,7 +674,12 @@ impl AgentSession {
             ended: false,
             deferred_interruption: None,
         };
-        let service = policy.service();
+        // Режим ответа и подключение к базе — служебные команды открытия сессии: работы
+        // команды они не отмечают.
+        let service = WaitPolicy {
+            work: None,
+            ..policy.clone()
+        };
         session.run(JSON_MODE_COMMAND, &service)?.outcome()?;
         session.run(CONNECT_COMMAND, &service)?.outcome()?;
         Ok(session)
@@ -695,8 +691,10 @@ impl AgentSession {
     pub fn run(&mut self, command: &str, policy: &WaitPolicy) -> Result<AgentReply, AgentError> {
         self.send(command)?;
         // Команда ушла агенту: это работа команды, чем бы она ни кончилась. Служебные
-        // команды сессии приходят с отметкой, которую никто не читает.
-        policy.work.mark_work_given();
+        // команды сессии приходят без отметки.
+        if let Some(work) = &policy.work {
+            work.mark_work_given();
+        }
         let mut messages = Vec::new();
         let mut deferred_interruption = None;
         loop {
@@ -1254,7 +1252,8 @@ impl ManagedAgent {
             startup_probe: Some(Duration::from_millis(300)),
         };
         let process = runner
-            .spawn_managed(&request, ManagedSpawnMode::Wait)
+            // Процесс агента — подъём сессии, а не работа команды: отметки у него нет.
+            .spawn_managed(&request, ManagedSpawnMode::Wait, None)
             .map_err(AgentError::Launch)?;
         debug!(
             pid = process.pid(),
@@ -1313,7 +1312,7 @@ impl ManagedAgent {
                 Some(Duration::from_secs(15)),
                 CancellationToken::new(),
                 crate::platform::process::ProcessInterruptionSafety::Interruptible,
-                crate::platform::process::WorkGiven::detached(),
+                None,
             );
             match process.wait_for_exit(&grace) {
                 Ok(outcome) if outcome.timed_out => {
@@ -1397,7 +1396,7 @@ mod tests {
             deadline: Some(deadline),
             cancellation: cancellation.clone(),
             safety: ProcessInterruptionSafety::GracefulThenKill,
-            work: WorkGiven::for_command(),
+            work: Some(WorkGiven::for_command()),
         };
 
         let critical = base.critical();
@@ -1449,7 +1448,7 @@ mod tests {
             deadline: Some(soon),
             cancellation: CancellationToken::new(),
             safety: ProcessInterruptionSafety::GracefulThenKill,
-            work: WorkGiven::for_command(),
+            work: Some(WorkGiven::for_command()),
         }
         .cleanup();
         assert_eq!(
@@ -1463,7 +1462,7 @@ mod tests {
             deadline: Some(far),
             cancellation: CancellationToken::new(),
             safety: ProcessInterruptionSafety::GracefulThenKill,
-            work: WorkGiven::for_command(),
+            work: Some(WorkGiven::for_command()),
         }
         .cleanup();
         let bounded = bounded.deadline.expect("cleanup always has a deadline");
@@ -1528,7 +1527,7 @@ mod tests {
             deadline: Some(Instant::now() + Duration::from_secs(60)),
             cancellation: CancellationToken::new(),
             safety: ProcessInterruptionSafety::Interruptible,
-            work: WorkGiven::for_command(),
+            work: Some(WorkGiven::for_command()),
         };
         let mut session = AgentSession::open(&request, &wait).expect("open");
         eprintln!(

@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::platform::process::ProcessError;
+use crate::platform::process::{ProcessError, WorkGiven};
 
 /// Программа, которой система открывает ссылки, и её аргументы перед адресом.
 pub fn opener() -> (PathBuf, Vec<String>) {
@@ -50,8 +50,14 @@ fn ensure_openable(url: &str) -> Result<(), ProcessError> {
     Ok(())
 }
 
-/// Просит систему открыть адрес и не ждёт браузера.
-pub fn open_url(program: &Path, leading_args: &[String], url: &str) -> Result<u32, ProcessError> {
+/// Просит систему открыть адрес и не ждёт браузера. Запущенная программа открытия — работа
+/// команды: отметка ставится, как только она запущена.
+pub fn open_url(
+    program: &Path,
+    leading_args: &[String],
+    url: &str,
+    work: &WorkGiven,
+) -> Result<u32, ProcessError> {
     ensure_openable(url)?;
     let child = Command::new(program)
         .args(leading_args)
@@ -64,6 +70,7 @@ pub fn open_url(program: &Path, leading_args: &[String], url: &str) -> Result<u3
             cmd: program.display().to_string(),
             source,
         })?;
+    work.mark_work_given();
     Ok(child.id())
 }
 
@@ -86,6 +93,39 @@ mod tests {
         ] {
             ensure_openable(hostile).expect_err(&format!("must refuse {hostile:?}"));
         }
+    }
+
+    /// Запущенная программа открытия — работа команды. Адрес, отвергнутый до запуска, и
+    /// программа, которой нет, работы не дают.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_started_opener_marks_the_work() {
+        let shell = Path::new("/bin/sh");
+        let quiet = ["-c".to_owned(), "exit 0".to_owned()];
+
+        let refused = WorkGiven::for_command();
+        open_url(shell, &quiet, "http://host/\r\nx", &refused).expect_err("a hostile address");
+        assert!(
+            !refused.given(),
+            "an address refused before the start gives no work"
+        );
+
+        let missing = WorkGiven::for_command();
+        open_url(
+            Path::new("/nonexistent/opener"),
+            &[],
+            "http://host/",
+            &missing,
+        )
+        .expect_err("no opener");
+        assert!(
+            !missing.given(),
+            "an opener that could not start gives no work"
+        );
+
+        let opened = WorkGiven::for_command();
+        open_url(shell, &quiet, "http://host/", &opened).expect("the opener started");
+        assert!(opened.given(), "a started opener is the command's work");
     }
 
     /// На Windows ссылку открывает обработчик протокола, а не интерпретатор команд:

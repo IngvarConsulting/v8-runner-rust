@@ -199,21 +199,18 @@ pub struct ProcessInterruption {
 /// команда запроса. Подъём сессии и её служебные команды отметки не ставят. Читает её
 /// сценарий, когда собирает ответ; клоны делят одну отметку.
 ///
-/// `Default` нет нарочно: отметка, созданная мимо команды, молча теряла бы работу.
+/// Шаг самой платформы — служебная команда сессии, ожидание выхода агента — отметки не
+/// несёт вовсе: носитель держит `Option<WorkGiven>`, и `None` у него значит «не работа
+/// команды». `Default` нет нарочно: отметка, созданная мимо команды, молча теряла бы работу.
 #[derive(Debug, Clone)]
 pub struct WorkGiven(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
 impl WorkGiven {
     /// Отметка одной команды: её заводит контекст команды.
-    pub fn for_command() -> Self {
+    pub(crate) fn for_command() -> Self {
         Self(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
             false,
         )))
-    }
-
-    /// Отметка, которую никто не читает: для служебной работы самой платформы.
-    pub(crate) fn detached() -> Self {
-        Self::for_command()
     }
 
     /// Работа передана исполнителю.
@@ -221,7 +218,7 @@ impl WorkGiven {
         self.0.store(true, std::sync::atomic::Ordering::Release);
     }
 
-    pub fn given(&self) -> bool {
+    pub(crate) fn given(&self) -> bool {
         self.0.load(std::sync::atomic::Ordering::Acquire)
     }
 }
@@ -234,7 +231,8 @@ pub struct ProcessExecutionPolicy {
     pub safety: ProcessInterruptionSafety,
     pub graceful_shutdown_timeout: Duration,
     /// Куда отметить, что процесс запущен: запуск разового процесса — работа команды.
-    pub work: WorkGiven,
+    /// `None` — у шага самой платформы, который работой команды не является.
+    pub work: Option<WorkGiven>,
 }
 
 /// Только для тестов: в работе политику строит контекст команды, и отметка работы у неё
@@ -246,7 +244,7 @@ impl Default for ProcessExecutionPolicy {
             None,
             CancellationToken::new(),
             ProcessInterruptionSafety::Interruptible,
-            WorkGiven::for_command(),
+            Some(WorkGiven::for_command()),
         )
     }
 }
@@ -256,7 +254,7 @@ impl ProcessExecutionPolicy {
         timeout: Option<Duration>,
         cancellation: CancellationToken,
         safety: ProcessInterruptionSafety,
-        work: WorkGiven,
+        work: Option<WorkGiven>,
     ) -> Self {
         Self {
             timeout,
@@ -306,9 +304,9 @@ pub enum ProcessError {
 pub trait ProcessRunner {
     /// Execute a process under the caller's execution policy.
     ///
-    /// Right after the process has started, the implementation marks `policy.work`: a
-    /// started request process is the command's work, whatever happens to it later. A run
-    /// refused before the start marks nothing.
+    /// Right after the process has started, the implementation marks `policy.work` when
+    /// there is one: a started request process is the command's work, whatever happens to
+    /// it later. A run refused before the start marks nothing.
     ///
     /// No default: an implementation must answer for the whole policy, not just its
     /// timeout. Since a command carries no deadline
@@ -321,16 +319,24 @@ pub trait ProcessRunner {
         policy: &ProcessExecutionPolicy,
     ) -> Result<ProcessResult, ProcessError>;
 
-    /// Start a process in fire-and-forget mode without waiting for completion.
-    fn spawn(&self, request: &ProcessRequest) -> Result<SpawnResult, ProcessError>;
+    /// Start a process in fire-and-forget mode without waiting for completion. A process
+    /// that passed its startup probe is the command's work: the implementation marks `work`.
+    fn spawn(
+        &self,
+        request: &ProcessRequest,
+        work: &WorkGiven,
+    ) -> Result<SpawnResult, ProcessError>;
 
-    /// Start a process and keep a handle until the caller detaches or terminates it.
+    /// Start a process and keep a handle until the caller detaches or terminates it. The
+    /// implementation marks `work`, when there is one, once the process has started; a
+    /// session's own process comes without it.
     fn spawn_managed(
         &self,
         request: &ProcessRequest,
         mode: ManagedSpawnMode,
+        work: Option<&WorkGiven>,
     ) -> Result<ManagedSpawnResult, ProcessError> {
-        let _ = mode;
+        let _ = (mode, work);
         Err(ProcessError::ManagedSpawnUnsupported {
             cmd: render_command(request),
         })
@@ -349,10 +355,15 @@ impl ProcessRunner for ProcessExecutor {
         self.run_internal(request, policy)
     }
 
-    fn spawn(&self, request: &ProcessRequest) -> Result<SpawnResult, ProcessError> {
+    fn spawn(
+        &self,
+        request: &ProcessRequest,
+        work: &WorkGiven,
+    ) -> Result<SpawnResult, ProcessError> {
         let rendered_command = render_command(request);
         debug!(command = rendered_command.as_str(), "spawning process");
         let spawned = spawn_checked_child(request, ProcessIoMode::Detached, &rendered_command)?;
+        work.mark_work_given();
         let pid = spawned.child.id();
 
         debug!(command = rendered_command.as_str(), pid, "process started");
@@ -366,6 +377,7 @@ impl ProcessRunner for ProcessExecutor {
         &self,
         request: &ProcessRequest,
         mode: ManagedSpawnMode,
+        work: Option<&WorkGiven>,
     ) -> Result<ManagedSpawnResult, ProcessError> {
         let rendered_command = render_command(request);
         debug!(
@@ -377,6 +389,9 @@ impl ProcessRunner for ProcessExecutor {
             ManagedSpawnMode::Wait => ProcessIoMode::ManagedWait,
         };
         let spawned = spawn_checked_child(request, io_mode, &rendered_command)?;
+        if let Some(work) = work {
+            work.mark_work_given();
+        }
         let pid = spawned.child.id();
 
         debug!(
@@ -419,7 +434,9 @@ impl ProcessExecutor {
             });
         }
         let spawned = spawn_command(request, ProcessIoMode::Captured, &rendered_command)?;
-        policy.work.mark_work_given();
+        if let Some(work) = &policy.work {
+            work.mark_work_given();
+        }
         let output = wait_for_output(spawned, &rendered_command, policy)?;
         debug!(
             command = rendered_command.as_str(),
@@ -1083,7 +1100,7 @@ mod tests {
         is_invalid_standard_handle_error, render_command, ManagedSpawnMode, ProcessError,
         ProcessExecutionPolicy, ProcessExecutor, ProcessInterruptionAction,
         ProcessInterruptionReason, ProcessInterruptionSafety, ProcessIoMode, ProcessRequest,
-        ProcessRunner, WINDOWS_ERROR_INVALID_HANDLE,
+        ProcessRunner, WorkGiven, WINDOWS_ERROR_INVALID_HANDLE,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1118,6 +1135,11 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn gave_work(policy: &ProcessExecutionPolicy) -> bool {
+        policy.work.as_ref().is_some_and(WorkGiven::given)
+    }
+
+    #[cfg(unix)]
     fn plain_request(program: PathBuf) -> ProcessRequest {
         ProcessRequest {
             program,
@@ -1144,16 +1166,17 @@ mod tests {
             .run_with_policy(&plain_request(script.clone()), &started)
             .expect("the process ran");
         assert_eq!(result.exit_code, 3);
-        assert!(started.work.given(), "a started process got the work");
+        assert!(gave_work(&started), "a started process got the work");
 
         let cancelled = ProcessExecutionPolicy::default();
         cancelled.cancellation.cancel();
-        assert!(matches!(
-            runner.run_with_policy(&plain_request(script.clone()), &cancelled),
-            Err(ProcessError::Cancelled { .. })
-        ));
+        let outcome = runner.run_with_policy(&plain_request(script.clone()), &cancelled);
         assert!(
-            !cancelled.work.given(),
+            matches!(outcome, Err(ProcessError::Cancelled { .. })),
+            "{outcome:?}"
+        );
+        assert!(
+            !gave_work(&cancelled),
             "a cancel before the start gives no work"
         );
 
@@ -1161,22 +1184,21 @@ mod tests {
             timeout: Some(Duration::ZERO),
             ..ProcessExecutionPolicy::default()
         };
-        assert!(matches!(
-            runner.run_with_policy(&plain_request(script), &zero),
-            Err(ProcessError::TimedOut { .. })
-        ));
+        let outcome = runner.run_with_policy(&plain_request(script), &zero);
         assert!(
-            !zero.work.given(),
-            "a zero timeout refuses before the start"
+            matches!(outcome, Err(ProcessError::TimedOut { .. })),
+            "{outcome:?}"
         );
+        assert!(!gave_work(&zero), "a zero timeout refuses before the start");
 
         let missing = ProcessExecutionPolicy::default();
-        assert!(matches!(
-            runner.run_with_policy(&plain_request(dir.path().join("absent")), &missing),
-            Err(ProcessError::SpawnFailed { .. })
-        ));
+        let outcome = runner.run_with_policy(&plain_request(dir.path().join("absent")), &missing);
         assert!(
-            !missing.work.given(),
+            matches!(outcome, Err(ProcessError::SpawnFailed { .. })),
+            "{outcome:?}"
+        );
+        assert!(
+            !gave_work(&missing),
             "a process that could not start got no work"
         );
     }
@@ -1209,9 +1231,12 @@ mod tests {
         let outcome = ProcessExecutor.run_with_policy(&plain_request(script), &policy);
         operator.join().expect("operator");
 
-        assert!(matches!(outcome, Err(ProcessError::Cancelled { .. })));
         assert!(
-            policy.work.given(),
+            matches!(outcome, Err(ProcessError::Cancelled { .. })),
+            "{outcome:?}"
+        );
+        assert!(
+            gave_work(&policy),
             "the process had started before the cancel"
         );
     }
@@ -1385,19 +1410,14 @@ mod tests {
         write_script(&script, "sleep 0.1");
 
         let runner = ProcessExecutor;
+        let work = WorkGiven::for_command();
         let result = runner
-            .spawn(&ProcessRequest {
-                program: script.clone(),
-                args: vec![],
-                workdir: None,
-                stdout_log_path: None,
-                stderr_log_path: None,
-                startup_probe: None,
-            })
+            .spawn(&plain_request(script.clone()), &work)
             .expect("spawn");
 
         assert!(result.pid > 0);
         assert_eq!(result.binary, script);
+        assert!(work.given(), "a started process is the command's work");
     }
 
     #[cfg(unix)]
@@ -1407,21 +1427,52 @@ mod tests {
         assert!(false_binary.exists(), "/usr/bin/false must exist on Unix");
 
         let runner = ProcessExecutor;
+        let work = WorkGiven::for_command();
         let err = runner
-            .spawn(&ProcessRequest {
-                program: false_binary,
-                args: vec![],
-                workdir: None,
-                stdout_log_path: None,
-                stderr_log_path: None,
-                startup_probe: Some(Duration::from_millis(250)),
-            })
+            .spawn(
+                &ProcessRequest {
+                    program: false_binary,
+                    args: vec![],
+                    workdir: None,
+                    stdout_log_path: None,
+                    stderr_log_path: None,
+                    startup_probe: Some(Duration::from_millis(250)),
+                },
+                &work,
+            )
             .expect_err("expected early exit");
 
-        assert!(matches!(
-            err,
-            ProcessError::ExitedEarly { exit_code: 1, .. }
-        ));
+        assert!(
+            matches!(err, ProcessError::ExitedEarly { exit_code: 1, .. }),
+            "{err:?}"
+        );
+        assert!(
+            !work.given(),
+            "a process that failed its startup probe did not start"
+        );
+    }
+
+    /// Клиент, запущенный с ручкой, — тоже работа команды: отметку ставит платформа, как
+    /// только процесс прошёл пробу старта.
+    #[cfg(unix)]
+    #[test]
+    fn a_managed_process_marks_the_work_once_started() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("client.sh");
+        write_script(&script, "sleep 30");
+        let work = WorkGiven::for_command();
+
+        let managed = ProcessExecutor
+            .spawn_managed(
+                &plain_request(script),
+                ManagedSpawnMode::Detached,
+                Some(&work),
+            )
+            .expect("spawn managed");
+        let started = work.given();
+        managed.terminate();
+
+        assert!(started, "a started client is the command's work");
     }
 
     #[cfg(unix)]
@@ -1435,6 +1486,7 @@ mod tests {
         );
 
         let runner = ProcessExecutor;
+        let work = WorkGiven::for_command();
         let err = match runner.spawn_managed(
             &ProcessRequest {
                 program: PathBuf::from("/bin/sh"),
@@ -1445,6 +1497,7 @@ mod tests {
                 startup_probe: Some(Duration::from_secs(2)),
             },
             ManagedSpawnMode::Detached,
+            Some(&work),
         ) {
             Ok(managed) => {
                 managed.terminate();
@@ -1453,7 +1506,8 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(matches!(err, ProcessError::ExitedEarly { .. }));
+        assert!(matches!(err, ProcessError::ExitedEarly { .. }), "{err:?}");
+        assert!(!work.given(), "an early exit is a start that failed");
         let child_pid = read_pid(&child_pid_path);
         if !wait_for_process_exit(child_pid, Duration::from_secs(5)) {
             unsafe {
@@ -1517,13 +1571,13 @@ mod tests {
             let pid = match spawn_mode {
                 RedirectedStdoutSpawnMode::Detached => {
                     ProcessExecutor
-                        .spawn(&request)
+                        .spawn(&request, &WorkGiven::for_command())
                         .expect("spawn detached helper child")
                         .pid
                 }
                 RedirectedStdoutSpawnMode::ManagedDetached => {
                     ProcessExecutor
-                        .spawn_managed(&request, ManagedSpawnMode::Detached)
+                        .spawn_managed(&request, ManagedSpawnMode::Detached, None)
                         .expect("spawn managed-detached helper child")
                         .detach()
                         .pid
@@ -1621,6 +1675,7 @@ mod tests {
                     startup_probe: None,
                 },
                 ManagedSpawnMode::Detached,
+                None,
             )
             .expect("spawn managed");
 
@@ -1666,6 +1721,7 @@ mod tests {
                 startup_probe: Some(Duration::from_millis(200)),
             },
             ManagedSpawnMode::Detached,
+            None,
         ) {
             Ok(managed) => {
                 managed.terminate();
@@ -1731,7 +1787,7 @@ mod tests {
                     Some(Duration::from_millis(100)),
                     CancellationToken::new(),
                     ProcessInterruptionSafety::Interruptible,
-                    crate::platform::process::WorkGiven::for_command(),
+                    Some(crate::platform::process::WorkGiven::for_command()),
                 ),
             )
             .expect_err("expected timeout");
@@ -1792,7 +1848,7 @@ mod tests {
                             timeout,
                             cancellation,
                             safety,
-                            crate::platform::process::WorkGiven::for_command(),
+                            Some(crate::platform::process::WorkGiven::for_command()),
                         ),
                     )
                     .expect_err("the process must be interrupted");
@@ -1843,7 +1899,7 @@ mod tests {
                     None,
                     cancellation,
                     ProcessInterruptionSafety::Interruptible,
-                    crate::platform::process::WorkGiven::for_command(),
+                    Some(crate::platform::process::WorkGiven::for_command()),
                 ),
             )
             .expect_err("expected cancellation");
@@ -1873,7 +1929,7 @@ mod tests {
                     Some(Duration::from_millis(10)),
                     CancellationToken::new(),
                     ProcessInterruptionSafety::CriticalNonAbortable,
-                    crate::platform::process::WorkGiven::for_command(),
+                    Some(crate::platform::process::WorkGiven::for_command()),
                 ),
             )
             .expect("critical process must reach terminal success");

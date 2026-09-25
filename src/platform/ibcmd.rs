@@ -525,7 +525,7 @@ fn required_dbms_field(field: &'static str, value: Option<&str>) -> Result<Strin
 mod tests {
     use super::{DynamicUpdateMode, IbcmdConnection, IbcmdDsl, IbcmdInfobaseCreateStatus};
     use crate::config::model::{InfobaseConfig, InfobaseDbmsConfig};
-    use crate::platform::process::{ProcessExecutor, ProcessRunner};
+    use crate::platform::process::{ProcessExecutionPolicy, ProcessExecutor, ProcessRunner};
     use std::fs;
     use std::io::Write;
     use std::path::{Path, PathBuf};
@@ -629,7 +629,7 @@ mod tests {
             script,
             conn,
             &runner as &dyn ProcessRunner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         );
 
         dsl.config_import_full(dir.path(), Some("Ext"))
@@ -658,7 +658,7 @@ mod tests {
             script,
             conn,
             &runner as &dyn ProcessRunner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         );
         let files = vec![PathBuf::from("Catalogs/Items.xml")];
 
@@ -689,7 +689,7 @@ mod tests {
             script,
             conn,
             &runner as &dyn ProcessRunner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         );
 
         dsl.config_apply(None, DynamicUpdateMode::Auto)
@@ -717,7 +717,7 @@ mod tests {
             script,
             conn,
             &runner as &dyn ProcessRunner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         );
 
         dsl.config_export_full(dir.path(), None).expect("export");
@@ -744,7 +744,7 @@ mod tests {
             script,
             file_connection("File=/ib"),
             &runner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         );
 
         dsl.config_export_file(&source, &target)
@@ -782,7 +782,7 @@ mod tests {
             script,
             conn,
             &runner as &dyn ProcessRunner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         );
 
         dsl.config_save(&target, true, Some("SalesAddon"))
@@ -831,7 +831,7 @@ mod tests {
             script,
             conn,
             &runner as &dyn ProcessRunner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         )
         .with_data_path(data_path.clone());
 
@@ -879,7 +879,7 @@ mod tests {
             script,
             conn,
             &runner as &dyn ProcessRunner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         )
         .with_data_path(data_path.clone());
 
@@ -920,7 +920,7 @@ mod tests {
                 script,
                 conn,
                 &runner as &dyn ProcessRunner,
-                crate::platform::process::ProcessExecutionPolicy::default(),
+                ProcessExecutionPolicy::default(),
             );
 
             dsl.config_export_full(dir.path(), None).expect("export");
@@ -947,7 +947,7 @@ mod tests {
             script,
             conn,
             &runner as &dyn ProcessRunner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         );
 
         dsl.config_export_incremental(dir.path(), None)
@@ -970,7 +970,7 @@ mod tests {
             script,
             conn,
             &runner as &dyn ProcessRunner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         );
 
         let result = dsl
@@ -1001,7 +1001,7 @@ mod tests {
             script,
             conn,
             &runner as &dyn ProcessRunner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         );
 
         let outcome = dsl.ensure_infobase_create().expect("create");
@@ -1039,7 +1039,7 @@ mod tests {
             script,
             conn,
             &runner as &dyn ProcessRunner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         );
 
         let outcome = dsl.ensure_infobase_create().expect("ensure");
@@ -1078,7 +1078,7 @@ mod tests {
             script,
             conn,
             &runner as &dyn ProcessRunner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         );
 
         let outcome = dsl.ensure_infobase_create().expect("create outcome");
@@ -1105,7 +1105,7 @@ mod tests {
             script,
             conn,
             &runner as &dyn ProcessRunner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         );
 
         let outcome = dsl.ensure_infobase_create().expect("create outcome");
@@ -1129,7 +1129,7 @@ mod tests {
             script,
             conn,
             &runner as &dyn ProcessRunner,
-            crate::platform::process::ProcessExecutionPolicy::default(),
+            ProcessExecutionPolicy::default(),
         );
 
         dsl.infobase_extension_update_properties("client_mcp", false, false)

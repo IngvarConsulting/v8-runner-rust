@@ -141,9 +141,7 @@ pub fn plan(request: BootstrapRequest) -> Result<ClonePlan, UseCaseFailure<Boots
 /// выгрузку только планирует. Выгрузку ведёт один и тот же `dump_config`.
 /// Единственный выход сценария: `provider_dispatched` ответа ставит отметка работы команды.
 pub fn execute(context: &ExecutionContext, plan: &ClonePlan) -> UseCaseResult<BootstrapResult> {
-    let mut outcome = run_bootstrap(context, plan);
-    stamp_dispatch(&mut outcome, context.work());
-    outcome
+    stamp_dispatch(run_bootstrap(context, plan), context.work())
 }
 
 fn run_bootstrap(context: &ExecutionContext, plan: &ClonePlan) -> UseCaseResult<BootstrapResult> {
@@ -200,7 +198,7 @@ fn run_bootstrap(context: &ExecutionContext, plan: &ClonePlan) -> UseCaseResult<
         Ok(dump) => Ok(bootstrap_result(
             plan.started,
             &plan.paths,
-            outcome_of(&dump, plan.is_preview(), dump.message.clone()),
+            outcome_of(&dump, plan, dump.message.clone()),
             warnings.clone(),
         )),
         Err(failure) => {
@@ -513,10 +511,10 @@ struct BootstrapOutcome {
 /// Выгружено, если это не превью, выгрузка удалась и не нашла базу неизменной: превью тоже
 /// отвечает успехом, а неизменная база — работой агента без выгрузки. Признак работы
 /// исполнителя тут не годится: он говорит не о выгрузке.
-fn outcome_of(dump: &DumpResult, preview: bool, message: Option<String>) -> BootstrapOutcome {
+fn outcome_of(dump: &DumpResult, plan: &ClonePlan, message: Option<String>) -> BootstrapOutcome {
     BootstrapOutcome {
         ok: dump.ok,
-        dumped: !preview && dump.ok && !dump.up_to_date,
+        dumped: !plan.is_preview() && dump.ok && !dump.up_to_date,
         message,
     }
 }

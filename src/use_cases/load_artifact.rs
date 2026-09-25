@@ -53,9 +53,7 @@ pub fn execute(
         extension = args.extension.as_deref().unwrap_or("<none>"),
         "executing load use case"
     );
-    let mut outcome = run_load(context, config, args);
-    stamp_dispatch(&mut outcome, context.work());
-    outcome
+    stamp_dispatch(run_load(context, config, args), context.work())
 }
 
 type LoadExecutionFailure = UseCaseFailure<LoadResult>;
@@ -178,7 +176,6 @@ fn run_load(
     crate::use_cases::provider_selection::attach(outcome, &receipt)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_load_selected(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -611,8 +608,8 @@ fn probe_compatibility(
 enum ExtensionPresence {
     Present,
     Absent,
-    /// The list could not be read. Asked and not proven, so no change is permitted. The flag
-    /// says whether a platform process was started before the attempt gave up.
+    /// The list could not be read. Asked and not proven, so no change is permitted. Whether
+    /// `ibcmd` had started is the command's work mark, not this answer.
     NotEstablished(String),
 }
 
@@ -642,7 +639,8 @@ fn installed_extension_state(
     );
     let result = match dsl.infobase_extension_list() {
         Ok(result) => result,
-        // The spawn itself failed, so nothing ran.
+        // Refused before the start or stopped after it: the runner has already marked the
+        // work if `ibcmd` started.
         Err(error) => return ExtensionPresence::NotEstablished(error.to_string()),
     };
     if result.process.exit_code != 0 {

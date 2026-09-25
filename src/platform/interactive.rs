@@ -319,12 +319,13 @@ impl InteractiveProcessExecutor {
         )
     }
 
+    /// Как `execute_delivering`, но под политикой команды: доставленная команда отмечает
+    /// работу в `policy.work`, если та есть, — у служебной команды её нет.
     pub(crate) fn execute_with_policy(
         &mut self,
         command: &str,
         timeout: Duration,
         policy: &ProcessExecutionPolicy,
-        delivered: Option<&WorkGiven>,
     ) -> Result<InteractiveCommandExecution, InteractiveProcessError> {
         if self.poisoned {
             return Err(InteractiveProcessError::Poisoned);
@@ -349,7 +350,7 @@ impl InteractiveProcessExecutor {
         }
 
         self.send_command(command)?;
-        if let Some(work) = delivered {
+        if let Some(work) = &policy.work {
             work.mark_work_given();
         }
 

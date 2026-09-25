@@ -29,16 +29,13 @@ pub struct PublishRequest {
     pub dry_run: bool,
 }
 
-#[allow(clippy::result_large_err)] // Failure payload preserves the typed result.
 /// Единственный выход сценария: `provider_dispatched` ответа ставит отметка работы команды.
 pub fn execute(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &PublishRequest,
 ) -> UseCaseResult<PublishResult> {
-    let mut outcome = run_publish(context, config, request);
-    stamp_dispatch(&mut outcome, context.work());
-    outcome
+    stamp_dispatch(run_publish(context, config, request), context.work())
 }
 
 fn run_publish(

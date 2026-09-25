@@ -78,9 +78,10 @@ pub fn execute(
     config: &AppConfig,
     request: &ConvertRequest,
 ) -> UseCaseResult<ConvertResult> {
-    let mut outcome = run_convert_with_context(context, config, request);
-    stamp_dispatch(&mut outcome, context.work());
-    outcome
+    stamp_dispatch(
+        run_convert_with_context(context, config, request),
+        context.work(),
+    )
 }
 
 pub fn preflight_validate(config: &AppConfig, request: &ConvertRequest) -> Result<(), AppError> {
