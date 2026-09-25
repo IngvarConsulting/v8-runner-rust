@@ -225,6 +225,7 @@ fn managed_agent_dumps_through_the_built_in_ssh_client_and_reads_the_result_from
         payload["data"]["provider"]["selected"], "agent",
         "{payload}"
     );
+    assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
     assert!(
         harness.target.join("Configuration.xml").is_file(),
         "the agent dump was not published into the target"
@@ -365,6 +366,8 @@ fn an_unchanged_generation_is_not_dumped_twice() {
 
     assert_eq!(second, 0, "{payload}");
     assert_eq!(payload["data"]["up_to_date"], true, "{payload}");
+    // Вопрос о поколении — команда запроса: исполнитель работу получил, хоть выгрузки и не было.
+    assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
     assert!(
         payload["data"]["message"]
             .as_str()
@@ -433,6 +436,8 @@ fn a_rejected_password_is_an_environment_refusal_even_though_the_port_answers() 
             .is_some_and(|message| message.contains("rejected the credentials")),
         "{payload}"
     );
+    // Агент запущен, но сессия не открылась: запуск процесса сессии работой не считается.
+    assert_ne!(payload["data"]["provider_dispatched"], true, "{payload}");
     assert!(
         !harness.target.join("Configuration.xml").exists(),
         "nothing may be published after a refused session"
@@ -486,6 +491,7 @@ fn an_unreachable_attached_agent_is_refused_and_no_process_is_launched_instead()
             .is_some_and(|message| message.contains("unreachable")),
         "{payload}"
     );
+    assert_ne!(payload["data"]["provider_dispatched"], true, "{payload}");
     assert!(
         !harness.designer_args_log.exists(),
         "an attached endpoint must never be replaced by a managed launch"

@@ -1898,6 +1898,149 @@ mod tests {
         assert!(!calls_text.contains("/UpdateDBCfg"), "{calls_text}");
     }
 
+    /// Подставная программа, которая отмечается, что запущена, и ждёт, пока её не отпустят.
+    #[cfg(unix)]
+    fn write_waiting_program(path: &Path, started: &Path, release: &Path, when: &str) {
+        fs::write(
+            path,
+            format!(
+                "#!/bin/sh\nif printf '%s' \"$*\" | grep -F -q -- '{when}'; then\n  : > '{}'\n  while [ ! -e '{}' ]; do sleep 0.05; done\nfi\nexit 0\n",
+                started.display(),
+                release.display()
+            ),
+        )
+        .expect("write program");
+        make_executable(path);
+    }
+
+    /// Отменяет команду, когда подставная программа отметилась, что запущена, и отпускает её.
+    #[cfg(unix)]
+    fn cancel_once_started(
+        started: PathBuf,
+        release: PathBuf,
+    ) -> (CancellationToken, thread::JoinHandle<()>) {
+        let cancellation = CancellationToken::new();
+        let operator = {
+            let cancellation = cancellation.clone();
+            thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while !started.exists() && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                cancellation.cancel();
+                fs::write(&release, "").expect("release");
+            })
+        };
+        (cancellation, operator)
+    }
+
+    /// Проба списка расширений, отменённая уже после запуска `ibcmd`, работу получила, и ответ
+    /// говорит `provider_dispatched: true` (#309: прежде он отвечал `false`).
+    #[cfg(unix)]
+    #[test]
+    fn an_extension_probe_cancelled_after_its_start_reports_the_work() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("work")).expect("work");
+        let binary = root.join("1cv8");
+        write_designer_script(&binary, &root.join("calls.log"));
+        let (started, release) = (root.join("started"), root.join("release"));
+        write_waiting_program(&root.join("ibcmd"), &started, &release, "extension");
+        fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
+        let request = LoadRequest {
+            vendor_name: None,
+            dry_run: false,
+            mode: LoadMode::Load,
+            artifact_path: "ext.cfe".to_owned(),
+            settings_path: None,
+            extension: Some("ExistingExt".to_owned()),
+        };
+        let (cancellation, operator) = cancel_once_started(started, release);
+
+        let outcome = execute(
+            &ExecutionContext::cli(CommandName::Load).with_cancellation(cancellation),
+            &sample_config(root, &binary),
+            &request,
+        );
+        operator.join().expect("operator");
+
+        let payload = match outcome {
+            Ok(result) => result,
+            Err(failure) => failure.payload.expect("the refusal carries the form"),
+        };
+        assert!(payload.provider_dispatched, "the probe had started");
+    }
+
+    /// Проба совместимости конфигурации, отменённая после запуска Конфигуратора, — тоже
+    /// работа (#309).
+    #[cfg(unix)]
+    #[test]
+    fn a_configuration_probe_cancelled_after_its_start_reports_the_work() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("work")).expect("work");
+        let binary = root.join("1cv8");
+        let (started, release) = (root.join("started"), root.join("release"));
+        write_waiting_program(&binary, &started, &release, "/CompareCfg");
+        fs::write(root.join("main.cf"), "cf").expect("artifact");
+        let request = LoadRequest {
+            vendor_name: Some("Vendor".to_owned()),
+            dry_run: false,
+            mode: LoadMode::Merge,
+            artifact_path: "main.cf".to_owned(),
+            settings_path: Some("merge.xml".to_owned()),
+            extension: None,
+        };
+        fs::write(root.join("merge.xml"), "<settings/>").expect("settings");
+        let (cancellation, operator) = cancel_once_started(started, release);
+
+        let outcome = execute(
+            &ExecutionContext::cli(CommandName::Load).with_cancellation(cancellation),
+            &sample_config(root, &binary),
+            &request,
+        );
+        operator.join().expect("operator");
+
+        let payload = match outcome {
+            Ok(result) => result,
+            Err(failure) => failure.payload.expect("the refusal carries the form"),
+        };
+        assert!(payload.provider_dispatched, "the probe had started");
+    }
+
+    /// Отказ до первого процесса работы не дал, даже если проба не шла и прежде признак
+    /// ставился заранее (#309): рабочий каталог — файл, и журнал платформы некуда писать.
+    #[cfg(unix)]
+    #[test]
+    fn a_load_refused_before_its_first_process_reports_no_work() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(root.join("work"), "not a directory").expect("work is a file");
+        let binary = root.join("1cv8");
+        let calls = root.join("calls.log");
+        write_designer_script(&binary, &calls);
+        fs::write(root.join("main.cf"), "cf").expect("artifact");
+        let request = LoadRequest {
+            vendor_name: None,
+            dry_run: false,
+            mode: LoadMode::Load,
+            artifact_path: "main.cf".to_owned(),
+            settings_path: None,
+            extension: None,
+        };
+
+        let failure = execute(
+            &ExecutionContext::cli(CommandName::Load),
+            &sample_config(root, &binary),
+            &request,
+        )
+        .expect_err("no platform log directory");
+
+        let payload = failure.payload.expect("the refusal carries the form");
+        assert!(!payload.provider_dispatched, "no process was started");
+        assert!(!calls.exists(), "the platform never ran");
+    }
+
     #[cfg(unix)]
     #[test]
     fn execute_merge_cfe_merges_and_updates_after_the_list() {

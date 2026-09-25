@@ -443,8 +443,10 @@ fn a_server_base_without_dbms_serves_extensions_through_the_agent() {
 
     let (code, payload) = run(&harness, &["extensions", "list"]);
     assert_eq!(code, 0, "{payload}");
+    assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
     let (code, payload) = run(&harness, &["extensions"]);
     assert_eq!(code, 0, "{payload}");
+    assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
     let (code, payload) = run(
         &harness,
         &[
@@ -470,6 +472,39 @@ fn a_server_base_without_dbms_serves_extensions_through_the_agent() {
             .iter()
             .any(|line| line.starts_with("config extensions create --extension=Проба")),
         "{lines:?}"
+    );
+}
+
+/// Сессия агента, открытая без команды запроса, работы не даёт. `extensions` без целей
+/// подключается к базе служебными командами, ничего не просит и отвечает
+/// `provider_dispatched: false`; с целью — просит и отвечает `true` (тест выше).
+#[test]
+fn an_agent_session_without_a_request_command_gives_no_work() {
+    let harness = harness_with("  extensions: agent\n");
+    let config = fs::read_to_string(&harness.config_path).expect("config");
+    let without_extensions = config.replace(
+        "  - name: Зонд\n    type: EXTENSION\n    path: project/ext\n",
+        "",
+    );
+    assert_ne!(
+        config, without_extensions,
+        "the sample declares an extension set"
+    );
+    fs::write(&harness.config_path, without_extensions).expect("rewrite config");
+
+    let (code, payload) = run(&harness, &["extensions"]);
+
+    assert_eq!(code, 0, "{payload}");
+    assert_eq!(payload["data"]["steps"], serde_json::json!([]), "{payload}");
+    assert_eq!(payload["data"]["provider_dispatched"], false, "{payload}");
+    let lines = commands(&harness);
+    assert!(
+        lines.iter().any(|line| line == "common connect-ib"),
+        "the session was opened, and only service commands went to it: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.starts_with("config ")),
+        "no request command reached the agent: {lines:?}"
     );
 }
 
