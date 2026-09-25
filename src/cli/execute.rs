@@ -248,7 +248,7 @@ fn execute_publish(
                         result,
                     ));
                 } else {
-                    render_publish_text(&result, presenter, true, dry_run);
+                    render_publish_text(&result, presenter, true, Requested::from_dry_run(dry_run));
                 }
                 Ok(())
             }
@@ -269,7 +269,12 @@ fn execute_publish(
                     }
                 } else {
                     if let Some(result) = failure.payload.as_ref() {
-                        render_publish_text(result, presenter, false, dry_run);
+                        render_publish_text(
+                            result,
+                            presenter,
+                            false,
+                            Requested::from_dry_run(dry_run),
+                        );
                     }
                     presenter.print_error(&error.to_string());
                 }
@@ -279,11 +284,30 @@ fn execute_publish(
     )
 }
 
+/// Что просил вызывающий: превью (`--dry-run`) или боевой прогон. Слова превью в ответе
+/// берутся отсюда, а не из `provider_dispatched`: признак говорит, получил ли исполнитель
+/// работу, а не было ли превью.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Requested {
+    Preview,
+    Run,
+}
+
+impl Requested {
+    pub(crate) fn from_dry_run(dry_run: bool) -> Self {
+        if dry_run {
+            Self::Preview
+        } else {
+            Self::Run
+        }
+    }
+}
+
 fn render_publish_text(
     result: &crate::domain::publish::PublishResult,
     presenter: &Presenter,
     succeeded: bool,
-    previewed: bool,
+    requested: Requested,
 ) {
     let verb = match result.action {
         crate::domain::publish::PublishAction::Publish => "Publication",
@@ -291,7 +315,8 @@ fn render_publish_text(
     };
     // «Запланировано» — не стандартный исход, у него своя подпись. Превью называет запрос:
     // `provider_dispatched` говорит о работе исполнителя, а не о превью.
-    let planned_label = (succeeded && previewed).then(|| format!("{verb} planned"));
+    let planned_label =
+        (succeeded && requested == Requested::Preview).then(|| format!("{verb} planned"));
     let mut details = vec![
         format!("server: {}", result.server),
         format!("wsdir: {}", result.wsdir),
@@ -516,7 +541,7 @@ fn execute_extensions(
                         result,
                     ));
                 } else if dry_run {
-                    render_extensions_text(&result, presenter, true);
+                    render_extensions_text(&result, presenter, Requested::Preview);
                 }
                 Ok(())
             }
@@ -668,7 +693,7 @@ fn run_extension_change(
                     result,
                 ));
             } else {
-                render_extensions_text(&result, presenter, dry_run);
+                render_extensions_text(&result, presenter, Requested::from_dry_run(dry_run));
             }
             Ok(())
         }
@@ -753,7 +778,7 @@ fn render_extension_inventory_text(
 fn render_extensions_text(
     result: &crate::domain::extensions::ExtensionsResult,
     presenter: &Presenter,
-    previewed: bool,
+    requested: Requested,
 ) {
     let details = result
         .steps
@@ -764,10 +789,10 @@ fn render_extensions_text(
                 step.target,
                 step.action,
                 // A preview performed nothing, so the step must not read as done.
-                match (previewed, step.ok) {
-                    (true, _) => "planned",
-                    (false, true) => "ok",
-                    (false, false) => "failed",
+                match (requested, step.ok) {
+                    (Requested::Preview, _) => "planned",
+                    (Requested::Run, true) => "ok",
+                    (Requested::Run, false) => "failed",
                 },
                 step.message
                     .as_deref()
@@ -781,7 +806,7 @@ fn render_extensions_text(
     } else {
         TimelineStatus::Failed
     };
-    let label = if previewed {
+    let label = if requested == Requested::Preview {
         "Infobase extension change preview"
     } else {
         "Infobase extension change"
@@ -962,10 +987,10 @@ fn execute_load(
         || match load_artifact::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
-                    let envelope = build_load_envelope(&result, dry_run);
+                    let envelope = build_load_envelope(&result, Requested::from_dry_run(dry_run));
                     presenter.print_envelope(&envelope);
                 } else {
-                    render_load_text(&result, presenter, true, dry_run);
+                    render_load_text(&result, presenter, true, Requested::from_dry_run(dry_run));
                 }
                 Ok(())
             }
@@ -973,13 +998,20 @@ fn execute_load(
                 let error = failure.error;
                 if presenter.is_json() {
                     if let Some(result) = failure.payload {
-                        let envelope =
-                            with_cli_error(build_load_envelope(&result, dry_run), &error);
+                        let envelope = with_cli_error(
+                            build_load_envelope(&result, Requested::from_dry_run(dry_run)),
+                            &error,
+                        );
                         presenter.print_envelope(&envelope);
                     }
                 } else {
                     if let Some(result) = failure.payload.as_ref() {
-                        render_load_text(result, presenter, false, dry_run);
+                        render_load_text(
+                            result,
+                            presenter,
+                            false,
+                            Requested::from_dry_run(dry_run),
+                        );
                     }
                     presenter.print_error(&error.to_string());
                 }
@@ -2241,7 +2273,7 @@ fn execute_syntax(
                         result,
                     ));
                 } else {
-                    render_syntax_text(&result, presenter, dry_run);
+                    render_syntax_text(&result, presenter, Requested::from_dry_run(dry_run));
                 }
                 Ok(())
             }
@@ -2258,7 +2290,7 @@ fn execute_syntax(
                     }
                 } else {
                     if let Some(result) = failure.payload.as_ref() {
-                        render_syntax_text(result, presenter, dry_run);
+                        render_syntax_text(result, presenter, Requested::from_dry_run(dry_run));
                     }
                     presenter.print_error(&error.to_string());
                 }
@@ -2295,7 +2327,7 @@ fn execute_launch(
                         result,
                     ));
                 } else {
-                    render_launch_text(&result, presenter, dry_run);
+                    render_launch_text(&result, presenter, Requested::from_dry_run(dry_run));
                 }
                 Ok(())
             }
@@ -3187,7 +3219,7 @@ pub(crate) struct LoadJsonData<'a> {
 }
 
 impl<'a> LoadJsonData<'a> {
-    fn from_result(result: &'a LoadResult, previewed: bool) -> Self {
+    fn from_result(result: &'a LoadResult, requested: Requested) -> Self {
         let metadata = load_metadata(result);
         Self {
             provider: result.provider.clone(),
@@ -3205,7 +3237,7 @@ impl<'a> LoadJsonData<'a> {
             extension: result.extension.as_deref(),
             platform_log_path: platform_log_path_from_artifacts(&result.execution.artifacts),
             duration_ms: result.duration_ms,
-            message: load_message(result, previewed),
+            message: load_message(result, requested),
             execution: &result.execution,
         }
     }
@@ -3215,7 +3247,7 @@ fn load_metadata(result: &LoadResult) -> Option<&LoadExecutionMetadata> {
     result.execution.payload.as_ref()
 }
 
-fn load_message(result: &LoadResult, previewed: bool) -> Option<String> {
+fn load_message(result: &LoadResult, requested: Requested) -> Option<String> {
     if !result.execution.is_ok() {
         return execution_message(&result.execution);
     }
@@ -3229,7 +3261,7 @@ fn load_message(result: &LoadResult, previewed: bool) -> Option<String> {
     // A preview applied nothing, so it must not claim a successful apply; its own
     // diagnostics below say what it would have done. The request says it was a preview:
     // `provider_dispatched` tells whether an executor got work, not whether it previewed.
-    let mut message = if previewed {
+    let mut message = if requested == Requested::Preview {
         format!(
             "{mode} {} previewed; nothing applied",
             result.artifact_path.display()
@@ -3248,7 +3280,7 @@ fn load_message(result: &LoadResult, previewed: bool) -> Option<String> {
     Some(message)
 }
 
-fn build_load_envelope(result: &LoadResult, previewed: bool) -> Envelope<LoadJsonData<'_>> {
+fn build_load_envelope(result: &LoadResult, requested: Requested) -> Envelope<LoadJsonData<'_>> {
     Envelope {
         ok: result.execution.is_ok(),
         command: CommandName::Load.as_str().to_owned(),
@@ -3256,7 +3288,7 @@ fn build_load_envelope(result: &LoadResult, previewed: bool) -> Envelope<LoadJso
         warnings: Vec::new(),
         steps: Vec::new(),
         error: None,
-        data: LoadJsonData::from_result(result, previewed),
+        data: LoadJsonData::from_result(result, requested),
     }
 }
 
@@ -3694,7 +3726,12 @@ fn render_artifact_mode(mode: ArtifactBuildMode) -> &'static str {
     }
 }
 
-fn render_load_text(result: &LoadResult, presenter: &Presenter, succeeded: bool, previewed: bool) {
+fn render_load_text(
+    result: &LoadResult,
+    presenter: &Presenter,
+    succeeded: bool,
+    requested: Requested,
+) {
     let mode = match result.mode {
         LoadMode::Load => "load",
         LoadMode::Merge => "combine",
@@ -3730,7 +3767,7 @@ fn render_load_text(result: &LoadResult, presenter: &Presenter, succeeded: bool,
         let prefix = if succeeded { "warning" } else { "error" };
         append_if_present(
             &mut details,
-            load_message(result, previewed).map(|message| bracketed_detail(prefix, message)),
+            load_message(result, requested).map(|message| bracketed_detail(prefix, message)),
         );
         append_error_details(&mut details, &result.execution.errors);
         append_diagnostics(&mut details, &result.execution.diagnostics);
@@ -3978,7 +4015,7 @@ fn render_convert_scope(scope: ConvertScope, source_set: Option<&str>) -> String
     }
 }
 
-fn render_syntax_text(result: &SyntaxCheckResult, presenter: &Presenter, previewed: bool) {
+fn render_syntax_text(result: &SyntaxCheckResult, presenter: &Presenter, requested: Requested) {
     // Превью — исход успешный: проверка не выполнялась, значит и приговора нет.
     let succeeded = matches!(
         result.status,
@@ -3988,7 +4025,7 @@ fn render_syntax_text(result: &SyntaxCheckResult, presenter: &Presenter, preview
     // слово выбирает presenter. Непрочитанный журнал больше не остаётся одним
     // предупреждением среди подробностей: он делает вердикт неизвестным, то есть
     // `tool_failed`, и подпись следует за знаком сама.
-    let subject = if previewed {
+    let subject = if requested == Requested::Preview {
         format!("Syntax check {} preview", result.check_name)
     } else {
         format!("Syntax check {}", result.check_name)
@@ -4066,8 +4103,8 @@ fn render_syntax_status(status: SyntaxCheckStatus) -> &'static str {
     }
 }
 
-fn render_launch_text(result: &LaunchResult, presenter: &Presenter, previewed: bool) {
-    let subject = if previewed {
+fn render_launch_text(result: &LaunchResult, presenter: &Presenter, requested: Requested) {
+    let subject = if requested == Requested::Preview {
         "Launch preview"
     } else {
         "Launch"
@@ -5212,7 +5249,8 @@ mod tests {
                 }),
         };
 
-        let json = serde_json::to_value(build_load_envelope(&result, false)).expect("json");
+        let json = serde_json::to_value(build_load_envelope(&result, super::Requested::Run))
+            .expect("json");
         let message = json["data"]["message"].as_str().expect("message");
 
         assert_eq!(json["ok"], true);
