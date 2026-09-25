@@ -155,7 +155,8 @@ v8-runner infobase create
   another command holds it. `provider_dispatched: false` means no executor got the
   command's work; export-shaped verbs also answer `mode: preview`. The flag is not a preview
   marker — refusals before any work and runs with nothing to do answer `false` too — so know
-  the preview from your own `--dry-run`. Two limits are named
+  the preview from your own `--dry-run`. `true` means an executor got the work: a failure
+  with `true` is not "nothing ran", so check the target before a retry. Two limits are named
   rather than guessed: `upload` reports `compatibility_state: not_probed` because the probe is
   itself a Designer run, and `infobase create` against a server infobase cannot tell "created" from
   "already existed" without creating it.
