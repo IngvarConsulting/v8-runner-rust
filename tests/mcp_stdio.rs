@@ -1018,6 +1018,14 @@ async fn mcp_stdio_tools_answer_in_the_forms_of_their_commands() {
         };
         assert_eq!(payload["command"], command, "{tool}: {payload}");
         assert_data_matches_its_command_form(&payload, tool);
+        // Заглушки исполнителей здесь действительно запускаются, и признак, поставленный
+        // сценарием, доходит до ответа MCP. У формы `test` признака нет.
+        if command != "test" {
+            assert_eq!(
+                payload["data"]["provider_dispatched"], true,
+                "{tool}: {payload}"
+            );
+        }
     }
 
     client.cancel().await.expect("cancel client");
@@ -1046,6 +1054,35 @@ async fn mcp_stdio_the_live_edt_check_answers_in_the_form_of_check() {
     assert_eq!(payload["data"]["status"], "issues_found", "{payload}");
     assert_eq!(payload["data"]["issues"][0]["kind"], "edt", "{payload}");
     assert_data_matches_its_command_form(&payload, "check_syntax_edt");
+    // Команда проверки доставлена в общую сессию: исполнитель работу получил.
+    assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
+
+    client.cancel().await.expect("cancel client");
+}
+
+/// Живая проверка EDT, чья сессия так и не поднялась, работы исполнителю не дала: команда
+/// проверки в процесс не попала, и признак это говорит.
+#[tokio::test]
+async fn mcp_stdio_a_live_edt_check_whose_session_never_started_reports_no_work() {
+    let (dir, config_path) = setup_edt_project_with_options(
+        "prompt",
+        MCP_ADMISSION_TIMEOUT_MS,
+        EDT_COMMAND_TIMEOUT_MS,
+        1,
+    );
+    // Тот же файл, права прежние: EDT CLI выходит, не выдав подсказки.
+    fs::write(dir.path().join("edt").join("1cedtcli"), "#!/bin/sh\nexit 1\n")
+        .expect("broken edt cli");
+    let client = serve_stdio(&config_path).await;
+
+    let response = client
+        .peer()
+        .call_tool(check_syntax_edt_call())
+        .await
+        .expect("edt syntax call");
+
+    let payload = response.structured_content.expect("structured payload");
+    assert_eq!(payload["data"]["provider_dispatched"], false, "{payload}");
 
     client.cancel().await.expect("cancel client");
 }
