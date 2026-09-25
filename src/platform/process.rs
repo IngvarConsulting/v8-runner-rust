@@ -1118,6 +1118,104 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn plain_request(program: PathBuf) -> ProcessRequest {
+        ProcessRequest {
+            program,
+            args: vec![],
+            workdir: None,
+            stdout_log_path: None,
+            stderr_log_path: None,
+            startup_probe: None,
+        }
+    }
+
+    /// Запущенный процесс — работа команды, чем бы он ни кончился. Отказ до запуска — отмена,
+    /// нулевой срок, программа, которую не удалось запустить, — работы не даёт.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_started_process_marks_the_work() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("fails.sh");
+        write_script(&script, "exit 3");
+        let runner = ProcessExecutor;
+
+        let started = ProcessExecutionPolicy::default();
+        let result = runner
+            .run_with_policy(&plain_request(script.clone()), &started)
+            .expect("the process ran");
+        assert_eq!(result.exit_code, 3);
+        assert!(started.work.given(), "a started process got the work");
+
+        let cancelled = ProcessExecutionPolicy::default();
+        cancelled.cancellation.cancel();
+        assert!(matches!(
+            runner.run_with_policy(&plain_request(script.clone()), &cancelled),
+            Err(ProcessError::Cancelled { .. })
+        ));
+        assert!(
+            !cancelled.work.given(),
+            "a cancel before the start gives no work"
+        );
+
+        let zero = ProcessExecutionPolicy {
+            timeout: Some(Duration::ZERO),
+            ..ProcessExecutionPolicy::default()
+        };
+        assert!(matches!(
+            runner.run_with_policy(&plain_request(script), &zero),
+            Err(ProcessError::TimedOut { .. })
+        ));
+        assert!(
+            !zero.work.given(),
+            "a zero timeout refuses before the start"
+        );
+
+        let missing = ProcessExecutionPolicy::default();
+        assert!(matches!(
+            runner.run_with_policy(&plain_request(dir.path().join("absent")), &missing),
+            Err(ProcessError::SpawnFailed { .. })
+        ));
+        assert!(
+            !missing.work.given(),
+            "a process that could not start got no work"
+        );
+    }
+
+    /// Процесс, снятый уже после запуска, работу получил. Порядок задан рукопожатием: отмена
+    /// приходит, когда скрипт отметился, что запущен.
+    #[cfg(unix)]
+    #[test]
+    fn a_process_cancelled_after_its_start_still_got_the_work() {
+        let dir = tempdir().expect("tempdir");
+        let started_marker = dir.path().join("started");
+        let script = dir.path().join("waits.sh");
+        write_script(
+            &script,
+            &format!(": > '{}'\nsleep 30", started_marker.display()),
+        );
+        let policy = ProcessExecutionPolicy::default();
+        let operator = {
+            let cancellation = policy.cancellation.clone();
+            let started_marker = started_marker.clone();
+            thread::spawn(move || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                while !started_marker.exists() && std::time::Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                cancellation.cancel();
+            })
+        };
+
+        let outcome = ProcessExecutor.run_with_policy(&plain_request(script), &policy);
+        operator.join().expect("operator");
+
+        assert!(matches!(outcome, Err(ProcessError::Cancelled { .. })));
+        assert!(
+            policy.work.given(),
+            "the process had started before the cancel"
+        );
+    }
+
     fn write_script(path: &Path, body: &str) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("create dirs");

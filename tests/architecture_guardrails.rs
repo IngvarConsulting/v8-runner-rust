@@ -2484,3 +2484,250 @@ fn resolves_with_exact_case(root: &Path, base: &Path, target: &str) -> bool {
     }
     true
 }
+
+/// Что тело кода делает с признаком `provider_dispatched` и с отметкой работы исполнителя.
+#[derive(Default)]
+struct DispatchUse {
+    /// Поле `provider_dispatched` литерала структуры со значением, отличным от `false`.
+    decided_fields: Vec<String>,
+    /// Присваивания `.provider_dispatched` и его изменяемые заимствования.
+    writes: usize,
+    marks: usize,
+    detached: usize,
+    for_command: usize,
+    stamps: usize,
+    returns: usize,
+    tries: usize,
+}
+
+impl DispatchUse {
+    fn of(block: &syn::Block) -> Self {
+        let mut found = Self::default();
+        syn::visit::Visit::visit_block(&mut found, block);
+        found
+    }
+}
+
+fn is_dispatch_field(expr: &syn::Expr) -> bool {
+    matches!(expr, syn::Expr::Field(field)
+        if matches!(&field.member, syn::Member::Named(name) if name == "provider_dispatched"))
+}
+
+impl<'ast> syn::visit::Visit<'ast> for DispatchUse {
+    fn visit_field_value(&mut self, node: &'ast syn::FieldValue) {
+        if matches!(&node.member, syn::Member::Named(name) if name == "provider_dispatched") {
+            let literal_false = matches!(
+                &node.expr,
+                syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Bool(value), .. }) if !value.value
+            );
+            if !literal_false || node.colon_token.is_none() {
+                self.decided_fields.push(normalize_tokens(&node.expr));
+            }
+        }
+        syn::visit::visit_field_value(self, node);
+    }
+
+    fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+        if is_dispatch_field(&node.left) {
+            self.writes += 1;
+        }
+        syn::visit::visit_expr_assign(self, node);
+    }
+
+    fn visit_expr_reference(&mut self, node: &'ast syn::ExprReference) {
+        if node.mutability.is_some() && is_dispatch_field(&node.expr) {
+            self.writes += 1;
+        }
+        syn::visit::visit_expr_reference(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if node.method == "mark_work_given" {
+            self.marks += 1;
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref() {
+            let segments = path
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            match segments.as_slice() {
+                [.., owner, name] if owner == "WorkGiven" && name == "detached" => {
+                    self.detached += 1
+                }
+                [.., owner, name] if owner == "WorkGiven" && name == "for_command" => {
+                    self.for_command += 1
+                }
+                [.., name] if name == "stamp_dispatch" => self.stamps += 1,
+                _ => {}
+            }
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_return(&mut self, node: &'ast syn::ExprReturn) {
+        self.returns += 1;
+        syn::visit::visit_expr_return(self, node);
+    }
+
+    fn visit_expr_try(&mut self, node: &'ast syn::ExprTry) {
+        self.tries += 1;
+        syn::visit::visit_expr_try(self, node);
+    }
+}
+
+/// Сценарии, чей ответ несёт `provider_dispatched`: у каждого один выход, и на нём признак
+/// ставит отметка работы команды.
+const STAMPED_SCENARIOS: &[&str] = &[
+    "crate::mcp::edt_syntax::execute",
+    "crate::use_cases::artifacts::execute",
+    "crate::use_cases::bootstrap_project::execute",
+    "crate::use_cases::build_project::execute",
+    "crate::use_cases::check_syntax::execute",
+    "crate::use_cases::configure_extensions::execute",
+    "crate::use_cases::convert_sources::execute",
+    "crate::use_cases::dump_config::execute",
+    "crate::use_cases::extension_inventory::change",
+    "crate::use_cases::extension_inventory::execute",
+    "crate::use_cases::init_project::execute",
+    "crate::use_cases::launch_app::execute",
+    "crate::use_cases::load_artifact::execute",
+    "crate::use_cases::publish_infobase::execute",
+];
+
+/// Корень #312: сценарии решали признак сами, чаще всего постоянной `true` на всяком
+/// отказе. Владелец теперь один — отметка работы команды, и значение признаку ставит только
+/// `stamp_dispatch` на единственном выходе сценария. Страж держит все три стороны: в
+/// сценариях и в MCP признак пишется лишь как `false` в конструкторе, отметку ставит только
+/// платформа (и `launch`, чьи запуски идут мимо политики процесса), а каждый сценарий из
+/// перечня выходит одним путём — без `return` и `?` — и ставит штамп ровно раз.
+#[test]
+fn provider_dispatched_takes_its_value_only_from_the_work_mark() {
+    let index = SourceIndex::of_src();
+    let scenarios = path_of("crate::use_cases");
+    let mcp = path_of("crate::mcp");
+    let platform = path_of("crate::platform");
+    let launch = path_of("crate::use_cases::launch_app");
+    let owners_of_command_work = [
+        path_of("crate::use_cases::context"),
+        path_of("crate::mcp::edt_syntax"),
+    ];
+
+    let mut decided = Vec::new();
+    let mut marks = Vec::new();
+    let mut detached = Vec::new();
+    let mut fresh = Vec::new();
+    let mut stamping = Vec::new();
+    for body in production_bodies(&index) {
+        let site = format!("{}::{}", body.module.join("::"), body.context);
+        let found = DispatchUse::of(body.block);
+        let flag_owner_side = body.module.starts_with(&scenarios) || body.module.starts_with(&mcp);
+        if flag_owner_side && (!found.decided_fields.is_empty() || found.writes > 0) {
+            decided.push(format!(
+                "{site}: {:?}, writes {}",
+                found.decided_fields, found.writes
+            ));
+        }
+        if found.marks > 0 && !body.module.starts_with(&platform) && body.module != launch {
+            marks.push(site.clone());
+        }
+        if found.detached > 0 && !body.module.starts_with(&platform) {
+            detached.push(site.clone());
+        }
+        if found.for_command > 0 && !owners_of_command_work.contains(&body.module) {
+            fresh.push(site.clone());
+        }
+        if found.stamps > 0 {
+            stamping.push(site);
+        }
+    }
+    stamping.sort();
+
+    assert!(
+        decided.is_empty(),
+        "these scenarios decide provider_dispatched themselves:\n{}",
+        decided.join("\n")
+    );
+    assert!(
+        marks.is_empty(),
+        "only the platform (and launch) marks the command's work:\n{}",
+        marks.join("\n")
+    );
+    assert!(
+        detached.is_empty(),
+        "a detached work mark belongs to the platform's own service work:\n{}",
+        detached.join("\n")
+    );
+    assert!(
+        fresh.is_empty(),
+        "a command's work mark comes from its context:\n{}",
+        fresh.join("\n")
+    );
+    assert_eq!(
+        stamping, STAMPED_SCENARIOS,
+        "the stamped exits changed; name each scenario whose answer carries the flag"
+    );
+    for scenario in STAMPED_SCENARIOS {
+        let function = index
+            .functions
+            .get(&path_of(scenario))
+            .unwrap_or_else(|| panic!("{scenario} is a free function"));
+        let found = DispatchUse::of(&function.item.block);
+        assert_eq!(
+            (found.stamps, found.returns, found.tries),
+            (1, 0, 0),
+            "{scenario} must have one exit that stamps the work once"
+        );
+    }
+
+    let invocations = index
+        .units
+        .iter()
+        .flat_map(|unit| &unit.syntax.items)
+        .filter(|item| !item_has_cfg_test(item))
+        .filter(|item| {
+            matches!(item, syn::Item::Macro(item_macro)
+                if item_macro.mac.path.is_ident("carries_dispatch"))
+        })
+        .count();
+    assert_eq!(
+        invocations, 1,
+        "the forms that carry the flag are listed once, in carries_dispatch!"
+    );
+}
+
+/// Страж выше смотрит глазами этого поиска, поэтому поиск проверен на образце: литерал
+/// с решённым признаком, запись признака, отметка работы вне платформы, лишний выход.
+#[test]
+fn the_dispatch_finder_sees_decisions_marks_and_exits() {
+    let index = SourceIndex::from_sources(&[(
+        "crate::use_cases::sample",
+        "pub fn decides(ok: bool) -> R { R { provider_dispatched: ok } }\n\
+         pub fn copies(r: R) -> R { R { provider_dispatched: r.provider_dispatched } }\n\
+         pub fn assigns(mut r: R) -> R { r.provider_dispatched = true; r }\n\
+         pub fn borrows(mut r: R) { let flag = &mut r.provider_dispatched; *flag = true; }\n\
+         pub fn honest() -> R { R { provider_dispatched: false } }\n\
+         pub fn marks(work: &WorkGiven) { work.mark_work_given(); }\n\
+         pub fn exits(c: &C) -> Out { let mut o = run(c)?; stamp_dispatch(&mut o, c.work()); o }",
+    )]);
+    let found = |name: &str| {
+        let function = index
+            .functions
+            .get(&path_of(&format!("crate::use_cases::sample::{name}")))
+            .expect("sample function");
+        DispatchUse::of(&function.item.block)
+    };
+    assert_eq!(found("decides").decided_fields, ["ok"]);
+    assert_eq!(found("copies").decided_fields.len(), 1);
+    assert_eq!(found("assigns").writes, 1);
+    assert_eq!(found("borrows").writes, 1);
+    assert!(found("honest").decided_fields.is_empty());
+    assert_eq!(found("marks").marks, 1);
+    let exits = found("exits");
+    assert_eq!((exits.stamps, exits.returns, exits.tries), (1, 0, 1));
+}

@@ -1508,6 +1508,110 @@ mod tests {
         );
     }
 
+    /// Работу команды отмечает доставка её запроса. Сброс базового состояния перед ним и
+    /// служебная команда сессии работы не отмечают: у служебной отметки нет вовсе, а сброс
+    /// идёт без неё.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_a_delivered_work_request_marks_the_work() {
+        let workspace = PathBuf::from("/tmp/edt workspace");
+        let complete = |stdout: String| CommandBehavior::CompleteAfter {
+            delay: Duration::from_millis(1),
+            stdout,
+            stderr: String::new(),
+        };
+        let inner = FakeSessionFactory::new(vec![SessionPlan::Session(vec![
+            complete(String::new()),
+            complete(format!("{}\n", workspace.display())),
+            complete("service".to_owned()),
+            complete(String::new()),
+            complete(format!("{}\n", workspace.display())),
+            complete("work".to_owned()),
+        ])]);
+        let factory = ResettingSessionFactory::new(
+            inner.clone(),
+            workspace.clone(),
+            Duration::from_millis(20),
+        );
+        let manager = manager(factory, 2, Duration::from_millis(100));
+        let work = WorkGiven::for_command();
+
+        manager
+            .execute(EdtSessionRequest::service(
+                "cd",
+                Instant::now() + Duration::from_millis(200),
+            ))
+            .await
+            .expect("service command");
+        assert!(
+            !work.given(),
+            "a service command and its baseline give no work"
+        );
+
+        let reply = manager
+            .execute(EdtSessionRequest::for_work(
+                "validate",
+                Instant::now() + Duration::from_millis(200),
+                work.clone(),
+            ))
+            .await
+            .expect("work request");
+        assert_eq!(reply.stdout, "work");
+        assert!(work.given(), "the delivered request is the command's work");
+    }
+
+    /// Запрос, отменённый во время сброса базового состояния, в процесс не попал: сброс
+    /// выполнялся, а работы команда не дала.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_work_request_cancelled_during_the_baseline_marks_nothing() {
+        let workspace = PathBuf::from("/tmp/edt workspace");
+        let inner = FakeSessionFactory::new(vec![SessionPlan::Session(vec![
+            CommandBehavior::CompleteAfter {
+                delay: Duration::from_millis(30),
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            CommandBehavior::CompleteAfter {
+                delay: Duration::from_millis(1),
+                stdout: format!("{}\n", workspace.display()),
+                stderr: String::new(),
+            },
+        ])]);
+        let factory = ResettingSessionFactory::new(
+            inner.clone(),
+            workspace.clone(),
+            Duration::from_millis(50),
+        );
+        let manager = manager(factory, 2, Duration::from_millis(100));
+        let cancellation = CancellationToken::new();
+        let work = WorkGiven::for_command();
+
+        let request = tokio::spawn({
+            let manager = manager.clone();
+            let cancellation = cancellation.clone();
+            let work = work.clone();
+            async move {
+                manager
+                    .execute(
+                        EdtSessionRequest::for_work(
+                            "validate",
+                            Instant::now() + Duration::from_millis(200),
+                            work,
+                        )
+                        .with_cancellation(cancellation),
+                    )
+                    .await
+            }
+        });
+        wait_for_commands(&inner, 1).await;
+        cancellation.cancel();
+
+        assert_eq!(
+            request.await.expect("join"),
+            Err(EdtSessionError::QueuedCancelled)
+        );
+        assert!(!work.given(), "the request never reached the process");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn baseline_probe_accepts_equivalent_workspace_with_trailing_separator() {
         let workspace = PathBuf::from("/tmp/edt workspace");
