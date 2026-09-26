@@ -10,7 +10,7 @@ use tracing::warn;
 
 use crate::platform::process::{
     ProcessExecutionPolicy, ProcessInterruption, ProcessInterruptionAction,
-    ProcessInterruptionReason, ProcessInterruptionSafety, WorkGiven,
+    ProcessInterruptionReason, ProcessInterruptionSafety,
 };
 use crate::platform::secrets::render_masked_command;
 
@@ -136,6 +136,9 @@ pub enum InteractiveProcessError {
         command: String,
         stdout: String,
         stderr: String,
+        /// Доставлена ли команда как работа команды. Отказ до отправки и служебная команда
+        /// сессии работы не несут.
+        delivered: bool,
     },
 
     #[error("interactive process exited before the next prompt (exit {exit_code})")]
@@ -288,17 +291,17 @@ impl InteractiveProcessExecutor {
         command: &str,
         timeout: Duration,
     ) -> Result<InteractiveCommandOutput, InteractiveProcessError> {
-        self.execute_delivering(command, timeout, None)
+        self.execute_delivering(command, timeout, || {})
     }
 
-    /// Как `execute`, но команда запроса отмечает работу, как только доставлена в процесс:
-    /// записана и вытолкнута, ещё до ответа. Служебная команда передаёт `None` — и объявить
-    /// так команду может только платформа.
+    /// Как `execute`, но `delivered` вызывается, как только команда доставлена в процесс:
+    /// записана и вытолкнута, ещё до ответа. Команда запроса отмечает в нём работу;
+    /// служебная передаёт пустой вызов — и объявить так команду может только платформа.
     pub(in crate::platform) fn execute_delivering(
         &mut self,
         command: &str,
         timeout: Duration,
-        delivered: Option<&WorkGiven>,
+        delivered: impl FnOnce(),
     ) -> Result<InteractiveCommandOutput, InteractiveProcessError> {
         if self.poisoned {
             return Err(InteractiveProcessError::Poisoned);
@@ -308,9 +311,7 @@ impl InteractiveProcessExecutor {
         }
 
         self.send_command(command)?;
-        if let Some(work) = delivered {
-            work.mark_work_given();
-        }
+        delivered();
 
         self.wait_for_prompt(
             WaitMode::Command {
@@ -339,6 +340,7 @@ impl InteractiveProcessExecutor {
                 command: command.to_owned(),
                 stdout: String::new(),
                 stderr: String::new(),
+                delivered: false,
             });
         }
         if timeout.is_zero() {
@@ -824,7 +826,12 @@ impl InteractiveProcessExecutor {
                 self.poisoned = true;
                 self.kill_internal()?;
                 Ok(Some(interactive_error_from_reason(
-                    command, timeout, reason, stdout, stderr,
+                    command,
+                    timeout,
+                    reason,
+                    policy.work.is_some(),
+                    stdout,
+                    stderr,
                 )))
             }
             ProcessInterruptionSafety::GracefulThenKill => {
@@ -836,7 +843,12 @@ impl InteractiveProcessExecutor {
                 }
                 self.poisoned = true;
                 Ok(Some(interactive_error_from_reason(
-                    command, timeout, reason, stdout, stderr,
+                    command,
+                    timeout,
+                    reason,
+                    policy.work.is_some(),
+                    stdout,
+                    stderr,
                 )))
             }
         }
@@ -855,10 +867,12 @@ enum WaitMode {
     Command { command: String },
 }
 
+/// Команда уже отправлена: отмена обрывает работу команды, если команда ею была.
 fn interactive_error_from_reason(
     command: &str,
     timeout: Duration,
     reason: ProcessInterruptionReason,
+    delivered: bool,
     stdout: &[u8],
     stderr: &[u8],
 ) -> InteractiveProcessError {
@@ -867,6 +881,7 @@ fn interactive_error_from_reason(
             command: command.to_owned(),
             stdout: String::from_utf8_lossy(stdout).into_owned(),
             stderr: String::from_utf8_lossy(stderr).into_owned(),
+            delivered,
         },
         ProcessInterruptionReason::TimedOut => InteractiveProcessError::CommandTimeout {
             command: command.to_owned(),

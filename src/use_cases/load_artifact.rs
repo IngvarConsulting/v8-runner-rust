@@ -8,7 +8,8 @@ use crate::domain::artifact::{ArtifactKind, ArtifactRef, ArtifactSet, ARTIFACT_R
 use crate::domain::artifacts::ArtifactBuildMode;
 use crate::domain::capability::{Operation, Provider};
 use crate::domain::execution::{
-    ExecutionError, ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus,
+    ExecutionError, ExecutionInterruptionDetails, ExecutionInterruptionPhase, ExecutionOutcome,
+    ExecutionStatus,
 };
 use crate::domain::load::{
     CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
@@ -23,11 +24,10 @@ use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::support::path::normalize_windows_verbatim_path;
 use crate::support::temp::platform_logs_dir;
-use crate::use_cases::context::{ExecutionContext, ExecutionInterruption, InterruptionSafetyClass};
+use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
 use crate::use_cases::interruption::{
-    command_interruption_details, command_interruption_status, deferred_process_interruption,
-    interruption_before_safe_point_message,
+    cancellation_record, deferred_process_interruption, SafePoint, SafePointCancel,
 };
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::LoadRequest;
@@ -133,18 +133,18 @@ fn run_load(
         }
     };
 
-    if let Some(interruption) = context.interruption() {
-        let message = interruption_before_safe_point_message(context, interruption, "load probe");
+    if let Some(cancel) = SafePointCancel::noticed(context, SafePoint::Before("load probe")) {
+        let result = interrupted_result_from_resolved(
+            &resolved,
+            CompatibilityState::NotProbed,
+            started,
+            cancel.message().to_owned(),
+            cancel.record(),
+            None,
+        );
         return Err(LoadExecutionFailure::with_payload(
-            AppError::Runtime(message.clone()),
-            interrupted_result_from_resolved(
-                &resolved,
-                CompatibilityState::NotProbed,
-                started,
-                interruption,
-                message,
-                None,
-            ),
+            cancel.into_error(),
+            result,
         ));
     }
 
@@ -239,18 +239,23 @@ fn run_load_selected(
     ) {
         Ok(result) => result,
         Err((error, platform_log_path)) => {
-            let message = error.to_string();
-            return Err(LoadExecutionFailure::with_payload(
-                error,
-                empty_result_from_resolved(
-                    &resolved,
-                    CompatibilityState::NotProbed,
-                    started,
-                    Some(message),
-                    platform_log_path,
-                    false,
-                ),
-            ));
+            // Проба, которую успели запустить, спросила и ответа не получила; `not_probed` —
+            // только когда не спрашивал никто.
+            let state = if context.work().given() {
+                CompatibilityState::NotEstablished
+            } else {
+                CompatibilityState::NotProbed
+            };
+            let result = failed_result_from_resolved(
+                &resolved,
+                state,
+                started,
+                &error,
+                ExecutionInterruptionPhase::ProviderCommand,
+                platform_log_path,
+                false,
+            );
+            return Err(LoadExecutionFailure::with_payload(error, result));
         }
     };
 
@@ -288,18 +293,16 @@ fn run_load_selected(
     ) {
         Ok(dsl) => dsl,
         Err((error, platform_log_path)) => {
-            let message = error.to_string();
-            return Err(LoadExecutionFailure::with_payload(
-                error,
-                empty_result_from_resolved(
-                    &resolved,
-                    compatibility_state,
-                    started,
-                    Some(message),
-                    platform_log_path.or(probe_log_path),
-                    false,
-                ),
-            ));
+            let result = failed_result_from_resolved(
+                &resolved,
+                compatibility_state,
+                started,
+                &error,
+                ExecutionInterruptionPhase::Apply,
+                platform_log_path.or(probe_log_path),
+                false,
+            );
+            return Err(LoadExecutionFailure::with_payload(error, result));
         }
     };
 
@@ -329,18 +332,16 @@ fn run_load_selected(
     let apply_result = match apply_result {
         Ok(result) => result,
         Err((error, platform_log_path)) => {
-            let message = error.to_string();
-            return Err(LoadExecutionFailure::with_payload(
-                error,
-                empty_result_from_resolved(
-                    &resolved,
-                    compatibility_state,
-                    started,
-                    Some(message),
-                    platform_log_path.or(probe_log_path),
-                    false,
-                ),
-            ));
+            let result = failed_result_from_resolved(
+                &resolved,
+                compatibility_state,
+                started,
+                &error,
+                ExecutionInterruptionPhase::Apply,
+                platform_log_path.or(probe_log_path),
+                false,
+            );
+            return Err(LoadExecutionFailure::with_payload(error, result));
         }
     };
 
@@ -351,18 +352,24 @@ fn run_load_selected(
     };
 
     if let Err(error) = ensure_platform_success(apply_action, &resolved, &apply_result) {
-        let message = error.to_string();
-        return Err(LoadExecutionFailure::with_payload(
-            error,
-            empty_result_from_resolved(
-                &resolved,
-                compatibility_state,
-                started,
-                Some(message),
-                apply_result.platform_log_path.or(probe_log_path),
-                false,
+        let mut result = failed_result_from_resolved(
+            &resolved,
+            compatibility_state,
+            started,
+            &error,
+            ExecutionInterruptionPhase::Apply,
+            apply_result.platform_log_path.clone().or(probe_log_path),
+            false,
+        );
+        name_deferral(
+            &mut result,
+            deferred_process_interruption(
+                ExecutionInterruptionPhase::Apply,
+                &format!("{apply_action} ended"),
+                &apply_result,
             ),
-        ));
+        );
+        return Err(LoadExecutionFailure::with_payload(error, result));
     }
 
     let apply_deferral = deferred_process_interruption(
@@ -370,25 +377,20 @@ fn run_load_selected(
         "apply completed successfully",
         &apply_result,
     );
-    if let Some(interruption) = context.interruption() {
-        let message =
-            interruption_before_safe_point_message(context, interruption, "update_db_cfg");
+    if let Some(cancel) = SafePointCancel::noticed(context, SafePoint::Before("update_db_cfg")) {
         let mut result = with_loaded_artifact(interrupted_result_from_resolved(
             &resolved,
             compatibility_state,
             started,
-            interruption,
-            message.clone(),
+            cancel.message().to_owned(),
+            cancel.record(),
             apply_result.platform_log_path.or(probe_log_path),
         ));
         // Если отмена пришла во время загрузки, загрузка её отложила и довела дело до конца;
         // ответ называет это раньше остановки на безопасной точке.
-        if let Some((warning, details)) = apply_deferral {
-            result.execution.diagnostics.insert(0, warning);
-            result.execution.interruptions.insert(0, details);
-        }
+        name_deferral(&mut result, apply_deferral);
         return Err(LoadExecutionFailure::with_payload(
-            AppError::Runtime(message),
+            cancel.into_error(),
             result,
         ));
     }
@@ -403,20 +405,18 @@ fn run_load_selected(
     ) {
         Ok(dsl) => dsl,
         Err((error, platform_log_path)) => {
-            let message = error.to_string();
-            return Err(LoadExecutionFailure::with_payload(
-                error,
-                with_loaded_artifact(empty_result_from_resolved(
-                    &resolved,
-                    compatibility_state,
-                    started,
-                    Some(message),
-                    platform_log_path
-                        .or(apply_result.platform_log_path)
-                        .or(probe_log_path),
-                    false,
-                )),
+            let result = with_loaded_artifact(failed_result_from_resolved(
+                &resolved,
+                compatibility_state,
+                started,
+                &error,
+                ExecutionInterruptionPhase::UpdateDbCfg,
+                platform_log_path
+                    .or(apply_result.platform_log_path)
+                    .or(probe_log_path),
+                false,
             ));
+            return Err(LoadExecutionFailure::with_payload(error, result));
         }
     };
 
@@ -431,37 +431,42 @@ fn run_load_selected(
     let update_result = match update_result {
         Ok(result) => result,
         Err(error) => {
-            let message = error.to_string();
-            return Err(LoadExecutionFailure::with_payload(
-                error,
-                with_loaded_artifact(empty_result_from_resolved(
-                    &resolved,
-                    compatibility_state,
-                    started,
-                    Some(message),
-                    apply_result.platform_log_path.or(probe_log_path),
-                    false,
-                )),
+            let result = with_loaded_artifact(failed_result_from_resolved(
+                &resolved,
+                compatibility_state,
+                started,
+                &error,
+                ExecutionInterruptionPhase::UpdateDbCfg,
+                apply_result.platform_log_path.or(probe_log_path),
+                false,
             ));
+            return Err(LoadExecutionFailure::with_payload(error, result));
         }
     };
 
     if let Err(error) = ensure_platform_success("update_db_cfg", &resolved, &update_result) {
-        let message = error.to_string();
-        return Err(LoadExecutionFailure::with_payload(
-            error,
-            with_loaded_artifact(empty_result_from_resolved(
-                &resolved,
-                compatibility_state,
-                started,
-                Some(message),
-                update_result
-                    .platform_log_path
-                    .or(apply_result.platform_log_path)
-                    .or(probe_log_path),
-                true,
-            )),
+        let mut result = with_loaded_artifact(failed_result_from_resolved(
+            &resolved,
+            compatibility_state,
+            started,
+            &error,
+            ExecutionInterruptionPhase::UpdateDbCfg,
+            update_result
+                .platform_log_path
+                .clone()
+                .or(apply_result.platform_log_path)
+                .or(probe_log_path),
+            true,
         ));
+        name_deferral(
+            &mut result,
+            deferred_process_interruption(
+                ExecutionInterruptionPhase::UpdateDbCfg,
+                "update_db_cfg ended",
+                &update_result,
+            ),
+        );
+        return Err(LoadExecutionFailure::with_payload(error, result));
     }
 
     let update_deferral = deferred_process_interruption(
@@ -525,14 +530,15 @@ fn probe_compatibility(
     // interface language. Comparing the extension with its database copy told us nothing more
     // and told it in prose.
     if resolved.target_kind == LoadTargetKind::Extension {
-        let (state, diagnostic) =
-            match installed_extension_state(context, config, utilities, resolved) {
-                ExtensionPresence::Absent => (CompatibilityState::Absent, None),
-                ExtensionPresence::Present => (CompatibilityState::Supported, None),
-                ExtensionPresence::NotEstablished(reason) => {
-                    (CompatibilityState::NotEstablished, Some(reason))
-                }
-            };
+        let presence = installed_extension_state(context, config, utilities, resolved)
+            .map_err(|cancelled| (cancelled, None))?;
+        let (state, diagnostic) = match presence {
+            ExtensionPresence::Absent => (CompatibilityState::Absent, None),
+            ExtensionPresence::Present => (CompatibilityState::Supported, None),
+            ExtensionPresence::NotEstablished(reason) => {
+                (CompatibilityState::NotEstablished, Some(reason))
+            }
+        };
         return Ok(ProbeResult {
             state,
             platform_log_path: None,
@@ -613,23 +619,26 @@ enum ExtensionPresence {
     NotEstablished(String),
 }
 
-/// Asks the infobase whether the extension is installed, by its own keyed list.
+/// Asks the infobase whether the extension is installed, by its own keyed list. `Err` is only a
+/// cancellation of the list read: it answers nothing about the extension, it ends the command.
 fn installed_extension_state(
     context: &ExecutionContext,
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
     resolved: &ResolvedLoadRequest,
-) -> ExtensionPresence {
+) -> Result<ExtensionPresence, AppError> {
     let Some(name) = resolved.extension.as_deref() else {
-        return ExtensionPresence::NotEstablished("the extension is not named".to_owned());
+        return Ok(ExtensionPresence::NotEstablished(
+            "the extension is not named".to_owned(),
+        ));
     };
     let connection = match IbcmdConnection::from_infobase(&config.infobase) {
         Ok(connection) => connection,
-        Err(error) => return ExtensionPresence::NotEstablished(error.to_string()),
+        Err(error) => return Ok(ExtensionPresence::NotEstablished(error.to_string())),
     };
     let binary = match utilities.locate(UtilityType::Ibcmd) {
         Ok(location) => location.path,
-        Err(error) => return ExtensionPresence::NotEstablished(error.to_string()),
+        Err(error) => return Ok(ExtensionPresence::NotEstablished(error.to_string())),
     };
     let dsl = IbcmdDsl::new(
         binary,
@@ -640,16 +649,22 @@ fn installed_extension_state(
     let result = match dsl.infobase_extension_list() {
         Ok(result) => result,
         // Refused before the start or stopped after it: the runner has already marked the
-        // work if `ibcmd` started.
-        Err(error) => return ExtensionPresence::NotEstablished(error.to_string()),
+        // work if `ibcmd` started. A cancellation keeps its type — it is not an answer.
+        Err(error) => {
+            let error = AppError::from(error);
+            if error.cancellation().is_some() {
+                return Err(error);
+            }
+            return Ok(ExtensionPresence::NotEstablished(error.to_string()));
+        }
     };
     if result.process.exit_code != 0 {
-        return ExtensionPresence::NotEstablished(format!(
+        return Ok(ExtensionPresence::NotEstablished(format!(
             "reading the extension list exited with {}",
             result.process.exit_code
-        ));
+        )));
     }
-    match parse_extension_inventory(&result.process.stdout) {
+    Ok(match parse_extension_inventory(&result.process.stdout) {
         Ok(extensions) => {
             if extensions.iter().any(|extension| extension.name == name) {
                 ExtensionPresence::Present
@@ -658,7 +673,7 @@ fn installed_extension_state(
             }
         }
         Err(error) => ExtensionPresence::NotEstablished(error),
-    }
+    })
 }
 
 /// The platform's own words about a probe that did not run, kept as evidence for a human.
@@ -977,15 +992,15 @@ fn target_label(resolved: &ResolvedLoadRequest) -> String {
     }
 }
 
-/// Итог прерывания на безопасной точке. Получил ли исполнитель работу, ставит отметка
-/// команды на выходе `execute`; что пакет уже загружен, отмечает `with_loaded_artifact` у
-/// места вызова.
+/// Итог загрузки, остановленной отменой: `message` — её текст, `record` — запись о
+/// прерывании. Получил ли исполнитель работу, ставит отметка команды на выходе `execute`;
+/// что пакет уже загружен, отмечает `with_loaded_artifact` у места вызова.
 fn interrupted_result_from_resolved(
     resolved: &ResolvedLoadRequest,
     compatibility_state: CompatibilityState,
     started: Instant,
-    interruption: ExecutionInterruption,
     message: String,
+    record: ExecutionInterruptionDetails,
     platform_log_path: Option<PathBuf>,
 ) -> LoadResult {
     LoadResult {
@@ -997,17 +1012,13 @@ fn interrupted_result_from_resolved(
         extension: resolved.extension.clone(),
         duration_ms: started.elapsed().as_millis() as u64,
         execution: with_platform_log_artifact(
-            ExecutionOutcome::new(command_interruption_status(interruption))
+            ExecutionOutcome::new(ExecutionStatus::Cancelled)
                 .with_diagnostics(vec![message.clone()])
                 .with_errors(vec![ExecutionError::new(
                     "artifact_load_interrupted",
-                    message.clone(),
-                )])
-                .with_interruptions(vec![command_interruption_details(
-                    interruption,
-                    ExecutionInterruptionPhase::CommandBoundary,
                     message,
                 )])
+                .with_interruptions(vec![record])
                 .with_payload(LoadExecutionMetadata {
                     applied: false,
                     target_kind: resolved.target_kind,
@@ -1016,6 +1027,51 @@ fn interrupted_result_from_resolved(
                 }),
             platform_log_path,
         ),
+    }
+}
+
+/// Отказ загрузки. Отмена — прерывание: статус `cancelled` и запись о нём, фазу которой
+/// называет ошибка — безопасная точка или оборванная работа `work_phase`. Прочий отказ —
+/// `failed`, как был.
+fn failed_result_from_resolved(
+    resolved: &ResolvedLoadRequest,
+    compatibility_state: CompatibilityState,
+    started: Instant,
+    error: &AppError,
+    work_phase: ExecutionInterruptionPhase,
+    platform_log_path: Option<PathBuf>,
+    update_db_cfg_ran: bool,
+) -> LoadResult {
+    let message = error.to_string();
+    match cancellation_record(error, work_phase, message.clone()) {
+        Some(record) => interrupted_result_from_resolved(
+            resolved,
+            compatibility_state,
+            started,
+            message,
+            record,
+            platform_log_path,
+        ),
+        None => empty_result_from_resolved(
+            resolved,
+            compatibility_state,
+            started,
+            Some(message),
+            platform_log_path,
+            update_db_cfg_ran,
+        ),
+    }
+}
+
+/// Отмену, которую процесс отложил и пережил, ответ называет первой — и тогда, когда процесс
+/// потом не удался: оператор просил остановить, и ответ говорит, почему его не послушали.
+fn name_deferral(
+    result: &mut LoadResult,
+    deferral: Option<(String, ExecutionInterruptionDetails)>,
+) {
+    if let Some((warning, details)) = deferral {
+        result.execution.diagnostics.insert(0, warning);
+        result.execution.interruptions.insert(0, details);
     }
 }
 
@@ -1765,6 +1821,10 @@ mod tests {
         let context = ExecutionContext::cli(CommandName::Load).with_cancellation(cancellation);
 
         let failure = execute(&context, &config, &request).expect_err("cancelled");
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Cancelled(crate::support::error::CancelledAt::Boundary)
+        );
         let payload = failure.payload.expect("payload");
 
         assert_eq!(payload.execution.status, ExecutionStatus::Cancelled);
@@ -1859,6 +1919,10 @@ mod tests {
             operator.join().expect("operator thread"),
             "the runner never logged that it deferred the cancellation"
         );
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Cancelled(crate::support::error::CancelledAt::Boundary)
+        );
         let payload = failure.payload.expect("payload");
 
         assert_eq!(payload.execution.status, ExecutionStatus::Cancelled);
@@ -1894,6 +1958,103 @@ mod tests {
         let calls_text = fs::read_to_string(&calls).expect("calls");
         assert!(calls_text.contains("/LoadCfg"), "{calls_text}");
         assert!(!calls_text.contains("/UpdateDBCfg"), "{calls_text}");
+    }
+
+    /// Загрузка, отложившая отмену и потом не удавшаяся, остаётся отказом, а не отменой: сигнал
+    /// отказа не переписывает. Но отложенную отмену ответ называет — оператор просил
+    /// остановить, и ответ говорит, почему его не послушали (как у `infobase restore`).
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_load_after_a_deferred_cancellation_still_names_it() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("work")).expect("work");
+        let binary = root.join("1cv8");
+        let calls = root.join("calls.log");
+        let load_started = root.join("load-started");
+        let load_release = root.join("load-release");
+        fs::write(root.join("main.cf"), "cf").expect("artifact");
+        write_designer_script_with(
+            &binary,
+            &calls,
+            &format!(
+                "if printf '%s' \"$args\" | grep -F -q -- '/LoadCfg'; then\n\
+                   : > '{}'\n\
+                   waited=0\n\
+                   while [ ! -e '{}' ] && [ \"$waited\" -lt 300 ]; do\n\
+                     sleep 0.1\n\
+                     waited=$((waited + 1))\n\
+                   done\n\
+                   exit 5\n\
+                 fi\n",
+                load_started.display(),
+                load_release.display()
+            ),
+        );
+        let config = sample_config(root, &binary);
+        let request = LoadRequest {
+            vendor_name: None,
+            dry_run: false,
+            mode: LoadMode::Load,
+            artifact_path: "main.cf".to_owned(),
+            settings_path: None,
+            extension: None,
+        };
+        let cancellation = CancellationToken::new();
+        let watch = DeferralWatch::default();
+        let operator = {
+            let cancellation = cancellation.clone();
+            let watch = watch.clone();
+            thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while !load_started.exists() && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                cancellation.cancel();
+                while !watch.observed() && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                fs::write(&load_release, "").expect("release the load");
+                watch.observed()
+            })
+        };
+
+        let failure = watch
+            .during(|| {
+                execute(
+                    &ExecutionContext::cli(CommandName::Load).with_cancellation(cancellation),
+                    &config,
+                    &request,
+                )
+            })
+            .expect_err("the load failed");
+        assert!(
+            operator.join().expect("operator thread"),
+            "the runner never logged that it deferred the cancellation"
+        );
+
+        assert_eq!(failure.error.kind(), UseCaseErrorKind::Platform);
+        let payload = failure.payload.expect("payload");
+        assert_eq!(payload.execution.status, ExecutionStatus::Failed);
+        let [deferred] = payload.execution.interruptions.as_slice() else {
+            panic!(
+                "the deferred cancellation must be named: {:?}",
+                payload.execution.interruptions
+            );
+        };
+        assert!(deferred.deferred);
+        assert_eq!(deferred.kind, ExecutionInterruptionKind::Cancelled);
+        assert_eq!(deferred.phase, Some(ExecutionInterruptionPhase::Apply));
+        assert!(
+            payload.execution.diagnostics[0]
+                .contains("load ended after cancellation request during critical phase"),
+            "{:?}",
+            payload.execution.diagnostics
+        );
+        assert!(!load_payload(&payload).applied);
+        assert!(!fs::read_to_string(&calls)
+            .expect("calls")
+            .contains("/UpdateDBCfg"));
     }
 
     /// Подставная программа, которая отмечается, что запущена, и ждёт, пока её не отпустят.
@@ -1933,7 +2094,9 @@ mod tests {
     }
 
     /// Проба списка расширений, отменённая уже после запуска `ibcmd`, работу получила, и ответ
-    /// говорит `provider_dispatched: true` (#309: прежде он отвечал `false`).
+    /// говорит `provider_dispatched: true` (#309: прежде он отвечал `false`). Отмена остаётся
+    /// отменой, а не ответом о расширении: команда прервана в фазе `provider_command`, и
+    /// совместимость не установлена — спросили, а ответа нет (#308).
     #[cfg(unix)]
     #[test]
     fn an_extension_probe_cancelled_after_its_start_reports_the_work() {
@@ -1955,22 +2118,19 @@ mod tests {
         };
         let (cancellation, operator) = cancel_once_started(started, release);
 
-        let outcome = execute(
+        let failure = execute(
             &ExecutionContext::cli(CommandName::Load).with_cancellation(cancellation),
             &sample_config(root, &binary),
             &request,
-        );
+        )
+        .expect_err("the cancelled probe stops the command");
         operator.join().expect("operator");
 
-        let payload = match outcome {
-            Ok(result) => result,
-            Err(failure) => failure.payload.expect("the refusal carries the form"),
-        };
-        assert!(payload.provider_dispatched, "the probe had started");
+        assert_cancelled_probe(failure);
     }
 
     /// Проба совместимости конфигурации, отменённая после запуска Конфигуратора, — тоже
-    /// работа (#309).
+    /// работа (#309) и тоже прерывание в фазе `provider_command` (#308).
     #[cfg(unix)]
     #[test]
     fn a_configuration_probe_cancelled_after_its_start_reports_the_work() {
@@ -1992,18 +2152,43 @@ mod tests {
         fs::write(root.join("merge.xml"), "<settings/>").expect("settings");
         let (cancellation, operator) = cancel_once_started(started, release);
 
-        let outcome = execute(
+        let failure = execute(
             &ExecutionContext::cli(CommandName::Load).with_cancellation(cancellation),
             &sample_config(root, &binary),
             &request,
-        );
+        )
+        .expect_err("the cancelled probe stops the command");
         operator.join().expect("operator");
 
-        let payload = match outcome {
-            Ok(result) => result,
-            Err(failure) => failure.payload.expect("the refusal carries the form"),
-        };
+        assert_cancelled_probe(failure);
+    }
+
+    #[cfg(unix)]
+    fn assert_cancelled_probe(failure: crate::use_cases::result::UseCaseFailure<LoadResult>) {
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Cancelled(crate::support::error::CancelledAt::Work)
+        );
+        let payload = failure.payload.expect("the refusal carries the form");
         assert!(payload.provider_dispatched, "the probe had started");
+        assert_eq!(payload.execution.status, ExecutionStatus::Cancelled);
+        let [interruption] = payload.execution.interruptions.as_slice() else {
+            panic!(
+                "one interruption expected: {:?}",
+                payload.execution.interruptions
+            );
+        };
+        assert!(!interruption.deferred);
+        assert_eq!(
+            interruption.phase,
+            Some(ExecutionInterruptionPhase::ProviderCommand)
+        );
+        assert_eq!(
+            load_payload(&payload).compatibility_state,
+            CompatibilityState::NotEstablished,
+            "the probe was asked and did not answer"
+        );
+        assert!(!load_payload(&payload).applied);
     }
 
     /// Отказ до первого процесса работы не дал, даже если проба не шла и прежде признак

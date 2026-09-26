@@ -777,11 +777,13 @@ fn interrupted_syntax_failure(
     started: Instant,
     platform_log_path: Option<PathBuf>,
 ) -> Option<SyntaxExecutionFailure> {
-    let interruption = context.interruption()?;
-    let message =
-        crate::use_cases::interruption::command_interruption_message(context, interruption);
+    let cancel = crate::use_cases::interruption::SafePointCancel::noticed(
+        context,
+        crate::use_cases::interruption::SafePoint::Command,
+    )?;
+    let message = cancel.message().to_owned();
     Some(SyntaxExecutionFailure::with_payload(
-        AppError::Runtime(message.clone()),
+        cancel.into_error(),
         failed_result(
             check_name,
             SyntaxCheckStatus::ToolFailed,

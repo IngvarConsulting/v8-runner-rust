@@ -799,10 +799,20 @@ mod tests {
         };
 
         let failure = run_tests(&context, &config, &args).expect_err("cancelled");
+        assert_eq!(
+            failure.error.kind(),
+            crate::use_cases::result::UseCaseErrorKind::Cancelled(
+                crate::support::error::CancelledAt::Boundary
+            )
+        );
         let payload = failure.payload.expect("payload");
 
         assert_eq!(payload.execution.status, ExecutionStatus::Cancelled);
         assert_eq!(payload.execution.interruptions.len(), 1);
+        assert_eq!(
+            payload.execution.interruptions[0].phase,
+            Some(crate::domain::execution::ExecutionInterruptionPhase::CommandBoundary)
+        );
         assert!(payload.execution.errors.is_empty());
     }
 

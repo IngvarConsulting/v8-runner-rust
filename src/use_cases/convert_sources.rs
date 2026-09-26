@@ -98,11 +98,10 @@ fn run_convert_with_context(
     let scope = scope_from_request(request);
     let workspace_path = convert_workspace_path(config);
 
-    if let Some(interruption) = context.interruption() {
-        let error = AppError::Runtime(interruption::command_interruption_message(
-            context,
-            interruption,
-        ));
+    if let Some(cancel) =
+        interruption::SafePointCancel::noticed(context, interruption::SafePoint::Command)
+    {
+        let error = cancel.into_error();
         let message = error.to_string();
         return Err(ConvertExecutionFailure::with_payload(
             error,
@@ -455,13 +454,10 @@ fn execute_with_dsl(
             )
         })?;
 
-        if let Some(interruption) = context.interruption() {
+        if let Some(error) =
+            interruption::interruption_before_safe_point(context, "convert publication")
+        {
             let _ = remove_path_if_exists(&staging_root);
-            let error = AppError::Runtime(interruption::interruption_before_safe_point_message(
-                context,
-                interruption,
-                "convert publication",
-            ));
             let message = error.to_string();
             return Err(ConvertExecutionFailure::with_payload(
                 error,

@@ -93,10 +93,11 @@ fn run_launch(
         ));
     }
 
-    if let Some(interruption) = context.interruption() {
-        return Err(UseCaseFailure::without_payload(AppError::Runtime(
-            crate::use_cases::interruption::command_interruption_message(context, interruption),
-        )));
+    if let Some(cancel) = crate::use_cases::interruption::SafePointCancel::noticed(
+        context,
+        crate::use_cases::interruption::SafePoint::Command,
+    ) {
+        return Err(UseCaseFailure::without_payload(cancel.into_error()));
     }
 
     // Путь и адрес разрешаются до поиска утилиты: искать платформу, когда адреса нет,
@@ -321,12 +322,27 @@ fn run_launch(
                 let _ = managed.detach();
                 return Ok(result);
             }
-            Err(readiness) => {
-                let message = readiness
-                    .message
-                    .clone()
-                    .unwrap_or_else(|| "MCP endpoint did not become ready".to_owned());
-                managed.terminate();
+            Err(not_ready) => {
+                let unready = |readiness: &crate::domain::launch::McpReadinessResult| {
+                    readiness
+                        .message
+                        .clone()
+                        .unwrap_or_else(|| "MCP endpoint did not become ready".to_owned())
+                };
+                let (readiness, message, error) = match not_ready {
+                    client_mcp_readiness::NotReady::Failed(readiness) => {
+                        let message = unready(&readiness);
+                        managed.terminate();
+                        let error = AppError::Runtime(message.clone());
+                        (readiness, message, error)
+                    }
+                    // Клиент уже запущен: отмена снимает его и называется отменой его работы.
+                    client_mcp_readiness::NotReady::Cancelled(readiness) => {
+                        let message = unready(&readiness);
+                        let error = AppError::from(managed.cancel()).with_context(message.clone());
+                        (readiness, message, error)
+                    }
+                };
                 result.ok = false;
                 result.message = Some(format!(
                     "Launched {} via {} (pid {}) but {message}; process terminated",
@@ -335,10 +351,7 @@ fn run_launch(
                     pid
                 ));
                 result.mcp_readiness = Some(readiness);
-                return Err(UseCaseFailure::with_payload(
-                    AppError::Runtime(message),
-                    result,
-                ));
+                return Err(UseCaseFailure::with_payload(error, result));
             }
         }
     }
@@ -575,10 +588,11 @@ fn execute_web(
                 .to_owned(),
         )));
     }
-    if let Some(interruption) = context.interruption() {
-        return Err(UseCaseFailure::without_payload(AppError::Runtime(
-            crate::use_cases::interruption::command_interruption_message(context, interruption),
-        )));
+    if let Some(cancel) = crate::use_cases::interruption::SafePointCancel::noticed(
+        context,
+        crate::use_cases::interruption::SafePoint::Command,
+    ) {
+        return Err(UseCaseFailure::without_payload(cancel.into_error()));
     }
 
     let (program, leading) = crate::platform::browser::opener();

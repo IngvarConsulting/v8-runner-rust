@@ -315,6 +315,10 @@ fn publish_interrupted_after_webinst_started_answers_in_its_form() {
     let payload: Value = serde_json::from_str(&stdout).expect("one json document");
     assert_eq!(payload["ok"], false, "{payload}");
     assert_eq!(payload["command"], "publish", "{payload}");
+    // Снятый процесс — отмена, как всякая: род `interruption`, код `cancelled` и выход 4 (#308).
+    assert_eq!(payload["error"]["code"], "cancelled", "{payload}");
+    assert_eq!(payload["error"]["kind"], "interruption", "{payload}");
+    assert_eq!(runner.0.wait().expect("exit status").code(), Some(4));
     assert_eq!(payload["data"]["ok"], false, "{payload}");
     assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
     assert!(payload["data"]["platform_log_path"].is_null(), "{payload}");

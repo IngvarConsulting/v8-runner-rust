@@ -235,8 +235,11 @@ fn fetch_latest_release(context: &ExecutionContext, repo: &str) -> Result<GitHub
     let url = format!("{base}/repos/{repo}/releases/latest");
     debug!(repo, url = %url, "fetching latest tool release");
     let cancellation = context.cancellation();
+    // Отказ загрузки — отказ выполнения, её отмена — отмена: различает их `From`.
     let text = download::get_text(&url, TRANSFER_IS_BOUNDED_BY_SILENCE, &cancellation).map_err(
-        |error| AppError::Runtime(format!("failed to fetch latest release {repo}: {error}")),
+        |error| {
+            AppError::from(error).with_context(format!("failed to fetch latest release {repo}"))
+        },
     )?;
     serde_json::from_str::<GitHubRelease>(&text).map_err(|error| {
         AppError::Runtime(format!("failed to parse latest release {repo}: {error}"))
@@ -272,10 +275,7 @@ fn download_asset_file(
         &cancellation,
     )
     .map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to download asset '{}': {error}",
-            asset.name
-        ))
+        AppError::from(error).with_context(format!("failed to download asset '{}'", asset.name))
     })?;
     if verify_asset_digest(&asset.name, asset.digest.as_deref(), &bytes)?
         == DigestVerdict::NotPublished
@@ -312,10 +312,7 @@ fn download_single_file_from_zip(
         &cancellation,
     )
     .map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to download asset '{}': {error}",
-            asset.name
-        ))
+        AppError::from(error).with_context(format!("failed to download asset '{}'", asset.name))
     })?;
     if verify_asset_digest(&asset.name, asset.digest.as_deref(), &bytes)?
         == DigestVerdict::NotPublished
@@ -351,10 +348,8 @@ fn download_source_subdir(
     let cancellation = context.cancellation();
     let bytes = download::get_bytes(&archive_url, TRANSFER_IS_BOUNDED_BY_SILENCE, &cancellation)
         .map_err(|error| {
-            AppError::Runtime(format!(
-                "failed to download source archive '{}': {error}",
-                archive_url
-            ))
+            AppError::from(error)
+                .with_context(format!("failed to download source archive '{archive_url}'"))
         })?;
     let staged = target_path.with_extension(format!(
         "download-{}",
@@ -1090,6 +1085,29 @@ fn verify_asset_digest(
 #[cfg(test)]
 mod tests {
     use super::{verify_asset_digest, DigestVerdict};
+
+    /// Отмена загрузки — отмена, а не отказ выполнения: род `cancelled`, и оборванной работы
+    /// она не оставляет — файлы ложатся на место только после загрузки (#308).
+    #[test]
+    fn a_cancelled_download_is_a_cancellation() {
+        use crate::support::error::CancelledAt;
+        use crate::use_cases::context::{CommandName, ExecutionContext};
+        use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
+
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
+        let context =
+            ExecutionContext::cli(CommandName::ToolsDownload).with_cancellation(cancellation);
+
+        let error = super::fetch_latest_release(&context, "IngvarConsulting/v8-runner-rust")
+            .expect_err("the download was cancelled");
+
+        assert_eq!(error.cancellation(), Some(CancelledAt::Boundary), "{error}");
+        assert_eq!(
+            UseCaseError::from(error).kind(),
+            UseCaseErrorKind::Cancelled(CancelledAt::Boundary)
+        );
+    }
 
     /// Расширение после загрузки попадает в информационную базу как исполняемый код 1С,
     /// поэтому сумма, опубликованная рядом с ассетом, сверяется. Её отсутствие названо

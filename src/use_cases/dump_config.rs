@@ -2857,7 +2857,11 @@ exit 0"#,
         )
         .expect_err("interrupted after bootstrap");
 
-        assert!(matches!(error, AppError::Runtime(_)));
+        assert_eq!(
+            error.cancellation(),
+            Some(crate::support::error::CancelledAt::Boundary),
+            "a safe point is a cancellation at the boundary: {error}"
+        );
         assert_eq!(dump_runner.call_count(), 1);
         assert_eq!(edt_runner.call_count(), 0);
     }
@@ -2902,7 +2906,11 @@ exit 0"#,
         )
         .expect_err("interrupted after bootstrap");
 
-        assert!(matches!(error, AppError::Runtime(_)));
+        assert_eq!(
+            error.cancellation(),
+            Some(crate::support::error::CancelledAt::Boundary),
+            "a safe point is a cancellation at the boundary: {error}"
+        );
         assert_eq!(dump_runner.call_count(), 1);
         assert_eq!(edt_runner.call_count(), 0);
     }
@@ -2951,7 +2959,11 @@ exit 0"#,
         )
         .expect_err("interrupted after bootstrap");
 
-        assert!(matches!(error, AppError::Runtime(_)));
+        assert_eq!(
+            error.cancellation(),
+            Some(crate::support::error::CancelledAt::Boundary),
+            "a safe point is a cancellation at the boundary: {error}"
+        );
         assert_eq!(dump_runner.call_count(), 1);
         assert_eq!(edt_runner.call_count(), 0);
     }
@@ -3002,7 +3014,11 @@ exit 0"#,
         )
         .expect_err("interrupted after bootstrap");
 
-        assert!(matches!(error, AppError::Runtime(_)));
+        assert_eq!(
+            error.cancellation(),
+            Some(crate::support::error::CancelledAt::Boundary),
+            "a safe point is a cancellation at the boundary: {error}"
+        );
         assert_eq!(dump_runner.call_count(), 1);
         assert_eq!(edt_runner.call_count(), 0);
     }
@@ -3280,7 +3296,11 @@ exit 0"#,
         )
         .expect_err("interrupted");
 
-        assert!(matches!(error, AppError::Runtime(_)));
+        assert_eq!(
+            error.cancellation(),
+            Some(crate::support::error::CancelledAt::Boundary),
+            "a safe point is a cancellation at the boundary: {error}"
+        );
         assert!(
             !edt_calls.exists()
                 || fs::read_to_string(edt_calls)

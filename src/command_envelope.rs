@@ -363,7 +363,7 @@ mod schema_tests {
 
         // Соответствие рода отказа паре «код, род» на проводе проверяется целиком и по
         // литералам: иначе можно поменять местами два кода, и набор останется тем же.
-        use crate::support::error::CapabilityReason;
+        use crate::support::error::{CancelledAt, CapabilityReason};
         use crate::use_cases::result::UseCaseErrorKind;
         let cli: Vec<(UseCaseErrorKind, &str, &str)> = vec![
             (
@@ -401,7 +401,16 @@ mod schema_tests {
                 "invalid_output",
                 "invalid_output",
             ),
-            (UseCaseErrorKind::Cancelled, "cancelled", "interruption"),
+            (
+                UseCaseErrorKind::Cancelled(CancelledAt::Boundary),
+                "cancelled",
+                "interruption",
+            ),
+            (
+                UseCaseErrorKind::Cancelled(CancelledAt::Work),
+                "cancelled",
+                "interruption",
+            ),
             (UseCaseErrorKind::TimedOut, "timed_out", "interruption"),
             (
                 UseCaseErrorKind::Validation,

@@ -1,3 +1,4 @@
+use super::helpers::build_prerequisite_failure;
 use super::*;
 use crate::support::error::CapabilityReason;
 use crate::use_cases::progress::log_live_stage;
@@ -90,24 +91,15 @@ pub(super) fn run_tests(
                         .as_ref()
                         .map(build_summary)
                         .unwrap_or_else(|| failure.error.to_string());
-                    steps.push(
-                        failed_step(
-                            "build",
-                            ExecutionStepKind::PlatformCommand,
-                            build_started.elapsed().as_millis() as u64,
-                            summary.clone(),
-                        )
-                        .with_errors(vec![test_execution_error(
-                            TestErrorKind::BuildFailed,
-                            summary.clone(),
-                        )]),
+                    let step = failed_step(
+                        "build",
+                        ExecutionStepKind::PlatformCommand,
+                        build_started.elapsed().as_millis() as u64,
+                        summary.clone(),
                     );
-                    let outcome = ExecutionOutcome::new(ExecutionStatus::Failed)
-                        .with_diagnostics(vec![summary.clone()])
-                        .with_errors(vec![test_execution_error(
-                            TestErrorKind::BuildFailed,
-                            summary.clone(),
-                        )]);
+                    let (step, outcome) =
+                        build_prerequisite_failure(&failure.error, step, &summary);
+                    steps.push(step);
                     let result = make_test_result(
                         target,
                         mode,

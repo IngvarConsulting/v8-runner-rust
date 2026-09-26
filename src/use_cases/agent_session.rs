@@ -72,7 +72,7 @@ impl AgentHandle {
         };
         agent::user_dir(base_dir, &agent_user(config))
             .map(Exchange::Dir)
-            .map_err(map_agent_error)
+            .map_err(AppError::from)
     }
 
     /// Управляемый агент гасится, чужой — только отпускается: соединение с базой
@@ -107,11 +107,14 @@ fn open_gate_session(
             Err(
                 error
                 @ (AgentError::AuthenticationRejected { .. } | AgentError::Unreachable { .. }),
-            ) if started.elapsed() < GATE_REFRESH_WINDOW && !wait.cancellation.is_cancelled() => {
+            ) if started.elapsed() < GATE_REFRESH_WINDOW => {
+                // Отмена прекращает ожидание шлюза: сессии ещё нет, и ответ называет отмену,
+                // а не последний отказ шлюза.
+                wait.refuse_if_cancelled("open")?;
                 tracing::debug!(%error, "gate is not accepting sessions yet; waiting");
                 std::thread::sleep(Duration::from_secs(1));
             }
-            Err(error) => return Err(map_agent_error(error)),
+            Err(error) => return Err(AppError::from(error)),
         }
     }
 }
@@ -199,7 +202,7 @@ pub(crate) fn connect(
                 host_key: declared_expectation(agent.host_fingerprint.as_deref())?,
             };
             // Чужая точка входа не поднимается заново: недоступная — типизированный отказ.
-            let session = AgentSession::open(&request, wait).map_err(map_agent_error)?;
+            let session = AgentSession::open(&request, wait).map_err(AppError::from)?;
             Ok(AgentHandle::Attached { session, base_dir })
         }
         DesignerAgentMode::Managed { port } => {
@@ -237,7 +240,7 @@ pub(crate) fn connect(
                 Duration::from_millis(agent.startup_timeout_ms.max(1)),
                 wait,
             )
-            .map_err(map_agent_error)?;
+            .map_err(AppError::from)?;
             Ok(AgentHandle::Managed(managed))
         }
     }
@@ -248,34 +251,6 @@ fn declared_expectation(fingerprint: Option<&str>) -> Result<HostKeyExpectation,
     match fingerprint {
         Some(declared) => HostKeyExpectation::declared(declared).map_err(AppError::Validation),
         None => Ok(HostKeyExpectation::Unpinned),
-    }
-}
-
-/// Отказы агента раскладываются по типам раннера: среда, срок, отмена, платформа.
-pub(crate) fn map_agent_error(error: AgentError) -> AppError {
-    match error {
-        AgentError::TimedOut { .. } => AppError::TimedOut(error.to_string()),
-        AgentError::Cancelled { .. } => AppError::Cancelled(error.to_string()),
-        AgentError::Command { .. }
-        | AgentError::Canceled { .. }
-        | AgentError::Question { .. }
-        | AgentError::NoTerminalMessage { .. }
-        | AgentError::InvalidReply { .. }
-        | AgentError::SessionClosed { .. }
-        | AgentError::Transport { .. }
-        | AgentError::UserDirUnknown { .. }
-        | AgentError::UnsafeEntryName { .. }
-        | AgentError::Exchange { .. } => AppError::Platform(error.to_string()),
-        AgentError::Workspace { .. } => AppError::Runtime(error.to_string()),
-        AgentError::Unreachable { .. }
-        | AgentError::Handshake { .. }
-        | AgentError::AuthenticationRejected { .. }
-        // Тот же класс, что и отвергнутые учётные данные: сервер ответил, но работать
-        // с этой точкой входа как объявлено нельзя.
-        | AgentError::HostKeyRejected { .. }
-        | AgentError::Channel { .. }
-        | AgentError::Launch(_)
-        | AgentError::StartupTimedOut { .. } => AppError::EnvironmentUnavailable(error.to_string()),
     }
 }
 
@@ -422,8 +397,8 @@ pub(crate) fn run_command(
     let reply = handle
         .session()
         .run(command, wait)
-        .map_err(map_agent_error)?;
-    reply.outcome().map_err(map_agent_error)?;
+        .map_err(AppError::from)?;
+    reply.outcome().map_err(AppError::from)?;
     Ok(reply)
 }
 
@@ -480,7 +455,7 @@ pub(crate) fn stage_dir(
             .session()
             .sftp_put_dir(local, relative)
             .map(|()| relative.to_owned())
-            .map_err(map_agent_error),
+            .map_err(AppError::from),
     }
 }
 
@@ -500,7 +475,7 @@ pub(crate) fn stage_dir_partially(
         return stage_dir(handle, exchange, relative, local);
     };
     let session = handle.session();
-    session.sftp_mkdir_all(relative).map_err(map_agent_error)?;
+    session.sftp_mkdir_all(relative).map_err(AppError::from)?;
     let mut selected: Vec<PathBuf> = ["Configuration.xml", "ConfigDumpInfo.xml"]
         .iter()
         .map(|name| local.join(name))
@@ -520,11 +495,11 @@ pub(crate) fn stage_dir_partially(
             inside.display().to_string().replace('\\', "/")
         );
         if let Some((parent, _)) = remote.rsplit_once('/') {
-            session.sftp_mkdir_all(parent).map_err(map_agent_error)?;
+            session.sftp_mkdir_all(parent).map_err(AppError::from)?;
         }
         session
             .sftp_put_file(&file, &remote)
-            .map_err(map_agent_error)?;
+            .map_err(AppError::from)?;
     }
     Ok(relative.to_owned())
 }
@@ -555,12 +530,12 @@ pub(crate) fn stage_file(
         Exchange::Sftp => {
             let session = handle.session();
             if let Some((parent, _)) = relative.rsplit_once('/') {
-                session.sftp_mkdir_all(parent).map_err(map_agent_error)?;
+                session.sftp_mkdir_all(parent).map_err(AppError::from)?;
             }
             session
                 .sftp_put_file(local, relative)
                 .map(|()| relative.to_owned())
-                .map_err(map_agent_error)
+                .map_err(AppError::from)
         }
     }
 }
@@ -603,9 +578,9 @@ pub(crate) fn write_bytes(
         Exchange::Sftp => {
             let session = handle.session();
             if let Some((parent, _)) = relative.rsplit_once('/') {
-                session.sftp_mkdir_all(parent).map_err(map_agent_error)?;
+                session.sftp_mkdir_all(parent).map_err(AppError::from)?;
             }
-            session.sftp_write(relative, bytes).map_err(map_agent_error)
+            session.sftp_write(relative, bytes).map_err(AppError::from)
         }
     }
 }
@@ -621,7 +596,7 @@ pub(crate) fn make_output_dir(
         Exchange::Sftp => handle
             .session()
             .sftp_mkdir_all(relative)
-            .map_err(map_agent_error),
+            .map_err(AppError::from),
     }
 }
 
@@ -665,7 +640,7 @@ pub(crate) fn collect_dir(
                         "agent reported success but its dir '{relative}' could not be collected: {error}"
                     ))
                 })?;
-            session.sftp_remove_all(relative).map_err(map_agent_error)
+            session.sftp_remove_all(relative).map_err(AppError::from)
         }
     }
 }
@@ -694,8 +669,8 @@ pub(crate) fn collect_into_dir(
             let session = handle.session();
             session
                 .sftp_get_dir(relative, existing)
-                .map_err(map_agent_error)?;
-            session.sftp_remove_all(relative).map_err(map_agent_error)
+                .map_err(AppError::from)?;
+            session.sftp_remove_all(relative).map_err(AppError::from)
         }
     }
 }
@@ -732,7 +707,7 @@ pub(crate) fn collect_file(
                         "agent reported success but its file '{relative}' could not be collected: {error}"
                     ))
                 })?;
-            session.sftp_remove_all(relative).map_err(map_agent_error)
+            session.sftp_remove_all(relative).map_err(AppError::from)
         }
     }
 }
@@ -785,8 +760,8 @@ pub(crate) fn generation_id(
     if let Some(extension) = extension {
         command.push_str(&format!(" --extension={}", argument(extension)));
     }
-    let reply = session.run(&command, wait).map_err(map_agent_error)?;
-    let body = reply.outcome().map_err(map_agent_error)?;
+    let reply = session.run(&command, wait).map_err(AppError::from)?;
+    let body = reply.outcome().map_err(AppError::from)?;
     body.and_then(|value| value.as_str())
         .filter(|token| !token.is_empty())
         .map(str::to_owned)

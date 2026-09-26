@@ -61,6 +61,9 @@ pub struct ManagedSpawnResult {
     result: SpawnResult,
     child: Option<SpawnedChild>,
     rendered_command: String,
+    /// Стал ли этот процесс работой команды: его запуск отметил работу. Процесс самой
+    /// платформы — агент — работой не становится.
+    delivered: bool,
 }
 
 /// Managed spawn lifecycle behaviour used by current callers.
@@ -94,6 +97,18 @@ impl ManagedSpawnResult {
             terminate_child_group_gracefully(&mut spawned, Duration::from_millis(250));
             let _ = spawned.child.wait();
         }
+    }
+
+    /// Снимает процесс по отмене команды и называет это отменой: ошибка несёт, был ли
+    /// процесс работой команды.
+    #[must_use]
+    pub fn cancel(self) -> ProcessError {
+        let error = ProcessError::Cancelled {
+            cmd: self.rendered_command.clone(),
+            delivered: self.delivered,
+        };
+        self.terminate();
+        error
     }
 
     /// Waits for a managed client and guarantees process-group cleanup at timeout.
@@ -132,6 +147,7 @@ impl ManagedSpawnResult {
                 let _ = spawned.child.wait();
                 return Err(ProcessError::Cancelled {
                     cmd: self.rendered_command.clone(),
+                    delivered: self.delivered,
                 });
             }
             if policy
@@ -330,7 +346,12 @@ pub enum ProcessError {
     },
 
     #[error("process cancelled '{cmd}' before reaching a safe completion point")]
-    Cancelled { cmd: String },
+    Cancelled {
+        cmd: String,
+        /// Успел ли запуск стать работой команды: процесс запущен под её отметкой работы.
+        /// Отказ до запуска и шаг самой платформы работы не несут — они на границе.
+        delivered: bool,
+    },
 
     #[error("process timed out '{cmd}' after {timeout_ms}ms")]
     TimedOut { cmd: String, timeout_ms: u64 },
@@ -445,6 +466,7 @@ impl ProcessRunner for ProcessExecutor {
             },
             child: Some(spawned),
             rendered_command,
+            delivered: work.is_some(),
         })
     }
 }
@@ -465,6 +487,7 @@ impl ProcessExecutor {
         if policy.cancellation.is_cancelled() {
             return Err(ProcessError::Cancelled {
                 cmd: rendered_command,
+                delivered: false,
             });
         }
         if policy.timeout.is_some_and(|timeout| timeout.is_zero()) {
@@ -879,6 +902,7 @@ fn wait_for_output(
                 {
                     Err(ProcessError::Cancelled {
                         cmd: rendered_command.to_owned(),
+                        delivered: policy.work.is_some(),
                     })
                 }
                 Some(ProcessInterruptionReason::TimedOut)
@@ -969,7 +993,7 @@ fn interrupt_child(
             let _ = spawned.child.wait();
             Ok(Some(process_error_from_reason(
                 rendered_command,
-                policy.timeout,
+                policy,
                 reason,
             )))
         }
@@ -978,25 +1002,27 @@ fn interrupt_child(
             let _ = spawned.child.wait();
             Ok(Some(process_error_from_reason(
                 rendered_command,
-                policy.timeout,
+                policy,
                 reason,
             )))
         }
     }
 }
 
+/// Процесс уже запущен: отмена обрывает работу команды, если он был ею.
 fn process_error_from_reason(
     rendered_command: &str,
-    timeout: Option<Duration>,
+    policy: &ProcessExecutionPolicy,
     reason: ProcessInterruptionReason,
 ) -> ProcessError {
     match reason {
         ProcessInterruptionReason::Cancelled => ProcessError::Cancelled {
             cmd: rendered_command.to_owned(),
+            delivered: policy.work.is_some(),
         },
         ProcessInterruptionReason::TimedOut => ProcessError::TimedOut {
             cmd: rendered_command.to_owned(),
-            timeout_ms: timeout.unwrap_or_default().as_millis() as u64,
+            timeout_ms: policy.timeout.unwrap_or_default().as_millis() as u64,
         },
     }
 }
@@ -1212,8 +1238,14 @@ mod tests {
         cancelled.cancellation.cancel();
         let outcome = runner.run_with_policy(&plain_request(script.clone()), &cancelled);
         assert!(
-            matches!(outcome, Err(ProcessError::Cancelled { .. })),
-            "{outcome:?}"
+            matches!(
+                outcome,
+                Err(ProcessError::Cancelled {
+                    delivered: false,
+                    ..
+                })
+            ),
+            "a refusal before the start delivers nothing: {outcome:?}"
         );
         assert!(
             !gave_work(&cancelled),
@@ -1272,13 +1304,103 @@ mod tests {
         operator.join().expect("operator");
 
         assert!(
-            matches!(outcome, Err(ProcessError::Cancelled { .. })),
-            "{outcome:?}"
+            matches!(
+                outcome,
+                Err(ProcessError::Cancelled {
+                    delivered: true,
+                    ..
+                })
+            ),
+            "the cancel cut the command's work short: {outcome:?}"
         );
         assert!(
             gave_work(&policy),
             "the process had started before the cancel"
         );
+    }
+
+    /// Шаг самой платформы работой команды не является: отмена, снявшая его процесс, работы
+    /// не обрывает — ни у разового процесса, ни у управляемого.
+    #[cfg(unix)]
+    #[test]
+    fn a_cancelled_platform_step_delivered_no_work() {
+        let dir = tempdir().expect("tempdir");
+        let started_marker = dir.path().join("started");
+        let script = dir.path().join("waits.sh");
+        write_script(
+            &script,
+            &format!(": > '{}'\nsleep 30", started_marker.display()),
+        );
+        let policy = ProcessExecutionPolicy::platform_step(
+            None,
+            CancellationToken::new(),
+            ProcessInterruptionSafety::Interruptible,
+        );
+        let operator = cancel_when_started(&policy, &started_marker);
+
+        let outcome = ProcessExecutor.run_with_policy(&plain_request(script), &policy);
+        operator.join().expect("operator");
+
+        assert!(
+            matches!(
+                outcome,
+                Err(ProcessError::Cancelled {
+                    delivered: false,
+                    ..
+                })
+            ),
+            "{outcome:?}"
+        );
+    }
+
+    /// Управляемый процесс помнит, стал ли он работой команды: отмена ожидания его выхода
+    /// называет это так же, как отмена разового процесса.
+    #[cfg(unix)]
+    #[test]
+    fn a_cancelled_managed_wait_names_whether_the_process_was_the_work() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("waits.sh");
+        write_script(&script, "sleep 30");
+        for with_work in [true, false] {
+            let work = WorkGiven::for_command();
+            let request = ProcessRequest {
+                stdout_log_path: Some(dir.path().join("stdout.log")),
+                stderr_log_path: Some(dir.path().join("stderr.log")),
+                ..plain_request(script.clone())
+            };
+            let managed = ProcessExecutor
+                .spawn_managed(&request, ManagedSpawnMode::Wait, with_work.then_some(&work))
+                .expect("spawn managed");
+            let policy = ProcessExecutionPolicy::default();
+            policy.cancellation.cancel();
+
+            let outcome = managed.wait_for_exit(&policy);
+
+            assert!(
+                matches!(
+                    outcome,
+                    Err(ProcessError::Cancelled { delivered, .. }) if delivered == with_work
+                ),
+                "with work {with_work}: {outcome:?}"
+            );
+            assert_eq!(work.given(), with_work);
+        }
+    }
+
+    #[cfg(unix)]
+    fn cancel_when_started(
+        policy: &ProcessExecutionPolicy,
+        started_marker: &Path,
+    ) -> thread::JoinHandle<()> {
+        let cancellation = policy.cancellation.clone();
+        let started_marker = started_marker.to_path_buf();
+        thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while !started_marker.exists() && std::time::Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            cancellation.cancel();
+        })
     }
 
     #[cfg(unix)]

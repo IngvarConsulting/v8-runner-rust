@@ -159,12 +159,12 @@
       "oneOf": [
         {
           "const": "command_boundary",
-          "description": "A safe point of the command: no platform work or publication was cut short.",
+          "description": "A safe point of the command: its own check between steps, or a refusal before a process\nstarted or a request command was sent. No work of the command was cut short.",
           "type": "string"
         },
         {
           "const": "provider_command",
-          "description": "The platform command of `download`, `infobase dump` or `infobase restore`: a process of\nits own or a command of an agent session.",
+          "description": "A platform command the command ran — a process of its own or a command of an agent\nsession. The interruption reached it after it started: it cut the command short or, in\na critical phase, waited for its end.",
           "type": "string"
         },
         {
@@ -185,11 +185,6 @@
         {
           "const": "publication",
           "description": "Publishing the result through a staged copy (`make`, `download`, `infobase dump`).",
-          "type": "string"
-        },
-        {
-          "const": "export_or_publication",
-          "description": "`make` only: any failure that arrived while an interruption was pending — at the safe\npoint before export, during export or during publication. The answer does not tell which\n(issue #308).",
           "type": "string"
         }
       ]

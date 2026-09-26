@@ -34,8 +34,8 @@ use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
 
 use super::interruption::{
-    command_interruption_details, deferred_command_interruption_details,
-    deferred_process_interruption, process_interruption_details,
+    cancellation_record, deferred_command_interruption_details, deferred_process_interruption,
+    pending_interruption_error, process_interruption_details,
 };
 use super::staged_publication::{
     cleanup_owned_orphan_files, interruption_before_publish, PublicationFailureState,
@@ -579,8 +579,12 @@ pub fn execute_infobase_restore(
     ) {
         Ok(platform_result) => platform_result,
         Err(error) => {
-            result.target_state = ExportTargetState::Uncertain;
-            record_uncertain_target_warning(&mut result.warnings, result.target_state);
+            // Базу мог тронуть только исполнитель, получивший работу. Отказ до неё — отмена
+            // до запуска, исполнитель, которого не собрать, — оставляет цель как была.
+            if context.work().given() {
+                result.target_state = ExportTargetState::Uncertain;
+                record_uncertain_target_warning(&mut result.warnings, result.target_state);
+            }
             return Err(restore_failure(
                 context,
                 error,
@@ -899,17 +903,8 @@ fn select_provider(
     let mut has_implemented = false;
 
     for provider in plan.candidates() {
-        if let Some(interruption) = context.interruption() {
-            let reason = format!(
-                "{} during provider selection",
-                interruption.message(context.command())
-            );
+        if let Some(error) = pending_interruption_error(context, "during provider selection") {
             let receipt = plan.receipt_for_nobody(skipped);
-            let error = match interruption {
-                crate::use_cases::context::ExecutionInterruption::Cancelled => {
-                    AppError::Cancelled(reason)
-                }
-            };
             return Err((error, receipt));
         }
         let (implementation, implementation_reason) = capability(intent, provider);
@@ -1156,15 +1151,14 @@ fn snapshot_failure(
     UseCaseFailure::with_payload(infobase_use_case_error(error), result)
 }
 
+/// Истёкший срок процесса перенос называет сроком, а не отказом платформы. Отмену называет
+/// `From` — одинаково для всех команд.
 fn infobase_use_case_error(error: AppError) -> UseCaseError {
-    let kind = match process_error(&error) {
-        Some(ProcessError::Cancelled { .. }) => Some(UseCaseErrorKind::Cancelled),
-        Some(ProcessError::TimedOut { .. }) => Some(UseCaseErrorKind::TimedOut),
-        _ => None,
-    };
-    match kind {
-        Some(kind) => UseCaseError::new(kind, error.to_string()),
-        None => error.into(),
+    match process_error(&error) {
+        Some(ProcessError::TimedOut { .. }) => {
+            UseCaseError::new(UseCaseErrorKind::TimedOut, error.to_string())
+        }
+        _ => error.into(),
     }
 }
 
@@ -1179,17 +1173,18 @@ fn record_execution_failure(
     execution: &mut ExecutionOutcome<()>,
 ) {
     let message = error.to_string();
+    // Отмену и её место называет ошибка: безопасная точка — `command_boundary`, где бы её
+    // ни проверили, оборванная работа исполнителя — фаза шага.
+    if let Some(details) = cancellation_record(error, phase.interruption_phase(), &message) {
+        execution.status = ExecutionStatus::Cancelled;
+        execution
+            .errors
+            .push(ExecutionError::new("cancelled", message));
+        execution.interruptions.push(details);
+        return;
+    }
     let mut interruption_details = None;
     let (status, code) = match process_error(error) {
-        Some(ProcessError::Cancelled { .. }) => {
-            interruption_details = Some(process_interruption_details(
-                ProcessInterruptionReason::Cancelled,
-                phase.interruption_phase(),
-                false,
-                &message,
-            ));
-            (ExecutionStatus::Cancelled, "cancelled")
-        }
         Some(ProcessError::TimedOut { .. }) => {
             interruption_details = Some(process_interruption_details(
                 ProcessInterruptionReason::TimedOut,
@@ -1200,14 +1195,6 @@ fn record_execution_failure(
             (ExecutionStatus::TimedOut, "timed_out")
         }
         _ => match error {
-            AppError::Cancelled(_) => {
-                interruption_details = Some(command_interruption_details(
-                    crate::use_cases::context::ExecutionInterruption::Cancelled,
-                    phase.interruption_phase(),
-                    &message,
-                ));
-                (ExecutionStatus::Cancelled, "cancelled")
-            }
             // Сюда `timed_out` приходит только от шага — например от завершения
             // агентской сессии, у которого предел свой. Срок команды его дать не может,
             // поэтому улика записывается как процессная, а не командная.
@@ -1256,7 +1243,6 @@ fn execution_error_code(error: &AppError) -> &'static str {
         AppError::CapabilityUnavailable(_) => "capability_unavailable",
         AppError::EnvironmentUnavailable(_) => "environment_unavailable",
         AppError::WorkspaceBusy(_) => "workspace_busy",
-        AppError::Cancelled(_) => "cancelled",
         AppError::TimedOut(_) => "timed_out",
         AppError::InvalidOutput(_) => "invalid_output",
         AppError::Runtime(_) => "runtime_failure",
@@ -1454,17 +1440,14 @@ fn acquire_target_lock(
         match try_acquire_advisory_lock(lock_path) {
             Ok(guard) => return Ok(guard),
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                if let Some(interruption) = context.interruption() {
-                    let message = format!(
-                        "{} while waiting for {command} output lock '{}'",
-                        interruption.message(context.command()),
+                if let Some(error) = pending_interruption_error(
+                    context,
+                    format!(
+                        "while waiting for {command} output lock '{}'",
                         lock_path.display()
-                    );
-                    return Err(match interruption {
-                        crate::use_cases::context::ExecutionInterruption::Cancelled => {
-                            AppError::Cancelled(message)
-                        }
-                    });
+                    ),
+                ) {
+                    return Err(error);
                 }
                 if waiting_since.elapsed() >= wait {
                     return Err(AppError::WorkspaceBusy(format!(
@@ -1852,7 +1835,10 @@ mod tests {
         let error = acquire_target_lock(&context, &lock_path, SNAPSHOT_COMMAND, TARGET_LOCK_WAIT)
             .expect_err("cancellation must stop lock wait");
 
-        assert!(matches!(error, AppError::Cancelled(_)));
+        assert_eq!(
+            error.cancellation(),
+            Some(crate::support::error::CancelledAt::Boundary)
+        );
     }
 
     #[test]
@@ -1873,7 +1859,10 @@ mod tests {
         let failure = super::prepare_infobase_snapshot(&context, &config, &request)
             .expect_err("an interrupted run must not pick a provider");
 
-        assert_eq!(failure.error.kind(), UseCaseErrorKind::Cancelled);
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Cancelled(crate::support::error::CancelledAt::Boundary)
+        );
         let result = failure.payload.expect("typed payload");
         assert_eq!(result.execution.status, ExecutionStatus::Cancelled);
         assert_eq!(result.execution.errors[0].code, "cancelled");
@@ -1934,34 +1923,42 @@ mod tests {
         assert!(!metadata_path.exists());
     }
 
+    /// Снятый процесс исполнителя — отмена его работы, а отказ запустить процесс по отмене —
+    /// безопасная точка: фазу записи называет сама ошибка, а не место вызова.
     #[test]
     fn cancelled_process_is_not_collapsed_into_generic_failure() {
-        let context = ExecutionContext::cli(
-            crate::use_cases::context::CommandName::InfobaseConfigurationExport,
-        );
-        let mut execution = ExecutionOutcome::new(ExecutionStatus::Failed);
-        let error = AppError::PlatformProcess(ProcessError::Cancelled {
-            cmd: "1cv8 DESIGNER".to_owned(),
-        });
+        for (delivered, phase) in [
+            (true, ExecutionInterruptionPhase::ProviderCommand),
+            (false, ExecutionInterruptionPhase::CommandBoundary),
+        ] {
+            let context = ExecutionContext::cli(
+                crate::use_cases::context::CommandName::InfobaseConfigurationExport,
+            );
+            if delivered {
+                context.work().mark_work_given();
+            }
+            let mut execution = ExecutionOutcome::new(ExecutionStatus::Failed);
+            let error = AppError::PlatformProcess(ProcessError::Cancelled {
+                cmd: "1cv8 DESIGNER".to_owned(),
+                delivered,
+            });
 
-        record_execution_failure(
-            &context,
-            &error,
-            InfobaseTransferPhase::ProviderCommand,
-            &mut execution,
-        );
+            record_execution_failure(
+                &context,
+                &error,
+                InfobaseTransferPhase::ProviderCommand,
+                &mut execution,
+            );
 
-        assert_eq!(execution.status, ExecutionStatus::Cancelled);
-        assert_eq!(execution.errors[0].code, "cancelled");
-        assert!(!execution.errors[0].retryable);
-        let [interruption] = execution.interruptions.as_slice() else {
-            panic!("one interruption expected: {:?}", execution.interruptions);
-        };
-        assert!(!interruption.deferred);
-        assert_eq!(
-            interruption.phase,
-            Some(ExecutionInterruptionPhase::ProviderCommand)
-        );
+            assert_eq!(execution.status, ExecutionStatus::Cancelled);
+            assert_eq!(execution.errors[0].code, "cancelled");
+            assert!(!execution.errors[0].retryable);
+            let [interruption] = execution.interruptions.as_slice() else {
+                panic!("one interruption expected: {:?}", execution.interruptions);
+            };
+            assert!(!interruption.deferred);
+            assert_eq!(interruption.phase, Some(phase), "delivered: {delivered}");
+        }
     }
 
     #[test]
@@ -2230,5 +2227,112 @@ mod tests {
             "{:?}",
             result.warnings
         );
+    }
+
+    /// Подъём снимка для двух случаев без работы исполнителя: отмена до запуска и
+    /// исполнитель, которого не собрать. Цель оба раза не тронута.
+    #[cfg(unix)]
+    fn restore_without_work(
+        provider: Provider,
+        cancelled: bool,
+    ) -> (
+        tempfile::TempDir,
+        crate::use_cases::result::UseCaseResult<
+            crate::domain::infobase_export::RestoreInfobaseSnapshotResult,
+        >,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+
+        use crate::domain::capability::{ProviderOrigin, ProviderReceipt};
+        use crate::domain::infobase_export::{RestoreInfobaseSnapshotRequest, RestoreTargetMode};
+        use crate::use_cases::context::CommandName;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let base = root.join("base");
+        let infobase = root.join("ib");
+        std::fs::create_dir_all(&base).expect("base");
+        std::fs::create_dir_all(&infobase).expect("infobase");
+        std::fs::write(infobase.join("1Cv8.1CD"), "data").expect("existing infobase");
+        let input = root.join("snapshot.dt");
+        std::fs::write(&input, "snapshot").expect("snapshot");
+        let designer = root.join("1cv8");
+        std::fs::write(
+            &designer,
+            format!("#!/bin/sh\nprintf ran > '{}/ran'\nexit 0\n", root.display()),
+        )
+        .expect("fake designer");
+        std::fs::set_permissions(&designer, std::fs::Permissions::from_mode(0o755))
+            .expect("executable");
+        let mut config = config(&base, &root.join("work"));
+        config.infobase = InfobaseConfig::file(format!("File={}", infobase.display()));
+        let request = RestoreInfobaseSnapshotRequest {
+            input,
+            target_mode: RestoreTargetMode::Replace,
+        };
+        let prepared = super::PreparedTransferProvider {
+            receipt: ProviderReceipt::new(provider, ProviderOrigin::Default),
+            provider,
+            executable: Some(designer),
+        };
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        if cancelled {
+            cancellation.cancel();
+        }
+        let context =
+            ExecutionContext::cli(CommandName::InfobaseRestore).with_cancellation(cancellation);
+        let outcome = super::execute_infobase_restore(&context, &config, &request, &prepared);
+        (dir, outcome)
+    }
+
+    /// Отмена перед подъёмом снимка — безопасная точка: род отказа — отмена, запись —
+    /// `command_boundary`, цель не тронута, и ответ не пугает неудавшимся откатом (#308).
+    #[cfg(unix)]
+    #[test]
+    fn a_restore_cancelled_before_the_provider_stops_at_the_boundary() {
+        let (dir, outcome) = restore_without_work(Provider::Designer, true);
+
+        let failure = outcome.expect_err("the restore was cancelled");
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Cancelled(crate::support::error::CancelledAt::Boundary)
+        );
+        assert!(!dir.path().join("ran").exists(), "the platform never ran");
+        let result = failure.payload.expect("typed payload");
+        assert_eq!(result.execution.status, ExecutionStatus::Cancelled);
+        let [interruption] = result.execution.interruptions.as_slice() else {
+            panic!(
+                "one interruption expected: {:?}",
+                result.execution.interruptions
+            );
+        };
+        assert!(!interruption.deferred);
+        assert_eq!(
+            interruption.phase,
+            Some(ExecutionInterruptionPhase::CommandBoundary)
+        );
+        assert_eq!(
+            result.target_state,
+            crate::domain::infobase_export::ExportTargetState::Unchanged
+        );
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    }
+
+    /// Исполнитель, которого не собрать, базу не трогал: цель остаётся `unchanged`, и
+    /// предупреждения о неудавшемся откате нет — его давала бы только работа исполнителя.
+    #[cfg(unix)]
+    #[test]
+    fn a_restore_refused_before_any_work_leaves_the_target_unchanged() {
+        let (dir, outcome) = restore_without_work(Provider::Webinst, false);
+
+        let failure = outcome.expect_err("the provider has no adapter");
+        assert!(!dir.path().join("ran").exists(), "the platform never ran");
+        let result = failure.payload.expect("typed payload");
+        assert!(!result.restored);
+        assert_eq!(
+            result.target_state,
+            crate::domain::infobase_export::ExportTargetState::Unchanged
+        );
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     }
 }

@@ -95,7 +95,11 @@ pub enum EdtSessionError {
     QueuedTimeout,
 
     #[error("shared EDT request was cancelled while running")]
-    RunningCancelled,
+    RunningCancelled {
+        /// Дошла ли команда запроса до процесса. Отмена может застать запрос в работе раньше,
+        /// чем воркер его доставит; окончательно это известно после конца запроса.
+        delivered: bool,
+    },
 
     #[error("shared EDT request timed out while running")]
     RunningTimeout,
@@ -111,6 +115,14 @@ pub enum EdtSessionError {
 
     #[error("shared EDT actor failed internally: {message}")]
     InternalFailure { message: String },
+}
+
+impl EdtSessionError {
+    /// Запрос покинул очередь, так и не дойдя до сессии: его сняли отменой или истёкшим
+    /// сроком, пока он ждал.
+    pub(crate) fn ended_in_queue(&self) -> bool {
+        matches!(self, Self::QueuedCancelled | Self::QueuedTimeout)
+    }
 }
 
 /// Shutdown failures for the shared EDT actor.
@@ -277,24 +289,39 @@ impl EdtSessionManager {
 
         let execution = runtime.block_on(async { self.execute_observed(request).await });
         match execution.result {
-            Err(EdtSessionError::RunningCancelled) => {
-                if let Some(completion) = execution.completion {
-                    let completed = runtime.block_on(async {
-                        tokio::time::timeout(completion_wait_timeout, completion.wait())
-                            .await
-                            .is_ok()
-                    });
-                    if !completed {
-                        drop(runtime);
-                        self.shutdown()
-                            .map_err(|error| EdtSessionError::InternalFailure {
-                                message: format!(
-                                    "shared EDT running cancellation cleanup failed: {error}"
-                                ),
-                            })?;
+            Err(EdtSessionError::RunningCancelled { delivered }) => {
+                let Some(completion) = execution.completion else {
+                    return Err(EdtSessionError::RunningCancelled { delivered });
+                };
+                let completed = runtime.block_on(async {
+                    tokio::time::timeout(completion_wait_timeout, completion.wait())
+                        .await
+                        .is_ok()
+                });
+                if !completed {
+                    drop(runtime);
+                    // Запрос снимается вместе с сессией. Воркер мог остановить и другой поток:
+                    // запрос кончается у воркера, и ответ ждёт этого, прежде чем назвать исход.
+                    let cleanup = self.shutdown();
+                    if let Err(error) = &cleanup {
+                        tracing::error!(%error, "shared EDT running cancellation cleanup failed");
+                    }
+                    // Отмена — исход, только когда запрос кончился: запрос, который идёт и после
+                    // снятия сессии, отменой не назван — статусу мало одного сигнала.
+                    if !completion.wait_blocking(completion_wait_timeout) {
+                        let cause = match cleanup {
+                            Err(error) => format!("cleanup failed: {error}"),
+                            Ok(()) => "its session was stopped".to_owned(),
+                        };
+                        return Err(EdtSessionError::InternalFailure {
+                            message: format!(
+                                "shared EDT running cancellation: the request did not end after {cause}"
+                            ),
+                        });
                     }
                 }
-                Err(EdtSessionError::RunningCancelled)
+                // Запрос кончился: доставить его позже некому, и ответ называет, дошёл ли он.
+                Err(completion.settle())
             }
             Err(EdtSessionError::RunningTimeout) => {
                 if let Some(completion) = execution.completion {
@@ -418,8 +445,11 @@ impl EdtSessionManager {
                         return execution;
                     }
                     if state.is_running() {
+                        // Что известно сейчас; окончательно — после конца запроса.
                         return ObservedEdtExecution::running(
-                            Err(EdtSessionError::RunningCancelled),
+                            Err(EdtSessionError::RunningCancelled {
+                                delivered: state.delivered(),
+                            }),
                             state.clone(),
                         );
                     }
@@ -498,12 +528,27 @@ impl EdtSessionManager {
     }
 }
 
+/// Исход запроса, каким его застал вызывающий. Отмена, заставшая запрос в работе, ещё не
+/// знает, дойдёт ли он до процесса, поэтому наружу исход выходит только через `finished`.
 pub(crate) struct ObservedEdtExecution {
-    pub(crate) result: Result<EdtSessionResponse, EdtSessionError>,
-    pub(crate) completion: Option<EdtRequestCompletion>,
+    result: Result<EdtSessionResponse, EdtSessionError>,
+    completion: Option<EdtRequestCompletion>,
 }
 
 impl ObservedEdtExecution {
+    /// Исход после конца запроса. Запрос, брошенный отменой или сроком, пока работал,
+    /// доводится до конца, и доставку отмена называет только тогда.
+    pub(crate) async fn finished(self) -> Result<EdtSessionResponse, EdtSessionError> {
+        let Some(completion) = self.completion else {
+            return self.result;
+        };
+        completion.wait().await;
+        match self.result {
+            Err(EdtSessionError::RunningCancelled { .. }) => Err(completion.settle()),
+            other => other,
+        }
+    }
+
     fn ready(result: Result<EdtSessionResponse, EdtSessionError>) -> Self {
         Self {
             result,
@@ -522,13 +567,32 @@ impl ObservedEdtExecution {
     }
 }
 
-pub(crate) struct EdtRequestCompletion {
+struct EdtRequestCompletion {
     state: Arc<RequestState>,
 }
 
 impl EdtRequestCompletion {
-    pub(crate) async fn wait(self) {
+    async fn wait(&self) {
         self.state.wait_finished().await;
+    }
+
+    /// Ждёт конца запроса без среды исполнения; `false` — если он не кончился за `timeout`.
+    fn wait_blocking(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while !self.state.finished.load(Ordering::SeqCst) {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        true
+    }
+
+    /// Отмена запроса, который кончился: теперь известно, дошёл ли он до процесса.
+    fn settle(&self) -> EdtSessionError {
+        EdtSessionError::RunningCancelled {
+            delivered: self.state.delivered(),
+        }
     }
 }
 
@@ -713,6 +777,8 @@ impl EdtSessionManagerInner {
 
 struct RequestState {
     stage: AtomicU8,
+    /// Доставлена ли команда запроса в процесс как работа команды.
+    delivered: AtomicBool,
     finished: AtomicBool,
     finished_notify: Notify,
     permit: Mutex<Option<OwnedSemaphorePermit>>,
@@ -722,10 +788,19 @@ impl RequestState {
     fn queued(permit: Option<OwnedSemaphorePermit>) -> Self {
         Self {
             stage: AtomicU8::new(REQUEST_QUEUED),
+            delivered: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             finished_notify: Notify::new(),
             permit: Mutex::new(permit),
         }
+    }
+
+    fn mark_delivered(&self) {
+        self.delivered.store(true, Ordering::SeqCst);
+    }
+
+    fn delivered(&self) -> bool {
+        self.delivered.load(Ordering::SeqCst)
     }
 
     fn release_queued(&self) -> bool {
@@ -1063,6 +1138,11 @@ mod tests {
             release: Arc<AtomicBool>,
             stdout: String,
         },
+        /// Команда не слышит снятия и кончается, только когда тест отпустит `release`: так
+        /// выглядит процесс, который снять не удалось.
+        HangUntilReleased {
+            release: Arc<AtomicBool>,
+        },
     }
 
     struct FakeSession {
@@ -1207,13 +1287,11 @@ mod tests {
             &mut self,
             command: &str,
             timeout: Duration,
-            delivered: Option<&WorkGiven>,
+            delivered: &dyn Fn(),
         ) -> Result<InteractiveCommandOutput, InteractiveProcessError> {
             // Поддельная сессия принимает команду сразу: доставка — это вызов. Отметка
             // ставится раньше записи команды, чтобы тест, дождавшийся записи, видел и её.
-            if let Some(work) = delivered {
-                work.mark_work_given();
-            }
+            delivered();
             self.commands
                 .lock()
                 .expect("commands lock")
@@ -1283,6 +1361,16 @@ mod tests {
                     }
                     Ok(InteractiveCommandOutput {
                         stdout,
+                        stderr: String::new(),
+                    })
+                }
+                CommandBehavior::HangUntilReleased { release } => {
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while !release.load(Ordering::SeqCst) && Instant::now() < deadline {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Ok(InteractiveCommandOutput {
+                        stdout: String::new(),
                         stderr: String::new(),
                     })
                 }
@@ -2161,7 +2249,8 @@ mod tests {
 
         assert_eq!(
             running.await.expect("running join"),
-            Err(EdtSessionError::RunningCancelled)
+            Err(EdtSessionError::RunningCancelled { delivered: false }),
+            "a service command is never the command's work"
         );
         assert_eq!(
             manager.execute(request("cmd-2", 10_000)).await,
@@ -2198,7 +2287,10 @@ mod tests {
             .execute_observed(request("cmd-1", 200).with_cancellation(cancellation))
             .await;
 
-        assert_eq!(execution.result, Err(EdtSessionError::RunningCancelled));
+        assert_eq!(
+            execution.result,
+            Err(EdtSessionError::RunningCancelled { delivered: false })
+        );
         if let Some(completion) = execution.completion {
             timeout(Duration::from_secs(1), completion.wait())
                 .await
@@ -2211,6 +2303,176 @@ mod tests {
                 .expect("capacity recovers after cancellation")
                 .stdout,
             "second"
+        );
+    }
+
+    /// Отмена, заставшая запрос работы в работе раньше доставки, называет его недоставленным:
+    /// воркер уже отметил запрос работающим, но команда до процесса не дошла.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_work_request_cancelled_before_delivery_is_not_delivered() {
+        let cancellation = CancellationToken::new();
+        let factory = FakeSessionFactory::new(vec![SessionPlan::Session(vec![])])
+            .with_post_mark_running_cancel(cancellation.clone());
+        let manager = manager(factory.clone(), 1, Duration::from_millis(100));
+        let work = WorkGiven::for_command();
+
+        let result = manager
+            .execute_observed(
+                EdtSessionRequest::new(
+                    "validate",
+                    Instant::now() + Duration::from_secs(10),
+                    work.clone(),
+                )
+                .with_cancellation(cancellation),
+            )
+            .await
+            .finished()
+            .await;
+
+        assert_eq!(
+            result,
+            Err(EdtSessionError::RunningCancelled { delivered: false })
+        );
+        assert!(!work.given(), "the request never reached the process");
+        assert!(factory.commands().is_empty(), "{:?}", factory.commands());
+    }
+
+    /// Отмена, заставшая доставленный запрос, называет его доставленным, когда запрос
+    /// кончился: работа дошла до процесса, и отметка команды это знает.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_work_request_cancelled_after_delivery_is_delivered() {
+        let factory = FakeSessionFactory::new(vec![SessionPlan::Session(vec![
+            CommandBehavior::CompleteAfter {
+                delay: Duration::from_millis(200),
+                stdout: "late".to_owned(),
+                stderr: String::new(),
+            },
+        ])]);
+        let manager = manager(factory.clone(), 1, Duration::from_millis(100));
+        let cancellation = CancellationToken::new();
+        let work = WorkGiven::for_command();
+
+        let running = tokio::spawn({
+            let manager = manager.clone();
+            let cancellation = cancellation.clone();
+            let work = work.clone();
+            async move {
+                manager
+                    .execute_observed(
+                        EdtSessionRequest::new(
+                            "validate",
+                            Instant::now() + Duration::from_secs(10),
+                            work,
+                        )
+                        .with_cancellation(cancellation),
+                    )
+                    .await
+                    .finished()
+                    .await
+            }
+        });
+        wait_for_commands(&factory, 1).await;
+        cancellation.cancel();
+
+        assert_eq!(
+            running.await.expect("running join"),
+            Err(EdtSessionError::RunningCancelled { delivered: true })
+        );
+        assert!(work.given());
+    }
+
+    /// Блокирующий вход называет доставку и тогда, когда запрос пришлось снять вместе с
+    /// сессией: после остановки воркера доставить его позже некому.
+    #[test]
+    fn execute_blocking_names_a_delivered_request_after_forced_cleanup() {
+        let cancellation = CancellationToken::new();
+        let factory = FakeSessionFactory::new(vec![SessionPlan::Session(vec![
+            CommandBehavior::CompleteAfter {
+                delay: Duration::from_millis(150),
+                stdout: "late".to_owned(),
+                stderr: String::new(),
+            },
+        ])]);
+        let manager = manager(factory.clone(), 1, Duration::from_millis(60));
+        let work = WorkGiven::for_command();
+        let cancellation_thread = thread::spawn({
+            let cancellation = cancellation.clone();
+            let factory = factory.clone();
+            move || {
+                for _ in 0..50 {
+                    if !factory.commands().is_empty() {
+                        cancellation.cancel();
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                panic!("timed out waiting for running shared EDT command");
+            }
+        });
+
+        // Срок запроса дальний: уборку запускает ожидание конца запроса, а не срок, и
+        // медленный поток отмены не должен уступить сроку.
+        let error = manager.execute_blocking(
+            EdtSessionRequest::new(
+                "cmd-1",
+                Instant::now() + Duration::from_secs(10),
+                work.clone(),
+            )
+            .with_cancellation(cancellation),
+        );
+        cancellation_thread.join().expect("cancellation thread");
+
+        assert_eq!(
+            error,
+            Err(EdtSessionError::RunningCancelled { delivered: true })
+        );
+        assert!(work.given());
+    }
+
+    /// Запрос, который не кончился и после снятия сессии, отменой не назван: статус отмены
+    /// ставится только при состоявшемся исходе, а исхода здесь нет.
+    #[test]
+    fn execute_blocking_does_not_call_a_request_that_never_ended_cancelled() {
+        let cancellation = CancellationToken::new();
+        let release = Arc::new(AtomicBool::new(false));
+        let factory = FakeSessionFactory::new(vec![SessionPlan::Session(vec![
+            CommandBehavior::HangUntilReleased {
+                release: release.clone(),
+            },
+        ])]);
+        let manager = manager(factory.clone(), 1, Duration::from_millis(60));
+        let cancellation_thread = thread::spawn({
+            let cancellation = cancellation.clone();
+            let factory = factory.clone();
+            move || {
+                for _ in 0..2_000 {
+                    if !factory.commands().is_empty() {
+                        cancellation.cancel();
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                panic!("timed out waiting for running shared EDT command");
+            }
+        });
+
+        let error = manager.execute_blocking(
+            EdtSessionRequest::new(
+                "cmd-1",
+                Instant::now() + Duration::from_secs(10),
+                WorkGiven::for_command(),
+            )
+            .with_cancellation(cancellation),
+        );
+        cancellation_thread.join().expect("cancellation thread");
+        release.store(true, Ordering::SeqCst);
+
+        assert!(
+            matches!(
+                &error,
+                Err(EdtSessionError::InternalFailure { message }) if message.contains("did not end")
+            ),
+            "{error:?}"
         );
     }
 
@@ -2261,7 +2523,10 @@ mod tests {
         let error = manager.execute_blocking(request("cmd-1", 200).with_cancellation(cancellation));
         cancellation_thread.join().expect("cancellation thread");
 
-        assert_eq!(error, Err(EdtSessionError::RunningCancelled));
+        assert_eq!(
+            error,
+            Err(EdtSessionError::RunningCancelled { delivered: false })
+        );
         assert!(!manager.has_live_session());
     }
 
