@@ -8,7 +8,8 @@ pub struct LaunchResult {
     /// `true` when the process was spawned and, when the command waits on it, the wait
     /// succeeded: under `--wait-for-exit` the client exited on its own, under `--wait-ready`
     /// its MCP endpoint became ready. A timeout, an interrupted wait or a failed readiness
-    /// check answers `false` although the client was started.
+    /// check answers `false` although the client was started. A preview answers `true`
+    /// without starting anything: `provider_dispatched` tells the two apart.
     pub ok: bool,
     /// Requested launch mode.
     pub mode: LaunchMode,

@@ -210,31 +210,48 @@ fn run_launch(
             )
             .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
         let pid = managed.pid();
-        let waited = managed.wait_for_exit(&context.process_policy(
+        // Чем кончилось ожидание уже запущенного клиента. Прерванное ожидание отвечает
+        // формой `launch`, и выхода у клиента в нём нет — ни кода, ни истёкшего срока.
+        enum WaitEnd {
+            Exited(Option<i32>),
+            TimedOut(Option<i32>),
+            Interrupted(AppError),
+        }
+        let end = match managed.wait_for_exit(&context.process_policy(
             InterruptionSafetyClass::GracefulThenKill,
             Some(Duration::from_millis(plan.timeout_ms)),
-        ));
-        // Клиент уже запущен: ожидание, кончившееся раньше выхода клиента, отвечает формой
-        // `launch`, и выхода у клиента нет — ни кода, ни истёкшего срока.
-        let (exit_code, timed_out, wait_error) = match waited {
-            Ok(outcome) => (outcome.exit_code, outcome.timed_out, None),
-            Err(error) => (None, false, Some(AppError::from(error))),
+        )) {
+            Ok(outcome) if outcome.timed_out => WaitEnd::TimedOut(outcome.exit_code),
+            Ok(outcome) => WaitEnd::Exited(outcome.exit_code),
+            Err(error) => WaitEnd::Interrupted(AppError::from(error)),
         };
-        let message = match &wait_error {
-            Some(error) => {
-                format!("External EPF client wait ended before the client exited: {error}")
-            }
-            None if timed_out => format!(
-                "External EPF client timed out after {}ms and was terminated",
-                plan.timeout_ms
+        let (message, exit_code, timed_out) = match &end {
+            WaitEnd::Exited(exit_code) => (
+                format!(
+                    "External EPF client exited with status {}",
+                    exit_code.unwrap_or(-1)
+                ),
+                *exit_code,
+                false,
             ),
-            None => format!(
-                "External EPF client exited with status {}",
-                exit_code.unwrap_or(-1)
+            WaitEnd::TimedOut(exit_code) => (
+                format!(
+                    "External EPF client timed out after {}ms and was terminated",
+                    plan.timeout_ms
+                ),
+                *exit_code,
+                true,
+            ),
+            WaitEnd::Interrupted(error) => (
+                format!(
+                    "External EPF client wait ended before the client exited on its own: {error}"
+                ),
+                None,
+                false,
             ),
         };
         let result = LaunchResult {
-            ok: wait_error.is_none() && !timed_out,
+            ok: matches!(end, WaitEnd::Exited(_)),
             mode,
             via,
             pid: Some(pid),
@@ -254,20 +271,18 @@ fn run_launch(
                 stderr_path: plan.stderr_path.display().to_string(),
             }),
         };
-        if let Some(error) = wait_error {
-            return Err(UseCaseFailure::after_possible_work(
+        return match end {
+            WaitEnd::Exited(_) => Ok(result),
+            WaitEnd::TimedOut(_) => Err(UseCaseFailure::with_payload(
+                AppError::Runtime(message),
+                result,
+            )),
+            WaitEnd::Interrupted(error) => Err(UseCaseFailure::after_possible_work(
                 error,
                 context.work(),
                 || result,
-            ));
-        }
-        if timed_out {
-            return Err(UseCaseFailure::with_payload(
-                AppError::Runtime(message),
-                result,
-            ));
-        }
-        return Ok(result);
+            )),
+        };
     }
 
     if let Some(url) = readiness_url {
