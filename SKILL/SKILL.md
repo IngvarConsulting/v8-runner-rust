@@ -156,7 +156,9 @@ v8-runner infobase create
   command's work; export-shaped verbs also answer `mode: preview`. The flag is not a preview
   marker — refusals before any work and runs with nothing to do answer `false` too — so know
   the preview from your own `--dry-run`. `true` means an executor got the work: a failure
-  with `true` is not "nothing ran", so check the target before a retry. Two limits are named
+  with `true` is not "nothing ran", so check the target before a retry. A failure after the
+  executor got the work answers the command's own form; the shared refusal form, without the
+  flag, means no executor got work. Two limits are named
   rather than guessed: `upload` reports `compatibility_state: not_probed` because the probe is
   itself a Designer run, and `infobase create` against a server infobase cannot tell "created" from
   "already existed" without creating it.
@@ -183,7 +185,7 @@ v8-runner infobase create
 - Need to read a failed launch: the command in the error text and in `logs/mcp/actions.log` is
   masked the same way, and there the user name is hidden too (`/N ***`, `Usr=***`) because those
   lines outlive the run. Server, base and paths stay readable; run `--dry-run` to see the account.
-- Need an observable local external EPF runtime gate: use `launch thin --execute <file.epf> --output <out> --stderr-output <stderr> --wait-for-exit --wait-timeout-ms <ms>`. This opt-in mode is limited to explicit `.epf` files, reports PID/exit-or-timeout/artifacts, treats timeout as a CLI failure after terminating the client group, and rejects raw or configured `/C`, `/Execute`, and `/Out` aliases; callers must inspect the reported exit code because non-zero EPF exit is observational rather than a CLI failure; plain launch remains asynchronous.
+- Need an observable local external EPF runtime gate: use `launch thin --execute <file.epf> --output <out> --stderr-output <stderr> --wait-for-exit --wait-timeout-ms <ms>`. This opt-in mode is limited to explicit `.epf` files, reports PID/exit-or-timeout/artifacts, treats timeout as a CLI failure after terminating the client group, answers an interrupted wait with `exit_code: null` and `timed_out: false`, and rejects raw or configured `/C`, `/Execute`, and `/Out` aliases; callers must inspect the reported exit code because non-zero EPF exit is observational rather than a CLI failure; plain launch remains asynchronous.
 - Need onec-client-mcp-devkit launched inside 1C without VA authoring: use `v8-runner launch mcp --wait-ready ...` when the caller needs a ready MCP endpoint; tune readiness with `tools.client_mcp.wait_ready_timeout_ms` when the project needs a shorter or longer wait, and use bare `launch mcp` only for fire-and-forget startup.
 
 ## Guardrails

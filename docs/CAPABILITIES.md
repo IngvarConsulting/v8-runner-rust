@@ -97,10 +97,10 @@ CLI help, доверяйте текущему коду и затем синхр�
   `--dry-run`; у экспортной формы его называет и `mode` (`preview` против `apply`), а
   `provider_dispatched` там появляется только в превью. `true` приходит и тогда, когда
   команда упала уже после передачи работы: исполнитель её получил, и повтор может
-  застать сделанное. Отказы после работы у `publish`, `launch` с ожиданием,
-  `extensions list|info` и у MCP-проверки EDT, чей следующий проект не дождался очереди,
-  пока отвечают общей формой отказа, без признака
-  ([#314](https://github.com/IngvarConsulting/v8-runner-rust/issues/314)).
+  застать сделанное. Отказ после работы исполнителя отвечает формой своей команды, и
+  признак в ней — `true`; общая форма отказа, без признака, значит, что работы исполнитель
+  не получил. У MCP-проверки EDT по нескольким проектам то же: проект, не дождавшийся общей
+  сессии после уже проверенного, отвечает формой `check`, а не ошибкой протокола.
 - Превью возвращается **после** поиска утилиты: отсутствующая платформа
   отказывает до одобрения плана, а не после.
 - **Превью не берёт workspace lock и не ждёт его.** Значит «покажи план» не
@@ -690,7 +690,7 @@ v8-runner launch mcp [va] [--mode <thin|thick|ordinary>] [--via <web|connection>
   подготовка выполняется командой `v8-runner push`.
 - `--mcp-config` не должен содержать `;`, потому что `/C` payload разделяется точкой с запятой.
 - `launch mcp` не принимает `--c` и `--execute`, потому что `/C` управляется командой.
-- Для локальной проверки external EPF используйте только `launch thin --execute <file.epf> --output <out> --stderr-output <stderr> --wait-for-exit --wait-timeout-ms <ms>`: это opt-in bounded wait с JSON-полями PID, execute path, exit code/timeout и заявленными artifact paths. Timeout считается CLI failure и возвращает error envelope с payload после остановки группы процесса. Ненулевой exit code external EPF возвращается в JSON как наблюдаемый результат; вызывающий runtime gate обязан проверить `external_epf_wait.exit_code`. Обычный `launch` остаётся асинхронным. В wait-режиме запрещены raw `/C`, `/Execute` и `/Out` (включая configured additional launch keys).
+- Для локальной проверки external EPF используйте только `launch thin --execute <file.epf> --output <out> --stderr-output <stderr> --wait-for-exit --wait-timeout-ms <ms>`: это opt-in bounded wait с JSON-полями PID, execute path, exit code/timeout и заявленными artifact paths. Timeout считается CLI failure и возвращает error envelope с payload после остановки группы процесса. Ожидание, прерванное отменой уже после старта клиента, тоже отвечает конвертом с payload: `ok: false`, `provider_dispatched: true`, `external_epf_wait.exit_code: null` и `timed_out: false`. Ненулевой exit code external EPF возвращается в JSON как наблюдаемый результат; вызывающий runtime gate обязан проверить `external_epf_wait.exit_code`. Обычный `launch` остаётся асинхронным. В wait-режиме запрещены raw `/C`, `/Execute` и `/Out` (включая configured additional launch keys).
 - `launch mcp` принимает общие launch flags `--use-privileged-mode`, `--output` и `--raw-key`, но
   `--raw-key` не может задавать `/C`, `/Execute` или `/Out`.
 - Для `designer`/`thin`/`thick`/`ordinary` дополнительные typed flags: `--c`, `--execute`, `--use-privileged-mode`, `--output`,
