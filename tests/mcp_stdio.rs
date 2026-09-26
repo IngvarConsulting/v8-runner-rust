@@ -1134,14 +1134,30 @@ async fn mcp_stdio_a_project_that_misses_the_edt_session_after_work_answers_in_t
     // Сброс перед вторым проектом зависает: заглушка спит на переходе в рабочее пространство,
     // когда проверка уже была.
     let script = dir.path().join("edt").join("1cedtcli");
+    let session_started = dir.path().join("edt-session-started");
     let body = fs::read_to_string(&script).expect("edt script");
-    let stalled = body.replace(
-        "cwd=\"$1\"\n",
-        "if [ \"$validate_count\" -ge 1 ]; then sleep 5; fi\ncwd=\"$1\"\n",
-    );
+    let stalled = body
+        .replace(
+            "cwd=\"$1\"\n",
+            "if [ \"$validate_count\" -ge 1 ]; then sleep 5; fi\ncwd=\"$1\"\n",
+        )
+        .replacen(
+            "set -eu\n",
+            &format!(
+                "set -eu\nprintf started > '{}'\n",
+                session_started.display()
+            ),
+            1,
+        );
     assert_ne!(body, stalled, "the stub changes directory on cd");
     fs::write(&script, stalled).expect("stalled edt script");
     let client = serve_stdio(&config_path).await;
+    // Сессия поднимается при старте сервера; вызов ждёт её, чтобы время вызова ушло на
+    // проекты, а не на запуск EDT.
+    assert!(
+        support::wait_for_file(&session_started, Duration::from_secs(30)),
+        "the shared EDT session never started"
+    );
 
     let response = client
         .peer()

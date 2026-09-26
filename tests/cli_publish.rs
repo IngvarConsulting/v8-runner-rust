@@ -12,12 +12,15 @@ mod support;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::Value;
 use support::command_data::assert_data_matches_one_of;
-use support::{temp_workspace, v8_runner_command, wait_for_file, wait_until, write_shell_script};
+use support::{
+    interruptible_stub, temp_workspace, terminate_and_wait, v8_runner_command, wait_for_file,
+    write_shell_script, RunnerGuard,
+};
 
 struct Project {
     config: PathBuf,
@@ -264,17 +267,6 @@ fn a_web_connection_string_is_refused_as_an_administrative_channel() {
     );
 }
 
-/// Раннер, которого тест снимет сам, если не дождётся его конца: брошенный процесс пережил
-/// бы временный каталог.
-struct RunnerGuard(std::process::Child);
-
-impl Drop for RunnerGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
 /// `webinst` запущен, и команду прерывают, пока он работает: исполнитель работу получил,
 /// поэтому отказ отвечает формой `publish` с `provider_dispatched: true`, а не общей формой
 /// отказа. Журнала у оборванного запуска нет, и пути к нему ответ не называет.
@@ -286,18 +278,7 @@ fn publish_interrupted_after_webinst_started_answers_in_its_form() {
     let release = dir.path().join("webinst-release");
     write_shell_script(
         &dir.path().join("platform").join("bin").join("webinst"),
-        &format!(
-            "trap 'exit 143' TERM INT\n\
-             printf started > '{started}'\n\
-             waited=0\n\
-             while [ ! -e '{release}' ] && [ \"$waited\" -lt 300 ]; do\n\
-               sleep 0.1\n\
-               waited=$((waited + 1))\n\
-             done\n\
-             exit 0",
-            started = started.display(),
-            release = release.display(),
-        ),
+        &interruptible_stub(&started, &release),
     );
     let stderr = dir.path().join("stderr.log");
     let mut runner = RunnerGuard(
@@ -315,15 +296,7 @@ fn publish_interrupted_after_webinst_started_answers_in_its_form() {
     );
     let timeout = Duration::from_secs(30);
     assert!(wait_for_file(&started, timeout), "webinst never started");
-
-    let signalled = Command::new("kill")
-        .args(["-TERM", &runner.0.id().to_string()])
-        .status()
-        .expect("kill");
-    assert!(signalled.success());
-    let stopped = wait_until(timeout, Duration::from_millis(20), || {
-        runner.0.try_wait().expect("wait publish").is_some()
-    });
+    let stopped = terminate_and_wait(&mut runner.0, timeout);
     fs::write(&release, "").expect("release a stray webinst");
     assert!(
         stopped,

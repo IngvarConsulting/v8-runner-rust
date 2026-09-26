@@ -230,7 +230,7 @@
       "description": "Requested launch mode."
     },
     "ok": {
-      "description": "`true` when the process was spawned successfully and, under `--wait-for-exit`, the\nclient exited on its own: a timeout or an interrupted wait answers `false`.",
+      "description": "`true` when the process was spawned and, when the command waits on it, the wait\nsucceeded: under `--wait-for-exit` the client exited on its own, under `--wait-ready`\nits MCP endpoint became ready. A timeout, an interrupted wait or a failed readiness\ncheck answers `false` although the client was started.",
       "type": "boolean"
     },
     "pid": {

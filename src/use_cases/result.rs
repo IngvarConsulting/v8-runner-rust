@@ -196,6 +196,7 @@ impl<T> UseCaseFailure<T> {
     /// была. До работы — общей формой отказа, как всякий отказ до начала. Какая из двух,
     /// решает отметка работы команды, а не место вызова: одна и та же ошибка исполнителя
     /// бывает и до запуска, и после него.
+    #[must_use]
     pub(crate) fn after_possible_work(
         error: impl Into<UseCaseError>,
         work: &WorkGiven,
@@ -262,11 +263,24 @@ pub(crate) fn stamp_dispatch<T: CarriesDispatch>(
 ) -> UseCaseResult<T> {
     // Отказ без формы после работы — ошибка сценария: вызывающий прочёл бы «ничего не
     // запускалось». Такой отказ строит `UseCaseFailure::after_possible_work`, и всякий тест,
-    // дошедший до забытого места, падает здесь, как бы оно ни называлось.
-    debug_assert!(
-        !(work.given() && matches!(&outcome, Err(failure) if failure.payload.is_none())),
-        "a failure after the executor got the command's work must answer in the command's form"
-    );
+    // дошедший до забытого места, падает здесь, как бы оно ни называлось. В сборке без
+    // проверок место остаётся видно в журнале.
+    if let Err(failure) = &outcome {
+        let formless = failure.payload.is_none() && work.given();
+        debug_assert!(
+            !formless,
+            "a failure after the executor got the command's work must answer in the command's form: {} ({})",
+            failure.error,
+            std::any::type_name::<T>()
+        );
+        if formless {
+            tracing::error!(
+                error = %failure.error,
+                form = std::any::type_name::<T>(),
+                "a failure after the executor got the command's work answered without its form"
+            );
+        }
+    }
     if let Some(payload) = payload_mut(&mut outcome) {
         payload.stamp_work(work);
     }
@@ -280,8 +294,7 @@ mod tests {
     use crate::platform::designer::DesignerError;
     use crate::platform::edt_session::EdtSessionError;
     use crate::platform::ibcmd::IbcmdError;
-    use crate::platform::process::ProcessError;
-    use crate::platform::process::WorkGiven;
+    use crate::platform::process::{ProcessError, WorkGiven};
     use crate::support::error::{AppError, CapabilityReason};
 
     /// Форма с признаком в миниатюре.
@@ -305,9 +318,10 @@ mod tests {
     #[test]
     fn a_failure_answers_in_the_command_form_only_after_work() {
         let work = WorkGiven::for_command();
-        let before = UseCaseFailure::after_possible_work(refusal(), &work, || Form {
-            provider_dispatched: false,
-        });
+        let before: UseCaseFailure<Form> =
+            UseCaseFailure::after_possible_work(refusal(), &work, || {
+                unreachable!("no form is built before any work")
+            });
         assert!(
             before.payload.is_none(),
             "a refusal before any work keeps the shared refusal form"

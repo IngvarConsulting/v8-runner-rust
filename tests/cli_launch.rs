@@ -2337,59 +2337,41 @@ fn an_epf_wait_interrupted_after_the_client_started_answers_in_its_form() {
     let release = dir.path().join("client-release");
     write_shell_script_atomically(
         &install_dir.join("bin").join("1cv8c"),
-        &format!(
-            "trap 'exit 143' TERM INT\n\
-             printf started > '{started}'\n\
-             waited=0\n\
-             while [ ! -e '{release}' ] && [ \"$waited\" -lt 300 ]; do\n\
-               sleep 0.1\n\
-               waited=$((waited + 1))\n\
-             done\n\
-             exit 0",
-            started = started.display(),
-            release = release.display(),
-        ),
+        &support::interruptible_stub(&started, &release),
     );
     let epf = work_path.join("runtime-check.epf");
     fs::write(&epf, "epf").expect("epf");
     let stderr_log = dir.path().join("runner.stderr");
-    let mut runner = std::process::Command::new(support::v8_runner_binary())
-        .args([
-            "--config",
-            &config_path.display().to_string(),
-            "--json-message",
-            "launch",
-            "thin",
-            "--execute",
-            &epf.display().to_string(),
-            "--output",
-            &work_path.join("runtime.out").display().to_string(),
-            "--stderr-output",
-            &work_path.join("runtime.stderr").display().to_string(),
-            "--wait-for-exit",
-            "--wait-timeout-ms",
-            &IDLE_WAIT_TIMEOUT_MS.to_string(),
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(fs::File::create(&stderr_log).expect("stderr log"))
-        .spawn()
-        .expect("spawn launch");
+    let mut runner = support::RunnerGuard(
+        std::process::Command::new(support::v8_runner_binary())
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "launch",
+                "thin",
+                "--execute",
+                &epf.display().to_string(),
+                "--output",
+                &work_path.join("runtime.out").display().to_string(),
+                "--stderr-output",
+                &work_path.join("runtime.stderr").display().to_string(),
+                "--wait-for-exit",
+                "--wait-timeout-ms",
+                &IDLE_WAIT_TIMEOUT_MS.to_string(),
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(fs::File::create(&stderr_log).expect("stderr log"))
+            .spawn()
+            .expect("spawn launch"),
+    );
     let timeout = Duration::from_secs(30);
-    let client_started = support::wait_for_file(&started, timeout);
-    let signalled = std::process::Command::new("kill")
-        .args(["-TERM", &runner.id().to_string()])
-        .status()
-        .expect("kill");
-    let stopped = support::wait_until(timeout, Duration::from_millis(20), || {
-        runner.try_wait().expect("wait launch").is_some()
-    });
+    assert!(
+        support::wait_for_file(&started, timeout),
+        "the client never started"
+    );
+    let stopped = support::terminate_and_wait(&mut runner.0, timeout);
     fs::write(&release, "").expect("release a stray client");
-    if !stopped {
-        let _ = runner.kill();
-    }
-    let _ = runner.wait();
-    assert!(client_started, "the client never started");
-    assert!(signalled.success());
     assert!(
         stopped,
         "launch did not stop after SIGTERM: {}",
@@ -2398,6 +2380,7 @@ fn an_epf_wait_interrupted_after_the_client_started_answers_in_its_form() {
 
     let mut stdout = String::new();
     runner
+        .0
         .stdout
         .as_mut()
         .expect("piped stdout")

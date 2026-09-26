@@ -94,30 +94,28 @@ fn run_read(
     // Открытие сессии и отказ до запуска `ibcmd` работы не дают и отвечают общей формой
     // отказа; всё, что случилось после, отвечает формой чтения: вызывающий узнаёт из неё,
     // что платформа запрос получила.
-    let extensions =
-        read_extensions(context, config, request, executor, &utilities).map_err(|error| {
-            UseCaseFailure::after_possible_work(error, context.work(), || {
-                ExtensionInventoryResult {
-                    provider: Some(receipt.clone()),
-                    ok: false,
-                    provider_dispatched: false,
-                    requested: requested(&request.scope),
-                    plan: None,
-                    extensions: Vec::new(),
-                    duration_ms: started.elapsed().as_millis() as u64,
-                }
-            })
-        })?;
-
-    Ok(ExtensionInventoryResult {
+    let (extensions, failure) =
+        match read_extensions(context, config, request, executor, &utilities) {
+            Ok(extensions) => (extensions, None),
+            Err(error) => (Vec::new(), Some(error)),
+        };
+    let result = ExtensionInventoryResult {
         provider: Some(receipt),
-        ok: true,
+        ok: failure.is_none(),
         provider_dispatched: false,
         requested: requested(&request.scope),
         plan: None,
         extensions,
         duration_ms: started.elapsed().as_millis() as u64,
-    })
+    };
+    match failure {
+        None => Ok(result),
+        Some(error) => Err(UseCaseFailure::after_possible_work(
+            error,
+            context.work(),
+            || result,
+        )),
+    }
 }
 
 /// Состав расширений у исполнителя. Ошибка — какой бы она ни была — возвращается как есть:

@@ -210,51 +210,31 @@ fn run_launch(
             )
             .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
         let pid = managed.pid();
-        let outcome = managed
-            .wait_for_exit(&context.process_policy(
-                InterruptionSafetyClass::GracefulThenKill,
-                Some(Duration::from_millis(plan.timeout_ms)),
-            ))
-            .map_err(|error| {
-                // Клиент уже запущен: ожидание, оборванное отменой, отвечает формой `launch`,
-                // и выхода у клиента нет — ни кода, ни истёкшего срока.
-                let error = AppError::from(error);
-                let message = format!("External EPF client wait was interrupted: {error}");
-                UseCaseFailure::after_possible_work(error, context.work(), || LaunchResult {
-                    ok: false,
-                    mode: mode.clone(),
-                    via,
-                    pid: Some(pid),
-                    binary: location.path.clone(),
-                    platform_resolution: platform_resolution.clone(),
-                    url: reported_url.clone(),
-                    provider_dispatched: false,
-                    plan: None,
-                    message: Some(message),
-                    mcp_readiness: None,
-                    external_epf_wait: Some(ExternalEpfWaitResult {
-                        pid,
-                        execute_path: plan.execute_path.clone(),
-                        exit_code: None,
-                        timed_out: false,
-                        output_path: plan.output_path.clone(),
-                        stderr_path: plan.stderr_path.display().to_string(),
-                    }),
-                })
-            })?;
-        let message = if outcome.timed_out {
-            format!(
+        let waited = managed.wait_for_exit(&context.process_policy(
+            InterruptionSafetyClass::GracefulThenKill,
+            Some(Duration::from_millis(plan.timeout_ms)),
+        ));
+        // Клиент уже запущен: ожидание, кончившееся раньше выхода клиента, отвечает формой
+        // `launch`, и выхода у клиента нет — ни кода, ни истёкшего срока.
+        let (exit_code, timed_out, wait_error) = match waited {
+            Ok(outcome) => (outcome.exit_code, outcome.timed_out, None),
+            Err(error) => (None, false, Some(AppError::from(error))),
+        };
+        let message = match &wait_error {
+            Some(error) => {
+                format!("External EPF client wait ended before the client exited: {error}")
+            }
+            None if timed_out => format!(
                 "External EPF client timed out after {}ms and was terminated",
                 plan.timeout_ms
-            )
-        } else {
-            format!(
+            ),
+            None => format!(
                 "External EPF client exited with status {}",
-                outcome.exit_code.unwrap_or(-1)
-            )
+                exit_code.unwrap_or(-1)
+            ),
         };
         let result = LaunchResult {
-            ok: !outcome.timed_out,
+            ok: wait_error.is_none() && !timed_out,
             mode,
             via,
             pid: Some(pid),
@@ -268,13 +248,20 @@ fn run_launch(
             external_epf_wait: Some(ExternalEpfWaitResult {
                 pid,
                 execute_path: plan.execute_path,
-                exit_code: outcome.exit_code,
-                timed_out: outcome.timed_out,
+                exit_code,
+                timed_out,
                 output_path: plan.output_path,
                 stderr_path: plan.stderr_path.display().to_string(),
             }),
         };
-        if outcome.timed_out {
+        if let Some(error) = wait_error {
+            return Err(UseCaseFailure::after_possible_work(
+                error,
+                context.work(),
+                || result,
+            ));
+        }
+        if timed_out {
             return Err(UseCaseFailure::with_payload(
                 AppError::Runtime(message),
                 result,
