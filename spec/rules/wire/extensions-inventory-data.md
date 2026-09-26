@@ -5,6 +5,7 @@ artifact: docs/schemas/command-data/extensions-inventory.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
+  - tests/cli_extensions.rs::extensions_info_that_fails_after_the_platform_ran_answers_in_its_form
 ---
 
 # `data` чтения состава расширений

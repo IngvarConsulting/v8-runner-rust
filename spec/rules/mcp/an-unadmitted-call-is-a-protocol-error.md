@@ -3,6 +3,7 @@ id: INV.MCP.AN-UNADMITTED-CALL-IS-A-PROTOCOL-ERROR
 check:
   - src/mcp/server.rs::queued_cancellation_returns_transport_error_without_running_call
   - src/mcp/server.rs::an_admission_timeout_returns_a_transport_error
+  - src/mcp/edt_syntax.rs::a_project_that_misses_the_session_answers_by_the_work_mark
 ---
 
 # Вызов, не допущенный к исполнению, — ошибка протокола

@@ -7,6 +7,7 @@ check:
   - tests/cli_extensions.rs::extensions_info_that_fails_after_the_platform_ran_answers_in_its_form
   - tests/cli_agent_scenarios.rs::extensions_list_and_info_through_the_agent_read_the_structured_reply
   - tests/mcp_stdio.rs::mcp_stdio_a_project_that_misses_the_edt_session_after_work_answers_in_the_check_form
+  - src/mcp/edt_syntax.rs::a_project_that_misses_the_session_answers_by_the_work_mark
   - src/use_cases/result.rs::a_failure_answers_in_the_command_form_only_after_work
   - src/use_cases/result.rs::the_stamp_catches_a_failure_without_its_form_after_work
 ---

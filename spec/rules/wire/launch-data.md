@@ -5,6 +5,7 @@ artifact: docs/schemas/command-data/launch.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
+  - tests/cli_launch.rs::an_epf_wait_interrupted_after_the_client_started_answers_in_its_form
 ---
 
 # `data` команды `launch`

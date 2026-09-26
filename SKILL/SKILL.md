@@ -171,7 +171,9 @@ v8-runner infobase create
   properties of the configured extension source-sets". For `ibcmd`, a successful read
   reports `name_prefix` from the applied DB configuration; for the standalone agent it is
   `null` until that provider can attest the applied prefix. Never fill it from source files
-  or the working configuration after `upload` without `apply`.
+  or the working configuration after `upload` without `apply`. A read that fails after the
+  platform got the request answers `ok: false` with an empty `extensions`: the composition is
+  unknown, not empty — check `ok` first.
   Every subcommand of this family, reads included, accepts `--dry-run`: reading the composition
   starts the platform, authenticates and leaves a journal trace, so it is an action. The preview names the
   target infobase, the account and the utility, and never echoes the connection string.
