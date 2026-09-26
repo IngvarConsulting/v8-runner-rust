@@ -122,12 +122,14 @@ v8-runner infobase create
   `capability_unavailable`, `target` (not for this target), `soon` (not yet). A refusal that has a
   way out names it in `error.next` — `{command, source_set?, keys?}` — so an orchestrator reads the
   step instead of parsing the message.
-- An operator's interrupt (Ctrl+C, SIGTERM) answers the CLI envelope with `error.kind:
-  interruption`, `error.code: cancelled` and exit 4 for every command; MCP folds it into
-  `platform_failure`. In forms with `execution`, the interruption record's `phase` says where
-  it stopped: `command_boundary` — a safe point, no work of the command was cut short; `provider_command`,
-  `run`, `apply`, `update_db_cfg`, `publication` — the executor's work was cut short or, with
-  `deferred: true`, waited for.
+- When an operator's interrupt (Ctrl+C, SIGTERM) ends a command, the CLI envelope answers
+  `error.kind: interruption`, `error.code: cancelled` and exit 4 for every command; MCP folds it
+  into `platform_failure`. A pending interrupt alone decides nothing: an unrelated failure keeps
+  its own code, and a critical phase such as a database write runs to its end — a success stays
+  a success and names the interrupt with `deferred: true`. In forms with `execution`, the
+  interruption record's `phase` says where it stopped: `command_boundary` — a safe point, no
+  work of the command was cut short; `provider_command`, `run`, `apply`, `update_db_cfg`,
+  `publication` — the executor's work was cut short or, with `deferred: true`, waited for.
 - For infobase export failures, distinguish `capability_unavailable` (no implemented adapter)
   from `environment_unavailable` (adapter exists, but binary/version/connection is not ready).
   Never retry another provider after the selected provider has been spawned.
