@@ -27,6 +27,9 @@ static LOG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// Transport-level queued cancellation and timeout are returned separately so the
 /// MCP transport can preserve admission semantics. Running cancellation and timeout
 /// wait for terminal state and are converted into the normal use-case payload contract.
+/// A project that is cancelled or times out in the shared EDT queue after an earlier
+/// project was delivered is a failure after work: the call was admitted and ran, so it
+/// answers in the `check` form rather than as a protocol error.
 pub async fn execute(
     manager: &EdtSessionManager,
     config: &AppConfig,
@@ -162,10 +165,20 @@ async fn run(
         let response = match execution.result {
             Ok(response) => response,
             Err(EdtSessionError::QueuedCancelled) => {
-                return Err(EdtSyntaxTransportError::QueuedCancelled);
+                return missed_session(
+                    EdtSyntaxTransportError::QueuedCancelled,
+                    &source_set.name,
+                    work,
+                    started,
+                );
             }
             Err(EdtSessionError::QueuedTimeout) => {
-                return Err(EdtSyntaxTransportError::QueuedTimeout);
+                return missed_session(
+                    EdtSyntaxTransportError::QueuedTimeout,
+                    &source_set.name,
+                    work,
+                    started,
+                );
             }
             Err(EdtSessionError::RunningCancelled) => {
                 if let Some(completion) = execution.completion {
@@ -514,7 +527,98 @@ fn elapsed_millis(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+/// Проект не дождался общей сессии. Если до него уже проверялся другой проект, работа была,
+/// и ответ — форма `check`; иначе вызов работы не дал, и это ошибка протокола, как у всякого
+/// недопущенного вызова. Какая из двух, решает `after_possible_work`, как у всех сценариев.
+fn missed_session(
+    transport: EdtSyntaxTransportError,
+    project: &str,
+    work: &WorkGiven,
+    started: Instant,
+) -> Result<UseCaseResult<SyntaxCheckResult>, EdtSyntaxTransportError> {
+    let waited = match &transport {
+        EdtSyntaxTransportError::QueuedCancelled => "was cancelled",
+        EdtSyntaxTransportError::QueuedTimeout => "timed out",
+    };
+    let message = format!(
+        "project '{project}' {waited} while waiting for the shared EDT session after earlier projects were checked"
+    );
+    let failure = SyntaxExecutionFailure::after_possible_work(
+        AppError::Runtime(message.clone()),
+        work,
+        || {
+            failed_result(
+                CheckName::Edt,
+                SyntaxCheckStatus::ToolFailed,
+                -1,
+                started,
+                vec![],
+                None,
+                Some(message),
+                None,
+            )
+        },
+    );
+    match failure.payload {
+        Some(_) => Ok(Err(failure)),
+        None => Err(transport),
+    }
+}
+
 pub(crate) enum EdtSyntaxTransportError {
     QueuedCancelled,
     QueuedTimeout,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{missed_session, EdtSyntaxTransportError};
+    use crate::platform::process::WorkGiven;
+    use std::time::Instant;
+
+    /// Проект, не дождавшийся общей сессии, пока работы не было, — ошибка протокола, как у
+    /// недопущенного вызова. После работы — отказ формой `check`, и в нём названы проект и
+    /// причина: отмена или истёкшее время.
+    #[test]
+    fn a_project_that_misses_the_session_answers_by_the_work_mark() {
+        let idle = WorkGiven::for_command();
+        assert!(matches!(
+            missed_session(
+                EdtSyntaxTransportError::QueuedCancelled,
+                "main",
+                &idle,
+                Instant::now()
+            ),
+            Err(EdtSyntaxTransportError::QueuedCancelled)
+        ));
+        assert!(matches!(
+            missed_session(
+                EdtSyntaxTransportError::QueuedTimeout,
+                "main",
+                &idle,
+                Instant::now()
+            ),
+            Err(EdtSyntaxTransportError::QueuedTimeout)
+        ));
+
+        let worked = WorkGiven::for_command();
+        worked.mark_work_given();
+        for (transport, waited) in [
+            (EdtSyntaxTransportError::QueuedCancelled, "was cancelled"),
+            (EdtSyntaxTransportError::QueuedTimeout, "timed out"),
+        ] {
+            let Ok(Err(failure)) = missed_session(transport, "second", &worked, Instant::now())
+            else {
+                panic!("a project missed after work must answer in the `check` form");
+            };
+            let stderr = failure
+                .payload
+                .and_then(|form| form.stderr)
+                .unwrap_or_default();
+            assert!(
+                stderr.contains("'second'") && stderr.contains(waited),
+                "{stderr}"
+            );
+        }
+    }
 }

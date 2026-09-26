@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use support::command_data::assert_data_matches_one_of;
 use support::{temp_workspace, v8_runner_command, write_shell_script_atomically};
 
 fn write_script(path: &Path) {
@@ -2323,5 +2324,78 @@ fn a_real_web_launch_passes_the_unmasked_address_to_the_client() {
     assert!(
         dispatched.contains("http://alice:s3cret@localhost/base"),
         "в процесс обязан уйти настоящий адрес, иначе клиент не подключится: {dispatched:?}"
+    );
+}
+
+/// Клиент запущен под `--wait-for-exit`, и команду прерывают, пока его ждут: работу
+/// исполнитель получил, поэтому отказ отвечает формой `launch` с `provider_dispatched: true`.
+/// Выхода у клиента нет — ни кода, ни истёкшего срока.
+#[test]
+fn an_epf_wait_interrupted_after_the_client_started_answers_in_its_form() {
+    let (dir, config_path, install_dir, work_path) = setup_project_with_thin_script("exit 0");
+    let started = dir.path().join("client-started");
+    let release = dir.path().join("client-release");
+    write_shell_script_atomically(
+        &install_dir.join("bin").join("1cv8c"),
+        &support::interruptible_stub(&started, &release),
+    );
+    let epf = work_path.join("runtime-check.epf");
+    fs::write(&epf, "epf").expect("epf");
+    let stderr_log = dir.path().join("runner.stderr");
+    let mut runner = support::RunnerGuard(
+        std::process::Command::new(support::v8_runner_binary())
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "launch",
+                "thin",
+                "--execute",
+                &epf.display().to_string(),
+                "--output",
+                &work_path.join("runtime.out").display().to_string(),
+                "--stderr-output",
+                &work_path.join("runtime.stderr").display().to_string(),
+                "--wait-for-exit",
+                "--wait-timeout-ms",
+                &IDLE_WAIT_TIMEOUT_MS.to_string(),
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(fs::File::create(&stderr_log).expect("stderr log"))
+            .spawn()
+            .expect("spawn launch"),
+    );
+    let timeout = Duration::from_secs(30);
+    assert!(
+        support::wait_for_file(&started, timeout),
+        "the client never started"
+    );
+    let stopped = support::terminate_and_wait(&mut runner.0, timeout);
+    fs::write(&release, "").expect("release a stray client");
+    assert!(
+        stopped,
+        "launch did not stop after SIGTERM: {}",
+        fs::read_to_string(&stderr_log).unwrap_or_default()
+    );
+
+    let mut stdout = String::new();
+    runner
+        .0
+        .stdout
+        .as_mut()
+        .expect("piped stdout")
+        .read_to_string(&mut stdout)
+        .expect("stdout");
+    let payload: Value = serde_json::from_str(&stdout).expect("one json document");
+    assert_eq!(payload["ok"], false, "{payload}");
+    assert_eq!(payload["data"]["ok"], false, "{payload}");
+    assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
+    let wait = &payload["data"]["external_epf_wait"];
+    assert!(wait["exit_code"].is_null(), "{payload}");
+    assert_eq!(wait["timed_out"], false, "{payload}");
+    assert_data_matches_one_of(
+        &payload["data"],
+        "`launch` wait interrupted after the client started",
+        &["launch"],
     );
 }

@@ -1,10 +1,11 @@
 ---
 id: CTR.WIRE.LAUNCH-DATA
-version: 3
+version: 4
 artifact: docs/schemas/command-data/launch.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
+  - tests/cli_launch.rs::an_epf_wait_interrupted_after_the_client_started_answers_in_its_form
 ---
 
 # `data` команды `launch`
@@ -17,6 +18,11 @@ check:
 `pid` есть только у настоящего запуска; у превью он пуст, и `provider_dispatched: false`
 говорит о том же вторым полем — вызывающему не приходится выводить факт запуска из
 отсутствия значения.
+
+**Что изменила версия 4.** Ожидание `--wait-for-exit`, прерванное уже после старта
+клиента, отвечает этой формой: `ok: false`, `provider_dispatched: true` и
+`external_epf_wait` с `exit_code: null` и `timed_out: false` — клиент не вышел, и срок не
+истёк. Прежде такой отказ отвечал общей формой отказа.
 
 `via` называет, каким из двух адресов цели открыта база: `connection` — административным,
 `web` — клиентским. Поле есть у каждого режима, а не только у тонкого клиента, где есть

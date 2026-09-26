@@ -85,6 +85,49 @@ where
     condition()
 }
 
+/// Раннер, которого тест снимет сам, если не дождётся его конца: брошенный процесс пережил
+/// бы временный каталог.
+pub struct RunnerGuard(pub std::process::Child);
+
+impl Drop for RunnerGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Тело заглушки, которая отмечает старт файлом `started` и работает, пока тест не создаст
+/// `release` (не дольше полуминуты); сигнал завершения она принимает и выходит. На ней
+/// команду прерывают уже после того, как исполнитель получил работу.
+#[cfg(unix)]
+pub fn interruptible_stub(started: &Path, release: &Path) -> String {
+    format!(
+        "trap 'exit 143' TERM INT\n\
+         printf started > '{started}'\n\
+         waited=0\n\
+         while [ ! -e '{release}' ] && [ \"$waited\" -lt 300 ]; do\n\
+           sleep 0.1\n\
+           waited=$((waited + 1))\n\
+         done\n\
+         exit 0",
+        started = started.display(),
+        release = release.display(),
+    )
+}
+
+/// Шлёт раннеру SIGTERM и ждёт его выхода; `true` — вышел вовремя.
+#[cfg(unix)]
+pub fn terminate_and_wait(runner: &mut std::process::Child, timeout: Duration) -> bool {
+    let signalled = Command::new("kill")
+        .args(["-TERM", &runner.id().to_string()])
+        .status()
+        .expect("kill");
+    assert!(signalled.success(), "SIGTERM was not delivered");
+    wait_until(timeout, Duration::from_millis(20), || {
+        runner.try_wait().expect("wait runner").is_some()
+    })
+}
+
 pub fn wait_for_file(path: &Path, timeout: Duration) -> bool {
     wait_until(timeout, Duration::from_millis(50), || path.exists())
 }

@@ -5,9 +5,11 @@
       "description": "Observed outcome of an opt-in bounded external EPF client launch.",
       "properties": {
         "execute_path": {
+          "description": "The external data processor the client was asked to execute.",
           "type": "string"
         },
         "exit_code": {
+          "description": "The client's exit code; `null` when the wait ended without one: the client was\nterminated at the timeout (`timed_out: true`), or the wait was interrupted before the\nclient exited (`timed_out: false`).",
           "format": "int32",
           "type": [
             "integer",
@@ -15,17 +17,21 @@
           ]
         },
         "output_path": {
+          "description": "Where the external data processor was asked to write its output.",
           "type": "string"
         },
         "pid": {
+          "description": "Process identifier of the waited client.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
         },
         "stderr_path": {
+          "description": "Where the client's stderr was captured.",
           "type": "string"
         },
         "timed_out": {
+          "description": "`true` when the client was terminated at the declared timeout.",
           "type": "boolean"
         }
       },
@@ -224,7 +230,7 @@
       "description": "Requested launch mode."
     },
     "ok": {
-      "description": "`true` when the process was spawned successfully.",
+      "description": "`true` when the process was spawned and, when the command waits on it, the wait\nsucceeded: under `--wait-for-exit` the client exited on its own, under `--wait-ready`\nits MCP endpoint became ready. A timeout, an interrupted wait or a failed readiness\ncheck answers `false` although the client was started. A preview answers `true`\nwithout starting anything: `provider_dispatched` tells the two apart.",
       "type": "boolean"
     },
     "pid": {
@@ -259,7 +265,7 @@
       "description": "Canonical platform installation metadata for the selected binary. Absent for\n`web`: a browser is not a platform utility."
     },
     "provider_dispatched": {
-      "description": "Whether the program in `binary` was started: the client, or the system URL opener\nfor `launch web`. `false` in a preview; a refusal or a start that failed answers the\nshared refusal form, without this field.",
+      "description": "Whether the program in `binary` was started: the client, or the system URL opener\nfor `launch web`. `false` in a preview. A refusal before the start, or a start that\nfailed, answers the shared refusal form, without this field; a failure after the\nstart answers this form with `true`.",
       "type": "boolean"
     },
     "url": {

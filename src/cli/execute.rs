@@ -255,18 +255,13 @@ fn execute_publish(
             Err(failure) => {
                 let error = failure.error;
                 if presenter.is_json() {
-                    match failure.payload {
-                        Some(result) => presenter.print_envelope(&failure_envelope(
-                            CommandName::Publish.as_str(),
-                            result.duration_ms,
-                            result,
-                            &error,
-                        )),
-                        None => presenter.print_envelope(&pre_dispatch_error_envelope(
-                            CommandName::Publish.as_str(),
-                            &error,
-                        )),
-                    }
+                    print_failure(
+                        presenter,
+                        CommandName::Publish,
+                        failure.payload,
+                        |result| result.duration_ms,
+                        &error,
+                    );
                 } else {
                     if let Some(result) = failure.payload.as_ref() {
                         render_publish_text(
@@ -282,6 +277,26 @@ fn execute_publish(
             }
         },
     )
+}
+
+/// Отказ команды в JSON: с формой команды — её конвертом, без формы — общей формой отказа.
+/// Форму отказ несёт, когда исполнитель уже получил работу или команда отвечает предметом.
+fn print_failure<T: Serialize>(
+    presenter: &Presenter,
+    command: CommandName,
+    payload: Option<T>,
+    duration_ms: impl FnOnce(&T) -> u64,
+    error: &UseCaseError,
+) {
+    match payload {
+        Some(result) => presenter.print_envelope(&failure_envelope(
+            command.as_str(),
+            duration_ms(&result),
+            result,
+            error,
+        )),
+        None => presenter.print_envelope(&pre_dispatch_error_envelope(command.as_str(), error)),
+    }
 }
 
 /// Что просил вызывающий: превью (`--dry-run`) или боевой прогон. Слова превью в ответе
@@ -465,18 +480,13 @@ fn execute_tools_download(
             Err(failure) => {
                 let error = failure.error;
                 if presenter.is_json() {
-                    match failure.payload {
-                        Some(result) => presenter.print_envelope(&failure_envelope(
-                            CommandName::ToolsDownload.as_str(),
-                            result.duration_ms,
-                            result,
-                            &error,
-                        )),
-                        None => presenter.print_envelope(&pre_dispatch_error_envelope(
-                            CommandName::ToolsDownload.as_str(),
-                            &error,
-                        )),
-                    }
+                    print_failure(
+                        presenter,
+                        CommandName::ToolsDownload,
+                        failure.payload,
+                        |result| result.duration_ms,
+                        &error,
+                    );
                 } else {
                     presenter.print_error(&error.to_string());
                 }
@@ -548,18 +558,13 @@ fn execute_extensions(
             Err(failure) => {
                 let error = failure.error;
                 if presenter.is_json() {
-                    match failure.payload {
-                        Some(result) => presenter.print_envelope(&failure_envelope(
-                            CommandName::Extensions.as_str(),
-                            result.duration_ms,
-                            result,
-                            &error,
-                        )),
-                        None => presenter.print_envelope(&pre_dispatch_error_envelope(
-                            CommandName::Extensions.as_str(),
-                            &error,
-                        )),
-                    }
+                    print_failure(
+                        presenter,
+                        CommandName::Extensions,
+                        failure.payload,
+                        |result| result.duration_ms,
+                        &error,
+                    );
                 } else {
                     presenter.print_error(&error.to_string());
                 }
@@ -665,10 +670,15 @@ fn run_extension_inventory(
         Err(failure) => {
             let error = failure.error;
             if presenter.is_json() {
-                presenter.print_envelope(&pre_dispatch_error_envelope(
-                    CommandName::Extensions.as_str(),
+                // Отказ после работы исполнителя несёт форму чтения, до неё — общую форму
+                // отказа.
+                print_failure(
+                    presenter,
+                    CommandName::Extensions,
+                    failure.payload,
+                    |result| result.duration_ms,
                     &error,
-                ));
+                );
             } else {
                 presenter.print_error(&error.to_string());
             }
@@ -700,18 +710,13 @@ fn run_extension_change(
         Err(failure) => {
             let error = failure.error;
             if presenter.is_json() {
-                match failure.payload {
-                    Some(result) => presenter.print_envelope(&failure_envelope(
-                        CommandName::Extensions.as_str(),
-                        result.duration_ms,
-                        result,
-                        &error,
-                    )),
-                    None => presenter.print_envelope(&pre_dispatch_error_envelope(
-                        CommandName::Extensions.as_str(),
-                        &error,
-                    )),
-                }
+                print_failure(
+                    presenter,
+                    CommandName::Extensions,
+                    failure.payload,
+                    |result| result.duration_ms,
+                    &error,
+                );
             } else {
                 presenter.print_error(&error.to_string());
             }

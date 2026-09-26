@@ -5,7 +5,11 @@ use serde::{Deserialize, Serialize};
 /// Structured result of a `launch` command.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LaunchResult {
-    /// `true` when the process was spawned successfully.
+    /// `true` when the process was spawned and, when the command waits on it, the wait
+    /// succeeded: under `--wait-for-exit` the client exited on its own, under `--wait-ready`
+    /// its MCP endpoint became ready. A timeout, an interrupted wait or a failed readiness
+    /// check answers `false` although the client was started. A preview answers `true`
+    /// without starting anything: `provider_dispatched` tells the two apart.
     pub ok: bool,
     /// Requested launch mode.
     pub mode: LaunchMode,
@@ -25,8 +29,9 @@ pub struct LaunchResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// Whether the program in `binary` was started: the client, or the system URL opener
-    /// for `launch web`. `false` in a preview; a refusal or a start that failed answers the
-    /// shared refusal form, without this field.
+    /// for `launch web`. `false` in a preview. A refusal before the start, or a start that
+    /// failed, answers the shared refusal form, without this field; a failure after the
+    /// start answers this form with `true`.
     pub provider_dispatched: bool,
     /// Compact machine-facing plan produced by a non-executing preview.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -81,11 +86,19 @@ pub struct LaunchPlan {
 /// Observed outcome of an opt-in bounded external EPF client launch.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExternalEpfWaitResult {
+    /// Process identifier of the waited client.
     pub pid: u32,
+    /// The external data processor the client was asked to execute.
     pub execute_path: String,
+    /// The client's exit code; `null` when the wait ended without one: the client was
+    /// terminated at the timeout (`timed_out: true`), or the wait was interrupted before the
+    /// client exited (`timed_out: false`).
     pub exit_code: Option<i32>,
+    /// `true` when the client was terminated at the declared timeout.
     pub timed_out: bool,
+    /// Where the external data processor was asked to write its output.
     pub output_path: String,
+    /// Where the client's stderr was captured.
     pub stderr_path: String,
 }
 

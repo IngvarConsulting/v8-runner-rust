@@ -1,10 +1,11 @@
 ---
 id: CTR.WIRE.EXTENSIONS-INVENTORY-DATA
-version: 3
+version: 4
 artifact: docs/schemas/command-data/extensions-inventory.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
+  - tests/cli_extensions.rs::extensions_info_that_fails_after_the_platform_ran_answers_in_its_form
 ---
 
 # `data` чтения состава расширений
@@ -22,6 +23,10 @@ check:
 это свойство. `ibcmd` читает его из сохранённого состояния БД и сверяет запись
 с инвентаризацией; агент пока сообщает `null`. Подмена рабочей конфигурацией
 после `upload` до `apply` недопустима.
+
+**Что изменила версия 4.** Отказ после того, как исполнитель получил работу, отвечает
+этой формой: `ok: false`, `extensions` пуст — состав неизвестен, а не пуст, — и
+`provider_dispatched: true`. Прежде любой отказ чтения отвечал общей формой отказа.
 
 Предмет чтения назван полем `requested` — `{"kind": "all"}` или
 `{"kind": "named", "name": …}` — и в превью, и в ответе: вызывающий сверяет ответ со

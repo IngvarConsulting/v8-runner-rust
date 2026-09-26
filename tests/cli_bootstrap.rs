@@ -7,8 +7,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use support::command_data::assert_data_matches_its_command_form;
 use support::{
-    hold_workspace_lock, temp_workspace, v8_runner_command, wait_for_file, wait_until,
-    write_shell_script as write_script,
+    hold_workspace_lock, interruptible_stub, temp_workspace, terminate_and_wait, v8_runner_command,
+    wait_for_file, write_shell_script as write_script, RunnerGuard,
 };
 
 const LOCAL_CONFIG_SCHEMA_MODEL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.local.schema.json";
@@ -517,17 +517,6 @@ fn clone_refuses_a_busy_workspace_before_writing_the_project() {
     );
 }
 
-/// Раннер, которого тест снимет сам, если не дождётся его конца: брошенный процесс
-/// пережил бы временный каталог.
-struct RunnerGuard(std::process::Child);
-
-impl Drop for RunnerGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
 /// SIGTERM посреди выгрузки — отмена, как у остальных команд: раннер снимает выгрузку,
 /// отпускает замок и отвечает. Без перехвата сигнал убил бы раннер, и файл
 /// владельца замка остался бы в `build` — следующая команда проекта отказывала бы до
@@ -540,21 +529,7 @@ fn an_interrupted_clone_leaves_no_workspace_lock_behind() {
     let started = dir.path().join("dump-started");
     let release = dir.path().join("dump-release");
     let stderr = dir.path().join("stderr.log");
-    write_script(
-        &platform_path,
-        &format!(
-            "trap 'exit 143' TERM INT\n\
-             printf started > '{started}'\n\
-             waited=0\n\
-             while [ ! -e '{release}' ] && [ \"$waited\" -lt 300 ]; do\n\
-               sleep 0.1\n\
-               waited=$((waited + 1))\n\
-             done\n\
-             exit 0",
-            started = started.display(),
-            release = release.display(),
-        ),
-    );
+    write_script(&platform_path, &interruptible_stub(&started, &release));
 
     let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
     args.insert(0, "--json-message".to_owned());
@@ -568,14 +543,7 @@ fn an_interrupted_clone_leaves_no_workspace_lock_behind() {
     );
     let timeout = std::time::Duration::from_secs(30);
     assert!(wait_for_file(&started, timeout), "the dump never started");
-    let signalled = std::process::Command::new("kill")
-        .args(["-TERM", &runner.0.id().to_string()])
-        .status()
-        .expect("kill");
-    assert!(signalled.success());
-    let stopped = wait_until(timeout, std::time::Duration::from_millis(20), || {
-        runner.0.try_wait().expect("wait clone").is_some()
-    });
+    let stopped = terminate_and_wait(&mut runner.0, timeout);
     fs::write(&release, "").expect("release a stray dump");
     assert!(
         stopped,

@@ -231,6 +231,7 @@
       "type": "array"
     },
     "ok": {
+      "description": "`false` when the read failed after the executor got the work: the composition is then\nunknown, not empty.",
       "type": "boolean"
     },
     "plan": {
@@ -252,7 +253,7 @@
       "description": "Квитанция о выборе исполнителя; `None`, пока выбор не начинался."
     },
     "provider_dispatched": {
-      "description": "Whether an executor got this command's work: a process was started to do it, or the\nrequest's command was handed to a running session. Starting or opening a session and\nits own service commands are not work. `false` in a preview; any failure answers the\nshared refusal form, without this field.\n\nReading the composition is an action, not a look: the platform starts, a session\nopens, the account authenticates and a journal trace is left. So the read has a\npreview too, and in it `extensions` is empty because nothing was asked.",
+      "description": "Whether an executor got this command's work: a process was started to do it, or the\nrequest's command was handed to a running session. Starting or opening a session and\nits own service commands are not work. `false` in a preview. A refusal before any work\nanswers the shared refusal form, without this field; a failure after the executor got\nthe work answers this form with `ok: false`, an empty `extensions` and `true`.\n\nReading the composition is an action, not a look: the platform starts, a session\nopens, the account authenticates and a journal trace is left. So the read has a\npreview too, and in it `extensions` is empty because nothing was asked.",
       "type": "boolean"
     },
     "requested": {

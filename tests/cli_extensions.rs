@@ -9,6 +9,7 @@ use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use support::command_data::assert_data_matches_one_of;
 use support::{
     temp_workspace, v8_runner_command, wait_for_received_line, write_shell_script as write_script,
 };
@@ -573,6 +574,46 @@ fn extensions_info_refuses_a_reply_about_another_extension() {
     );
     assert!(!output.status.success(), "{reported}");
     assert!(reported.contains("Другая"), "{reported}");
+}
+
+/// Платформа ответила о другом расширении: запрос она получила, поэтому отказ отвечает
+/// формой чтения — `ok: false`, состав неизвестен, `provider_dispatched: true`, — а не общей
+/// формой отказа.
+#[test]
+fn extensions_info_that_fails_after_the_platform_ran_answers_in_its_form() {
+    let (_dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
+    write_inventory_ibcmd(&ibcmd_path, &calls_log, MEASURED_INVENTORY);
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "extensions",
+            "info",
+            "--name",
+            "Другая",
+        ])
+        .output()
+        .expect("run command");
+
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json envelope");
+    assert!(!output.status.success(), "{payload}");
+    assert_eq!(payload["command"], "extensions", "{payload}");
+    assert_eq!(payload["data"]["ok"], false, "{payload}");
+    assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
+    assert_eq!(
+        payload["data"]["extensions"],
+        serde_json::json!([]),
+        "{payload}"
+    );
+    assert_data_matches_one_of(
+        &payload["data"],
+        "`extensions info` after the platform ran",
+        &["extensions-inventory"],
+    );
+    let calls = fs::read_to_string(&calls_log).expect("ibcmd was called");
+    assert!(calls.contains("extension info"), "{calls}");
 }
 
 #[test]

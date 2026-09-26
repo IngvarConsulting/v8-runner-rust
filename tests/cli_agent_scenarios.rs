@@ -562,6 +562,15 @@ fn extensions_list_and_info_through_the_agent_read_the_structured_reply() {
             .is_some_and(|message| message.contains("ExtensionNotFound")),
         "{payload}"
     );
+    // Агент команду запроса получил и ответил отказом: это отказ после работы, и он
+    // отвечает формой чтения, а не общей формой отказа.
+    assert_eq!(payload["data"]["ok"], false, "{payload}");
+    assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
+    assert_data_matches_one_of(
+        &payload["data"],
+        "`extensions info` refused by the agent",
+        &["extensions-inventory"],
+    );
 }
 
 /// Отключение безопасного режима — `properties set` на каждое расширение в одной сессии.
