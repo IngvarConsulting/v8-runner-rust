@@ -83,13 +83,14 @@ Exactly one mode is required, and a mode that does not match the observed target
 before the platform starts: `--create` over an existing infobase and `--replace` over an absent
 one are both `invalid_argument`. Neither provider asks on its own — Designer creates an absent
 infobase and overwrites a present one — and unlike an export there is no staging step, so the
-mode is the only protection the caller gets. A failed restore reports
-`target_state: uncertain`, because how much data the provider had already replaced is not
-observable. Restore shares the export provider posture: Designer `/RestoreIB` is implemented and
-live-verified, IBCMD `infobase restore` stays experimental. Terminating active sessions is not
-exposed yet, so a busy infobase fails with the platform's own error. The load is a critical
-phase: Ctrl+C or SIGTERM does not stop it — the runner waits for the platform and reports the
-deferred interruption in `execution.interruptions` with `phase: provider_command`.
+mode is the only protection the caller gets. A restore that fails after the provider started
+reports `target_state: uncertain`, because how much data it had already replaced is not
+observable; a refusal before the start leaves `unchanged`. Restore shares the export provider
+posture: Designer `/RestoreIB` is implemented and live-verified, IBCMD `infobase restore` stays
+experimental. Terminating active sessions is not exposed yet, so a busy infobase fails with the
+platform's own error. The load is a critical phase: Ctrl+C or SIGTERM does not stop it — the
+runner waits for the platform and reports the deferred interruption in
+`execution.interruptions` with `phase: provider_command`.
 
 ## Convert
 

@@ -1,10 +1,12 @@
 ---
 id: CTR.WIRE.MAKE-DATA
-version: 3
+version: 4
 artifact: docs/schemas/command-data/make.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
+  - src/use_cases/artifacts.rs::a_designer_export_cancelled_after_its_start_is_a_cut_provider_command
+  - src/use_cases/artifacts.rs::an_unrelated_failure_while_an_interruption_is_pending_stays_a_failure
 ---
 
 # `data` команды `make`
@@ -16,12 +18,12 @@ check:
 `published: false` при успешном исполнении означает превью: артефакт спланирован, но не
 выложен.
 
-**Что изменила версия 3.** Фаза прерывания `execution.interruptions[].phase` стала закрытым
-набором значений в `snake_case`, общим для всех форм с итогом исполнения; набор перечисляет
-`$defs/ExecutionInterruptionPhase` схемы. `publish` стал `publication`, `export_or_publish` —
-`export_or_publication`. Последнее значение получает любой отказ, пришедший, когда прерывание
-уже запрошено, и остановку на безопасной точке перед экспортом тоже: какую работу прервали,
-ответ не различает ([#308](https://github.com/IngvarConsulting/v8-runner-rust/issues/308)).
+**Что изменила версия 4.** Значение `export_or_publication` ушло из набора фаз
+`execution.interruptions[].phase`: прерывание называет, что прервано. Остановка на безопасной
+точке — перед экспортом или перед публикацией — даёт `command_boundary`, выгрузка, снятая после
+запуска Конфигуратора, — `provider_command`. Отказ, пришедший, когда прерывание уже запрошено,
+остаётся отказом: `status: failed` и ошибка `designer_export_failed`, без записи о прерывании.
+Набор фаз общий для всех форм с итогом исполнения, и версию они сменили вместе.
 
 ## Пример
 

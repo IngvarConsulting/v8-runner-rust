@@ -1,10 +1,11 @@
 ---
 id: CTR.WIRE.INFOBASE-RESTORE-DATA
-version: 4
+version: 5
 artifact: docs/schemas/command-data/infobase-restore.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
+  - src/use_cases/infobase_export.rs::a_restore_refused_before_any_work_leaves_the_target_unchanged
 ---
 
 # `data` команды `infobase restore`
@@ -14,12 +15,13 @@ check:
 (создать или заместить), `restored` — сделано ли. `target_state` остаётся `unchanged`,
 пока платформа не отработала: превью цель не трогает.
 
-**Что изменила версия 4.** Фаза прерывания `execution.interruptions[].phase` стала закрытым
-набором значений в `snake_case`, общим для всех форм с итогом исполнения; набор перечисляет
-`$defs/ExecutionInterruptionPhase` схемы. Прежде фаза повторяла имя шага словами. Теперь
-`provider command` стал `provider_command`, а прерывание, замеченное на остальных шагах,
-называется `command_boundary`. Не всякая остановка на безопасной точке даёт запись: часть
-отвечает отказом без неё ([#308](https://github.com/IngvarConsulting/v8-runner-rust/issues/308)). Имена шагов в `steps[]` прежние.
+**Что изменила версия 5.** Значение `export_or_publication` ушло из общего набора фаз; эта
+форма его не давала. Каждая остановка на безопасной точке теперь пишет прерывание: статус
+`cancelled` и запись с фазой `command_boundary`, а не `failed` без записи. Процесс, которому
+отмена не дала запуститься, тоже называется `command_boundary`, а не `provider_command`:
+работы он не получил. Отказ исполнителя, так и не получившего работу, базу не трогал:
+`target_state` остаётся `unchanged`, и предупреждения о неудавшемся откате в ответе нет.
+Имена шагов в `steps[]` прежние.
 
 ## Пример
 
