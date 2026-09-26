@@ -232,11 +232,6 @@ pub(super) fn build_enterprise_dsl<'a>(
         client_mode.into(),
         runner,
         artifacts.platform_log.clone(),
-        timeout_override_ms
-            .map(Duration::from_millis)
-            .unwrap_or_else(|| Duration::from_secs(config.tests.execution_timeout_seconds)),
-    )
-    .with_execution_policy(
         context.process_policy(
             InterruptionSafetyClass::GracefulThenKill,
             Some(

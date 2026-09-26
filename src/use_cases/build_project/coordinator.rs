@@ -118,7 +118,7 @@ fn run_build_with(
                     error,
                     BuildResult {
                         provider: None,
-                        provider_dispatched: true,
+                        provider_dispatched: false,
                         ok: false,
                         steps: vec![],
                         duration_ms: started.elapsed().as_millis() as u64,
@@ -295,7 +295,7 @@ fn run_build_with(
 
     Ok(BuildResult {
         provider: None,
-        provider_dispatched: true,
+        provider_dispatched: false,
         ok: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,
@@ -323,7 +323,7 @@ pub(super) fn run_build_ibcmd(
                     error,
                     BuildResult {
                         provider: None,
-                        provider_dispatched: true,
+                        provider_dispatched: false,
                         ok: false,
                         steps: vec![],
                         duration_ms: started.elapsed().as_millis() as u64,
@@ -482,7 +482,7 @@ pub(super) fn run_build_ibcmd(
 
     Ok(BuildResult {
         provider: None,
-        provider_dispatched: true,
+        provider_dispatched: false,
         ok: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,
@@ -542,7 +542,7 @@ pub(super) fn run_build_edt(
             error,
             BuildResult {
                 provider: None,
-                provider_dispatched: true,
+                provider_dispatched: false,
                 ok: false,
                 steps: vec![],
                 duration_ms: 0,
@@ -560,7 +560,7 @@ pub(super) fn run_build_edt(
                     error,
                     BuildResult {
                         provider: None,
-                        provider_dispatched: true,
+                        provider_dispatched: false,
                         ok: false,
                         steps: vec![],
                         duration_ms: started.elapsed().as_millis() as u64,
@@ -699,11 +699,12 @@ pub(super) fn run_build_edt(
                                 Arc::new(manager),
                                 Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
                                 Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
-                            ) {
-                                Ok(dsl) => dsl.with_execution_policy(context.process_policy(
+                                context.process_policy(
                                     InterruptionSafetyClass::GracefulThenKill,
                                     None,
-                                )),
+                                ),
+                            ) {
+                                Ok(dsl) => dsl,
                                 Err(error) => {
                                     let app_error = AppError::from(error);
                                     let result = fail_from_source_set_index(
@@ -746,8 +747,6 @@ pub(super) fn run_build_edt(
                     edt.clone(),
                     config.work_path.join("edt-workspace"),
                     utilities.runner_for(UtilityType::EdtCli),
-                )
-                .with_execution_policy(
                     context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
                 );
                 prepare_edt_external_artifacts(config, source_set, &one_shot_edt)
@@ -914,11 +913,12 @@ pub(super) fn run_build_edt(
                                     Arc::new(manager),
                                     Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
                                     Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
-                                ) {
-                                    Ok(dsl) => dsl.with_execution_policy(context.process_policy(
+                                    context.process_policy(
                                         InterruptionSafetyClass::GracefulThenKill,
                                         None,
-                                    )),
+                                    ),
+                                ) {
+                                    Ok(dsl) => dsl,
                                     Err(error) => {
                                         let app_error = AppError::from(error);
                                         let result = fail_from_source_set_index(
@@ -967,8 +967,6 @@ pub(super) fn run_build_edt(
                         edt.clone(),
                         config.work_path.join("edt-workspace"),
                         utilities.runner_for(UtilityType::EdtCli),
-                    )
-                    .with_execution_policy(
                         context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
                     );
                     execute_edt_export_step(
@@ -1176,7 +1174,7 @@ pub(super) fn run_build_edt(
 
     Ok(BuildResult {
         provider: None,
-        provider_dispatched: true,
+        provider_dispatched: false,
         ok: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,

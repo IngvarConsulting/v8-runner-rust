@@ -1,14 +1,12 @@
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use thiserror::Error;
-use tokio_util::sync::CancellationToken;
 
 use crate::domain::runner::LaunchClientModeRequest;
 use crate::domain::runner::{launch_key_alias_matches, LaunchOptions};
 use crate::platform::connection::V8Connection;
 use crate::platform::process::{
-    ProcessError, ProcessExecutionPolicy, ProcessInterruptionSafety, ProcessRequest, ProcessRunner,
+    ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessRunner,
 };
 use crate::platform::result::PlatformCommandResult;
 
@@ -44,7 +42,7 @@ impl<'a> EnterpriseDsl<'a> {
         client_mode: LaunchClientMode,
         runner: &'a dyn ProcessRunner,
         log_file: PathBuf,
-        timeout: Duration,
+        execution_policy: ProcessExecutionPolicy,
     ) -> Self {
         Self {
             binary,
@@ -53,18 +51,8 @@ impl<'a> EnterpriseDsl<'a> {
             client_mode,
             runner,
             log_file,
-            execution_policy: ProcessExecutionPolicy::new(
-                Some(timeout),
-                CancellationToken::new(),
-                ProcessInterruptionSafety::GracefulThenKill,
-            ),
+            execution_policy,
         }
-    }
-
-    /// Overrides the shared execution policy for launching Enterprise.
-    pub fn with_execution_policy(mut self, execution_policy: ProcessExecutionPolicy) -> Self {
-        self.execution_policy = execution_policy;
-        self
     }
 
     pub fn run_launch(
@@ -268,7 +256,6 @@ mod tests {
     use crate::platform::connection::V8Connection;
     use crate::platform::process::{ProcessExecutor, ProcessRunner};
     use std::path::Path;
-    use std::time::Duration;
     use tempfile::tempdir;
 
     #[test]
@@ -470,7 +457,7 @@ mod tests {
             LaunchClientMode::Thin,
             &runner as &dyn ProcessRunner,
             dir.path().join("platform.log"),
-            Duration::from_secs(5),
+            crate::platform::process::ProcessExecutionPolicy::default(),
         );
 
         let args = dsl.build_args(&LaunchOptions {

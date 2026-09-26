@@ -459,7 +459,12 @@ fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 
                     data: result,
                 });
             } else {
-                render_bootstrap_text(&result, presenter, true, cli.dry_run);
+                render_bootstrap_text(
+                    &result,
+                    presenter,
+                    true,
+                    execute::Requested::from_dry_run(cli.dry_run),
+                );
             }
             0
         }
@@ -485,7 +490,12 @@ fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 
                 }
             } else {
                 if let Some(result) = failure.payload.as_ref() {
-                    render_bootstrap_text(result, presenter, false, cli.dry_run);
+                    render_bootstrap_text(
+                        result,
+                        presenter,
+                        false,
+                        execute::Requested::from_dry_run(cli.dry_run),
+                    );
                 }
                 presenter.print_error(&error.to_string());
             }
@@ -632,7 +642,7 @@ fn render_bootstrap_text(
     result: &crate::domain::bootstrap::BootstrapResult,
     presenter: &Presenter,
     succeeded: bool,
-    previewed: bool,
+    requested: execute::Requested,
 ) {
     let mut details = vec![
         format!("path: {}", result.path.display()),
@@ -663,9 +673,9 @@ fn render_bootstrap_text(
     // что были бы написаны. Признак берётся у запроса, а не выводится из
     // `provider_dispatched`: тот говорит, получил ли исполнитель работу, а не было ли
     // превью, и успешный боевой прогон может вернуться без работы исполнителю.
-    let label = match (succeeded, previewed) {
-        (true, false) => "Project cloned successfully",
-        (true, true) => "Project clone planned, nothing written",
+    let label = match (succeeded, requested) {
+        (true, execute::Requested::Apply) => "Project cloned successfully",
+        (true, execute::Requested::Preview) => "Project clone planned, nothing written",
         (false, _) => "Project clone failed",
     };
     let timeline = vec![

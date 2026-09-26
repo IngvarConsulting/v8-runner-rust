@@ -84,7 +84,7 @@ flowchart TB
 | Файл | Что в нём |
 | --- | --- |
 | [`utilities.rs`](../../src/platform/utilities.rs), [`locator.rs`](../../src/platform/locator.rs) | Вход для сценариев; поиск утилит по маске версии — [правило](../rules/platform/platform-tools-are-found-by-version-mask.md) |
-| [`process.rs`](../../src/platform/process.rs) | Процесс в своей группе, класс прерывания, снятие группы; клиент `launch` без ожидания — отсоединённым |
+| [`process.rs`](../../src/platform/process.rs) | Процесс в своей группе, класс прерывания, снятие группы; клиент `launch` без ожидания — отсоединённым; отметка работы команды (`WorkGiven`), которую ставит запуск процесса |
 | [`connection.rs`](../../src/platform/connection.rs) | Строка подключения выбранной базы и аргументы подключения утилит |
 | [`designer.rs`](../../src/platform/designer.rs), [`ibcmd.rs`](../../src/platform/ibcmd.rs), [`edt.rs`](../../src/platform/edt.rs), [`enterprise.rs`](../../src/platform/enterprise.rs), [`webinst.rs`](../../src/platform/webinst.rs) | Команды утилит; итог — [`PlatformCommandResult`](../../src/platform/result.rs) |
 | [`agent.rs`](../../src/platform/agent.rs), [`sftp.rs`](../../src/platform/sftp.rs) | Агент Конфигуратора и шлюз по встроенному SSH; SFTP поверх того же соединения |

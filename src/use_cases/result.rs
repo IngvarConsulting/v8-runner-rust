@@ -1,6 +1,7 @@
 use std::fmt;
 
 use crate::domain::next_step::NextStep;
+use crate::platform::process::WorkGiven;
 use crate::support::error::{AppError, CapabilityReason};
 
 const VALIDATION_EXIT_CODE: i32 = 2;
@@ -200,6 +201,52 @@ pub(crate) fn payload_mut<T>(outcome: &mut UseCaseResult<T>) -> Option<&mut T> {
         Ok(result) => Some(result),
         Err(failure) => failure.payload.as_mut(),
     }
+}
+
+/// Форма, несущая `provider_dispatched`. Значение ей ставит только `stamp_dispatch` — из
+/// отметки работы команды, а не из значения, решённого по месту.
+pub(crate) trait CarriesDispatch {
+    fn stamp_work(&mut self, work: &WorkGiven);
+}
+
+macro_rules! carries_dispatch {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl CarriesDispatch for $ty {
+                fn stamp_work(&mut self, work: &WorkGiven) {
+                    self.provider_dispatched = work.given();
+                }
+            }
+        )*
+    };
+}
+
+carries_dispatch!(
+    crate::domain::syntax::SyntaxCheckResult,
+    crate::domain::bootstrap::BootstrapResult,
+    crate::domain::dump::DumpResult,
+    crate::domain::convert::ConvertResult,
+    crate::domain::extensions::ExtensionsResult,
+    crate::domain::extensions::ExtensionInventoryResult,
+    crate::domain::init::InitResult,
+    crate::domain::artifacts::ArtifactsResult,
+    crate::domain::build::BuildResult,
+    crate::domain::load::LoadResult,
+    crate::domain::launch::LaunchResult,
+    crate::domain::publish::PublishResult,
+);
+
+/// Ставит `provider_dispatched` ответа из отметки работы команды. Это единственное место, где
+/// признак получает значение: сценарии пишут в конструкторах `false`, а вход сценария отдаёт
+/// исход через этот штамп, так что ни CLI, ни MCP не видят признака, решённого по месту.
+pub(crate) fn stamp_dispatch<T: CarriesDispatch>(
+    mut outcome: UseCaseResult<T>,
+    work: &WorkGiven,
+) -> UseCaseResult<T> {
+    if let Some(payload) = payload_mut(&mut outcome) {
+        payload.stamp_work(work);
+    }
+    outcome
 }
 
 #[cfg(test)]

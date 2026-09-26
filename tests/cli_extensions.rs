@@ -728,6 +728,41 @@ fn extensions_command_filters_by_requested_source_set_names() {
     assert!(!calls.contains("--name tests"));
 }
 
+/// Без целей настройка работы не даёт, и `provider_dispatched` говорит `false`. Текст при
+/// этом не выдаёт боевой прогон за превью: слова превью берутся из `--dry-run`, а не из
+/// признака (#312).
+#[test]
+fn extensions_command_without_targets_does_not_read_as_a_preview() {
+    let (_dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+    let config = fs::read_to_string(&config_path).expect("config");
+    let extensions = "  - name: client_mcp\n    type: EXTENSION\n    path: exts/client-mcp\n  - name: tests\n    type: EXTENSION\n    path: tests\n";
+    assert!(config.contains(extensions), "{config}");
+    fs::write(&config_path, config.replace(extensions, "")).expect("config without targets");
+    let text = |extra: &[&str]| {
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--no-color",
+                "extensions",
+            ])
+            .args(extra)
+            .output()
+            .expect("run command");
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+
+    // Слова превью на месте там, где им место: иначе их отсутствие ниже ничего не значило бы.
+    assert!(text(&["--dry-run"]).contains("preview"));
+    let applied = text(&[]);
+    assert!(
+        !applied.contains("preview") && !applied.contains("planned"),
+        "{applied}"
+    );
+    assert!(!calls_log.exists(), "ibcmd ran without a target");
+}
+
 #[test]
 fn extensions_command_json_failure_reports_operation_target_and_exit_code() {
     let (_dir, config_path, _calls_log, ibcmd_path) = setup_extensions_project();

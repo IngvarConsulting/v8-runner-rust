@@ -27,7 +27,7 @@ use crate::use_cases::external_artifacts::{
     discover_designer_external_artifacts, prepare_edt_external_artifacts, source_set_external_kind,
 };
 use crate::use_cases::request::BuildRequest as BuildArgs;
-use crate::use_cases::result::{payload_mut, UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::tool_extension;
 use tempfile::NamedTempFile;
@@ -52,6 +52,7 @@ const SUPPORTED_DESIGNER_BUILD_ERROR: &str =
 const SUPPORTED_EDT_BUILD_ERROR: &str =
     "build with format=EDT currently supports only the Designer or ibcmd provider";
 
+/// Caller must ensure exclusive ownership of `config.work_path`.
 pub fn execute(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -62,34 +63,18 @@ pub fn execute(
         transport = ?context.transport(),
         "executing build use case"
     );
-    run_build_unlocked(context, config, args)
+    stamp_dispatch(run_build_branch(context, config, args), context.work())
 }
 
 pub(crate) type BuildExecutionFailure = UseCaseFailure<BuildResult>;
 
 #[cfg(test)]
 pub(crate) fn run_build(config: &AppConfig, args: &BuildArgs) -> UseCaseResult<BuildResult> {
-    run_build_unlocked(
+    execute(
         &ExecutionContext::cli(crate::use_cases::context::CommandName::Build),
         config,
         args,
     )
-}
-
-/// Caller must ensure exclusive ownership of `config.work_path`.
-pub(crate) fn run_build_unlocked(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    args: &BuildArgs,
-) -> UseCaseResult<BuildResult> {
-    let mut outcome = run_build_branch(context, config, args);
-    // One place decides the flag for every branch, so a new branch cannot forget it.
-    if args.dry_run {
-        if let Some(result) = payload_mut(&mut outcome) {
-            result.provider_dispatched = false;
-        }
-    }
-    outcome
 }
 
 fn run_build_branch(
@@ -129,7 +114,7 @@ fn run_build_selected(
             error,
             BuildResult {
                 provider: None,
-                provider_dispatched: true,
+                provider_dispatched: false,
                 ok: false,
                 steps: vec![],
                 duration_ms: 0,

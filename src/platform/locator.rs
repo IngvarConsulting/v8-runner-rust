@@ -2760,6 +2760,49 @@ mod tests {
         );
     }
 
+    /// На этом держится образец без исполнителей в `tests/contract_dispatch.rs`: явный путь
+    /// к EDT CLI пуст, и поиск уходит в корни по умолчанию, но установку с чужой версией
+    /// там не берёт.
+    #[cfg(unix)]
+    #[test]
+    fn an_absent_edt_path_with_an_unknown_version_finds_no_installed_edt() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("edt");
+        let installed = root
+            .join("1c-edt-2025.2.3+30-x86_64")
+            .join("1cedt")
+            .join(UtilityType::EdtCli.executable_name());
+        touch_executable(&installed);
+        let absent = dir.path().join("absent").join("1cedtcli");
+        let locator = |version: Option<EdtVersion>| {
+            Locator::with_roots(
+                None,
+                None,
+                Some(absent.clone()),
+                version,
+                vec![],
+                vec![root.clone()],
+            )
+        };
+
+        // Без версии та же установка находится: отказ ниже вызван версией, а не тем, что
+        // корни по умолчанию при явном пути не просматриваются.
+        assert_eq!(
+            locator(None)
+                .locate(UtilityType::EdtCli)
+                .expect("the default root is searched")
+                .path,
+            canonical(&installed)
+        );
+        assert!(matches!(
+            locator(EdtVersion::parse_lenient("1999.9.9")).locate(UtilityType::EdtCli),
+            Err(LocatorError::NotFound {
+                utility: UtilityType::EdtCli,
+                ..
+            })
+        ));
+    }
+
     #[cfg(unix)]
     #[test]
     fn edt_version_requirement_rejects_canonical_symlink_mismatch() {

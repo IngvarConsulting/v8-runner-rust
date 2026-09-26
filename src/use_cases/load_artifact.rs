@@ -31,7 +31,7 @@ use crate::use_cases::interruption::{
 };
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::LoadRequest;
-use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 
 const SUPPORTED_LOAD_ERROR: &str =
     "load currently supports only the Designer provider and format=DESIGNER";
@@ -53,7 +53,7 @@ pub fn execute(
         extension = args.extension.as_deref().unwrap_or("<none>"),
         "executing load use case"
     );
-    run_load(context, config, args)
+    stamp_dispatch(run_load(context, config, args), context.work())
 }
 
 type LoadExecutionFailure = UseCaseFailure<LoadResult>;
@@ -91,16 +91,12 @@ fn run_load(
     args: &LoadRequest,
 ) -> UseCaseResult<LoadResult> {
     let started = Instant::now();
-    // One owner of the truth about the run: flipped where a platform process is actually
-    // started, and carried into every payload instead of a constant `true`.
-    let dispatched = false;
     let request_snapshot = request_snapshot_for_failure_payload(args);
 
     if let Some(error) = validate_supported_matrix(config) {
         return Err(LoadExecutionFailure::with_payload(
             error,
             empty_result(
-                dispatched,
                 args.mode,
                 PathBuf::from(&args.artifact_path),
                 request_snapshot.artifact_type,
@@ -122,7 +118,6 @@ fn run_load(
             return Err(LoadExecutionFailure::with_payload(
                 error,
                 empty_result(
-                    dispatched,
                     args.mode,
                     PathBuf::from(&args.artifact_path),
                     request_snapshot.artifact_type,
@@ -143,7 +138,6 @@ fn run_load(
         return Err(LoadExecutionFailure::with_payload(
             AppError::Runtime(message.clone()),
             interrupted_result_from_resolved(
-                dispatched,
                 &resolved,
                 CompatibilityState::NotProbed,
                 started,
@@ -164,7 +158,6 @@ fn run_load(
         Err((error, receipt)) => {
             let message = error.to_string();
             let mut result = empty_result_from_resolved(
-                dispatched,
                 &resolved,
                 CompatibilityState::NotProbed,
                 started,
@@ -178,18 +171,16 @@ fn run_load(
     };
     let receipt = selected.receipt.clone();
     let outcome = run_load_selected(
-        context, config, args, started, dispatched, resolved, utilities, selected,
+        context, config, args, started, resolved, utilities, selected,
     );
     crate::use_cases::provider_selection::attach(outcome, &receipt)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_load_selected(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &LoadRequest,
     started: Instant,
-    mut dispatched: bool,
     resolved: ResolvedLoadRequest,
     mut utilities: PlatformUtilities,
     selected: crate::use_cases::provider_selection::SelectedProvider,
@@ -252,7 +243,6 @@ fn run_load_selected(
             return Err(LoadExecutionFailure::with_payload(
                 error,
                 empty_result_from_resolved(
-                    dispatched,
                     &resolved,
                     CompatibilityState::NotProbed,
                     started,
@@ -265,7 +255,6 @@ fn run_load_selected(
     };
 
     let compatibility_state = probe_result.state;
-    dispatched = probe_result.dispatched;
     let probe_log_path = probe_result.platform_log_path;
     let probe_evidence = probe_result.diagnostic;
     if let Some(error) =
@@ -275,7 +264,6 @@ fn run_load_selected(
         return Err(LoadExecutionFailure::with_payload(
             error,
             empty_result_from_resolved(
-                dispatched,
                 &resolved,
                 compatibility_state,
                 started,
@@ -286,7 +274,6 @@ fn run_load_selected(
         ));
     }
 
-    dispatched = true;
     let apply_dsl = match build_designer_dsl(
         context,
         config,
@@ -305,7 +292,6 @@ fn run_load_selected(
             return Err(LoadExecutionFailure::with_payload(
                 error,
                 empty_result_from_resolved(
-                    dispatched,
                     &resolved,
                     compatibility_state,
                     started,
@@ -347,7 +333,6 @@ fn run_load_selected(
             return Err(LoadExecutionFailure::with_payload(
                 error,
                 empty_result_from_resolved(
-                    dispatched,
                     &resolved,
                     compatibility_state,
                     started,
@@ -370,7 +355,6 @@ fn run_load_selected(
         return Err(LoadExecutionFailure::with_payload(
             error,
             empty_result_from_resolved(
-                dispatched,
                 &resolved,
                 compatibility_state,
                 started,
@@ -390,7 +374,6 @@ fn run_load_selected(
         let message =
             interruption_before_safe_point_message(context, interruption, "update_db_cfg");
         let mut result = with_loaded_artifact(interrupted_result_from_resolved(
-            dispatched,
             &resolved,
             compatibility_state,
             started,
@@ -424,7 +407,6 @@ fn run_load_selected(
             return Err(LoadExecutionFailure::with_payload(
                 error,
                 with_loaded_artifact(empty_result_from_resolved(
-                    dispatched,
                     &resolved,
                     compatibility_state,
                     started,
@@ -453,7 +435,6 @@ fn run_load_selected(
             return Err(LoadExecutionFailure::with_payload(
                 error,
                 with_loaded_artifact(empty_result_from_resolved(
-                    dispatched,
                     &resolved,
                     compatibility_state,
                     started,
@@ -470,7 +451,6 @@ fn run_load_selected(
         return Err(LoadExecutionFailure::with_payload(
             error,
             with_loaded_artifact(empty_result_from_resolved(
-                dispatched,
                 &resolved,
                 compatibility_state,
                 started,
@@ -509,7 +489,7 @@ fn run_load_selected(
     }
     Ok(LoadResult {
         provider: None,
-        provider_dispatched: true,
+        provider_dispatched: false,
         mode: resolved.mode,
         artifact_path: resolved.artifact_path,
         artifact_type: resolved.artifact_type,
@@ -527,9 +507,6 @@ fn run_load_selected(
 
 struct ProbeResult {
     state: CompatibilityState,
-    /// Whether asking actually started a platform process. `provider_dispatched` on the wire
-    /// must be the truth about the run, not a constant.
-    dispatched: bool,
     platform_log_path: Option<PathBuf>,
     /// What the platform said about a probe that did not run — carried, never interpreted.
     diagnostic: Option<String>,
@@ -548,17 +525,16 @@ fn probe_compatibility(
     // interface language. Comparing the extension with its database copy told us nothing more
     // and told it in prose.
     if resolved.target_kind == LoadTargetKind::Extension {
-        let (state, diagnostic, dispatched) =
+        let (state, diagnostic) =
             match installed_extension_state(context, config, utilities, resolved) {
-                ExtensionPresence::Absent => (CompatibilityState::Absent, None, true),
-                ExtensionPresence::Present => (CompatibilityState::Supported, None, true),
-                ExtensionPresence::NotEstablished(reason, dispatched) => {
-                    (CompatibilityState::NotEstablished, Some(reason), dispatched)
+                ExtensionPresence::Absent => (CompatibilityState::Absent, None),
+                ExtensionPresence::Present => (CompatibilityState::Supported, None),
+                ExtensionPresence::NotEstablished(reason) => {
+                    (CompatibilityState::NotEstablished, Some(reason))
                 }
             };
         return Ok(ProbeResult {
             state,
-            dispatched,
             platform_log_path: None,
             diagnostic,
         });
@@ -569,7 +545,6 @@ fn probe_compatibility(
         // support state from the refusal text is what DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES forbids.
         return Ok(ProbeResult {
             state: CompatibilityState::NotProbed,
-            dispatched: false,
             platform_log_path: None,
             diagnostic: None,
         });
@@ -625,7 +600,6 @@ fn probe_compatibility(
     let diagnostic = probe_evidence(&result);
     Ok(ProbeResult {
         state,
-        dispatched: true,
         platform_log_path: result.platform_log_path,
         diagnostic,
     })
@@ -634,9 +608,9 @@ fn probe_compatibility(
 enum ExtensionPresence {
     Present,
     Absent,
-    /// The list could not be read. Asked and not proven, so no change is permitted. The flag
-    /// says whether a platform process was started before the attempt gave up.
-    NotEstablished(String, bool),
+    /// The list could not be read. Asked and not proven, so no change is permitted. Whether
+    /// `ibcmd` had started is the command's work mark, not this answer.
+    NotEstablished(String),
 }
 
 /// Asks the infobase whether the extension is installed, by its own keyed list.
@@ -647,33 +621,33 @@ fn installed_extension_state(
     resolved: &ResolvedLoadRequest,
 ) -> ExtensionPresence {
     let Some(name) = resolved.extension.as_deref() else {
-        return ExtensionPresence::NotEstablished("the extension is not named".to_owned(), false);
+        return ExtensionPresence::NotEstablished("the extension is not named".to_owned());
     };
     let connection = match IbcmdConnection::from_infobase(&config.infobase) {
         Ok(connection) => connection,
-        Err(error) => return ExtensionPresence::NotEstablished(error.to_string(), false),
+        Err(error) => return ExtensionPresence::NotEstablished(error.to_string()),
     };
     let binary = match utilities.locate(UtilityType::Ibcmd) {
         Ok(location) => location.path,
-        Err(error) => return ExtensionPresence::NotEstablished(error.to_string(), false),
+        Err(error) => return ExtensionPresence::NotEstablished(error.to_string()),
     };
-    let dsl = IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
-        .with_execution_policy(
-            context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-        );
+    let dsl = IbcmdDsl::new(
+        binary,
+        connection,
+        utilities.runner_for(UtilityType::Ibcmd),
+        context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+    );
     let result = match dsl.infobase_extension_list() {
         Ok(result) => result,
-        // The spawn itself failed, so nothing ran.
-        Err(error) => return ExtensionPresence::NotEstablished(error.to_string(), false),
+        // Refused before the start or stopped after it: the runner has already marked the
+        // work if `ibcmd` started.
+        Err(error) => return ExtensionPresence::NotEstablished(error.to_string()),
     };
     if result.process.exit_code != 0 {
-        return ExtensionPresence::NotEstablished(
-            format!(
-                "reading the extension list exited with {}",
-                result.process.exit_code
-            ),
-            true,
-        );
+        return ExtensionPresence::NotEstablished(format!(
+            "reading the extension list exited with {}",
+            result.process.exit_code
+        ));
     }
     match parse_extension_inventory(&result.process.stdout) {
         Ok(extensions) => {
@@ -683,7 +657,7 @@ fn installed_extension_state(
                 ExtensionPresence::Absent
             }
         }
-        Err(error) => ExtensionPresence::NotEstablished(error, true),
+        Err(error) => ExtensionPresence::NotEstablished(error),
     }
 }
 
@@ -964,8 +938,8 @@ fn build_designer_dsl<'a>(
         config.v8_connection(),
         runner,
         Some(log_file),
-    )
-    .with_execution_policy(context.process_policy(safety, None)))
+        context.process_policy(safety, None),
+    ))
 }
 
 fn ensure_platform_success(
@@ -1003,10 +977,10 @@ fn target_label(resolved: &ResolvedLoadRequest) -> String {
     }
 }
 
-/// Итог прерывания на безопасной точке. Запускалась ли платформа, говорит `dispatched`
-/// сценария; что пакет уже загружен, отмечает `with_loaded_artifact` у места вызова.
+/// Итог прерывания на безопасной точке. Получил ли исполнитель работу, ставит отметка
+/// команды на выходе `execute`; что пакет уже загружен, отмечает `with_loaded_artifact` у
+/// места вызова.
 fn interrupted_result_from_resolved(
-    provider_dispatched: bool,
     resolved: &ResolvedLoadRequest,
     compatibility_state: CompatibilityState,
     started: Instant,
@@ -1016,7 +990,7 @@ fn interrupted_result_from_resolved(
 ) -> LoadResult {
     LoadResult {
         provider: None,
-        provider_dispatched,
+        provider_dispatched: false,
         mode: resolved.mode,
         artifact_path: resolved.artifact_path.clone(),
         artifact_type: resolved.artifact_type,
@@ -1058,7 +1032,6 @@ fn with_loaded_artifact(mut result: LoadResult) -> LoadResult {
 }
 
 fn empty_result_from_resolved(
-    provider_dispatched: bool,
     resolved: &ResolvedLoadRequest,
     compatibility_state: CompatibilityState,
     started: Instant,
@@ -1067,7 +1040,6 @@ fn empty_result_from_resolved(
     update_db_cfg_ran: bool,
 ) -> LoadResult {
     empty_result(
-        provider_dispatched,
         resolved.mode,
         resolved.artifact_path.clone(),
         resolved.artifact_type,
@@ -1086,7 +1058,6 @@ fn empty_result_from_resolved(
 // была бы копией самого результата.
 #[allow(clippy::too_many_arguments)]
 fn empty_result(
-    provider_dispatched: bool,
     mode: LoadMode,
     artifact_path: PathBuf,
     artifact_type: ArtifactBuildMode,
@@ -1103,7 +1074,7 @@ fn empty_result(
         .unwrap_or_else(|| "artifact load failed".to_owned());
     LoadResult {
         provider: None,
-        provider_dispatched,
+        provider_dispatched: false,
         mode,
         artifact_path,
         artifact_type,
@@ -1923,6 +1894,149 @@ mod tests {
         let calls_text = fs::read_to_string(&calls).expect("calls");
         assert!(calls_text.contains("/LoadCfg"), "{calls_text}");
         assert!(!calls_text.contains("/UpdateDBCfg"), "{calls_text}");
+    }
+
+    /// Подставная программа, которая отмечается, что запущена, и ждёт, пока её не отпустят.
+    #[cfg(unix)]
+    fn write_waiting_program(path: &Path, started: &Path, release: &Path, when: &str) {
+        fs::write(
+            path,
+            format!(
+                "#!/bin/sh\nif printf '%s' \"$*\" | grep -F -q -- '{when}'; then\n  : > '{}'\n  while [ ! -e '{}' ]; do sleep 0.05; done\nfi\nexit 0\n",
+                started.display(),
+                release.display()
+            ),
+        )
+        .expect("write program");
+        make_executable(path);
+    }
+
+    /// Отменяет команду, когда подставная программа отметилась, что запущена, и отпускает её.
+    #[cfg(unix)]
+    fn cancel_once_started(
+        started: PathBuf,
+        release: PathBuf,
+    ) -> (CancellationToken, thread::JoinHandle<()>) {
+        let cancellation = CancellationToken::new();
+        let operator = {
+            let cancellation = cancellation.clone();
+            thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while !started.exists() && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                cancellation.cancel();
+                fs::write(&release, "").expect("release");
+            })
+        };
+        (cancellation, operator)
+    }
+
+    /// Проба списка расширений, отменённая уже после запуска `ibcmd`, работу получила, и ответ
+    /// говорит `provider_dispatched: true` (#309: прежде он отвечал `false`).
+    #[cfg(unix)]
+    #[test]
+    fn an_extension_probe_cancelled_after_its_start_reports_the_work() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("work")).expect("work");
+        let binary = root.join("1cv8");
+        write_designer_script(&binary, &root.join("calls.log"));
+        let (started, release) = (root.join("started"), root.join("release"));
+        write_waiting_program(&root.join("ibcmd"), &started, &release, "extension");
+        fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
+        let request = LoadRequest {
+            vendor_name: None,
+            dry_run: false,
+            mode: LoadMode::Load,
+            artifact_path: "ext.cfe".to_owned(),
+            settings_path: None,
+            extension: Some("ExistingExt".to_owned()),
+        };
+        let (cancellation, operator) = cancel_once_started(started, release);
+
+        let outcome = execute(
+            &ExecutionContext::cli(CommandName::Load).with_cancellation(cancellation),
+            &sample_config(root, &binary),
+            &request,
+        );
+        operator.join().expect("operator");
+
+        let payload = match outcome {
+            Ok(result) => result,
+            Err(failure) => failure.payload.expect("the refusal carries the form"),
+        };
+        assert!(payload.provider_dispatched, "the probe had started");
+    }
+
+    /// Проба совместимости конфигурации, отменённая после запуска Конфигуратора, — тоже
+    /// работа (#309).
+    #[cfg(unix)]
+    #[test]
+    fn a_configuration_probe_cancelled_after_its_start_reports_the_work() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("work")).expect("work");
+        let binary = root.join("1cv8");
+        let (started, release) = (root.join("started"), root.join("release"));
+        write_waiting_program(&binary, &started, &release, "/CompareCfg");
+        fs::write(root.join("main.cf"), "cf").expect("artifact");
+        let request = LoadRequest {
+            vendor_name: Some("Vendor".to_owned()),
+            dry_run: false,
+            mode: LoadMode::Merge,
+            artifact_path: "main.cf".to_owned(),
+            settings_path: Some("merge.xml".to_owned()),
+            extension: None,
+        };
+        fs::write(root.join("merge.xml"), "<settings/>").expect("settings");
+        let (cancellation, operator) = cancel_once_started(started, release);
+
+        let outcome = execute(
+            &ExecutionContext::cli(CommandName::Load).with_cancellation(cancellation),
+            &sample_config(root, &binary),
+            &request,
+        );
+        operator.join().expect("operator");
+
+        let payload = match outcome {
+            Ok(result) => result,
+            Err(failure) => failure.payload.expect("the refusal carries the form"),
+        };
+        assert!(payload.provider_dispatched, "the probe had started");
+    }
+
+    /// Отказ до первого процесса работы не дал, даже если проба не шла и прежде признак
+    /// ставился заранее (#309): рабочий каталог — файл, и журнал платформы некуда писать.
+    #[cfg(unix)]
+    #[test]
+    fn a_load_refused_before_its_first_process_reports_no_work() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(root.join("work"), "not a directory").expect("work is a file");
+        let binary = root.join("1cv8");
+        let calls = root.join("calls.log");
+        write_designer_script(&binary, &calls);
+        fs::write(root.join("main.cf"), "cf").expect("artifact");
+        let request = LoadRequest {
+            vendor_name: None,
+            dry_run: false,
+            mode: LoadMode::Load,
+            artifact_path: "main.cf".to_owned(),
+            settings_path: None,
+            extension: None,
+        };
+
+        let failure = execute(
+            &ExecutionContext::cli(CommandName::Load),
+            &sample_config(root, &binary),
+            &request,
+        )
+        .expect_err("no platform log directory");
+
+        let payload = failure.payload.expect("the refusal carries the form");
+        assert!(!payload.provider_dispatched, "no process was started");
+        assert!(!calls.exists(), "the platform never ran");
     }
 
     #[cfg(unix)]

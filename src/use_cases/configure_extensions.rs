@@ -14,14 +14,23 @@ use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
 use crate::use_cases::interruption;
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::ConfigureExtensionsRequest;
-use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use tracing::{debug, info};
 
 const DISABLE_SAFETY_ACTION: &str = "disable_safety";
 const EXTENSIONS_SUCCESS_LABEL: &str = "Extension properties updated successfully";
 const EXTENSIONS_FAILURE_LABEL: &str = "Extension property update failed";
 
+/// Единственный выход сценария: `provider_dispatched` ответа ставит отметка работы команды.
 pub fn execute(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &ConfigureExtensionsRequest,
+) -> UseCaseResult<ExtensionsResult> {
+    stamp_dispatch(run_configure(context, config, args), context.work())
+}
+
+fn run_configure(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &ConfigureExtensionsRequest,
@@ -91,19 +100,19 @@ pub fn execute(
             Ok(agent) => SafetySetter::Agent(Box::new(agent)),
             Err(error) => return Err(UseCaseFailure::without_payload(error)),
         },
-        Executor::Ibcmd { binary, connection } => SafetySetter::Ibcmd(Box::new(
-            IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
-                .with_execution_policy(
-                    context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
-                ),
-        )),
+        Executor::Ibcmd { binary, connection } => SafetySetter::Ibcmd(Box::new(IbcmdDsl::new(
+            binary,
+            connection,
+            utilities.runner_for(UtilityType::Ibcmd),
+            context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
+        ))),
     };
 
     let outcome = disable_safety_for(context, &mut setter, targets, started);
     setter.close();
     outcome.map(|steps| ExtensionsResult {
         provider: Some(receipt),
-        provider_dispatched: true,
+        provider_dispatched: false,
         ok: true,
         duration_ms: started.elapsed().as_millis() as u64,
         steps,
@@ -184,7 +193,7 @@ fn disable_safety_for(
             );
             let payload = ExtensionsResult {
                 provider: None,
-                provider_dispatched: true,
+                provider_dispatched: false,
                 ok: false,
                 steps,
                 duration_ms: started.elapsed().as_millis() as u64,
@@ -230,7 +239,7 @@ fn disable_safety_for(
                 log_extensions_summary(false);
                 let payload = ExtensionsResult {
                     provider: None,
-                    provider_dispatched: true,
+                    provider_dispatched: false,
                     ok: false,
                     steps,
                     duration_ms: started.elapsed().as_millis() as u64,
@@ -254,7 +263,7 @@ fn disable_safety_for(
                 log_extensions_summary(false);
                 let payload = ExtensionsResult {
                     provider: None,
-                    provider_dispatched: true,
+                    provider_dispatched: false,
                     ok: false,
                     steps,
                     duration_ms: started.elapsed().as_millis() as u64,

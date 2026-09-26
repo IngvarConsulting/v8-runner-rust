@@ -12,7 +12,7 @@ use crate::support::error::AppError;
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::dump_config;
 use crate::use_cases::request::{DumpModeRequest, DumpRequest};
-use crate::use_cases::result::{UseCaseError, UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
 
 const CONFIG_FILE_NAME: &str = "v8project.yaml";
 const LOCAL_CONFIG_FILE_NAME: &str = "v8project.local.yaml";
@@ -84,7 +84,6 @@ fn refused_before_dump(
             BootstrapOutcome {
                 ok: false,
                 dumped: false,
-                provider_dispatched: false,
                 message: Some(message),
             },
             Vec::new(),
@@ -140,7 +139,12 @@ pub fn plan(request: BootstrapRequest) -> Result<ClonePlan, UseCaseFailure<Boots
 ///
 /// Боевой прогон пишет проект, читает его настройки с диска и выгружает базу; превью
 /// выгрузку только планирует. Выгрузку ведёт один и тот же `dump_config`.
+/// Единственный выход сценария: `provider_dispatched` ответа ставит отметка работы команды.
 pub fn execute(context: &ExecutionContext, plan: &ClonePlan) -> UseCaseResult<BootstrapResult> {
+    stamp_dispatch(run_bootstrap(context, plan), context.work())
+}
+
+fn run_bootstrap(context: &ExecutionContext, plan: &ClonePlan) -> UseCaseResult<BootstrapResult> {
     let request = &plan.request;
     let written;
     let LoadedConfig { config, warnings } = if plan.is_preview() {
@@ -194,7 +198,7 @@ pub fn execute(context: &ExecutionContext, plan: &ClonePlan) -> UseCaseResult<Bo
         Ok(dump) => Ok(bootstrap_result(
             plan.started,
             &plan.paths,
-            outcome_of(&dump, dump.message.clone()),
+            outcome_of(&dump, plan, dump.message.clone()),
             warnings.clone(),
         )),
         Err(failure) => {
@@ -207,19 +211,12 @@ pub fn execute(context: &ExecutionContext, plan: &ClonePlan) -> UseCaseResult<Bo
                 .and_then(|dump| dump.message.as_deref())
                 .map(|value| redact_message(value, request))
                 .or(Some(message));
-            // Признак запуска берётся у выгрузки и здесь: отказ тоже знает, дошло ли дело
-            // до платформы. Его отсутствие значит `false` — ответа не было вовсе.
-            let provider_dispatched = failure
-                .payload
-                .as_ref()
-                .is_some_and(|dump| dump.provider_dispatched);
             let payload = bootstrap_result(
                 plan.started,
                 &plan.paths,
                 BootstrapOutcome {
                     ok: false,
                     dumped: false,
-                    provider_dispatched,
                     message: payload_message,
                 },
                 warnings.clone(),
@@ -500,24 +497,24 @@ fn is_embedded_auth_arg(arg: &str) -> bool {
     matches!(key.to_ascii_lowercase().as_str(), "/n" | "-n" | "/p" | "-p")
 }
 
-/// Исход попытки выгрузки в трёх признаках. Названы полями, а не позициями: три подряд
-/// идущих `bool` переставляются молча, а перестановка здесь меняет ответ.
+/// Исход попытки выгрузки. Признаки названы полями, а не позициями: подряд идущие `bool`
+/// переставляются молча, а перестановка здесь меняет ответ. `provider_dispatched` здесь нет:
+/// его ставит отметка работы команды на выходе `execute`.
 struct BootstrapOutcome {
     ok: bool,
     dumped: bool,
-    provider_dispatched: bool,
     message: Option<String>,
 }
 
 /// Исход, выведенный из ответа выгрузки.
 ///
-/// `dumped` требует обоих признаков: ответ превью тоже успешен, но выгрузки в нём не было.
-/// Выдумывать это различие не приходится — его называет сама выгрузка.
-fn outcome_of(dump: &DumpResult, message: Option<String>) -> BootstrapOutcome {
+/// Выгружено, если это не превью, выгрузка удалась и не нашла базу неизменной: превью тоже
+/// отвечает успехом, а неизменная база — работой агента без выгрузки. Признак работы
+/// исполнителя тут не годится: он говорит не о выгрузке.
+fn outcome_of(dump: &DumpResult, plan: &ClonePlan, message: Option<String>) -> BootstrapOutcome {
     BootstrapOutcome {
         ok: dump.ok,
-        dumped: dump.ok && dump.provider_dispatched,
-        provider_dispatched: dump.provider_dispatched,
+        dumped: !plan.is_preview() && dump.ok && !dump.up_to_date,
         message,
     }
 }
@@ -536,7 +533,7 @@ fn bootstrap_result(
         source_dir: paths.source_dir.clone(),
         dump_target_path: paths.source_dir.clone(),
         dumped: outcome.dumped,
-        provider_dispatched: outcome.provider_dispatched,
+        provider_dispatched: false,
         warnings,
         message: outcome.message,
         duration_ms: started.elapsed().as_millis() as u64,

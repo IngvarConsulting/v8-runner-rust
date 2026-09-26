@@ -29,7 +29,7 @@ use crate::use_cases::external_artifacts::ExternalArtifactKind;
 use crate::use_cases::interruption;
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::{DumpModeRequest, DumpRequest as DumpArgs};
-use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use tracing::debug;
 
 mod agent;
@@ -71,7 +71,10 @@ pub fn execute(
         transport = ?context.transport(),
         "executing dump use case"
     );
-    run_dump_with_context(context, config, args)
+    stamp_dispatch(
+        coordinator::run_dump_with_context(context, config, args),
+        context.work(),
+    )
 }
 
 type DumpExecutionFailure = UseCaseFailure<DumpResult>;
@@ -114,15 +117,7 @@ impl ResolvedDumpTarget {
 #[cfg(test)]
 fn run_dump(config: &AppConfig, args: &DumpArgs) -> UseCaseResult<DumpResult> {
     let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump);
-    run_dump_with_context(&context, config, args)
-}
-
-fn run_dump_with_context(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    args: &DumpArgs,
-) -> UseCaseResult<DumpResult> {
-    coordinator::run_dump_with_context(context, config, args)
+    execute(&context, config, args)
 }
 
 fn run_incremental_dump_designer(
@@ -731,16 +726,13 @@ fn build_edt_dsl<'a>(
             Arc::new(manager),
             Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
             Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
+            policy,
         )
         .map_err(AppError::from)
-        .map(|dsl| {
-            dsl.with_timeout(context.edt_timeout())
-                .with_execution_policy(policy)
-        })
+        .map(|dsl| dsl.with_timeout(context.edt_timeout()))
     } else {
-        Ok(EdtDsl::new(binary.to_path_buf(), workspace, runner)
-            .with_timeout(context.edt_timeout())
-            .with_execution_policy(policy))
+        Ok(EdtDsl::new(binary.to_path_buf(), workspace, runner, policy)
+            .with_timeout(context.edt_timeout()))
     }
 }
 
@@ -1273,12 +1265,18 @@ exit 0"#,
         fn run_with_policy(
             &self,
             request: &ProcessRequest,
-            _policy: &ProcessExecutionPolicy,
+            policy: &ProcessExecutionPolicy,
         ) -> Result<ProcessResult, ProcessError> {
+            // Как настоящий исполнитель, двойник отмечает работу, едва «запустил» процесс.
+            policy.mark_started_for_test();
             self.run_request(request)
         }
 
-        fn spawn(&self, _request: &ProcessRequest) -> Result<SpawnResult, ProcessError> {
+        fn spawn(
+            &self,
+            _request: &ProcessRequest,
+            _work: &crate::platform::process::WorkGiven,
+        ) -> Result<SpawnResult, ProcessError> {
             panic!("spawn must not be used in dump_config tests")
         }
     }

@@ -26,10 +26,19 @@ use crate::support::error::AppError;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::extension_agent::ExtensionAgent;
 use crate::use_cases::request::{ExtensionInventoryRequest, ExtensionInventoryScope};
-use crate::use_cases::result::{UseCaseError, UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
 use tracing::debug;
 
+/// Единственный выход сценария: `provider_dispatched` ответа ставит отметка работы команды.
 pub fn execute(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    request: &ExtensionInventoryRequest,
+) -> UseCaseResult<ExtensionInventoryResult> {
+    stamp_dispatch(run_read(context, config, request), context.work())
+}
+
+fn run_read(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &ExtensionInventoryRequest,
@@ -97,10 +106,12 @@ pub fn execute(
             extensions
         }
         Executor::Ibcmd { binary, connection } => {
-            let dsl = IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
-                .with_execution_policy(
-                    context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-                );
+            let dsl = IbcmdDsl::new(
+                binary,
+                connection,
+                utilities.runner_for(UtilityType::Ibcmd),
+                context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+            );
             let subject = inventory_subject(&request.scope);
 
             let platform_result = match &request.scope {
@@ -131,7 +142,7 @@ pub fn execute(
     Ok(ExtensionInventoryResult {
         provider: Some(receipt),
         ok: true,
-        provider_dispatched: true,
+        provider_dispatched: false,
         requested: requested(&request.scope),
         plan: None,
         extensions,
@@ -476,7 +487,20 @@ impl ExtensionChangeRequest {
 }
 
 /// Applies one change to the extension composition of the configured infobase.
+/// Единственный выход сценария: `provider_dispatched` ответа ставит отметка работы команды.
 pub fn change(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    request: &ExtensionChangeRequest,
+    dry_run: bool,
+) -> UseCaseResult<ExtensionsResult> {
+    stamp_dispatch(
+        run_change(context, config, request, dry_run),
+        context.work(),
+    )
+}
+
+fn run_change(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &ExtensionChangeRequest,
@@ -540,10 +564,12 @@ pub fn change(
             })
         }
         Executor::Ibcmd { binary, connection } => {
-            let dsl = IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
-                .with_execution_policy(
-                    context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
-                );
+            let dsl = IbcmdDsl::new(
+                binary,
+                connection,
+                utilities.runner_for(UtilityType::Ibcmd),
+                context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
+            );
             let platform_result = match request {
                 ExtensionChangeRequest::Create {
                     name,
@@ -572,7 +598,7 @@ pub fn change(
         Ok(()) => Ok(ExtensionsResult {
             provider: Some(receipt.clone()),
             ok: true,
-            provider_dispatched: true,
+            provider_dispatched: false,
             steps: vec![ExtensionsStep {
                 target: request.target().to_owned(),
                 action: request.action().to_owned(),
@@ -586,7 +612,7 @@ pub fn change(
             let payload = ExtensionsResult {
                 provider: Some(receipt.clone()),
                 ok: false,
-                provider_dispatched: true,
+                provider_dispatched: false,
                 steps: vec![ExtensionsStep {
                     target: request.target().to_owned(),
                     action: request.action().to_owned(),

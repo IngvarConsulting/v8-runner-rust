@@ -28,7 +28,7 @@ use crate::use_cases::external_artifacts::{
 use crate::use_cases::interruption;
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::{ConvertRequest, ConvertScopeRequest};
-use crate::use_cases::result::{payload_mut, UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 
 const CONVERT_BACKUP_PREFIX: &str = ".convert-backup";
 
@@ -78,15 +78,10 @@ pub fn execute(
     config: &AppConfig,
     request: &ConvertRequest,
 ) -> UseCaseResult<ConvertResult> {
-    let mut outcome = run_convert_with_context(context, config, request);
-    // Под превью признак решает одно место за все ветки: превью, даже отказавшее, работы
-    // EDT CLI не давало, и новая ветка об этом не забудет.
-    if request.dry_run {
-        if let Some(result) = payload_mut(&mut outcome) {
-            result.provider_dispatched = false;
-        }
-    }
-    outcome
+    stamp_dispatch(
+        run_convert_with_context(context, config, request),
+        context.work(),
+    )
 }
 
 pub fn preflight_validate(config: &AppConfig, request: &ConvertRequest) -> Result<(), AppError> {
@@ -180,7 +175,6 @@ fn run_convert_with_context(
                 target_path: item.target_path.clone(),
             })
             .collect();
-        // `provider_dispatched` превью ставит `execute` — одно место за все ветки.
         let preview = result_snapshot(
             true,
             resolved.direction,
@@ -226,6 +220,7 @@ fn run_convert_with_context(
             Arc::new(manager),
             Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
             Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
+            policy,
         )
         .map_err(|error| {
             let app_error = AppError::from(error);
@@ -244,17 +239,16 @@ fn run_convert_with_context(
                 ),
             )
         })?
-        .with_timeout(context.edt_timeout())
-        .with_execution_policy(policy);
+        .with_timeout(context.edt_timeout());
         execute_with_dsl(context, &dsl, &resolved, started)
     } else {
         let dsl = EdtDsl::new(
             location.path.clone(),
             resolved.workspace_path.clone(),
             utilities.runner_for(UtilityType::EdtCli),
+            policy,
         )
-        .with_timeout(context.edt_timeout())
-        .with_execution_policy(policy);
+        .with_timeout(context.edt_timeout());
         execute_with_dsl(context, &dsl, &resolved, started)
     }
 }
@@ -1400,7 +1394,7 @@ fn result_snapshot(
 ) -> ConvertResult {
     ConvertResult {
         ok,
-        provider_dispatched: true,
+        provider_dispatched: false,
         direction,
         scope,
         source_set,

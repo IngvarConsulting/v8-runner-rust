@@ -17,7 +17,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::platform::process::{ProcessInterruptionReason, ProcessInterruptionSafety};
+use crate::platform::process::{
+    ProcessExecutionPolicy, ProcessInterruptionReason, ProcessInterruptionSafety, WorkGiven,
+};
 
 use russh::client;
 use russh::keys::ssh_key::{Fingerprint, HashAlg};
@@ -375,9 +377,24 @@ pub struct WaitPolicy {
     pub deadline: Option<Instant>,
     pub cancellation: CancellationToken,
     pub safety: ProcessInterruptionSafety,
+    /// Куда отметить, что команда запроса отправлена агенту. Служебные команды сессии —
+    /// подключение к базе, закрытие — идут без отметки, и снимает её сама платформа
+    /// (`without_work`): снаружи поле не видно.
+    work: Option<WorkGiven>,
 }
 
 impl WaitPolicy {
+    /// Ожидание команды запроса по политике шага команды: отмена, класс безопасности и
+    /// отметка работы — оттуда, срок — если он у шага есть.
+    pub fn from_step(policy: ProcessExecutionPolicy) -> Self {
+        Self {
+            deadline: policy.timeout.map(|timeout| Instant::now() + timeout),
+            cancellation: policy.cancellation,
+            safety: policy.safety,
+            work: policy.work,
+        }
+    }
+
     /// Та же политика, урезанная до срока очистки. Это единственное место, где у
     /// агентского ожидания срок вообще появляется: сама работа идёт без него, а вот
     /// завершение обязано закончиться — иначе прерванная сессия висела бы вечно.
@@ -393,6 +410,14 @@ impl WaitPolicy {
         }
     }
 
+    /// Та же политика для служебной команды сессии: работы команды она не отмечает.
+    fn without_work(&self) -> Self {
+        Self {
+            work: None,
+            ..self.clone()
+        }
+    }
+
     /// Та же политика со сроком и отменой, но фаза объявлена критической: команда,
     /// меняющая информационную базу, доводится до исхода, а прерывание записывается
     /// и отдаётся вызывающему отложенным предупреждением.
@@ -404,12 +429,15 @@ impl WaitPolicy {
     }
 }
 
+/// Только для тестов: в работе политику ожидания строит контекст команды.
+#[cfg(test)]
 impl Default for WaitPolicy {
     fn default() -> Self {
         Self {
             deadline: None,
             cancellation: CancellationToken::new(),
             safety: ProcessInterruptionSafety::Interruptible,
+            work: Some(WorkGiven::for_command()),
         }
     }
 }
@@ -666,8 +694,11 @@ impl AgentSession {
             ended: false,
             deferred_interruption: None,
         };
-        session.run(JSON_MODE_COMMAND, policy)?.outcome()?;
-        session.run(CONNECT_COMMAND, policy)?.outcome()?;
+        // Режим ответа и подключение к базе — служебные команды открытия сессии: работы
+        // команды они не отмечают.
+        let service = policy.without_work();
+        session.run(JSON_MODE_COMMAND, &service)?.outcome()?;
+        session.run(CONNECT_COMMAND, &service)?.outcome()?;
         Ok(session)
     }
 
@@ -676,6 +707,11 @@ impl AgentSession {
     /// (замер 15.09.2026: `load-config-from-files` — `progress`, `progress`, …, `success`).
     pub fn run(&mut self, command: &str, policy: &WaitPolicy) -> Result<AgentReply, AgentError> {
         self.send(command)?;
+        // Команда ушла агенту: это работа команды, чем бы она ни кончилась. Служебные
+        // команды сессии приходят без отметки.
+        if let Some(work) = &policy.work {
+            work.mark_work_given();
+        }
         let mut messages = Vec::new();
         let mut deferred_interruption = None;
         loop {
@@ -702,8 +738,12 @@ impl AgentSession {
         Ok(reply)
     }
 
-    /// Закрывает сессию, не трогая агента: у чужого процесса раннер не хозяин.
-    pub fn close(mut self) {
+    /// Отпускает чужой агент, не трогая его процесса — у чужого процесса раннер не хозяин:
+    /// закрывает соединение с базой служебной командой — иначе точка входа держит
+    /// блокировку Конфигуратора и после разрыва SSH — и саму сессию. Ответ не важен, работы
+    /// команды это не отмечает.
+    pub fn release(mut self, policy: &WaitPolicy) {
+        let _ = self.run(DISCONNECT_COMMAND, &policy.cleanup().without_work());
         self.disconnect();
     }
 
@@ -987,10 +1027,11 @@ impl AgentSession {
     }
 
     /// Просит агента завершиться и закрывает сессию; возвращает ответ, если он был.
+    /// Завершение — служебная команда: работы команды оно не отмечает.
     pub fn shutdown(mut self, policy: &WaitPolicy) -> Option<AgentReply> {
         // Ответ на shutdown может и не прийти — сессию закрывает сам агент; ждать его
         // дольше короткого срока незачем, даже если бюджет команды не ограничен.
-        let capped = policy.cleanup();
+        let capped = policy.cleanup().without_work();
         // Агент может закрыть соединение, не ответив: EOF здесь — не отказ.
         let reply = self.run(SHUTDOWN_COMMAND, &capped).ok();
         self.disconnect();
@@ -1233,7 +1274,8 @@ impl ManagedAgent {
             startup_probe: Some(Duration::from_millis(300)),
         };
         let process = runner
-            .spawn_managed(&request, ManagedSpawnMode::Wait)
+            // Процесс агента — подъём сессии, а не работа команды: отметки у него нет.
+            .spawn_managed(&request, ManagedSpawnMode::Wait, None)
             .map_err(AgentError::Launch)?;
         debug!(
             pid = process.pid(),
@@ -1287,12 +1329,12 @@ impl ManagedAgent {
             session.shutdown(policy);
         }
         if let Some(process) = self.process.take() {
-            let grace = crate::platform::process::ProcessExecutionPolicy {
-                timeout: Some(Duration::from_secs(15)),
-                cancellation: CancellationToken::new(),
-                safety: crate::platform::process::ProcessInterruptionSafety::Interruptible,
-                graceful_shutdown_timeout: Duration::from_millis(250),
-            };
+            // Ожидание выхода агента — служебное: работы команды оно не отмечает.
+            let grace = ProcessExecutionPolicy::platform_step(
+                Some(Duration::from_secs(15)),
+                CancellationToken::new(),
+                ProcessInterruptionSafety::Interruptible,
+            );
             match process.wait_for_exit(&grace) {
                 Ok(outcome) if outcome.timed_out => {
                     warn!("designer agent ignored shutdown and was terminated")
@@ -1375,6 +1417,7 @@ mod tests {
             deadline: Some(deadline),
             cancellation: cancellation.clone(),
             safety: ProcessInterruptionSafety::GracefulThenKill,
+            work: Some(WorkGiven::for_command()),
         };
 
         let critical = base.critical();
@@ -1426,6 +1469,7 @@ mod tests {
             deadline: Some(soon),
             cancellation: CancellationToken::new(),
             safety: ProcessInterruptionSafety::GracefulThenKill,
+            work: Some(WorkGiven::for_command()),
         }
         .cleanup();
         assert_eq!(
@@ -1439,6 +1483,7 @@ mod tests {
             deadline: Some(far),
             cancellation: CancellationToken::new(),
             safety: ProcessInterruptionSafety::GracefulThenKill,
+            work: Some(WorkGiven::for_command()),
         }
         .cleanup();
         let bounded = bounded.deadline.expect("cleanup always has a deadline");
@@ -1503,6 +1548,7 @@ mod tests {
             deadline: Some(Instant::now() + Duration::from_secs(60)),
             cancellation: CancellationToken::new(),
             safety: ProcessInterruptionSafety::Interruptible,
+            work: Some(WorkGiven::for_command()),
         };
         let mut session = AgentSession::open(&request, &wait).expect("open");
         eprintln!(
@@ -1534,8 +1580,7 @@ mod tests {
             session.sftp_read("probe/x/a.cf").map(|b| b.len())
         );
         eprintln!("remove: {:?}", session.sftp_remove_all("probe"));
-        let _ = session.run("common disconnect-ib", &wait);
-        session.close();
+        session.release(&wait);
     }
 
     /// Шлюз автономного сервера внутри ответа на `update-db-cfg` шлёт уведомление

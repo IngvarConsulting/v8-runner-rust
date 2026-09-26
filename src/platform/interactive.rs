@@ -10,7 +10,7 @@ use tracing::warn;
 
 use crate::platform::process::{
     ProcessExecutionPolicy, ProcessInterruption, ProcessInterruptionAction,
-    ProcessInterruptionReason, ProcessInterruptionSafety,
+    ProcessInterruptionReason, ProcessInterruptionSafety, WorkGiven,
 };
 use crate::platform::secrets::render_masked_command;
 
@@ -251,19 +251,9 @@ impl InteractiveProcessExecutor {
         self.child.as_ref().map(Child::id)
     }
 
-    /// Runs one interactive command and waits for the next prompt.
-    pub fn execute(
-        &mut self,
-        command: &str,
-        timeout: Duration,
-    ) -> Result<InteractiveCommandOutput, InteractiveProcessError> {
-        if self.poisoned {
-            return Err(InteractiveProcessError::Poisoned);
-        }
-        if self.terminated || self.child.is_none() {
-            return Err(InteractiveProcessError::Terminated);
-        }
-
+    /// Пишет команду в процесс и выталкивает её. Ошибка здесь значит, что команда в процесс не
+    /// попала.
+    fn send_command(&mut self, command: &str) -> Result<(), InteractiveProcessError> {
         let stdin = self
             .stdin
             .as_mut()
@@ -286,6 +276,41 @@ impl InteractiveProcessExecutor {
                 command: command.to_owned(),
                 source,
             })?;
+        Ok(())
+    }
+
+    /// Runs one interactive command and waits for the next prompt. Only tests send commands
+    /// without saying whether they are the command's work; production goes through
+    /// `execute_delivering`.
+    #[cfg(test)]
+    pub fn execute(
+        &mut self,
+        command: &str,
+        timeout: Duration,
+    ) -> Result<InteractiveCommandOutput, InteractiveProcessError> {
+        self.execute_delivering(command, timeout, None)
+    }
+
+    /// Как `execute`, но команда запроса отмечает работу, как только доставлена в процесс:
+    /// записана и вытолкнута, ещё до ответа. Служебная команда передаёт `None` — и объявить
+    /// так команду может только платформа.
+    pub(in crate::platform) fn execute_delivering(
+        &mut self,
+        command: &str,
+        timeout: Duration,
+        delivered: Option<&WorkGiven>,
+    ) -> Result<InteractiveCommandOutput, InteractiveProcessError> {
+        if self.poisoned {
+            return Err(InteractiveProcessError::Poisoned);
+        }
+        if self.terminated || self.child.is_none() {
+            return Err(InteractiveProcessError::Terminated);
+        }
+
+        self.send_command(command)?;
+        if let Some(work) = delivered {
+            work.mark_work_given();
+        }
 
         self.wait_for_prompt(
             WaitMode::Command {
@@ -295,6 +320,8 @@ impl InteractiveProcessExecutor {
         )
     }
 
+    /// Как `execute_delivering`, но под политикой команды: доставленная команда отмечает
+    /// работу в `policy.work`, если та есть, — у служебной команды её нет.
     pub(crate) fn execute_with_policy(
         &mut self,
         command: &str,
@@ -323,28 +350,10 @@ impl InteractiveProcessExecutor {
             });
         }
 
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or(InteractiveProcessError::Terminated)?;
-        stdin.write_all(command.as_bytes()).map_err(|source| {
-            InteractiveProcessError::StdinWriteFailed {
-                command: command.to_owned(),
-                source,
-            }
-        })?;
-        stdin
-            .write_all(b"\n")
-            .map_err(|source| InteractiveProcessError::StdinWriteFailed {
-                command: command.to_owned(),
-                source,
-            })?;
-        stdin
-            .flush()
-            .map_err(|source| InteractiveProcessError::StdinFlushFailed {
-                command: command.to_owned(),
-                source,
-            })?;
+        self.send_command(command)?;
+        if let Some(work) = &policy.work {
+            work.mark_work_given();
+        }
 
         self.wait_for_prompt_with_policy(
             WaitMode::Command {

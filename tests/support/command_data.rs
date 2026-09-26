@@ -21,7 +21,7 @@ pub fn form_index() -> Value {
     serde_json::from_str(&text).expect("index is valid json")
 }
 
-fn form_schema(slug: &str) -> Value {
+pub fn form_schema(slug: &str) -> Value {
     let path = repo_root().join(format!("docs/schemas/command-data/{slug}.schema.json"));
     let text = fs::read_to_string(&path).expect("form artefact is present");
     serde_json::from_str(&text).expect("form is valid json")

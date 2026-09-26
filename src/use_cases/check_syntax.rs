@@ -27,7 +27,7 @@ use crate::use_cases::request::{
     DesignerConfigSyntaxRequest as DesignerConfigSyntaxArgs, ExtendedModulesPolicy,
     SyntaxExtensionScope, SyntaxRequest as SyntaxArgs, SyntaxTargetRequest as SyntaxTarget,
 };
-use crate::use_cases::result::{payload_mut, UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 use tracing::debug;
 
@@ -47,7 +47,7 @@ pub fn execute(
         transport = ?context.transport(),
         "executing syntax use case"
     );
-    run_syntax_with_context(context, config, args)
+    stamp_dispatch(run_syntax_branch(context, config, args), context.work())
 }
 
 type SyntaxExecutionFailure = UseCaseFailure<SyntaxCheckResult>;
@@ -55,24 +55,7 @@ type SyntaxExecutionFailure = UseCaseFailure<SyntaxCheckResult>;
 #[cfg(test)]
 fn run_syntax(config: &AppConfig, args: &SyntaxArgs) -> UseCaseResult<SyntaxCheckResult> {
     let context = ExecutionContext::cli(CommandName::Syntax);
-    run_syntax_with_context(&context, config, args)
-}
-
-fn run_syntax_with_context(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    args: &SyntaxArgs,
-) -> UseCaseResult<SyntaxCheckResult> {
-    let mut outcome = run_syntax_branch(context, config, args);
-    // Признак решается в одном месте за обе ветки и за оба исхода: превью платформу не
-    // запускает, чем бы оно ни кончилось — планом или отказом поиска утилиты. Иначе отказ
-    // превью сообщал бы о запуске, которого не было.
-    if args.dry_run {
-        if let Some(result) = payload_mut(&mut outcome) {
-            result.provider_dispatched = false;
-        }
-    }
-    outcome
+    execute(&context, config, args)
 }
 
 fn run_syntax_branch(
@@ -173,8 +156,8 @@ fn run_syntax_branch(
         config.v8_connection(),
         runner,
         Some(log_path.clone()),
-    )
-    .with_execution_policy(context.process_policy(InterruptionSafetyClass::GracefulThenKill, None));
+        context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+    );
 
     let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
     let stage_label = "check: designer-config";
@@ -605,14 +588,12 @@ fn run_edt_syntax(
                 Arc::new(manager),
                 Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
                 Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
-            ) {
-                Ok(dsl) => Some(
-                    dsl.with_timeout(context.edt_timeout())
-                        .with_execution_policy(context.process_policy(
-                            InterruptionSafetyClass::GracefulThenKill,
-                            context.edt_timeout(),
-                        )),
+                context.process_policy(
+                    InterruptionSafetyClass::GracefulThenKill,
+                    context.edt_timeout(),
                 ),
+            ) {
+                Ok(dsl) => Some(dsl.with_timeout(context.edt_timeout())),
                 Err(error) => {
                     let app_error = AppError::from(error);
                     let message = app_error.to_string();
@@ -679,12 +660,12 @@ fn run_edt_syntax(
                 edt_binary.clone(),
                 config.work_path.join("edt-workspace"),
                 utilities.runner_for(UtilityType::EdtCli),
+                context.process_policy(
+                    InterruptionSafetyClass::GracefulThenKill,
+                    context.edt_timeout(),
+                ),
             )
             .with_timeout(context.edt_timeout())
-            .with_execution_policy(context.process_policy(
-                InterruptionSafetyClass::GracefulThenKill,
-                context.edt_timeout(),
-            ))
             .validate_project(&source_path, &log_path)
         } {
             Ok(result) => result,
@@ -761,7 +742,7 @@ fn run_edt_syntax(
     let log_read_warning = (!log_warnings.is_empty()).then_some(log_warnings.join("\n"));
     let result = SyntaxCheckResult {
         provider: None,
-        provider_dispatched: true,
+        provider_dispatched: false,
         message: None,
         status,
         exit_code,
@@ -924,7 +905,7 @@ fn build_result(
 
     SyntaxCheckResult {
         provider: None,
-        provider_dispatched: true,
+        provider_dispatched: false,
         message: None,
         status,
         exit_code,
@@ -950,7 +931,7 @@ fn failed_result(
 ) -> SyntaxCheckResult {
     SyntaxCheckResult {
         provider: None,
-        provider_dispatched: true,
+        provider_dispatched: false,
         message: None,
         status,
         exit_code,
@@ -1089,8 +1070,7 @@ fn fallback_edt_issue(
 #[cfg(test)]
 mod tests {
     use super::{
-        edt_status_from_result, normalize_config_flags, run_syntax, run_syntax_with_context,
-        status_from_exit_code,
+        edt_status_from_result, execute, normalize_config_flags, run_syntax, status_from_exit_code,
     };
     use crate::config::model::{
         AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
@@ -1739,8 +1719,7 @@ mod tests {
         let context = ExecutionContext::mcp_stdio(CommandName::Syntax)
             .with_edt_timeout(Some(Duration::from_millis(20)));
 
-        let failure =
-            run_syntax_with_context(&context, &config, &args).expect_err("expected timeout");
+        let failure = execute(&context, &config, &args).expect_err("expected timeout");
         let message = failure.error.to_string();
         let payload = failure
             .payload
@@ -1774,8 +1753,7 @@ mod tests {
         let context = ExecutionContext::mcp_stdio(CommandName::Syntax)
             .with_edt_timeout(Some(Duration::from_millis(20)));
 
-        let failure =
-            run_syntax_with_context(&context, &config, &args).expect_err("expected timeout");
+        let failure = execute(&context, &config, &args).expect_err("expected timeout");
         let message = failure.error.to_string();
         let payload = failure
             .payload

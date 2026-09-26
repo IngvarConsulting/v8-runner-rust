@@ -22,7 +22,7 @@ use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::interruption;
 use crate::use_cases::progress::{log_live_stage, log_live_stage_status, LiveStageStatus};
 use crate::use_cases::request::InitRequest;
-use crate::use_cases::result::{UseCaseError, UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
 use crate::use_cases::tool_extension;
 
 pub fn execute(
@@ -35,7 +35,7 @@ pub fn execute(
         transport = ?context.transport(),
         "executing init use case"
     );
-    run_init(context, config, args.dry_run)
+    stamp_dispatch(run_init(context, config, args.dry_run), context.work())
 }
 
 pub(crate) type InitExecutionFailure = UseCaseFailure<InitResult>;
@@ -80,7 +80,6 @@ fn run_init(
     );
 
     let mut result = init_result(started, steps, first_error.is_none());
-    result.provider_dispatched = !dry_run;
     if dry_run {
         // Строка о ходе остаётся в выводе, хотя ни база, ни рабочее пространство не
         // тронуты: запись о вызове несёт конверт, журнала превью не ведёт.
@@ -98,7 +97,7 @@ fn init_result(started: Instant, steps: Vec<InitStep>, ok: bool) -> InitResult {
     InitResult {
         provider: None,
         ok,
-        provider_dispatched: true,
+        provider_dispatched: false,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,
     }
@@ -529,10 +528,9 @@ fn ensure_edt_workspace(
                 Arc::new(manager),
                 Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
                 Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
+                context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
             ) {
-                Ok(dsl) => dsl.with_execution_policy(
-                    context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-                ),
+                Ok(dsl) => dsl,
                 Err(error) => {
                     return StepOutcome::failed(
                         "edt_workspace",
@@ -556,8 +554,6 @@ fn ensure_edt_workspace(
             binary,
             workspace.clone(),
             utilities.runner_for(UtilityType::EdtCli),
-        )
-        .with_execution_policy(
             context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
         )
     };
@@ -644,8 +640,6 @@ fn create_infobase_via_designer(
         config.v8_connection(),
         utilities.runner_for(UtilityType::V8),
         None,
-    )
-    .with_execution_policy(
         context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
     )
     .create_infobase()
@@ -670,12 +664,14 @@ fn create_infobase_via_ibcmd(
         .map_err(AppError::from)?
         .path;
     let connection = IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
-    IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
-        .with_execution_policy(
-            context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
-        )
-        .ensure_infobase_create()
-        .map_err(AppError::from)
+    IbcmdDsl::new(
+        binary,
+        connection,
+        utilities.runner_for(UtilityType::Ibcmd),
+        context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
+    )
+    .ensure_infobase_create()
+    .map_err(AppError::from)
 }
 
 /// Locates the utility that would create the infobase, without creating it.

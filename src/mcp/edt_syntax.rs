@@ -11,10 +11,11 @@ use crate::domain::syntax::{CheckName, SyntaxCheckResult, SyntaxCheckStatus, Syn
 use crate::parsers::edt_validation;
 use crate::platform::edt::render_interactive_validate_command;
 use crate::platform::edt_session::{EdtSessionError, EdtSessionManager, EdtSessionRequest};
+use crate::platform::process::WorkGiven;
 use crate::support::error::AppError;
 use crate::support::temp::platform_logs_dir;
 use crate::use_cases::request::{SyntaxRequest, SyntaxTargetRequest};
-use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 
 const SUPPORTED_EDT_SYNTAX_ERROR: &str =
@@ -32,6 +33,21 @@ pub async fn execute(
     request: &SyntaxRequest,
     timeout: Duration,
     cancellation: CancellationToken,
+) -> Result<UseCaseResult<SyntaxCheckResult>, EdtSyntaxTransportError> {
+    // У этого пути нет контекста команды, и отметку работы заводит сам вызов.
+    let work = WorkGiven::for_command();
+    run(manager, config, request, timeout, cancellation, &work)
+        .await
+        .map(|outcome| stamp_dispatch(outcome, &work))
+}
+
+async fn run(
+    manager: &EdtSessionManager,
+    config: &AppConfig,
+    request: &SyntaxRequest,
+    timeout: Duration,
+    cancellation: CancellationToken,
+    work: &WorkGiven,
 ) -> Result<UseCaseResult<SyntaxCheckResult>, EdtSyntaxTransportError> {
     let started = Instant::now();
     let projects = match &request.target {
@@ -139,7 +155,8 @@ pub async fn execute(
         let command = render_interactive_validate_command(&source_path, &log_path);
         let execution = manager
             .execute_observed(
-                EdtSessionRequest::new(command, deadline).with_cancellation(cancellation.clone()),
+                EdtSessionRequest::new(command, deadline, work.clone())
+                    .with_cancellation(cancellation.clone()),
             )
             .await;
         let response = match execution.result {
@@ -276,7 +293,7 @@ pub async fn execute(
     let log_read_warning = (!log_warnings.is_empty()).then_some(log_warnings.join("\n"));
     let result = SyntaxCheckResult {
         provider: None,
-        provider_dispatched: true,
+        provider_dispatched: false,
         message: None,
         status,
         exit_code,
@@ -416,7 +433,7 @@ fn failed_result(
 ) -> SyntaxCheckResult {
     SyntaxCheckResult {
         provider: None,
-        provider_dispatched: true,
+        provider_dispatched: false,
         message: None,
         status,
         exit_code,
