@@ -1090,6 +1090,89 @@ async fn mcp_stdio_a_live_edt_check_whose_session_never_started_reports_no_work(
     client.cancel().await.expect("cancel client");
 }
 
+/// Проверка по нескольким проектам: первый доставлен в общую сессию и проверен, а второй её
+/// не дождался — сброс перед ним завис дольше, чем осталось времени у вызова. Работа уже
+/// была, поэтому вызов отказывает формой `check` с `provider_dispatched: true`, а не ошибкой
+/// протокола. Время вызова не больше потолка сброса: иначе зависший сброс считался бы сбоем
+/// сессии, а не ожиданием её; сессия поднята заранее, чтобы первый проект в это время уложился.
+#[tokio::test]
+async fn mcp_stdio_a_project_that_misses_the_edt_session_after_work_answers_in_the_check_form() {
+    let validate_handler = "if [ -n \"$out\" ]; then : > \"$out\"; fi\nprompt";
+    let (dir, config_path) =
+        setup_edt_project_with_options(validate_handler, MCP_ADMISSION_TIMEOUT_MS, 1_000, 1);
+    let second = dir.path().join("project").join("second-edt");
+    write_edt_configuration_source(&second, "second");
+    fs::write(
+        second.join(".project"),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<projectDescription>\n  <name>second</name>\n  <natures>\n    <nature>com._1c.g5.v8.dt.core.V8ExtensionNature</nature>\n  </natures>\n</projectDescription>\n",
+    )
+    .expect("extension project");
+    fs::write(
+        second.join("DT-INF").join("PROJECT.PMF"),
+        format!(
+            "Manifest-Version: 1.0\nRuntime-Version: {EDT_RUNTIME_VERSION}\nBase-Project: main\n"
+        ),
+    )
+    .expect("extension manifest");
+    fs::write(
+        second.join("metadata").join("Configuration.xml"),
+        "<Configuration><ConfigurationExtensionPurpose>Extension</ConfigurationExtensionPurpose></Configuration>",
+    )
+    .expect("extension descriptor");
+    let config = fs::read_to_string(&config_path).expect("config");
+    let with_second = config
+        .replace(
+            "    path: project/main-edt\n",
+            "    path: project/main-edt\n  - name: second\n    type: EXTENSION\n    path: project/second-edt\n",
+        )
+        .replace(
+            "    interactive-mode: true\n",
+            "    interactive-mode: true\n    auto-start: true\n",
+        );
+    assert_ne!(config, with_second, "the sample names its source sets");
+    fs::write(&config_path, with_second).expect("config with a second project");
+    // Сброс перед вторым проектом зависает: заглушка спит на переходе в рабочее пространство,
+    // когда проверка уже была.
+    let script = dir.path().join("edt").join("1cedtcli");
+    let body = fs::read_to_string(&script).expect("edt script");
+    let stalled = body.replace(
+        "cwd=\"$1\"\n",
+        "if [ \"$validate_count\" -ge 1 ]; then sleep 5; fi\ncwd=\"$1\"\n",
+    );
+    assert_ne!(body, stalled, "the stub changes directory on cd");
+    fs::write(&script, stalled).expect("stalled edt script");
+    let client = serve_stdio(&config_path).await;
+
+    let response = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("check_syntax_edt"))
+        .await
+        .expect("edt syntax call");
+
+    assert_eq!(response.is_error, Some(true), "{response:?}");
+    let payload = response.structured_content.expect("structured payload");
+    assert_eq!(payload["command"], "check", "{payload}");
+    assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
+    assert_data_matches_its_command_form(&payload, "check_syntax_edt after work");
+    assert_eq!(payload["data"]["status"], "tool_failed", "{payload}");
+    let message = payload["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("second") && message.contains("timed out"),
+        "{payload}"
+    );
+    let commands = fs::read_to_string(dir.path().join("edt-commands.log")).expect("command log");
+    assert_eq!(
+        commands
+            .lines()
+            .filter(|line| line.starts_with("validate "))
+            .count(),
+        1,
+        "only the first project was checked: {commands}"
+    );
+
+    client.cancel().await.expect("cancel client");
+}
+
 #[tokio::test]
 async fn mcp_stdio_returns_structured_business_failure() {
     let (_dir, config_path) = setup_project();
