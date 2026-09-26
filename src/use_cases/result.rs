@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::domain::next_step::NextStep;
 use crate::platform::process::WorkGiven;
-use crate::support::error::{AppError, CapabilityReason};
+use crate::support::error::{AppError, CancelledAt, CapabilityReason};
 
 const VALIDATION_EXIT_CODE: i32 = 2;
 const RUNTIME_EXIT_CODE: i32 = 3;
@@ -16,7 +16,8 @@ pub enum UseCaseErrorKind {
     Environment,
     WorkspaceBusy,
     InvalidOutput,
-    Cancelled,
+    /// Отмена оператором; место остановки говорит, оборвана ли работа исполнителя.
+    Cancelled(CancelledAt),
     TimedOut,
     Validation,
     Runtime,
@@ -30,7 +31,7 @@ impl UseCaseErrorKind {
             Self::Capability(_) => VALIDATION_EXIT_CODE,
             Self::Environment => VALIDATION_EXIT_CODE,
             Self::WorkspaceBusy => RUNTIME_EXIT_CODE,
-            Self::InvalidOutput | Self::Cancelled | Self::TimedOut => PLATFORM_EXIT_CODE,
+            Self::InvalidOutput | Self::Cancelled(_) | Self::TimedOut => PLATFORM_EXIT_CODE,
             Self::Validation => VALIDATION_EXIT_CODE,
             Self::Runtime => RUNTIME_EXIT_CODE,
             Self::Platform => PLATFORM_EXIT_CODE,
@@ -43,7 +44,7 @@ impl UseCaseErrorKind {
             Self::Environment => "environment unavailable",
             Self::WorkspaceBusy => "workspace busy",
             Self::InvalidOutput => "invalid output",
-            Self::Cancelled => "cancelled",
+            Self::Cancelled(_) => "cancelled",
             Self::TimedOut => "timed out",
             Self::Validation => "validation error",
             Self::Runtime => "runtime error",
@@ -84,6 +85,15 @@ impl UseCaseError {
         self.next.as_deref()
     }
 
+    /// Где отмена остановила команду, если отказ — отмена: по нему ответ с записью о
+    /// прерывании называет фазу, а штамп сверяет отметку работы.
+    pub const fn cancellation(&self) -> Option<CancelledAt> {
+        match self.kind {
+            UseCaseErrorKind::Cancelled(at) => Some(at),
+            _ => None,
+        }
+    }
+
     /// Returns the error kind.
     pub const fn kind(&self) -> UseCaseErrorKind {
         self.kind
@@ -108,6 +118,23 @@ impl fmt::Display for UseCaseError {
 
 impl From<AppError> for UseCaseError {
     fn from(value: AppError) -> Self {
+        // Отмена одна для всех: где бы её ни заметили — на безопасной точке, в снятом
+        // процессе, в брошенной команде агента, — род отказа у неё `cancelled`.
+        let cancelled_at = value.cancellation();
+        let error = Self::classified(value);
+        match cancelled_at {
+            Some(at) => Self {
+                kind: UseCaseErrorKind::Cancelled(at),
+                ..error
+            },
+            None => error,
+        }
+    }
+}
+
+impl UseCaseError {
+    /// Род отказа по виду ошибки; отмену поверх него узнаёт `From`.
+    fn classified(value: AppError) -> Self {
         match value {
             AppError::CapabilityUnavailable(refusal) => Self::new(
                 UseCaseErrorKind::Capability(refusal.reason),
@@ -117,7 +144,9 @@ impl From<AppError> for UseCaseError {
                 Self::new(UseCaseErrorKind::Environment, message)
             }
             AppError::WorkspaceBusy(message) => Self::new(UseCaseErrorKind::WorkspaceBusy, message),
-            AppError::Cancelled(message) => Self::new(UseCaseErrorKind::Cancelled, message),
+            AppError::Cancelled { message, at } => {
+                Self::new(UseCaseErrorKind::Cancelled(at), message)
+            }
             AppError::TimedOut(message) => Self::new(UseCaseErrorKind::TimedOut, message),
             AppError::InvalidOutput(message) => Self::new(UseCaseErrorKind::InvalidOutput, message),
             AppError::Validation(message) => Self::new(UseCaseErrorKind::Validation, message),
@@ -266,6 +295,23 @@ pub(crate) fn stamp_dispatch<T: CarriesDispatch>(
     // дошедший до забытого места, падает здесь, как бы оно ни называлось. В сборке без
     // проверок место остаётся видно в журнале.
     if let Err(failure) = &outcome {
+        // Оборвать можно только работу, которую исполнитель получил: отмена посреди работы
+        // без отметки назвала бы фазу работы, которой не было.
+        let unmarked_work =
+            failure.error.cancellation() == Some(CancelledAt::Work) && !work.given();
+        debug_assert!(
+            !unmarked_work,
+            "a cancellation that cut the executor's work short needs the work mark: {} ({})",
+            failure.error,
+            std::any::type_name::<T>()
+        );
+        if unmarked_work {
+            tracing::error!(
+                error = %failure.error,
+                form = std::any::type_name::<T>(),
+                "a cancellation named cut work that the work mark never saw"
+            );
+        }
         let formless = failure.payload.is_none() && work.given();
         debug_assert!(
             !formless,
@@ -295,7 +341,7 @@ mod tests {
     use crate::platform::edt_session::EdtSessionError;
     use crate::platform::ibcmd::IbcmdError;
     use crate::platform::process::{ProcessError, WorkGiven};
-    use crate::support::error::{AppError, CapabilityReason};
+    use crate::support::error::{AppError, CancelledAt, CapabilityReason};
 
     /// Форма с признаком в миниатюре.
     #[derive(Debug)]
@@ -353,6 +399,63 @@ mod tests {
         );
     }
 
+    /// Всякая отмена — род `cancelled`, где бы её ни заметили: на безопасной точке, в снятом
+    /// процессе, в брошенной команде агента или сессии EDT. Место остановки отказ несёт дальше.
+    #[test]
+    fn every_cancellation_answers_as_cancelled() {
+        for (error, at) in [
+            (
+                AppError::Cancelled {
+                    message: "safe point".to_owned(),
+                    at: CancelledAt::Boundary,
+                },
+                CancelledAt::Boundary,
+            ),
+            (
+                AppError::PlatformProcess(ProcessError::Cancelled {
+                    cmd: "webinst".to_owned(),
+                    delivered: true,
+                })
+                .with_context("publish"),
+                CancelledAt::Work,
+            ),
+            (
+                AppError::from(EdtSessionError::RunningCancelled { delivered: false }),
+                CancelledAt::Boundary,
+            ),
+        ] {
+            let error = UseCaseError::from(error);
+            assert_eq!(error.kind(), UseCaseErrorKind::Cancelled(at), "{error}");
+            assert_eq!(error.exit_code(), 4);
+            assert_eq!(error.cancellation(), Some(at), "{error}");
+        }
+        let timeout = UseCaseError::from(AppError::TimedOut("agent".to_owned()));
+        assert_eq!(timeout.kind(), UseCaseErrorKind::TimedOut);
+        assert_eq!(timeout.cancellation(), None);
+    }
+
+    /// Отмена посреди работы бывает только у команды, чей исполнитель работу получил: штамп
+    /// ловит отказ, который назвал бы оборванной работу, которой не было.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "needs the work mark")]
+    fn the_stamp_catches_a_cut_work_without_the_work_mark() {
+        let work = WorkGiven::for_command();
+        let cut = AppError::PlatformProcess(ProcessError::Cancelled {
+            cmd: "1cv8 DESIGNER".to_owned(),
+            delivered: true,
+        });
+        let _ = stamp_dispatch(
+            Err::<Form, _>(UseCaseFailure::with_payload(
+                cut,
+                Form {
+                    provider_dispatched: false,
+                },
+            )),
+            &work,
+        );
+    }
+
     #[test]
     fn use_case_error_kinds_keep_stable_cli_exit_codes() {
         for reason in [
@@ -370,7 +473,9 @@ mod tests {
         assert_eq!(UseCaseErrorKind::Environment.exit_code(), 2);
         assert_eq!(UseCaseErrorKind::WorkspaceBusy.exit_code(), 3);
         assert_eq!(UseCaseErrorKind::InvalidOutput.exit_code(), 4);
-        assert_eq!(UseCaseErrorKind::Cancelled.exit_code(), 4);
+        for at in [CancelledAt::Boundary, CancelledAt::Work] {
+            assert_eq!(UseCaseErrorKind::Cancelled(at).exit_code(), 4, "{at:?}");
+        }
         assert_eq!(UseCaseErrorKind::TimedOut.exit_code(), 4);
         assert_eq!(UseCaseErrorKind::Validation.exit_code(), 2);
         assert_eq!(UseCaseErrorKind::Runtime.exit_code(), 3);

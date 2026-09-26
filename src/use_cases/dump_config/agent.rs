@@ -14,8 +14,8 @@ use crate::platform::process::ProcessResult;
 use crate::support::fs::move_dir;
 use crate::use_cases::agent_session::{
     argument, collect_dir, collect_into_dir, connect, expose_dir, generation_id, make_output_dir,
-    map_agent_error, run_id, stage_file, tidy, transcript_log, wait_policy, withdraw_dir,
-    write_text, AgentHandle, Exchange, GenerationLedger,
+    run_id, stage_file, tidy, transcript_log, wait_policy, withdraw_dir, write_text, AgentHandle,
+    Exchange, GenerationLedger,
 };
 
 /// Выгрузка одного режима через одну сессию.
@@ -265,8 +265,8 @@ fn run_command(
     let reply = handle
         .session()
         .run(command, wait)
-        .map_err(map_agent_error)?;
-    reply.outcome().map_err(map_agent_error)?;
+        .map_err(AppError::from)?;
+    reply.outcome().map_err(AppError::from)?;
     Ok(reply.transcript())
 }
 

@@ -472,9 +472,10 @@ fn map_interactive_command_error(
     error: InteractiveProcessError,
 ) -> EdtError {
     match error {
-        InteractiveProcessError::CommandCancelled { .. } => {
+        InteractiveProcessError::CommandCancelled { delivered, .. } => {
             EdtError::Spawn(ProcessError::Cancelled {
                 cmd: render_interactive_session_command(binary, workspace, command),
+                delivered,
             })
         }
         InteractiveProcessError::CommandTimeout { timeout_ms, .. } => {
@@ -507,9 +508,14 @@ fn map_shared_session_error(
     timeout: Duration,
 ) -> EdtError {
     match error {
-        EdtSessionError::QueuedCancelled | EdtSessionError::RunningCancelled => {
+        EdtSessionError::QueuedCancelled => EdtError::Spawn(ProcessError::Cancelled {
+            cmd: render_interactive_session_command(binary, workspace, command),
+            delivered: false,
+        }),
+        EdtSessionError::RunningCancelled { delivered } => {
             EdtError::Spawn(ProcessError::Cancelled {
                 cmd: render_interactive_session_command(binary, workspace, command),
+                delivered,
             })
         }
         EdtSessionError::QueuedTimeout | EdtSessionError::RunningTimeout => {
@@ -526,6 +532,8 @@ fn map_shared_session_error(
     }
 }
 
+/// Прерывание, которое переход в рабочее пространство отложил: команда запроса после него
+/// не отправлялась, и работы команда не дала.
 fn process_error_from_interruption(
     binary: &Path,
     workspace: &Path,
@@ -536,6 +544,7 @@ fn process_error_from_interruption(
     match reason {
         ProcessInterruptionReason::Cancelled => ProcessError::Cancelled {
             cmd: render_interactive_session_command(binary, workspace, command),
+            delivered: false,
         },
         ProcessInterruptionReason::TimedOut => ProcessError::TimedOut {
             cmd: render_interactive_session_command(binary, workspace, command),
@@ -1124,6 +1133,7 @@ mod tests {
             if policy.cancellation.is_cancelled() {
                 return Err(ProcessError::Cancelled {
                     cmd: request.program.display().to_string(),
+                    delivered: false,
                 });
             }
             *self.timeout.lock().expect("timeout lock") = policy.timeout;
@@ -1626,6 +1636,97 @@ OUT\n\
             error,
             EdtError::Spawn(ProcessError::Cancelled { .. })
         ));
+    }
+
+    /// Команда EDT, снятая после доставки, — оборванная работа команды; отмена, заставшая
+    /// служебный переход в рабочее пространство, работы не обрывает: команда запроса ещё не
+    /// отправлена.
+    #[cfg(unix)]
+    #[test]
+    fn interactive_dsl_names_whether_the_cancelled_command_was_delivered() {
+        for cancel_during_cd in [false, true] {
+            let dir = tempdir().expect("tempdir");
+            let cd_marker = dir.path().join("cd");
+            let export_marker = dir.path().join("export");
+            let script = dir.path().join("1cedtcli");
+            let cd_wait = if cancel_during_cd { "sleep 30\n" } else { "" };
+            write_script(
+                &script,
+                &format!(
+                    "set -eu\n\
+                     prompt() {{ printf '1C:EDT>'; }}\n\
+                     prompt\n\
+                     while IFS= read -r line; do\n\
+                       eval \"set -- $line\"\n\
+                       cmd=\"${{1:-}}\"\n\
+                       case \"$cmd\" in\n\
+                         cd)\n\
+                           : > '{cd}'\n\
+                           {cd_wait}\
+                           prompt\n\
+                           ;;\n\
+                         export)\n\
+                           : > '{export}'\n\
+                           sleep 30\n\
+                           prompt\n\
+                           ;;\n\
+                         *)\n\
+                           prompt\n\
+                           ;;\n\
+                       esac\n\
+                     done\n",
+                    cd = cd_marker.display(),
+                    export = export_marker.display(),
+                ),
+            );
+            let cancellation = CancellationToken::new();
+            let work = WorkGiven::for_command();
+            let operator = {
+                let cancellation = cancellation.clone();
+                let marker = if cancel_during_cd {
+                    cd_marker.clone()
+                } else {
+                    export_marker.clone()
+                };
+                thread::spawn(move || {
+                    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                    while !marker.exists() && std::time::Instant::now() < deadline {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    cancellation.cancel();
+                })
+            };
+            let dsl = EdtDsl::new_interactive(
+                script,
+                dir.path().join("ws"),
+                TEST_INTERACTIVE_STARTUP_TIMEOUT,
+                TEST_INTERACTIVE_COMMAND_TIMEOUT,
+                ProcessExecutionPolicy::new(
+                    None,
+                    cancellation,
+                    ProcessInterruptionSafety::GracefulThenKill,
+                    work.clone(),
+                ),
+            )
+            .expect("interactive dsl");
+
+            let error = dsl
+                .export_project("project", Path::new("/tmp/out"))
+                .expect_err("cancelled error");
+            operator.join().expect("operator");
+
+            let delivered = !cancel_during_cd;
+            assert!(
+                matches!(
+                    &error,
+                    EdtError::Spawn(ProcessError::Cancelled { delivered: named, .. })
+                        if *named == delivered
+                ),
+                "cancelled during cd: {cancel_during_cd}: {error:?}"
+            );
+            assert_eq!(work.given(), delivered);
+            assert_eq!(export_marker.exists(), delivered);
+        }
     }
 
     #[cfg(unix)]

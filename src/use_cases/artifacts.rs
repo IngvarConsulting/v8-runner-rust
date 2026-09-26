@@ -34,9 +34,8 @@ use crate::use_cases::external_artifacts::{
     source_set_external_kind, ExternalArtifactDescriptor,
 };
 use crate::use_cases::interruption::{
-    command_interruption_details, command_interruption_status,
-    deferred_command_interruption_details, deferred_interruption_warning_for_command,
-    interruption_before_safe_point,
+    cancellation_record, deferred_command_interruption_details,
+    deferred_interruption_warning_for_command, interruption_before_safe_point,
 };
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::{ArtifactsModeRequest, ArtifactsRequest};
@@ -310,63 +309,80 @@ fn run_artifacts_selected(
                 execution,
             })
         }
-        Err((error, mut artifacts, platform_log_path)) => {
-            let message = error.to_string();
-            if artifacts.get_by_role(ARTIFACT_ROLE_PLATFORM_LOG).is_none() {
-                if let Some(path) = platform_log_path.as_ref() {
-                    artifacts.push(
-                        ArtifactRef::new(ArtifactKind::PlatformLog, path)
-                            .with_role(ARTIFACT_ROLE_PLATFORM_LOG),
-                    );
-                }
-            }
-            let metadata = ArtifactBuildMetadata {
-                artifact_type: resolved.mode,
-                output_path: resolved.output_path.clone(),
-                file_names: published_file_names(&artifacts),
-                published: false,
-            };
-            let artifact_for_error = artifacts
-                .get_by_role(ARTIFACT_ROLE_PLATFORM_LOG)
-                .or_else(|| artifacts.get_by_role(ARTIFACT_ROLE_STAGE_FILE))
-                .map(|path| ArtifactRef::new(ArtifactKind::Other("diagnostic".to_owned()), path));
-            let mut execution = ExecutionOutcome::new(
-                context
-                    .interruption()
-                    .map(command_interruption_status)
-                    .unwrap_or(ExecutionStatus::Failed),
-            )
-            .with_artifacts(artifacts.clone())
-            .with_payload(metadata);
-            if let Some(interruption) = context.interruption() {
-                execution = execution
-                    .with_diagnostics(vec![message.clone()])
-                    .with_interruptions(vec![command_interruption_details(
-                        interruption,
-                        ExecutionInterruptionPhase::ExportOrPublication,
-                        message.clone(),
-                    )]);
-            } else {
-                execution = execution.with_errors(vec![ExecutionError {
-                    code: "designer_export_failed".to_owned(),
-                    message: message.clone(),
-                    details: Vec::new(),
-                    artifact: artifact_for_error,
-                    retryable: false,
-                }]);
-            }
-            let payload = ArtifactsResult {
-                provider: None,
-                provider_dispatched: false,
-                mode: resolved.mode,
-                source_set: Some(resolved.source_set_name),
-                extension: resolved.extension,
-                duration_ms: started.elapsed().as_millis() as u64,
-                execution,
-            };
-            Err(ArtifactsExecutionFailure::with_payload(error, payload))
+        Err((error, artifacts, platform_log_path)) => Err(export_refusal(
+            &resolved,
+            started,
+            error,
+            artifacts,
+            platform_log_path,
+        )),
+    }
+}
+
+/// Отказ сборки артефакта формой команды. Отмену и её место называет ошибка: безопасная
+/// точка — `command_boundary`, снятый экспорт — `provider_command`. Отказ, пришедший, когда
+/// отмена уже ожидала, остаётся отказом со своим кодом: сигнал сюда не доходит вовсе.
+fn export_refusal(
+    resolved: &ResolvedArtifactsTarget,
+    started: Instant,
+    error: AppError,
+    mut artifacts: ArtifactSet,
+    platform_log_path: Option<PathBuf>,
+) -> ArtifactsExecutionFailure {
+    let message = error.to_string();
+    if artifacts.get_by_role(ARTIFACT_ROLE_PLATFORM_LOG).is_none() {
+        if let Some(path) = platform_log_path.as_ref() {
+            artifacts.push(
+                ArtifactRef::new(ArtifactKind::PlatformLog, path)
+                    .with_role(ARTIFACT_ROLE_PLATFORM_LOG),
+            );
         }
     }
+    let metadata = ArtifactBuildMetadata {
+        artifact_type: resolved.mode,
+        output_path: resolved.output_path.clone(),
+        file_names: published_file_names(&artifacts),
+        published: false,
+    };
+    let artifact_for_error = artifacts
+        .get_by_role(ARTIFACT_ROLE_PLATFORM_LOG)
+        .or_else(|| artifacts.get_by_role(ARTIFACT_ROLE_STAGE_FILE))
+        .map(|path| ArtifactRef::new(ArtifactKind::Other("diagnostic".to_owned()), path));
+    let interruption = cancellation_record(
+        &error,
+        ExecutionInterruptionPhase::ProviderCommand,
+        message.clone(),
+    );
+    let status = if interruption.is_some() {
+        ExecutionStatus::Cancelled
+    } else {
+        ExecutionStatus::Failed
+    };
+    let execution = ExecutionOutcome::new(status)
+        .with_artifacts(artifacts.clone())
+        .with_payload(metadata);
+    let execution = match interruption {
+        Some(interruption) => execution
+            .with_diagnostics(vec![message.clone()])
+            .with_interruptions(vec![interruption]),
+        None => execution.with_errors(vec![ExecutionError {
+            code: "designer_export_failed".to_owned(),
+            message: message.clone(),
+            details: Vec::new(),
+            artifact: artifact_for_error,
+            retryable: false,
+        }]),
+    };
+    let payload = ArtifactsResult {
+        provider: None,
+        provider_dispatched: false,
+        mode: resolved.mode,
+        source_set: Some(resolved.source_set_name.clone()),
+        extension: resolved.extension.clone(),
+        duration_ms: started.elapsed().as_millis() as u64,
+        execution,
+    };
+    ArtifactsExecutionFailure::with_payload(error, payload)
 }
 
 /// Исход публикации артефактов: и успех, и отказ несут уже разложенный набор, чтобы
@@ -1244,9 +1260,9 @@ fn published_file_names(artifacts: &ArtifactSet) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_orphan_files, publication_message, publication_warning, published_execution,
-        resolve_target, run_artifacts, run_designer_export, validate_supported_matrix,
-        ResolvedArtifactsTarget, StagedPublicationOutcome,
+        cleanup_orphan_files, export_refusal, publication_message, publication_warning,
+        published_execution, resolve_target, run_artifacts, run_designer_export,
+        validate_supported_matrix, ResolvedArtifactsTarget, StagedPublicationOutcome,
     };
     use crate::config::model::{
         AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
@@ -1311,9 +1327,23 @@ mod tests {
     }
 
     /// Подставной Конфигуратор: выгружает `.cf` и журнал, а затем делает то, что задал тест, —
-    /// отменяет команду или подменяет цель.
+    /// отменяет команду или подменяет цель — и выходит с заданным кодом.
     #[cfg(unix)]
-    struct DumpThen<F>(F);
+    struct DumpThen<F> {
+        then: F,
+        exit_code: i32,
+    }
+
+    #[cfg(unix)]
+    impl<F> DumpThen<F> {
+        fn new(then: F) -> Self {
+            Self { then, exit_code: 0 }
+        }
+
+        fn exiting(self, exit_code: i32) -> Self {
+            Self { exit_code, ..self }
+        }
+    }
 
     #[cfg(unix)]
     impl<F: Fn(&ProcessExecutionPolicy)> ProcessRunner for DumpThen<F> {
@@ -1340,9 +1370,9 @@ mod tests {
                 }
                 previous = arg;
             }
-            (self.0)(policy);
+            (self.then)(policy);
             Ok(ProcessResult {
-                exit_code: 0,
+                exit_code: self.exit_code,
                 stdout: String::new(),
                 stderr: String::new(),
                 interruption: None,
@@ -1559,9 +1589,16 @@ mod tests {
 
         let failure = run_artifacts(&context, &config, &request).expect_err("failure");
         let error_text = failure.error.to_string();
+        let kind = failure.error.kind();
         let payload = failure.payload.expect("payload");
 
         assert!(error_text.contains("before entering artifact export"));
+        assert_eq!(
+            kind,
+            crate::use_cases::result::UseCaseErrorKind::Cancelled(
+                crate::support::error::CancelledAt::Boundary
+            )
+        );
         assert_eq!(payload.execution.status, ExecutionStatus::Cancelled);
         let [interruption] = payload.execution.interruptions.as_slice() else {
             panic!(
@@ -1569,11 +1606,10 @@ mod tests {
                 payload.execution.interruptions
             );
         };
-        // Известный разрыв #308: до экспорта ничего не выгружено, и по смыслу это
-        // `command_boundary`. Когда #308 закроют, ожидание здесь сменится.
+        // До экспорта ничего не выгружено: это безопасная точка команды.
         assert_eq!(
             interruption.phase,
-            Some(ExecutionInterruptionPhase::ExportOrPublication)
+            Some(ExecutionInterruptionPhase::CommandBoundary)
         );
     }
 
@@ -1640,7 +1676,7 @@ mod tests {
             &config,
             &resolved,
             Path::new("/tmp/fake-1cv8"),
-            &DumpThen(|policy: &ProcessExecutionPolicy| policy.cancellation.cancel()),
+            &DumpThen::new(|policy: &ProcessExecutionPolicy| policy.cancellation.cancel()),
         )
         .expect_err("interrupted before publish");
         let (error, artifacts, _platform_log_path) = failure;
@@ -1679,7 +1715,7 @@ mod tests {
         let resolved = resolve_target(&config, &request).expect("resolved");
         let context = ExecutionContext::cli(CommandName::Artifacts);
         // Пока исполнитель работает, на месте цели появляется ссылка в чужое место.
-        let runner = DumpThen(|_: &ProcessExecutionPolicy| {
+        let runner = DumpThen::new(|_: &ProcessExecutionPolicy| {
             std::os::unix::fs::symlink(&elsewhere, &target).expect("plant a link");
         });
 
@@ -1709,6 +1745,126 @@ mod tests {
             .get_by_role(ARTIFACT_ROLE_STAGE_FILE)
             .expect("stage artifact");
         assert!(stage_path.is_file());
+    }
+
+    /// Отказ, пришедший, когда отмена уже ожидает, остаётся отказом со своим кодом: сигнал
+    /// без ошибки отмены прерыванием его не делает (#308).
+    #[cfg(unix)]
+    #[test]
+    fn an_unrelated_failure_while_an_interruption_is_pending_stays_a_failure() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        fs::create_dir_all(base.join("configuration")).expect("base config");
+        fs::create_dir_all(&work).expect("work");
+        let config = sample_config(
+            &base,
+            &work,
+            Path::new("/tmp/fake-1cv8"),
+            SourceFormat::Designer,
+        );
+        let request = cf_request(&dir.path().join("dist/release.cf").display().to_string());
+        let resolved = resolve_target(&config, &request).expect("resolved");
+        let context = ExecutionContext::cli(CommandName::Artifacts);
+        // Конфигуратор выходит с отказом, а оператор тем временем просит остановиться.
+        let runner = DumpThen::new(|policy: &ProcessExecutionPolicy| policy.cancellation.cancel())
+            .exiting(12);
+
+        let (error, artifacts, platform_log_path) = run_designer_export(
+            &context,
+            &config,
+            &resolved,
+            Path::new("/tmp/fake-1cv8"),
+            &runner,
+        )
+        .expect_err("the export failed");
+        assert!(
+            context.interruption().is_some(),
+            "the interruption is pending"
+        );
+        let failure = export_refusal(
+            &resolved,
+            std::time::Instant::now(),
+            error,
+            artifacts,
+            platform_log_path,
+        );
+
+        assert_eq!(
+            failure.error.kind(),
+            crate::use_cases::result::UseCaseErrorKind::Platform
+        );
+        let payload = failure.payload.expect("payload");
+        assert_eq!(payload.execution.status, ExecutionStatus::Failed);
+        assert!(
+            payload.execution.interruptions.is_empty(),
+            "{:?}",
+            payload.execution.interruptions
+        );
+        assert_eq!(payload.execution.errors[0].code, "designer_export_failed");
+    }
+
+    /// Конфигуратор, снятый отменой посреди выгрузки, — оборванная работа команды: фаза
+    /// `provider_command`, род отказа — отмена (#308).
+    #[cfg(unix)]
+    #[test]
+    fn a_designer_export_cancelled_after_its_start_is_a_cut_provider_command() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("configuration")).expect("config dir");
+        let script = dir.path().join("1cv8");
+        let started = dir.path().join("started");
+        write_script(
+            &script,
+            &format!(
+                ": > '{}'\nwaited=0\nwhile [ \"$waited\" -lt 300 ]; do sleep 0.1; waited=$((waited + 1)); done\nexit 0",
+                started.display()
+            ),
+        );
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        fs::create_dir_all(base.join("configuration")).expect("base config");
+        fs::create_dir_all(&work).expect("work");
+        let config = sample_config(&base, &work, &script, SourceFormat::Designer);
+        let request = cf_request(&dir.path().join("dist/release.cf").display().to_string());
+        let cancellation = CancellationToken::new();
+        let operator = {
+            let cancellation = cancellation.clone();
+            std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while !started.exists() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                cancellation.cancel();
+            })
+        };
+
+        let failure = super::execute(
+            &ExecutionContext::cli(CommandName::Artifacts).with_cancellation(cancellation),
+            &config,
+            &request,
+        )
+        .expect_err("the export was cancelled");
+        operator.join().expect("operator");
+
+        assert_eq!(
+            failure.error.kind(),
+            crate::use_cases::result::UseCaseErrorKind::Cancelled(
+                crate::support::error::CancelledAt::Work
+            )
+        );
+        let payload = failure.payload.expect("payload");
+        assert!(payload.provider_dispatched, "the export had started");
+        assert_eq!(payload.execution.status, ExecutionStatus::Cancelled);
+        let [interruption] = payload.execution.interruptions.as_slice() else {
+            panic!(
+                "one interruption expected: {:?}",
+                payload.execution.interruptions
+            );
+        };
+        assert_eq!(
+            interruption.phase,
+            Some(ExecutionInterruptionPhase::ProviderCommand)
+        );
     }
 
     #[test]

@@ -3,6 +3,7 @@ id: INV.USE-CASES.AN-INTERRUPTION-STATUS-MEANS-A-TERMINAL-OUTCOME
 check:
   - src/use_cases/infobase_export.rs::cancelled_process_is_not_collapsed_into_generic_failure
   - src/use_cases/infobase_export.rs::unrelated_failure_is_not_reclassified_by_an_interrupted_context
+  - src/use_cases/artifacts.rs::an_unrelated_failure_while_an_interruption_is_pending_stays_a_failure
   - src/platform/process.rs::an_interrupted_process_is_reaped_before_the_answer
   - src/platform/interactive.rs::command_timeout_kills_process_and_poison_fails_next_call
   - src/platform/edt_session.rs::execute_blocking_running_cancellation_preserves_cancelled_result_after_forced_cleanup

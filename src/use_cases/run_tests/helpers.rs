@@ -7,7 +7,9 @@ use crate::domain::execution::{
     ExecutionStepKind, ExecutionStepStatus, StepResult,
 };
 use crate::domain::runner::{LaunchClientModeRequest, LaunchOptions, RunnerKind};
-use crate::domain::test::{TestErrorKind, TestOutputMode, TestReport, TestRunResult, TestTarget};
+use crate::domain::test::{
+    test_execution_error, TestErrorKind, TestOutputMode, TestReport, TestRunResult, TestTarget,
+};
 use crate::platform::enterprise::{EnterpriseDsl, EnterpriseError};
 use crate::platform::locator::UtilityType;
 use crate::platform::process::{ProcessError, ProcessInterruptionReason};
@@ -16,11 +18,11 @@ use crate::support::error::AppError;
 use crate::support::path::is_safe_path_segment;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::interruption::{
-    command_interruption_details, command_interruption_message, command_interruption_status,
-    process_interruption_details,
+    interruption_record, process_interruption_details, SafePoint, SafePointCancel,
 };
 use crate::use_cases::launch_keys::vanessa_enterprise_launch_keys;
 use crate::use_cases::request::{TestRequest as TestArgs, TestScopeRequest as TestScope};
+use crate::use_cases::result::UseCaseError;
 
 use super::{build_yaxunit_config, prepare_vanessa_run, PreparedRun, RunArtifacts};
 
@@ -95,15 +97,10 @@ pub(super) fn interrupted_test_failure(
     steps: &[StepResult],
     started: Instant,
 ) -> Option<super::TestExecutionFailure> {
-    let interruption = context.interruption()?;
-    let message = command_interruption_message(context, interruption);
-    let outcome = ExecutionOutcome::new(command_interruption_status(interruption))
-        .with_diagnostics(vec![message.clone()])
-        .with_interruptions(vec![command_interruption_details(
-            interruption,
-            ExecutionInterruptionPhase::CommandBoundary,
-            message.clone(),
-        )]);
+    let cancel = SafePointCancel::noticed(context, SafePoint::Command)?;
+    let outcome = ExecutionOutcome::new(cancel.status())
+        .with_diagnostics(vec![cancel.message().to_owned()])
+        .with_interruptions(vec![cancel.record()]);
     let result = make_test_result(
         target.clone(),
         mode.clone(),
@@ -113,9 +110,43 @@ pub(super) fn interrupted_test_failure(
         started.elapsed().as_millis() as u64,
     );
     Some(super::TestExecutionFailure::with_payload(
-        AppError::Runtime(message),
+        cancel.into_error(),
         result,
     ))
+}
+
+/// Итог теста, чью сборку-предпосылку остановил отказ `error`. Сборку прервала отмена — тест
+/// отвечает прерыванием там, где она её застала, а не отказом сборки; прочий отказ —
+/// `build_failed`.
+pub(super) fn build_prerequisite_failure(
+    error: &UseCaseError,
+    step: StepResult,
+    summary: &str,
+) -> (StepResult, ExecutionOutcome<TestReport>) {
+    match error.cancellation() {
+        Some(at) => (
+            step,
+            ExecutionOutcome::new(ExecutionStatus::Cancelled)
+                .with_diagnostics(vec![summary.to_owned()])
+                .with_interruptions(vec![interruption_record(
+                    at,
+                    ExecutionInterruptionPhase::ProviderCommand,
+                    summary,
+                )]),
+        ),
+        None => (
+            step.with_errors(vec![test_execution_error(
+                TestErrorKind::BuildFailed,
+                summary,
+            )]),
+            ExecutionOutcome::new(ExecutionStatus::Failed)
+                .with_diagnostics(vec![summary.to_owned()])
+                .with_errors(vec![test_execution_error(
+                    TestErrorKind::BuildFailed,
+                    summary,
+                )]),
+        ),
+    }
 }
 
 pub(super) fn validate_runner_profile_id(profile_id: &str) -> Result<&str, AppError> {
@@ -315,66 +346,62 @@ pub(super) fn enterprise_error_kind(
     Option<ExecutionInterruptionDetails>,
     ExecutionStatus,
 ) {
-    match error {
-        EnterpriseError::Spawn(ProcessError::Cancelled { .. }) => (
+    let error = AppError::from(error);
+    // Отмену и её место называет ошибка: снятый прогон — фаза `run`, отказ запустить его по
+    // отмене — безопасная точка.
+    if let Some(at) = error.cancellation() {
+        let message = "enterprise test run cancelled";
+        return (
             None,
-            AppError::Runtime("enterprise test run cancelled".to_owned()),
-            Some(process_interruption_details(
-                ProcessInterruptionReason::Cancelled,
+            error.with_context(message),
+            Some(interruption_record(
+                at,
                 ExecutionInterruptionPhase::Run,
-                false,
-                "enterprise test run cancelled",
+                message,
             )),
             ExecutionStatus::Cancelled,
-        ),
-        EnterpriseError::Spawn(ProcessError::TimedOut { .. }) => (
-            None,
-            AppError::Runtime("enterprise test run timed out".to_owned()),
-            Some(process_interruption_details(
-                ProcessInterruptionReason::TimedOut,
-                ExecutionInterruptionPhase::Run,
-                false,
-                "enterprise test run timed out",
-            )),
-            ExecutionStatus::TimedOut,
-        ),
-        EnterpriseError::Spawn(process_error @ ProcessError::SpawnFailed { .. }) => (
-            Some(TestErrorKind::EnterpriseSpawnFailed),
-            AppError::PlatformProcess(process_error),
-            None,
-            ExecutionStatus::Failed,
-        ),
-        EnterpriseError::Spawn(process_error @ ProcessError::ManagedSpawnUnsupported { .. }) => (
-            Some(TestErrorKind::EnterpriseSpawnFailed),
-            AppError::PlatformProcess(process_error),
-            None,
-            ExecutionStatus::Failed,
-        ),
-        EnterpriseError::Spawn(process_error @ ProcessError::StartupCheckFailed { .. }) => (
-            Some(TestErrorKind::EnterpriseStartupCheckFailed),
-            AppError::PlatformProcess(process_error),
-            None,
-            ExecutionStatus::Failed,
-        ),
-        EnterpriseError::Spawn(process_error @ ProcessError::ExitedEarly { .. }) => (
-            Some(TestErrorKind::EnterpriseExitedEarly),
-            AppError::PlatformProcess(process_error),
-            None,
-            ExecutionStatus::Failed,
-        ),
-        EnterpriseError::Spawn(process_error @ ProcessError::StdoutLogIo { .. }) => (
-            Some(TestErrorKind::EnterpriseStdoutLogIo),
-            AppError::PlatformProcess(process_error),
-            None,
-            ExecutionStatus::Failed,
-        ),
-        EnterpriseError::Spawn(process_error @ ProcessError::StderrLogIo { .. }) => (
-            Some(TestErrorKind::EnterpriseStderrLogIo),
-            AppError::PlatformProcess(process_error),
-            None,
-            ExecutionStatus::Failed,
-        ),
+        );
     }
+    let kind = match &error {
+        AppError::PlatformProcess(ProcessError::TimedOut { .. }) => {
+            return (
+                None,
+                AppError::Runtime("enterprise test run timed out".to_owned()),
+                Some(process_interruption_details(
+                    ProcessInterruptionReason::TimedOut,
+                    ExecutionInterruptionPhase::Run,
+                    false,
+                    "enterprise test run timed out",
+                )),
+                ExecutionStatus::TimedOut,
+            );
+        }
+        AppError::PlatformProcess(ProcessError::StartupCheckFailed { .. }) => {
+            TestErrorKind::EnterpriseStartupCheckFailed
+        }
+        AppError::PlatformProcess(ProcessError::ExitedEarly { .. }) => {
+            TestErrorKind::EnterpriseExitedEarly
+        }
+        AppError::PlatformProcess(ProcessError::StdoutLogIo { .. }) => {
+            TestErrorKind::EnterpriseStdoutLogIo
+        }
+        AppError::PlatformProcess(ProcessError::StderrLogIo { .. }) => {
+            TestErrorKind::EnterpriseStderrLogIo
+        }
+        AppError::PlatformProcess(
+            ProcessError::SpawnFailed { .. } | ProcessError::ManagedSpawnUnsupported { .. },
+        ) => TestErrorKind::EnterpriseSpawnFailed,
+        // Сюда не доходит ничто: отмену разобрали выше, а ошибка прогона — всегда ошибка
+        // процесса. Новый вид ошибки процесса должен получить здесь свою строку.
+        other => {
+            debug_assert!(
+                false,
+                "an enterprise run failure is not classified: {other}"
+            );
+            TestErrorKind::EnterpriseSpawnFailed
+        }
+    };
+    (Some(kind), error, None, ExecutionStatus::Failed)
 }
 
 #[cfg(test)]
@@ -471,6 +498,83 @@ mod tests {
                 ));
             },
         );
+    }
+
+    /// Снятый прогон — прерывание в фазе `run`, отказ запустить его по отмене — безопасная
+    /// точка; род отказа у обоих — отмена.
+    #[test]
+    fn a_cancelled_run_is_classified_by_where_it_stopped() {
+        for (delivered, phase) in [
+            (true, ExecutionInterruptionPhase::Run),
+            (false, ExecutionInterruptionPhase::CommandBoundary),
+        ] {
+            let (kind, app_error, interruption, status) =
+                enterprise_error_kind(EnterpriseError::Spawn(ProcessError::Cancelled {
+                    cmd: "1cv8c ENTERPRISE".to_owned(),
+                    delivered,
+                }));
+
+            assert_eq!(kind, None);
+            assert_eq!(
+                app_error.cancellation(),
+                Some(crate::support::error::CancelledAt::after(delivered))
+            );
+            let interruption = interruption.expect("a cancelled run is an interruption");
+            assert_eq!(interruption.kind, ExecutionInterruptionKind::Cancelled);
+            assert!(!interruption.deferred);
+            assert_eq!(interruption.phase, Some(phase), "delivered: {delivered}");
+            assert_eq!(status, ExecutionStatus::Cancelled);
+        }
+    }
+
+    /// Сборка-предпосылка, остановленная отменой, — прерывание теста там, где отмена её
+    /// застала: безопасная точка сборки — `command_boundary`, снятый исполнитель сборки —
+    /// `provider_command`. Прочий отказ сборки остаётся `build_failed` (#308).
+    #[test]
+    fn a_build_prerequisite_stopped_by_a_cancellation_is_an_interruption() {
+        use crate::domain::execution::{ExecutionStepKind, StepResult};
+        use crate::support::error::CancelledAt;
+        use crate::use_cases::result::UseCaseError;
+
+        for (at, phase) in [
+            (
+                CancelledAt::Boundary,
+                ExecutionInterruptionPhase::CommandBoundary,
+            ),
+            (
+                CancelledAt::Work,
+                ExecutionInterruptionPhase::ProviderCommand,
+            ),
+        ] {
+            let error = UseCaseError::from(AppError::Cancelled {
+                message: "build cancelled".to_owned(),
+                at,
+            });
+            let (step, outcome) = super::build_prerequisite_failure(
+                &error,
+                StepResult::failed("build", ExecutionStepKind::PlatformCommand, 0),
+                "build cancelled",
+            );
+
+            assert!(step.errors.is_empty(), "{at:?}: {step:?}");
+            assert_eq!(outcome.status, ExecutionStatus::Cancelled);
+            assert!(outcome.errors.is_empty(), "{at:?}: {:?}", outcome.errors);
+            let [interruption] = outcome.interruptions.as_slice() else {
+                panic!("one interruption expected: {:?}", outcome.interruptions);
+            };
+            assert_eq!(interruption.kind, ExecutionInterruptionKind::Cancelled);
+            assert_eq!(interruption.phase, Some(phase), "{at:?}");
+        }
+
+        let failed = UseCaseError::from(AppError::Platform("load failed".to_owned()));
+        let (step, outcome) = super::build_prerequisite_failure(
+            &failed,
+            StepResult::failed("build", ExecutionStepKind::PlatformCommand, 0),
+            "load failed",
+        );
+        assert_eq!(step.errors[0].code, TestErrorKind::BuildFailed.code());
+        assert_eq!(outcome.status, ExecutionStatus::Failed);
+        assert!(outcome.interruptions.is_empty());
     }
 
     #[test]

@@ -134,9 +134,10 @@ pub fn get_bytes(
 
     runtime.block_on(async move {
         let started = Instant::now();
-        let mut last_error = None;
-
-        for attempt in 1..=RETRY_ATTEMPTS {
+        // Каждая попытка кончается либо байтами, либо своей ошибкой — после последней
+        // подставлять нечего, и отмену из ниоткуда ответ не назовёт.
+        let mut attempt = 1;
+        loop {
             ensure_not_cancelled(cancellation)?;
             let request_timeout = remaining_budget(timeout, started)?;
             let client = build_client(request_timeout)?;
@@ -144,14 +145,12 @@ pub fn get_bytes(
             match download_once(&client, &url, timeout, started, cancellation).await {
                 Ok(bytes) => return Ok(bytes),
                 Err(error) if attempt < RETRY_ATTEMPTS && error.is_retryable() => {
-                    last_error = Some(error);
                     sleep_before_retry(cancellation, timeout, started).await?;
+                    attempt += 1;
                 }
                 Err(error) => return Err(error),
             }
         }
-
-        Err(last_error.unwrap_or(DownloadError::Cancelled))
     })
 }
 

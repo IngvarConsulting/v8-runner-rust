@@ -1777,7 +1777,7 @@ fn infobase_pre_dispatch_execution_phase(workspace_lock_acquired: bool) -> Infob
 fn annotate_pre_dispatch_failure(execution: &mut ExecutionOutcome<()>, error: &UseCaseError) {
     execution.status = match error.kind() {
         UseCaseErrorKind::InvalidOutput => ExecutionStatus::InvalidOutput,
-        UseCaseErrorKind::Cancelled => ExecutionStatus::Cancelled,
+        UseCaseErrorKind::Cancelled(_) => ExecutionStatus::Cancelled,
         UseCaseErrorKind::TimedOut => ExecutionStatus::TimedOut,
         _ => ExecutionStatus::Failed,
     };
@@ -1798,7 +1798,7 @@ const fn execution_step_code(kind: UseCaseErrorKind) -> &'static str {
         UseCaseErrorKind::Environment => "environment_unavailable",
         UseCaseErrorKind::WorkspaceBusy => "workspace_busy",
         UseCaseErrorKind::InvalidOutput => "invalid_output",
-        UseCaseErrorKind::Cancelled => "cancelled",
+        UseCaseErrorKind::Cancelled(_) => "cancelled",
         UseCaseErrorKind::TimedOut => "timed_out",
         UseCaseErrorKind::Validation => "invalid_argument",
         UseCaseErrorKind::Runtime => "runtime_failure",

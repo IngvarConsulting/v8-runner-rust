@@ -3364,3 +3364,334 @@ fn a_step_may_skip_the_work_mark_only_inside_the_platform() {
         "a step may be declared not to be the command's work only inside the platform: {open:?}"
     );
 }
+
+/// Варианты отмены. Назвать их вне платформы и владельца значило бы решить «отменено» в
+/// обход классификатора — и потерять, получил ли исполнитель работу.
+const CANCEL_VARIANTS: &[&str] = &[
+    "crate::platform::process::ProcessError::Cancelled",
+    "crate::platform::agent::AgentError::Cancelled",
+    "crate::platform::download::DownloadError::Cancelled",
+    "crate::platform::interactive::InteractiveProcessError::CommandCancelled",
+    "crate::platform::edt_session::EdtSessionError::QueuedCancelled",
+    "crate::platform::edt_session::EdtSessionError::RunningCancelled",
+    "crate::support::error::AppError::Cancelled",
+];
+
+/// Чтение сигнала отмены в обход безопасной точки.
+const SIGNAL_READS: &[&str] = &["is_cancelled", "cancelled", "interruption"];
+
+/// Кто называет варианты отмены: платформа их строит, владельцы классифицируют —
+/// `support::error` узнаёт отмену в любой обёртке, `use_cases::result` отдаёт её роду
+/// отказа, `use_cases::interruption` строит отмену безопасной точки.
+fn may_name_cancel_variants(module: &[String]) -> bool {
+    module.starts_with(&path_of("crate::platform"))
+        || module == path_of("crate::support::error").as_slice()
+        || module == path_of("crate::use_cases::result").as_slice()
+        || module == path_of("crate::use_cases::interruption").as_slice()
+}
+
+/// Кто читает сигнал сам: платформа, контекст команды, безопасные точки и допуск вызова MCP.
+fn may_read_the_signal(module: &[String]) -> bool {
+    module.starts_with(&path_of("crate::platform"))
+        || module == path_of("crate::use_cases::context").as_slice()
+        || module == path_of("crate::use_cases::interruption").as_slice()
+        || module == path_of("crate::mcp::server").as_slice()
+}
+
+/// Места производственного кода, где отмену решают в обход владельца.
+fn cancellation_bypasses(index: &SourceIndex) -> Vec<String> {
+    struct Scan<'a, 'b> {
+        index: &'a SourceIndex,
+        body: &'a Body<'b>,
+        local_uses: std::collections::HashMap<String, Vec<String>>,
+        found: Vec<String>,
+    }
+
+    impl Scan<'_, '_> {
+        fn note(&mut self, what: impl std::fmt::Display) {
+            self.found.push(format!(
+                "{} ({}): {what}",
+                self.body.unit.file.display(),
+                self.body.context
+            ));
+        }
+
+        /// Тело макроса проверяется по словам: `Тип::Вариант` и `.метод(`, как бы его ни
+        /// разбирал сам макрос.
+        fn scan_tokens(&mut self, tokens: &impl quote::ToTokens) {
+            let flat = flat_tokens(tokens);
+            for window in flat.windows(4) {
+                if let [Tok::Ident(owner), Tok::Punct(':'), Tok::Punct(':'), Tok::Ident(variant)] =
+                    window
+                {
+                    let named = format!("{owner}::{variant}");
+                    if !may_name_cancel_variants(&self.body.module)
+                        && CANCEL_VARIANTS
+                            .iter()
+                            .any(|full| full.ends_with(&format!("::{named}")))
+                    {
+                        self.note(format!("names {named} in a macro"));
+                    }
+                }
+            }
+            for window in flat.windows(3) {
+                if let [Tok::Punct('.'), Tok::Ident(method), Tok::Group { empty: true }] = window {
+                    if !may_read_the_signal(&self.body.module)
+                        && SIGNAL_READS.contains(&method.as_str())
+                    {
+                        self.note(format!("reads the signal with .{method}() in a macro"));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Слова тела макроса подряд: группа отмечена и раскрыта сразу за отметкой.
+    enum Tok {
+        Ident(String),
+        Punct(char),
+        Group { empty: bool },
+        Other,
+    }
+
+    fn flat_tokens(tokens: &impl quote::ToTokens) -> Vec<Tok> {
+        fn walk(mut cursor: syn::buffer::Cursor<'_>, out: &mut Vec<Tok>) {
+            while !cursor.eof() {
+                if let Some((ident, next)) = cursor.ident() {
+                    out.push(Tok::Ident(ident.to_string()));
+                    cursor = next;
+                } else if let Some((punct, next)) = cursor.punct() {
+                    out.push(Tok::Punct(punct.as_char()));
+                    cursor = next;
+                } else if let Some((inside, _, _, next)) = cursor.any_group() {
+                    out.push(Tok::Group {
+                        empty: inside.eof(),
+                    });
+                    walk(inside, out);
+                    cursor = next;
+                } else if let Some((_, next)) = cursor.token_tree() {
+                    out.push(Tok::Other);
+                    cursor = next;
+                } else {
+                    break;
+                }
+            }
+        }
+        let buffer = syn::buffer::TokenBuffer::new2(tokens.to_token_stream());
+        let mut out = Vec::new();
+        walk(buffer.begin(), &mut out);
+        out
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for Scan<'_, '_> {
+        fn visit_path(&mut self, node: &'ast syn::Path) {
+            if !may_name_cancel_variants(&self.body.module) {
+                let resolved = self
+                    .index
+                    .resolve(&self.body.module, &self.local_uses, node)
+                    .into_iter();
+                // Одно имя из звёздочного `use` — `use ProcessError::*` и затем `Cancelled`.
+                let through_globs = if node.segments.len() == 1 {
+                    let name = node.segments[0].ident.to_string();
+                    self.body
+                        .globs
+                        .iter()
+                        .map(|glob| [glob.as_slice(), std::slice::from_ref(&name)].concat())
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                for path in resolved.chain(through_globs) {
+                    let joined = path.join("::");
+                    if CANCEL_VARIANTS.contains(&joined.as_str()) {
+                        self.note(format!("names {joined}"));
+                    }
+                }
+            }
+            syn::visit::visit_path(self, node);
+        }
+
+        /// Чтение сигнала вызовом по пути — `CancellationToken::is_cancelled(&token)` — и род
+        /// отмены, собранный в обход классификатора: `UseCaseErrorKind::Cancelled(..)`.
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(function) = node.func.as_ref() {
+                let builds_the_kind = self
+                    .index
+                    .resolve(&self.body.module, &self.local_uses, &function.path)
+                    .is_some_and(|path| {
+                        path.join("::") == "crate::use_cases::result::UseCaseErrorKind::Cancelled"
+                    });
+                if builds_the_kind && !may_name_cancel_variants(&self.body.module) {
+                    self.note("builds UseCaseErrorKind::Cancelled around the classifier");
+                }
+                let last = function
+                    .path
+                    .segments
+                    .last()
+                    .map(|segment| segment.ident.to_string())
+                    .unwrap_or_default();
+                if function.path.segments.len() > 1
+                    && node.args.len() == 1
+                    && SIGNAL_READS.contains(&last.as_str())
+                    && !may_read_the_signal(&self.body.module)
+                {
+                    self.note(format!("reads the signal with ::{last}(..)"));
+                }
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            let method = node.method.to_string();
+            if node.args.is_empty()
+                && SIGNAL_READS.contains(&method.as_str())
+                && !may_read_the_signal(&self.body.module)
+            {
+                self.note(format!("reads the signal with .{method}()"));
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+
+        fn visit_macro(&mut self, node: &'ast syn::Macro) {
+            self.scan_tokens(&node.tokens);
+        }
+    }
+
+    let mut found = Vec::new();
+    for body in production_bodies(index) {
+        let mut scan = Scan {
+            index,
+            body: &body,
+            local_uses: body.local_uses(index),
+            found: Vec::new(),
+        };
+        syn::visit::Visit::visit_block(&mut scan, body.block);
+        found.extend(scan.found);
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// Отмену и её место решает один владелец — `AppError::cancellation()`, а безопасные
+/// точки — `src/use_cases/interruption.rs` (#308). Корень прежней ошибки: команды решали
+/// «отменено» по сигналу или тексту, а не по ошибке, и отмена становилась отказом
+/// выполнения, а снятый процесс — отказом платформы. Страж ловит возвращение под любым
+/// именем: вне платформы и владельцев производственный код не называет вариантов отмены —
+/// ни в выражении, ни в образце, ни в макросе — и не читает сигнал сам.
+///
+/// Чего страж не видит: ошибку платформы, превращённую в текст, —
+/// `AppError::Runtime(format!("…{error}"))` теряет отмену так же, как её теряли
+/// `tools download` и ожидание `launch` до #308, — а ещё переименованный тип внутри макроса
+/// и код вне тел функций. Это ловит разбор: ошибку, которая может нести отмену, в текст не
+/// превращают, а оборачивают `with_context`.
+#[test]
+fn a_cancellation_is_classified_only_by_its_owner() {
+    let bypasses = cancellation_bypasses(&SourceIndex::of_src());
+    assert!(
+        bypasses.is_empty(),
+        "a cancellation is decided around its owner; classify it with `AppError::cancellation()` \
+         and notice a safe point through `crate::use_cases::interruption`:\n{}",
+        bypasses.join("\n")
+    );
+}
+
+/// Страж видит обход в каждом виде, в каком он уже бывал, и не видит законных мест.
+#[test]
+fn the_cancellation_guard_sees_every_bypass() {
+    let index = SourceIndex::from_sources(&[
+        (
+            "crate::use_cases::sample",
+            "use crate::platform::process::ProcessError;\n\
+             use crate::platform::ibcmd::IbcmdError;\n\
+             use crate::support::error::AppError;\n\
+             use crate::use_cases::result::UseCaseErrorKind;\n\
+             fn by_pattern(error: ProcessError) -> bool {\n\
+                 match error { ProcessError::Cancelled { .. } => true, _ => false }\n\
+             }\n\
+             fn by_macro(error: &IbcmdError) -> bool {\n\
+                 matches!(error, IbcmdError::Spawn(ProcessError::Cancelled { .. }))\n\
+             }\n\
+             fn by_signal(context: &ExecutionContext) -> bool {\n\
+                 context.cancellation().is_cancelled()\n\
+             }\n\
+             fn by_interruption(context: &ExecutionContext) -> bool {\n\
+                 context.interruption().is_some()\n\
+             }\n\
+             fn by_hand() -> AppError {\n\
+                 AppError::Cancelled { message: String::new(), at: todo!() }\n\
+             }\n\
+             fn by_classifier(error: &AppError) -> bool {\n\
+                 error.cancellation().is_some()\n\
+             }\n\
+             fn by_path_call(token: &CancellationToken) -> bool {\n\
+                 CancellationToken::is_cancelled(token)\n\
+             }\n\
+             fn by_kind(at: CancelledAt) -> UseCaseError {\n\
+                 UseCaseError::new(UseCaseErrorKind::Cancelled(at), String::new())\n\
+             }\n\
+             fn by_reading_the_kind(error: &UseCaseError) -> bool {\n\
+                 matches!(error.kind(), UseCaseErrorKind::Cancelled(_))\n\
+             }",
+        ),
+        (
+            "crate::use_cases::globbed",
+            "use crate::platform::process::ProcessError::*;\n\
+             fn by_glob(error: crate::platform::process::ProcessError) -> bool {\n\
+                 match error { Cancelled { .. } => true, _ => false }\n\
+             }",
+        ),
+        (
+            "crate::platform::process",
+            "pub enum ProcessError { Cancelled { cmd: String, delivered: bool } }\n\
+             fn refuse(policy: &Policy) -> Result<(), ProcessError> {\n\
+                 if policy.cancellation.is_cancelled() {\n\
+                     return Err(ProcessError::Cancelled { cmd: String::new(), delivered: false });\n\
+                 }\n\
+                 Ok(())\n\
+             }",
+        ),
+        (
+            "crate::support::error",
+            "pub enum AppError { Cancelled { message: String, at: CancelledAt } }\n\
+             impl AppError {\n\
+                 fn cancellation(&self) -> Option<CancelledAt> {\n\
+                     match self { Self::Cancelled { at, .. } => Some(*at) }\n\
+                 }\n\
+             }",
+        ),
+    ]);
+
+    let found = cancellation_bypasses(&index);
+
+    for (context, what) in [
+        (
+            "by_pattern",
+            "crate::platform::process::ProcessError::Cancelled",
+        ),
+        ("by_macro", "ProcessError::Cancelled in a macro"),
+        ("by_signal", ".is_cancelled()"),
+        ("by_interruption", ".interruption()"),
+        ("by_hand", "crate::support::error::AppError::Cancelled"),
+        ("by_path_call", "::is_cancelled(..)"),
+        ("by_kind", "builds UseCaseErrorKind::Cancelled"),
+        (
+            "by_glob",
+            "crate::platform::process::ProcessError::Cancelled",
+        ),
+    ] {
+        assert!(
+            found
+                .iter()
+                .any(|line| line.contains(&format!("({context})")) && line.contains(what)),
+            "the guard misses {context}: {found:?}"
+        );
+    }
+    assert!(
+        !found.iter().any(|line| line.contains("by_classifier")
+            || line.contains("by_reading_the_kind")
+            || line.contains("refuse")
+            || line.contains("AppError::cancellation")),
+        "the guard flags a legitimate place: {found:?}"
+    );
+}

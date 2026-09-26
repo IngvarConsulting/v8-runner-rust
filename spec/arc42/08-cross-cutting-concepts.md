@@ -114,11 +114,17 @@
   затем SIGKILL; критический — дорабатывает, итог успешен с отложенным прерыванием.
 - Запись в базу — критическая фаза, у `/RestoreIB` тоже. `Cancelled` и `TimedOut` ставятся,
   только когда процесс действительно остановлен; MCP в работе ждёт конечного состояния.
+- Отмену узнаёт сама ошибка: платформа кладёт в неё, получил ли исполнитель работу, а
+  `AppError::cancellation()` ([`error.rs`](../../src/support/error.rs)) находит её в любой
+  обёртке. Безопасная точка — `command_boundary`, оборванная работа исполнителя — фаза шага.
+  Безопасные точки сценарии отмечают через [`interruption.rs`](../../src/use_cases/interruption.rs).
 
 Правила: [шаг ограничен своим пределом](../rules/use-cases/a-step-is-bounded-only-by-its-own-cap.md),
 [класс прерывания объявлен](../rules/use-cases/operations-declare-an-interruption-class.md),
 [запись в базу — критическая фаза](../rules/use-cases/a-database-write-is-a-critical-phase.md),
-[отмена и истечение предела означают состоявшийся исход](../rules/use-cases/an-interruption-status-means-a-terminal-outcome.md).
+[отмена и истечение предела означают состоявшийся исход](../rules/use-cases/an-interruption-status-means-a-terminal-outcome.md),
+[отмена отвечает отменой](../rules/wire/a-cancellation-answers-as-a-cancellation.md),
+[прерывание на безопасной точке записано](../rules/use-cases/an-interruption-at-a-safe-point-is-recorded.md).
 
 ### 8.8 Публикация с заменой
 

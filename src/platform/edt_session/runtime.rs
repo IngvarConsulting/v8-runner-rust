@@ -10,7 +10,6 @@ use crate::platform::interactive::{
     InteractiveProcessRequest, ShutdownOutcome,
 };
 use crate::platform::locator::UtilityType;
-use crate::platform::process::WorkGiven;
 use crate::platform::utilities::PlatformUtilities;
 
 use super::{
@@ -21,13 +20,13 @@ use super::{
 pub(super) trait ManagedSession: Send {
     fn pid(&self) -> Option<u32>;
 
-    /// `delivered` отмечается, как только команда доставлена в процесс; служебные команды
-    /// сессии передают `None`.
+    /// `delivered` вызывается, как только команда доставлена в процесс; служебные команды
+    /// сессии передают пустой вызов.
     fn execute(
         &mut self,
         command: &str,
         timeout: Duration,
-        delivered: Option<&WorkGiven>,
+        delivered: &dyn Fn(),
     ) -> Result<InteractiveCommandOutput, InteractiveProcessError>;
 
     fn shutdown(&mut self, timeout: Duration) -> Result<ShutdownOutcome, InteractiveProcessError>;
@@ -44,7 +43,7 @@ impl ManagedSession for InteractiveProcessExecutor {
         &mut self,
         command: &str,
         timeout: Duration,
-        delivered: Option<&WorkGiven>,
+        delivered: &dyn Fn(),
     ) -> Result<InteractiveCommandOutput, InteractiveProcessError> {
         Self::execute_delivering(self, command, timeout, delivered)
     }
@@ -245,14 +244,20 @@ pub(super) fn run_worker(
         factory.post_mark_running(&queued.request);
         if queued.request.cancellation.is_cancelled() {
             queued.state.finish();
-            queued.reply(Err(EdtSessionError::RunningCancelled));
+            queued.reply(Err(EdtSessionError::RunningCancelled { delivered: false }));
             continue;
         }
-        let execution = active_session.execute(
-            &queued.request.command,
-            remaining,
-            queued.request.work.as_ref(),
-        );
+        // Доставку запроса видят и отметка работы команды, и сам запрос: отмена, заставшая
+        // его в работе, называет по нему, дошла ли работа до процесса. Отметка ставится
+        // первой, чтобы запрос не назвал доставку, которой отметка ещё не знает.
+        let request = &queued.request;
+        let state = &queued.state;
+        let execution = active_session.execute(&request.command, remaining, &|| {
+            if let Some(work) = &request.work {
+                work.mark_work_given();
+                state.mark_delivered();
+            }
+        });
         match execution {
             Ok(output) => {
                 queued.state.finish();
@@ -372,7 +377,7 @@ pub(super) fn run_baseline_reset(
         .execute(
             &super::render_interactive_change_dir_command(workspace),
             reset_timeout.duration,
-            None,
+            &|| {},
         )
         .map_err(|error| baseline_error("reset", error, reset_timeout.clamped_by_budget))?;
     if !reset_output.stderr.trim().is_empty() {
@@ -393,7 +398,7 @@ pub(super) fn run_baseline_reset(
         .execute(
             &super::render_interactive_probe_workdir_command(),
             probe_timeout.duration,
-            None,
+            &|| {},
         )
         .map_err(|error| baseline_error("probe", error, probe_timeout.clamped_by_budget))?;
     if !probe_output.stderr.trim().is_empty() {

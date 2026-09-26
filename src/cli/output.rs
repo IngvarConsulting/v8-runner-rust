@@ -79,7 +79,7 @@ pub(crate) const fn cli_error_contract(kind: UseCaseErrorKind) -> (ErrorCode, Er
         }
         UseCaseErrorKind::WorkspaceBusy => (ErrorCode::WorkspaceBusy, ErrorKind::Workspace),
         UseCaseErrorKind::InvalidOutput => (ErrorCode::InvalidOutput, ErrorKind::InvalidOutput),
-        UseCaseErrorKind::Cancelled => (ErrorCode::Cancelled, ErrorKind::Interruption),
+        UseCaseErrorKind::Cancelled(_) => (ErrorCode::Cancelled, ErrorKind::Interruption),
         UseCaseErrorKind::TimedOut => (ErrorCode::TimedOut, ErrorKind::Interruption),
         UseCaseErrorKind::Validation => (ErrorCode::InvalidArgument, ErrorKind::Validation),
         UseCaseErrorKind::Runtime => (ErrorCode::RuntimeFailure, ErrorKind::Runtime),

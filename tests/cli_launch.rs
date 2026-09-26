@@ -2388,6 +2388,10 @@ fn an_epf_wait_interrupted_after_the_client_started_answers_in_its_form() {
         .expect("stdout");
     let payload: Value = serde_json::from_str(&stdout).expect("one json document");
     assert_eq!(payload["ok"], false, "{payload}");
+    // Прерванная работа — отмена, как всякая: род `interruption`, код `cancelled` (#308).
+    assert_eq!(payload["error"]["code"], "cancelled", "{payload}");
+    assert_eq!(payload["error"]["kind"], "interruption", "{payload}");
+    assert_eq!(runner.0.wait().expect("exit status").code(), Some(4));
     assert_eq!(payload["data"]["ok"], false, "{payload}");
     assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
     let wait = &payload["data"]["external_epf_wait"];
@@ -2397,5 +2401,78 @@ fn an_epf_wait_interrupted_after_the_client_started_answers_in_its_form() {
         &payload["data"],
         "`launch` wait interrupted after the client started",
         &["launch"],
+    );
+}
+
+/// Клиент запущен под `--wait-ready`, и команду прерывают, пока ждут его эндпоинта: клиент
+/// снят, а отказ — отмена его работы, род `interruption` и код выхода 4, а не отказ ожидания
+/// (#308). Форма `launch` называет, что ожидание прервано.
+#[test]
+fn a_wait_ready_interrupted_after_the_client_started_is_a_cancellation() {
+    let (dir, config_path, install_dir, _work_path) = setup_project_with_thin_script("exit 0");
+    let started = dir.path().join("client-started");
+    let release = dir.path().join("client-release");
+    write_shell_script_atomically(
+        &install_dir.join("bin").join("1cv8c"),
+        &support::interruptible_stub(&started, &release),
+    );
+    insert_client_mcp_config(
+        &config_path,
+        &format!("    wait_ready_timeout_ms: {IDLE_WAIT_TIMEOUT_MS}\n"),
+    );
+    let endpoint = UnresponsiveEndpoint::start();
+    let port = endpoint.port();
+    let stderr_log = dir.path().join("runner.stderr");
+    let mut runner = support::RunnerGuard(
+        std::process::Command::new(support::v8_runner_binary())
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "launch",
+                "mcp",
+                "--mcp-port",
+                &port.to_string(),
+                "--wait-ready",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(fs::File::create(&stderr_log).expect("stderr log"))
+            .spawn()
+            .expect("spawn launch"),
+    );
+    let timeout = Duration::from_secs(30);
+    assert!(
+        support::wait_for_file(&started, timeout),
+        "the client never started"
+    );
+    let stopped = support::terminate_and_wait(&mut runner.0, timeout);
+    fs::write(&release, "").expect("release a stray client");
+    assert!(
+        stopped,
+        "launch did not stop after SIGTERM: {}",
+        fs::read_to_string(&stderr_log).unwrap_or_default()
+    );
+
+    let mut stdout = String::new();
+    runner
+        .0
+        .stdout
+        .as_mut()
+        .expect("piped stdout")
+        .read_to_string(&mut stdout)
+        .expect("stdout");
+    let payload: Value = serde_json::from_str(&stdout).expect("one json document");
+    assert_eq!(payload["ok"], false, "{payload}");
+    assert_eq!(payload["error"]["code"], "cancelled", "{payload}");
+    assert_eq!(payload["error"]["kind"], "interruption", "{payload}");
+    assert_eq!(runner.0.wait().expect("exit status").code(), Some(4));
+    assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
+    assert_eq!(payload["data"]["mcp_readiness"]["ok"], false, "{payload}");
+    assert!(
+        payload["data"]["mcp_readiness"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("while waiting for MCP readiness"),
+        "{payload}"
     );
 }

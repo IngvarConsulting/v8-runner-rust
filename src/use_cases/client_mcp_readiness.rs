@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 
 use crate::domain::launch::McpReadinessResult;
 use crate::use_cases::context::ExecutionContext;
+use crate::use_cases::interruption::{SafePoint, SafePointCancel};
 
 const MCP_READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MCP_READY_REQUEST_TIMEOUT: Duration = Duration::from_millis(300);
@@ -33,17 +34,38 @@ pub(in crate::use_cases) fn endpoint_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}{MCP_ENDPOINT_PATH}")
 }
 
+/// Готовности нет: эндпоинт не ответил как нужно до срока, или ожидание прервала отмена.
+#[derive(Debug)]
+pub(in crate::use_cases) enum NotReady {
+    Failed(McpReadinessResult),
+    Cancelled(McpReadinessResult),
+}
+
+#[cfg(test)]
+impl NotReady {
+    fn into_readiness(self) -> McpReadinessResult {
+        match self {
+            Self::Failed(readiness) | Self::Cancelled(readiness) => readiness,
+        }
+    }
+}
+
 pub(in crate::use_cases) fn wait_for_readiness(
     context: &ExecutionContext,
     url: &str,
     required_tools: &[&str],
     readiness_timeout: Duration,
-) -> Result<McpReadinessResult, McpReadinessResult> {
+) -> Result<McpReadinessResult, NotReady> {
     let timeout = readiness_timeout.max(Duration::from_millis(1));
     let deadline = Instant::now() + timeout;
-    let client = Client::builder()
-        .build()
-        .map_err(|error| readiness_failure(url, Vec::new(), required_tools, error.to_string()))?;
+    let client = Client::builder().build().map_err(|error| {
+        NotReady::Failed(readiness_failure(
+            url,
+            Vec::new(),
+            required_tools,
+            error.to_string(),
+        ))
+    })?;
     let mut last_message = "MCP endpoint did not become ready".to_owned();
     let mut last_tools = Vec::new();
     let mut last_missing = required_tools
@@ -54,11 +76,9 @@ pub(in crate::use_cases) fn wait_for_readiness(
     let mut session: Option<McpProbeSession> = None;
 
     loop {
-        if let Some(interruption) = context.interruption() {
-            let message = format!(
-                "{} while waiting for MCP readiness",
-                interruption.message(context.command())
-            );
+        if let Some(cancel) =
+            SafePointCancel::noticed(context, SafePoint::Named("while waiting for MCP readiness"))
+        {
             if let Some(session) = session.take() {
                 delete_mcp_session(
                     &client,
@@ -67,12 +87,12 @@ pub(in crate::use_cases) fn wait_for_readiness(
                     &session.protocol_version,
                 );
             }
-            return Err(readiness_failure_with_missing(
+            return Err(NotReady::Cancelled(readiness_failure_with_missing(
                 url,
                 last_tools,
                 last_missing,
-                message,
-            ));
+                cancel.message().to_owned(),
+            )));
         }
         if Instant::now() >= deadline {
             if let Some(session) = session.take() {
@@ -83,12 +103,12 @@ pub(in crate::use_cases) fn wait_for_readiness(
                     &session.protocol_version,
                 );
             }
-            return Err(readiness_failure_with_missing(
+            return Err(NotReady::Failed(readiness_failure_with_missing(
                 url,
                 last_tools,
                 last_missing,
                 last_message,
-            ));
+            )));
         }
         if session.is_none() {
             match initialize_mcp_session(&client, url, deadline) {
@@ -493,13 +513,16 @@ mod tests {
         cancellation.cancel();
         let context = ExecutionContext::cli(CommandName::Launch).with_cancellation(cancellation);
 
-        let readiness =
+        let not_ready =
             wait_for_readiness(&context, &endpoint_url(1), &[], Duration::from_millis(500))
                 .expect_err("expected the interrupt to end the readiness wait");
 
+        let NotReady::Cancelled(readiness) = not_ready else {
+            panic!("the interrupt must end the wait as a cancellation");
+        };
         assert_eq!(
             readiness.message.as_deref(),
-            Some("execution cancelled before reaching a safe completion point while waiting for MCP readiness")
+            Some("execution cancelled before reaching a safe completion point for command 'launch' while waiting for MCP readiness")
         );
     }
 
@@ -525,7 +548,8 @@ mod tests {
             &[],
             Duration::from_millis(50),
         )
-        .expect_err("expected the stalled request to respect the readiness timeout");
+        .expect_err("expected the stalled request to respect the readiness timeout")
+        .into_readiness();
 
         release_connection.store(true, Ordering::SeqCst);
         server.join().expect("fake MCP server exits");

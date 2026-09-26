@@ -87,10 +87,12 @@ pub enum ExecutionInterruptionKind {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionInterruptionPhase {
-    /// A safe point of the command: no platform work or publication was cut short.
+    /// A safe point of the command: its own check between steps, or a refusal before a process
+    /// started or a request command was sent. No work of the command was cut short.
     CommandBoundary,
-    /// The platform command of `download`, `infobase dump` or `infobase restore`: a process of
-    /// its own or a command of an agent session.
+    /// A platform command the command ran — a process of its own or a command of an agent
+    /// session. The interruption reached it after it started: it cut the command short or, in
+    /// a critical phase, waited for its end.
     ProviderCommand,
     /// The test run in the 1C client (`test`).
     Run,
@@ -100,10 +102,6 @@ pub enum ExecutionInterruptionPhase {
     UpdateDbCfg,
     /// Publishing the result through a staged copy (`make`, `download`, `infobase dump`).
     Publication,
-    /// `make` only: any failure that arrived while an interruption was pending — at the safe
-    /// point before export, during export or during publication. The answer does not tell which
-    /// (issue #308).
-    ExportOrPublication,
 }
 
 impl ExecutionInterruptionPhase {
@@ -115,7 +113,6 @@ impl ExecutionInterruptionPhase {
             Self::Apply => "apply",
             Self::UpdateDbCfg => "update_db_cfg",
             Self::Publication => "publication",
-            Self::ExportOrPublication => "export_or_publication",
         }
     }
 }

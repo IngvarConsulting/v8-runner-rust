@@ -721,11 +721,8 @@ fn interruption_step_outcome(
     started: Instant,
     safe_point: &str,
 ) -> Option<StepOutcome> {
-    context.interruption().map(|interruption| {
-        let message =
-            interruption::interruption_before_safe_point_message(context, interruption, safe_point);
-        StepOutcome::failed(target, action, started, AppError::Runtime(message))
-    })
+    interruption::interruption_before_safe_point(context, safe_point)
+        .map(|error| StepOutcome::failed(target, action, started, error))
 }
 
 fn with_deferred_warning(message: String, result: &PlatformCommandResult) -> String {
@@ -744,13 +741,7 @@ fn deferred_interruption_warning(result: &PlatformCommandResult) -> Option<Strin
 }
 
 fn context_deferred_warning(context: &ExecutionContext) -> Option<String> {
-    context.interruption().map(|interruption| {
-        interruption::deferred_interruption_warning_for_command(
-            "operation completed successfully",
-            context.command(),
-            interruption,
-        )
-    })
+    interruption::deferred_interruption_warning_after(context, "operation completed successfully")
 }
 
 fn prepare_infobase_parent(path: &Path) -> Result<(), AppError> {

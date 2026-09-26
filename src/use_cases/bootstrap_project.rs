@@ -158,10 +158,11 @@ fn run_bootstrap(context: &ExecutionContext, plan: &ClonePlan) -> UseCaseResult<
             request.force,
         )
         .map_err(UseCaseFailure::without_payload)?;
-        if context.cancellation().is_cancelled() {
-            return Err(UseCaseFailure::without_payload(AppError::Cancelled(
-                "clone cancelled before the project was written".to_owned(),
-            )));
+        if let Some(error) = crate::use_cases::interruption::pending_interruption_error(
+            context,
+            "before the project was written",
+        ) {
+            return Err(UseCaseFailure::without_payload(error));
         }
         // Запись — единственная собственная запись команды, и превью её не делает. Отказ
         // на ней остаётся отказом записи: подменять его отказом настроек значило бы
@@ -652,7 +653,10 @@ mod tests {
 
         let failure = execute(&context, &plan).expect_err("cancelled before the write");
 
-        assert_eq!(failure.error.kind(), UseCaseErrorKind::Cancelled);
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Cancelled(crate::support::error::CancelledAt::Boundary)
+        );
         assert!(!plan.paths.config_path.exists());
         assert!(!plan.paths.local_config_path.exists());
     }

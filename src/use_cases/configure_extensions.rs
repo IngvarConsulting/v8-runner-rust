@@ -185,12 +185,9 @@ fn disable_safety_for(
 ) -> Result<Vec<ExtensionsStep>, UseCaseFailure<ExtensionsResult>> {
     let mut steps = Vec::new();
     for target in targets {
-        if let Some(interruption) = context.interruption() {
-            let message = interruption::interruption_before_safe_point_message(
-                context,
-                interruption,
-                "extension update",
-            );
+        if let Some(error) =
+            interruption::interruption_before_safe_point(context, "extension update")
+        {
             let payload = ExtensionsResult {
                 provider: None,
                 provider_dispatched: false,
@@ -198,10 +195,7 @@ fn disable_safety_for(
                 steps,
                 duration_ms: started.elapsed().as_millis() as u64,
             };
-            return Err(UseCaseFailure::with_payload(
-                AppError::Runtime(message),
-                payload,
-            ));
+            return Err(UseCaseFailure::with_payload(error, payload));
         }
         let step_started = Instant::now();
         debug!(

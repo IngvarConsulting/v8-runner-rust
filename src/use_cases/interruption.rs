@@ -4,22 +4,110 @@ use crate::domain::execution::{
 };
 use crate::platform::process::ProcessInterruptionReason;
 use crate::platform::result::PlatformCommandResult;
-use crate::support::error::AppError;
+use crate::support::error::{AppError, CancelledAt};
 
 use super::context::{CommandName, ExecutionContext, ExecutionInterruption};
 
-pub(crate) fn command_interruption_status(interruption: ExecutionInterruption) -> ExecutionStatus {
-    match interruption {
-        ExecutionInterruption::Cancelled => ExecutionStatus::Cancelled,
+/// Какую безопасную точку заметила команда: текст отмены её называет.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SafePoint<'a> {
+    /// Точка команды без уточнения.
+    Command,
+    /// Точка, которую называет место: «during provider selection», «while waiting for …».
+    Named(&'a str),
+    /// Точка перед шагом: «before entering <шаг> safe point».
+    Before(&'a str),
+}
+
+/// Отмена, которую команда заметила на своей безопасной точке. Всё, что ответ о ней
+/// говорит, строится отсюда: ошибка — отмена на границе, запись — фаза `command_boundary`,
+/// текст называет точку.
+pub(crate) struct SafePointCancel {
+    interruption: ExecutionInterruption,
+    message: String,
+}
+
+impl SafePointCancel {
+    /// Отмена на безопасной точке `point`, если она пришла.
+    #[must_use]
+    pub(crate) fn noticed(context: &ExecutionContext, point: SafePoint<'_>) -> Option<Self> {
+        context.interruption().map(|interruption| {
+            let command = format!(
+                "{} for command '{}'",
+                interruption_text(interruption),
+                context.command().as_str()
+            );
+            let message = match point {
+                SafePoint::Command => command,
+                SafePoint::Named(place) => format!("{command} {place}"),
+                SafePoint::Before(step) => {
+                    format!("{command} before entering {step} safe point")
+                }
+            };
+            Self {
+                interruption,
+                message,
+            }
+        })
+    }
+
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub(crate) fn status(&self) -> ExecutionStatus {
+        match self.interruption {
+            ExecutionInterruption::Cancelled => ExecutionStatus::Cancelled,
+        }
+    }
+
+    /// Запись о прерывании: безопасная точка, работа команды не оборвана.
+    pub(crate) fn record(&self) -> ExecutionInterruptionDetails {
+        interruption_record(
+            CancelledAt::Boundary,
+            ExecutionInterruptionPhase::CommandBoundary,
+            self.message.clone(),
+        )
+    }
+
+    pub(crate) fn into_error(self) -> AppError {
+        AppError::Cancelled {
+            message: self.message,
+            at: CancelledAt::Boundary,
+        }
     }
 }
 
-pub(crate) fn command_interruption_details(
-    interruption: ExecutionInterruption,
-    phase: ExecutionInterruptionPhase,
+/// Прерывание, которое принесла ошибка, как его пишет ответ. Ошибка не отмена — `None`:
+/// сигнал, пришедший во время чужого отказа, её не переписывает.
+pub(crate) fn cancellation_record(
+    error: &AppError,
+    work_phase: ExecutionInterruptionPhase,
+    message: impl Into<String>,
+) -> Option<ExecutionInterruptionDetails> {
+    error
+        .cancellation()
+        .map(|at| interruption_record(at, work_phase, message))
+}
+
+/// Запись об отмене, остановившей команду в `at`. Безопасная точка — фаза
+/// `command_boundary`, где бы её ни проверили; оборванная работа исполнителя — `work_phase`,
+/// фаза места вызова.
+pub(crate) fn interruption_record(
+    at: CancelledAt,
+    work_phase: ExecutionInterruptionPhase,
     message: impl Into<String>,
 ) -> ExecutionInterruptionDetails {
-    command_interruption_details_with_deferred(interruption, phase, false, message)
+    let phase = match at {
+        CancelledAt::Boundary => ExecutionInterruptionPhase::CommandBoundary,
+        CancelledAt::Work => work_phase,
+    };
+    command_interruption_details_with_deferred(
+        ExecutionInterruption::Cancelled,
+        phase,
+        false,
+        message,
+    )
 }
 
 pub(crate) fn deferred_command_interruption_details(
@@ -88,60 +176,33 @@ pub(crate) fn deferred_interruption_warning_for_command(
     )
 }
 
-pub(crate) fn command_interruption_message(
-    context: &ExecutionContext,
-    interruption: ExecutionInterruption,
-) -> String {
-    format!(
-        "{} for command '{}'",
-        interruption.message(context.command()),
-        context.command().as_str()
-    )
-}
-
-pub(crate) fn pending_interruption_message(
-    context: &ExecutionContext,
-    interruption: ExecutionInterruption,
-    phase: impl AsRef<str>,
-) -> String {
-    format!(
-        "{} {}",
-        command_interruption_message(context, interruption),
-        phase.as_ref()
-    )
-}
-
-pub(crate) fn interruption_before_safe_point_message(
-    context: &ExecutionContext,
-    interruption: ExecutionInterruption,
-    safe_point: impl AsRef<str>,
-) -> String {
-    pending_interruption_message(
-        context,
-        interruption,
-        format!("before entering {} safe point", safe_point.as_ref()),
-    )
-}
-
+/// Ошибка отмены на безопасной точке, названной местом `place`, если отмена пришла.
+#[must_use]
 pub(crate) fn pending_interruption_error(
     context: &ExecutionContext,
-    phase: impl AsRef<str>,
+    place: impl AsRef<str>,
 ) -> Option<AppError> {
-    context.interruption().map(|interruption| {
-        AppError::Runtime(pending_interruption_message(context, interruption, phase))
-    })
+    SafePointCancel::noticed(context, SafePoint::Named(place.as_ref()))
+        .map(SafePointCancel::into_error)
 }
 
+/// Ошибка отмены перед безопасной точкой шага `step`, если отмена пришла.
+#[must_use]
 pub(crate) fn interruption_before_safe_point(
     context: &ExecutionContext,
-    safe_point: impl AsRef<str>,
+    step: impl AsRef<str>,
 ) -> Option<AppError> {
+    SafePointCancel::noticed(context, SafePoint::Before(step.as_ref()))
+        .map(SafePointCancel::into_error)
+}
+
+/// Предупреждение об отмене, которую команда отложила до конца успешной операции.
+pub(crate) fn deferred_interruption_warning_after(
+    context: &ExecutionContext,
+    completed_action: &str,
+) -> Option<String> {
     context.interruption().map(|interruption| {
-        AppError::Runtime(interruption_before_safe_point_message(
-            context,
-            interruption,
-            safe_point.as_ref(),
-        ))
+        deferred_interruption_warning_for_command(completed_action, context.command(), interruption)
     })
 }
 
@@ -166,6 +227,14 @@ fn process_interruption_kind(interruption: ProcessInterruptionReason) -> Executi
     match interruption {
         ProcessInterruptionReason::Cancelled => ExecutionInterruptionKind::Cancelled,
         ProcessInterruptionReason::TimedOut => ExecutionInterruptionKind::TimedOut,
+    }
+}
+
+fn interruption_text(interruption: ExecutionInterruption) -> &'static str {
+    match interruption {
+        ExecutionInterruption::Cancelled => {
+            "execution cancelled before reaching a safe completion point"
+        }
     }
 }
 
@@ -211,21 +280,51 @@ fn format_deferred_interruption_warning(
 
 #[cfg(test)]
 mod tests {
-    use crate::domain::execution::ExecutionInterruptionPhase;
+    use crate::domain::execution::{ExecutionInterruptionPhase, ExecutionStatus};
     use crate::platform::process::ProcessInterruptionReason;
-    use crate::use_cases::context::{CommandName, ExecutionInterruption};
+    use crate::support::error::CancelledAt;
+    use crate::use_cases::context::{CommandName, ExecutionContext, ExecutionInterruption};
 
     use super::{
-        command_interruption_status, deferred_interruption_warning,
-        deferred_interruption_warning_for_command, process_interruption_details,
+        deferred_interruption_warning, deferred_interruption_warning_for_command,
+        process_interruption_details, SafePoint, SafePointCancel,
     };
 
+    /// Отмена на безопасной точке — отмена на границе: статус `cancelled`, запись
+    /// `command_boundary` без отсрочки, ошибка того же места. Текст называет точку.
     #[test]
-    fn command_interruption_status_preserves_terminal_state() {
-        assert_eq!(
-            command_interruption_status(ExecutionInterruption::Cancelled),
-            crate::domain::execution::ExecutionStatus::Cancelled
-        );
+    fn a_safe_point_cancel_is_a_cancellation_at_the_boundary() {
+        let idle = ExecutionContext::cli(CommandName::Test);
+        assert!(SafePointCancel::noticed(&idle, SafePoint::Command).is_none());
+
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
+        let context = ExecutionContext::cli(CommandName::Test).with_cancellation(cancellation);
+        for (point, tail) in [
+            (SafePoint::Command, "for command 'test'"),
+            (
+                SafePoint::Named("during provider selection"),
+                "for command 'test' during provider selection",
+            ),
+            (
+                SafePoint::Before("run"),
+                "for command 'test' before entering run safe point",
+            ),
+        ] {
+            let cancel = SafePointCancel::noticed(&context, point).expect("pending cancel");
+            assert!(cancel.message().ends_with(tail), "{}", cancel.message());
+            assert_eq!(cancel.status(), ExecutionStatus::Cancelled);
+            let record = cancel.record();
+            assert!(!record.deferred);
+            assert_eq!(
+                record.phase,
+                Some(ExecutionInterruptionPhase::CommandBoundary)
+            );
+            assert_eq!(
+                cancel.into_error().cancellation(),
+                Some(CancelledAt::Boundary)
+            );
+        }
     }
 
     #[test]

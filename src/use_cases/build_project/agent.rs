@@ -12,9 +12,8 @@ use super::*;
 use crate::platform::agent::WaitPolicy;
 use crate::platform::locator::UtilityLocation;
 use crate::use_cases::agent_session::{
-    argument, connect, generation_id, map_agent_error, run_id, stage_dir, stage_dir_partially,
-    tidy, transcript_log, unstage, wait_policy, write_bytes, AgentHandle, Exchange,
-    GenerationLedger,
+    argument, connect, generation_id, run_id, stage_dir, stage_dir_partially, tidy, transcript_log,
+    unstage, wait_policy, write_bytes, AgentHandle, Exchange, GenerationLedger,
 };
 use crate::use_cases::interruption::deferred_process_interruption_message;
 
@@ -246,8 +245,8 @@ fn run_command_deferring(
     let reply = handle
         .session()
         .run(command, wait)
-        .map_err(map_agent_error)?;
-    reply.outcome().map_err(map_agent_error)?;
+        .map_err(AppError::from)?;
+    reply.outcome().map_err(AppError::from)?;
     Ok(reply
         .deferred_interruption
         .map(|reason| deferred_process_interruption_message(completed_action, reason)))

@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.LOAD-DATA
-version: 3
+version: 4
 artifact: docs/schemas/command-data/upload.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -8,6 +8,9 @@ check:
   - src/use_cases/load_artifact.rs::execute_reports_cancelled_status_at_update_db_cfg_safe_point
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
   - tests/cli_load.rs::upload_update_failure_preserves_the_completed_load_receipt
+  - src/use_cases/load_artifact.rs::a_configuration_probe_cancelled_after_its_start_reports_the_work
+  - src/use_cases/load_artifact.rs::an_extension_probe_cancelled_after_its_start_reports_the_work
+  - src/use_cases/load_artifact.rs::a_failed_load_after_a_deferred_cancellation_still_names_it
 ---
 
 # `data` команды `load`
@@ -28,14 +31,18 @@ check:
 отказ до подтверждённого результата этого вызова оставляет `false`. Эти поля
 не утверждают, что конфигурация базы данных успешно обновлена.
 
-**Что изменила версия 3.** Фаза прерывания `execution.interruptions[].phase` стала закрытым
-набором значений в `snake_case`, общим для всех форм с итогом исполнения; набор перечисляет
-`$defs/ExecutionInterruptionPhase` схемы. Остановка на безопасной точке — перед пробой или
-перед `/UpdateDBCfg` — называется `command_boundary` вместо `update_db_cfg_safe_point`;
-`apply` и `update_db_cfg` прежние. Остановка перед пробой больше не утверждает, что платформа
-запускалась и пакет загружен: `provider_dispatched` и `execution.payload.applied` там `false`.
-Остановка перед `/UpdateDBCfg` после отмены, пришедшей во время загрузки, называет и
-отложенную отмену: запись `apply` с `deferred: true` идёт перед `command_boundary`.
+Остановка на безопасной точке — перед пробой или перед `/UpdateDBCfg` — называется
+`command_boundary`. Если отмену до этого отложила загрузка, её запись `apply` с
+`deferred: true` идёт перед `command_boundary`.
+
+**Что изменила версия 4.** Значение `export_or_publication` ушло из общего набора фаз;
+`upload` его не давал. Проба совместимости, снятая отменой после запуска, отвечает
+`status: cancelled` с записью фазы `provider_command` и `compatibility_state: not_established`:
+вопрос задан, ответа нет. Прежде такая проба отвечала `failed` с `not_probed`, а проба
+расширения — отказом проверки. `not_established` теперь и у всякой другой пробы, которая
+запустилась и ответа не дала. Загрузка или `/UpdateDBCfg`, пережившие отложенную отмену и
+потом не удавшиеся, остаются отказом, но отложенную отмену называют: её запись с
+`deferred: true` и предупреждение идут первыми.
 
 ## Пример
 

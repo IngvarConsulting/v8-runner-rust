@@ -126,6 +126,8 @@ Interruption policy:
 
 - timeout/cancellation являются общим CLI/MCP contract;
 - terminal cancellation и deferred interruption должны различаться;
+- отмена — род `interruption` у любой команды, и решает это сама ошибка, а не сигнал: отказ,
+  пришедший при ожидающей отмене, остаётся отказом;
 - critical publish/apply phases не hard-kill by default; запись в базу, и `/RestoreIB` тоже,
   дорабатывает до конца.
 

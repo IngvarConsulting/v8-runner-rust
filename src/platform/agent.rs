@@ -278,7 +278,12 @@ pub enum AgentError {
     TimedOut { command: String, timeout_ms: u64 },
 
     #[error("agent session cancelled while waiting for '{command}'")]
-    Cancelled { command: String },
+    Cancelled {
+        command: String,
+        /// Доставлена ли агенту команда запроса — работа команды. Служебные команды сессии
+        /// и ожидание до её открытия работы не несут.
+        delivered: bool,
+    },
 
     #[error("agent reply is not a JSON message array: {detail}; head: {head}")]
     InvalidReply { detail: String, head: String },
@@ -408,6 +413,17 @@ impl WaitPolicy {
             safety: ProcessInterruptionSafety::Interruptible,
             ..self.clone()
         }
+    }
+
+    /// Отказ ждать дальше, если пришла отмена: сессии ещё нет, и работы команда не дала.
+    pub fn refuse_if_cancelled(&self, command: &str) -> Result<(), AgentError> {
+        if self.cancellation.is_cancelled() {
+            return Err(AgentError::Cancelled {
+                command: command.to_owned(),
+                delivered: false,
+            });
+        }
+        Ok(())
     }
 
     /// Та же политика для служебной команды сессии: работы команды она не отмечает.
@@ -1117,8 +1133,10 @@ impl AgentSession {
             }
             if policy.cancellation.is_cancelled() {
                 if !critical {
+                    // Ответ читается после отправки: команда запроса уже работа команды.
                     return Err(AgentError::Cancelled {
                         command: command.to_owned(),
+                        delivered: policy.work.is_some(),
                     });
                 }
                 deferred.get_or_insert(ProcessInterruptionReason::Cancelled);
@@ -1297,6 +1315,7 @@ impl ManagedAgent {
                 process.terminate();
                 return Err(AgentError::Cancelled {
                     command: "open".to_owned(),
+                    delivered: false,
                 });
             }
             if started.elapsed() >= startup_timeout {
