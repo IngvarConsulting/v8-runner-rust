@@ -3271,12 +3271,11 @@ fn work_opt_outs(index: &SourceIndex) -> Vec<(String, String)> {
                         }
                     }
                 }
-                syn::Item::Fn(item) => {
+                syn::Item::Fn(item)
                     if may_skip(&normalize_tokens(&item.sig.inputs))
-                        || builds_without_work(&item.block)
-                    {
-                        found.push((at(&item.sig.ident.to_string()), scope(&item.vis)));
-                    }
+                        || builds_without_work(&item.block) =>
+                {
+                    found.push((at(&item.sig.ident.to_string()), scope(&item.vis)));
                 }
                 syn::Item::Impl(item) if item.trait_.is_none() => {
                     let owner = normalize_tokens(item.self_ty.as_ref());
@@ -3356,7 +3355,8 @@ fn a_step_may_skip_the_work_mark_only_inside_the_platform() {
             );
             let held_by_the_dispatch_guard =
                 at == "crate::platform::process::ProcessRunner::spawn_managed";
-            !(inside && hidden) && !held_by_the_dispatch_guard
+            let allowed = (inside && hidden) || held_by_the_dispatch_guard;
+            !allowed
         })
         .collect::<Vec<_>>();
     assert!(
