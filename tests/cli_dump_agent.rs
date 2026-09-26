@@ -417,6 +417,44 @@ fn an_attached_agent_is_used_without_launching_or_stopping_anything() {
     );
 }
 
+/// Чужой агент, которому команда не дала ни одной команды запроса: сессия открыта, соединение
+/// с базой закрыто служебной командой, а работы исполнитель не получил. Закрытие чужого
+/// агента снимает отметку работы само — как и завершение управляемого.
+#[test]
+fn an_attached_agent_released_without_a_request_command_gives_no_work() {
+    let harness = harness(false, Some(true), true);
+    let config = fs::read_to_string(&harness.config_path).expect("config");
+    let with_extensions = config.replace(
+        "providers:\n  dump: agent\n",
+        "providers:\n  dump: agent\n  extensions: agent\n",
+    );
+    assert_ne!(config, with_extensions, "the sample names its providers");
+    fs::write(&harness.config_path, with_extensions).expect("rewrite config");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &harness.config_path.display().to_string(),
+            "--json-message",
+            "extensions",
+        ])
+        .output()
+        .expect("run extensions");
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json envelope");
+
+    assert_eq!(output.status.code(), Some(0), "{payload}");
+    assert_eq!(payload["data"]["provider_dispatched"], false, "{payload}");
+    let lines = commands(&harness);
+    assert!(
+        lines.iter().any(|line| line == "common disconnect-ib"),
+        "the attached agent was released: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.starts_with("config ")),
+        "no request command reached the agent: {lines:?}"
+    );
+}
+
 /// Готовность агента доказывает аутентификация: открытый порт с отвергнутым паролем —
 /// отказ среды, а не попытка работать дальше.
 #[test]

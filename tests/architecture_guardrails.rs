@@ -2501,8 +2501,9 @@ struct DispatchUse {
     marks: usize,
     stamp_work: usize,
     for_command: usize,
-    /// Шаг, объявленный не работой команды: `work: None` или `None` последним аргументом
-    /// конструктора политики процесса, запроса к сессии EDT или `spawn_managed`.
+    /// Запуск `spawn_managed` без отметки: последним аргументом не `Some(..)`. Прочие шаги
+    /// «не работы» вне платформы не выразить вовсе — поля отметки и конструкторы без неё
+    /// видны только платформе.
     without_work: usize,
     policies: usize,
     contexts: usize,
@@ -2538,6 +2539,16 @@ fn is_literal_false(expr: &syn::Expr) -> bool {
 
 fn is_none(expr: &syn::Expr) -> bool {
     matches!(expr, syn::Expr::Path(path) if path.path.is_ident("None"))
+}
+
+fn is_dispatch_key(expr: &syn::Expr) -> bool {
+    matches!(expr, syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(key), .. })
+        if key.value() == "provider_dispatched")
+}
+
+fn is_some_call(expr: &syn::Expr) -> bool {
+    matches!(expr, syn::Expr::Call(call) if matches!(call.func.as_ref(), syn::Expr::Path(path)
+        if path.path.segments.last().is_some_and(|segment| segment.ident == "Some")))
 }
 
 /// Значение, которым признак о работе сказать не может: `false`, `None`, `Some(false)`.
@@ -2581,9 +2592,6 @@ impl<'ast> syn::visit::Visit<'ast> for DispatchUse {
                     self.note_value(&node.expr);
                 }
             }
-            if name == "work" && is_none(&node.expr) {
-                self.without_work += 1;
-            }
         }
         syn::visit::visit_field_value(self, node);
     }
@@ -2591,6 +2599,10 @@ impl<'ast> syn::visit::Visit<'ast> for DispatchUse {
     fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
         if is_dispatch_field(&node.left) {
             self.note_value(&node.right);
+        }
+        // `data["provider_dispatched"] = …` — поле ответа, записанное руками мимо формы.
+        if matches!(node.left.as_ref(), syn::Expr::Index(index) if is_dispatch_key(&index.index)) {
+            self.decided.push(normalize_tokens(node));
         }
         syn::visit::visit_expr_assign(self, node);
     }
@@ -2622,20 +2634,109 @@ impl<'ast> syn::visit::Visit<'ast> for DispatchUse {
         syn::visit::visit_expr_reference(self, node);
     }
 
-    /// Тело макроса, похожее на список выражений (`vec![…]`, `format!(…)`, `debug!(…)`),
-    /// проверяется как код; иначе упоминание признака в нём — уже нарушение.
+    /// Тело макроса проверяется как код, если оно — список выражений (`vec![…]`,
+    /// `format!(…)`, `dbg!(…)`). У событий журнала пара `ключ = значение` — имя поля и его
+    /// значение, и проверяется только значение; у `matches!` — проверяемое выражение и условие
+    /// после `if`. В остальное страж не заглядывает, и упоминание в нём признака или отметки
+    /// работы — уже нарушение.
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        let name = node
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+            .unwrap_or_default();
+        if matches!(
+            name.as_str(),
+            "matches" | "assert_matches" | "debug_assert_matches"
+        ) {
+            let parts = node.parse_body_with(|input: syn::parse::ParseStream| {
+                let scrutinee: syn::Expr = input.parse()?;
+                input.parse::<syn::Token![,]>()?;
+                syn::Pat::parse_multi_with_leading_vert(input)?;
+                let guard = if input.peek(syn::Token![if]) {
+                    input.parse::<syn::Token![if]>()?;
+                    Some(input.parse::<syn::Expr>()?)
+                } else {
+                    None
+                };
+                input.step(|cursor| {
+                    let mut rest = *cursor;
+                    while let Some((_, next)) = rest.token_tree() {
+                        rest = next;
+                    }
+                    Ok(((), rest))
+                })?;
+                Ok((scrutinee, guard))
+            });
+            if let Ok((scrutinee, guard)) = parts {
+                syn::visit::Visit::visit_expr(self, &scrutinee);
+                if let Some(guard) = &guard {
+                    syn::visit::Visit::visit_expr(self, guard);
+                }
+                return;
+            }
+        }
+        let logging = matches!(
+            name.as_str(),
+            "trace"
+                | "debug"
+                | "info"
+                | "warn"
+                | "error"
+                | "event"
+                | "span"
+                | "trace_span"
+                | "debug_span"
+                | "info_span"
+                | "warn_span"
+                | "error_span"
+        );
         match node.parse_body_with(
             syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated,
         ) {
             Ok(arguments) => {
                 for argument in &arguments {
-                    syn::visit::Visit::visit_expr(self, argument);
+                    match argument {
+                        syn::Expr::Assign(pair) if logging => {
+                            syn::visit::Visit::visit_expr(self, &pair.right)
+                        }
+                        other => syn::visit::Visit::visit_expr(self, other),
+                    }
                 }
             }
-            Err(_) if mentions_dispatch(&node.tokens) => self.opaque_macros += 1,
+            Err(_) if mentions_watched(&node.tokens) => self.opaque_macros += 1,
             Err(_) => {}
         }
+    }
+
+    /// `data["provider_dispatched"]` — чтение поля ответа: ключ здесь не решение.
+    fn visit_expr_index(&mut self, node: &'ast syn::ExprIndex) {
+        if is_dispatch_key(&node.index) {
+            syn::visit::Visit::visit_expr(self, &node.expr);
+            return;
+        }
+        syn::visit::visit_expr_index(self, node);
+    }
+
+    /// Путь как значение или как вызов в полной форме: `WorkGiven::for_command`,
+    /// `WorkGiven::mark_work_given(&w)`, `CarriesDispatch::stamp_work(r, w)`.
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        let segments = node
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        match segments.as_slice() {
+            [.., owner, name] if owner == "WorkGiven" && name == "for_command" => {
+                self.for_command += 1
+            }
+            [.., name] if name == "mark_work_given" => self.marks += 1,
+            [.., name] if name == "stamp_work" => self.stamp_work += 1,
+            _ => {}
+        }
+        syn::visit::visit_expr_path(self, node);
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
@@ -2645,7 +2746,7 @@ impl<'ast> syn::visit::Visit<'ast> for DispatchUse {
         if node.method == "stamp_work" {
             self.stamp_work += 1;
         }
-        if node.method == "spawn_managed" && node.args.last().is_some_and(is_none) {
+        if node.method == "spawn_managed" && !node.args.last().is_some_and(is_some_call) {
             self.without_work += 1;
         }
         syn::visit::visit_expr_method_call(self, node);
@@ -2659,24 +2760,28 @@ impl<'ast> syn::visit::Visit<'ast> for DispatchUse {
                 .iter()
                 .map(|segment| segment.ident.to_string())
                 .collect::<Vec<_>>();
-            let without_work = node.args.last().is_some_and(is_none);
             match segments.as_slice() {
-                [.., owner, name] if owner == "WorkGiven" && name == "for_command" => {
-                    self.for_command += 1
-                }
                 [.., owner, name] if owner == "ProcessExecutionPolicy" && name == "new" => {
-                    self.policies += 1;
-                    self.without_work += usize::from(without_work);
-                }
-                [.., owner, name] if owner == "EdtSessionRequest" && name == "new" => {
-                    self.without_work += usize::from(without_work);
+                    self.policies += 1
                 }
                 [.., owner, _] if owner == "ExecutionContext" => self.contexts += 1,
                 [.., name] if name == "stamp_dispatch" => self.stamps += 1,
+                [.., name]
+                    if name == "spawn_managed" && !node.args.last().is_some_and(is_some_call) =>
+                {
+                    self.without_work += 1
+                }
                 _ => {}
             }
         }
         syn::visit::visit_expr_call(self, node);
+    }
+
+    /// Ключ `"provider_dispatched"`, собранный руками, — поле ответа мимо формы и штампа.
+    fn visit_lit_str(&mut self, node: &'ast syn::LitStr) {
+        if node.value() == "provider_dispatched" {
+            self.decided.push(normalize_tokens(node));
+        }
     }
 
     fn visit_expr_return(&mut self, node: &'ast syn::ExprReturn) {
@@ -2690,20 +2795,52 @@ impl<'ast> syn::visit::Visit<'ast> for DispatchUse {
     }
 }
 
-/// Упоминает ли макрос признак: тело макроса страж не разбирает, поэтому признаку там не
-/// место. Строковые литералы не в счёт — `format!("{provider_dispatched}")` только печатает.
-fn mentions_dispatch(tokens: &impl quote::ToTokens) -> bool {
-    static STRINGS: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r#""(?:[^"\\]|\\.)*""#).expect("string literal pattern"));
-    let text = tokens.to_token_stream().to_string();
-    STRINGS
-        .replace_all(&text, "")
-        .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
-        .any(|word| word == "provider_dispatched")
+/// Имена, которые страж ищет в телах макросов, куда сам не заглядывает: признак, отметка
+/// работы и те, кто её заводит, ставит и переносит.
+const WATCHED: &[&str] = &[
+    "provider_dispatched",
+    "mark_work_given",
+    "stamp_work",
+    "stamp_dispatch",
+    "for_command",
+    "spawn_managed",
+    "ProcessExecutionPolicy",
+    "ExecutionContext",
+];
+
+/// Упоминает ли поток токенов наблюдаемое имя. Обходятся идентификаторы, а не текст:
+/// литерал — не идентификатор, и `format!("{provider_dispatched}")` только печатает. Строка,
+/// равная ровно имени признака, — ключ ответа, собранного руками (`json!`), и она в счёт.
+fn mentions_watched(tokens: &impl quote::ToTokens) -> bool {
+    let buffer = syn::buffer::TokenBuffer::new2(tokens.to_token_stream());
+    let mut pending = vec![buffer.begin()];
+    while let Some(mut cursor) = pending.pop() {
+        while !cursor.eof() {
+            if let Some((ident, next)) = cursor.ident() {
+                if WATCHED.iter().any(|name| ident == *name) {
+                    return true;
+                }
+                cursor = next;
+            } else if let Some((literal, next)) = cursor.literal() {
+                if literal.to_string() == "\"provider_dispatched\"" {
+                    return true;
+                }
+                cursor = next;
+            } else if let Some((inside, _, _, next)) = cursor.any_group() {
+                pending.push(inside);
+                cursor = next;
+            } else if let Some((_, next)) = cursor.token_tree() {
+                cursor = next;
+            } else {
+                break;
+            }
+        }
+    }
+    false
 }
 
-/// Макросы уровня элементов, чьи токены упоминают признак: `модуль::имя!`. Макросы внутри
-/// тел смотрит `DispatchUse`.
+/// Макросы уровня элементов, чьи токены упоминают признак или отметку работы:
+/// `модуль::имя!`. Макросы внутри тел смотрит `DispatchUse`.
 struct DispatchMacros {
     module: Vec<String>,
     found: Vec<String>,
@@ -2731,7 +2868,7 @@ impl<'ast> syn::visit::Visit<'ast> for DispatchMacros {
     fn visit_block(&mut self, _node: &'ast syn::Block) {}
 
     fn visit_item_macro(&mut self, node: &'ast syn::ItemMacro) {
-        if mentions_dispatch(&node.mac.tokens) {
+        if mentions_watched(&node.mac.tokens) {
             let name = node
                 .ident
                 .as_ref()
@@ -2742,7 +2879,7 @@ impl<'ast> syn::visit::Visit<'ast> for DispatchMacros {
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        if mentions_dispatch(&node.tokens) {
+        if mentions_watched(&node.tokens) {
             self.found.push(format!(
                 "{}::{}!",
                 self.module.join("::"),
@@ -2790,15 +2927,46 @@ fn dispatch_forms(index: &SourceIndex) -> Vec<String> {
     let types = invocations[0]
         .parse_body_with(syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
         .expect("carries_dispatch! lists type paths");
-    types
+    let mut forms = types
         .iter()
         .filter_map(|path| path.segments.last())
         .map(|segment| segment.ident.to_string())
-        .collect()
+        .collect::<Vec<_>>();
+    // Псевдоним, чьё определение называет форму, — тоже форма: вход, отвечающий
+    // `Result<_, SyntaxExecutionFailure>`, несёт признак так же.
+    let aliases = index
+        .units
+        .iter()
+        .flat_map(|unit| &unit.syntax.items)
+        .filter(|item| !item_has_cfg_test(item))
+        .filter_map(|item| match item {
+            syn::Item::Type(alias) => Some((alias.ident.to_string(), normalize_tokens(&alias.ty))),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    loop {
+        let found = aliases
+            .iter()
+            .filter(|(name, _)| !forms.contains(name))
+            .filter(|(_, definition)| names_a_form(definition, &forms))
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        if found.is_empty() {
+            return forms;
+        }
+        forms.extend(found);
+    }
 }
 
-/// Входы сценариев, чей ответ несёт признак: открытые функции сценариев и MCP, которые
-/// возвращают такую форму и могут дать работу — берут контекст команды или заводят свою
+/// Называет ли текст типа одну из форм — целым словом.
+fn names_a_form(text: &str, forms: &[String]) -> bool {
+    text.split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+        .any(|word| forms.iter().any(|form| form == word))
+}
+
+/// Входы сценариев, чей ответ несёт признак: функции сценариев и MCP, видимые снаружи
+/// сценария — `pub`, или `pub(crate)` в самом модуле сценария, а не в его подмодулях, — которые
+/// возвращают такую форму и могут дать работу: берут контекст команды или заводят свою
 /// отметку. Выводятся из типов, а не перечнем: вход, забывший штамп, не ускользнёт.
 fn dispatch_entries(index: &SourceIndex, forms: &[String]) -> Vec<String> {
     let scenarios = path_of("crate::use_cases");
@@ -2809,13 +2977,14 @@ fn dispatch_entries(index: &SourceIndex, forms: &[String]) -> Vec<String> {
         .filter(|(_, function)| {
             function.module.starts_with(&scenarios) || function.module.starts_with(&mcp)
         })
-        .filter(|(_, function)| matches!(function.item.vis, syn::Visibility::Public(_)))
-        .filter(|(_, function)| {
-            let output = normalize_tokens(&function.item.sig.output);
-            output
-                .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
-                .any(|word| forms.iter().any(|form| form == word))
+        .filter(|(_, function)| match &function.item.vis {
+            syn::Visibility::Public(_) => true,
+            syn::Visibility::Restricted(restricted) => {
+                restricted.path.is_ident("crate") && function.module.len() == 3
+            }
+            syn::Visibility::Inherited => false,
         })
+        .filter(|(_, function)| names_a_form(&normalize_tokens(&function.item.sig.output), forms))
         .filter(|(_, function)| {
             let inputs = normalize_tokens(&function.item.sig.inputs);
             inputs.contains("ExecutionContext")
@@ -2829,11 +2998,13 @@ fn dispatch_entries(index: &SourceIndex, forms: &[String]) -> Vec<String> {
 
 /// Корень #312: сценарии решали признак сами, чаще всего постоянной `true` на всяком
 /// отказе. Владелец теперь один — отметка работы команды: её ставит только платформа, а
-/// значение признаку — только `stamp_dispatch` в хвосте входа сценария. Страж держит обе
-/// стороны и узнаёт ту же ошибку под другим именем: решённое по месту значение в сценарии,
-/// MCP, домене или CLI, составное присваивание, признак внутри макроса, `stamp_work` мимо
-/// штампа, отметку вне платформы, свою отметку или свой контекст в сценарии, шаг, объявленный
-/// «не работой», вне платформы, и вход, возвращающий форму с признаком без штампа в хвосте.
+/// значение признаку — только `stamp_dispatch` в хвосте входа сценария. Объявить шаг «не
+/// работой» вне платформы не даёт компилятор: поля отметки и конструкторы без неё видны только
+/// ей. Остальное держит страж и узнаёт ту же ошибку под другим именем: решённое по месту
+/// значение в сценарии, MCP, домене или CLI, ключ ответа, собранный руками, составное
+/// присваивание, признак или отметку в непрочитанном макросе, `stamp_work` мимо штампа,
+/// отметку вне платформы, свою отметку, политику или контекст в сценарии, `spawn_managed` без
+/// отметки и вход, возвращающий форму с признаком без штампа в хвосте.
 #[test]
 fn provider_dispatched_takes_its_value_only_from_the_work_mark() {
     let index = SourceIndex::of_src();
@@ -2940,27 +3111,40 @@ fn the_dispatch_finder_sees_decisions_marks_and_exits() {
         ),
         (
             "crate::use_cases::sample",
-            "pub fn decides(ok: bool) -> R { R { provider_dispatched: ok } }\n\
+            "type QFailure = UseCaseFailure<Q>;\n\
+             pub fn decides(ok: bool) -> R { R { provider_dispatched: ok } }\n\
              pub fn shorthand(provider_dispatched: bool) -> R { R { provider_dispatched } }\n\
              pub fn copies(r: R) -> R { R { provider_dispatched: r.provider_dispatched } }\n\
              pub fn assigns(mut r: R) -> R { r.provider_dispatched = true; r }\n\
              pub fn honest(mut r: R) -> Q { r.provider_dispatched = Some(false); Q { provider_dispatched: false, other: None } }\n\
              pub fn compounds(mut r: R, ok: bool) { r.provider_dispatched |= ok; }\n\
              pub fn borrows(mut r: R) { let flag = &mut r.provider_dispatched; *flag = true; }\n\
-             pub fn marks(work: &WorkGiven) { work.mark_work_given(); }\n\
-             pub fn stamps_by_hand(r: &mut R, w: &WorkGiven) { r.stamp_work(w); }\n\
-             pub fn serves(p: P) -> P { let q = ProcessExecutionPolicy::new(a, b, c, None); P { work: None, ..p } }\n\
-             pub fn queues() -> E { EdtSessionRequest::new(c, d, None) }\n\
-             pub fn launches(r: &Runner) { r.spawn_managed(&q, Mode::Wait, None); }\n\
+             pub fn marks(work: &WorkGiven) { work.mark_work_given(); WorkGiven::mark_work_given(work); }\n\
+             pub fn stamps_by_hand(r: &mut R, w: &WorkGiven) { r.stamp_work(w); CarriesDispatch::stamp_work(r, w); }\n\
+             pub fn mints(w: Option<WorkGiven>) -> WorkGiven { w.unwrap_or_else(WorkGiven::for_command) }\n\
+             pub fn builds(w: WorkGiven) -> P { ProcessExecutionPolicy::new(a, b, c, w) }\n\
+             pub fn launches(r: &Runner, w: Option<&WorkGiven>) { r.spawn_managed(&q, Mode::Wait, None); ProcessRunner::spawn_managed(r, &q, Mode::Wait, w); }\n\
+             pub fn launches_work(r: &Runner, c: &C) { r.spawn_managed(&q, Mode::Wait, Some(c.work())); }\n\
              pub fn opens() -> ExecutionContext { ExecutionContext::cli(C::X) }\n\
-             pub fn logs(r: &R) { debug!(\"{}\", r.provider_dispatched); format!(\"{provider_dispatched}\"); }\n\
+             pub fn logs(r: &R, x: bool) { debug!(\"{}\", r.provider_dispatched); format!(\"{provider_dispatched}\"); info!(r.provider_dispatched = x); assert!(matches!(r, R { provider_dispatched: true, .. })); }\n\
              pub fn hides(ok: bool) -> Vec<R> { vec![R { provider_dispatched: ok }] }\n\
-             pub fn obscures() { weird!(provider_dispatched => true); }\n\
+             pub fn inserts(m: &mut Map) { m.insert(\"provider_dispatched\".into(), true.into()); }\n\
+             pub fn reads_key(v: &Value) -> bool { v[\"provider_dispatched\"] == true }\n\
+             pub fn writes_key(v: &mut Value) { v[\"provider_dispatched\"] = json!(true); }\n\
+             pub fn debugs(mut r: R, ok: bool) { dbg!(r.provider_dispatched = ok); }\n\
+             pub fn guards(mut r: R) -> bool { matches!(r, _ if { r.provider_dispatched = true; true }) }\n\
+             pub fn keys() -> Value { json!({\"provider_dispatched\": true}) }\n\
+             pub fn obscures(r: &R, w: &WorkGiven) { weird!(provider_dispatched => true); debug!(f = ?r.provider_dispatched); select! { x = w.mark_work_given() => {} } }\n\
              pub fn exits(c: &ExecutionContext) -> UseCaseResult<R> { stamp_dispatch(run(c), c.work()) }\n\
              pub fn maps(c: &M) -> Result<UseCaseResult<Q>, T> { let w = WorkGiven::for_command(); run(c).map(|o| stamp_dispatch(o, &w)) }\n\
              pub fn branches(c: &ExecutionContext, d: bool) -> UseCaseResult<R> { if d { stamp_dispatch(run(c), c.work()) } else { run(c) } }\n\
              pub fn forgets(c: &ExecutionContext) -> UseCaseResult<R> { run(c) }\n\
+             pub(crate) fn aliased(c: &ExecutionContext) -> Result<X, QFailure> { run(c) }\n\
              pub fn plans(p: &Plan) -> Result<X, UseCaseFailure<R>> { plan(p) }",
+        ),
+        (
+            "crate::use_cases::sample::helpers",
+            "pub(crate) fn inner(c: &ExecutionContext) -> UseCaseResult<R> { run(c) }",
         ),
     ]);
     let found = |name: &str| {
@@ -2975,36 +3159,63 @@ fn the_dispatch_finder_sees_decisions_marks_and_exits() {
     assert!(honest.decided.is_empty() && honest.copies == 0);
     assert_eq!(found("compounds").writes, 1);
     assert_eq!(found("borrows").writes, 1);
-    assert_eq!(found("marks").marks, 1);
-    assert_eq!(found("stamps_by_hand").stamp_work, 1);
-    let serves = found("serves");
-    assert_eq!((serves.without_work, serves.policies), (2, 1));
-    assert_eq!(found("queues").without_work, 1);
-    assert_eq!(found("launches").without_work, 1);
+    assert_eq!(found("marks").marks, 2, "a method call and a full path");
+    assert_eq!(
+        found("stamps_by_hand").stamp_work,
+        2,
+        "a method call and a full path"
+    );
+    assert_eq!(found("mints").for_command, 1, "a path used as a value");
+    assert_eq!(found("builds").policies, 1);
+    assert_eq!(
+        found("launches").without_work,
+        2,
+        "a None and a ledger that may be None"
+    );
+    assert_eq!(found("launches_work").without_work, 0);
     assert_eq!(found("opens").contexts, 1);
     let logs = found("logs");
     assert!(
-        logs.decided.is_empty() && logs.opaque_macros == 0,
-        "a read is not a decision"
+        logs.decided.is_empty() && logs.copies == 0 && logs.opaque_macros == 0,
+        "reads, log fields and patterns are not decisions"
     );
     assert_eq!(found("hides").decided, ["ok"]);
-    assert_eq!(found("obscures").opaque_macros, 1);
+    assert_eq!(found("inserts").decided, ["\"provider_dispatched\""]);
+    assert!(
+        found("reads_key").decided.is_empty(),
+        "a read by key is not a decision"
+    );
+    assert_eq!(found("writes_key").decided.len(), 1, "a write by key is");
+    assert_eq!(found("debugs").decided, ["ok"], "dbg! is not a log field");
+    assert_eq!(
+        found("guards").decided,
+        ["true"],
+        "a matches! guard is code"
+    );
+    assert_eq!(found("keys").opaque_macros, 1, "a wire key built by hand");
+    assert_eq!(
+        found("obscures").opaque_macros,
+        3,
+        "an unreadable body may not name the flag or the work mark"
+    );
     assert_eq!(
         dispatch_macros(&index),
         ["crate::use_cases::result::carries_dispatch!"]
     );
 
     let forms = dispatch_forms(&index);
-    assert_eq!(forms, ["R", "Q"]);
+    assert_eq!(forms, ["R", "Q", "QFailure"]);
     assert_eq!(
         dispatch_entries(&index, &forms),
         [
+            "crate::use_cases::sample::aliased",
             "crate::use_cases::sample::branches",
             "crate::use_cases::sample::exits",
             "crate::use_cases::sample::forgets",
             "crate::use_cases::sample::maps",
         ],
-        "an entry is found by its answer and its context, the plan without one is not"
+        "an entry is found by its answer, even through an alias, and by its context; \
+         the plan without a context and a submodule helper are not entries"
     );
     let tail = |name: &str| {
         let function = &index.functions[&path_of(&format!("crate::use_cases::sample::{name}"))];
@@ -3014,5 +3225,142 @@ fn the_dispatch_finder_sees_decisions_marks_and_exits() {
         }
     };
     assert!(tail("exits") && tail("maps"));
-    assert!(!tail("branches") && !tail("forgets"));
+    assert!(!tail("branches") && !tail("forgets") && !tail("aliased"));
+}
+
+/// Где код может объявить шаг «не работой»: поле с отметкой, которой может не быть,
+/// функция, которая такую отметку берёт или собирает `work: None`, и метод трейта с такой
+/// отметкой. Для каждого — место и видимость.
+fn work_opt_outs(index: &SourceIndex) -> Vec<(String, String)> {
+    fn may_skip(tokens: &str) -> bool {
+        tokens.contains("Option<WorkGiven>") || tokens.contains("Option<&WorkGiven>")
+    }
+    fn scope(visibility: &syn::Visibility) -> String {
+        match visibility {
+            syn::Visibility::Public(_) => "pub".to_owned(),
+            syn::Visibility::Inherited => "private".to_owned(),
+            syn::Visibility::Restricted(restricted) => normalize_tokens(&restricted.path),
+        }
+    }
+    /// `work: None` в литерале структуры.
+    struct BuildsWithoutWork(bool);
+    impl<'ast> syn::visit::Visit<'ast> for BuildsWithoutWork {
+        fn visit_field_value(&mut self, node: &'ast syn::FieldValue) {
+            if matches!(&node.member, syn::Member::Named(name) if name == "work")
+                && is_none(&node.expr)
+            {
+                self.0 = true;
+            }
+            syn::visit::visit_field_value(self, node);
+        }
+    }
+    fn builds_without_work(block: &syn::Block) -> bool {
+        let mut finder = BuildsWithoutWork(false);
+        syn::visit::Visit::visit_block(&mut finder, block);
+        finder.0
+    }
+    fn walk(module: &[String], items: &[syn::Item], found: &mut Vec<(String, String)>) {
+        let at = |name: &str| format!("{}::{name}", module.join("::"));
+        for item in items.iter().filter(|item| !item_has_cfg_test(item)) {
+            match item {
+                syn::Item::Struct(item) => {
+                    for field in &item.fields {
+                        let named = field.ident.as_ref().is_some_and(|name| name == "work");
+                        if named && may_skip(&normalize_tokens(&field.ty)) {
+                            found.push((at(&format!("{}.work", item.ident)), scope(&field.vis)));
+                        }
+                    }
+                }
+                syn::Item::Fn(item) => {
+                    if may_skip(&normalize_tokens(&item.sig.inputs))
+                        || builds_without_work(&item.block)
+                    {
+                        found.push((at(&item.sig.ident.to_string()), scope(&item.vis)));
+                    }
+                }
+                syn::Item::Impl(item) if item.trait_.is_none() => {
+                    let owner = normalize_tokens(item.self_ty.as_ref());
+                    for member in &item.items {
+                        if let syn::ImplItem::Fn(method) = member {
+                            if has_cfg_test(&method.attrs) {
+                                continue;
+                            }
+                            if may_skip(&normalize_tokens(&method.sig.inputs))
+                                || builds_without_work(&method.block)
+                            {
+                                found.push((
+                                    at(&format!("{owner}::{}", method.sig.ident)),
+                                    scope(&method.vis),
+                                ));
+                            }
+                        }
+                    }
+                }
+                syn::Item::Trait(item) => {
+                    for member in &item.items {
+                        if let syn::TraitItem::Fn(method) = member {
+                            if may_skip(&normalize_tokens(&method.sig.inputs)) {
+                                found.push((
+                                    at(&format!("{}::{}", item.ident, method.sig.ident)),
+                                    scope(&item.vis),
+                                ));
+                            }
+                        }
+                    }
+                }
+                syn::Item::Mod(item) => {
+                    if let Some((_, nested)) = &item.content {
+                        let inner = [module, &[item.ident.to_string()]].concat();
+                        walk(&inner, nested, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut found = Vec::new();
+    for unit in &index.units {
+        walk(&unit.module, &unit.syntax.items, &mut found);
+    }
+    found.sort();
+    found
+}
+
+/// Шаг, который не работа команды, объявляет только платформа: поле отметки, конструктор
+/// без неё и доставка без неё видны лишь внутри `crate::platform`. Это держит компилятор —
+/// а этот страж держит саму видимость: расширь её ради удобства двойника, и `p.work = None`
+/// в сценарии снова скомпилируется. Единственное открытое место — `spawn_managed`, чьи вызовы
+/// вне платформы страж признака требует с `Some(..)`.
+#[test]
+fn a_step_may_skip_the_work_mark_only_inside_the_platform() {
+    let index = SourceIndex::of_src();
+    let found = work_opt_outs(&index);
+    let known = [
+        "crate::platform::agent::WaitPolicy.work",
+        "crate::platform::edt_session::EdtSessionRequest.work",
+        "crate::platform::process::ProcessExecutionPolicy.work",
+    ];
+    for site in known {
+        assert!(
+            found.iter().any(|(at, _)| at == site),
+            "the finder no longer sees {site}: {found:?}"
+        );
+    }
+    let open = found
+        .iter()
+        .filter(|(at, scope)| {
+            let inside = at.starts_with("crate::platform::");
+            let hidden = matches!(
+                scope.as_str(),
+                "private" | "crate::platform" | "super" | "self"
+            );
+            let held_by_the_dispatch_guard =
+                at == "crate::platform::process::ProcessRunner::spawn_managed";
+            !(inside && hidden) && !held_by_the_dispatch_guard
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        open.is_empty(),
+        "a step may be declared not to be the command's work only inside the platform: {open:?}"
+    );
 }
