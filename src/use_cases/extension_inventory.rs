@@ -91,18 +91,54 @@ fn run_read(
         });
     }
 
+    // Открытие сессии и отказ до запуска `ibcmd` работы не дают и отвечают общей формой
+    // отказа; всё, что случилось после, отвечает формой чтения: вызывающий узнаёт из неё,
+    // что платформа запрос получила.
+    let extensions =
+        read_extensions(context, config, request, executor, &utilities).map_err(|error| {
+            UseCaseFailure::after_possible_work(error, context.work(), || {
+                ExtensionInventoryResult {
+                    provider: Some(receipt.clone()),
+                    ok: false,
+                    provider_dispatched: false,
+                    requested: requested(&request.scope),
+                    plan: None,
+                    extensions: Vec::new(),
+                    duration_ms: started.elapsed().as_millis() as u64,
+                }
+            })
+        })?;
+
+    Ok(ExtensionInventoryResult {
+        provider: Some(receipt),
+        ok: true,
+        provider_dispatched: false,
+        requested: requested(&request.scope),
+        plan: None,
+        extensions,
+        duration_ms: started.elapsed().as_millis() as u64,
+    })
+}
+
+/// Состав расширений у исполнителя. Ошибка — какой бы она ни была — возвращается как есть:
+/// какой формой на неё ответить, решает отметка работы у вызывающего.
+fn read_extensions(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    request: &ExtensionInventoryRequest,
+    executor: Executor,
+    utilities: &PlatformUtilities,
+) -> Result<Vec<InstalledExtension>, AppError> {
     let extensions = match executor {
         Executor::Agent { v8 } => {
-            let mut agent = ExtensionAgent::open(context, config, v8.as_deref())
-                .map_err(UseCaseFailure::without_payload)?;
+            let mut agent = ExtensionAgent::open(context, config, v8.as_deref())?;
             let inventory = agent.inventory(match &request.scope {
                 ExtensionInventoryScope::All => None,
                 ExtensionInventoryScope::Named { name } => Some(name.as_str()),
             });
             agent.close();
-            let extensions = inventory.map_err(UseCaseFailure::without_payload)?;
-            ensure_requested_record(&extensions, request)
-                .map_err(UseCaseFailure::without_payload)?;
+            let extensions = inventory?;
+            ensure_requested_record(&extensions, request)?;
             extensions
         }
         Executor::Ibcmd { binary, connection } => {
@@ -118,36 +154,20 @@ fn run_read(
                 ExtensionInventoryScope::All => dsl.infobase_extension_list(),
                 ExtensionInventoryScope::Named { name } => dsl.infobase_extension_info(name),
             }
-            .map_err(|error| {
-                UseCaseFailure::without_payload(snapshot_dispatch_error(
-                    context, error, "read", &subject,
-                ))
-            })?;
+            .map_err(|error| snapshot_dispatch_error(context, error, "read", &subject))?;
 
-            validate_snapshot_step(&platform_result, "read", &subject)
-                .map_err(UseCaseFailure::without_payload)?;
+            validate_snapshot_step(&platform_result, "read", &subject)?;
             if context.cancellation().is_cancelled() {
-                return Err(UseCaseFailure::without_payload(AppError::Cancelled(
+                return Err(AppError::Cancelled(
                     "extension inventory cancelled".to_owned(),
-                )));
+                ));
             }
-            let mut extensions = read_inventory(&platform_result, request)
-                .map_err(UseCaseFailure::without_payload)?;
-            attest_applied_prefixes(context, config, request, &dsl, &mut extensions)
-                .map_err(UseCaseFailure::without_payload)?;
+            let mut extensions = read_inventory(&platform_result, request)?;
+            attest_applied_prefixes(context, config, request, &dsl, &mut extensions)?;
             extensions
         }
     };
-
-    Ok(ExtensionInventoryResult {
-        provider: Some(receipt),
-        ok: true,
-        provider_dispatched: false,
-        requested: requested(&request.scope),
-        plan: None,
-        extensions,
-        duration_ms: started.elapsed().as_millis() as u64,
-    })
+    Ok(extensions)
 }
 
 /// The list/info command omits NamePrefix. Save the *applied database* CFE for

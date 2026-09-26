@@ -215,7 +215,33 @@ fn run_launch(
                 InterruptionSafetyClass::GracefulThenKill,
                 Some(Duration::from_millis(plan.timeout_ms)),
             ))
-            .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+            .map_err(|error| {
+                // Клиент уже запущен: ожидание, оборванное отменой, отвечает формой `launch`,
+                // и выхода у клиента нет — ни кода, ни истёкшего срока.
+                let error = AppError::from(error);
+                let message = format!("External EPF client wait was interrupted: {error}");
+                UseCaseFailure::after_possible_work(error, context.work(), || LaunchResult {
+                    ok: false,
+                    mode: mode.clone(),
+                    via,
+                    pid: Some(pid),
+                    binary: location.path.clone(),
+                    platform_resolution: platform_resolution.clone(),
+                    url: reported_url.clone(),
+                    provider_dispatched: false,
+                    plan: None,
+                    message: Some(message),
+                    mcp_readiness: None,
+                    external_epf_wait: Some(ExternalEpfWaitResult {
+                        pid,
+                        execute_path: plan.execute_path.clone(),
+                        exit_code: None,
+                        timed_out: false,
+                        output_path: plan.output_path.clone(),
+                        stderr_path: plan.stderr_path.display().to_string(),
+                    }),
+                })
+            })?;
         let message = if outcome.timed_out {
             format!(
                 "External EPF client timed out after {}ms and was terminated",

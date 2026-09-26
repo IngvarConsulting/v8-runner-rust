@@ -163,7 +163,19 @@ fn run_publish(
             &process,
             &context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
         )
-        .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+        .map_err(|error| {
+            // Отказ после старта `webinst` отвечает формой `publish`. Журнала у оборванного
+            // запуска нет — исполнитель пишет его только после выхода, — поэтому и пути к
+            // нему ответ не называет.
+            let error = AppError::from(error);
+            let message = error.to_string();
+            UseCaseFailure::after_possible_work(error, context.work(), || {
+                let mut failed = result(None);
+                failed.ok = false;
+                failed.message = Some(message);
+                failed
+            })
+        })?;
 
     let mut done = result(None);
     done.platform_log_path = Some(log_path);

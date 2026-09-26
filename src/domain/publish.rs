@@ -35,8 +35,9 @@ pub struct PublishResult {
     pub provider: Option<crate::domain::capability::ProviderReceipt>,
 
     pub ok: bool,
-    /// Whether `webinst` was started for this command. `false` in a preview; a refusal or a
-    /// start that failed answers the shared refusal form, without this field.
+    /// Whether `webinst` was started for this command. `false` in a preview. A refusal before
+    /// the start answers the shared refusal form, without this field; a failure after the
+    /// start answers this form with `ok: false` and `true`.
     pub provider_dispatched: bool,
     pub action: PublishAction,
     /// Web server named in `infobase.web.server`.

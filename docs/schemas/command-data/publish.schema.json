@@ -196,7 +196,7 @@
       "description": "Квитанция о выборе исполнителя; `None`, пока выбор не начинался."
     },
     "provider_dispatched": {
-      "description": "Whether `webinst` was started for this command. `false` in a preview; a refusal or a\nstart that failed answers the shared refusal form, without this field.",
+      "description": "Whether `webinst` was started for this command. `false` in a preview. A refusal before\nthe start answers the shared refusal form, without this field; a failure after the\nstart answers this form with `ok: false` and `true`.",
       "type": "boolean"
     },
     "server": {

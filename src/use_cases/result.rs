@@ -190,6 +190,23 @@ impl<T> UseCaseFailure<T> {
             payload: None,
         }
     }
+
+    /// Отказ там, где исполнитель, может быть, уже получил работу команды. После работы —
+    /// формой самой команды: из неё и её `provider_dispatched` вызывающий узнаёт, что работа
+    /// была. До работы — общей формой отказа, как всякий отказ до начала. Какая из двух,
+    /// решает отметка работы команды, а не место вызова: одна и та же ошибка исполнителя
+    /// бывает и до запуска, и после него.
+    pub(crate) fn after_possible_work(
+        error: impl Into<UseCaseError>,
+        work: &WorkGiven,
+        payload: impl FnOnce() -> T,
+    ) -> Self {
+        if work.given() {
+            Self::with_payload(error, payload())
+        } else {
+            Self::without_payload(error)
+        }
+    }
 }
 
 /// The transport-neutral result contract for use-case execution.
@@ -243,6 +260,13 @@ pub(crate) fn stamp_dispatch<T: CarriesDispatch>(
     mut outcome: UseCaseResult<T>,
     work: &WorkGiven,
 ) -> UseCaseResult<T> {
+    // Отказ без формы после работы — ошибка сценария: вызывающий прочёл бы «ничего не
+    // запускалось». Такой отказ строит `UseCaseFailure::after_possible_work`, и всякий тест,
+    // дошедший до забытого места, падает здесь, как бы оно ни называлось.
+    debug_assert!(
+        !(work.given() && matches!(&outcome, Err(failure) if failure.payload.is_none())),
+        "a failure after the executor got the command's work must answer in the command's form"
+    );
     if let Some(payload) = payload_mut(&mut outcome) {
         payload.stamp_work(work);
     }
@@ -251,13 +275,69 @@ pub(crate) fn stamp_dispatch<T: CarriesDispatch>(
 
 #[cfg(test)]
 mod tests {
-    use super::{UseCaseError, UseCaseErrorKind};
+    use super::{stamp_dispatch, CarriesDispatch, UseCaseError, UseCaseErrorKind, UseCaseFailure};
     use crate::config::loader::ConfigLoadError;
     use crate::platform::designer::DesignerError;
     use crate::platform::edt_session::EdtSessionError;
     use crate::platform::ibcmd::IbcmdError;
     use crate::platform::process::ProcessError;
+    use crate::platform::process::WorkGiven;
     use crate::support::error::{AppError, CapabilityReason};
+
+    /// Форма с признаком в миниатюре.
+    #[derive(Debug)]
+    struct Form {
+        provider_dispatched: bool,
+    }
+
+    impl CarriesDispatch for Form {
+        fn stamp_work(&mut self, work: &WorkGiven) {
+            self.provider_dispatched = work.given();
+        }
+    }
+
+    fn refusal() -> AppError {
+        AppError::Runtime("the executor refused".to_owned())
+    }
+
+    /// Отказ отвечает формой команды, только когда исполнитель уже получил работу: до неё —
+    /// общей формой отказа, после — формой, и штамп ставит в ней `true`.
+    #[test]
+    fn a_failure_answers_in_the_command_form_only_after_work() {
+        let work = WorkGiven::for_command();
+        let before = UseCaseFailure::after_possible_work(refusal(), &work, || Form {
+            provider_dispatched: false,
+        });
+        assert!(
+            before.payload.is_none(),
+            "a refusal before any work keeps the shared refusal form"
+        );
+
+        work.mark_work_given();
+        let after = UseCaseFailure::after_possible_work(refusal(), &work, || Form {
+            provider_dispatched: false,
+        });
+        let stamped = stamp_dispatch(Err::<Form, _>(after), &work);
+        assert!(
+            matches!(&stamped, Err(failure)
+                if failure.payload.as_ref().is_some_and(|form| form.provider_dispatched)),
+            "{stamped:?}"
+        );
+    }
+
+    /// Отказ без формы после работы ловит сам штамп: забытое место падает в любом тесте,
+    /// который до него дошёл, как бы оно ни называлось.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "must answer in the command's form")]
+    fn the_stamp_catches_a_failure_without_its_form_after_work() {
+        let work = WorkGiven::for_command();
+        work.mark_work_given();
+        let _ = stamp_dispatch(
+            Err::<Form, _>(UseCaseFailure::without_payload(refusal())),
+            &work,
+        );
+    }
 
     #[test]
     fn use_case_error_kinds_keep_stable_cli_exit_codes() {

@@ -665,10 +665,20 @@ fn run_extension_inventory(
         Err(failure) => {
             let error = failure.error;
             if presenter.is_json() {
-                presenter.print_envelope(&pre_dispatch_error_envelope(
-                    CommandName::Extensions.as_str(),
-                    &error,
-                ));
+                // Отказ после работы исполнителя несёт форму чтения, до неё — общую форму
+                // отказа.
+                match failure.payload {
+                    Some(result) => presenter.print_envelope(&failure_envelope(
+                        CommandName::Extensions.as_str(),
+                        result.duration_ms,
+                        result,
+                        &error,
+                    )),
+                    None => presenter.print_envelope(&pre_dispatch_error_envelope(
+                        CommandName::Extensions.as_str(),
+                        &error,
+                    )),
+                }
             } else {
                 presenter.print_error(&error.to_string());
             }

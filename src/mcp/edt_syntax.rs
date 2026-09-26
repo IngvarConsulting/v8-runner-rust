@@ -27,6 +27,9 @@ static LOG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// Transport-level queued cancellation and timeout are returned separately so the
 /// MCP transport can preserve admission semantics. Running cancellation and timeout
 /// wait for terminal state and are converted into the normal use-case payload contract.
+/// A project that is cancelled or times out in the shared EDT queue after an earlier
+/// project was delivered is a failure after work: the call was admitted and ran, so it
+/// answers in the `check` form rather than as a protocol error.
 pub async fn execute(
     manager: &EdtSessionManager,
     config: &AppConfig,
@@ -161,11 +164,40 @@ async fn run(
             .await;
         let response = match execution.result {
             Ok(response) => response,
-            Err(EdtSessionError::QueuedCancelled) => {
-                return Err(EdtSyntaxTransportError::QueuedCancelled);
-            }
-            Err(EdtSessionError::QueuedTimeout) => {
-                return Err(EdtSyntaxTransportError::QueuedTimeout);
+            Err(error @ (EdtSessionError::QueuedCancelled | EdtSessionError::QueuedTimeout)) => {
+                // Проект не дождался общей сессии. Если до него уже проверялся другой проект,
+                // работа была, и ответ — форма `check`; иначе вызов работы не дал, и это
+                // ошибка протокола, как у всякого недопущенного вызова.
+                let (transport, waited) = match error {
+                    EdtSessionError::QueuedCancelled => {
+                        (EdtSyntaxTransportError::QueuedCancelled, "was cancelled")
+                    }
+                    _ => (EdtSyntaxTransportError::QueuedTimeout, "timed out"),
+                };
+                let message = format!(
+                    "project '{}' {waited} while waiting for the shared EDT session after earlier projects were checked",
+                    source_set.name
+                );
+                let failure = SyntaxExecutionFailure::after_possible_work(
+                    AppError::Runtime(message.clone()),
+                    work,
+                    || {
+                        failed_result(
+                            CheckName::Edt,
+                            SyntaxCheckStatus::ToolFailed,
+                            -1,
+                            started,
+                            vec![],
+                            None,
+                            Some(message),
+                            None,
+                        )
+                    },
+                );
+                return match failure.payload {
+                    Some(_) => Ok(Err(failure)),
+                    None => Err(transport),
+                };
             }
             Err(EdtSessionError::RunningCancelled) => {
                 if let Some(completion) = execution.completion {

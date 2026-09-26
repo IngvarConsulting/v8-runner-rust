@@ -72,11 +72,14 @@ pub struct ExtensionInventoryResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<crate::domain::capability::ProviderReceipt>,
 
+    /// `false` when the read failed after the executor got the work: the composition is then
+    /// unknown, not empty.
     pub ok: bool,
     /// Whether an executor got this command's work: a process was started to do it, or the
     /// request's command was handed to a running session. Starting or opening a session and
-    /// its own service commands are not work. `false` in a preview; any failure answers the
-    /// shared refusal form, without this field.
+    /// its own service commands are not work. `false` in a preview. A refusal before any work
+    /// answers the shared refusal form, without this field; a failure after the executor got
+    /// the work answers this form with `ok: false`, an empty `extensions` and `true`.
     ///
     /// Reading the composition is an action, not a look: the platform starts, a session
     /// opens, the account authenticates and a journal trace is left. So the read has a
