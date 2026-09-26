@@ -291,10 +291,7 @@ impl<'a> EdtDsl<'a> {
                     "running interactive edt command"
                 );
                 // Переход в рабочее пространство — служебная команда: работы он не отмечает.
-                let service_policy = ProcessExecutionPolicy {
-                    work: None,
-                    ..execution_policy.clone()
-                };
+                let service_policy = execution_policy.without_work();
                 let change_dir = session
                     .execute_with_policy(
                         &change_dir_command,
@@ -364,10 +361,9 @@ impl<'a> EdtDsl<'a> {
                 if !manager.has_live_session() {
                     manager
                         .execute_blocking(
-                            EdtSessionRequest::new(
+                            EdtSessionRequest::service(
                                 render_interactive_change_dir_command(&self.workspace),
                                 Instant::now() + *startup_timeout,
-                                None,
                             )
                             .with_cancellation(self.execution_policy.cancellation.clone()),
                         )
@@ -396,14 +392,17 @@ impl<'a> EdtDsl<'a> {
                     timeout_ms = effective_timeout.as_millis() as u64,
                     "running shared edt command"
                 );
+                let deadline = Instant::now() + effective_timeout;
+                // Политика DSL без отметки — шаг самой платформы: его команда служебная.
+                let request = match self.execution_policy.work.clone() {
+                    Some(work) => {
+                        EdtSessionRequest::new(interactive_command.to_owned(), deadline, work)
+                    }
+                    None => EdtSessionRequest::service(interactive_command.to_owned(), deadline),
+                };
                 let output = manager
                     .execute_blocking(
-                        EdtSessionRequest::new(
-                            interactive_command.to_owned(),
-                            Instant::now() + effective_timeout,
-                            self.execution_policy.work.clone(),
-                        )
-                        .with_cancellation(self.execution_policy.cancellation.clone()),
+                        request.with_cancellation(self.execution_policy.cancellation.clone()),
                     )
                     .map_err(|error| {
                         map_shared_session_error(
@@ -1129,9 +1128,7 @@ mod tests {
             }
             *self.timeout.lock().expect("timeout lock") = policy.timeout;
             // Как настоящий исполнитель, двойник отмечает работу, едва «запустил» процесс.
-            if let Some(work) = &policy.work {
-                work.mark_work_given();
-            }
+            policy.mark_started_for_test();
             Ok(ProcessResult {
                 exit_code: 0,
                 stdout: String::new(),
@@ -1442,7 +1439,7 @@ OUT\n\
                 Some(Duration::from_millis(50)),
                 CancellationToken::new(),
                 ProcessInterruptionSafety::GracefulThenKill,
-                Some(WorkGiven::for_command()),
+                WorkGiven::for_command(),
             ),
         )
         .expect("interactive dsl");
@@ -1496,7 +1493,7 @@ OUT\n\
                 Some(Duration::from_millis(100)),
                 CancellationToken::new(),
                 ProcessInterruptionSafety::GracefulThenKill,
-                Some(WorkGiven::for_command()),
+                WorkGiven::for_command(),
             ),
         )
         .expect("interactive dsl");
@@ -1554,7 +1551,7 @@ OUT\n\
                 Some(Duration::from_millis(400)),
                 CancellationToken::new(),
                 ProcessInterruptionSafety::GracefulThenKill,
-                Some(WorkGiven::for_command()),
+                WorkGiven::for_command(),
             ),
         )
         .expect("interactive dsl");
@@ -1616,7 +1613,7 @@ OUT\n\
                 Some(Duration::from_secs(1)),
                 cancellation,
                 ProcessInterruptionSafety::GracefulThenKill,
-                Some(WorkGiven::for_command()),
+                WorkGiven::for_command(),
             ),
         )
         .expect("interactive dsl");
@@ -1669,7 +1666,7 @@ OUT\n\
                 Some(Duration::from_millis(250)),
                 CancellationToken::new(),
                 ProcessInterruptionSafety::CriticalNonAbortable,
-                Some(WorkGiven::for_command()),
+                WorkGiven::for_command(),
             ),
         )
         .expect("interactive dsl");

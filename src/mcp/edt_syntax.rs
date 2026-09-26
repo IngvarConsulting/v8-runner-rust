@@ -155,7 +155,7 @@ async fn run(
         let command = render_interactive_validate_command(&source_path, &log_path);
         let execution = manager
             .execute_observed(
-                EdtSessionRequest::new(command, deadline, Some(work.clone()))
+                EdtSessionRequest::new(command, deadline, work.clone())
                     .with_cancellation(cancellation.clone()),
             )
             .await;

@@ -290,7 +290,7 @@ fn execute_publish(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Requested {
     Preview,
-    Run,
+    Apply,
 }
 
 impl Requested {
@@ -298,7 +298,7 @@ impl Requested {
         if dry_run {
             Self::Preview
         } else {
-            Self::Run
+            Self::Apply
         }
     }
 }
@@ -791,8 +791,8 @@ fn render_extensions_text(
                 // A preview performed nothing, so the step must not read as done.
                 match (requested, step.ok) {
                     (Requested::Preview, _) => "planned",
-                    (Requested::Run, true) => "ok",
-                    (Requested::Run, false) => "failed",
+                    (Requested::Apply, true) => "ok",
+                    (Requested::Apply, false) => "failed",
                 },
                 step.message
                     .as_deref()
@@ -5249,7 +5249,7 @@ mod tests {
                 }),
         };
 
-        let json = serde_json::to_value(build_load_envelope(&result, super::Requested::Run))
+        let json = serde_json::to_value(build_load_envelope(&result, super::Requested::Apply))
             .expect("json");
         let message = json["data"]["message"].as_str().expect("message");
 

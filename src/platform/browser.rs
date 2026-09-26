@@ -124,7 +124,12 @@ mod tests {
         );
 
         let opened = WorkGiven::for_command();
-        open_url(shell, &quiet, "http://host/", &opened).expect("the opener started");
+        let pid = open_url(shell, &quiet, "http://host/", &opened).expect("the opener started");
+        // Программу открытия никто не ждёт: тест дожидается её сам, чтобы не оставить зомби.
+        // SAFETY: `pid` — наш собственный потомок, только что запущенный `open_url`; указатель
+        // на статус может быть нулевым.
+        let reaped = unsafe { libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), 0) };
+        assert_eq!(reaped, pid as libc::pid_t, "the opener was reaped");
         assert!(opened.given(), "a started opener is the command's work");
     }
 

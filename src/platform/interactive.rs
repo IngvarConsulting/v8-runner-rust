@@ -292,8 +292,9 @@ impl InteractiveProcessExecutor {
     }
 
     /// Как `execute`, но команда запроса отмечает работу, как только доставлена в процесс:
-    /// записана и вытолкнута, ещё до ответа. Служебная команда передаёт `None`.
-    pub(crate) fn execute_delivering(
+    /// записана и вытолкнута, ещё до ответа. Служебная команда передаёт `None` — и объявить
+    /// так команду может только платформа.
+    pub(in crate::platform) fn execute_delivering(
         &mut self,
         command: &str,
         timeout: Duration,

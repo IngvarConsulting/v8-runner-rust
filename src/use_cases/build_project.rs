@@ -52,6 +52,7 @@ const SUPPORTED_DESIGNER_BUILD_ERROR: &str =
 const SUPPORTED_EDT_BUILD_ERROR: &str =
     "build with format=EDT currently supports only the Designer or ibcmd provider";
 
+/// Caller must ensure exclusive ownership of `config.work_path`.
 pub fn execute(
     context: &ExecutionContext,
     config: &AppConfig,

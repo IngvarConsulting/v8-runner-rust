@@ -17,7 +17,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::platform::process::{ProcessInterruptionReason, ProcessInterruptionSafety, WorkGiven};
+use crate::platform::process::{
+    ProcessExecutionPolicy, ProcessInterruptionReason, ProcessInterruptionSafety, WorkGiven,
+};
 
 use russh::client;
 use russh::keys::ssh_key::{Fingerprint, HashAlg};
@@ -375,12 +377,24 @@ pub struct WaitPolicy {
     pub deadline: Option<Instant>,
     pub cancellation: CancellationToken,
     pub safety: ProcessInterruptionSafety,
-    /// Куда отметить, что команда запроса отправлена агенту. У служебных команд сессии —
-    /// подключения к базе, закрытия — отметки нет: `None`.
-    pub work: Option<WorkGiven>,
+    /// Куда отметить, что команда запроса отправлена агенту. Служебные команды сессии —
+    /// подключение к базе, закрытие — идут без отметки, и снимает её сама платформа
+    /// (`without_work`): снаружи поле не видно.
+    work: Option<WorkGiven>,
 }
 
 impl WaitPolicy {
+    /// Ожидание команды запроса по политике шага команды: отмена, класс безопасности и
+    /// отметка работы — оттуда, срок — если он у шага есть.
+    pub fn from_step(policy: ProcessExecutionPolicy) -> Self {
+        Self {
+            deadline: policy.timeout.map(|timeout| Instant::now() + timeout),
+            cancellation: policy.cancellation,
+            safety: policy.safety,
+            work: policy.work,
+        }
+    }
+
     /// Та же политика, урезанная до срока очистки. Это единственное место, где у
     /// агентского ожидания срок вообще появляется: сама работа идёт без него, а вот
     /// завершение обязано закончиться — иначе прерванная сессия висела бы вечно.
@@ -392,7 +406,13 @@ impl WaitPolicy {
             // Очистка не наследует критический класс: иначе она перестала бы слушать
             // собственный срок и завершение могло бы не закончиться никогда.
             safety: ProcessInterruptionSafety::Interruptible,
-            // Закрытие сессии — служебная команда, работы команды оно не отмечает.
+            ..self.clone()
+        }
+    }
+
+    /// Та же политика для служебной команды сессии: работы команды она не отмечает.
+    fn without_work(&self) -> Self {
+        Self {
             work: None,
             ..self.clone()
         }
@@ -676,10 +696,7 @@ impl AgentSession {
         };
         // Режим ответа и подключение к базе — служебные команды открытия сессии: работы
         // команды они не отмечают.
-        let service = WaitPolicy {
-            work: None,
-            ..policy.clone()
-        };
+        let service = policy.without_work();
         session.run(JSON_MODE_COMMAND, &service)?.outcome()?;
         session.run(CONNECT_COMMAND, &service)?.outcome()?;
         Ok(session)
@@ -721,8 +738,12 @@ impl AgentSession {
         Ok(reply)
     }
 
-    /// Закрывает сессию, не трогая агента: у чужого процесса раннер не хозяин.
-    pub fn close(mut self) {
+    /// Отпускает чужой агент, не трогая его процесса — у чужого процесса раннер не хозяин:
+    /// закрывает соединение с базой служебной командой — иначе точка входа держит
+    /// блокировку Конфигуратора и после разрыва SSH — и саму сессию. Ответ не важен, работы
+    /// команды это не отмечает.
+    pub fn release(mut self, policy: &WaitPolicy) {
+        let _ = self.run(DISCONNECT_COMMAND, &policy.cleanup().without_work());
         self.disconnect();
     }
 
@@ -1006,10 +1027,11 @@ impl AgentSession {
     }
 
     /// Просит агента завершиться и закрывает сессию; возвращает ответ, если он был.
+    /// Завершение — служебная команда: работы команды оно не отмечает.
     pub fn shutdown(mut self, policy: &WaitPolicy) -> Option<AgentReply> {
         // Ответ на shutdown может и не прийти — сессию закрывает сам агент; ждать его
         // дольше короткого срока незачем, даже если бюджет команды не ограничен.
-        let capped = policy.cleanup();
+        let capped = policy.cleanup().without_work();
         // Агент может закрыть соединение, не ответив: EOF здесь — не отказ.
         let reply = self.run(SHUTDOWN_COMMAND, &capped).ok();
         self.disconnect();
@@ -1308,11 +1330,10 @@ impl ManagedAgent {
         }
         if let Some(process) = self.process.take() {
             // Ожидание выхода агента — служебное: работы команды оно не отмечает.
-            let grace = crate::platform::process::ProcessExecutionPolicy::new(
+            let grace = ProcessExecutionPolicy::platform_step(
                 Some(Duration::from_secs(15)),
                 CancellationToken::new(),
-                crate::platform::process::ProcessInterruptionSafety::Interruptible,
-                None,
+                ProcessInterruptionSafety::Interruptible,
             );
             match process.wait_for_exit(&grace) {
                 Ok(outcome) if outcome.timed_out => {
@@ -1559,8 +1580,7 @@ mod tests {
             session.sftp_read("probe/x/a.cf").map(|b| b.len())
         );
         eprintln!("remove: {:?}", session.sftp_remove_all("probe"));
-        let _ = session.run("common disconnect-ib", &wait);
-        session.close();
+        session.release(&wait);
     }
 
     /// Шлюз автономного сервера внутри ответа на `update-db-cfg` шлёт уведомление

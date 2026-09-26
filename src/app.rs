@@ -674,7 +674,7 @@ fn render_bootstrap_text(
     // `provider_dispatched`: тот говорит, получил ли исполнитель работу, а не было ли
     // превью, и успешный боевой прогон может вернуться без работы исполнителю.
     let label = match (succeeded, requested) {
-        (true, execute::Requested::Run) => "Project cloned successfully",
+        (true, execute::Requested::Apply) => "Project cloned successfully",
         (true, execute::Requested::Preview) => "Project clone planned, nothing written",
         (false, _) => "Project clone failed",
     };

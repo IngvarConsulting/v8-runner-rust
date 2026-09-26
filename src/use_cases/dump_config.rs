@@ -71,7 +71,10 @@ pub fn execute(
         transport = ?context.transport(),
         "executing dump use case"
     );
-    stamp_dispatch(run_dump_with_context(context, config, args), context.work())
+    stamp_dispatch(
+        coordinator::run_dump_with_context(context, config, args),
+        context.work(),
+    )
 }
 
 type DumpExecutionFailure = UseCaseFailure<DumpResult>;
@@ -114,15 +117,7 @@ impl ResolvedDumpTarget {
 #[cfg(test)]
 fn run_dump(config: &AppConfig, args: &DumpArgs) -> UseCaseResult<DumpResult> {
     let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump);
-    run_dump_with_context(&context, config, args)
-}
-
-fn run_dump_with_context(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    args: &DumpArgs,
-) -> UseCaseResult<DumpResult> {
-    coordinator::run_dump_with_context(context, config, args)
+    execute(&context, config, args)
 }
 
 fn run_incremental_dump_designer(
@@ -1273,9 +1268,7 @@ exit 0"#,
             policy: &ProcessExecutionPolicy,
         ) -> Result<ProcessResult, ProcessError> {
             // Как настоящий исполнитель, двойник отмечает работу, едва «запустил» процесс.
-            if let Some(work) = &policy.work {
-                work.mark_work_given();
-            }
+            policy.mark_started_for_test();
             self.run_request(request)
         }
 

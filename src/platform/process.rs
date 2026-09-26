@@ -223,6 +223,9 @@ impl WorkGiven {
     }
 }
 
+/// Сколько снимаемый процесс ждёт мягкого завершения, прежде чем его убьют.
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
+
 /// Shared execution policy passed from transport-neutral command context into the runner.
 #[derive(Debug, Clone)]
 pub struct ProcessExecutionPolicy {
@@ -231,8 +234,9 @@ pub struct ProcessExecutionPolicy {
     pub safety: ProcessInterruptionSafety,
     pub graceful_shutdown_timeout: Duration,
     /// Куда отметить, что процесс запущен: запуск разового процесса — работа команды.
-    /// `None` — у шага самой платформы, который работой команды не является.
-    pub work: Option<WorkGiven>,
+    /// `None` — у шага самой платформы, который работой команды не является; объявить так
+    /// шаг может только платформа: поле за её пределами не видно.
+    pub(in crate::platform) work: Option<WorkGiven>,
 }
 
 /// Только для тестов: в работе политику строит контекст команды, и отметка работы у неё
@@ -244,24 +248,59 @@ impl Default for ProcessExecutionPolicy {
             None,
             CancellationToken::new(),
             ProcessInterruptionSafety::Interruptible,
-            Some(WorkGiven::for_command()),
+            WorkGiven::for_command(),
         )
     }
 }
 
 impl ProcessExecutionPolicy {
+    /// Политика шага команды: запуск процесса под ней — работа команды.
     pub fn new(
         timeout: Option<Duration>,
         cancellation: CancellationToken,
         safety: ProcessInterruptionSafety,
-        work: Option<WorkGiven>,
+        work: WorkGiven,
     ) -> Self {
         Self {
             timeout,
             cancellation,
             safety,
-            graceful_shutdown_timeout: Duration::from_millis(250),
-            work,
+            graceful_shutdown_timeout: GRACEFUL_SHUTDOWN_TIMEOUT,
+            work: Some(work),
+        }
+    }
+
+    /// Политика шага самой платформы — ожидания выхода агента: работы команды он не
+    /// отмечает.
+    pub(in crate::platform) fn platform_step(
+        timeout: Option<Duration>,
+        cancellation: CancellationToken,
+        safety: ProcessInterruptionSafety,
+    ) -> Self {
+        Self {
+            timeout,
+            cancellation,
+            safety,
+            graceful_shutdown_timeout: GRACEFUL_SHUTDOWN_TIMEOUT,
+            work: None,
+        }
+    }
+
+    /// Та же политика для служебной команды платформы — перехода интерактивной сессии в
+    /// рабочее пространство: работы команды она не отмечает.
+    pub(in crate::platform) fn without_work(&self) -> Self {
+        Self {
+            work: None,
+            ..self.clone()
+        }
+    }
+
+    /// Двойник исполнителя в тестах сценариев отмечает работу, как настоящий, едва
+    /// «запустил» процесс.
+    #[cfg(test)]
+    pub(crate) fn mark_started_for_test(&self) {
+        if let Some(work) = &self.work {
+            work.mark_work_given();
         }
     }
 }
@@ -328,7 +367,8 @@ pub trait ProcessRunner {
     ) -> Result<SpawnResult, ProcessError>;
 
     /// Start a process and keep a handle until the caller detaches or terminates it. The
-    /// implementation marks `work`, when there is one, once the process has started; a
+    /// implementation marks `work`, when there is one, once the process has passed its
+    /// startup probe: a client that exits inside the probe is a start that failed. A
     /// session's own process comes without it.
     fn spawn_managed(
         &self,
@@ -1787,7 +1827,7 @@ mod tests {
                     Some(Duration::from_millis(100)),
                     CancellationToken::new(),
                     ProcessInterruptionSafety::Interruptible,
-                    Some(crate::platform::process::WorkGiven::for_command()),
+                    crate::platform::process::WorkGiven::for_command(),
                 ),
             )
             .expect_err("expected timeout");
@@ -1848,7 +1888,7 @@ mod tests {
                             timeout,
                             cancellation,
                             safety,
-                            Some(crate::platform::process::WorkGiven::for_command()),
+                            crate::platform::process::WorkGiven::for_command(),
                         ),
                     )
                     .expect_err("the process must be interrupted");
@@ -1899,7 +1939,7 @@ mod tests {
                     None,
                     cancellation,
                     ProcessInterruptionSafety::Interruptible,
-                    Some(crate::platform::process::WorkGiven::for_command()),
+                    crate::platform::process::WorkGiven::for_command(),
                 ),
             )
             .expect_err("expected cancellation");
@@ -1929,7 +1969,7 @@ mod tests {
                     Some(Duration::from_millis(10)),
                     CancellationToken::new(),
                     ProcessInterruptionSafety::CriticalNonAbortable,
-                    Some(crate::platform::process::WorkGiven::for_command()),
+                    crate::platform::process::WorkGiven::for_command(),
                 ),
             )
             .expect("critical process must reach terminal success");

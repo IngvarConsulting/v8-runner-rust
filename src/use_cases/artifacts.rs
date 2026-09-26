@@ -1323,9 +1323,7 @@ mod tests {
             policy: &ProcessExecutionPolicy,
         ) -> Result<ProcessResult, ProcessError> {
             // Как настоящий исполнитель, двойник отмечает работу, едва «запустил» процесс.
-            if let Some(work) = &policy.work {
-                work.mark_work_given();
-            }
+            policy.mark_started_for_test();
             let mut previous = "";
             for arg in &request.args {
                 if previous == "/DumpCfg" {

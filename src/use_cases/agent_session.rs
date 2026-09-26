@@ -8,7 +8,7 @@
 //! или выгрузки и сравниваемый перед следующей выгрузкой.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::platform::process::{
     ProcessInterruption, ProcessInterruptionAction, ProcessInterruptionReason,
@@ -83,13 +83,9 @@ impl AgentHandle {
     /// Срок очистки урезан: прежде `disconnect` наследовал весь остаток бюджета
     /// команды и мог держать её столько же ещё раз.
     pub(crate) fn finish(self, wait: &WaitPolicy) {
-        let wait = wait.cleanup();
         match self {
-            Self::Managed(agent) => agent.shutdown(&wait),
-            Self::Attached { mut session, .. } | Self::Gate { mut session, .. } => {
-                let _ = session.run(agent::DISCONNECT_COMMAND, &wait);
-                session.close();
-            }
+            Self::Managed(agent) => agent.shutdown(wait),
+            Self::Attached { session, .. } | Self::Gate { session, .. } => session.release(wait),
         }
     }
 }
@@ -130,13 +126,7 @@ fn open_gate_session(
 /// 15.09.2026 дал тишине занятого агента нижнюю границу и не дал верхней. Ожидание
 /// заканчивает оператор, а мёртвый шлюз — таймаут записи TCP на keepalive-пакетах.
 pub(crate) fn wait_policy(context: &ExecutionContext) -> WaitPolicy {
-    let policy = context.process_policy(InterruptionSafetyClass::GracefulThenKill, None);
-    WaitPolicy {
-        deadline: policy.timeout.map(|timeout| Instant::now() + timeout),
-        cancellation: policy.cancellation,
-        safety: policy.safety,
-        work: policy.work,
-    }
+    WaitPolicy::from_step(context.process_policy(InterruptionSafetyClass::GracefulThenKill, None))
 }
 
 /// Журнал сессии рядом с журналами платформы, свежий на каждую команду.

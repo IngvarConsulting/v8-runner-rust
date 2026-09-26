@@ -38,16 +38,26 @@ pub struct EdtSessionRequest {
 }
 
 impl EdtSessionRequest {
-    /// Команда для общей сессии. С отметкой это команда запроса: её доставка в процесс —
-    /// работа команды. `None` — служебная команда самой сессии, переход в рабочее
-    /// пространство перед первым запросом: работы команды она не отмечает. Значения по
-    /// умолчанию у отметки нет, чтобы новая команда запроса не забыла её передать.
-    pub fn new(command: impl Into<String>, deadline: Instant, work: Option<WorkGiven>) -> Self {
+    /// Команда запроса: её доставка в процесс — работа команды. Значения по умолчанию у
+    /// отметки нет, чтобы новая команда запроса не забыла её передать.
+    pub fn new(command: impl Into<String>, deadline: Instant, work: WorkGiven) -> Self {
         Self {
             command: command.into(),
             deadline,
             cancellation: CancellationToken::new(),
-            work,
+            work: Some(work),
+        }
+    }
+
+    /// Служебная команда самой сессии — переход в рабочее пространство перед первым
+    /// запросом: работы команды она не отмечает. Объявить так команду может только
+    /// платформа.
+    pub(in crate::platform) fn service(command: impl Into<String>, deadline: Instant) -> Self {
+        Self {
+            command: command.into(),
+            deadline,
+            cancellation: CancellationToken::new(),
+            work: None,
         }
     }
 
@@ -1199,14 +1209,15 @@ mod tests {
             timeout: Duration,
             delivered: Option<&WorkGiven>,
         ) -> Result<InteractiveCommandOutput, InteractiveProcessError> {
+            // Поддельная сессия принимает команду сразу: доставка — это вызов. Отметка
+            // ставится раньше записи команды, чтобы тест, дождавшийся записи, видел и её.
+            if let Some(work) = delivered {
+                work.mark_work_given();
+            }
             self.commands
                 .lock()
                 .expect("commands lock")
                 .push(command.to_owned());
-            // Поддельная сессия принимает команду сразу: доставка — это вызов.
-            if let Some(work) = delivered {
-                work.mark_work_given();
-            }
             let behavior = self
                 .behaviors
                 .lock()
@@ -1384,11 +1395,7 @@ mod tests {
     }
 
     fn request(command: &str, after_ms: u64) -> EdtSessionRequest {
-        EdtSessionRequest::new(
-            command,
-            Instant::now() + Duration::from_millis(after_ms),
-            None,
-        )
+        EdtSessionRequest::service(command, Instant::now() + Duration::from_millis(after_ms))
     }
 
     async fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
@@ -1532,20 +1539,21 @@ mod tests {
     }
 
     /// Работу команды отмечает доставка её запроса. Подъём сессии и сброс базового
-    /// состояния перед ним работы не отмечают: пока идёт сброс, отметка запроса пуста.
+    /// состояния перед ним — переход в рабочее пространство и проверка, что переход удался, —
+    /// работы не отмечают: пока идёт каждая из этих команд, отметка запроса пуста.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn only_a_delivered_work_request_marks_the_work() {
         let workspace = PathBuf::from("/tmp/edt workspace");
-        let release = Arc::new(AtomicBool::new(false));
+        let reset = Arc::new(AtomicBool::new(false));
+        let probe = Arc::new(AtomicBool::new(false));
         let inner = FakeSessionFactory::new(vec![SessionPlan::Session(vec![
             CommandBehavior::CompleteWhenReleased {
-                release: release.clone(),
+                release: reset.clone(),
                 stdout: String::new(),
             },
-            CommandBehavior::CompleteAfter {
-                delay: Duration::from_millis(1),
+            CommandBehavior::CompleteWhenReleased {
+                release: probe.clone(),
                 stdout: format!("{}\n", workspace.display()),
-                stderr: String::new(),
             },
             CommandBehavior::CompleteAfter {
                 delay: Duration::from_millis(1),
@@ -1554,7 +1562,7 @@ mod tests {
             },
         ])]);
         let factory =
-            ResettingSessionFactory::new(inner.clone(), workspace.clone(), Duration::from_secs(5));
+            ResettingSessionFactory::new(inner.clone(), workspace, Duration::from_secs(5));
         let manager = manager(factory, 2, Duration::from_millis(100));
         let work = WorkGiven::for_command();
 
@@ -1566,18 +1574,21 @@ mod tests {
                     .execute(EdtSessionRequest::new(
                         "validate",
                         Instant::now() + Duration::from_secs(10),
-                        Some(work),
+                        work,
                     ))
                     .await
             }
         });
         wait_for_commands(&inner, 1).await;
-        let during_baseline = work.given();
-        release.store(true, Ordering::SeqCst);
+        let during_reset = work.given();
+        reset.store(true, Ordering::SeqCst);
+        wait_for_commands(&inner, 2).await;
+        let during_probe = work.given();
+        probe.store(true, Ordering::SeqCst);
         let reply = request.await.expect("join").expect("work request");
 
         assert!(
-            !during_baseline,
+            !during_reset && !during_probe,
             "the session start and its baseline reset are not the command's work"
         );
         assert_eq!(reply.stdout, "work");
@@ -1585,7 +1596,8 @@ mod tests {
     }
 
     /// Запрос, отменённый во время сброса базового состояния, в процесс не попал: сброс
-    /// выполнялся, а работы команда не дала. Отмена приходит, пока сброс держит тест.
+    /// выполнялся, а работы команда не дала. Отмена приходит, пока сброс держит тест, а
+    /// утверждение — после выхода воркера: позже доставить запрос уже некому.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_work_request_cancelled_during_the_baseline_marks_nothing() {
         let workspace = PathBuf::from("/tmp/edt workspace");
@@ -1602,7 +1614,7 @@ mod tests {
             },
         ])]);
         let factory =
-            ResettingSessionFactory::new(inner.clone(), workspace.clone(), Duration::from_secs(5));
+            ResettingSessionFactory::new(inner.clone(), workspace, Duration::from_secs(5));
         let manager = manager(factory, 2, Duration::from_millis(100));
         let cancellation = CancellationToken::new();
         let work = WorkGiven::for_command();
@@ -1617,7 +1629,7 @@ mod tests {
                         EdtSessionRequest::new(
                             "validate",
                             Instant::now() + Duration::from_secs(10),
-                            Some(work),
+                            work,
                         )
                         .with_cancellation(cancellation),
                     )
@@ -1632,7 +1644,19 @@ mod tests {
             request.await.expect("join"),
             Err(EdtSessionError::QueuedCancelled)
         );
+        tokio::task::spawn_blocking({
+            let manager = manager.clone();
+            move || manager.shutdown()
+        })
+        .await
+        .expect("join shutdown")
+        .expect("the worker exits");
         assert!(!work.given(), "the request never reached the process");
+        assert!(
+            !inner.commands().iter().any(|command| command == "validate"),
+            "the cancelled request was delivered: {:?}",
+            inner.commands()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1772,7 +1796,7 @@ mod tests {
             .execute(EdtSessionRequest::new(
                 "cmd-2",
                 Instant::now() + Duration::from_secs(10),
-                Some(work.clone()),
+                work.clone(),
             ))
             .await;
         release.store(true, Ordering::SeqCst);

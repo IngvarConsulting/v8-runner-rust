@@ -194,7 +194,7 @@ impl ExecutionContext {
             timeout_cap,
             self.cancellation(),
             safety.process_safety(),
-            Some(self.work.clone()),
+            self.work.clone(),
         )
     }
 
