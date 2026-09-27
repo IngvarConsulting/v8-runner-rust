@@ -366,7 +366,7 @@ fn run_load_selected(
             deferred_process_interruption(
                 ExecutionInterruptionPhase::Apply,
                 &format!("{apply_action} ended"),
-                &apply_result,
+                apply_result.process.interruption,
             ),
         );
         return Err(LoadExecutionFailure::with_payload(error, result));
@@ -375,7 +375,7 @@ fn run_load_selected(
     let apply_deferral = deferred_process_interruption(
         ExecutionInterruptionPhase::Apply,
         "apply completed successfully",
-        &apply_result,
+        apply_result.process.interruption,
     );
     if let Some(cancel) = SafePointCancel::noticed(context, SafePoint::Before("update_db_cfg")) {
         let mut result = with_loaded_artifact(interrupted_result_from_resolved(
@@ -463,7 +463,7 @@ fn run_load_selected(
             deferred_process_interruption(
                 ExecutionInterruptionPhase::UpdateDbCfg,
                 "update_db_cfg ended",
-                &update_result,
+                update_result.process.interruption,
             ),
         );
         return Err(LoadExecutionFailure::with_payload(error, result));
@@ -472,7 +472,7 @@ fn run_load_selected(
     let update_deferral = deferred_process_interruption(
         ExecutionInterruptionPhase::UpdateDbCfg,
         "update_db_cfg completed successfully",
-        &update_result,
+        update_result.process.interruption,
     );
     let (deferred_warnings, deferred_interruptions): (Vec<_>, Vec<_>) =
         [apply_deferral, update_deferral]
@@ -1181,6 +1181,8 @@ mod tests {
     use crate::domain::load::{
         CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
     };
+    #[cfg(unix)]
+    use crate::platform::process::HeldCommand;
     use crate::platform::process::{DeferralWatch, ProcessResult};
     use crate::platform::result::PlatformCommandResult;
     use crate::use_cases::context::{CommandName, ExecutionContext};
@@ -1859,25 +1861,9 @@ mod tests {
         fs::create_dir_all(root.join("work")).expect("work");
         let binary = root.join("1cv8");
         let calls = root.join("calls.log");
-        let load_started = root.join("load-started");
-        let load_release = root.join("load-release");
+        let held = HeldCommand::in_dir(root);
         fs::write(root.join("main.cf"), "cf").expect("artifact");
-        write_designer_script_with(
-            &binary,
-            &calls,
-            &format!(
-                "if printf '%s' \"$args\" | grep -F -q -- '/LoadCfg'; then\n\
-                   : > '{}'\n\
-                   waited=0\n\
-                   while [ ! -e '{}' ] && [ \"$waited\" -lt 300 ]; do\n\
-                     sleep 0.1\n\
-                     waited=$((waited + 1))\n\
-                   done\n\
-                 fi\n",
-                load_started.display(),
-                load_release.display()
-            ),
-        );
+        write_designer_script_with(&binary, &calls, &held.script_branch("/LoadCfg", 0));
         let config = sample_config(root, &binary);
         let request = LoadRequest {
             vendor_name: None,
@@ -1889,22 +1875,7 @@ mod tests {
         };
         let cancellation = CancellationToken::new();
         let watch = DeferralWatch::default();
-        let operator = {
-            let cancellation = cancellation.clone();
-            let watch = watch.clone();
-            thread::spawn(move || {
-                let deadline = Instant::now() + Duration::from_secs(30);
-                while !load_started.exists() && Instant::now() < deadline {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                cancellation.cancel();
-                while !watch.observed() && Instant::now() < deadline {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                fs::write(&load_release, "").expect("release the load");
-                watch.observed()
-            })
-        };
+        let operator = held.interrupt(cancellation.clone(), &watch);
 
         let failure = watch
             .during(|| {
@@ -1971,26 +1942,9 @@ mod tests {
         fs::create_dir_all(root.join("work")).expect("work");
         let binary = root.join("1cv8");
         let calls = root.join("calls.log");
-        let load_started = root.join("load-started");
-        let load_release = root.join("load-release");
+        let held = HeldCommand::in_dir(root);
         fs::write(root.join("main.cf"), "cf").expect("artifact");
-        write_designer_script_with(
-            &binary,
-            &calls,
-            &format!(
-                "if printf '%s' \"$args\" | grep -F -q -- '/LoadCfg'; then\n\
-                   : > '{}'\n\
-                   waited=0\n\
-                   while [ ! -e '{}' ] && [ \"$waited\" -lt 300 ]; do\n\
-                     sleep 0.1\n\
-                     waited=$((waited + 1))\n\
-                   done\n\
-                   exit 5\n\
-                 fi\n",
-                load_started.display(),
-                load_release.display()
-            ),
-        );
+        write_designer_script_with(&binary, &calls, &held.script_branch("/LoadCfg", 5));
         let config = sample_config(root, &binary);
         let request = LoadRequest {
             vendor_name: None,
@@ -2002,22 +1956,7 @@ mod tests {
         };
         let cancellation = CancellationToken::new();
         let watch = DeferralWatch::default();
-        let operator = {
-            let cancellation = cancellation.clone();
-            let watch = watch.clone();
-            thread::spawn(move || {
-                let deadline = Instant::now() + Duration::from_secs(30);
-                while !load_started.exists() && Instant::now() < deadline {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                cancellation.cancel();
-                while !watch.observed() && Instant::now() < deadline {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                fs::write(&load_release, "").expect("release the load");
-                watch.observed()
-            })
-        };
+        let operator = held.interrupt(cancellation.clone(), &watch);
 
         let failure = watch
             .during(|| {

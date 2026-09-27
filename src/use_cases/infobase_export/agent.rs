@@ -10,13 +10,13 @@ use std::path::Path;
 use crate::config::model::AppConfig;
 use crate::domain::infobase_export::ConfigurationState;
 use crate::platform::result::PlatformCommandResult;
-use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::agent_session::{
-    argument, collect_file, connect, make_output_dir, platform_result, run_command, run_id,
-    stage_file, tidy, tidy_run_path, transcript_log, wait_policy, AgentHandle, Exchange,
+    argument, collect_file, make_output_dir, run_command, run_id, stage_file, tidy, tidy_run_path,
+    transcript_log, with_session, Exchange,
 };
 use crate::use_cases::context::ExecutionContext;
+use crate::use_cases::interruption::CommandFailure;
 use crate::use_cases::progress::log_live_stage;
 
 /// `config dump-cfg --file=… [--extension=…]` — только рабочая конфигурация: у агента
@@ -28,11 +28,11 @@ pub(super) fn export_configuration(
     state: ConfigurationState,
     extension: Option<&str>,
     staging_path: &Path,
-) -> Result<PlatformCommandResult, AppError> {
+) -> Result<PlatformCommandResult, CommandFailure> {
     if state == ConfigurationState::Database {
-        return Err(AppError::capability(
+        return Err(CommandFailure::without_deferral(AppError::capability(
             "the agent exports only the working configuration: it has no command for the database configuration; use providers.infobase.configuration.export: designer or ibcmd".to_owned(),
-        ));
+        )));
     }
     let name = match extension {
         Some(extension) => format!("{extension}.cfe"),
@@ -43,7 +43,7 @@ pub(super) fn export_configuration(
         context,
         config,
         v8,
-        "infobase-export",
+        transcript_log(config, "infobase-export").map_err(CommandFailure::without_deferral)?,
         |handle, wait, exchange| {
             let out = format!("export/{}", run_id());
             make_output_dir(handle, exchange, &out)?;
@@ -75,12 +75,12 @@ pub(super) fn export_snapshot(
     config: &AppConfig,
     v8: Option<&Path>,
     staging_path: &Path,
-) -> Result<PlatformCommandResult, AppError> {
+) -> Result<PlatformCommandResult, CommandFailure> {
     with_session(
         context,
         config,
         v8,
-        "infobase-dump",
+        transcript_log(config, "infobase-dump").map_err(CommandFailure::without_deferral)?,
         |handle, wait, exchange| {
             let out = format!("export/{}", run_id());
             make_output_dir(handle, exchange, &out)?;
@@ -113,12 +113,12 @@ pub(super) fn restore_snapshot(
     config: &AppConfig,
     v8: Option<&Path>,
     source_file: &Path,
-) -> Result<PlatformCommandResult, AppError> {
+) -> Result<PlatformCommandResult, CommandFailure> {
     with_session(
         context,
         config,
         v8,
-        "infobase-restore",
+        transcript_log(config, "infobase-restore").map_err(CommandFailure::without_deferral)?,
         |handle, wait, exchange| {
             let relative = format!("restore/{}.dt", run_id());
             stage_file(handle, exchange, &relative, source_file)?;
@@ -141,28 +141,4 @@ pub(super) fn restore_snapshot(
             Ok(outcome?.transcript())
         },
     )
-}
-
-/// Одна сессия на операцию: открыть, выполнить, закрыть — и при отказе тоже.
-fn with_session(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    v8: Option<&Path>,
-    log_name: &str,
-    work: impl FnOnce(
-        &mut AgentHandle,
-        &crate::platform::agent::WaitPolicy,
-        &Exchange,
-    ) -> Result<String, AppError>,
-) -> Result<PlatformCommandResult, AppError> {
-    let wait = wait_policy(context);
-    let log = transcript_log(config, log_name)?;
-    let mut utilities = PlatformUtilities::from_config(config);
-    let mut handle = connect(config, &mut utilities, v8, log.clone(), &wait)?;
-    let outcome = handle
-        .exchange(config)
-        .and_then(|exchange| work(&mut handle, &wait, &exchange));
-    let deferred = handle.session().deferred_interruption();
-    handle.finish(&wait);
-    outcome.map(|transcript| platform_result(transcript, log, deferred))
 }

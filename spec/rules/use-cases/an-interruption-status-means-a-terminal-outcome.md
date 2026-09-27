@@ -12,6 +12,9 @@ check:
   - src/use_cases/load_artifact.rs::execute_reports_cancelled_status_at_update_db_cfg_safe_point
   - src/platform/process.rs::run_with_policy_defers_timeout_for_critical_process
   - src/use_cases/context.rs::no_process_critical_phase_reports_deferred_cancellation
+  - src/use_cases/configure_extensions.rs::a_safety_update_that_deferred_the_cancellation_names_it
+  - src/use_cases/extension_inventory.rs::a_change_through_ibcmd_names_the_cancellation_it_deferred
+  - tests/cli_agent_scenarios.rs::extensions_safety_through_the_agent_names_the_deferred_cancellation
 ---
 
 # Статус отмены или истечения предела означает состоявшийся исход

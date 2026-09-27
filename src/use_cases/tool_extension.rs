@@ -24,7 +24,7 @@ use crate::support::temp::platform_logs_dir;
 use crate::use_cases::build_progress::{log_timeline_stage, TimelineStageStatus};
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
-use crate::use_cases::interruption;
+use crate::use_cases::interruption::{self, append_warnings, collecting_deferrals, Deferrals};
 
 #[derive(Debug)]
 pub(crate) struct ToolExtensionFailure {
@@ -87,7 +87,9 @@ fn prepare_extension(
     if dry_run {
         return preview_extension(config, extension, &mut utilities, full_rebuild, started);
     }
-    match &extension.input {
+    // Отмены, которые критические команды отложили, ответ называет, чем бы подготовка ни
+    // кончилась: удача — в сообщении шага, отказ — в начале своего текста.
+    let (mut step, warnings) = collecting_deferrals(|deferrals| match &extension.input {
         ToolExtensionInput::Source(source) => prepare_source_extension(
             context,
             config,
@@ -96,16 +98,31 @@ fn prepare_extension(
             &mut utilities,
             started,
             full_rebuild,
+            deferrals,
         ),
-        ToolExtensionInput::Artifact(artifact) => {
-            prepare_artifact_extension(context, config, extension, &artifact.path, &mut utilities)?;
-            Ok(successful_build_step(
+        ToolExtensionInput::Artifact(artifact) => prepare_artifact_extension(
+            context,
+            config,
+            extension,
+            &artifact.path,
+            &mut utilities,
+            deferrals,
+        )
+        .map(|()| {
+            successful_build_step(
                 extension,
                 format!("prepared extension '{}' from .cfe artifact", extension.name),
                 started.elapsed().as_millis() as u64,
-            ))
-        }
+            )
+        }),
+    })?;
+    if !warnings.is_empty() {
+        step.message = Some(append_warnings(
+            step.message.take().unwrap_or_default(),
+            &warnings,
+        ));
     }
+    Ok(step)
 }
 
 /// Превью подготовки расширения: тот же поиск утилиты и тот же разбор изменений, но ни
@@ -223,10 +240,11 @@ fn prepare_source_extension(
     utilities: &mut PlatformUtilities,
     started: Instant,
     full_rebuild: bool,
+    deferrals: &mut Deferrals,
 ) -> Result<BuildStep, AppError> {
     let source_context = tool_extension_source_context(config, extension, source)?;
     if full_rebuild {
-        prepare_source_extension_full(context, config, extension, source, utilities)?;
+        prepare_source_extension_full(context, config, extension, source, utilities, deferrals)?;
         commit_tool_extension_full_rescan(&source_context, &config.work_path, true)?;
         return Ok(successful_build_step(
             extension,
@@ -238,7 +256,9 @@ fn prepare_source_extension(
     let outcome = match analyzer::analyze_context(&source_context, &config.work_path).outcome {
         Ok(outcome) => outcome,
         Err(_error) if storage_needs_recovery(&source_context, &config.work_path) => {
-            prepare_source_extension_full(context, config, extension, source, utilities)?;
+            prepare_source_extension_full(
+                context, config, extension, source, utilities, deferrals,
+            )?;
             commit_tool_extension_full_rescan(&source_context, &config.work_path, true)?;
             return Ok(successful_build_step(
                 extension,
@@ -256,7 +276,9 @@ fn prepare_source_extension(
             started.elapsed().as_millis() as u64,
         )),
         AnalysisOutcome::Fallback => {
-            prepare_source_extension_full(context, config, extension, source, utilities)?;
+            prepare_source_extension_full(
+                context, config, extension, source, utilities, deferrals,
+            )?;
             commit_tool_extension_full_rescan(&source_context, &config.work_path, false)?;
             Ok(successful_build_step(
                 extension,
@@ -265,7 +287,9 @@ fn prepare_source_extension(
             ))
         }
         AnalysisOutcome::Changes { prepared, .. } => {
-            prepare_source_extension_full(context, config, extension, source, utilities)?;
+            prepare_source_extension_full(
+                context, config, extension, source, utilities, deferrals,
+            )?;
             analyzer::commit_success(&source_context, &config.work_path, &prepared)
                 .map_err(|error| AppError::Runtime(error.to_string()))?;
             Ok(successful_build_step(
@@ -283,15 +307,23 @@ fn prepare_source_extension_full(
     extension: &ToolExtensionConfig,
     source: &ToolExtensionSourceConfig,
     utilities: &mut PlatformUtilities,
+    deferrals: &mut Deferrals,
 ) -> Result<(), AppError> {
     match source.format.unwrap_or(config.format) {
-        SourceFormat::Designer => {
-            prepare_designer_source_extension(context, config, extension, &source.path, utilities)
-        }
+        SourceFormat::Designer => prepare_designer_source_extension(
+            context,
+            config,
+            extension,
+            &source.path,
+            utilities,
+            deferrals,
+        ),
         SourceFormat::Edt => {
             let exported =
                 export_edt_source_extension(context, config, extension, &source.path, utilities)?;
-            prepare_designer_source_extension(context, config, extension, &exported, utilities)
+            prepare_designer_source_extension(
+                context, config, extension, &exported, utilities, deferrals,
+            )
         }
     }
 }
@@ -382,6 +414,7 @@ fn prepare_designer_source_extension(
     extension: &ToolExtensionConfig,
     source_path: &Path,
     utilities: &mut PlatformUtilities,
+    deferrals: &mut Deferrals,
 ) -> Result<(), AppError> {
     match config.selected_provider(Operation::Build) {
         other @ (Provider::Agent | Provider::IbcmdRs | Provider::Webinst) => Err(
@@ -408,7 +441,7 @@ fn prepare_designer_source_extension(
             let load = dsl
                 .load_config_from_files_full(source_path, Some(&extension.name))
                 .map_err(AppError::from)?;
-            ensure_tool_extension_success("load", extension, &load)?;
+            ensure_written("load", extension, &load, deferrals)?;
 
             if let Some(error) =
                 interruption_before_safe_point(context, extension, "tool extension update_db_cfg")
@@ -431,7 +464,7 @@ fn prepare_designer_source_extension(
             let update = dsl
                 .update_db_cfg(Some(&extension.name))
                 .map_err(AppError::from)?;
-            ensure_tool_extension_success("update_db_cfg", extension, &update)
+            ensure_written("update_db_cfg", extension, &update, deferrals)
         }
         Provider::Ibcmd => {
             let binary = utilities
@@ -452,7 +485,7 @@ fn prepare_designer_source_extension(
             let import = dsl
                 .config_import_full(source_path, Some(&extension.name))
                 .map_err(AppError::from)?;
-            ensure_tool_extension_success("ibcmd_import", extension, &import)?;
+            ensure_written("ibcmd_import", extension, &import, deferrals)?;
 
             if let Some(error) =
                 interruption_before_safe_point(context, extension, "tool extension ibcmd apply")
@@ -473,7 +506,7 @@ fn prepare_designer_source_extension(
             let apply = dsl
                 .config_apply(Some(&extension.name), DynamicUpdateMode::Auto)
                 .map_err(AppError::from)?;
-            ensure_tool_extension_success("ibcmd_apply", extension, &apply)
+            ensure_written("ibcmd_apply", extension, &apply, deferrals)
         }
     }
 }
@@ -484,6 +517,7 @@ fn prepare_artifact_extension(
     extension: &ToolExtensionConfig,
     artifact_path: &Path,
     utilities: &mut PlatformUtilities,
+    deferrals: &mut Deferrals,
 ) -> Result<(), AppError> {
     let binary = utilities
         .locate(UtilityType::V8)
@@ -505,7 +539,7 @@ fn prepare_artifact_extension(
     let load = dsl
         .load_cfg(artifact_path, Some(&extension.name))
         .map_err(AppError::from)?;
-    ensure_tool_extension_success("load_cfg", extension, &load)?;
+    ensure_written("load_cfg", extension, &load, deferrals)?;
 
     if let Some(error) =
         interruption_before_safe_point(context, extension, "tool extension update_db_cfg")
@@ -523,7 +557,7 @@ fn prepare_artifact_extension(
     let update = dsl
         .update_db_cfg(Some(&extension.name))
         .map_err(AppError::from)?;
-    ensure_tool_extension_success("update_db_cfg", extension, &update)
+    ensure_written("update_db_cfg", extension, &update, deferrals)
 }
 
 fn export_edt_source_extension(
@@ -697,6 +731,18 @@ fn write_edt_export_log(
         ))
     })?;
     Ok(log_path)
+}
+
+/// Итог критической команды: отмену, которую она отложила, учёт получает раньше проверки
+/// итога, так что её не теряет и отказ.
+fn ensure_written(
+    action: &str,
+    extension: &ToolExtensionConfig,
+    result: &PlatformCommandResult,
+    deferrals: &mut Deferrals,
+) -> Result<(), AppError> {
+    deferrals.note_result(action, result);
+    ensure_tool_extension_success(action, extension, result)
 }
 
 fn ensure_tool_extension_success(

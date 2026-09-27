@@ -273,7 +273,7 @@ fn run_build_with(
                         &source_set.name,
                         mode,
                         true,
-                        merge_step_message(message, &warnings),
+                        append_warnings(message, &warnings),
                         step_started.elapsed().as_millis() as u64,
                     ),
                     Err(error) => {
@@ -460,7 +460,7 @@ pub(super) fn run_build_ibcmd(
                         &source_set.name,
                         mode,
                         true,
-                        merge_step_message(message, &warnings),
+                        append_warnings(message, &warnings),
                         step_started.elapsed().as_millis() as u64,
                     ),
                     Err(error) => {
@@ -780,7 +780,7 @@ pub(super) fn run_build_edt(
                         &source_set.name,
                         BuildMode::EdtExport,
                         true,
-                        merge_step_message(
+                        append_warnings(
                             format!(
                                 "exported {} external artifact(s) to designer runtime",
                                 descriptors.len()
@@ -1014,7 +1014,7 @@ pub(super) fn run_build_edt(
                     &source_set.name,
                     BuildMode::EdtExport,
                     true,
-                    merge_step_message("EDT export completed".to_owned(), &export_warnings),
+                    append_warnings("EDT export completed".to_owned(), &export_warnings),
                     export_started.elapsed().as_millis() as u64,
                 );
             }
@@ -1152,7 +1152,7 @@ pub(super) fn run_build_edt(
                         &source_set.name,
                         mode,
                         true,
-                        merge_step_message(message, &warnings),
+                        append_warnings(message, &warnings),
                         load_started.elapsed().as_millis() as u64,
                     ),
                     Err(error) => {

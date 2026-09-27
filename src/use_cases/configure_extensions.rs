@@ -11,13 +11,18 @@ use crate::use_cases::extension_agent::ExtensionAgent;
 use crate::use_cases::extension_identity::platform_extension_name;
 use crate::use_cases::extension_inventory::Executor;
 use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
-use crate::use_cases::interruption;
+use crate::use_cases::interruption::{
+    self, append_warnings, collecting_deferrals, prefix_warnings,
+};
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::ConfigureExtensionsRequest;
 use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use tracing::{debug, info};
 
 const DISABLE_SAFETY_ACTION: &str = "disable_safety";
+/// Чем предупреждение об отложенной отмене называет запись свойств — одно слово для обоих
+/// исполнителей; `DISABLE_SAFETY_ACTION` — имя шага в ответе.
+const SAFETY_UPDATE_LABEL: &str = "extension properties update";
 const EXTENSIONS_SUCCESS_LABEL: &str = "Extension properties updated successfully";
 const EXTENSIONS_FAILURE_LABEL: &str = "Extension property update failed";
 
@@ -133,35 +138,39 @@ impl SafetySetter<'_> {
     fn disable(&mut self, target: &str) -> Result<String, StepFailure> {
         match self {
             Self::Ibcmd(dsl) => {
-                match dsl.infobase_extension_update_properties(target, false, false) {
-                    Ok(result) if result.process.exit_code == 0 => {
-                        let mut message =
-                            "безопасный режим и защита от опасных действий отключены".to_owned();
-                        if let Some(warning) = deferred_interruption_warning(&result) {
-                            message.push_str("; ");
-                            message.push_str(&warning);
-                        }
-                        Ok(message)
-                    }
-                    Ok(result) => Err(StepFailure::Platform(format_ibcmd_failure_details(
-                        "extension update",
-                        "extension",
-                        target,
-                        result.process.exit_code,
-                        &result.process.stdout,
-                        &result.process.stderr,
-                        None,
-                        None,
-                    ))),
-                    Err(error) => Err(StepFailure::Error(map_extension_update_error(
-                        target, error,
-                    ))),
+                let (result, warnings) = collecting_deferrals(|deferrals| {
+                    let result = dsl
+                        .infobase_extension_update_properties(target, false, false)
+                        .map_err(|error| map_extension_update_error(target, error))?;
+                    deferrals.note_result(SAFETY_UPDATE_LABEL, &result);
+                    Ok(result)
+                })
+                .map_err(StepFailure::Error)?;
+                if result.process.exit_code == 0 {
+                    Ok(append_warnings(SAFETY_DISABLED.to_owned(), &warnings))
+                } else {
+                    // Отказ несёт текст шага, а не ошибку: отмену, отложенную до конца
+                    // записи, он называет первой.
+                    Err(StepFailure::Platform(prefix_warnings(
+                        &warnings,
+                        format_ibcmd_failure_details(
+                            "extension update",
+                            "extension",
+                            target,
+                            result.process.exit_code,
+                            &result.process.stdout,
+                            &result.process.stderr,
+                            None,
+                            None,
+                        ),
+                    )))
                 }
             }
-            Self::Agent(agent) => agent
-                .disable_safety(target)
-                .map(|()| "безопасный режим и защита от опасных действий отключены".to_owned())
-                .map_err(StepFailure::Error),
+            Self::Agent(agent) => collecting_deferrals(|deferrals| {
+                agent.disable_safety(SAFETY_UPDATE_LABEL, target, deferrals)
+            })
+            .map(|((), warnings)| append_warnings(SAFETY_DISABLED.to_owned(), &warnings))
+            .map_err(StepFailure::Error),
         }
     }
 
@@ -305,14 +314,7 @@ fn log_extensions_summary(ok: bool) {
     );
 }
 
-fn deferred_interruption_warning(
-    result: &crate::platform::result::PlatformCommandResult,
-) -> Option<String> {
-    interruption::deferred_process_interruption_warning(
-        "extension properties updated successfully",
-        result,
-    )
-}
+const SAFETY_DISABLED: &str = "безопасный режим и защита от опасных действий отключены";
 
 fn map_extension_update_error(target: &str, error: IbcmdError) -> AppError {
     AppError::from(error).with_context(format!(
@@ -380,6 +382,8 @@ mod tests {
     };
     use crate::platform::ibcmd::IbcmdError;
     use crate::platform::process::ProcessError;
+    #[cfg(unix)]
+    use crate::platform::process::{DeferralWatch, HeldCommand};
     use crate::support::error::AppError;
     use crate::use_cases::context::{CommandName, ExecutionContext};
     use crate::use_cases::request::ConfigureExtensionsRequest;
@@ -650,6 +654,94 @@ mod tests {
             .error
             .message()
             .contains("stderr: bad extension state"));
+    }
+
+    /// Запись свойств расширения через `ibcmd`, отложившая отмену: удача называет её в
+    /// сообщении шага.
+    #[cfg(unix)]
+    #[test]
+    fn a_safety_update_that_deferred_the_cancellation_names_it() {
+        let dir = tempdir().expect("tempdir");
+        let (config, held) = config_with_held_update(dir.path(), 0);
+
+        let result = safety_update_interrupted_while_held(&config, &held)
+            .expect("the update finishes despite the cancellation");
+
+        assert!(result.ok);
+        let message = result.steps[0].message.as_deref().expect("step message");
+        assert!(
+            message.contains(
+                "extension properties update completed successfully after cancellation request \
+                 during critical phase"
+            ),
+            "{message}"
+        );
+    }
+
+    /// Запись свойств расширения через `ibcmd`, отложившая отмену и потом не удавшаяся:
+    /// ответ остаётся отказом, а отложенную отмену называет первой.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_safety_update_after_a_deferred_cancellation_names_it() {
+        let dir = tempdir().expect("tempdir");
+        let (config, held) = config_with_held_update(dir.path(), 17);
+
+        let failure =
+            safety_update_interrupted_while_held(&config, &held).expect_err("the update failed");
+
+        assert_eq!(failure.error.kind(), UseCaseErrorKind::Platform);
+        let message = failure.error.message();
+        assert!(
+            message.starts_with(
+                "extension properties update ended after cancellation request during critical phase"
+            ),
+            "{message}"
+        );
+        assert!(message.contains("exit code 17"), "{message}");
+        let payload = failure.payload.expect("payload");
+        assert_eq!(payload.steps[0].message.as_deref(), Some(message));
+    }
+
+    #[cfg(unix)]
+    fn config_with_held_update(root: &Path, exit_code: i32) -> (AppConfig, HeldCommand) {
+        let ibcmd = root.join("ibcmd");
+        fs::create_dir_all(root.join("exts").join("client-mcp")).expect("ext dir");
+        fs::write(
+            root.join("exts").join("client-mcp").join(".project"),
+            "<projectDescription><name>client_mcp</name></projectDescription>",
+        )
+        .expect("project file");
+        let held = HeldCommand::in_dir(root);
+        write_script(
+            &ibcmd,
+            &format!(
+                "args=\"$*\"\n{}exit 0",
+                held.script_branch("extension update", exit_code)
+            ),
+        );
+        (sample_config(root, root, &ibcmd), held)
+    }
+
+    #[cfg(unix)]
+    fn safety_update_interrupted_while_held(
+        config: &AppConfig,
+        held: &HeldCommand,
+    ) -> crate::use_cases::result::UseCaseResult<crate::domain::extensions::ExtensionsResult> {
+        let cancellation = CancellationToken::new();
+        let watch = DeferralWatch::default();
+        let operator = held.interrupt(cancellation.clone(), &watch);
+        let outcome = watch.during(|| {
+            execute(
+                &ExecutionContext::cli(CommandName::Extensions).with_cancellation(cancellation),
+                config,
+                &ConfigureExtensionsRequest::default(),
+            )
+        });
+        assert!(
+            operator.join().expect("operator thread"),
+            "the runner never logged that it deferred the cancellation"
+        );
+        outcome
     }
 
     #[cfg(unix)]

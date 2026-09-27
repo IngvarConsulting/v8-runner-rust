@@ -34,8 +34,8 @@ use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
 
 use super::interruption::{
-    cancellation_record, deferred_command_interruption_details, deferred_process_interruption,
-    pending_interruption_error, process_interruption_details,
+    cancellation_record, deferred_command_interruption_details, pending_interruption_error,
+    process_interruption_details, record_deferral, CommandFailure,
 };
 use super::staged_publication::{
     cleanup_owned_orphan_files, interruption_before_publish, PublicationFailureState,
@@ -176,9 +176,10 @@ pub fn execute_configuration_export(
             InfobaseTransferPhase::ValidateProviderOutput,
         ));
     }
-    record_deferred_process_interruption(
-        &platform_result,
+    record_deferral(
+        ExecutionInterruptionPhase::ProviderCommand,
         "configuration export",
+        platform_result.process.interruption,
         &mut result.execution,
         &mut result.warnings,
     );
@@ -360,9 +361,10 @@ pub fn execute_infobase_snapshot(
             InfobaseTransferPhase::ValidateProviderOutput,
         ));
     }
-    record_deferred_process_interruption(
-        &platform_result,
+    record_deferral(
+        ExecutionInterruptionPhase::ProviderCommand,
         "infobase DT export",
+        platform_result.process.interruption,
         &mut result.execution,
         &mut result.warnings,
     );
@@ -578,13 +580,21 @@ pub fn execute_infobase_restore(
         &request.input,
     ) {
         Ok(platform_result) => platform_result,
-        Err(error) => {
+        Err(failure) => {
             // Базу мог тронуть только исполнитель, получивший работу. Отказ до неё — отмена
             // до запуска, исполнитель, которого не собрать, — оставляет цель как была.
             if context.work().given() {
                 result.target_state = ExportTargetState::Uncertain;
                 record_uncertain_target_warning(&mut result.warnings, result.target_state);
             }
+            // Отмена, отложенная до конца критической фазы, названа и у неудачи — как на
+            // пути Конфигуратора ниже, в том же порядке предупреждений.
+            let error = failure.record_into(
+                ExecutionInterruptionPhase::ProviderCommand,
+                "infobase DT restore",
+                &mut result.execution,
+                &mut result.warnings,
+            );
             return Err(restore_failure(
                 context,
                 error,
@@ -600,9 +610,10 @@ pub fn execute_infobase_restore(
         record_uncertain_target_warning(&mut result.warnings, result.target_state);
         // Отмена, отложенная до конца критической фазы, названа и у неудачной загрузки:
         // оператор просил остановить, и ответ говорит, почему его не послушали.
-        record_deferred_process_interruption(
-            &platform_result,
+        record_deferral(
+            ExecutionInterruptionPhase::ProviderCommand,
             "infobase DT restore",
+            platform_result.process.interruption,
             &mut result.execution,
             &mut result.warnings,
         );
@@ -621,9 +632,10 @@ pub fn execute_infobase_restore(
         )
         .with_target(request.input.display().to_string()),
     );
-    record_deferred_process_interruption(
-        &platform_result,
+    record_deferral(
+        ExecutionInterruptionPhase::ProviderCommand,
         "infobase DT restore",
+        platform_result.process.interruption,
         &mut result.execution,
         &mut result.warnings,
     );
@@ -655,20 +667,21 @@ fn run_restore_provider(
     provider: Provider,
     executable: Option<&Path>,
     source_file: &Path,
-) -> Result<PlatformCommandResult, AppError> {
+) -> Result<PlatformCommandResult, CommandFailure> {
     match provider {
         // Исполнитель без адаптера: отказ, а не паника — строка матрицы опередила код.
-        other @ (Provider::IbcmdRs | Provider::Webinst) => {
-            Err(crate::use_cases::unimplemented_provider(
+        other @ (Provider::IbcmdRs | Provider::Webinst) => Err(CommandFailure::without_deferral(
+            crate::use_cases::unimplemented_provider(
                 crate::domain::capability::Operation::InfobaseRestore,
                 other,
-            ))
-        }
+            ),
+        )),
         Provider::Agent => agent::restore_snapshot(context, config, executable, source_file),
         Provider::Designer => {
-            let executable = executable_of(executable)?;
+            let executable = executable_of(executable).map_err(CommandFailure::without_deferral)?;
             let runner = crate::platform::process::ProcessExecutor;
-            let log = provider_log_path(config, "infobase-restore")?;
+            let log = provider_log_path(config, "infobase-restore")
+                .map_err(CommandFailure::without_deferral)?;
             // Загрузка снимка подменяет базу целиком: фаза критическая, как у `restore-ib`
             // агента. Снятый посреди записи Конфигуратор оставил бы базу в состоянии,
             // которое не назовёт никто.
@@ -680,11 +693,13 @@ fn run_restore_provider(
                 context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
             )
             .restore_infobase(source_file)
-            .map_err(AppError::from)
+            // Отказ раннера фактом отсрочки не владеет: процесс, отложивший отмену,
+            // отвечает результатом, а не ошибкой.
+            .map_err(|error| CommandFailure::without_deferral(AppError::from(error)))
         }
-        Provider::Ibcmd => Err(AppError::capability(
+        Provider::Ibcmd => Err(CommandFailure::without_deferral(AppError::capability(
             "IBCMD DT restore is experimental and cannot be dispatched".to_owned(),
-        )),
+        ))),
     }
 }
 
@@ -1250,22 +1265,6 @@ fn execution_error_code(error: &AppError) -> &'static str {
     }
 }
 
-fn record_deferred_process_interruption(
-    platform_result: &PlatformCommandResult,
-    completed_action: &str,
-    execution: &mut ExecutionOutcome<()>,
-    warnings: &mut Vec<String>,
-) {
-    if let Some((warning, details)) = deferred_process_interruption(
-        ExecutionInterruptionPhase::ProviderCommand,
-        completed_action,
-        platform_result,
-    ) {
-        execution.interruptions.push(details);
-        warnings.push(warning);
-    }
-}
-
 fn resolve_output(config: &AppConfig, requested: &Path) -> Result<ResolvedOutput, AppError> {
     let requested = if requested.is_absolute() {
         requested.to_path_buf()
@@ -1498,7 +1497,9 @@ fn run_configuration_provider(
                 state,
                 extension,
                 staging_path,
-            );
+            )
+            // Выгрузка критических команд не ведёт, отложенной отмены у её сессии не бывает.
+            .map_err(|failure| failure.into_error("configuration export"));
         }
         Provider::Designer => {
             let executable = executable_of(executable)?;
@@ -1560,7 +1561,9 @@ fn run_snapshot_provider(
                 other,
             ))
         }
-        Provider::Agent => agent::export_snapshot(context, config, executable, staging_path),
+        // Выгрузка критических команд не ведёт, отложенной отмены у её сессии не бывает.
+        Provider::Agent => agent::export_snapshot(context, config, executable, staging_path)
+            .map_err(|failure| failure.into_error("infobase DT export")),
         Provider::Designer => {
             let executable = executable_of(executable)?;
             let runner = crate::platform::process::ProcessExecutor;

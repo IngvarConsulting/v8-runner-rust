@@ -10,14 +10,12 @@ use std::path::{Path, PathBuf};
 use crate::config::model::AppConfig;
 use crate::domain::artifact::{ArtifactKind, ArtifactRef, ArtifactSet};
 use crate::domain::artifacts::ArtifactBuildMode;
-use crate::platform::agent::WaitPolicy;
 use crate::platform::result::PlatformCommandResult;
-use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::support::fs::{write_temp_dir_metadata, TempDirKind};
 use crate::use_cases::agent_session::{
-    argument, collect_file, connect, make_output_dir, platform_result, run_command, run_id,
-    stage_copy_dir, tidy, transcript_log, wait_policy, AgentHandle, Exchange,
+    argument, collect_file, make_output_dir, run_command, run_id, stage_copy_dir, tidy,
+    transcript_log, with_session,
 };
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::dump_config::verify_external_dump_descriptor;
@@ -119,9 +117,10 @@ pub(super) fn run_agent_export(
             Ok(reply.transcript())
         },
     )
-    .map_err(|error| {
+    // Выгрузка критических команд не ведёт, отложенной отмены у её сессии не бывает.
+    .map_err(|failure| {
         (
-            cleanup_unmaterialized_stage(error),
+            cleanup_unmaterialized_stage(failure.into_error("artifact export")),
             artifacts.clone(),
             Some(log.clone()),
         )
@@ -261,7 +260,9 @@ fn run_external_agent_export(
                     "make: external export",
                     "[агент] exporting external artifact package",
                 );
-                // Загрузка внешней обработки меняет содержимое базы: фаза критическая.
+                // Загрузка внешней обработки пишет только файл обработки, а база ей нужна
+                // лишь для разрешения ссылок (документация `LoadExternalDataProcessorOrReportFromFiles`):
+                // фаза не критическая, отмена её снимает, как на пути Конфигуратора.
                 run_command(
                     handle,
                     &format!(
@@ -269,7 +270,7 @@ fn run_external_agent_export(
                         argument(&xml),
                         argument(&out)
                     ),
-                    &wait.critical(),
+                    wait,
                 )?;
 
                 log_live_stage(
@@ -319,7 +320,14 @@ fn run_external_agent_export(
         tidy(handle, exchange, &base);
         outcome
     })
-    .map_err(|error| (error, artifacts.clone(), Some(log.clone())))?;
+    // Внешняя обработка собирается некритической загрузкой: отложенной отмены нет и здесь.
+    .map_err(|failure| {
+        (
+            failure.into_error("external artifact export"),
+            artifacts.clone(),
+            Some(log.clone()),
+        )
+    })?;
     for (_, _, staging_file) in &staged {
         artifacts.push(
             ArtifactRef::new(ArtifactKind::Package, staging_file)
@@ -365,23 +373,4 @@ fn run_external_agent_export(
         artifacts,
         publication_message(context, publish_phase),
     ))
-}
-
-/// Одна сессия на операцию: открыть, выполнить, закрыть — и при отказе тоже.
-fn with_session(
-    context: &ExecutionContext,
-    config: &AppConfig,
-    v8: Option<&Path>,
-    log: PathBuf,
-    work: impl FnOnce(&mut AgentHandle, &WaitPolicy, &Exchange) -> Result<String, AppError>,
-) -> Result<PlatformCommandResult, AppError> {
-    let wait = wait_policy(context);
-    let mut utilities = PlatformUtilities::from_config(config);
-    let mut handle = connect(config, &mut utilities, v8, log.clone(), &wait)?;
-    let outcome = handle
-        .exchange(config)
-        .and_then(|exchange| work(&mut handle, &wait, &exchange));
-    let deferred = handle.session().deferred_interruption();
-    handle.finish(&wait);
-    outcome.map(|transcript| platform_result(transcript, log, deferred))
 }

@@ -415,6 +415,11 @@ impl From<AgentError> for AppError {
                 message: error.to_string(),
                 at: CancelledAt::after(delivered),
             },
+            // Команда, которую агенту не отдали, работы не несёт: отмена — на границе.
+            AgentError::NotSent { .. } => Self::Cancelled {
+                message: error.to_string(),
+                at: CancelledAt::Boundary,
+            },
             AgentError::Command { .. }
             | AgentError::Canceled { .. }
             | AgentError::Question { .. }
@@ -526,6 +531,9 @@ mod tests {
             .with_context("dump"),
             AppError::from(EdtSessionError::QueuedCancelled),
             AppError::from(DownloadError::Cancelled),
+            AppError::from(AgentError::NotSent {
+                command: "restore-ib".to_owned(),
+            }),
         ] {
             assert_eq!(
                 error.cancellation(),

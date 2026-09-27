@@ -14,9 +14,12 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 use support::fake_agent::{
-    read_or_empty, start_fake_agent, write_fake_designer, FakeAgent, AGENT_PASSWORD,
+    read_or_empty, start_fake_agent, write_fake_designer, FakeAgent, Hold, HoldReply,
+    AGENT_PASSWORD,
 };
-use support::{temp_workspace, v8_runner_command};
+use support::{
+    interrupt_at_hold, temp_workspace, v8_runner_command, CRITICAL_INTERRUPTION_DEFERRED,
+};
 
 struct Harness {
     dir: tempfile::TempDir,
@@ -27,6 +30,11 @@ struct Harness {
 }
 
 fn harness() -> Harness {
+    harness_holding(None)
+}
+
+/// Стенд, двойник которого держит команду `hold`, пока тест её не отпустит.
+fn harness_holding(hold: Option<Hold>) -> Harness {
     let dir = temp_workspace();
     let root = dir.path().to_path_buf();
     let sources = root.join("project").join("configuration");
@@ -42,13 +50,15 @@ fn harness() -> Harness {
     let base_dir_file = root.join("base-dir.txt");
     let designer_pid_file = root.join("designer.pid");
     let designer_args_log = root.join("designer-args.log");
-    let port = start_fake_agent(FakeAgent::new(
+    let mut agent = FakeAgent::new(
         true,
         commands_log.clone(),
         None,
         base_dir_file.clone(),
         designer_pid_file.clone(),
-    ));
+    );
+    agent.hold = hold;
+    let port = start_fake_agent(agent);
     write_fake_designer(
         &bin.join("1cv8"),
         &designer_args_log,
@@ -239,5 +249,91 @@ fn a_dump_after_a_build_with_an_unchanged_generation_dumps_nothing() {
     assert!(
         harness.sources.join("Catalogs").join("Items.xml").is_file(),
         "a skipped dump leaves the sources alone"
+    );
+}
+
+/// Прогон сборки, который прерывают, пока двойник держит `command`: отвечает он `reply`.
+fn build_interrupted_at(command: &str, reply: HoldReply) -> (i32, Value, Vec<String>) {
+    let marks = temp_workspace();
+    let (started, release) = (marks.path().join("started"), marks.path().join("release"));
+    let harness = harness_holding(Some(Hold {
+        command: command.to_owned(),
+        started: started.clone(),
+        release: release.clone(),
+        reply,
+    }));
+    let mut runner = v8_runner_command();
+    runner.args([
+        "--config",
+        &harness.config_path.display().to_string(),
+        "--json-message",
+        "build",
+    ]);
+    let (code, payload) = interrupt_at_hold(
+        runner,
+        &marks.path().join("actions.log"),
+        &started,
+        &release,
+        CRITICAL_INTERRUPTION_DEFERRED,
+    );
+    let lines = commands(&harness);
+    (code, payload, lines)
+}
+
+/// Сообщение шага, который не удался: за ним в ответе идут пропущенные наборы.
+fn step_message(payload: &Value) -> String {
+    payload["data"]["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .find(|step| step["ok"] == false)
+        .and_then(|step| step["message"].as_str())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// Загрузка, отложившая отмену и потом отказавшая или оборвавшая сессию, остаётся отказом,
+/// но отложенную отмену называет первой в тексте шага (#317).
+#[test]
+fn a_load_that_fails_after_a_deferred_cancellation_names_it() {
+    for (reply, failure) in [
+        (HoldReply::Error, "agent command failed"),
+        (HoldReply::Close, "ended before a reply"),
+    ] {
+        let (code, payload, _) = build_interrupted_at("config load-config-from-files", reply);
+
+        assert_ne!(code, 0, "{payload}");
+        assert_ne!(
+            payload["error"]["code"], "cancelled",
+            "the failure is the agent's: {payload}"
+        );
+        let message = step_message(&payload);
+        let deferral = message
+            .find("load ended after cancellation request")
+            .unwrap_or_else(|| panic!("{payload}"));
+        let failure = message.find(failure).unwrap_or_else(|| panic!("{payload}"));
+        assert!(deferral < failure, "{payload}");
+    }
+}
+
+/// Обновление базы доведено, хоть отмену и просили; следующая команда — поколение — уже не
+/// уходит агенту, и шаг останавливается отменой. Отложенную отмену обновления ответ всё равно
+/// называет (#317).
+#[test]
+fn an_update_that_deferred_the_cancellation_is_named_when_the_generation_is_refused() {
+    let (code, payload, lines) = build_interrupted_at("config update-db-cfg", HoldReply::Normal);
+
+    assert_eq!(code, 4, "{payload}");
+    assert_eq!(payload["error"]["code"], "cancelled", "{payload}");
+    assert!(
+        step_message(&payload)
+            .contains("update_db_cfg completed successfully after cancellation request"),
+        "{payload}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.starts_with("config generation-id")),
+        "no request goes to the agent after the interrupt: {lines:?}"
     );
 }

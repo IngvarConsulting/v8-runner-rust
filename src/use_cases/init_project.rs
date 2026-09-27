@@ -737,7 +737,10 @@ fn with_optional_warning(message: String, warning: Option<String>) -> String {
 }
 
 fn deferred_interruption_warning(result: &PlatformCommandResult) -> Option<String> {
-    interruption::deferred_process_interruption_warning("operation completed successfully", result)
+    interruption::deferred_process_interruption_warning(
+        "operation completed successfully",
+        result.process.interruption,
+    )
 }
 
 fn context_deferred_warning(context: &ExecutionContext) -> Option<String> {

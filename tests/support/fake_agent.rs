@@ -21,6 +21,60 @@ use russh_sftp::protocol::{
 
 pub const AGENT_PASSWORD: &str = "agentpass";
 
+/// Команда, которую двойник держит, пока тест её не отпустит: так тест прерывает раннер
+/// посреди команды, не гадая по часам. Держится каждая подходящая команда каждого
+/// соединения: двойник клонируется на соединение, и удержание едет с ним. Ждёт двойник
+/// внутри обработчика данных, поэтому, пока команда удержана, сессия этого соединения не
+/// обслуживает ничего другого — ни SFTP, ни keepalive.
+#[derive(Clone)]
+pub struct Hold {
+    /// Начало строки команды.
+    pub command: String,
+    /// Файл, который двойник кладёт, когда команда пришла.
+    pub started: PathBuf,
+    /// Файл, которого двойник ждёт, прежде чем ответить.
+    pub release: PathBuf,
+    /// Чем двойник отвечает, когда его отпустили.
+    pub reply: HoldReply,
+}
+
+/// Ответ удержанной команды.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum HoldReply {
+    /// Обычный ответ двойника на эту команду.
+    Normal,
+    /// Сообщение об ошибке агента.
+    Error,
+    /// Канал закрыт без итогового сообщения.
+    Close,
+}
+
+/// Запись по SFTP, которую двойник держит, пока тест её не отпустит. Держится только
+/// первая запись соединения: SFTP-сервер забирает удержание, открывая её.
+#[derive(Clone)]
+pub struct SftpHold {
+    /// Файл, который двойник кладёт, когда запись началась.
+    pub started: PathBuf,
+    /// Файл, которого двойник ждёт, прежде чем писать.
+    pub release: PathBuf,
+}
+
+/// Ждёт файла `release` не дольше полуминуты, уступая рантайм двойника. Паника внутри
+/// обработчика russh пропала бы молча, поэтому просроченное ожидание пишется в stderr, а
+/// двойник отвечает как обычно: тест падает на своих сроках, с понятной причиной.
+async fn wait_for_release(release: &Path) {
+    for _ in 0..3_000 {
+        if release.exists() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    eprintln!(
+        "fake agent: the test never released the held command ({})",
+        release.display()
+    );
+}
+
 /// Один экземпляр на соединение, общее состояние — через `Arc`.
 #[derive(Clone)]
 pub struct FakeAgent {
@@ -39,6 +93,10 @@ pub struct FakeAgent {
     /// SFTP только на чтение — как у живого шлюза `ibsrv` 8.3.27 (замер 15.09.2026:
     /// mkdir/rmdir/get работают, open на запись — Failure).
     pub sftp_read_only: bool,
+    /// Команда shell, которую двойник держит до знака теста.
+    pub hold: Option<Hold>,
+    /// Запись по SFTP, которую двойник держит до знака теста.
+    pub sftp_hold: Option<SftpHold>,
     /// Каналы соединения: подсистема SFTP забирает свой канал в поток.
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
     /// Каналы, отданные SFTP: их байты — не команды shell.
@@ -94,6 +152,8 @@ impl FakeAgent {
             designer_pid_file,
             gate: None,
             sftp_read_only: false,
+            hold: None,
+            sftp_hold: None,
             channels: Arc::new(Mutex::new(HashMap::new())),
             sftp_channels: Arc::new(Mutex::new(Vec::new())),
             generation: Arc::new(AtomicU64::new(1)),
@@ -574,6 +634,7 @@ impl server::Handler for FakeAgent {
             commands_log: self.commands_log.clone(),
             handles: HashMap::new(),
             next_handle: 0,
+            hold: self.sftp_hold.clone(),
         };
         tokio::spawn(async move {
             russh_sftp::server::run(channel.into_stream(), handler).await;
@@ -623,6 +684,32 @@ impl server::Handler for FakeAgent {
             lines
         };
         for line in lines {
+            let held = self
+                .hold
+                .clone()
+                .filter(|hold| line.starts_with(&hold.command));
+            if let Some(hold) = held {
+                if let Err(error) = fs::write(&hold.started, "") {
+                    eprintln!("fake agent: cannot mark the held command started: {error}");
+                }
+                wait_for_release(&hold.release).await;
+                match hold.reply {
+                    HoldReply::Normal => {}
+                    HoldReply::Error => {
+                        self.log(&line);
+                        let failure = r#"[{"type":"error","error-type":"UnknownError","message":"held command failed"}]"#;
+                        session.data(channel, format!("{failure}\n").into_bytes())?;
+                        continue;
+                    }
+                    HoldReply::Close => {
+                        self.log(&line);
+                        session.eof(channel)?;
+                        session.close(channel)?;
+                        // Канал закрыт: остальные строки пакета читать уже некому.
+                        break;
+                    }
+                }
+            }
             let (reply, closing) = self.respond(&line);
             session.data(channel, reply.into_bytes())?;
             if closing {
@@ -643,6 +730,7 @@ struct FakeSftp {
     commands_log: PathBuf,
     handles: HashMap<String, FakeSftpHandle>,
     next_handle: u64,
+    hold: Option<SftpHold>,
 }
 
 enum FakeSftpHandle {
@@ -719,6 +807,12 @@ impl russh_sftp::server::Handler for FakeSftp {
             if self.read_only {
                 self.log("open-refused", &filename);
                 return Err(StatusCode::Failure);
+            }
+            if let Some(hold) = self.hold.take() {
+                if let Err(error) = fs::write(&hold.started, "") {
+                    eprintln!("fake agent: cannot mark the held write started: {error}");
+                }
+                wait_for_release(&hold.release).await;
             }
             self.log("write", &filename);
             let file = fs::OpenOptions::new()

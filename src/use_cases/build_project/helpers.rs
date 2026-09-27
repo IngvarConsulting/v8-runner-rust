@@ -526,24 +526,6 @@ pub(super) fn interruption_before_safe_point(
     interruption::interruption_before_safe_point(context, safe_point)
 }
 
-pub(super) fn deferred_interruption_warning(
-    action: &str,
-    result: &PlatformCommandResult,
-) -> Option<String> {
-    interruption::deferred_process_interruption_warning(
-        &format!("{action} completed successfully"),
-        result,
-    )
-}
-
-pub(super) fn merge_step_message(message: String, warnings: &[String]) -> String {
-    if warnings.is_empty() {
-        message
-    } else {
-        format!("{message}; {}", warnings.join("; "))
-    }
-}
-
 pub(super) fn extension_name(source_set: &SourceSetConfig) -> Option<&str> {
     match source_set.purpose {
         SourceSetPurpose::Configuration => None,

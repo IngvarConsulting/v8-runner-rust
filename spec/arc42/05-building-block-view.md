@@ -74,7 +74,7 @@ flowchart TB
 | [`provider_selection.rs`](../../src/use_cases/provider_selection.rs) | Выбор исполнителя и квитанция — [6.2](06-runtime-view.md) |
 | [`agent_session.rs`](../../src/use_cases/agent_session.rs) | Сессия агента на команду, обмен файлами, поколение — [6.4](06-runtime-view.md) |
 | [`staged_publication.rs`](../../src/use_cases/staged_publication.rs), [`destruction_guard.rs`](../../src/use_cases/destruction_guard.rs) | Публикация с заменой и вопрос к git — [8.8](08-cross-cutting-concepts.md) |
-| [`interruption.rs`](../../src/use_cases/interruption.rs) | Слова о прерывании — [8.7](08-cross-cutting-concepts.md) |
+| [`interruption.rs`](../../src/use_cases/interruption.rs) | Слова о прерывании и учёт отмен, отложенных критической фазой, — [8.7](08-cross-cutting-concepts.md) |
 | [`progress.rs`](../../src/use_cases/progress.rs) | События живой ленты текстового вывода |
 | [`source_inventory.rs`](../../src/use_cases/source_inventory.rs) | Наборы исходников проекта в порядке обработки |
 | [`tool_extension.rs`](../../src/use_cases/tool_extension.rs) | Расширение-инструмент клиентского MCP |

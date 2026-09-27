@@ -6,6 +6,7 @@ check:
   - src/use_cases/result.rs::every_cancellation_answers_as_cancelled
   - tests/cli_publish.rs::publish_interrupted_after_webinst_started_answers_in_its_form
   - tests/cli_launch.rs::a_wait_ready_interrupted_after_the_client_started_is_a_cancellation
+  - tests/cli_agent_standalone.rs::an_interrupt_during_the_upload_stops_the_build_before_the_load
   - tests/architecture_guardrails.rs::a_cancellation_is_classified_only_by_its_owner
 ---
 

@@ -15,9 +15,13 @@ use std::path::PathBuf;
 use serde_json::Value;
 use support::command_data::assert_data_matches_one_of;
 use support::fake_agent::{
-    read_or_empty, start_fake_agent, write_fake_designer, FakeAgent, AGENT_PASSWORD,
+    read_or_empty, start_fake_agent, write_fake_designer, FakeAgent, Hold, HoldReply,
+    AGENT_PASSWORD,
 };
-use support::{temp_workspace, v8_runner_command};
+use support::{
+    interrupt_at_hold, temp_workspace, v8_runner_command, AGENT_COMMAND_ABANDONED,
+    CRITICAL_INTERRUPTION_DEFERRED, OPERATOR_INTERRUPT_RECEIVED,
+};
 
 struct Harness {
     dir: tempfile::TempDir,
@@ -33,6 +37,11 @@ fn harness_with(providers: &str) -> Harness {
 
 /// Стенд с базой по адресу `connection`; без него — файловая база самого стенда.
 fn harness_for(connection: Option<&str>, providers: &str) -> Harness {
+    harness_holding(connection, providers, None)
+}
+
+/// Стенд, двойник которого держит команду `hold`, пока тест её не отпустит.
+fn harness_holding(connection: Option<&str>, providers: &str, hold: Option<Hold>) -> Harness {
     let dir = temp_workspace();
     let root = dir.path().to_path_buf();
     let project = root.join("project");
@@ -70,13 +79,15 @@ fn harness_for(connection: Option<&str>, providers: &str) -> Harness {
     let base_dir_file = root.join("base-dir.txt");
     let designer_pid_file = root.join("designer.pid");
     let designer_args_log = root.join("designer-args.log");
-    let port = start_fake_agent(FakeAgent::new(
+    let mut agent = FakeAgent::new(
         true,
         commands_log.clone(),
         None,
         base_dir_file.clone(),
         designer_pid_file.clone(),
-    ));
+    );
+    agent.hold = hold;
+    let port = start_fake_agent(agent);
     write_fake_designer(
         &bin.join("1cv8"),
         &designer_args_log,
@@ -693,4 +704,238 @@ fn load_through_the_agent_is_refused_without_a_session() {
     );
     assert!(commands(&harness).is_empty(), "{:?}", commands(&harness));
     assert_eq!(read_or_empty(&harness.designer_args_log).lines().count(), 0);
+}
+
+const EVERY_AGENT_PROVIDER: &str = "  make: agent\n  extensions: agent\n  infobase.configuration.export: agent\n  infobase.dump: agent\n  infobase.restore: agent\n";
+
+/// Удержание команды `command` двойником: знаки лежат в `marks`.
+fn hold(marks: &tempfile::TempDir, command: &str, reply: HoldReply) -> Hold {
+    Hold {
+        command: command.to_owned(),
+        started: marks.path().join("started"),
+        release: marks.path().join("release"),
+        reply,
+    }
+}
+
+fn runner(harness: &Harness, arguments: &[&str]) -> std::process::Command {
+    let mut command = v8_runner_command();
+    command
+        .args([
+            "--config",
+            &harness.config_path.display().to_string(),
+            "--json-message",
+        ])
+        .args(arguments);
+    command
+}
+
+/// Отмена, которую `restore-ib` отложил, названа и тогда, когда агент потом ответил отказом
+/// или оборвал сессию: оператор просил остановить, и ответ говорит, почему его не послушали,
+/// как на пути Конфигуратора (#317).
+#[test]
+fn a_failed_restore_through_the_agent_still_names_the_deferred_cancellation() {
+    for reply in [HoldReply::Error, HoldReply::Close] {
+        let marks = temp_workspace();
+        let held = hold(&marks, "infobase-tools restore-ib", reply);
+        let (started, release) = (held.started.clone(), held.release.clone());
+        let harness = harness_holding(None, EVERY_AGENT_PROVIDER, Some(held));
+        let input = harness.dir.path().join("transfer").join("base.dt");
+        fs::create_dir_all(input.parent().unwrap()).expect("transfer");
+        fs::write(&input, "payload-42").expect("dt");
+
+        let (code, payload) = interrupt_at_hold(
+            runner(
+                &harness,
+                &[
+                    "infobase",
+                    "restore",
+                    "--input",
+                    &input.display().to_string(),
+                    "--replace",
+                ],
+            ),
+            &marks.path().join("actions.log"),
+            &started,
+            &release,
+            CRITICAL_INTERRUPTION_DEFERRED,
+        );
+
+        assert_ne!(code, 0, "{payload}");
+        assert_ne!(
+            payload["error"]["code"], "cancelled",
+            "the failure is the agent's: {payload}"
+        );
+        let data = &payload["data"];
+        assert_eq!(data["execution"]["status"], "failed", "{payload}");
+        let deferred = &data["execution"]["interruptions"][0];
+        assert_eq!(deferred["deferred"], true, "{payload}");
+        assert_eq!(deferred["kind"], "cancelled", "{payload}");
+        assert_eq!(deferred["phase"], "provider_command", "{payload}");
+        assert!(
+            payload["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|warning| warning
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("infobase DT restore after cancellation request")),
+            "{payload}"
+        );
+    }
+}
+
+/// Загрузка внешней обработки через агента не критическая: она пишет только файл обработки.
+/// Отмена её обрывает, как на пути Конфигуратора, и `make` отвечает отменой оборванной работы
+/// (#317).
+#[test]
+fn an_interrupt_cuts_the_external_load_through_the_agent() {
+    let marks = temp_workspace();
+    let held = hold(
+        &marks,
+        "config load-external-data-processor-or-report-from-files",
+        HoldReply::Normal,
+    );
+    let (started, release) = (held.started.clone(), held.release.clone());
+    let harness = harness_holding(None, EVERY_AGENT_PROVIDER, Some(held));
+    let output = harness.dir.path().join("dist").join("tools");
+
+    let (code, payload) = interrupt_at_hold(
+        runner(
+            &harness,
+            &[
+                "artifacts",
+                "--output",
+                &output.display().to_string(),
+                "--source-set",
+                "tools",
+            ],
+        ),
+        &marks.path().join("actions.log"),
+        &started,
+        &release,
+        AGENT_COMMAND_ABANDONED,
+    );
+
+    assert_eq!(code, 4, "{payload}");
+    assert_eq!(payload["error"]["code"], "cancelled", "{payload}");
+    let execution = &payload["data"]["execution"];
+    assert_eq!(execution["status"], "cancelled", "{payload}");
+    assert_eq!(
+        execution["interruptions"][0]["deferred"], false,
+        "{payload}"
+    );
+    assert_eq!(
+        execution["interruptions"][0]["phase"], "provider_command",
+        "{payload}"
+    );
+    assert!(!output.join("Alpha.epf").exists(), "nothing was published");
+}
+
+/// Отключение безопасного режима через агента — критическая запись. Отмену, которую она
+/// отложила, шаг называет и у удачи, и у отказа агента (#317).
+#[test]
+fn extensions_safety_through_the_agent_names_the_deferred_cancellation() {
+    for (reply, ok, wording) in [
+        (
+            HoldReply::Normal,
+            true,
+            "extension properties update completed successfully after cancellation request",
+        ),
+        (
+            HoldReply::Error,
+            false,
+            "extension properties update ended after cancellation request",
+        ),
+    ] {
+        let marks = temp_workspace();
+        let held = hold(&marks, "config extensions properties set", reply);
+        let (started, release) = (held.started.clone(), held.release.clone());
+        let harness = harness_holding(None, EVERY_AGENT_PROVIDER, Some(held));
+
+        let (code, payload) = interrupt_at_hold(
+            runner(&harness, &["extensions"]),
+            &marks.path().join("actions.log"),
+            &started,
+            &release,
+            CRITICAL_INTERRUPTION_DEFERRED,
+        );
+
+        // Удача после отложенной отмены остаётся удачей, отказ — отказом.
+        assert_eq!(code == 0, ok, "{payload}");
+        assert_eq!(payload["data"]["ok"], ok, "{payload}");
+        let step = &payload["data"]["steps"][0];
+        assert_eq!(step["ok"], ok, "{payload}");
+        assert!(
+            step["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(wording),
+            "{payload}"
+        );
+    }
+}
+
+/// Изменение состава расширений через агента, отложившее отмену и потом отказавшее или
+/// оборвавшее сессию, называет её в сообщении шага (#317).
+#[test]
+fn an_extension_created_through_the_agent_names_the_deferral_of_its_failure() {
+    for (reply, failure) in [
+        (HoldReply::Error, "agent command failed"),
+        (HoldReply::Close, "ended before a reply"),
+    ] {
+        let marks = temp_workspace();
+        let held = hold(&marks, "config extensions create", reply);
+        let (started, release) = (held.started.clone(), held.release.clone());
+        let harness = harness_holding(None, EVERY_AGENT_PROVIDER, Some(held));
+
+        let (code, payload) = interrupt_at_hold(
+            runner(
+                &harness,
+                &[
+                    "extensions",
+                    "create",
+                    "--name",
+                    "Проба",
+                    "--name-prefix",
+                    "Пр_",
+                ],
+            ),
+            &marks.path().join("actions.log"),
+            &started,
+            &release,
+            CRITICAL_INTERRUPTION_DEFERRED,
+        );
+
+        assert_ne!(code, 0, "{payload}");
+        let step = &payload["data"]["steps"][0];
+        assert_eq!(step["ok"], false, "{payload}");
+        // Отложенная отмена открывает текст отказа, раньше слов агента.
+        let message = step["message"].as_str().unwrap_or_default();
+        let deferral = message
+            .find("extension create ended after cancellation request")
+            .unwrap_or_else(|| panic!("{payload}"));
+        let failure = message.find(failure).unwrap_or_else(|| panic!("{payload}"));
+        assert!(deferral < failure, "{payload}");
+    }
+}
+
+/// Строки журнала, которых ждут тесты, — те же, что пишет раннер: переименование падает
+/// здесь, а не полуминутным ожиданием в каждом тесте.
+#[test]
+fn the_awaited_log_lines_are_the_runners_own() {
+    for (file, line) in [
+        ("src/platform/process.rs", CRITICAL_INTERRUPTION_DEFERRED),
+        ("src/platform/agent.rs", AGENT_COMMAND_ABANDONED),
+        ("src/cli/signal.rs", OPERATOR_INTERRUPT_RECEIVED),
+    ] {
+        let source =
+            fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file))
+                .unwrap_or_else(|error| panic!("{file}: {error}"));
+        assert!(
+            source.contains(&format!("\"{line}\"")),
+            "{file} no longer writes `{line}`"
+        );
+    }
 }
