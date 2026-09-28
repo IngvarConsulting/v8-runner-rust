@@ -322,6 +322,24 @@ impl ProcessExecutionPolicy {
         }
     }
 
+    /// Та же политика для команды, которая базу только читает: критическая фаза — запись, а
+    /// чтение отмена снимает (INV.USE-CASES.A-DATABASE-WRITE-IS-A-CRITICAL-PHASE). Под
+    /// критической политикой чтение снимается мягко — SIGTERM, затем kill; защищённее своего
+    /// класса оно не становится. Отмена, предел и отметка работы у него те же.
+    pub(in crate::platform) fn for_reading(&self) -> Self {
+        let safety = match self.safety {
+            ProcessInterruptionSafety::Interruptible => ProcessInterruptionSafety::Interruptible,
+            ProcessInterruptionSafety::GracefulThenKill
+            | ProcessInterruptionSafety::CriticalNonAbortable => {
+                ProcessInterruptionSafety::GracefulThenKill
+            }
+        };
+        Self {
+            safety,
+            ..self.clone()
+        }
+    }
+
     /// Двойник исполнителя в тестах сценариев отмечает работу, как настоящий, едва
     /// «запустил» процесс.
     #[cfg(test)]
@@ -1216,17 +1234,46 @@ impl HeldCommand {
         let watch = watch.clone();
         std::thread::spawn(move || {
             let deadline = std::time::Instant::now() + Duration::from_secs(30);
-            while !started.exists() && std::time::Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(10));
-            }
+            wait_until(deadline, || started.exists());
             cancellation.cancel();
-            while !watch.observed() && std::time::Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(10));
-            }
+            let deferred = wait_until(deadline, || watch.observed());
             std::fs::write(&release, "").expect("release the held command");
-            watch.observed()
+            deferred
         })
     }
+
+    /// Оператор для некритической команды — [`cancel_when_started`] по отметке её начала.
+    pub(crate) fn cancel_when_started(
+        &self,
+        cancellation: CancellationToken,
+    ) -> std::thread::JoinHandle<bool> {
+        cancel_when_started(&self.started, cancellation)
+    }
+}
+
+/// Оператор теста: дождаться, пока команда отметится файлом `started`, и отменить. Команду он
+/// не отпускает — отмена снимает её сама. Поток отвечает, дождался ли он отметки.
+#[cfg(all(test, unix))]
+fn cancel_when_started(
+    started: &std::path::Path,
+    cancellation: CancellationToken,
+) -> std::thread::JoinHandle<bool> {
+    let started = started.to_path_buf();
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let appeared = wait_until(deadline, || started.exists());
+        cancellation.cancel();
+        appeared
+    })
+}
+
+/// Ждёт, пока `condition` не станет верным или не выйдет `deadline`; отвечает, дождался ли.
+#[cfg(all(test, unix))]
+fn wait_until(deadline: std::time::Instant, condition: impl Fn() -> bool) -> bool {
+    while !condition() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    condition()
 }
 
 #[cfg(test)]
@@ -1269,7 +1316,6 @@ mod tests {
         fs::set_permissions(path, perms).expect("chmod");
     }
 
-    #[cfg(unix)]
     fn gave_work(policy: &ProcessExecutionPolicy) -> bool {
         policy.work.as_ref().is_some_and(WorkGiven::given)
     }
@@ -1357,20 +1403,13 @@ mod tests {
             &format!(": > '{}'\nsleep 30", started_marker.display()),
         );
         let policy = ProcessExecutionPolicy::default();
-        let operator = {
-            let cancellation = policy.cancellation.clone();
-            let started_marker = started_marker.clone();
-            thread::spawn(move || {
-                let deadline = std::time::Instant::now() + Duration::from_secs(30);
-                while !started_marker.exists() && std::time::Instant::now() < deadline {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                cancellation.cancel();
-            })
-        };
+        let operator = super::cancel_when_started(&started_marker, policy.cancellation.clone());
 
         let outcome = ProcessExecutor.run_with_policy(&plain_request(script), &policy);
-        operator.join().expect("operator");
+        assert!(
+            operator.join().expect("operator"),
+            "the process never started"
+        );
 
         assert!(
             matches!(
@@ -1405,10 +1444,13 @@ mod tests {
             CancellationToken::new(),
             ProcessInterruptionSafety::Interruptible,
         );
-        let operator = cancel_when_started(&policy, &started_marker);
+        let operator = super::cancel_when_started(&started_marker, policy.cancellation.clone());
 
         let outcome = ProcessExecutor.run_with_policy(&plain_request(script), &policy);
-        operator.join().expect("operator");
+        assert!(
+            operator.join().expect("operator"),
+            "the process never started"
+        );
 
         assert!(
             matches!(
@@ -1456,20 +1498,50 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    fn cancel_when_started(
-        policy: &ProcessExecutionPolicy,
-        started_marker: &Path,
-    ) -> thread::JoinHandle<()> {
-        let cancellation = policy.cancellation.clone();
-        let started_marker = started_marker.to_path_buf();
-        thread::spawn(move || {
-            let deadline = std::time::Instant::now() + Duration::from_secs(30);
-            while !started_marker.exists() && std::time::Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(10));
-            }
-            cancellation.cancel();
-        })
+    /// Чтение после записи критической фазой не бывает и защищённее своего класса не
+    /// становится; отмена, предел и отметка работы у него те же, что у записи.
+    #[test]
+    fn a_read_is_never_a_critical_phase() {
+        for (safety, read) in [
+            (
+                ProcessInterruptionSafety::Interruptible,
+                ProcessInterruptionSafety::Interruptible,
+            ),
+            (
+                ProcessInterruptionSafety::GracefulThenKill,
+                ProcessInterruptionSafety::GracefulThenKill,
+            ),
+            (
+                ProcessInterruptionSafety::CriticalNonAbortable,
+                ProcessInterruptionSafety::GracefulThenKill,
+            ),
+        ] {
+            let write = ProcessExecutionPolicy::new(
+                Some(Duration::from_secs(7)),
+                CancellationToken::new(),
+                safety,
+                WorkGiven::for_command(),
+            );
+
+            let reading = write.for_reading();
+
+            assert_eq!(reading.safety, read, "{safety:?}");
+            assert_eq!(reading.timeout, write.timeout, "{safety:?}");
+            assert_eq!(
+                reading.graceful_shutdown_timeout, write.graceful_shutdown_timeout,
+                "{safety:?}"
+            );
+            write.cancellation.cancel();
+            assert!(
+                reading.cancellation.is_cancelled(),
+                "{safety:?}: the read answers to the command's cancel"
+            );
+            reading.mark_started_for_test();
+            assert!(
+                gave_work(&write),
+                "{safety:?}: the read marks the command's work"
+            );
+        }
     }
 
     #[cfg(unix)]

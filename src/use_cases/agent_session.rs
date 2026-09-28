@@ -913,19 +913,21 @@ mod tests {
     }
 
     /// Отложенное прерывание едет тем же полем, что и у процессов платформы: иначе о нём
-    /// рассказывал бы второй путь, а существующие помощники (`deferred_process_*`) для
-    /// агентских результатов не срабатывали бы никогда.
+    /// рассказывал бы второй путь, а учёт отложенных отмен (`Deferrals`) для агентских
+    /// результатов не срабатывал бы никогда.
     #[test]
     fn an_agent_result_reports_a_deferred_interruption_like_any_platform_result() {
+        let noted = |action: &str, result: &crate::platform::result::PlatformCommandResult| {
+            crate::use_cases::interruption::collecting_deferrals(|deferrals| {
+                deferrals.note_result(action, result);
+                Ok(())
+            })
+            .map(|((), warnings)| warnings)
+            .expect("noting a finished command does not fail")
+        };
         let quiet = platform_result("ok".to_owned(), PathBuf::from("/tmp/agent.log"), None);
         assert!(quiet.process.interruption.is_none());
-        assert!(
-            crate::use_cases::interruption::deferred_process_interruption_warning(
-                "build",
-                quiet.process.interruption
-            )
-            .is_none()
-        );
+        assert!(noted("build", &quiet).is_empty());
 
         let latched = platform_result(
             "ok".to_owned(),
@@ -943,11 +945,10 @@ mod tests {
             crate::platform::process::ProcessInterruptionAction::Deferred
         );
 
-        let warning = crate::use_cases::interruption::deferred_process_interruption_warning(
-            "update_db_cfg",
-            latched.process.interruption,
-        )
-        .expect("the existing reporter must fire for an agent result");
+        let warnings = noted("update_db_cfg", &latched);
+        let [warning] = warnings.as_slice() else {
+            panic!("the ledger must name an agent result's deferral: {warnings:?}");
+        };
         assert!(warning.contains("update_db_cfg"), "{warning}");
         assert!(warning.contains("critical phase"), "{warning}");
     }

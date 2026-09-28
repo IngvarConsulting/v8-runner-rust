@@ -15,6 +15,7 @@ check:
   - src/use_cases/configure_extensions.rs::a_safety_update_that_deferred_the_cancellation_names_it
   - src/use_cases/extension_inventory.rs::a_change_through_ibcmd_names_the_cancellation_it_deferred
   - tests/cli_agent_scenarios.rs::extensions_safety_through_the_agent_names_the_deferred_cancellation
+  - src/use_cases/init_project.rs::a_created_infobase_names_the_cancellation_its_creation_deferred
 ---
 
 # Статус отмены или истечения предела означает состоявшийся исход

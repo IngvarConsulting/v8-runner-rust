@@ -22,15 +22,21 @@ check:
   - tests/cli_agent_scenarios.rs::extensions_safety_through_the_agent_names_the_deferred_cancellation
   - tests/cli_agent_scenarios.rs::an_extension_created_through_the_agent_names_the_deferral_of_its_failure
   - tests/architecture_guardrails.rs::an_agent_deferral_is_read_in_one_place
+  - src/platform/ibcmd.rs::a_create_that_deferred_a_cancel_keeps_its_result_when_the_question_is_refused
+  - src/use_cases/init_project.rs::a_failed_creation_after_a_deferred_cancellation_names_it
+  - src/use_cases/init_project.rs::a_creation_without_its_marker_after_a_deferred_cancellation_names_it
+  - src/use_cases/init_project.rs::an_ibcmd_creation_whose_question_went_unanswered_names_the_deferred_cancellation
+  - src/use_cases/init_project.rs::a_stop_after_the_creation_leaves_its_deferred_cancellation_in_the_step
+  - tests/architecture_guardrails.rs::a_critical_phase_names_its_deferral_through_the_owner
 ---
 
 # Отложенная отмена переживает следующий отказ
 
 Отмену, которую критическая фаза отложила до своего исхода, ответ `upload`,
-`infobase restore`, `push` и `extensions` называет и тогда, когда команда кончается не
-удачей: критическая команда потом отказала, сессия агента оборвалась, следующая команда
-не удалась или команда остановилась на следующей безопасной точке. Так поступает каждый
-исполнитель этих команд. Форма с `execution` называет её записью о прерывании с
+`infobase restore`, `push`, `extensions` и `infobase create` называет и тогда, когда команда
+кончается не удачей: критическая команда потом отказала, сессия агента оборвалась, следующая
+команда не удалась или команда остановилась на следующей безопасной точке. Так поступает
+каждый исполнитель этих команд. Форма с `execution` называет её записью о прерывании с
 `deferred: true` и тем же текстом среди своих предупреждений — `warnings` у
 `infobase restore`, `execution.diagnostics` у `upload`. Форма без `execution` называет
 её предупреждением в сообщении шага, чья команда отложила отмену; если этот шаг сам не

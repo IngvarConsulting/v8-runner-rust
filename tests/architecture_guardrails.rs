@@ -1802,6 +1802,435 @@ fn an_agent_deferral_is_read_in_one_place() {
     );
 }
 
+#[test]
+fn a_critical_phase_names_its_deferral_through_the_owner() {
+    // Корень проблемы (#317 и следом `infobase create`): критическая команда откладывает
+    // отмену до своего исхода, а сценарий читал её результат только ради статуса, и ранний
+    // выход — отказ, `?`, безопасная точка — уносил отсрочку. Владелец называния — учёт
+    // `use_cases::interruption` (`Deferrals`, `collecting_deferrals`, `record_deferral`,
+    // `deferred_process_interruption`) и агентские `run_critical` и `with_session`. Функция,
+    // которая объявляет критическую фазу процесса, сама называет её отсрочку через них.
+    //
+    // Строитель критического DSL отсрочку не видит: её называет хозяин из `DELEGATED` —
+    // функция того же модуля, которой достаются команда или её итог. Строитель принят, когда
+    // хозяин ниже него или когда каждая цепочка вызовов над ним доходит до самого хозяина;
+    // прямой вызывающий может и сам отдать итог хозяину. Вызов в обход хозяина назван как
+    // обход. Строка устарела, когда нет строителя или хозяина, когда строитель больше не
+    // объявляет фазу или называет её сам или когда хозяин отсрочки не называет.
+    //
+    // Не видит: вторую фазу внутри функции, которая учёт уже вызывает, — её ловят проверки
+    // правила INV.USE-CASES.A-DEFERRED-CANCELLATION-OUTLIVES-A-LATER-FAILURE; второго
+    // потребителя DSL ниже строителя, когда хозяин тоже ниже; фазу, объявленную вне тела
+    // функции — в константе или внутри макроса; вызов строителя из другого модуля. Вызов и
+    // ссылка на функцию узнаются по имени: метод — по имени метода, без типа приёмника.
+    const DELEGATED: &[(&str, &str)] = &[
+        (
+            "crate::use_cases::configure_extensions::run_configure",
+            "crate::use_cases::configure_extensions::SafetySetter::disable",
+        ),
+        (
+            "crate::use_cases::infobase_export::run_restore_provider",
+            "crate::use_cases::infobase_export::execute_infobase_restore",
+        ),
+        (
+            "crate::use_cases::init_project::create_infobase_via_designer",
+            "crate::use_cases::init_project::infobase_create_step",
+        ),
+        (
+            "crate::use_cases::init_project::create_infobase_via_ibcmd",
+            "crate::use_cases::init_project::infobase_create_step",
+        ),
+        (
+            "crate::use_cases::tool_extension::build_designer_dsl",
+            "crate::use_cases::tool_extension::ensure_written",
+        ),
+        (
+            "crate::use_cases::tool_extension::build_ibcmd_dsl",
+            "crate::use_cases::tool_extension::ensure_written",
+        ),
+    ];
+
+    let report = deferral_report(&SourceIndex::of_src(), DELEGATED);
+
+    assert!(
+        report.any_critical,
+        "no scenario declares a critical phase any more: the guard must name what replaced it"
+    );
+    assert!(
+        report.stale.is_empty(),
+        "stale DELEGATED entries, remove or fix them:\n{}",
+        report.stale.join("\n")
+    );
+    assert!(
+        report.unnamed.is_empty(),
+        "these functions declare a critical phase but never name its deferral through \
+         use_cases::interruption or the agent session helpers:\n{}",
+        report.unnamed.join("\n")
+    );
+}
+
+/// Как страж связывает фазу с учётом — на исходнике, где ответ известен заранее:
+/// - фаза, чья функция называет отсрочку, принята; фаза рядом, чью отсрочку не называет
+///   никто, — нет, хотя учёт в модуле есть; одноимённые методы разных типов не сливаются;
+/// - `.critical()` объявляет фазу; `.critical(флаг)`, образец в `match` и метод под
+///   `#[cfg(test)]` — нет;
+/// - строитель принят, когда каждая цепочка над ним доходит до хозяина, — и тогда, когда
+///   звено цепочки зовёт одноимённый метод; вызов в обход хозяина снимает принятие, даже
+///   если выше этот обход зовёт функция, которая зовёт и хозяина;
+/// - строитель принят, когда хозяин ниже него, и не принят, когда вниз до хозяина не дойти;
+/// - строка без строителя, строка, чей строитель называет отсрочку сам, и строка, чей
+///   хозяин отсрочки не называет, — устаревшие.
+#[test]
+fn the_deferral_guard_checks_each_critical_phase() {
+    let index = SourceIndex::from_sources(&[(
+        "crate::use_cases::family",
+        "fn named(context: &Context, deferrals: &mut Deferrals) {\n\
+             let result = run(context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None));\n\
+             deferrals.note_result(\"load\", &result);\n\
+         }\n\
+         fn forgotten(context: &Context) {\n\
+             let _ = run(context.process_policy(InterruptionSafetyClass::NoExternalProcess, None));\n\
+         }\n\
+         fn build_dsl(context: &Context) -> Dsl {\n\
+             Dsl::new(context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None))\n\
+         }\n\
+         fn create(context: &Context) -> Output { build_dsl(context).create() }\n\
+         fn step(context: &Context) {\n\
+             let _ = collecting_deferrals(|deferrals| {\n\
+                 let result = create(context);\n\
+                 deferrals.note_result(\"step\", &result);\n\
+                 Ok(())\n\
+             });\n\
+         }\n\
+         fn build_other(context: &Context) -> Dsl {\n\
+             Dsl::new(context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None))\n\
+         }\n\
+         fn ensure(deferrals: &mut Deferrals, result: &Output) { deferrals.note_result(\"other\", result); }\n\
+         fn with_owner(context: &Context, deferrals: &mut Deferrals) { ensure(deferrals, &build_other(context).run()); }\n\
+         fn bypass(context: &Context) -> bool { build_other(context).run().ok }\n\
+         fn build_third(context: &Context) -> Dsl {\n\
+             Dsl::new(context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None))\n\
+         }\n\
+         fn probe_third(context: &Context) -> bool { build_third(context).run().ok }\n\
+         fn with_probe(context: &Context, deferrals: &mut Deferrals) {\n\
+             if probe_third(context) { ensure(deferrals, &build_third(context).run()); }\n\
+         }\n\
+         struct Setter { dsl: Dsl }\n\
+         impl Setter {\n\
+             fn disable(&mut self, deferrals: &mut Deferrals) { deferrals.note_result(\"safety\", &self.dsl.update()); }\n\
+         }\n\
+         fn configure(context: &Context, deferrals: &mut Deferrals) {\n\
+             let mut setter = Setter { dsl: Dsl::new(context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None)) };\n\
+             apply(&mut setter, deferrals);\n\
+         }\n\
+         fn apply(setter: &mut Setter, deferrals: &mut Deferrals) { setter.disable(deferrals); }\n\
+         fn configure_alone(context: &Context) {\n\
+             let setter = Setter { dsl: Dsl::new(context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None)) };\n\
+             let _ = setter.dsl.update();\n\
+         }\n\
+         fn self_named(context: &Context, deferrals: &mut Deferrals) {\n\
+             let result = run(context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None));\n\
+             deferrals.note_result(\"self\", &result);\n\
+         }\n\
+         fn agent(wait: &WaitPolicy) { let _ = run_command(&wait.critical()); }\n\
+         fn flagged(wait: &WaitPolicy) { let _ = wait.critical(true); }\n\
+         fn classify(class: InterruptionSafetyClass) -> bool {\n\
+             match class { InterruptionSafetyClass::CriticalNonAbortable => true, _ => false }\n\
+         }\n\
+         struct Writer;\n\
+         impl Writer {\n\
+             fn run(&self, context: &Context) {\n\
+                 let _ = go(context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None));\n\
+             }\n\
+         }\n\
+         struct Reader;\n\
+         impl Reader {\n\
+             fn run(&self, deferrals: &mut Deferrals, result: &Output) { deferrals.note_result(\"read\", result); }\n\
+             #[cfg(test)]\n\
+             fn only_in_tests(context: &Context) {\n\
+                 let _ = go(context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None));\n\
+             }\n\
+         }",
+    )]);
+
+    let report = deferral_report(
+        &index,
+        &[
+            (
+                "crate::use_cases::family::build_dsl",
+                "crate::use_cases::family::step",
+            ),
+            (
+                "crate::use_cases::family::build_other",
+                "crate::use_cases::family::ensure",
+            ),
+            (
+                "crate::use_cases::family::build_third",
+                "crate::use_cases::family::ensure",
+            ),
+            (
+                "crate::use_cases::family::configure",
+                "crate::use_cases::family::Setter::disable",
+            ),
+            (
+                "crate::use_cases::family::configure_alone",
+                "crate::use_cases::family::Setter::disable",
+            ),
+            (
+                "crate::use_cases::family::gone",
+                "crate::use_cases::family::step",
+            ),
+            (
+                "crate::use_cases::family::self_named",
+                "crate::use_cases::family::step",
+            ),
+            (
+                "crate::use_cases::family::forgotten",
+                "crate::use_cases::family::create",
+            ),
+        ],
+    );
+
+    assert!(report.any_critical);
+    assert_eq!(
+        report.unnamed,
+        [
+            "crate::use_cases::family::Writer::run",
+            "crate::use_cases::family::agent",
+            "crate::use_cases::family::build_other (not every call reaches crate::use_cases::family::ensure)",
+            "crate::use_cases::family::build_third (not every call reaches crate::use_cases::family::ensure)",
+            "crate::use_cases::family::configure_alone (not every call reaches crate::use_cases::family::Setter::disable)",
+            "crate::use_cases::family::forgotten",
+        ]
+    );
+    assert_eq!(
+        report.stale,
+        [
+            "crate::use_cases::family::gone → crate::use_cases::family::step",
+            "crate::use_cases::family::self_named → crate::use_cases::family::step",
+            "crate::use_cases::family::forgotten → crate::use_cases::family::create",
+        ]
+    );
+}
+
+/// Вызовы учёта, которые называют отложенную отмену.
+const DEFERRAL_OWNER_CALLS: &[&str] = &[
+    "note_result",
+    "note_outcome",
+    "record_deferral",
+    "deferred_process_interruption",
+    "run_critical",
+    "with_session",
+];
+
+/// Что страж знает о теле функции: объявляет ли оно критическую фазу, называет ли
+/// отсрочку и кого зовёт — свободные функции и методы по имени.
+#[derive(Default)]
+struct PhaseFacts {
+    module: Vec<String>,
+    /// Имя функции или `Тип::метод`.
+    context: String,
+    critical: bool,
+    names_deferral: bool,
+    function_calls: std::collections::BTreeSet<String>,
+    method_calls: std::collections::BTreeSet<String>,
+}
+
+impl PhaseFacts {
+    /// Тело объявляет критическую фазу, а её отсрочку само не называет.
+    fn unnamed(&self) -> bool {
+        self.critical && !self.names_deferral
+    }
+
+    /// Зовёт ли это тело функцию или метод `callee` из своего модуля. Свободную функцию
+    /// зовут по пути, метод — и по пути, и через приёмник.
+    fn calls(&self, callee: &PhaseFacts) -> bool {
+        self.module == callee.module
+            && match callee.context.rsplit_once("::") {
+                Some((_, method)) => {
+                    self.method_calls.contains(method) || self.function_calls.contains(method)
+                }
+                None => self.function_calls.contains(&callee.context),
+            }
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for PhaseFacts {
+    fn visit_item(&mut self, node: &'ast syn::Item) {
+        if !item_has_cfg_test(node) {
+            syn::visit::visit_item(self, node);
+        }
+    }
+
+    /// Образец в `match` фазы не объявляет.
+    fn visit_pat(&mut self, node: &'ast syn::Pat) {
+        if !matches!(node, syn::Pat::Path(_)) {
+            syn::visit::visit_pat(self, node);
+        }
+    }
+
+    /// Путь к функции — вызов или ссылка на неё, как `let make = build_dsl;`, — ребро.
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if let Some(last) = node.path.segments.last() {
+            self.function_calls.insert(last.ident.to_string());
+        }
+        let mut segments = node.path.segments.iter().rev();
+        if let (Some(variant), Some(class)) = (segments.next(), segments.next()) {
+            self.critical |= class.ident == "InterruptionSafetyClass"
+                && (variant.ident == "CriticalNonAbortable"
+                    || variant.ident == "NoExternalProcess");
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = &*node.func {
+            self.names_deferral |= path.path.segments.last().is_some_and(|segment| {
+                DEFERRAL_OWNER_CALLS.contains(&segment.ident.to_string().as_str())
+            });
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        self.critical |= node.method == "critical" && node.args.is_empty();
+        let name = node.method.to_string();
+        self.names_deferral |= DEFERRAL_OWNER_CALLS.contains(&name.as_str());
+        self.method_calls.insert(name);
+        syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+/// Итог стража: есть ли критические фазы, какие из них без названной отсрочки и какие
+/// строки `DELEGATED` устарели.
+struct PhaseReport {
+    any_critical: bool,
+    unnamed: Vec<String>,
+    stale: Vec<String>,
+}
+
+/// Тела сценариев, кроме самого учёта, по полному пути — модуль и функция или
+/// `Тип::метод` — и что о каждом знает страж; дальше — фазы без названной отсрочки.
+fn deferral_report(index: &SourceIndex, delegated: &[(&str, &str)]) -> PhaseReport {
+    let scenarios = path_of("crate::use_cases");
+    let ledger = path_of("crate::use_cases::interruption");
+    let mut facts: std::collections::BTreeMap<String, PhaseFacts> = Default::default();
+    for body in production_bodies(index) {
+        if !body.module.starts_with(&scenarios) || body.module == ledger {
+            continue;
+        }
+        let entry = facts
+            .entry(format!("{}::{}", body.module.join("::"), body.context))
+            .or_default();
+        syn::visit::Visit::visit_block(entry, body.block);
+        entry.module = body.module;
+        entry.context = body.context;
+    }
+
+    let valid = |(builder, owner): &(&str, &str)| match (facts.get(*builder), facts.get(*owner)) {
+        (Some(built), Some(named)) => {
+            built.unnamed() && named.names_deferral && built.module == named.module
+        }
+        _ => false,
+    };
+    let unnamed = facts
+        .iter()
+        .filter(|(_, body)| body.unnamed())
+        .filter_map(|(path, _)| {
+            let owners: Vec<&str> = delegated
+                .iter()
+                .filter(|row| valid(row) && row.0 == path)
+                .map(|(_, owner)| *owner)
+                .collect();
+            if owners.is_empty() {
+                Some(path.clone())
+            } else if owners
+                .iter()
+                .any(|owner| reaches_owner(&facts, path, owner))
+            {
+                None
+            } else {
+                Some(format!(
+                    "{path} (not every call reaches {})",
+                    owners.join(", ")
+                ))
+            }
+        })
+        .collect();
+    let stale = delegated
+        .iter()
+        .filter(|row| !valid(row))
+        .map(|(builder, owner)| format!("{builder} → {owner}"))
+        .collect();
+    PhaseReport {
+        any_critical: facts.values().any(|body| body.critical),
+        unnamed,
+        stale,
+    }
+}
+
+/// Хозяин ниже строителя, или каждая цепочка вызовов над строителем доходит до хозяина.
+fn reaches_owner(
+    facts: &std::collections::BTreeMap<String, PhaseFacts>,
+    builder: &str,
+    owner: &str,
+) -> bool {
+    let Some(named) = facts.get(owner) else {
+        return false;
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut below = vec![builder];
+    while let Some(path) = below.pop() {
+        if !seen.insert(path) {
+            continue;
+        }
+        let Some(caller) = facts.get(path) else {
+            continue;
+        };
+        if caller.calls(named) {
+            return true;
+        }
+        below.extend(
+            facts
+                .iter()
+                .filter(|(_, callee)| caller.calls(callee))
+                .map(|(callee, _)| callee.as_str()),
+        );
+    }
+    covered_above(facts, builder, owner, true, &mut Default::default())
+}
+
+/// Каждая цепочка вызовов над `path` в его модуле доходит до хозяина `owner`; прямой
+/// вызывающий строителя (`direct`) может и сам отдать итог хозяину. Выше хозяина отдача
+/// ничего не значит: там итог строителя уже не в руках. Функция без вызывающих и цикл не
+/// покрыты; вызов самой себя по совпавшему имени не считается.
+fn covered_above(
+    facts: &std::collections::BTreeMap<String, PhaseFacts>,
+    path: &str,
+    owner: &str,
+    direct: bool,
+    visiting: &mut std::collections::BTreeSet<String>,
+) -> bool {
+    let (Some(callee), Some(named)) = (facts.get(path), facts.get(owner)) else {
+        return false;
+    };
+    if !visiting.insert(path.to_owned()) {
+        return false;
+    }
+    let callers: Vec<(&String, &PhaseFacts)> = facts
+        .iter()
+        .filter(|(caller_path, caller)| caller_path.as_str() != path && caller.calls(callee))
+        .collect();
+    let covered = !callers.is_empty()
+        && callers.iter().all(|(caller_path, caller)| {
+            caller_path.as_str() == owner
+                || (direct && caller.calls(named))
+                || covered_above(facts, caller_path, owner, false, visiting)
+        });
+    visiting.remove(path);
+    covered
+}
+
 /// Токены вызова `.<call>` в том виде, в каком их печатает `syn`, без приёмника.
 fn cut_marker(call: &str) -> String {
     let expression: syn::Expr =
