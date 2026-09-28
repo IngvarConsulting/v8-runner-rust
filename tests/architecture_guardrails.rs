@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 
 use guardrail_support::{
     collect_rust_files, free_function_tokens, has_cfg_test, item_has_cfg_test, normalize_tokens,
-    parse_rust_file, production_source, production_tokens,
+    parse_rust_file, production_items, production_source, production_tokens,
 };
 
 const EXPECTED_MCP_TOOLS: &[&str] = &[
@@ -1800,6 +1800,103 @@ fn an_agent_deferral_is_read_in_one_place() {
          deferral twice:\n{}",
         doubled.join("\n")
     );
+}
+
+#[test]
+fn a_critical_phase_names_its_deferral_through_the_owner() {
+    // Корень проблемы (#317 и следом `infobase create`): критическая команда откладывает
+    // отмену до своего исхода, а сценарий читал её результат только ради статуса, и ранний
+    // выход — отказ, `?`, безопасная точка — уносил отсрочку. Владелец называния — учёт
+    // `use_cases::interruption` (`Deferrals`, `collecting_deferrals`, `record_deferral`,
+    // `deferred_process_interruption`) и агентские `run_critical` и `with_session`. Сценарий,
+    // который объявляет критическую фазу процесса, называет её отсрочку через них; новый
+    // критический шаг мимо учёта ловится здесь. Считаются вызовы рабочего кода, а не
+    // упоминания и не тестовый код; вызов узнаётся по имени, без приёмника. Забытую ветку
+    // внутри файла, который учётом пользуется, страж не видит — её ловят проверки правила
+    // INV.USE-CASES.A-DEFERRED-CANCELLATION-OUTLIVES-A-LATER-FAILURE.
+    const CRITICAL_MARKERS: &[&str] = &[
+        "InterruptionSafetyClass::CriticalNonAbortable",
+        "InterruptionSafetyClass::NoExternalProcess",
+        ".critical()",
+    ];
+    const OWNER_CALLS: &[&str] = &[
+        "note_result",
+        "note_outcome",
+        "record_deferral",
+        "deferred_process_interruption",
+        "run_critical",
+        "with_session",
+    ];
+    let owner = repo_path("src/use_cases/interruption.rs");
+    let mut any_critical = false;
+    let mut offenders = Vec::new();
+
+    for file in collect_rust_files(&repo_path("src/use_cases")) {
+        if file == owner {
+            continue;
+        }
+        let production = without_doc_attributes(&production_tokens(&file));
+        if !CRITICAL_MARKERS
+            .iter()
+            .any(|marker| production.contains(marker))
+        {
+            continue;
+        }
+        any_critical = true;
+        let calls = called_names(&production_items(&file));
+        if !OWNER_CALLS.iter().any(|call| calls.contains(*call)) {
+            offenders.push(file.display().to_string());
+        }
+    }
+
+    assert!(
+        any_critical,
+        "no scenario declares a critical phase any more: the guard must name what replaced it"
+    );
+    assert!(
+        offenders.is_empty(),
+        "these scenarios declare a critical phase but never name its deferral through \
+         use_cases::interruption or the agent session helpers:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// Имена функций и методов, которые рабочий код `items` вызывает, — без путей и
+/// приёмников. Код под `#[cfg(test)]` не считается и внутри рабочих `impl`.
+fn called_names(items: &[syn::Item]) -> std::collections::BTreeSet<String> {
+    struct Calls(std::collections::BTreeSet<String>);
+    impl<'ast> syn::visit::Visit<'ast> for Calls {
+        fn visit_item(&mut self, node: &'ast syn::Item) {
+            if !item_has_cfg_test(node) {
+                syn::visit::visit_item(self, node);
+            }
+        }
+
+        fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+            if !has_cfg_test(&node.attrs) {
+                syn::visit::visit_impl_item_fn(self, node);
+            }
+        }
+
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = &*node.func {
+                if let Some(segment) = path.path.segments.last() {
+                    self.0.insert(segment.ident.to_string());
+                }
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            self.0.insert(node.method.to_string());
+            syn::visit::visit_expr_method_call(self, node);
+        }
+    }
+    let mut calls = Calls(Default::default());
+    for item in items {
+        syn::visit::Visit::visit_item(&mut calls, item);
+    }
+    calls.0
 }
 
 /// Токены вызова `.<call>` в том виде, в каком их печатает `syn`, без приёмника.

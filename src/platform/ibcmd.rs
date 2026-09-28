@@ -175,15 +175,21 @@ impl DynamicUpdateMode {
     }
 }
 
-/// Result status returned by `ibcmd infobase create`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Result status returned by `ibcmd infobase create`. `Failed` and `Unconfirmed` are failures
+/// carried inside `Ok`, so the create result — and the interruption it deferred — stays with
+/// them.
+#[derive(Debug)]
 pub enum IbcmdInfobaseCreateStatus {
     Created,
     AlreadyExists,
     Failed,
+    /// Создание не удалось, а вопрос, есть ли база уже, остался без ответа: его не пустила
+    /// или оборвала отмена, оборвал предел шага либо его процесс не запустился.
+    Unconfirmed(ProcessError),
 }
 
 /// Normalized outcome for infobase creation with the raw platform payload preserved.
+#[must_use]
 #[derive(Debug)]
 pub struct IbcmdInfobaseCreateOutcome {
     pub status: IbcmdInfobaseCreateStatus,
@@ -248,6 +254,12 @@ impl<'a> IbcmdDsl<'a> {
     /// infobase and a wrong user both answer 255. So a create that failed over an infobase we
     /// can still read is "already there", and anything else stays a failure, including the case
     /// where the infobase exists but is not ours to touch.
+    ///
+    /// The question only reads the infobase, and only a write is a critical phase
+    /// (INV.USE-CASES.A-DATABASE-WRITE-IS-A-CRITICAL-PHASE), so a cancel stops it gracefully:
+    /// SIGTERM, then kill. A question that goes unanswered — refused because the cancel came
+    /// first, cut, or failed to start — leaves the status `Unconfirmed` and keeps the create
+    /// result, with the interruption the create deferred.
     pub fn ensure_infobase_create(&self) -> Result<IbcmdInfobaseCreateOutcome, IbcmdError> {
         let args = self.create_infobase_args();
         let result = self.run(&args)?;
@@ -257,11 +269,11 @@ impl<'a> IbcmdDsl<'a> {
                 result,
             });
         }
-        let probe = self.run(&self.authenticated_infobase_args(&["config", "generation-id"]))?;
-        let status = if probe.process.exit_code == 0 {
-            IbcmdInfobaseCreateStatus::AlreadyExists
-        } else {
-            IbcmdInfobaseCreateStatus::Failed
+        let question = self.authenticated_infobase_args(&["config", "generation-id"]);
+        let status = match self.run_with(&question, &self.execution_policy.for_reading()) {
+            Ok(probe) if probe.process.exit_code == 0 => IbcmdInfobaseCreateStatus::AlreadyExists,
+            Ok(_) => IbcmdInfobaseCreateStatus::Failed,
+            Err(error) => IbcmdInfobaseCreateStatus::Unconfirmed(error),
         };
 
         Ok(IbcmdInfobaseCreateOutcome { status, result })
@@ -480,25 +492,31 @@ impl<'a> IbcmdDsl<'a> {
     }
 
     fn run(&self, args: &[String]) -> Result<PlatformCommandResult, IbcmdError> {
+        self.run_with(args, &self.execution_policy)
+            .map_err(IbcmdError::Spawn)
+    }
+
+    fn run_with(
+        &self,
+        args: &[String],
+        policy: &ProcessExecutionPolicy,
+    ) -> Result<PlatformCommandResult, ProcessError> {
         let mut args_with_data = args.to_vec();
         if let Some(data_path) = &self.data_path {
             args_with_data.insert(1, data_path.display().to_string());
             args_with_data.insert(1, "--data".to_owned());
         }
-        let process = self
-            .runner
-            .run_with_policy(
-                &ProcessRequest {
-                    program: self.binary.clone(),
-                    args: args_with_data,
-                    workdir: None,
-                    stdout_log_path: None,
-                    stderr_log_path: None,
-                    startup_probe: None,
-                },
-                &self.execution_policy,
-            )
-            .map_err(IbcmdError::Spawn)?;
+        let process = self.runner.run_with_policy(
+            &ProcessRequest {
+                program: self.binary.clone(),
+                args: args_with_data,
+                workdir: None,
+                stdout_log_path: None,
+                stderr_log_path: None,
+                startup_probe: None,
+            },
+            policy,
+        )?;
 
         Ok(PlatformCommandResult {
             process,
@@ -525,6 +543,8 @@ fn required_dbms_field(field: &'static str, value: Option<&str>) -> Result<Strin
 mod tests {
     use super::{DynamicUpdateMode, IbcmdConnection, IbcmdDsl, IbcmdInfobaseCreateStatus};
     use crate::config::model::{InfobaseConfig, InfobaseDbmsConfig};
+    #[cfg(unix)]
+    use crate::platform::process::ProcessInterruptionSafety;
     use crate::platform::process::{ProcessExecutionPolicy, ProcessExecutor, ProcessRunner};
     use std::fs;
     use std::io::Write;
@@ -1007,7 +1027,10 @@ mod tests {
         let outcome = dsl.ensure_infobase_create().expect("create");
 
         let args = fs::read_to_string(args_log).expect("args");
-        assert_eq!(outcome.status, IbcmdInfobaseCreateStatus::Created);
+        assert!(
+            matches!(outcome.status, IbcmdInfobaseCreateStatus::Created),
+            "{outcome:?}"
+        );
         assert!(args.contains("infobase"));
         assert!(args.contains("create"));
         assert!(args.contains("infobase\n--db-path\n/ib\ncreate"));
@@ -1044,7 +1067,10 @@ mod tests {
 
         let outcome = dsl.ensure_infobase_create().expect("ensure");
 
-        assert_eq!(outcome.status, IbcmdInfobaseCreateStatus::AlreadyExists);
+        assert!(
+            matches!(outcome.status, IbcmdInfobaseCreateStatus::AlreadyExists),
+            "{outcome:?}"
+        );
         let args = fs::read_to_string(args_log).expect("args");
         assert!(args.contains("--create-database"));
         assert!(args.contains("--dbms\nPostgreSQL"));
@@ -1083,7 +1109,10 @@ mod tests {
 
         let outcome = dsl.ensure_infobase_create().expect("create outcome");
 
-        assert_eq!(outcome.status, IbcmdInfobaseCreateStatus::AlreadyExists);
+        assert!(
+            matches!(outcome.status, IbcmdInfobaseCreateStatus::AlreadyExists),
+            "{outcome:?}"
+        );
         let args = fs::read_to_string(&args_log).expect("args");
         assert!(
             args.contains("generation-id"),
@@ -1110,7 +1139,138 @@ mod tests {
 
         let outcome = dsl.ensure_infobase_create().expect("create outcome");
 
-        assert_eq!(outcome.status, IbcmdInfobaseCreateStatus::Failed);
+        assert!(
+            matches!(outcome.status, IbcmdInfobaseCreateStatus::Failed),
+            "{outcome:?}"
+        );
+    }
+
+    /// Политика создания базы в работе: критическая, с отменой теста.
+    #[cfg(unix)]
+    fn critical_policy(
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> ProcessExecutionPolicy {
+        ProcessExecutionPolicy {
+            cancellation: cancellation.clone(),
+            safety: ProcessInterruptionSafety::CriticalNonAbortable,
+            ..ProcessExecutionPolicy::default()
+        }
+    }
+
+    /// Создание, отложившее отмену и отказавшее, не теряет своего результата: вопрос, есть
+    /// ли база, после отмены уже не запускается, и ответ несёт код создания и его отсрочку.
+    #[cfg(unix)]
+    #[test]
+    fn a_create_that_deferred_a_cancel_keeps_its_result_when_the_question_is_refused() {
+        use crate::platform::process::{
+            DeferralWatch, HeldCommand, ProcessError, ProcessInterruption,
+            ProcessInterruptionReason,
+        };
+
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("ibcmd");
+        let args_log = dir.path().join("args.log");
+        let held = HeldCommand::in_dir(dir.path());
+        write_script(
+            &script,
+            &format!(
+                "args=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\n{}exit 0",
+                args_log.display(),
+                held.script_branch("create", 255)
+            ),
+        );
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let runner = ProcessExecutor;
+        let dsl = IbcmdDsl::new(
+            script,
+            file_connection("File=/ib"),
+            &runner as &dyn ProcessRunner,
+            critical_policy(&cancellation),
+        );
+        let watch = DeferralWatch::default();
+        let operator = held.interrupt(cancellation, &watch);
+
+        let outcome = watch
+            .during(|| dsl.ensure_infobase_create())
+            .expect("the create ran");
+        assert!(
+            operator.join().expect("operator thread"),
+            "the runner never logged that it deferred the cancellation"
+        );
+
+        assert!(
+            matches!(
+                outcome.status,
+                IbcmdInfobaseCreateStatus::Unconfirmed(ProcessError::Cancelled {
+                    delivered: false,
+                    ..
+                })
+            ),
+            "{outcome:?}"
+        );
+        assert_eq!(outcome.result.process.exit_code, 255);
+        assert_eq!(
+            outcome.result.process.interruption,
+            Some(ProcessInterruption::deferred(
+                ProcessInterruptionReason::Cancelled
+            ))
+        );
+        let args = fs::read_to_string(&args_log).expect("args");
+        assert!(!args.contains("generation-id"), "{args}");
+    }
+
+    /// Вопрос после неудачного создания только читает базу: отмена обрывает его, не
+    /// дожидаясь конца, и ответ остаётся без подтверждения.
+    #[cfg(unix)]
+    #[test]
+    fn a_cancel_cuts_the_question_after_a_failed_create() {
+        use crate::platform::process::{HeldCommand, ProcessError};
+
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("ibcmd");
+        let held = HeldCommand::in_dir(dir.path());
+        write_script(
+            &script,
+            &format!(
+                "args=\"$*\"\nif printf '%s' \"$args\" | grep -F -q -- 'create'; then exit 255; fi\n{}exit 0",
+                held.script_branch("generation-id", 0)
+            ),
+        );
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let runner = ProcessExecutor;
+        let dsl = IbcmdDsl::new(
+            script,
+            file_connection("File=/ib"),
+            &runner as &dyn ProcessRunner,
+            critical_policy(&cancellation),
+        );
+        let operator = held.cancel_when_started(cancellation);
+        let started = std::time::Instant::now();
+
+        let outcome = dsl.ensure_infobase_create().expect("the create ran");
+        assert!(
+            operator.join().expect("operator thread"),
+            "the question never started"
+        );
+
+        assert!(
+            matches!(
+                outcome.status,
+                IbcmdInfobaseCreateStatus::Unconfirmed(ProcessError::Cancelled {
+                    delivered: true,
+                    ..
+                })
+            ),
+            "{outcome:?}"
+        );
+        assert_eq!(outcome.result.process.exit_code, 255);
+        assert!(outcome.result.process.interruption.is_none());
+        // Критический вопрос дождался бы отпуска — полминуты; снятый кончается сразу.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the question was waited for: {:?}",
+            started.elapsed()
+        );
     }
 
     #[cfg(unix)]

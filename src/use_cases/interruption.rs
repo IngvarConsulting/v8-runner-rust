@@ -145,15 +145,6 @@ pub(crate) fn deferred_process_interruption(
     })
 }
 
-pub(crate) fn deferred_process_interruption_warning(
-    completed_action: &str,
-    interruption: Option<ProcessInterruption>,
-) -> Option<String> {
-    interruption.map(|interruption| {
-        deferred_process_interruption_message(completed_action, interruption.reason)
-    })
-}
-
 /// Предупреждения об отменах, которые критические команды шага отложили и пережили. Шаг
 /// получает учёт от [`collecting_deferrals`] и отмечает каждую команду, как только она
 /// кончилась, удачей или отказом: так предупреждение не теряют ни её собственный отказ, ни
