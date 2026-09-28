@@ -39,11 +39,12 @@ mod helpers;
 
 pub(crate) use self::helpers::ensure_platform_success;
 use self::helpers::{
-    build_designer_dsl, build_ibcmd_dsl, commit_step_state, deferred_interruption_warning,
-    extension_name, fail_from_source_set_index, interruption_before_safe_point, map_ibcmd_error,
-    merge_step_message, plan_configurator_load_step, plan_edt_export_step,
-    plan_generated_designer_load_step, push_build_step, remove_storage_path, StepCommit, StepPlan,
+    build_designer_dsl, build_ibcmd_dsl, commit_step_state, extension_name,
+    fail_from_source_set_index, interruption_before_safe_point, map_ibcmd_error,
+    plan_configurator_load_step, plan_edt_export_step, plan_generated_designer_load_step,
+    push_build_step, remove_storage_path, StepCommit, StepPlan,
 };
+use crate::use_cases::interruption::{append_warnings, collecting_deferrals};
 
 #[cfg(test)]
 const BUILD_COMMAND: &str = crate::use_cases::context::CommandName::Build.as_str();
@@ -322,42 +323,43 @@ fn execute_edt_export_step(
     designer_context: &SourceSetContext,
     step_index: usize,
 ) -> Result<Vec<String>, AppError> {
-    if let Some(error) = interruption_before_safe_point(
-        context,
-        format!("EDT export for source-set '{}'", source_set.name),
-    ) {
-        return Err(error);
-    }
-    let export_target = reserved_source_set_dir(&config.work_path, &source_set.name);
-    let project_name = resolve_edt_project_name(source_set, edt_context)?;
-    recreate_directory(&export_target).map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to prepare EDT export directory '{}': {error}",
-            export_target.display()
-        ))
-    })?;
-    let export_result = dsl
-        .export_project(&project_name, designer_context.path())
-        .map_err(AppError::from)?;
-    let export_log_path = write_edt_export_log(
-        config,
-        source_set,
-        step_index,
-        &project_name,
-        designer_context.path(),
-        &export_result,
-    )?;
-    ensure_edt_export_success(source_set, &export_result, &export_log_path)?;
-    ensure_edt_export_output(
-        source_set,
-        &project_name,
-        designer_context.path(),
-        &export_result,
-        &export_log_path,
-    )?;
-    Ok(deferred_interruption_warning("edt_export", &export_result)
-        .into_iter()
-        .collect())
+    collecting_deferrals(|deferrals| {
+        if let Some(error) = interruption_before_safe_point(
+            context,
+            format!("EDT export for source-set '{}'", source_set.name),
+        ) {
+            return Err(error);
+        }
+        let export_target = reserved_source_set_dir(&config.work_path, &source_set.name);
+        let project_name = resolve_edt_project_name(source_set, edt_context)?;
+        recreate_directory(&export_target).map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to prepare EDT export directory '{}': {error}",
+                export_target.display()
+            ))
+        })?;
+        let export_result = dsl
+            .export_project(&project_name, designer_context.path())
+            .map_err(AppError::from)?;
+        deferrals.note_result("edt_export", &export_result);
+        let export_log_path = write_edt_export_log(
+            config,
+            source_set,
+            step_index,
+            &project_name,
+            designer_context.path(),
+            &export_result,
+        )?;
+        ensure_edt_export_success(source_set, &export_result, &export_log_path)?;
+        ensure_edt_export_output(
+            source_set,
+            &project_name,
+            designer_context.path(),
+            &export_result,
+            &export_log_path,
+        )
+    })
+    .map(|((), warnings)| warnings)
 }
 
 fn write_edt_export_log(
@@ -489,127 +491,119 @@ fn execute_source_set_step(
     partial_paths: Option<&[PathBuf]>,
     commit: &StepCommit,
 ) -> Result<Vec<String>, AppError> {
-    if let Some(error) = interruption_before_safe_point(
-        context,
-        format!("build load for source-set '{}'", source_set.name),
-    ) {
-        return Err(error);
-    }
-    if let Some(paths) = partial_paths {
-        log_timeline_stage(
-            &source_set.name,
-            &build_mode_label(&BuildMode::Partial {
-                file_count: paths.len(),
-            }),
-            "[Конфигуратор] Загрузка изменений в базу",
-            TimelineStageStatus::Running,
-        );
-    } else {
-        log_timeline_stage(
-            &source_set.name,
-            "full",
-            "[Конфигуратор] Загрузка в базу",
-            TimelineStageStatus::Running,
-        );
-    }
-    let load_result = if let Some(paths) = partial_paths {
-        let list_file = partial_list_file(&config.work_path).map_err(|error| {
-            AppError::Runtime(format!("failed to create partial list file: {error}"))
-        })?;
-        let list_file = write_partial_load_list_or_preserve(paths, load_context.path(), list_file)?;
-        let designer_dsl = match build_designer_dsl(
+    // Отмену, которую отложила критическая команда, шаг отмечает сразу по её исходу, до
+    // проверки итога: так её называет и отказ этой команды, и всё, что идёт после, —
+    // безопасная точка, следующая команда, фиксация состояния.
+    collecting_deferrals(|deferrals| {
+        if let Some(error) = interruption_before_safe_point(
             context,
-            config,
-            binary,
-            runner,
-            &source_set.name,
-            step_index,
-            "load",
-            InterruptionSafetyClass::CriticalNonAbortable,
+            format!("build load for source-set '{}'", source_set.name),
         ) {
-            Ok(dsl) => dsl,
-            Err(error) => {
+            return Err(error);
+        }
+        if let Some(paths) = partial_paths {
+            log_timeline_stage(
+                &source_set.name,
+                &build_mode_label(&BuildMode::Partial {
+                    file_count: paths.len(),
+                }),
+                "[Конфигуратор] Загрузка изменений в базу",
+                TimelineStageStatus::Running,
+            );
+        } else {
+            log_timeline_stage(
+                &source_set.name,
+                "full",
+                "[Конфигуратор] Загрузка в базу",
+                TimelineStageStatus::Running,
+            );
+        }
+        if let Some(paths) = partial_paths {
+            let list_file = partial_list_file(&config.work_path).map_err(|error| {
+                AppError::Runtime(format!("failed to create partial list file: {error}"))
+            })?;
+            let list_file =
+                write_partial_load_list_or_preserve(paths, load_context.path(), list_file)?;
+            // Список частичной загрузки переживает её отказ: по нему видно, что грузилось.
+            let loaded = build_designer_dsl(
+                context,
+                config,
+                binary,
+                runner,
+                &source_set.name,
+                step_index,
+                "load",
+                InterruptionSafetyClass::CriticalNonAbortable,
+            )
+            .and_then(|designer_dsl| {
+                designer_dsl
+                    .load_config_from_files_partial(
+                        load_context.path(),
+                        list_file.path(),
+                        extension_name(source_set),
+                    )
+                    .map_err(AppError::from)
+            })
+            .and_then(|result| {
+                deferrals.note_result("load", &result);
+                ensure_platform_success("load", source_set, &result)
+            });
+            if let Err(error) = loaded {
                 let partial_list = preserve_partial_load_list(list_file);
                 return Err(attach_partial_load_list_path(error, partial_list));
             }
-        };
-        let load_result = designer_dsl.load_config_from_files_partial(
-            load_context.path(),
-            list_file.path(),
-            extension_name(source_set),
-        );
-        match load_result {
-            Ok(result) if result.process.exit_code == 0 => result,
-            Ok(result) => {
-                let partial_list = preserve_partial_load_list(list_file);
-                ensure_platform_success("load", source_set, &result)
-                    .map_err(|error| attach_partial_load_list_path(error, partial_list))?;
-                result
-            }
-            Err(error) => {
-                let partial_list = preserve_partial_load_list(list_file);
-                return Err(attach_partial_load_list_path(
-                    AppError::from(error),
-                    partial_list,
-                ));
-            }
+        } else {
+            let result = build_designer_dsl(
+                context,
+                config,
+                binary,
+                runner,
+                &source_set.name,
+                step_index,
+                "load",
+                InterruptionSafetyClass::CriticalNonAbortable,
+            )?
+            .load_config_from_files_full(load_context.path(), extension_name(source_set))
+            .map_err(AppError::from)?;
+            deferrals.note_result("load", &result);
+            ensure_platform_success("load", source_set, &result)?;
         }
-    } else {
-        build_designer_dsl(
+
+        if let Some(error) = interruption_before_safe_point(
+            context,
+            format!("update_db_cfg for source-set '{}'", source_set.name),
+        ) {
+            return Err(error);
+        }
+
+        debug!(
+            source_set = source_set.name.as_str(),
+            "updating database configuration after load"
+        );
+        log_timeline_stage(
+            &source_set.name,
+            "update_db_cfg",
+            "[Конфигуратор] Применение изменений",
+            TimelineStageStatus::Running,
+        );
+        let update_result = build_designer_dsl(
             context,
             config,
             binary,
             runner,
             &source_set.name,
             step_index,
-            "load",
+            "update",
             InterruptionSafetyClass::CriticalNonAbortable,
         )?
-        .load_config_from_files_full(load_context.path(), extension_name(source_set))
-        .map_err(AppError::from)?
-    };
-    ensure_platform_success("load", source_set, &load_result)?;
+        .update_db_cfg(extension_name(source_set))
+        .map_err(AppError::from)?;
+        deferrals.note_result("update_db_cfg", &update_result);
+        ensure_platform_success("update_db_cfg", source_set, &update_result)?;
 
-    if let Some(error) = interruption_before_safe_point(
-        context,
-        format!("update_db_cfg for source-set '{}'", source_set.name),
-    ) {
-        return Err(error);
-    }
-
-    debug!(
-        source_set = source_set.name.as_str(),
-        "updating database configuration after load"
-    );
-    log_timeline_stage(
-        &source_set.name,
-        "update_db_cfg",
-        "[Конфигуратор] Применение изменений",
-        TimelineStageStatus::Running,
-    );
-    let update_result = build_designer_dsl(
-        context,
-        config,
-        binary,
-        runner,
-        &source_set.name,
-        step_index,
-        "update",
-        InterruptionSafetyClass::CriticalNonAbortable,
-    )?
-    .update_db_cfg(extension_name(source_set))
-    .map_err(AppError::from)?;
-    ensure_platform_success("update_db_cfg", source_set, &update_result)?;
-
-    commit_step_state(source_set, commit_context, &config.work_path, commit)?;
-
-    Ok([
-        deferred_interruption_warning("load", &load_result),
-        deferred_interruption_warning("update_db_cfg", &update_result),
-    ]
-    .into_iter()
-    .flatten()
-    .collect())
+        commit_step_state(source_set, commit_context, &config.work_path, commit)
+    })
+    .map(|((), warnings)| warnings)
 }
 
 fn write_partial_load_list_or_preserve(
@@ -668,97 +662,94 @@ fn execute_source_set_step_ibcmd(
     partial_paths: Option<&[PathBuf]>,
     commit: &StepCommit,
 ) -> Result<Vec<String>, AppError> {
-    if let Some(error) = interruption_before_safe_point(
-        context,
-        format!("ibcmd import for source-set '{}'", source_set.name),
-    ) {
-        return Err(error);
-    }
-    if partial_paths.is_some() {
+    collecting_deferrals(|deferrals| {
+        if let Some(error) = interruption_before_safe_point(
+            context,
+            format!("ibcmd import for source-set '{}'", source_set.name),
+        ) {
+            return Err(error);
+        }
+        if partial_paths.is_some() {
+            debug!(
+                source_set = source_set.name.as_str(),
+                "loading partial changes into infobase with ibcmd"
+            );
+        } else {
+            debug!(
+                source_set = source_set.name.as_str(),
+                "loading source set into infobase with ibcmd"
+            );
+        }
+
+        let import_dsl = build_ibcmd_dsl(
+            context,
+            config,
+            binary,
+            runner,
+            InterruptionSafetyClass::CriticalNonAbortable,
+        )?;
+        let extension = extension_name(source_set);
+        let load_result = if let Some(paths) = partial_paths {
+            let rel_paths =
+                partial_load::relative_paths(paths, load_context.path()).map_err(|error| {
+                    AppError::Runtime(format!("failed to convert partial paths: {error}"))
+                })?;
+            log_timeline_stage(
+                &source_set.name,
+                "ibcmd_import",
+                "[ibcmd] Загрузка изменений в базу",
+                TimelineStageStatus::Running,
+            );
+            import_dsl
+                .config_import_partial(load_context.path(), &rel_paths, extension)
+                .map_err(map_ibcmd_error)?
+        } else {
+            log_timeline_stage(
+                &source_set.name,
+                "ibcmd_import",
+                "[ibcmd] Загрузка в базу",
+                TimelineStageStatus::Running,
+            );
+            import_dsl
+                .config_import_full(load_context.path(), extension)
+                .map_err(map_ibcmd_error)?
+        };
+        deferrals.note_result("ibcmd_import", &load_result);
+        ensure_platform_success("load", source_set, &load_result)?;
+
+        if let Some(error) = interruption_before_safe_point(
+            context,
+            format!("ibcmd apply for source-set '{}'", source_set.name),
+        ) {
+            return Err(error);
+        }
+
         debug!(
             source_set = source_set.name.as_str(),
-            "loading partial changes into infobase with ibcmd"
+            "applying database configuration after ibcmd load"
         );
-    } else {
-        debug!(
-            source_set = source_set.name.as_str(),
-            "loading source set into infobase with ibcmd"
-        );
-    }
-
-    let import_dsl = build_ibcmd_dsl(
-        context,
-        config,
-        binary,
-        runner,
-        InterruptionSafetyClass::CriticalNonAbortable,
-    )?;
-    let extension = extension_name(source_set);
-    let load_result = if let Some(paths) = partial_paths {
-        let rel_paths =
-            partial_load::relative_paths(paths, load_context.path()).map_err(|error| {
-                AppError::Runtime(format!("failed to convert partial paths: {error}"))
-            })?;
+        let apply_dsl = build_ibcmd_dsl(
+            context,
+            config,
+            binary,
+            runner,
+            InterruptionSafetyClass::CriticalNonAbortable,
+        )?;
         log_timeline_stage(
             &source_set.name,
-            "ibcmd_import",
-            "[ibcmd] Загрузка изменений в базу",
+            "ibcmd_apply",
+            "[ibcmd] Применение изменений",
             TimelineStageStatus::Running,
         );
-        import_dsl
-            .config_import_partial(load_context.path(), &rel_paths, extension)
-            .map_err(map_ibcmd_error)?
-    } else {
-        log_timeline_stage(
-            &source_set.name,
-            "ibcmd_import",
-            "[ibcmd] Загрузка в базу",
-            TimelineStageStatus::Running,
-        );
-        import_dsl
-            .config_import_full(load_context.path(), extension)
-            .map_err(map_ibcmd_error)?
-    };
-    ensure_platform_success("load", source_set, &load_result)?;
+        let apply_result = apply_dsl
+            .config_apply(extension, DynamicUpdateMode::Auto)
+            .map_err(map_ibcmd_error)?;
+        deferrals.note_result("apply", &apply_result);
+        ensure_platform_success("apply", source_set, &apply_result)?;
 
-    if let Some(error) = interruption_before_safe_point(
-        context,
-        format!("ibcmd apply for source-set '{}'", source_set.name),
-    ) {
-        return Err(error);
-    }
-
-    debug!(
-        source_set = source_set.name.as_str(),
-        "applying database configuration after ibcmd load"
-    );
-    let apply_dsl = build_ibcmd_dsl(
-        context,
-        config,
-        binary,
-        runner,
-        InterruptionSafetyClass::CriticalNonAbortable,
-    )?;
-    log_timeline_stage(
-        &source_set.name,
-        "ibcmd_apply",
-        "[ibcmd] Применение изменений",
-        TimelineStageStatus::Running,
-    );
-    let apply_result = apply_dsl
-        .config_apply(extension, DynamicUpdateMode::Auto)
-        .map_err(map_ibcmd_error)?;
-    ensure_platform_success("apply", source_set, &apply_result)?;
-
-    commit_step_state(source_set, commit_context, &config.work_path, commit)?;
-
-    Ok([
-        deferred_interruption_warning("ibcmd_import", &load_result),
-        deferred_interruption_warning("apply", &apply_result),
-    ]
-    .into_iter()
-    .flatten()
-    .collect())
+        commit_step_state(source_set, commit_context, &config.work_path, commit)
+    })
+    .map(|((), warnings)| warnings)
 }
 
 #[cfg(test)]
@@ -773,14 +764,16 @@ mod tests {
     };
     use crate::domain::build::BuildMode;
     use crate::domain::source_set::SourceSetContext;
+    #[cfg(unix)]
+    use crate::platform::process::{DeferralWatch, HeldCommand};
+    #[cfg(unix)]
+    use crate::support::error::CancelledAt;
     use crate::use_cases::context::{CommandName, ExecutionContext};
     use crate::use_cases::request::BuildRequest as BuildArgs;
     use crate::use_cases::result::UseCaseErrorKind;
     use std::fs;
     use std::io::ErrorKind;
     use std::path::{Path, PathBuf};
-    use std::thread;
-    use std::time::Duration;
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
 
@@ -803,10 +796,15 @@ mod tests {
                 )
             })
             .unwrap_or_default();
+        write_designer_script_with(path, calls_log, &pattern_branch);
+    }
+
+    #[cfg(unix)]
+    fn write_designer_script_with(path: &Path, calls_log: &Path, branch: &str) {
         let body = format!(
             "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$out\" ]; then printf 'designer log for %s\\n' \"$args\" > \"$out\"; fi\nprintf '%s\\n' \"$args\" >> \"{}\"\n{}\nexit 0",
             calls_log.display(),
-            pattern_branch
+            branch
         );
 
         if let Some(parent) = path.parent() {
@@ -826,10 +824,15 @@ mod tests {
                 )
             })
             .unwrap_or_default();
+        write_ibcmd_script_with(path, calls_log, &pattern_branch);
+    }
+
+    #[cfg(unix)]
+    fn write_ibcmd_script_with(path: &Path, calls_log: &Path, branch: &str) {
         let body = format!(
             "args=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\n{}\nexit 0",
             calls_log.display(),
-            pattern_branch
+            branch
         );
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("create dirs");
@@ -1096,6 +1099,8 @@ mod tests {
         );
     }
 
+    /// Push через `ibcmd`: отмена, пришедшая во время импорта, его не рвёт, а команда
+    /// останавливается на безопасной точке перед применением и называет отложенную отмену.
     #[cfg(unix)]
     #[test]
     fn execute_ibcmd_build_honors_interruption_before_apply_safe_point() {
@@ -1108,33 +1113,8 @@ mod tests {
         fs::create_dir_all(base.join("ext")).expect("ext");
         fs::create_dir_all(&work).expect("work");
         fs::write(base.join("main").join("Catalogs.xml"), "<Catalogs />").expect("catalog");
-        if let Some(parent) = ibcmd.parent() {
-            fs::create_dir_all(parent).expect("create ibcmd dir");
-        }
-        // Импорт держится, пока тест его не отпустит: отмена приходит, когда запись в базу
-        // уже идёт, — порядок задан рукопожатием, а не отсчётом времени.
-        let import_started = dir.path().join("import-started");
-        let import_release = dir.path().join("import-release");
-        fs::write(
-            &ibcmd,
-            format!(
-                "#!/bin/sh\nargs=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\n\
-                 if printf '%s' \"$args\" | grep -F -q -- 'config import'; then\n\
-                   : > '{}'\n\
-                   waited=0\n\
-                   while [ ! -e '{}' ] && [ \"$waited\" -lt 300 ]; do\n\
-                     sleep 0.1\n\
-                     waited=$((waited + 1))\n\
-                   done\n\
-                 fi\n\
-                 exit 0\n",
-                calls_log.display(),
-                import_started.display(),
-                import_release.display()
-            ),
-        )
-        .expect("write ibcmd script");
-        make_executable(&ibcmd);
+        let held = HeldCommand::in_dir(dir.path());
+        write_ibcmd_script_with(&ibcmd, &calls_log, &held.script_branch("config import", 0));
         let config = build_config(
             &base,
             &work,
@@ -1143,36 +1123,399 @@ mod tests {
             SourceFormat::Designer,
             crate::domain::capability::ibcmd_for_every_choice(),
         );
-        let cancellation = CancellationToken::new();
-        let operator = {
-            let cancellation = cancellation.clone();
-            thread::spawn(move || {
-                let deadline = std::time::Instant::now() + Duration::from_secs(30);
-                while !import_started.exists() && std::time::Instant::now() < deadline {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                cancellation.cancel();
-                // Мягкое снятие за это время дошло бы до импорта; критический его ждёт.
-                thread::sleep(Duration::from_millis(500));
-                fs::write(&import_release, "").expect("release the import");
-            })
-        };
 
-        let failure = super::execute(
-            &ExecutionContext::cli(CommandName::Build).with_cancellation(cancellation),
-            &config,
-            &build_args(true),
-        )
-        .expect_err("build must stop before ibcmd apply");
-        operator.join().expect("operator thread");
+        let failure = push_interrupted_while_held(&config, &held, &build_args(true))
+            .expect_err("build must stop before ibcmd apply");
 
-        assert!(failure
-            .error
-            .message()
-            .contains("before entering ibcmd apply for source-set 'main' safe point"));
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Cancelled(CancelledAt::Boundary)
+        );
+        let message = failure.error.message();
+        assert!(
+            message.contains("before entering ibcmd apply for source-set 'main' safe point"),
+            "{message}"
+        );
+        assert!(
+            message.contains(
+                "ibcmd_import completed successfully after cancellation request during critical phase"
+            ),
+            "{message}"
+        );
         let calls = fs::read_to_string(&calls_log).expect("calls");
         assert!(calls.contains("config import"));
         assert!(!calls.contains("config apply"));
+    }
+
+    /// Применение через `ibcmd`, отложившее отмену и потом не удавшееся, остаётся отказом,
+    /// а не отменой, но отложенную отмену ответ называет: оператор просил остановить, и ответ
+    /// говорит, почему его не послушали.
+    #[cfg(unix)]
+    #[test]
+    fn an_ibcmd_apply_that_fails_after_a_deferred_cancellation_names_it() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let ibcmd = dir.path().join("ibcmd");
+        let calls_log = dir.path().join("ibcmd.calls.log");
+        create_source_tree(&base);
+        let held = HeldCommand::in_dir(dir.path());
+        write_ibcmd_script_with(&ibcmd, &calls_log, &held.script_branch("config apply", 17));
+        let config = build_config(
+            &base,
+            &work,
+            &ibcmd,
+            20,
+            SourceFormat::Designer,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
+
+        let failure = push_interrupted_while_held(&config, &held, &build_args(true))
+            .expect_err("the apply failed");
+
+        assert_eq!(failure.error.kind(), UseCaseErrorKind::Platform);
+        let message = failure.error.message();
+        assert!(
+            message.starts_with("apply ended after cancellation request during critical phase"),
+            "{message}"
+        );
+        assert!(message.contains("exit code 17"), "{message}");
+        assert_eq!(
+            failed_step_message(failure.payload.expect("payload")),
+            failure.error.to_string()
+        );
+    }
+
+    /// Загрузка через Конфигуратор, отложившая отмену и потом не удавшаяся, остаётся
+    /// отказом, но отложенную отмену ответ называет, и до обновления базы дело не доходит.
+    #[cfg(unix)]
+    #[test]
+    fn a_push_load_that_fails_after_a_deferred_cancellation_names_it() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let platform = dir.path().join("1cv8");
+        let calls_log = dir.path().join("designer.calls.log");
+        create_source_tree(&base);
+        let held = HeldCommand::in_dir(dir.path());
+        write_designer_script_with(
+            &platform,
+            &calls_log,
+            &held.script_branch("/LoadConfigFromFiles", 5),
+        );
+        let config = build_config(
+            &base,
+            &work,
+            &platform,
+            20,
+            SourceFormat::Designer,
+            Default::default(),
+        );
+
+        let failure = push_interrupted_while_held(&config, &held, &build_args(true))
+            .expect_err("the load failed");
+
+        assert_eq!(failure.error.kind(), UseCaseErrorKind::Platform);
+        let message = failure.error.message();
+        assert!(
+            message.starts_with("load ended after cancellation request during critical phase"),
+            "{message}"
+        );
+        assert_eq!(
+            failed_step_message(failure.payload.expect("payload")),
+            failure.error.to_string()
+        );
+        let calls = fs::read_to_string(&calls_log).expect("calls");
+        assert!(calls.contains("/LoadConfigFromFiles"), "{calls}");
+        assert!(!calls.contains("/UpdateDBCfg"), "{calls}");
+    }
+
+    /// Загрузка через Конфигуратор, отложившая отмену, догружается, а команда
+    /// останавливается перед обновлением базы — и называет отмену, которую загрузка отложила.
+    #[cfg(unix)]
+    #[test]
+    fn a_push_stopped_before_the_update_names_the_deferred_load() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let platform = dir.path().join("1cv8");
+        let calls_log = dir.path().join("designer.calls.log");
+        create_source_tree(&base);
+        let held = HeldCommand::in_dir(dir.path());
+        write_designer_script_with(
+            &platform,
+            &calls_log,
+            &held.script_branch("/LoadConfigFromFiles", 0),
+        );
+        let config = build_config(
+            &base,
+            &work,
+            &platform,
+            20,
+            SourceFormat::Designer,
+            Default::default(),
+        );
+
+        let failure = push_interrupted_while_held(&config, &held, &build_args(true))
+            .expect_err("the push stops before update_db_cfg");
+
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Cancelled(CancelledAt::Boundary)
+        );
+        let message = failure.error.message();
+        assert!(
+            message.contains(
+                "load completed successfully after cancellation request during critical phase"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains("before entering update_db_cfg for source-set 'main' safe point"),
+            "{message}"
+        );
+        let calls = fs::read_to_string(&calls_log).expect("calls");
+        assert!(!calls.contains("/UpdateDBCfg"), "{calls}");
+    }
+
+    /// Инструментальное расширение — тоже шаг push: его загрузка, отложившая отмену и потом
+    /// не удавшаяся, остаётся отказом, но отложенную отмену ответ называет.
+    #[cfg(unix)]
+    #[test]
+    fn a_tool_extension_load_that_fails_after_a_deferred_cancellation_names_it() {
+        let dir = tempdir().expect("tempdir");
+        let (config, held) = config_with_held_tool_extension_load(dir.path(), 5);
+
+        let failure = push_interrupted_while_held(&config, &held, &build_args(true))
+            .expect_err("the tool load failed");
+
+        assert_eq!(failure.error.kind(), UseCaseErrorKind::Platform);
+        let message = failure.error.message();
+        assert!(
+            message.starts_with("load_cfg ended after cancellation request during critical phase"),
+            "{message}"
+        );
+        assert_eq!(
+            failed_step_message(failure.payload.expect("payload")),
+            failure.error.to_string()
+        );
+    }
+
+    /// Загрузка инструментального расширения, отложившая отмену, догружается, а push
+    /// останавливается перед обновлением базы и называет отмену, которую загрузка отложила.
+    #[cfg(unix)]
+    #[test]
+    fn a_tool_extension_stopped_before_its_update_names_the_deferred_load() {
+        let dir = tempdir().expect("tempdir");
+        let (config, held) = config_with_held_tool_extension_load(dir.path(), 0);
+
+        let failure = push_interrupted_while_held(&config, &held, &build_args(true))
+            .expect_err("the push stops before the tool update");
+
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Cancelled(CancelledAt::Boundary)
+        );
+        let message = failure.error.message();
+        assert!(
+            message.contains(
+                "load_cfg completed successfully after cancellation request during critical phase"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains(
+                "before entering tool extension update_db_cfg for tool extension 'client_mcp' \
+                 safe point"
+            ),
+            "{message}"
+        );
+    }
+
+    /// Push набора `main` и инструментального расширения из `.cfe`; Конфигуратор держит
+    /// загрузку расширения.
+    #[cfg(unix)]
+    fn config_with_held_tool_extension_load(
+        root: &Path,
+        exit_code: i32,
+    ) -> (AppConfig, HeldCommand) {
+        let base = root.join("base");
+        let platform = root.join("platform").join("bin").join("1cv8");
+        let artifact = root.join("client_mcp.cfe");
+        create_source_tree(&base);
+        fs::write(&artifact, "cfe").expect("artifact");
+        let held = HeldCommand::in_dir(root);
+        write_designer_script_with(
+            &platform,
+            &root.join("designer.calls.log"),
+            &held.script_branch("/LoadCfg", exit_code),
+        );
+        let mut config = build_config(
+            &base,
+            &root.join("work"),
+            &root.join("platform"),
+            20,
+            SourceFormat::Designer,
+            Default::default(),
+        );
+        config.source_sets = vec![SourceSetConfig {
+            name: "main".to_owned(),
+            purpose: SourceSetPurpose::Configuration,
+            path: PathBuf::from("main"),
+        }];
+        config.tools.client_mcp.extension = Some(ToolExtensionConfig {
+            name: "client_mcp".to_owned(),
+            input: ToolExtensionInput::Artifact(ToolExtensionArtifactConfig { path: artifact }),
+        });
+        (config, held)
+    }
+
+    /// Частичная загрузка, отложившая отмену и потом не удавшаяся, называет отсрочку и
+    /// сохраняет свой список: по нему видно, что грузилось.
+    #[cfg(unix)]
+    #[test]
+    fn a_partial_load_that_fails_after_a_deferred_cancellation_names_it() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let script = dir.path().join("1cv8");
+        let calls = dir.path().join("calls.log");
+        create_source_tree(&base);
+        let held = HeldCommand::in_dir(dir.path());
+        write_designer_script_with(
+            &script,
+            &calls,
+            &held.script_branch("/LoadConfigFromFiles", 5),
+        );
+        let config = build_config(
+            &base,
+            &work,
+            &script,
+            20,
+            SourceFormat::Designer,
+            Default::default(),
+        );
+        prime_snapshots(&config);
+        fs::write(
+            base.join("main")
+                .join("Catalogs.Items")
+                .join("ObjectModule.bsl"),
+            "procedure Test()\n  // changed\nendprocedure",
+        )
+        .expect("modify main");
+
+        let failure = push_interrupted_while_held(&config, &held, &build_args(false))
+            .expect_err("the partial load failed");
+
+        assert_eq!(failure.error.kind(), UseCaseErrorKind::Platform);
+        let message = failure.error.message();
+        assert!(
+            message.starts_with("load ended after cancellation request during critical phase"),
+            "{message}"
+        );
+        assert!(message.contains("partial load list path: "), "{message}");
+        let payload = failure.payload.expect("payload");
+        assert!(matches!(payload.steps[0].mode, BuildMode::Partial { .. }));
+        let calls = fs::read_to_string(&calls).expect("calls");
+        assert!(calls.contains("-listFile"), "{calls}");
+        assert!(!calls.contains("/UpdateDBCfg"), "{calls}");
+    }
+
+    /// Инструментальное расширение через `ibcmd`: импорт, отложивший отмену и потом не
+    /// удавшийся, остаётся отказом, но отложенную отмену ответ называет.
+    #[cfg(unix)]
+    #[test]
+    fn an_ibcmd_tool_extension_import_that_fails_after_a_deferred_cancellation_names_it() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let ibcmd = dir.path().join("ibcmd");
+        let calls = dir.path().join("ibcmd.calls.log");
+        let tool_source = dir.path().join("tool-client-mcp");
+        create_source_tree(&base);
+        fs::create_dir_all(&tool_source).expect("tool source");
+        fs::write(tool_source.join("Configuration.xml"), "<Configuration />")
+            .expect("tool configuration");
+        let held = HeldCommand::in_dir(dir.path());
+        write_ibcmd_script_with(
+            &ibcmd,
+            &calls,
+            &held.script_branch("config import --extension client_mcp", 5),
+        );
+        let mut config = build_config(
+            &base,
+            &work,
+            &ibcmd,
+            20,
+            SourceFormat::Designer,
+            crate::domain::capability::ibcmd_for_every_choice(),
+        );
+        config.source_sets = vec![SourceSetConfig {
+            name: "main".to_owned(),
+            purpose: SourceSetPurpose::Configuration,
+            path: PathBuf::from("main"),
+        }];
+        config.tools.client_mcp.extension = Some(ToolExtensionConfig {
+            name: "client_mcp".to_owned(),
+            input: ToolExtensionInput::Source(ToolExtensionSourceConfig {
+                path: tool_source,
+                format: Some(SourceFormat::Designer),
+            }),
+        });
+
+        let failure = push_interrupted_while_held(&config, &held, &build_args(true))
+            .expect_err("the tool import failed");
+
+        assert_eq!(failure.error.kind(), UseCaseErrorKind::Platform);
+        let message = failure.error.message();
+        assert!(
+            message
+                .starts_with("ibcmd_import ended after cancellation request during critical phase"),
+            "{message}"
+        );
+        assert_eq!(
+            failed_step_message(failure.payload.expect("payload")),
+            failure.error.to_string()
+        );
+        let calls = fs::read_to_string(&calls).expect("calls");
+        assert!(
+            !calls.contains("config apply --extension client_mcp"),
+            "{calls}"
+        );
+    }
+
+    /// Push, который оператор отменяет, пока подставная программа держит команду.
+    #[cfg(unix)]
+    fn push_interrupted_while_held(
+        config: &AppConfig,
+        held: &HeldCommand,
+        args: &BuildArgs,
+    ) -> crate::use_cases::result::UseCaseResult<crate::domain::build::BuildResult> {
+        let cancellation = CancellationToken::new();
+        let watch = DeferralWatch::default();
+        let operator = held.interrupt(cancellation.clone(), &watch);
+        let outcome = watch.during(|| {
+            super::execute(
+                &ExecutionContext::cli(CommandName::Build).with_cancellation(cancellation),
+                config,
+                args,
+            )
+        });
+        assert!(
+            operator.join().expect("operator thread"),
+            "the runner never logged that it deferred the cancellation"
+        );
+        outcome
+    }
+
+    #[cfg(unix)]
+    fn failed_step_message(result: crate::domain::build::BuildResult) -> String {
+        result
+            .steps
+            .into_iter()
+            .find(|step| !step.ok)
+            .and_then(|step| step.message)
+            .expect("the failed step names its failure")
     }
 
     fn create_source_tree(base_path: &Path) {

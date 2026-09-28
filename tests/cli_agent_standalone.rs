@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use support::fake_agent::{
     fingerprint_of, fingerprint_with, random_host_key, read_or_empty,
-    start_fake_agent_with_host_key, FakeAgent, AGENT_PASSWORD,
+    start_fake_agent_with_host_key, FakeAgent, SftpHold, AGENT_PASSWORD,
 };
 use support::{temp_workspace, v8_runner_command};
 
@@ -97,6 +97,16 @@ fn harness_with(
     host_key: russh::keys::PrivateKey,
     declared: impl Fn(&russh::keys::PrivateKey) -> Option<String>,
 ) -> Harness {
+    harness_holding_sftp(channel, host_key, declared, None)
+}
+
+/// Стенд, шлюз которого держит первую запись по SFTP, пока тест её не отпустит.
+fn harness_holding_sftp(
+    channel: Channel,
+    host_key: russh::keys::PrivateKey,
+    declared: impl Fn(&russh::keys::PrivateKey) -> Option<String>,
+    sftp_hold: Option<SftpHold>,
+) -> Harness {
     let declared_fingerprint = declared(&host_key);
     let dir = temp_workspace();
     let root = dir.path().to_path_buf();
@@ -128,6 +138,7 @@ fn harness_with(
     let commands_log = root.join("gate-commands.log");
     let mut gate = FakeAgent::gate(commands_log.clone(), GATE_USER, user_dir.clone());
     gate.sftp_read_only = channel == Channel::SftpReadOnly;
+    gate.sftp_hold = sftp_hold;
     let port = start_fake_agent_with_host_key(gate, host_key);
     let harness = Harness {
         config_path: root.join("v8project.yaml"),
@@ -844,5 +855,51 @@ fn via_connection_against_a_standalone_server_is_refused() {
     assert!(
         error_message(&payload).contains("not used by the runner yet"),
         "{payload}"
+    );
+}
+
+/// Отмена, пришедшая, пока исходники идут на шлюз, останавливает сборку до загрузки:
+/// команду запроса агенту после отмены не отдают, как раннер не запускает процесс. Это
+/// безопасная точка, и загрузка в базу не начинается (#317).
+#[cfg(unix)]
+#[test]
+fn an_interrupt_during_the_upload_stops_the_build_before_the_load() {
+    let marks = temp_workspace();
+    let (started, release) = (marks.path().join("started"), marks.path().join("release"));
+    let harness = harness_holding_sftp(
+        Channel::Sftp,
+        random_host_key(),
+        |_| None,
+        Some(SftpHold {
+            started: started.clone(),
+            release: release.clone(),
+        }),
+    );
+    let mut runner = v8_runner_command();
+    runner.args([
+        "--config",
+        &harness.config_path.display().to_string(),
+        "--json-message",
+        "build",
+    ]);
+
+    let (code, payload) = support::interrupt_at_hold(
+        runner,
+        &marks.path().join("actions.log"),
+        &started,
+        &release,
+        support::OPERATOR_INTERRUPT_RECEIVED,
+    );
+
+    assert_eq!(code, 4, "{payload}");
+    assert_eq!(payload["error"]["code"], "cancelled", "{payload}");
+    // Работы агент не получил: отказ до неё отметку не ставит.
+    assert_eq!(payload["data"]["provider_dispatched"], false, "{payload}");
+    let lines = commands(&harness);
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.starts_with("config load-config-from-files")),
+        "the load must not reach the agent after the interrupt: {lines:?}"
     );
 }

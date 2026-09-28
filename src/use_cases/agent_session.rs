@@ -10,9 +10,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::platform::process::{
-    ProcessInterruption, ProcessInterruptionAction, ProcessInterruptionReason,
-};
+use crate::platform::process::{ProcessInterruption, ProcessInterruptionReason};
+use crate::platform::result::PlatformCommandResult;
 
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +26,7 @@ use crate::support::error::AppError;
 use crate::support::fs::copy_dir_recursively;
 use crate::support::temp::platform_logs_dir;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::interruption::{CommandFailure, Deferrals};
 
 /// Открытая точка входа: свой процесс с сессией или только сессия к чужому.
 pub(crate) enum AgentHandle {
@@ -388,6 +388,53 @@ pub(crate) fn output_dir(user_dir: &Path, relative: &str) -> Result<PathBuf, App
     Ok(dir)
 }
 
+/// Одна сессия на операцию: открыть, выполнить, закрыть — и при отказе тоже. Прерывание,
+/// которое сессия отложила в критической фазе, исход несёт и у удачи, и у отказа.
+pub(crate) fn with_session(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    v8: Option<&Path>,
+    log: PathBuf,
+    work: impl FnOnce(&mut AgentHandle, &WaitPolicy, &Exchange) -> Result<String, AppError>,
+) -> Result<PlatformCommandResult, CommandFailure> {
+    let wait = wait_policy(context);
+    let mut utilities = PlatformUtilities::from_config(config);
+    let mut handle = connect(config, &mut utilities, v8, log.clone(), &wait)
+        .map_err(CommandFailure::without_deferral)?;
+    let outcome = handle
+        .exchange(config)
+        .and_then(|exchange| work(&mut handle, &wait, &exchange));
+    let deferred = handle.session().deferred_interruption();
+    handle.finish(&wait);
+    match outcome {
+        Ok(transcript) => Ok(platform_result(transcript, log, deferred)),
+        Err(error) => Err(CommandFailure::after(
+            error,
+            deferred.map(ProcessInterruption::deferred),
+        )),
+    }
+}
+
+/// Команда, которая меняет базу: фаза критическая, отмену и истёкший срок команда
+/// откладывает до своего исхода. Отложенное попадает в `deferrals` и у удачи, и у отказа:
+/// сессия помнит его и тогда, когда ответ не дочитан. Сессия отдаёт этот факт только до
+/// следующей команды, и читает его только этот помощник.
+pub(crate) fn run_critical(
+    handle: &mut AgentHandle,
+    action: &str,
+    command: &str,
+    wait: &WaitPolicy,
+    deferrals: &mut Deferrals,
+) -> Result<agent::AgentReply, AppError> {
+    let outcome = run_command(handle, command, &wait.critical());
+    let deferral = handle
+        .session()
+        .last_command_deferral()
+        .map(ProcessInterruption::deferred);
+    deferrals.note_outcome(action, &outcome, deferral);
+    outcome
+}
+
 /// Одна команда с проверкой итога; журнал ответа возвращается как улика.
 pub(crate) fn run_command(
     handle: &mut AgentHandle,
@@ -408,18 +455,15 @@ pub(crate) fn platform_result(
     transcript: String,
     log: PathBuf,
     interruption: Option<ProcessInterruptionReason>,
-) -> crate::platform::result::PlatformCommandResult {
-    crate::platform::result::PlatformCommandResult {
+) -> PlatformCommandResult {
+    PlatformCommandResult {
         process: crate::platform::process::ProcessResult {
             exit_code: 0,
             stdout: transcript,
             stderr: String::new(),
             // Отложенное прерывание едет тем же полем, что и у процессов платформы,
             // поэтому о нём рассказывают уже существующие помощники, а не второй путь.
-            interruption: interruption.map(|reason| ProcessInterruption {
-                reason,
-                action: ProcessInterruptionAction::Deferred,
-            }),
+            interruption: interruption.map(ProcessInterruption::deferred),
         },
         platform_log_path: Some(log),
         platform_log: None,
@@ -876,8 +920,11 @@ mod tests {
         let quiet = platform_result("ok".to_owned(), PathBuf::from("/tmp/agent.log"), None);
         assert!(quiet.process.interruption.is_none());
         assert!(
-            crate::use_cases::interruption::deferred_process_interruption_warning("build", &quiet)
-                .is_none()
+            crate::use_cases::interruption::deferred_process_interruption_warning(
+                "build",
+                quiet.process.interruption
+            )
+            .is_none()
         );
 
         let latched = platform_result(
@@ -891,11 +938,14 @@ mod tests {
             .interruption
             .expect("a latched interruption must reach the platform result");
         assert_eq!(interruption.reason, ProcessInterruptionReason::Cancelled);
-        assert_eq!(interruption.action, ProcessInterruptionAction::Deferred);
+        assert_eq!(
+            interruption.action,
+            crate::platform::process::ProcessInterruptionAction::Deferred
+        );
 
         let warning = crate::use_cases::interruption::deferred_process_interruption_warning(
             "update_db_cfg",
-            &latched,
+            latched.process.interruption,
         )
         .expect("the existing reporter must fire for an agent result");
         assert!(warning.contains("update_db_cfg"), "{warning}");

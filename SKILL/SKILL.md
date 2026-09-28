@@ -126,10 +126,12 @@ v8-runner infobase create
   `error.kind: interruption`, `error.code: cancelled` and exit 4 for every command; MCP folds it
   into `platform_failure`. A pending interrupt alone decides nothing: an unrelated failure keeps
   its own code, and a critical phase such as a database write runs to its end — a success stays
-  a success and names the interrupt with `deferred: true`. In forms with `execution`, the
-  interruption record's `phase` says where it stopped: `command_boundary` — a safe point, no
-  work of the command was cut short; `provider_command`, `run`, `apply`, `update_db_cfg`,
-  `publication` — the executor's work was cut short or, with `deferred: true`, waited for.
+  a success and names the interrupt with `deferred: true`. In `upload`, `infobase restore`, `push`
+  and `extensions` a later failure or a stop at the next safe point names it too (forms without
+  `execution` say it in the step message). In forms with `execution`, the interruption record's
+  `phase` says where it stopped: `command_boundary` — a safe point, no work of the command was
+  cut short; `provider_command`, `run`, `apply`, `update_db_cfg`, `publication` — the executor's
+  work was cut short or, with `deferred: true`, waited for.
 - For infobase export failures, distinguish `capability_unavailable` (no implemented adapter)
   from `environment_unavailable` (adapter exists, but binary/version/connection is not ready).
   Never retry another provider after the selected provider has been spawned.

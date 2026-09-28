@@ -1,8 +1,8 @@
 use crate::domain::execution::{
     ExecutionInterruptionDetails, ExecutionInterruptionKind, ExecutionInterruptionPhase,
-    ExecutionStatus,
+    ExecutionOutcome, ExecutionStatus,
 };
-use crate::platform::process::ProcessInterruptionReason;
+use crate::platform::process::{ProcessInterruption, ProcessInterruptionReason};
 use crate::platform::result::PlatformCommandResult;
 use crate::support::error::{AppError, CancelledAt};
 
@@ -130,13 +130,14 @@ pub(crate) fn process_interruption_details(
 }
 
 /// Прерывание, которое процесс отложил и пережил: предупреждение и запись о прерывании,
-/// собранные из одного факта одними словами.
+/// собранные из одного факта одними словами. Факт — то же поле, что у результата процесса:
+/// у удачи его берут из результата, у отказа — из `CommandFailure`.
 pub(crate) fn deferred_process_interruption(
     phase: ExecutionInterruptionPhase,
     completed_action: &str,
-    result: &PlatformCommandResult,
+    interruption: Option<ProcessInterruption>,
 ) -> Option<(String, ExecutionInterruptionDetails)> {
-    result.process.interruption.map(|interruption| {
+    interruption.map(|interruption| {
         let warning = deferred_process_interruption_message(completed_action, interruption.reason);
         let details =
             process_interruption_details(interruption.reason, phase, true, warning.clone());
@@ -146,11 +147,185 @@ pub(crate) fn deferred_process_interruption(
 
 pub(crate) fn deferred_process_interruption_warning(
     completed_action: &str,
-    result: &PlatformCommandResult,
+    interruption: Option<ProcessInterruption>,
 ) -> Option<String> {
-    result.process.interruption.map(|interruption| {
+    interruption.map(|interruption| {
         deferred_process_interruption_message(completed_action, interruption.reason)
     })
+}
+
+/// Предупреждения об отменах, которые критические команды шага отложили и пережили. Шаг
+/// получает учёт от [`collecting_deferrals`] и отмечает каждую команду, как только она
+/// кончилась, удачей или отказом: так предупреждение не теряют ни её собственный отказ, ни
+/// следующая команда, ни безопасная точка.
+#[derive(Debug, Default)]
+pub(crate) struct Deferrals(Vec<String>);
+
+impl Deferrals {
+    /// Команда процесса платформы кончилась; удача — нулевой код выхода.
+    pub(crate) fn note_result(&mut self, action: &str, result: &PlatformCommandResult) {
+        let end = if result.process.exit_code == 0 {
+            CommandEnd::Succeeded
+        } else {
+            CommandEnd::Failed
+        };
+        self.note(action, end, result.process.interruption);
+    }
+
+    /// Команда агента кончилась удачей или отказом.
+    pub(crate) fn note_outcome<T, E>(
+        &mut self,
+        action: &str,
+        outcome: &Result<T, E>,
+        interruption: Option<ProcessInterruption>,
+    ) {
+        let end = if outcome.is_ok() {
+            CommandEnd::Succeeded
+        } else {
+            CommandEnd::Failed
+        };
+        self.note(action, end, interruption);
+    }
+
+    fn note(&mut self, action: &str, end: CommandEnd, interruption: Option<ProcessInterruption>) {
+        if let Some(interruption) = interruption {
+            self.0.push(deferred_process_interruption_message(
+                &end.words(action),
+                interruption.reason,
+            ));
+        }
+    }
+}
+
+/// Чем кончилась команда, которая отложила отмену.
+#[derive(Debug, Clone, Copy)]
+enum CommandEnd {
+    Succeeded,
+    Failed,
+}
+
+impl CommandEnd {
+    /// Удачу предупреждение называет удачей, а команду, кончившуюся отказом, — просто
+    /// кончившейся.
+    fn words(self, action: &str) -> String {
+        match self {
+            Self::Succeeded => format!("{action} completed successfully"),
+            Self::Failed => format!("{action} ended"),
+        }
+    }
+}
+
+/// Шаг с критическими командами: `body` отмечает их в учёте, а предупреждения идут в
+/// ответ, чем бы шаг ни кончился. Удача отдаёт их вызывающему для сообщения шага, отказ
+/// открывает ими свой текст; род и место отмены у ошибки те же.
+pub(crate) fn collecting_deferrals<T>(
+    body: impl FnOnce(&mut Deferrals) -> Result<T, AppError>,
+) -> Result<(T, Vec<String>), AppError> {
+    let mut deferrals = Deferrals::default();
+    match body(&mut deferrals) {
+        Ok(value) => Ok((value, deferrals.0)),
+        Err(error) => Err(named_after(error, &deferrals.0)),
+    }
+}
+
+/// Сообщение удачи, за которым идут предупреждения об отложенных отменах.
+#[must_use]
+pub(crate) fn append_warnings(message: String, warnings: &[String]) -> String {
+    match (message.is_empty(), warnings.is_empty()) {
+        (_, true) => message,
+        (true, false) => joined(warnings),
+        (false, false) => format!("{message}; {}", joined(warnings)),
+    }
+}
+
+/// Текст отказа, который открывают предупреждения об отложенных отменах, — для ответа,
+/// чей отказ несёт текст, а не ошибку; ошибку открывает [`collecting_deferrals`].
+#[must_use]
+pub(crate) fn prefix_warnings(warnings: &[String], message: String) -> String {
+    if warnings.is_empty() {
+        message
+    } else {
+        format!("{}; {message}", joined(warnings))
+    }
+}
+
+/// Отказ после отложенных отмен: их предупреждения открывают его текст теми же словами,
+/// что [`prefix_warnings`]. Род и место отмены у ошибки те же.
+fn named_after(error: AppError, warnings: &[String]) -> AppError {
+    if warnings.is_empty() {
+        error
+    } else {
+        error.with_context(joined(warnings))
+    }
+}
+
+/// Предупреждения одной строкой — тем же разделителем, что у `with_context`.
+fn joined(warnings: &[String]) -> String {
+    warnings.join("; ")
+}
+
+/// Отложенное прерывание — в форму с итогом исполнения: запись с `deferred: true` и
+/// предупреждение, собранные из одного факта одними словами.
+pub(crate) fn record_deferral<T>(
+    phase: ExecutionInterruptionPhase,
+    action: &str,
+    interruption: Option<ProcessInterruption>,
+    execution: &mut ExecutionOutcome<T>,
+    warnings: &mut Vec<String>,
+) {
+    if let Some((warning, details)) = deferred_process_interruption(phase, action, interruption) {
+        execution.interruptions.push(details);
+        warnings.push(warning);
+    }
+}
+
+/// Отказ команды платформы вместе с прерыванием, которое она отложила и пережила. Ошибку
+/// он отдаёт только вместе с ним, так что ответ называет отложенную отмену и у неудачи:
+/// оператор просил остановить, и ответ говорит, почему его не послушали.
+#[derive(Debug)]
+#[must_use]
+pub(crate) struct CommandFailure {
+    error: AppError,
+    interruption: Option<ProcessInterruption>,
+}
+
+impl CommandFailure {
+    /// Отказ, случившийся после того, как команда отложила прерывание.
+    pub(crate) fn after(error: AppError, interruption: Option<ProcessInterruption>) -> Self {
+        Self {
+            error,
+            interruption,
+        }
+    }
+
+    /// Отказ, которому откладывать было нечего: он пришёл раньше критической команды или
+    /// у сессии, которая её не ведёт.
+    pub(crate) fn without_deferral(error: AppError) -> Self {
+        Self::after(error, None)
+    }
+
+    /// Ошибка для формы с итогом исполнения: запись об отложенном прерывании и
+    /// предупреждение идут в ответ раньше неё.
+    #[must_use]
+    pub(crate) fn record_into<T>(
+        self,
+        phase: ExecutionInterruptionPhase,
+        action: &str,
+        execution: &mut ExecutionOutcome<T>,
+        warnings: &mut Vec<String>,
+    ) -> AppError {
+        record_deferral(phase, action, self.interruption, execution, warnings);
+        self.error
+    }
+
+    /// Ошибка без записи о прерывании: отложенную отмену, если она была, называет её
+    /// текст теми же словами, что у шага.
+    #[must_use]
+    pub(crate) fn into_error(self, action: &str) -> AppError {
+        let mut deferrals = Deferrals::default();
+        deferrals.note(action, CommandEnd::Failed, self.interruption);
+        named_after(self.error, &deferrals.0)
+    }
 }
 
 pub(crate) fn deferred_interruption_warning(
@@ -251,7 +426,7 @@ fn process_interruption_reason(interruption: ProcessInterruptionReason) -> &'sta
     }
 }
 
-pub(crate) fn deferred_process_interruption_message(
+fn deferred_process_interruption_message(
     completed_action: &str,
     interruption: ProcessInterruptionReason,
 ) -> String {
@@ -286,9 +461,154 @@ mod tests {
     use crate::use_cases::context::{CommandName, ExecutionContext, ExecutionInterruption};
 
     use super::{
-        deferred_interruption_warning, deferred_interruption_warning_for_command,
-        process_interruption_details, SafePoint, SafePointCancel,
+        append_warnings, collecting_deferrals, deferred_interruption_warning,
+        deferred_interruption_warning_for_command, prefix_warnings, process_interruption_details,
+        CommandFailure, SafePoint, SafePointCancel,
     };
+    use crate::domain::execution::ExecutionOutcome;
+    use crate::platform::process::{ProcessInterruption, ProcessResult};
+    use crate::platform::result::PlatformCommandResult;
+    use crate::support::error::AppError;
+
+    fn finished(exit_code: i32, deferred: bool) -> PlatformCommandResult {
+        PlatformCommandResult {
+            process: ProcessResult {
+                exit_code,
+                stdout: String::new(),
+                stderr: String::new(),
+                interruption: deferred
+                    .then(|| ProcessInterruption::deferred(ProcessInterruptionReason::Cancelled)),
+            },
+            platform_log_path: None,
+            platform_log: None,
+            platform_log_read_error: None,
+        }
+    }
+
+    /// Учёт отложенных отмен: удача отдаёт предупреждения вызывающему, отказ открывает ими
+    /// свой текст, а род и место отмены у ошибки остаются прежними. Удачу предупреждение
+    /// называет удачей, команду, кончившуюся отказом, — кончившейся.
+    #[test]
+    fn a_step_names_its_deferrals_whatever_it_ends_with() {
+        let ((), warnings) = collecting_deferrals(|deferrals| {
+            deferrals.note_result("load", &finished(0, true));
+            deferrals.note_result("update_db_cfg", &finished(0, false));
+            Ok(())
+        })
+        .expect("the step succeeded");
+        let [warning] = warnings.as_slice() else {
+            panic!("one deferral: {warnings:?}");
+        };
+        assert!(
+            warning.starts_with(
+                "load completed successfully after cancellation request during critical phase"
+            ),
+            "{warning}"
+        );
+
+        let error = collecting_deferrals(|deferrals| -> Result<(), AppError> {
+            deferrals.note_result("apply", &finished(17, true));
+            Err(AppError::Cancelled {
+                message: "stopped at the next safe point".to_owned(),
+                at: CancelledAt::Boundary,
+            })
+        })
+        .expect_err("the step stopped");
+        assert_eq!(error.cancellation(), Some(CancelledAt::Boundary));
+        let message = error.to_string();
+        assert!(
+            message.contains(
+                "apply ended after cancellation request during critical phase; unsafe \
+                 interruption was not performed; stopped at the next safe point"
+            ),
+            "{message}"
+        );
+
+        let error = collecting_deferrals(|deferrals| -> Result<(), AppError> {
+            deferrals.note_outcome(
+                "extension create",
+                &Err::<(), ()>(()),
+                Some(ProcessInterruption::deferred(
+                    ProcessInterruptionReason::TimedOut,
+                )),
+            );
+            Err(AppError::Platform("agent command failed".to_owned()))
+        })
+        .expect_err("the command failed");
+        assert_eq!(
+            error.to_string(),
+            "platform error: extension create ended after timeout during critical phase; \
+             unsafe interruption was not performed; agent command failed"
+        );
+
+        let untouched = collecting_deferrals(|_| -> Result<(), AppError> {
+            Err(AppError::Runtime("no deferral".to_owned()))
+        })
+        .expect_err("the step failed");
+        assert_eq!(untouched.to_string(), "runtime error: no deferral");
+    }
+
+    #[test]
+    fn warnings_follow_a_success_and_lead_a_failure_text() {
+        let warning = ["deferred".to_owned()];
+        assert_eq!(append_warnings("done".to_owned(), &[]), "done");
+        assert_eq!(
+            append_warnings("done".to_owned(), &warning),
+            "done; deferred"
+        );
+        assert_eq!(append_warnings(String::new(), &warning), "deferred");
+        assert_eq!(prefix_warnings(&[], "failed".to_owned()), "failed");
+        assert_eq!(
+            prefix_warnings(&warning, "failed".to_owned()),
+            "deferred; failed"
+        );
+    }
+
+    /// Отказ команды отдаёт ошибку только вместе с отсрочкой: форма с итогом исполнения
+    /// получает запись и предупреждение, текстовая — предупреждение в начале текста.
+    #[test]
+    fn a_command_failure_hands_out_its_error_only_with_its_deferral() {
+        let deferred = Some(ProcessInterruption::deferred(
+            ProcessInterruptionReason::Cancelled,
+        ));
+        let mut execution = ExecutionOutcome::<()>::new(ExecutionStatus::Failed);
+        let mut warnings = Vec::new();
+        let error = CommandFailure::after(AppError::Platform("agent failed".to_owned()), deferred)
+            .record_into(
+                ExecutionInterruptionPhase::ProviderCommand,
+                "infobase DT restore",
+                &mut execution,
+                &mut warnings,
+            );
+        assert_eq!(error.to_string(), "platform error: agent failed");
+        let [record] = execution.interruptions.as_slice() else {
+            panic!("one record: {:?}", execution.interruptions);
+        };
+        assert!(record.deferred);
+        assert_eq!(
+            record.phase,
+            Some(ExecutionInterruptionPhase::ProviderCommand)
+        );
+        let [warning] = warnings.as_slice() else {
+            panic!("one warning: {warnings:?}");
+        };
+        assert!(
+            warning.starts_with("infobase DT restore after cancellation request"),
+            "{warning}"
+        );
+
+        let error = CommandFailure::after(AppError::Platform("agent failed".to_owned()), deferred)
+            .into_error("artifact export");
+        assert_eq!(
+            error.to_string(),
+            "platform error: artifact export ended after cancellation request during critical \
+             phase; unsafe interruption was not performed; agent failed"
+        );
+
+        let error = CommandFailure::without_deferral(AppError::Platform("no".to_owned()))
+            .into_error("artifact export");
+        assert_eq!(error.to_string(), "platform error: no");
+    }
 
     /// Отмена на безопасной точке — отмена на границе: статус `cancelled`, запись
     /// `command_boundary` без отсрочки, ошибка того же места. Текст называет точку.

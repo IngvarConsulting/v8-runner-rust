@@ -21,9 +21,10 @@ use crate::platform::agent::{AgentMessageType, AgentReply, WaitPolicy};
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::agent_session::{
-    argument, connect, run_command, transcript_log, wait_policy, AgentHandle,
+    argument, connect, run_command, run_critical, transcript_log, wait_policy, AgentHandle,
 };
 use crate::use_cases::context::ExecutionContext;
+use crate::use_cases::interruption::Deferrals;
 
 pub(crate) struct ExtensionAgent {
     handle: AgentHandle,
@@ -60,19 +61,33 @@ impl ExtensionAgent {
     }
 
     /// `properties set --safe-mode=no --unsafe-action-protection=no`.
-    pub(crate) fn disable_safety(&mut self, name: &str) -> Result<(), AppError> {
-        self.run(&format!(
-            "config extensions properties set --extension={} --safe-mode=no --unsafe-action-protection=no",
+    pub(crate) fn disable_safety(
+        &mut self,
+        action: &str,
+        name: &str,
+        deferrals: &mut Deferrals,
+    ) -> Result<(), AppError> {
+        let command = format!(
+            "config extensions properties set --extension={} --safe-mode=no \
+             --unsafe-action-protection=no",
             argument(name)
-        ))
+        );
+        self.run(action, &command, deferrals)
     }
 
-    pub(crate) fn set_active(&mut self, name: &str, active: bool) -> Result<(), AppError> {
-        self.run(&format!(
+    pub(crate) fn set_active(
+        &mut self,
+        action: &str,
+        name: &str,
+        active: bool,
+        deferrals: &mut Deferrals,
+    ) -> Result<(), AppError> {
+        let command = format!(
             "config extensions properties set --extension={} --active={}",
             argument(name),
             if active { "yes" } else { "no" }
-        ))
+        );
+        self.run(action, &command, deferrals)
     }
 
     /// Агент требует синоним в форме `NStr()` и не принимает ни пустой, ни простую строку
@@ -81,10 +96,12 @@ impl ExtensionAgent {
     /// становится имя.
     pub(crate) fn create(
         &mut self,
+        action: &str,
         name: &str,
         name_prefix: &str,
         synonym: Option<&str>,
         purpose: Option<&str>,
+        deferrals: &mut Deferrals,
     ) -> Result<(), AppError> {
         let mut command = format!(
             "config extensions create --extension={} --name-prefix={} --synonym={}",
@@ -95,14 +112,17 @@ impl ExtensionAgent {
         if let Some(purpose) = purpose {
             command.push_str(&format!(" --purpose={}", argument(purpose)));
         }
-        self.run(&command)
+        self.run(action, &command, deferrals)
     }
 
-    pub(crate) fn delete(&mut self, name: &str) -> Result<(), AppError> {
-        self.run(&format!(
-            "config extensions delete --extension={}",
-            argument(name)
-        ))
+    pub(crate) fn delete(
+        &mut self,
+        action: &str,
+        name: &str,
+        deferrals: &mut Deferrals,
+    ) -> Result<(), AppError> {
+        let command = format!("config extensions delete --extension={}", argument(name));
+        self.run(action, &command, deferrals)
     }
 
     pub(crate) fn close(self) {
@@ -110,9 +130,16 @@ impl ExtensionAgent {
     }
 
     /// Команды, меняющие состав или свойства расширений: фаза критическая, её не
-    /// бросают на полпути. Чтение (`properties`, `list`) идёт мимо этого пути.
-    fn run(&mut self, command: &str) -> Result<(), AppError> {
-        run_command(&mut self.handle, command, &self.wait.critical()).map(|_| ())
+    /// бросают на полпути. Отмену, которую команда отложила, учёт сценария получает под его
+    /// словом `action` — тем же, что у `ibcmd`. Чтение (`properties`, `list`) идёт мимо
+    /// этого пути.
+    fn run(
+        &mut self,
+        action: &str,
+        command: &str,
+        deferrals: &mut Deferrals,
+    ) -> Result<(), AppError> {
+        run_critical(&mut self.handle, action, command, &self.wait, deferrals).map(|_| ())
     }
 }
 
@@ -219,7 +246,6 @@ mod tests {
     fn reply(json: &str) -> crate::platform::agent::AgentReply {
         crate::platform::agent::AgentReply {
             messages: serde_json::from_str(json).expect("messages"),
-            deferred_interruption: None,
         }
     }
 

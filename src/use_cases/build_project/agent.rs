@@ -12,10 +12,10 @@ use super::*;
 use crate::platform::agent::WaitPolicy;
 use crate::platform::locator::UtilityLocation;
 use crate::use_cases::agent_session::{
-    argument, connect, generation_id, run_id, stage_dir, stage_dir_partially, tidy, transcript_log,
-    unstage, wait_policy, write_bytes, AgentHandle, Exchange, GenerationLedger,
+    argument, connect, generation_id, run_critical, run_id, stage_dir, stage_dir_partially, tidy,
+    transcript_log, unstage, wait_policy, write_bytes, AgentHandle, Exchange, GenerationLedger,
 };
-use crate::use_cases::interruption::deferred_process_interruption_message;
+use crate::use_cases::interruption::Deferrals;
 
 pub(super) struct AgentLoader {
     utilities: PlatformUtilities,
@@ -95,54 +95,61 @@ impl SourceSetLoader for AgentLoader {
         partial_paths: Option<&[PathBuf]>,
         commit: &StepCommit,
     ) -> Result<Vec<String>, AppError> {
-        if let Some(error) = interruption_before_safe_point(
-            context,
-            format!("build load for source-set '{}'", source_set.name),
-        ) {
-            return Err(error);
-        }
-        let run = self.run.clone();
-        let (handle, wait) = self.handle(context, config)?;
-        let exchange = handle.exchange(config)?;
-        let relative = format!("build/{run}/{step_index:02}-{}", source_set.name);
-        // Недоставленные исходники (канал отверг запись) не оставляют на стороне точки
-        // входа и половины каталога.
-        let staged = match partial_paths {
-            Some(paths) => {
-                stage_dir_partially(handle, &exchange, &relative, source_context.path(), paths)
-            }
-            None => stage_dir(handle, &exchange, &relative, source_context.path()),
-        };
-        let exposed = match staged {
-            Ok(exposed) => exposed,
-            Err(error) => {
-                unstage(handle, &exchange, &relative);
+        // Всё, что идёт после отложенной отмены, — провал следующей команды, безопасная
+        // точка, фиксация состояния, срезанный `generation-id`, — выходит через учёт,
+        // который её называет.
+        collecting_deferrals(|deferrals| {
+            if let Some(error) = interruption_before_safe_point(
+                context,
+                format!("build load for source-set '{}'", source_set.name),
+            ) {
                 return Err(error);
             }
-        };
-        let extension = extension_name(source_set);
+            let run = self.run.clone();
+            let (handle, wait) = self.handle(context, config)?;
+            let exchange = handle.exchange(config)?;
+            let relative = format!("build/{run}/{step_index:02}-{}", source_set.name);
+            // Недоставленные исходники (канал отверг запись) не оставляют на стороне точки
+            // входа и половины каталога.
+            let staged = match partial_paths {
+                Some(paths) => {
+                    stage_dir_partially(handle, &exchange, &relative, source_context.path(), paths)
+                }
+                None => stage_dir(handle, &exchange, &relative, source_context.path()),
+            };
+            let exposed = match staged {
+                Ok(exposed) => exposed,
+                Err(error) => {
+                    unstage(handle, &exchange, &relative);
+                    return Err(error);
+                }
+            };
+            let extension = extension_name(source_set);
 
-        let outcome = load_and_update(
-            context,
-            handle,
-            &wait,
-            &exchange,
-            &exposed,
-            source_set,
-            source_context,
-            extension,
-            partial_paths,
-        );
-        unstage(handle, &exchange, &exposed);
-        let warnings = outcome?;
+            let outcome = load_and_update(
+                context,
+                handle,
+                &wait,
+                &exchange,
+                &exposed,
+                source_set,
+                source_context,
+                extension,
+                partial_paths,
+                deferrals,
+            );
+            unstage(handle, &exchange, &exposed);
+            outcome?;
 
-        commit_step_state(source_set, source_context, &config.work_path, commit)?;
+            commit_step_state(source_set, source_context, &config.work_path, commit)?;
 
-        // Поколение записывается после удачной загрузки: следующая выгрузка сравнит его
-        // и не станет выгружать то, что не менялось.
-        let token = generation_id(handle.session(), extension, &wait)?;
-        GenerationLedger::new(config).record(&source_set.name, &token, "build")?;
-        Ok(warnings)
+            // Поколение записывается после удачной загрузки: следующая выгрузка сравнит его
+            // и не станет выгружать то, что не менялось.
+            let token = generation_id(handle.session(), extension, &wait)?;
+            GenerationLedger::new(config).record(&source_set.name, &token, "build")?;
+            Ok(())
+        })
+        .map(|((), warnings)| warnings)
     }
 
     fn finish(&mut self) {
@@ -163,11 +170,11 @@ fn load_and_update(
     source_context: &SourceSetContext,
     extension: Option<&str>,
     partial_paths: Option<&[PathBuf]>,
-) -> Result<Vec<String>, AppError> {
+    deferrals: &mut Deferrals,
+) -> Result<(), AppError> {
     // Обе команды меняют базу: загрузка переписывает конфигурацию, а `update-db-cfg`
-    // перестраивает таблицы. Класс совпадает с путём Конфигуратора
-    // (`build_project.rs`: `load_config_from_files_full` и `update_db_cfg`).
-    let critical = wait.critical();
+    // перестраивает таблицы; обе идут через `run_critical`. Класс совпадает с путём
+    // Конфигуратора (`build_project.rs`: `load_config_from_files_full` и `update_db_cfg`).
     let mut load = format!(
         "config load-config-from-files --dir={} --update-config-dump-info",
         argument(exposed)
@@ -205,11 +212,11 @@ fn load_and_update(
     if let Some(extension) = extension {
         load.push_str(&format!(" --extension={}", argument(extension)));
     }
-    let loaded = run_command_deferring(handle, "load", &load, &critical);
+    let loaded = run_critical(handle, "load", &load, wait, deferrals);
     if partial_paths.is_some() {
         tidy(handle, exchange, &format!("{exposed}.list.txt"));
     }
-    let load_warning = loaded?;
+    loaded?;
 
     if let Some(error) = interruption_before_safe_point(
         context,
@@ -227,27 +234,6 @@ fn load_and_update(
     if let Some(extension) = extension {
         update.push_str(&format!(" --extension={}", argument(extension)));
     }
-    let update_warning = run_command_deferring(handle, "update_db_cfg", &update, &critical)?;
-    Ok([load_warning, update_warning]
-        .into_iter()
-        .flatten()
-        .collect())
-}
-
-/// Выполняет команду и возвращает отложенное предупреждение, если прерывание пришло
-/// в критической фазе: команда доведена, но об этом обязаны сказать в результате.
-fn run_command_deferring(
-    handle: &mut AgentHandle,
-    completed_action: &str,
-    command: &str,
-    wait: &WaitPolicy,
-) -> Result<Option<String>, AppError> {
-    let reply = handle
-        .session()
-        .run(command, wait)
-        .map_err(AppError::from)?;
-    reply.outcome().map_err(AppError::from)?;
-    Ok(reply
-        .deferred_interruption
-        .map(|reason| deferred_process_interruption_message(completed_action, reason)))
+    run_critical(handle, "update_db_cfg", &update, wait, deferrals)?;
+    Ok(())
 }

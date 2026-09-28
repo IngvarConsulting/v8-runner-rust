@@ -13,8 +13,9 @@ const EXECUTABLE_BUSY_MAX_RETRIES: usize = 5;
 const EXECUTABLE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(10);
 #[cfg(any(windows, test))]
 const WINDOWS_ERROR_INVALID_HANDLE: i32 = 6;
-/// Строка журнала, с которой раннер откладывает прерывание критического процесса.
-const CRITICAL_INTERRUPTION_DEFERRED: &str =
+/// Строка журнала, с которой раннер откладывает прерывание критического процесса или
+/// критической команды агента.
+pub(crate) const CRITICAL_INTERRUPTION_DEFERRED: &str =
     "interruption requested during critical process phase; waiting for terminal outcome";
 
 /// Request for launching an external utility.
@@ -208,6 +209,16 @@ pub enum ProcessInterruptionAction {
 pub struct ProcessInterruption {
     pub reason: ProcessInterruptionReason,
     pub action: ProcessInterruptionAction,
+}
+
+impl ProcessInterruption {
+    /// Прерывание, которое критическая фаза отложила до своего исхода.
+    pub fn deferred(reason: ProcessInterruptionReason) -> Self {
+        Self {
+            reason,
+            action: ProcessInterruptionAction::Deferred,
+        }
+    }
 }
 
 /// Получил ли исполнитель работу этой команды. Отмечает её платформа в тот миг, когда работа
@@ -917,10 +928,7 @@ fn wait_for_output(
                     status,
                     stdout,
                     stderr,
-                    interruption: Some(ProcessInterruption {
-                        reason,
-                        action: ProcessInterruptionAction::Deferred,
-                    }),
+                    interruption: Some(ProcessInterruption::deferred(reason)),
                 }),
                 None => Ok(ObservedOutput {
                     status,
@@ -1157,6 +1165,67 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for DeferralWatch {
 
     fn make_writer(&'a self) -> Self::Writer {
         self.clone()
+    }
+}
+
+/// Команда подставной программы, которую тест держит: начавшись, она отмечается файлом и
+/// ждёт, пока её не отпустят. Порядок «отмена пришла во время записи, запись кончилась,
+/// когда раннер уже отложил отмену» задают рукопожатия, а не отсчёт времени.
+#[cfg(all(test, unix))]
+pub(crate) struct HeldCommand {
+    started: PathBuf,
+    release: PathBuf,
+}
+
+#[cfg(all(test, unix))]
+impl HeldCommand {
+    pub(crate) fn in_dir(dir: &std::path::Path) -> Self {
+        Self {
+            started: dir.join("held-started"),
+            release: dir.join("held-release"),
+        }
+    }
+
+    /// Ветка sh-скрипта с аргументами в `$args`: команда, в которой есть `pattern`,
+    /// отмечается, ждёт отпуска и выходит с `exit_code`.
+    pub(crate) fn script_branch(&self, pattern: &str, exit_code: i32) -> String {
+        format!(
+            "if printf '%s' \"$args\" | grep -F -q -- '{pattern}'; then\n\
+               : > '{started}'\n\
+               waited=0\n\
+               while [ ! -e '{release}' ] && [ \"$waited\" -lt 300 ]; do\n\
+                 sleep 0.1\n\
+                 waited=$((waited + 1))\n\
+               done\n\
+               exit {exit_code}\n\
+             fi\n",
+            started = self.started.display(),
+            release = self.release.display(),
+        )
+    }
+
+    /// Оператор: дождаться начала команды, отменить, дождаться, пока раннер отложит отмену,
+    /// и отпустить команду. Поток отвечает, видел ли `watch` отложенную отмену.
+    pub(crate) fn interrupt(
+        &self,
+        cancellation: CancellationToken,
+        watch: &DeferralWatch,
+    ) -> std::thread::JoinHandle<bool> {
+        let started = self.started.clone();
+        let release = self.release.clone();
+        let watch = watch.clone();
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while !started.exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            cancellation.cancel();
+            while !watch.observed() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::fs::write(&release, "").expect("release the held command");
+            watch.observed()
+        })
     }
 }
 

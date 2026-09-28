@@ -25,7 +25,7 @@ use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::extension_agent::ExtensionAgent;
-use crate::use_cases::interruption;
+use crate::use_cases::interruption::{self, append_warnings, collecting_deferrals};
 use crate::use_cases::request::{ExtensionInventoryRequest, ExtensionInventoryScope};
 use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
 use tracing::debug;
@@ -328,12 +328,13 @@ fn requested(scope: &ExtensionInventoryScope) -> RequestedInventory {
     }
 }
 
-fn validate_success(result: &PlatformCommandResult) -> Result<(), AppError> {
+/// Отказ изменения состава через `ibcmd` называет само изменение, код выхода и вывод.
+fn validate_change(verb: &str, result: &PlatformCommandResult) -> Result<(), AppError> {
     if result.process.exit_code == 0 {
         return Ok(());
     }
     let mut details = vec![format!(
-        "platform extension read failed with exit code {}",
+        "platform extension {verb} failed with exit code {}",
         result.process.exit_code
     )];
     for (label, value) in [
@@ -556,24 +557,33 @@ fn run_change(
         });
     }
 
-    let outcome = match executor {
+    // Подпись действия одна для обоих исполнителей: ею предупреждение называет отмену,
+    // которую запись отложила и пережила.
+    let action = format!("extension {}", request.action());
+    let outcome = collecting_deferrals(|deferrals| match executor {
         Executor::Agent { v8 } => {
-            ExtensionAgent::open(context, config, v8.as_deref()).and_then(|mut agent| {
-                let outcome = match request {
-                    ExtensionChangeRequest::Create {
-                        name,
-                        name_prefix,
-                        synonym,
-                        purpose,
-                    } => agent.create(name, name_prefix, synonym.as_deref(), purpose.as_deref()),
-                    ExtensionChangeRequest::Delete { name } => agent.delete(name),
-                    ExtensionChangeRequest::SetActive { name, active } => {
-                        agent.set_active(name, *active)
-                    }
-                };
-                agent.close();
-                outcome
-            })
+            let mut agent = ExtensionAgent::open(context, config, v8.as_deref())?;
+            let outcome = match request {
+                ExtensionChangeRequest::Create {
+                    name,
+                    name_prefix,
+                    synonym,
+                    purpose,
+                } => agent.create(
+                    &action,
+                    name,
+                    name_prefix,
+                    synonym.as_deref(),
+                    purpose.as_deref(),
+                    deferrals,
+                ),
+                ExtensionChangeRequest::Delete { name } => agent.delete(&action, name, deferrals),
+                ExtensionChangeRequest::SetActive { name, active } => {
+                    agent.set_active(&action, name, *active, deferrals)
+                }
+            };
+            agent.close();
+            outcome
         }
         Executor::Ibcmd { binary, connection } => {
             let dsl = IbcmdDsl::new(
@@ -599,15 +609,16 @@ fn run_change(
                     dsl.infobase_extension_set_active(name, *active)
                 }
             };
-            platform_result
-                .map_err(AppError::from)
-                .and_then(|result| validate_success(&result))
+            let result = platform_result.map_err(AppError::from)?;
+            deferrals.note_result(&action, &result);
+            validate_change(request.action(), &result)
         }
-    };
+    });
 
     let step_duration = started.elapsed().as_millis() as u64;
     match outcome {
-        Ok(()) => Ok(ExtensionsResult {
+        // Отмену, которую запись отложила и пережила, называет сообщение шага.
+        Ok(((), warnings)) => Ok(ExtensionsResult {
             provider: Some(receipt.clone()),
             ok: true,
             provider_dispatched: false,
@@ -615,7 +626,7 @@ fn run_change(
                 target: request.target().to_owned(),
                 action: request.action().to_owned(),
                 ok: true,
-                message: None,
+                message: (!warnings.is_empty()).then(|| append_warnings(String::new(), &warnings)),
                 duration_ms: step_duration,
             }],
             duration_ms: started.elapsed().as_millis() as u64,
@@ -644,7 +655,7 @@ fn run_change(
 
 #[cfg(test)]
 mod tests {
-    use super::read_inventory;
+    use super::{read_inventory, ExtensionChangeRequest};
     use crate::platform::process::ProcessResult;
     use crate::platform::result::PlatformCommandResult;
     use crate::use_cases::request::{ExtensionInventoryRequest, ExtensionInventoryScope};
@@ -660,6 +671,117 @@ mod tests {
             platform_log_path: None,
             platform_log: None,
             platform_log_read_error: None,
+        }
+    }
+
+    /// Изменение состава через `ibcmd`, отложившее отмену: удача называет её в сообщении
+    /// шага, а отказ открывает ею свой текст, раньше слов `ibcmd`.
+    #[cfg(unix)]
+    #[test]
+    fn a_change_through_ibcmd_names_the_cancellation_it_deferred() {
+        use crate::platform::process::{DeferralWatch, HeldCommand};
+        use crate::use_cases::context::{CommandName, ExecutionContext};
+        use std::os::unix::fs::PermissionsExt;
+        use tokio_util::sync::CancellationToken;
+
+        for (exit_code, ok, wording) in [
+            (
+                0,
+                true,
+                "extension create completed successfully after cancellation request",
+            ),
+            (
+                17,
+                false,
+                "extension create ended after cancellation request",
+            ),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ibcmd = dir.path().join("ibcmd");
+            let held = HeldCommand::in_dir(dir.path());
+            std::fs::write(
+                &ibcmd,
+                format!(
+                    "#!/bin/sh\nargs=\"$*\"\n{}exit 0\n",
+                    held.script_branch("extension create", exit_code)
+                ),
+            )
+            .expect("ibcmd script");
+            std::fs::set_permissions(&ibcmd, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+            let config = config_with_ibcmd(dir.path(), &ibcmd);
+            let request = ExtensionChangeRequest::Create {
+                name: "Проба".to_owned(),
+                name_prefix: "Пр_".to_owned(),
+                synonym: None,
+                purpose: None,
+            };
+            let cancellation = CancellationToken::new();
+            let watch = DeferralWatch::default();
+            let operator = held.interrupt(cancellation.clone(), &watch);
+
+            let outcome = watch.during(|| {
+                super::change(
+                    &ExecutionContext::cli(CommandName::Extensions).with_cancellation(cancellation),
+                    &config,
+                    &request,
+                    false,
+                )
+            });
+            assert!(
+                operator.join().expect("operator thread"),
+                "the runner never logged that it deferred the cancellation"
+            );
+
+            let result = match outcome {
+                Ok(result) => result,
+                Err(failure) => failure.payload.expect("payload"),
+            };
+            let step = &result.steps[0];
+            assert_eq!(step.ok, ok, "{step:?}");
+            let message = step.message.as_deref().expect("step message");
+            let deferral = message
+                .find(wording)
+                .unwrap_or_else(|| panic!("the deferral is not named: {message}"));
+            if !ok {
+                let failure = message
+                    .find("platform extension create failed with exit code 17")
+                    .unwrap_or_else(|| panic!("the failure is not named: {message}"));
+                assert!(deferral < failure, "{message}");
+            }
+        }
+    }
+
+    /// Проект без наборов исходников: состав расширений меняет `ibcmd` из `tools.platform`.
+    #[cfg(unix)]
+    fn config_with_ibcmd(
+        root: &std::path::Path,
+        ibcmd: &std::path::Path,
+    ) -> crate::config::model::AppConfig {
+        use crate::config::model::{
+            AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, TestsConfig, ToolsConfig,
+        };
+        AppConfig {
+            base_path: root.to_path_buf(),
+            work_path: root.to_path_buf(),
+            format: SourceFormat::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
+            infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
+            source_sets: vec![],
+            build: BuildConfig::default(),
+            tools: ToolsConfig {
+                platform: PlatformToolConfig {
+                    path: Some(ibcmd.to_path_buf()),
+                    strict: false,
+                    version: None,
+                },
+                ..ToolsConfig::default()
+            },
+            mcp: Default::default(),
+            tests: TestsConfig::default(),
         }
     }
 

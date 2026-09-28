@@ -9,8 +9,8 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::platform::process::{
-    ProcessExecutionPolicy, ProcessInterruption, ProcessInterruptionAction,
-    ProcessInterruptionReason, ProcessInterruptionSafety,
+    ProcessExecutionPolicy, ProcessInterruption, ProcessInterruptionReason,
+    ProcessInterruptionSafety,
 };
 use crate::platform::secrets::render_masked_command;
 
@@ -531,10 +531,7 @@ impl InteractiveProcessExecutor {
                 let output = self.finish_prompt_wait(&mut stdout, &mut stderr)?;
                 return Ok(InteractiveCommandExecution {
                     output,
-                    interruption: observed_interruption.map(|reason| ProcessInterruption {
-                        reason,
-                        action: ProcessInterruptionAction::Deferred,
-                    }),
+                    interruption: observed_interruption.map(ProcessInterruption::deferred),
                 });
             }
 

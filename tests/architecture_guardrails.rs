@@ -1703,6 +1703,105 @@ fn a_host_port_record_is_read_in_one_place() {
     );
 }
 
+#[test]
+fn an_agent_deferral_is_read_in_one_place() {
+    // Корень проблемы (#317): `with_session` жил в двух копиях, и каждая брала отмену,
+    // которую агентская сессия отложила, только у удачи, — отказ после отложенной отмены
+    // терял её. Владелец один — `use_cases::agent_session`: его `with_session` и
+    // `run_critical` отдают этот факт и удаче, и отказу. Копия, которая читает сессию сама,
+    // ловится здесь под любым именем; копия, которая её не читает, — ниже, по критической
+    // команде.
+    const SESSION_DEFERRAL_READERS: &[&str] =
+        &[".deferred_interruption()", ".last_command_deferral()"];
+    let owner = repo_path("src/use_cases/agent_session.rs");
+    // Сессия сама объявляет эти чтения; её модуль — не читатель.
+    let session = repo_path("src/platform/agent.rs");
+    let owner_tokens = production_tokens(&owner);
+    for reader in SESSION_DEFERRAL_READERS {
+        assert!(
+            owner_tokens.contains(reader),
+            "use_cases::agent_session no longer reads `{reader}`: the guard must name the \
+             reader that replaced it"
+        );
+    }
+    let mut offenders = Vec::new();
+
+    for file in collect_rust_files(&repo_path("src")) {
+        if file == owner || file == session {
+            continue;
+        }
+        let production = production_tokens(&file);
+        for reader in SESSION_DEFERRAL_READERS {
+            if production.contains(reader) {
+                offenders.push(format!("{}: {reader}", file.display()));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these modules read the agent session's deferred cancellation on their own instead \
+         of going through use_cases::agent_session, which is the single owner:\n{}",
+        offenders.join("\n")
+    );
+
+    // Та же потеря без второго читателя: критическую команду отправили там, где отсрочку не
+    // читает никто. Отсрочку называют `run_critical` и сессия `with_session`, поэтому
+    // политику критической сценарии делают только в них; `restore-ib` идёт внутри
+    // `with_session`. Список может только сокращаться.
+    const CRITICAL_AGENT_COMMAND_SITES: &[&str] = &[
+        "src/use_cases/agent_session.rs",
+        "src/use_cases/infobase_export/agent.rs",
+    ];
+    let mut critical_sites = Vec::new();
+    for file in collect_rust_files(&repo_path("src/use_cases")) {
+        let relative = file
+            .strip_prefix(repo_path(""))
+            .expect("inside the repository")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if production_tokens(&file).contains(".critical()") {
+            critical_sites.push(relative);
+        }
+    }
+    let unexpected: Vec<&String> = critical_sites
+        .iter()
+        .filter(|site| !CRITICAL_AGENT_COMMAND_SITES.contains(&site.as_str()))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "these modules send a critical agent command where nobody reads its deferral; use \
+         agent_session::run_critical:\n{unexpected:?}"
+    );
+    let stale: Vec<&&str> = CRITICAL_AGENT_COMMAND_SITES
+        .iter()
+        .filter(|site| !critical_sites.iter().any(|found| found == *site))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "stale CRITICAL_AGENT_COMMAND_SITES entries, remove them: {stale:?}"
+    );
+
+    // Одну отсрочку помнят две защёлки: сессия целиком (её читает `with_session`) и
+    // последняя команда (её читает `run_critical`). Встретившись в одном сценарии, они
+    // назвали бы одну отмену дважды.
+    let doubled: Vec<String> = collect_rust_files(&repo_path("src/use_cases"))
+        .into_iter()
+        .filter(|file| *file != owner)
+        .filter(|file| {
+            let production = production_tokens(file);
+            production.contains("with_session(") && production.contains("run_critical(")
+        })
+        .map(|file| file.display().to_string())
+        .collect();
+    assert!(
+        doubled.is_empty(),
+        "these modules run `run_critical` and `with_session` together and would name one \
+         deferral twice:\n{}",
+        doubled.join("\n")
+    );
+}
+
 /// Токены вызова `.<call>` в том виде, в каком их печатает `syn`, без приёмника.
 fn cut_marker(call: &str) -> String {
     let expression: syn::Expr =

@@ -111,7 +111,10 @@
   `make`, `infobase create` и при подготовке расширения-инструмента предела не имеет.
 - Отмену проверяют между шагами. Процесс ведёт себя по классу
   ([`context.rs`](../../src/use_cases/context.rs)): снимается сразу; мягко — SIGTERM группе,
-  затем SIGKILL; критический — дорабатывает, итог успешен с отложенным прерыванием.
+  затем SIGKILL; критический — дорабатывает, итог успешен с отложенным прерыванием. У
+  `upload`, `infobase restore`, `push` и `extensions` ответ называет отложенное и тогда,
+  когда команда потом не удалась или остановилась на следующей безопасной точке; у `push`
+  и `extensions` его учёт ведёт [`interruption.rs`](../../src/use_cases/interruption.rs).
 - Запись в базу — критическая фаза, у `/RestoreIB` тоже. `Cancelled` и `TimedOut` ставятся,
   только когда процесс действительно остановлен; MCP в работе ждёт конечного состояния.
 - Отмену узнаёт сама ошибка: платформа кладёт в неё, получил ли исполнитель работу, а
@@ -124,7 +127,8 @@
 [запись в базу — критическая фаза](../rules/use-cases/a-database-write-is-a-critical-phase.md),
 [отмена и истечение предела означают состоявшийся исход](../rules/use-cases/an-interruption-status-means-a-terminal-outcome.md),
 [отмена отвечает отменой](../rules/wire/a-cancellation-answers-as-a-cancellation.md),
-[прерывание на безопасной точке записано](../rules/use-cases/an-interruption-at-a-safe-point-is-recorded.md).
+[прерывание на безопасной точке записано](../rules/use-cases/an-interruption-at-a-safe-point-is-recorded.md),
+[отложенная отмена переживает следующий отказ](../rules/use-cases/a-deferred-cancellation-outlives-a-later-failure.md).
 
 ### 8.8 Публикация с заменой
 

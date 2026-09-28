@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use crate::platform::process::{
     ProcessExecutionPolicy, ProcessInterruptionReason, ProcessInterruptionSafety, WorkGiven,
+    CRITICAL_INTERRUPTION_DEFERRED,
 };
 
 use russh::client;
@@ -27,7 +28,7 @@ use russh::ChannelMsg;
 use serde::Deserialize;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::platform::process::{ManagedSpawnMode, ProcessRequest, ProcessRunner};
 use crate::platform::sftp::{self, SftpClient, SftpError};
@@ -50,6 +51,8 @@ pub const BASE_DIR_MAP_FILE: &str = "agentbasedir.json";
 const RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 const WAIT_SLICE: Duration = Duration::from_millis(200);
+/// Строка журнала: отмена бросила ответ команды, которую не обязаны дожидаться.
+const AGENT_COMMAND_ABANDONED: &str = "agent command abandoned: the command was cancelled";
 
 /// Интервал keepalive: даёт каналу трафик, на котором TCP способен заметить мёртвый шлюз.
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
@@ -157,9 +160,6 @@ pub struct AgentMessage {
 #[derive(Debug, Clone, Default)]
 pub struct AgentReply {
     pub messages: Vec<AgentMessage>,
-    /// Прерывание, пришедшее в критической фазе и отложенное до её исхода: команда
-    /// доведена, но вызывающий обязан сказать об этом в результате.
-    pub deferred_interruption: Option<ProcessInterruptionReason>,
 }
 
 impl AgentMessage {
@@ -285,6 +285,11 @@ pub enum AgentError {
         delivered: bool,
     },
 
+    /// Команда запроса, которую после отмены агенту не отдали: работы он не получил, и в
+    /// базе она ничего не начинала.
+    #[error("agent command '{command}' was not sent: the command was cancelled")]
+    NotSent { command: String },
+
     #[error("agent reply is not a JSON message array: {detail}; head: {head}")]
     InvalidReply { detail: String, head: String },
 
@@ -381,7 +386,10 @@ pub struct AgentSessionRequest {
 pub struct WaitPolicy {
     pub deadline: Option<Instant>,
     pub cancellation: CancellationToken,
-    pub safety: ProcessInterruptionSafety,
+    /// Класс безопасности меняет только сама платформа (`critical`, `cleanup`): критическую
+    /// политику сценарий берёт у `critical()` там, где отсрочку потом называют
+    /// (`agent_session::run_critical`, команды внутри `with_session`).
+    safety: ProcessInterruptionSafety,
     /// Куда отметить, что команда запроса отправлена агенту. Служебные команды сессии —
     /// подключение к базе, закрытие — идут без отметки, и снимает её сама платформа
     /// (`without_work`): снаружи поле не видно.
@@ -597,6 +605,8 @@ pub struct AgentSession {
     /// Прерывание, защёлкнутое в критической фазе за время сессии; первое побеждает.
     /// Сессия помнит его, потому что результат платформы собирают после её закрытия.
     deferred_interruption: Option<ProcessInterruptionReason>,
+    /// Прерывание, которое отложила последняя команда, — и когда её ответ не дочитан.
+    command_deferral: Option<ProcessInterruptionReason>,
 }
 
 impl AgentSession {
@@ -709,6 +719,7 @@ impl AgentSession {
             transcript,
             ended: false,
             deferred_interruption: None,
+            command_deferral: None,
         };
         // Режим ответа и подключение к базе — служебные команды открытия сессии: работы
         // команды они не отмечают.
@@ -721,7 +732,17 @@ impl AgentSession {
     /// Одна команда — последовательность JSON-массивов до первого с итоговым
     /// сообщением: долгие команды шлют прогресс и журнал отдельными массивами
     /// (замер 15.09.2026: `load-config-from-files` — `progress`, `progress`, …, `success`).
+    /// Команду запроса после отмены не отправляет: отказ `NotSent`.
     pub fn run(&mut self, command: &str, policy: &WaitPolicy) -> Result<AgentReply, AgentError> {
+        self.command_deferral = None;
+        // Команду запроса после отмены агенту не отдают, как раннер не запускает процесс:
+        // отмена до работы — безопасная точка. Служебные команды — открытие, закрытие —
+        // идут и после неё, иначе сессию было бы не закрыть.
+        if policy.work.is_some() && policy.cancellation.is_cancelled() {
+            return Err(AgentError::NotSent {
+                command: command.to_owned(),
+            });
+        }
         self.send(command)?;
         // Команда ушла агенту: это работа команды, чем бы она ни кончилась. Служебные
         // команды сессии приходят без отметки.
@@ -729,9 +750,8 @@ impl AgentSession {
             work.mark_work_given();
         }
         let mut messages = Vec::new();
-        let mut deferred_interruption = None;
         loop {
-            let raw = self.read_reply(command, policy, &mut deferred_interruption)?;
+            let raw = self.read_reply(command, policy)?;
             let batch: Vec<AgentMessage> =
                 serde_json::from_slice(&raw).map_err(|error| AgentError::InvalidReply {
                     detail: error.to_string(),
@@ -743,15 +763,16 @@ impl AgentSession {
                 break;
             }
         }
-        if let Some(reason) = deferred_interruption {
-            self.deferred_interruption.get_or_insert(reason);
-        }
-        let reply = AgentReply {
-            messages,
-            deferred_interruption,
-        };
+        let reply = AgentReply { messages };
         debug!(command, messages = reply.messages.len(), "agent replied");
         Ok(reply)
+    }
+
+    /// Прерывание, которое отложила последняя команда, — и тогда, когда её ответ не
+    /// дочитан или оказался отказом. Читают его сразу после `run`: следующая команда его
+    /// сбрасывает.
+    pub fn last_command_deferral(&self) -> Option<ProcessInterruptionReason> {
+        self.command_deferral
     }
 
     /// Отпускает чужой агент, не трогая его процесса — у чужого процесса раннер не хозяин:
@@ -1099,14 +1120,19 @@ impl AgentSession {
         self.deferred_interruption
     }
 
+    /// Критическая фаза откладывает отмену или истёкший срок, и сессия помнит это в тот же
+    /// миг: ответ, который потом не дочитан, этого факта не теряет. Первое побеждает.
+    fn defer(&mut self, command: &str, reason: ProcessInterruptionReason) {
+        if self.command_deferral.is_none() {
+            warn!(command, reason = ?reason, "{}", CRITICAL_INTERRUPTION_DEFERRED);
+        }
+        self.command_deferral.get_or_insert(reason);
+        self.deferred_interruption.get_or_insert(reason);
+    }
+
     /// Читает канал до первого полного JSON-массива. Всё до открывающей скобки — не
     /// ответ (баннер или приглашение до JSON-режима) и записывается только в журнал.
-    fn read_reply(
-        &mut self,
-        command: &str,
-        policy: &WaitPolicy,
-        deferred: &mut Option<ProcessInterruptionReason>,
-    ) -> Result<Vec<u8>, AgentError> {
+    fn read_reply(&mut self, command: &str, policy: &WaitPolicy) -> Result<Vec<u8>, AgentError> {
         let started = Instant::now();
         // Критическая фаза меняет базу, и бросать её на полпути дороже, чем ждать
         // (`DEC.2026-04-20.A-MUTATING-CRITICAL-PHASE-IS-NOT-HARD-KILLED`): отмена и
@@ -1133,13 +1159,18 @@ impl AgentSession {
             }
             if policy.cancellation.is_cancelled() {
                 if !critical {
+                    // Служебные команды уборки тоже бросаются по отмене, но строка журнала —
+                    // о брошенной работе команды.
+                    if policy.work.is_some() {
+                        info!(command, "{}", AGENT_COMMAND_ABANDONED);
+                    }
                     // Ответ читается после отправки: команда запроса уже работа команды.
                     return Err(AgentError::Cancelled {
                         command: command.to_owned(),
                         delivered: policy.work.is_some(),
                     });
                 }
-                deferred.get_or_insert(ProcessInterruptionReason::Cancelled);
+                self.defer(command, ProcessInterruptionReason::Cancelled);
             }
             let wait = match policy.deadline {
                 Some(deadline) => {
@@ -1152,7 +1183,7 @@ impl AgentSession {
                             })
                         }
                         (true, true) => {
-                            deferred.get_or_insert(ProcessInterruptionReason::TimedOut);
+                            self.defer(command, ProcessInterruptionReason::TimedOut);
                             WAIT_SLICE
                         }
                         (false, _) => remaining.min(WAIT_SLICE),
@@ -1521,20 +1552,14 @@ mod tests {
             r#"[{"type":"log","message":"Ошибка: всё плохо"},{"type":"success","message":""}]"#,
         )
         .expect("parse");
-        let reply = AgentReply {
-            messages: reply,
-            deferred_interruption: None,
-        };
+        let reply = AgentReply { messages: reply };
         assert!(reply.outcome().is_ok());
 
         let reply: Vec<AgentMessage> = serde_json::from_str(
             r#"[{"type":"error","error-type":"InfoBaseNotFound","message":"Успешно"}]"#,
         )
         .expect("parse");
-        let reply = AgentReply {
-            messages: reply,
-            deferred_interruption: None,
-        };
+        let reply = AgentReply { messages: reply };
         match reply.outcome() {
             Err(AgentError::Command { error_type, .. }) => {
                 assert_eq!(error_type, AgentErrorType::InfoBaseNotFound)
@@ -1614,7 +1639,6 @@ mod tests {
         .expect("message");
         assert!(!notice.is_terminal());
         let reply = AgentReply {
-            deferred_interruption: None,
             messages: serde_json::from_str(
                 r#"[{"message":"Принятие изменений...","type":"log"},{"body":"9d88","type":"generation-id"},{"message":"Обновление конфигурации базы данных успешно завершено","type":"log"},{"type":"success"}]"#,
             )
@@ -1627,7 +1651,6 @@ mod tests {
     #[test]
     fn an_extension_properties_message_alone_ends_the_reply() {
         let reply = AgentReply {
-            deferred_interruption: None,
             messages: serde_json::from_str(
                 r#"[{"type":"extension-properties","body":{"name":"Зонд"}}]"#,
             )

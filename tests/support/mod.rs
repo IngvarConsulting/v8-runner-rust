@@ -115,14 +115,20 @@ pub fn interruptible_stub(started: &Path, release: &Path) -> String {
     )
 }
 
-/// Шлёт раннеру SIGTERM и ждёт его выхода; `true` — вышел вовремя.
+/// Шлёт процессу SIGTERM — сигнал, которым оператор отменяет команду.
 #[cfg(unix)]
-pub fn terminate_and_wait(runner: &mut std::process::Child, timeout: Duration) -> bool {
+pub fn send_sigterm(process: &std::process::Child) {
     let signalled = Command::new("kill")
-        .args(["-TERM", &runner.id().to_string()])
+        .args(["-TERM", &process.id().to_string()])
         .status()
         .expect("kill");
     assert!(signalled.success(), "SIGTERM was not delivered");
+}
+
+/// Шлёт раннеру SIGTERM и ждёт его выхода; `true` — вышел вовремя.
+#[cfg(unix)]
+pub fn terminate_and_wait(runner: &mut std::process::Child, timeout: Duration) -> bool {
+    send_sigterm(runner);
     wait_until(timeout, Duration::from_millis(20), || {
         runner.try_wait().expect("wait runner").is_some()
     })
@@ -231,3 +237,82 @@ pub async fn wait_for_line_count(path: &Path, expected: usize) {
 /// Поддельный процесс платформы внутри него помечен `cfg(unix)` поимённо — он нужен
 /// только управляемому режиму.
 pub mod fake_agent;
+
+/// Строка журнала, с которой раннер откладывает прерывание критической фазы.
+pub const CRITICAL_INTERRUPTION_DEFERRED: &str =
+    "interruption requested during critical process phase; waiting for terminal outcome";
+
+/// Строка журнала, с которой раннер бросает ответ некритической команды агента по отмене.
+pub const AGENT_COMMAND_ABANDONED: &str = "agent command abandoned: the command was cancelled";
+
+/// Строка журнала, которой раннер отмечает, что прерывание оператора дошло до команды.
+pub const OPERATOR_INTERRUPT_RECEIVED: &str =
+    "operator interrupt received; the command is cancelled";
+
+/// Раннер, которого прерывают посреди работы, удержанной двойником: ждёт `started`, шлёт
+/// SIGTERM, ждёт в журнале действий строку `logged` — раннер уже видел сигнал, — отпускает
+/// двойника (`release`) и ждёт выхода. Порядок задают знаки, а не часы. Возвращает код
+/// выхода и конверт.
+#[cfg(unix)]
+pub fn interrupt_at_hold(
+    mut command: Command,
+    action_log: &Path,
+    started: &Path,
+    release: &Path,
+    logged: &str,
+) -> (i32, serde_json::Value) {
+    use std::io::Read;
+
+    /// Отпускает двойника и тогда, когда тест упал раньше: иначе тот ждал бы полминуты.
+    struct ReleaseOnDrop<'a>(&'a Path);
+    impl Drop for ReleaseOnDrop<'_> {
+        fn drop(&mut self) {
+            let _ = fs::write(self.0, "");
+        }
+    }
+
+    let _release = ReleaseOnDrop(release);
+    let mut runner = RunnerGuard(
+        command
+            .env("V8TR_ACTION_LOG_FILE", action_log)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn runner"),
+    );
+    // Конверт читается в своём потоке: большой ответ не упрётся в буфер канала, пока тест
+    // ждёт выхода раннера.
+    let mut stdout = runner.0.stdout.take().expect("piped stdout");
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        stdout.read_to_string(&mut text).map(|_| text)
+    });
+    let timeout = Duration::from_secs(30);
+    assert!(
+        wait_for_file(started, timeout),
+        "the held work never started"
+    );
+    send_sigterm(&runner.0);
+    let seen = wait_until(timeout, Duration::from_millis(20), || {
+        fs::read_to_string(action_log).is_ok_and(|log| log.contains(logged))
+    });
+    fs::write(release, "").expect("release the held work");
+    assert!(
+        seen,
+        "the runner never logged `{logged}`: {}",
+        fs::read_to_string(action_log).unwrap_or_default()
+    );
+    // Оборванная сессия оставляет раннеру ждать своего агента до конца грации закрытия.
+    let exited = wait_until(Duration::from_secs(60), Duration::from_millis(20), || {
+        runner.0.try_wait().expect("wait runner").is_some()
+    });
+    assert!(exited, "the runner did not exit after the release");
+    let stdout = reader
+        .join()
+        .expect("stdout reader")
+        .expect("runner stdout");
+    let code = runner.0.wait().expect("exit status").code().unwrap_or(-1);
+    let payload = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("no json envelope: {error}: {stdout}"));
+    (code, payload)
+}
