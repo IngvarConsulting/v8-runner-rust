@@ -118,7 +118,7 @@ window.RUNNER_DATA = (function () {
       cmd: function (ctx) { return 'v8-runner init'; },
       applies: function () { return null; },
       today: function (ctx) { return { chain: [], config: [], note: 'платформа не нужна; тип каждого набора определяется по содержимому файлов, не по именам каталогов' }; },
-      target: function (ctx) { return this.today(ctx); }
+      target: function (ctx) { return { chain: [], config: [], note: 'платформа не нужна; тип каждого набора определяется по содержимому файлов, не по именам каталогов. В проекте, где v8project.yaml уже есть, пишет только местный слой; с --infobase перенаправляет origin и сохраняет прежнюю секцию под именем upstream' }; }
     },
     {
       id: 'clone', verb: 'clone', title: 'Завести проект из существующей базы',
@@ -146,8 +146,8 @@ window.RUNNER_DATA = (function () {
       },
       target: function (ctx) {
         if (ctx.target === 'standalone') return { kind: 'target', why: 'базу автономного сервера создают до его запуска, на его машине', fix: 'ibcmd server config init, затем ibcmd infobase create --load|--import|--restore; раннер подключается к уже работающему шлюзу' };
-        if (ctx.target === 'cluster') return { chain: [P.designer, P.rac], config: ['connection', 'dbms.*', 'cluster.user — если в кластере заведены администраторы'], note: 'CREATEINFOBASE с клиент-серверной строкой: регистрация в кластере и CrSQLDB=Y одной командой; rac — запасной путь' };
-        return { chain: [P.ibcmd, P.designer], config: ['connection'], note: 'ibcmd создаёт файловую базу сразу с конфигурацией из исходников (--import); память о базе записывается сразу, первый push идёт как обычный' };
+        if (ctx.target === 'cluster') return { chain: [P.designer, P.rac], config: ['connection', 'dbms.*', 'cluster.user — если в кластере заведены администраторы'], note: 'CREATEINFOBASE с клиент-серверной строкой: регистрация в кластере и CrSQLDB=Y одной командой; rac — запасной путь. База создаётся пустой, первый push полный. С --from — копия другой базы по шаблону .dt; источник должен быть свободен' };
+        return { chain: [P.ibcmd, P.designer], config: ['connection'], note: 'ibcmd создаёт файловую базу сразу с основной конфигурацией из исходников (--import); в память записывается этот набор, первый push досылает расширения. С --from — копия другой базы: её снимок и --restore; источник должен быть свободен' };
       }
     },
     {
