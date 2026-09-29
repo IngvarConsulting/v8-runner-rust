@@ -1183,15 +1183,15 @@ mod tests {
     };
     #[cfg(unix)]
     use crate::platform::process::HeldCommand;
-    use crate::platform::process::{DeferralWatch, ProcessResult};
+    use crate::platform::process::ProcessResult;
     use crate::platform::result::PlatformCommandResult;
     use crate::use_cases::context::{CommandName, ExecutionContext};
     use crate::use_cases::request::LoadRequest;
     use crate::use_cases::result::UseCaseErrorKind;
     use std::fs;
     use std::path::{Path, PathBuf};
+    #[cfg(unix)]
     use std::thread;
-    use std::time::{Duration, Instant};
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
 
@@ -1852,7 +1852,8 @@ mod tests {
     /// Отмена, пришедшая во время загрузки, её не рвёт: пакет догружается, ответ называет
     /// отложенное прерывание, и команда останавливается на безопасной точке перед обновлением
     /// конфигурации базы данных. Порядок задан рукопожатиями: отмена приходит, когда загрузка
-    /// уже идёт, а загрузка кончается, когда раннер уже отложил отмену (`DeferralWatch`).
+    /// уже идёт, а загрузка кончается, когда раннер уже отложил отмену
+    /// (`HeldCommand::interrupt_during`).
     #[cfg(unix)]
     #[test]
     fn execute_reports_cancelled_status_at_update_db_cfg_safe_point() {
@@ -1874,11 +1875,9 @@ mod tests {
             extension: None,
         };
         let cancellation = CancellationToken::new();
-        let watch = DeferralWatch::default();
-        let operator = held.interrupt(cancellation.clone(), &watch);
 
-        let failure = watch
-            .during(|| {
+        let failure = held
+            .interrupt_during(cancellation.clone(), || {
                 execute(
                     &ExecutionContext::cli(CommandName::Load).with_cancellation(cancellation),
                     &config,
@@ -1886,10 +1885,6 @@ mod tests {
                 )
             })
             .expect_err("the command stops before update_db_cfg");
-        assert!(
-            operator.join().expect("operator thread"),
-            "the runner never logged that it deferred the cancellation"
-        );
         assert_eq!(
             failure.error.kind(),
             UseCaseErrorKind::Cancelled(crate::support::error::CancelledAt::Boundary)
@@ -1955,11 +1950,9 @@ mod tests {
             extension: None,
         };
         let cancellation = CancellationToken::new();
-        let watch = DeferralWatch::default();
-        let operator = held.interrupt(cancellation.clone(), &watch);
 
-        let failure = watch
-            .during(|| {
+        let failure = held
+            .interrupt_during(cancellation.clone(), || {
                 execute(
                     &ExecutionContext::cli(CommandName::Load).with_cancellation(cancellation),
                     &config,
@@ -1967,10 +1960,6 @@ mod tests {
                 )
             })
             .expect_err("the load failed");
-        assert!(
-            operator.join().expect("operator thread"),
-            "the runner never logged that it deferred the cancellation"
-        );
 
         assert_eq!(failure.error.kind(), UseCaseErrorKind::Platform);
         let payload = failure.payload.expect("payload");
@@ -2012,23 +2001,22 @@ mod tests {
     }
 
     /// Отменяет команду, когда подставная программа отметилась, что запущена, и отпускает её.
+    /// Поток отвечает, дождался ли он отметки.
     #[cfg(unix)]
     fn cancel_once_started(
-        started: PathBuf,
+        started: &Path,
         release: PathBuf,
-    ) -> (CancellationToken, thread::JoinHandle<()>) {
+    ) -> (CancellationToken, thread::JoinHandle<bool>) {
         let cancellation = CancellationToken::new();
-        let operator = {
-            let cancellation = cancellation.clone();
-            thread::spawn(move || {
-                let deadline = Instant::now() + Duration::from_secs(30);
-                while !started.exists() && Instant::now() < deadline {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                cancellation.cancel();
-                fs::write(&release, "").expect("release");
-            })
-        };
+        let canceller =
+            crate::platform::process::cancel_when_started(started, cancellation.clone());
+        let operator = thread::spawn(move || {
+            let began = canceller
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            fs::write(&release, "").expect("release");
+            began
+        });
         (cancellation, operator)
     }
 
@@ -2055,7 +2043,7 @@ mod tests {
             settings_path: None,
             extension: Some("ExistingExt".to_owned()),
         };
-        let (cancellation, operator) = cancel_once_started(started, release);
+        let (cancellation, operator) = cancel_once_started(&started, release);
 
         let failure = execute(
             &ExecutionContext::cli(CommandName::Load).with_cancellation(cancellation),
@@ -2063,7 +2051,10 @@ mod tests {
             &request,
         )
         .expect_err("the cancelled probe stops the command");
-        operator.join().expect("operator");
+        assert!(
+            operator.join().expect("operator"),
+            "the command never marked its start"
+        );
 
         assert_cancelled_probe(failure);
     }
@@ -2089,7 +2080,7 @@ mod tests {
             extension: None,
         };
         fs::write(root.join("merge.xml"), "<settings/>").expect("settings");
-        let (cancellation, operator) = cancel_once_started(started, release);
+        let (cancellation, operator) = cancel_once_started(&started, release);
 
         let failure = execute(
             &ExecutionContext::cli(CommandName::Load).with_cancellation(cancellation),
@@ -2097,7 +2088,10 @@ mod tests {
             &request,
         )
         .expect_err("the cancelled probe stops the command");
-        operator.join().expect("operator");
+        assert!(
+            operator.join().expect("operator"),
+            "the command never marked its start"
+        );
 
         assert_cancelled_probe(failure);
     }

@@ -1140,20 +1140,21 @@ fn render_command(request: &ProcessRequest) -> String {
 }
 
 /// Тестовая отметка: раннер отложил прерывание критического процесса. Тест ждёт её, а не
-/// отсчёта времени, прежде чем отпустить подставной процесс.
-#[cfg(test)]
+/// отсчёта времени, прежде чем отпустить подставной процесс. Снаружи модуля её не видно:
+/// рукопожатие с ней ведёт [`HeldCommand::interrupt_during`].
+#[cfg(all(test, unix))]
 #[derive(Clone, Default)]
-pub(crate) struct DeferralWatch(std::sync::Arc<std::sync::atomic::AtomicBool>);
+struct DeferralWatch(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl DeferralWatch {
-    pub(crate) fn observed(&self) -> bool {
+    fn observed(&self) -> bool {
         self.0.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Выполняет `operation` на этом потоке и отмечает строку журнала об отложенном
     /// прерывании. Процесс ждёт раннер на вызывающем потоке, поэтому подписчика хватает.
-    pub(crate) fn during<T>(&self, operation: impl FnOnce() -> T) -> T {
+    fn during<T>(&self, operation: impl FnOnce() -> T) -> T {
         let subscriber = tracing_subscriber::fmt()
             .with_writer(self.clone())
             .with_max_level(tracing::Level::WARN)
@@ -1163,7 +1164,7 @@ impl DeferralWatch {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl std::io::Write for DeferralWatch {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         if String::from_utf8_lossy(buf).contains(CRITICAL_INTERRUPTION_DEFERRED) {
@@ -1177,7 +1178,7 @@ impl std::io::Write for DeferralWatch {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for DeferralWatch {
     type Writer = Self;
 
@@ -1198,10 +1199,13 @@ pub(crate) struct HeldCommand {
 #[cfg(all(test, unix))]
 impl HeldCommand {
     pub(crate) fn in_dir(dir: &std::path::Path) -> Self {
-        Self {
-            started: dir.join("held-started"),
-            release: dir.join("held-release"),
-        }
+        Self::with_markers(dir.join("held-started"), dir.join("held-release"))
+    }
+
+    /// Команда скрипта, который тест пишет целиком: начавшись, она создаёт `started` и ждёт,
+    /// пока не появится `release`.
+    pub(crate) fn with_markers(started: PathBuf, release: PathBuf) -> Self {
+        Self { started, release }
     }
 
     /// Ветка sh-скрипта с аргументами в `$args`: команда, в которой есть `pattern`,
@@ -1222,24 +1226,40 @@ impl HeldCommand {
         )
     }
 
-    /// Оператор: дождаться начала команды, отменить, дождаться, пока раннер отложит отмену,
-    /// и отпустить команду. Поток отвечает, видел ли `watch` отложенную отмену.
-    pub(crate) fn interrupt(
+    /// Выполняет `run` на этом потоке, пока оператор отменяет команду: дождаться её начала,
+    /// отменить `cancellation`, дождаться, пока раннер отложит отмену, и отпустить команду.
+    /// Отсрочку раннер должен записать на этом же потоке — отметку слушает подписчик потока.
+    /// Тест падает, если команда не началась или раннер отсрочки так и не записал.
+    #[track_caller]
+    pub(crate) fn interrupt_during<T>(
         &self,
         cancellation: CancellationToken,
-        watch: &DeferralWatch,
-    ) -> std::thread::JoinHandle<bool> {
-        let started = self.started.clone();
-        let release = self.release.clone();
-        let watch = watch.clone();
-        std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + Duration::from_secs(30);
-            wait_until(deadline, || started.exists());
-            cancellation.cancel();
-            let deferred = wait_until(deadline, || watch.observed());
-            std::fs::write(&release, "").expect("release the held command");
-            deferred
-        })
+        run: impl FnOnce() -> T,
+    ) -> T {
+        let watch = DeferralWatch::default();
+        let operator = {
+            let started = self.started.clone();
+            let release = self.release.clone();
+            let watch = watch.clone();
+            std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                let began = wait_until(deadline, || started.exists());
+                cancellation.cancel();
+                let deferred = wait_until(deadline, || watch.observed());
+                std::fs::write(&release, "").expect("release the held command");
+                (began, deferred)
+            })
+        };
+        let outcome = watch.during(run);
+        let (began, deferred) = operator
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        assert!(began, "the held command never started");
+        assert!(
+            deferred,
+            "the runner never logged that it deferred the cancellation"
+        );
+        outcome
     }
 
     /// Оператор для некритической команды — [`cancel_when_started`] по отметке её начала.
@@ -1254,7 +1274,7 @@ impl HeldCommand {
 /// Оператор теста: дождаться, пока команда отметится файлом `started`, и отменить. Команду он
 /// не отпускает — отмена снимает её сама. Поток отвечает, дождался ли он отметки.
 #[cfg(all(test, unix))]
-fn cancel_when_started(
+pub(crate) fn cancel_when_started(
     started: &std::path::Path,
     cancellation: CancellationToken,
 ) -> std::thread::JoinHandle<bool> {

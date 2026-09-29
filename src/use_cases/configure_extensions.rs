@@ -381,9 +381,9 @@ mod tests {
         SourceSetPurpose, TestsConfig, ToolsConfig,
     };
     use crate::platform::ibcmd::IbcmdError;
-    use crate::platform::process::ProcessError;
     #[cfg(unix)]
-    use crate::platform::process::{DeferralWatch, HeldCommand};
+    use crate::platform::process::HeldCommand;
+    use crate::platform::process::ProcessError;
     use crate::support::error::AppError;
     use crate::use_cases::context::{CommandName, ExecutionContext};
     use crate::use_cases::request::ConfigureExtensionsRequest;
@@ -723,25 +723,19 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[track_caller]
     fn safety_update_interrupted_while_held(
         config: &AppConfig,
         held: &HeldCommand,
     ) -> crate::use_cases::result::UseCaseResult<crate::domain::extensions::ExtensionsResult> {
         let cancellation = CancellationToken::new();
-        let watch = DeferralWatch::default();
-        let operator = held.interrupt(cancellation.clone(), &watch);
-        let outcome = watch.during(|| {
+        held.interrupt_during(cancellation.clone(), || {
             execute(
                 &ExecutionContext::cli(CommandName::Extensions).with_cancellation(cancellation),
                 config,
                 &ConfigureExtensionsRequest::default(),
             )
-        });
-        assert!(
-            operator.join().expect("operator thread"),
-            "the runner never logged that it deferred the cancellation"
-        );
-        outcome
+        })
     }
 
     #[cfg(unix)]

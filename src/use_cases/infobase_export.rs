@@ -2075,9 +2075,10 @@ mod tests {
     ///
     /// Он кладёт `started`, ждёт файла `release` (не дольше 30 с) и кладёт `finished`;
     /// сигнал снятия он записывает в `terminated`. Оператор отменяет команду, когда запись
-    /// уже идёт, и отпускает двойника на полсекунды позже: мягкое снятие за это время
-    /// дошло бы до процесса, а критическая фаза его не посылает.
+    /// уже идёт, и отпускает двойника, когда раннер уже отложил отмену: мягкое снятие дошло
+    /// бы до процесса раньше, а критическая фаза его не посылает.
     #[cfg(unix)]
+    #[track_caller]
     fn restore_cancelled_while_the_platform_writes(
         exit_code: i32,
     ) -> (
@@ -2137,30 +2138,13 @@ mod tests {
         let context = ExecutionContext::cli(CommandName::InfobaseRestore)
             .with_cancellation(cancellation.clone());
         // Конфигуратор отпускают, когда раннер уже отложил отмену, а не через отсчёт времени.
-        let watch = crate::platform::process::DeferralWatch::default();
-        let operator = {
-            let root = root.clone();
-            let watch = watch.clone();
-            std::thread::spawn(move || {
-                let deadline = Instant::now() + Duration::from_secs(30);
-                while !root.join("started").exists() && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                cancellation.cancel();
-                while !watch.observed() && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                std::fs::write(root.join("release"), "").expect("release");
-                watch.observed()
-            })
-        };
-
-        let outcome = watch
-            .during(|| super::execute_infobase_restore(&context, &config, &request, &prepared));
-        assert!(
-            operator.join().expect("operator thread"),
-            "the runner never logged that it deferred the cancellation"
+        let held = crate::platform::process::HeldCommand::with_markers(
+            root.join("started"),
+            root.join("release"),
         );
+        let outcome = held.interrupt_during(cancellation, || {
+            super::execute_infobase_restore(&context, &config, &request, &prepared)
+        });
         (dir, outcome)
     }
 

@@ -1163,8 +1163,7 @@ mod tests {
     #[test]
     fn a_create_that_deferred_a_cancel_keeps_its_result_when_the_question_is_refused() {
         use crate::platform::process::{
-            DeferralWatch, HeldCommand, ProcessError, ProcessInterruption,
-            ProcessInterruptionReason,
+            HeldCommand, ProcessError, ProcessInterruption, ProcessInterruptionReason,
         };
 
         let dir = tempdir().expect("tempdir");
@@ -1187,16 +1186,9 @@ mod tests {
             &runner as &dyn ProcessRunner,
             critical_policy(&cancellation),
         );
-        let watch = DeferralWatch::default();
-        let operator = held.interrupt(cancellation, &watch);
-
-        let outcome = watch
-            .during(|| dsl.ensure_infobase_create())
+        let outcome = held
+            .interrupt_during(cancellation, || dsl.ensure_infobase_create())
             .expect("the create ran");
-        assert!(
-            operator.join().expect("operator thread"),
-            "the runner never logged that it deferred the cancellation"
-        );
 
         assert!(
             matches!(

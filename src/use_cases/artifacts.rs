@@ -1827,16 +1827,8 @@ mod tests {
         let config = sample_config(&base, &work, &script, SourceFormat::Designer);
         let request = cf_request(&dir.path().join("dist/release.cf").display().to_string());
         let cancellation = CancellationToken::new();
-        let operator = {
-            let cancellation = cancellation.clone();
-            std::thread::spawn(move || {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-                while !started.exists() && std::time::Instant::now() < deadline {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                cancellation.cancel();
-            })
-        };
+        let operator =
+            crate::platform::process::cancel_when_started(&started, cancellation.clone());
 
         let failure = super::execute(
             &ExecutionContext::cli(CommandName::Artifacts).with_cancellation(cancellation),
@@ -1844,7 +1836,10 @@ mod tests {
             &request,
         )
         .expect_err("the export was cancelled");
-        operator.join().expect("operator");
+        assert!(
+            operator.join().expect("operator"),
+            "the command never marked its start"
+        );
 
         assert_eq!(
             failure.error.kind(),

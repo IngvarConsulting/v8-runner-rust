@@ -2013,6 +2013,147 @@ fn the_deferral_guard_checks_each_critical_phase() {
     );
 }
 
+#[test]
+fn a_cancel_test_operator_lives_in_the_process_module() {
+    // Корень проблемы: тесты отмены сами собирали оператора — поток, который ждёт, пока
+    // подставная программа отметит своё начало файлом, и отменяет команду. Семь повторяли
+    // обвязку вокруг прежнего `HeldCommand::interrupt`, четыре писали поток оператора сами.
+    // Владелец один — `src/platform/process.rs`: `HeldCommand::interrupt_during` для
+    // критической команды и `cancel_when_started` для некритической. `DeferralWatch` вне
+    // модуля не видно, так что оператора, который ждёт отметку отложенной отмены, в другом
+    // модуле не собрать. Здесь ловится цикл `while` или `loop` в тестовом коде, который
+    // спрашивает, есть ли файл, — в условии или в теле, как бы ни звались файл и срок. Не
+    // видит: цикл `for` с выходом по отметке, ожидание, которое файла не спрашивает, и
+    // тестовый модуль в отдельном файле (`#[cfg(test)] mod x;`).
+    let owner = repo_path("src/platform/process.rs");
+    let owner_file = parse_rust_file(&owner);
+    let free_helper = owner_file.items.iter().any(|item| {
+        matches!(item, syn::Item::Fn(function) if function.sig.ident == "cancel_when_started")
+    });
+    let held_helper = owner_file.items.iter().any(|item| match item {
+        syn::Item::Impl(block) => {
+            matches!(&*block.self_ty, syn::Type::Path(path) if path.path.is_ident("HeldCommand"))
+                && block.items.iter().any(|inner| {
+                    matches!(inner, syn::ImplItem::Fn(method) if method.sig.ident == "interrupt_during")
+                })
+        }
+        _ => false,
+    });
+    assert!(
+        free_helper && held_helper,
+        "src/platform/process.rs no longer has the free `cancel_when_started` or \
+         `HeldCommand::interrupt_during`: the guard must name what replaced them"
+    );
+
+    let offenders: Vec<String> = collect_rust_files(&repo_path("src"))
+        .into_iter()
+        .filter(|file| *file != owner)
+        .filter(|file| test_code_polls_a_file(&parse_rust_file(file)))
+        .map(|file| repo_relative(&file))
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "these files wait for a file in a `while` loop of their own in test code; use \
+         HeldCommand::interrupt_during or platform::process::cancel_when_started:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// Как страж читает циклы ожидания — на исходниках, где ответ известен заранее: файл
+/// спрашивают методом или функцией, в условии или в теле, в `while` или в `loop`, в тестовом
+/// модуле или в тестовом методе рабочего `impl`; цикл рабочего кода и цикл, который файла не
+/// спрашивает, стражу не интересны.
+#[test]
+fn the_file_polling_guard_reads_every_shape() {
+    let polls = |source: &str| test_code_polls_a_file(&syn::parse_str(source).expect("fixture"));
+
+    for caught in [
+        "#[cfg(test)] mod tests { fn wait(p: &Path) { while !p.exists() {} } }",
+        "#[cfg(test)] mod tests { fn wait(p: &Path) { while !p.try_exists().unwrap() {} } }",
+        "#[cfg(test)] mod tests { fn wait(p: &Path) { while !std::fs::exists(p).unwrap() {} } }",
+        "#[cfg(test)] mod tests { fn wait(p: &Path) { loop { if Path::exists(p) { break; } } } }",
+        "#[cfg(test)] mod tests { fn wait(p: &Path, d: Instant) { while Instant::now() < d { if p.exists() { break; } } } }",
+        "struct Probe; impl Probe { #[cfg(test)] fn wait(p: &Path) { while !p.exists() {} } }",
+    ] {
+        assert!(polls(caught), "the guard missed: {caught}");
+    }
+    for passed in [
+        "fn wait(p: &Path) { while !p.exists() {} }",
+        "#[cfg(test)] mod tests { fn count() { let mut n = 0; while n < 3 { n += 1; } } }",
+        "#[cfg(test)] mod tests { fn check(p: &Path) { assert!(p.exists()); } }",
+    ] {
+        assert!(!polls(passed), "the guard flagged: {passed}");
+    }
+}
+
+/// Есть ли в тестовом коде файла — под `#[cfg(test)]`, в том числе внутри модулей и `impl`
+/// — цикл `while` или `loop`, который спрашивает `exists` или `try_exists`: методом, как
+/// `path.exists()`, или функцией, как `std::fs::exists(&path)` и `Path::exists(&path)`.
+fn test_code_polls_a_file(file: &syn::File) -> bool {
+    const ASKS: &[&str] = &["exists", "try_exists"];
+    #[derive(Default)]
+    struct AsksForAFile(bool);
+    impl<'ast> syn::visit::Visit<'ast> for AsksForAFile {
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            self.0 |= ASKS.iter().any(|name| node.method == name);
+            syn::visit::visit_expr_method_call(self, node);
+        }
+
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = &*node.func {
+                self.0 |= path
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| ASKS.iter().any(|name| segment.ident == name));
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+    }
+    #[derive(Default)]
+    struct Loops {
+        in_test: bool,
+        found: bool,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Loops {
+        fn visit_item(&mut self, node: &'ast syn::Item) {
+            let outer = self.in_test;
+            self.in_test |= item_has_cfg_test(node);
+            syn::visit::visit_item(self, node);
+            self.in_test = outer;
+        }
+
+        fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+            let outer = self.in_test;
+            self.in_test |= has_cfg_test(&node.attrs);
+            syn::visit::visit_impl_item_fn(self, node);
+            self.in_test = outer;
+        }
+
+        fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+            if self.in_test {
+                let mut asks = AsksForAFile::default();
+                syn::visit::Visit::visit_expr_while(&mut asks, node);
+                self.found |= asks.0;
+            }
+            syn::visit::visit_expr_while(self, node);
+        }
+
+        fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
+            if self.in_test {
+                let mut asks = AsksForAFile::default();
+                syn::visit::Visit::visit_expr_loop(&mut asks, node);
+                self.found |= asks.0;
+            }
+            syn::visit::visit_expr_loop(self, node);
+        }
+    }
+    let mut loops = Loops::default();
+    syn::visit::Visit::visit_file(&mut loops, file);
+    loops.found
+}
+
 /// Вызовы учёта, которые называют отложенную отмену.
 const DEFERRAL_OWNER_CALLS: &[&str] = &[
     "note_result",

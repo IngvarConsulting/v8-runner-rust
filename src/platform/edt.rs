@@ -1681,21 +1681,13 @@ OUT\n\
             );
             let cancellation = CancellationToken::new();
             let work = WorkGiven::for_command();
-            let operator = {
-                let cancellation = cancellation.clone();
-                let marker = if cancel_during_cd {
-                    cd_marker.clone()
-                } else {
-                    export_marker.clone()
-                };
-                thread::spawn(move || {
-                    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-                    while !marker.exists() && std::time::Instant::now() < deadline {
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    cancellation.cancel();
-                })
+            let marker = if cancel_during_cd {
+                &cd_marker
+            } else {
+                &export_marker
             };
+            let operator =
+                crate::platform::process::cancel_when_started(marker, cancellation.clone());
             let dsl = EdtDsl::new_interactive(
                 script,
                 dir.path().join("ws"),
@@ -1713,7 +1705,10 @@ OUT\n\
             let error = dsl
                 .export_project("project", Path::new("/tmp/out"))
                 .expect_err("cancelled error");
-            operator.join().expect("operator");
+            assert!(
+                operator.join().expect("operator"),
+                "the command never marked its start"
+            );
 
             let delivered = !cancel_during_cd;
             assert!(
