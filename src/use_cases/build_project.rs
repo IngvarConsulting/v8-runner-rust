@@ -765,7 +765,7 @@ mod tests {
     use crate::domain::build::BuildMode;
     use crate::domain::source_set::SourceSetContext;
     #[cfg(unix)]
-    use crate::platform::process::{DeferralWatch, HeldCommand};
+    use crate::platform::process::HeldCommand;
     #[cfg(unix)]
     use crate::support::error::CancelledAt;
     use crate::use_cases::context::{CommandName, ExecutionContext};
@@ -1486,26 +1486,20 @@ mod tests {
 
     /// Push, который оператор отменяет, пока подставная программа держит команду.
     #[cfg(unix)]
+    #[track_caller]
     fn push_interrupted_while_held(
         config: &AppConfig,
         held: &HeldCommand,
         args: &BuildArgs,
     ) -> crate::use_cases::result::UseCaseResult<crate::domain::build::BuildResult> {
         let cancellation = CancellationToken::new();
-        let watch = DeferralWatch::default();
-        let operator = held.interrupt(cancellation.clone(), &watch);
-        let outcome = watch.during(|| {
+        held.interrupt_during(cancellation.clone(), || {
             super::execute(
                 &ExecutionContext::cli(CommandName::Build).with_cancellation(cancellation),
                 config,
                 args,
             )
-        });
-        assert!(
-            operator.join().expect("operator thread"),
-            "the runner never logged that it deferred the cancellation"
-        );
-        outcome
+        })
     }
 
     #[cfg(unix)]

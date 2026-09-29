@@ -897,7 +897,7 @@ mod tests {
         ToolExtensionConfig, ToolExtensionInput, ToolExtensionSourceConfig, ToolsConfig,
     };
     #[cfg(unix)]
-    use crate::platform::process::{DeferralWatch, HeldCommand};
+    use crate::platform::process::HeldCommand;
     #[cfg(unix)]
     use crate::support::error::CancelledAt;
     #[cfg(unix)]
@@ -1158,25 +1158,19 @@ mod tests {
 
     /// `infobase create`, который оператор отменяет, пока утилита держит создание базы.
     #[cfg(unix)]
+    #[track_caller]
     fn create_interrupted_while_held(
         config: &AppConfig,
         held: &HeldCommand,
     ) -> crate::use_cases::result::UseCaseResult<crate::domain::init::InitResult> {
         let cancellation = CancellationToken::new();
-        let watch = DeferralWatch::default();
-        let operator = held.interrupt(cancellation.clone(), &watch);
-        let outcome = watch.during(|| {
+        held.interrupt_during(cancellation.clone(), || {
             super::execute(
                 &ExecutionContext::cli(CommandName::Init).with_cancellation(cancellation),
                 config,
                 &crate::use_cases::request::InitRequest { dry_run: false },
             )
-        });
-        assert!(
-            operator.join().expect("operator thread"),
-            "the runner never logged that it deferred the cancellation"
-        );
-        outcome
+        })
     }
 
     /// Созданная база называет отмену, которую создание отложило: шаг успешен и говорит об

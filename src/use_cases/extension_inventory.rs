@@ -679,7 +679,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_change_through_ibcmd_names_the_cancellation_it_deferred() {
-        use crate::platform::process::{DeferralWatch, HeldCommand};
+        use crate::platform::process::HeldCommand;
         use crate::use_cases::context::{CommandName, ExecutionContext};
         use std::os::unix::fs::PermissionsExt;
         use tokio_util::sync::CancellationToken;
@@ -717,10 +717,8 @@ mod tests {
                 purpose: None,
             };
             let cancellation = CancellationToken::new();
-            let watch = DeferralWatch::default();
-            let operator = held.interrupt(cancellation.clone(), &watch);
 
-            let outcome = watch.during(|| {
+            let outcome = held.interrupt_during(cancellation.clone(), || {
                 super::change(
                     &ExecutionContext::cli(CommandName::Extensions).with_cancellation(cancellation),
                     &config,
@@ -728,10 +726,6 @@ mod tests {
                     false,
                 )
             });
-            assert!(
-                operator.join().expect("operator thread"),
-                "the runner never logged that it deferred the cancellation"
-            );
 
             let result = match outcome {
                 Ok(result) => result,
