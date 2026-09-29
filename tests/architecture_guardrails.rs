@@ -2060,15 +2060,55 @@ fn a_cancel_test_operator_lives_in_the_process_module() {
     );
 }
 
+/// Как страж читает циклы ожидания — на исходниках, где ответ известен заранее: файл
+/// спрашивают методом или функцией, в условии или в теле, в `while` или в `loop`, в тестовом
+/// модуле или в тестовом методе рабочего `impl`; цикл рабочего кода и цикл, который файла не
+/// спрашивает, стражу не интересны.
+#[test]
+fn the_file_polling_guard_reads_every_shape() {
+    let polls = |source: &str| test_code_polls_a_file(&syn::parse_str(source).expect("fixture"));
+
+    for caught in [
+        "#[cfg(test)] mod tests { fn wait(p: &Path) { while !p.exists() {} } }",
+        "#[cfg(test)] mod tests { fn wait(p: &Path) { while !p.try_exists().unwrap() {} } }",
+        "#[cfg(test)] mod tests { fn wait(p: &Path) { while !std::fs::exists(p).unwrap() {} } }",
+        "#[cfg(test)] mod tests { fn wait(p: &Path) { loop { if Path::exists(p) { break; } } } }",
+        "#[cfg(test)] mod tests { fn wait(p: &Path, d: Instant) { while Instant::now() < d { if p.exists() { break; } } } }",
+        "struct Probe; impl Probe { #[cfg(test)] fn wait(p: &Path) { while !p.exists() {} } }",
+    ] {
+        assert!(polls(caught), "the guard missed: {caught}");
+    }
+    for passed in [
+        "fn wait(p: &Path) { while !p.exists() {} }",
+        "#[cfg(test)] mod tests { fn count() { let mut n = 0; while n < 3 { n += 1; } } }",
+        "#[cfg(test)] mod tests { fn check(p: &Path) { assert!(p.exists()); } }",
+    ] {
+        assert!(!polls(passed), "the guard flagged: {passed}");
+    }
+}
+
 /// Есть ли в тестовом коде файла — под `#[cfg(test)]`, в том числе внутри модулей и `impl`
-/// — цикл `while` или `loop`, который спрашивает `exists()` или `try_exists()`.
+/// — цикл `while` или `loop`, который спрашивает `exists` или `try_exists`: методом, как
+/// `path.exists()`, или функцией, как `std::fs::exists(&path)` и `Path::exists(&path)`.
 fn test_code_polls_a_file(file: &syn::File) -> bool {
+    const ASKS: &[&str] = &["exists", "try_exists"];
     #[derive(Default)]
     struct AsksForAFile(bool);
     impl<'ast> syn::visit::Visit<'ast> for AsksForAFile {
         fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-            self.0 |= node.method == "exists" || node.method == "try_exists";
+            self.0 |= ASKS.iter().any(|name| node.method == name);
             syn::visit::visit_expr_method_call(self, node);
+        }
+
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = &*node.func {
+                self.0 |= path
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| ASKS.iter().any(|name| segment.ident == name));
+            }
+            syn::visit::visit_expr_call(self, node);
         }
     }
     #[derive(Default)]
