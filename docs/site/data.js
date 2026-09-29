@@ -118,7 +118,7 @@ window.RUNNER_DATA = (function () {
       cmd: function (ctx) { return 'v8-runner init'; },
       applies: function () { return null; },
       today: function (ctx) { return { chain: [], config: [], note: 'платформа не нужна; тип каждого набора определяется по содержимому файлов, не по именам каталогов' }; },
-      target: function (ctx) { return { chain: [], config: [], note: 'платформа не нужна; тип каждого набора определяется по содержимому файлов, не по именам каталогов. В проекте, где v8project.yaml уже есть, пишет только местный слой; с --infobase перенаправляет origin и сохраняет прежнюю секцию под именем upstream' }; }
+      target: function (ctx) { return { chain: [], config: [], note: 'платформа не нужна; тип каждого набора определяется по содержимому файлов, не по именам каталогов. В проекте, где v8project.yaml уже есть, пишет только местный слой; с --infobase перенаправляет origin и сохраняет прежнюю секцию под именем upstream; если upstream уже есть — отказ, который называет обе секции' }; }
     },
     {
       id: 'clone', verb: 'clone', title: 'Завести проект из существующей базы',

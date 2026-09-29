@@ -206,6 +206,9 @@ v8-runner infobase create
 - Never pass `infobase restore --replace` to recover from a failed command: it discards the data of the target infobase, and `target_state: uncertain` after a failed restore means an unknown amount of data was already replaced. Dump first.
 - Do not invent raw `1cv8`, `ibcmd`, or `1cedtcli` flags; prefer the `v8-runner` command surface.
 - Check `git status` before `pull` when the result may overwrite or mix with existing source changes.
+- Give each git worktree or clone its own file infobase (`origin` in its own `v8project.local.yaml`):
+  the runner does not yet detect two working copies sharing one base; pushes from different
+  branches silently mix in it, and a test run in one copy blocks apply in the other.
 - Preserve failed test artifacts under `workPath/temp/<runner-id>/runs/<run-id>/` for diagnosis instead of cleaning them immediately.
 - Report missing local 1C utilities as environment/setup issues, not as project source failures.
 - Keep final answers concrete: command run, result, relevant artifact path, and any follow-up command.

@@ -235,6 +235,9 @@ v8-runner init [--force] [--output <FILE>] [--connection <CONNECTION>] [--format
 - Ищет supported `DESIGNER` / `EDT` `source-set` по marker files и их содержимому.
 - Для external roots создаёт aggregate `source-set` только при однородной классификации каталога.
 - Не пишет synthetic `CONFIGURATION`: отсутствие конфигурационного source-set это validation error.
+- В проекте, где `v8project.yaml` уже есть, сегодня без `--force` отказывает: писать только
+  местный слой и перенаправлять `origin`, сохраняя прежнюю секцию как `upstream`, он пока не
+  умеет ([#329](https://github.com/IngvarConsulting/v8-runner-rust/issues/329)).
 
 ### `clone`
 
@@ -278,6 +281,7 @@ v8-runner infobase create [--dry-run]
   `EXTENSION`.
 - Если настроен `tools.client_mcp.extension.source.format=EDT`, импортирует этот tool extension
   project в EDT workspace, не добавляя его в project `source-set`.
+- Копию другой базы с данными (`--from <база>`) команда пока не делает ([#330](https://github.com/IngvarConsulting/v8-runner-rust/issues/330)).
 
 ### `tools download`
 
@@ -783,6 +787,9 @@ v8-runner mcp serve http
 
 ## Пока не поддерживается
 
+- Несколько рабочих копий одной файловой базы: замка базы и метки владельца нет, и копии
+  друг друга не видят ([#326](https://github.com/IngvarConsulting/v8-runner-rust/issues/326), [#327](https://github.com/IngvarConsulting/v8-runner-rust/issues/327)); общей базы по согласию
+  `shared: true` тоже нет ([#328](https://github.com/IngvarConsulting/v8-runner-rust/issues/328)).
 - Публикация CLI-only команд в MCP без отдельного решения владельца.
 - Object-scoped partial dump через `ibcmd`.
 - `upload` через `ibcmd`.
