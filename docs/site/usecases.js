@@ -4,6 +4,7 @@ window.RUNNER_ARTEFACTS = {
   repo:    { label: 'исходники в репозитории', kind: 'data' },
   other:   { label: 'исходники в другом формате', kind: 'data' },
   cfg:     { label: 'v8project.yaml', kind: 'data' },
+  local:   { label: 'v8project.local.yaml', kind: 'data' },
   ib:      { label: 'информационная база', kind: 'store' },
   dt:      { label: 'файл .dt', kind: 'data' },
   cf:      { label: '.cf или .cfe', kind: 'data' },
@@ -16,7 +17,8 @@ window.RUNNER_ARTEFACTS = {
   pub:     { label: 'публикация на веб-сервере', kind: 'store' },
   browser: { label: 'браузер', kind: 'ext' },
   client:  { label: 'клиент 1С', kind: 'ext' },
-  vcs:     { label: 'система контроля версий', kind: 'ext' }
+  vcs:     { label: 'система контроля версий', kind: 'ext' },
+  peer:    { label: 'база соседней рабочей копии', kind: 'store' }
 };
 
 window.RUNNER_USECASES = [
@@ -45,6 +47,27 @@ window.RUNNER_USECASES = [
       { id: 'push', in: ['repo', 'state'], out: ['ib', 'state', 'genid'], note: 'загружается только изменённое; после загрузки запоминается новый идентификатор поколения' },
       { id: 'check', in: ['ib'], out: ['issues'], note: 'проверка конфигурации и модулей' },
       { id: 'test', in: ['ib'], out: ['reports'], note: 'прогон тестов' }
+    ] },
+
+  { id: 'worktree', title: 'Задача в новой рабочей копии',
+    who: 'разработчик или агент, который открыл под задачу ворктри гита',
+    pre: 'в основной копии проект заведён; в новой нет местного слоя',
+    steps: [
+      { id: 'push', in: ['repo'], out: [], note: 'базы у копии нет: отказ называет три выхода — своя чистая база, копия базы, общая по согласию' },
+      { id: 'init', in: ['repo', 'cfg'], out: ['local'], note: 'v8project.yaml уже есть: пишется только местный слой, origin = File=build/ib в этой копии' },
+      { id: 'infobase-create', in: ['repo', 'local'], out: ['ib', 'state'], note: 'своя база сразу с основной конфигурацией из исходников этой копии' },
+      { id: 'push', in: ['repo', 'state'], out: ['ib', 'state'], note: 'досылает расширения, дальше — только изменённое' },
+      { id: 'test', in: ['ib'], out: ['reports'], note: 'тесты идут в своей базе и соседям не мешают' }
+    ] },
+
+  { id: 'worktree-data', title: 'Отладка на копии базы',
+    who: 'разработчик, которому ошибку нужно воспроизвести на данных',
+    pre: 'местный слой скопирован из основной копии, workPath в нём относительный или перенастроен на новую копию, origin указывает на базу основной копии с данными; Конфигуратор и клиенты основной копии закрыты',
+    steps: [
+      { id: 'init', cmd: 'v8-runner init --infobase File=build/ib', in: ['repo', 'cfg', 'local'], out: ['local'], note: 'местный слой новой копии: origin — своя база, прежняя секция остаётся под именем upstream' },
+      { id: 'infobase-create', cmd: 'v8-runner infobase create --from upstream', in: ['local', 'peer'], out: ['ib', 'genid'], note: 'снимок соседней базы и новая база из него; пока идёт снимок, соседняя база занята' },
+      { id: 'push', in: ['repo', 'genid'], out: ['ib', 'state'], note: 'первая отправка полная: в новой базе конфигурация ветки источника' },
+      { id: 'test', in: ['ib'], out: ['reports'], note: 'ошибка воспроизводится на данных, база соседа не тронута' }
     ] },
 
   { id: 'reverse', title: 'Правки сделали в Конфигураторе',
