@@ -2,6 +2,10 @@
 id: INV.USE-CASES.HASH-MEMORY-IS-SCOPED-TO-ITS-BASE-AND-SOURCE
 check:
   - src/change_detection/source_sets.rs::base_snapshots_remain_separate_and_reject_a_retargeted_base
+  - src/change_detection/source_sets.rs::distinct_non_utf8_source_roots_have_distinct_bindings
+  - src/change_detection/source_sets.rs::canonical_source_names_are_not_case_folded_for_memory
+  - src/config/loader.rs::spaced_file_parameters_use_the_project_directory_for_runtime_and_memory
+  - tests/cli_pull_memory.rs::relative_file_address_uses_the_project_directory_and_matches_absolute_memory
   - src/change_detection/source_sets.rs::ad_hoc_analysis_never_reads_or_writes_memory_and_empty_sources_skip
   - src/change_detection/source_sets.rs::edt_and_external_memory_is_shared_but_designer_identity_ignores_credentials
   - tests/cli_pull_memory.rs::a_pull_from_one_base_does_not_mark_another_base_as_loaded
@@ -16,7 +20,10 @@ check:
 Хеши загрузки конфигурации или расширения лежат в
 `workPath/infobases/<имя>/hashes/<набор>.redb`, отдельно для каждой именованной базы.
 Адрес без учётных данных, исходный каталог и назначение набора записываются атомарно
-со снимком. Исполнитель не участвует в привязке. Обычный `push` при чужой памяти
+со снимком. Адрес в привязке совпадает с адресом, переданным платформе, включая
+допустимые пробелы вокруг `=` у `File`. Канонические пути сравниваются по точному
+представлению ОС, без потери байтов и сведения регистра: консервативное объединение
+имён для замка не является равенством исходников. Исполнитель не участвует в привязке. Обычный `push` при чужой памяти
 отказывает с прежней привязкой и предлагает полный `pull`; явная полная загрузка
 заменяет её после успеха. Старые общие снимки автоматически не мигрируются.
 

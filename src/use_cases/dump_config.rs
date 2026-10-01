@@ -134,12 +134,7 @@ fn publish_full_dump(
     let snapshot = inventory
         .designer_context(&resolved.source_set_name)
         .filter(|source| config.format == SourceFormat::Designer && source.persists_snapshot())
-        .map(|source| {
-            (
-                source,
-                prepare_full_snapshot(source, publication.staging_path()),
-            )
-        });
+        .map(|source| prepare_full_snapshot(source, publication.staging_path()));
 
     validate_platform_target(resolved).map_err(|error| publication.cleanup_failure(error))?;
     validate_full_dump_work_path(config, resolved)
@@ -155,7 +150,16 @@ fn publish_full_dump(
 
     // Cancellation observed during publication must not leave a successfully published
     // tree unrecorded. This local commit starts no process and has no cancellation check.
-    let memory_warning = snapshot.and_then(|(source, prepared)| {
+    let memory_warning = snapshot.and_then(|prepared| {
+        // Publication can replace a symlink with a real directory. Bind the prepared
+        // bytes to the resulting source root, without scanning its contents again.
+        let published_inventory = SourceSetInventory::new(config);
+        let Some(source) = published_inventory.designer_context(&resolved.source_set_name) else {
+            return Some(format!(
+                "sources published for '{}', but hash memory was not updated: source context is missing; repeat a full pull to refresh memory",
+                resolved.source_set_name
+            ));
+        };
         prepared
             .and_then(|snapshot| commit_full_snapshot(source, &config.work_path, &snapshot))
             .err()

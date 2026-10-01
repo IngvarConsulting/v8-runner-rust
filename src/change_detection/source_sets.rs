@@ -56,7 +56,7 @@ impl<'a> SourceSetsService<'a> {
     }
 
     fn designer_context(&self, source_set: &SourceSetConfig, path: PathBuf) -> SourceSetContext {
-        use crate::support::path::{nearest_existing_canonical_path, stable_path_identity};
+        use crate::support::path::{nearest_existing_canonical_path, snapshot_path_identity};
         let context = SourceSetContext::new(
             &source_set.name,
             path,
@@ -84,7 +84,7 @@ impl<'a> SourceSetsService<'a> {
         let identity = format!(
             "{}; source={}; purpose={:?}; set={}",
             address,
-            stable_path_identity(&original),
+            snapshot_path_identity(&original),
             source_set.purpose,
             source_set.name
         );
@@ -347,5 +347,39 @@ mod tests {
             .designer_contexts()
             .remove(0);
         assert_ne!(before.storage_identity(), moved.storage_identity());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn distinct_non_utf8_source_roots_have_distinct_bindings() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = single_set_config(SourceFormat::Designer, "unused");
+        config.base_path = dir.path().to_path_buf();
+        config.work_path = dir.path().join("work");
+        config.source_sets[0].path = PathBuf::from(std::ffi::OsString::from_vec(vec![0xfe]));
+        let original = SourceSetsService::new(&config)
+            .designer_contexts()
+            .remove(0);
+        config.source_sets[0].path = PathBuf::from(std::ffi::OsString::from_vec(vec![0xff]));
+        let other = SourceSetsService::new(&config)
+            .designer_contexts()
+            .remove(0);
+        assert_ne!(original.storage_identity(), other.storage_identity());
+    }
+
+    #[test]
+    fn canonical_source_names_are_not_case_folded_for_memory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = single_set_config(SourceFormat::Designer, "unused");
+        config.base_path = dir.path().to_path_buf();
+        config.source_sets[0].path = PathBuf::from("source");
+        let original = SourceSetsService::new(&config)
+            .designer_contexts()
+            .remove(0);
+        config.source_sets[0].path = PathBuf::from("SOURCE");
+        let other = SourceSetsService::new(&config)
+            .designer_contexts()
+            .remove(0);
+        assert_ne!(original.storage_identity(), other.storage_identity());
     }
 }

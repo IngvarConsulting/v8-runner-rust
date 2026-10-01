@@ -177,6 +177,49 @@ fn full_pull_replaces_a_previous_push_baseline() {
     }
 }
 
+#[test]
+fn full_pull_replacing_a_source_symlink_records_the_published_directory_identity() {
+    let project = project("designer", false);
+    let original = project.sources.with_file_name("original-sources");
+    fs::rename(&project.sources, &original).expect("move sources");
+    std::os::unix::fs::symlink(&original, &project.sources).expect("source symlink");
+
+    pull(&project);
+
+    assert!(!project.sources.is_symlink());
+    assert_push_skips(&project);
+}
+
+#[test]
+fn relative_file_address_uses_the_project_directory_and_matches_absolute_memory() {
+    let project = project("designer", false);
+    let local = project.config.with_file_name("v8project.local.yaml");
+    let absolute = fs::read_to_string(&local).expect("local config");
+    let base = project.config.parent().expect("project root").join("ib");
+    fs::write(
+        &local,
+        absolute.replace(&format!("File={}", base.display()), "fIlE = ib"),
+    )
+    .expect("relative address");
+    let caller = temp_workspace();
+
+    succeeded(
+        v8_runner_command()
+            .current_dir(caller.path())
+            .arg("--config")
+            .arg(&project.config)
+            .arg("--json-message")
+            .args(["pull", "--mode", "full", "--source-set", "main"])
+            .output()
+            .expect("pull from another directory"),
+    );
+
+    let calls = fs::read_to_string(&project.calls).expect("platform calls");
+    assert!(calls.contains(&base.display().to_string()), "{calls}");
+    fs::write(&local, absolute).expect("absolute address");
+    assert_push_skips(&project);
+}
+
 fn git(path: &Path, args: &[&str]) {
     let output = std::process::Command::new("git")
         .arg("-C")

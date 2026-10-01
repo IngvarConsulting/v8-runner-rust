@@ -2,6 +2,7 @@
 id: INV.USE-CASES.FULL-PULL-RECORDS-THE-PUBLISHED-TREE
 check:
   - tests/cli_pull_memory.rs::first_full_pull_establishes_the_baseline_for_all_exporters
+  - tests/cli_pull_memory.rs::full_pull_replacing_a_source_symlink_records_the_published_directory_identity
   - tests/cli_pull_memory.rs::full_pull_replaces_a_previous_push_baseline
   - tests/cli_pull_memory.rs::full_pull_repairs_corrupt_hash_memory
   - tests/cli_pull_memory.rs::git_refusal_preserves_memory_and_a_retry_can_publish
@@ -18,7 +19,9 @@ check:
 `push` без правок пропускает загрузку. Полная выгрузка агента не пропускается по
 журналу поколений: она восстанавливает и дерево, и хеш-память.
 
-Хеши готовятся по staging до публикации, сохраняются после её успеха. Отказ публикации
+Хеши готовятся по staging до публикации, сохраняются после её успеха. Привязка
+соответствует получившемуся каталогу, в том числе когда публикация заменяет символическую
+ссылку каталогом; содержимое опубликованного дерева повторно не сканируется. Отказ публикации
 не меняет память. Ошибка обхода staging или записи памяти не отбрасывает успешную
 выгрузку: ответ называет опубликованные исходники, несохранённую память и повторный
 полный `pull` как следующий шаг. Загрузка старых исходников не является восстановлением

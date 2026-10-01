@@ -81,7 +81,7 @@ impl V8Connection {
 
     /// Stable address identity, excluding credentials and the selected executor.
     pub fn snapshot_identity(&self, base_path: &std::path::Path) -> Option<String> {
-        use crate::support::path::{nearest_existing_canonical_path, stable_path_identity};
+        use crate::support::path::{nearest_existing_canonical_path, snapshot_path_identity};
         if let Some(path) = self.file_path() {
             let path = std::path::Path::new(unquote_connection_value(path));
             let absolute = if path.is_absolute() {
@@ -92,7 +92,7 @@ impl V8Connection {
             let canonical = nearest_existing_canonical_path(&absolute).unwrap_or(absolute);
             return Some(format!(
                 "file:{} ({})",
-                stable_path_identity(&canonical),
+                snapshot_path_identity(&canonical),
                 canonical.display()
             ));
         }

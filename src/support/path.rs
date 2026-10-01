@@ -185,6 +185,28 @@ pub fn nearest_existing_canonical_path(path: &Path) -> std::io::Result<PathBuf> 
     Ok(resolved)
 }
 
+/// Snapshot bindings compare canonical paths exactly. Unlike lock identities,
+/// they must not merge distinct names on case-sensitive volumes or lossy UTF-8 names.
+/// The caller resolves filesystem aliases before asking for the binding.
+pub fn snapshot_path_identity(path: &Path) -> String {
+    let mut hasher = Sha256::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        hasher.update(path.as_os_str().as_bytes());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        for unit in path.as_os_str().encode_wide() {
+            hasher.update(unit.to_le_bytes());
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    hasher.update(path.as_os_str().as_encoded_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 pub fn stable_path_identity(path: &Path) -> String {
     let mut hasher = Sha256::new();
     let path = path.to_string_lossy();
