@@ -328,8 +328,9 @@ fn foreign_memory_is_named_in_the_response_without_dispatching_or_exposing_crede
     assert!(!output.status.success());
     let json: Value = serde_json::from_slice(&output.stdout).expect("JSON refusal");
     let message = json.to_string();
-    assert!(message.contains("snapshot belongs to"), "{message}");
-    assert!(message.contains("full pull"), "{message}");
+    assert!(message.contains("belongs to"), "{message}");
+    assert!(message.contains("pull --mode full"), "{message}");
+    assert!(message.contains("push --full"), "{message}");
     assert!(message.contains("replacement-ib"), "{message}");
     assert!(!message.contains(AGENT_PASSWORD), "{message}");
     assert_eq!(json["data"]["provider_dispatched"], false, "{json}");

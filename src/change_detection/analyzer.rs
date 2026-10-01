@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::change_detection::hash_storage::{HashStorage, StorageError, StoredFileState};
+use crate::change_detection::hash_storage::{
+    HashStorage, StorageError, StorageSnapshot, StoredFileState,
+};
 use crate::change_detection::scanner::{self, ScanError};
 use crate::domain::source_set::SourceSetContext;
 
@@ -66,6 +68,16 @@ pub enum ChangeDetectionError {
         reason: String,
     },
 
+    /// The stored snapshot describes another base or source directory. Its hashes say
+    /// nothing about the selected pair, so they are neither used nor silently replaced.
+    #[error("hash memory for source-set '{source_set}' at '{storage_path}' belongs to {recorded}; the selected target is {selected}. If the infobase holds the right state, run a full pull (`pull --mode full`) to record it; if the source directory does, run `push --full` to load it")]
+    ForeignMemory {
+        source_set: String,
+        storage_path: PathBuf,
+        recorded: String,
+        selected: String,
+    },
+
     #[error("concurrent state modification for source-set '{source_set}' at '{storage_path}': expected generation {expected}, found {actual}")]
     ConcurrentStateModified {
         source_set: String,
@@ -77,47 +89,24 @@ pub enum ChangeDetectionError {
 
 /// Analyze one source-set context and produce either concrete changes or a safe fallback.
 pub fn analyze_context(context: &SourceSetContext, work_path: &Path) -> ContextAnalysis {
-    let storage = HashStorage::new(context.storage_path(work_path));
-    let snapshot = match if context.persists_snapshot() {
-        storage.load_snapshot()
-    } else {
-        Ok(Default::default())
-    } {
-        Ok(snapshot) => snapshot,
-        Err(e) => {
-            if e.is_recoverable() {
-                tracing::warn!(
-                    source_set = %context.name(),
-                    error = %e,
-                    "recoverable storage problem, switching to fallback mode"
-                );
+    let snapshot = match context.storage_path(work_path) {
+        None => Default::default(),
+        Some(path) => match load_bound_snapshot(context, &HashStorage::new(path)) {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => {
                 return ContextAnalysis {
                     context: context.clone(),
                     outcome: Ok(AnalysisOutcome::Fallback),
-                };
+                }
             }
-            return ContextAnalysis {
-                context: context.clone(),
-                outcome: Err(map_storage_hard(context, storage.path(), e)),
-            };
-        }
+            Err(error) => {
+                return ContextAnalysis {
+                    context: context.clone(),
+                    outcome: Err(error),
+                }
+            }
+        },
     };
-
-    if let Some(expected) = context.storage_identity() {
-        if (snapshot.generation > 0 || snapshot.watermark.is_some() || !snapshot.entries.is_empty())
-            && snapshot.identity.as_deref() != Some(expected)
-        {
-            return ContextAnalysis {
-                context: context.clone(),
-                outcome: Err(ChangeDetectionError::StorageHard {
-                    source_set: context.name().to_owned(),
-                    storage_path: storage.path().to_path_buf(),
-                    reason: format!("snapshot belongs to {}; selected target is {}. Run a full pull to establish this directory/base relationship",
-                        snapshot.identity.as_deref().unwrap_or("an unidentified infobase"), expected),
-                }),
-            };
-        }
-    }
 
     let stored_keys: HashSet<String> = snapshot.entries.keys().cloned().collect();
     let scan = match scanner::scan(context.path(), snapshot.watermark, &stored_keys) {
@@ -165,6 +154,39 @@ pub fn analyze_context(context: &SourceSetContext, work_path: &Path) -> ContextA
     }
 }
 
+/// Load the snapshot and check that it describes this context's base and sources.
+/// `Ok(None)` is a recoverable storage problem: the caller falls back to a full load.
+fn load_bound_snapshot(
+    context: &SourceSetContext,
+    storage: &HashStorage,
+) -> Result<Option<StorageSnapshot>, ChangeDetectionError> {
+    let snapshot = match storage.load_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(e) if e.is_recoverable() => {
+            tracing::warn!(
+                source_set = %context.name(),
+                error = %e,
+                "recoverable storage problem, switching to fallback mode"
+            );
+            return Ok(None);
+        }
+        Err(e) => return Err(map_storage_hard(context, storage.path(), e)),
+    };
+    if let Some(selected) = context.storage_identity() {
+        if !snapshot.is_blank() && snapshot.identity.as_deref() != Some(selected) {
+            return Err(ChangeDetectionError::ForeignMemory {
+                source_set: context.name().to_owned(),
+                storage_path: storage.path().to_path_buf(),
+                recorded: snapshot
+                    .identity
+                    .unwrap_or_else(|| "an unidentified infobase".to_owned()),
+                selected: selected.to_owned(),
+            });
+        }
+    }
+    Ok(Some(snapshot))
+}
+
 /// Analyze multiple source-set contexts using the same work directory.
 pub fn analyze_contexts(contexts: &[SourceSetContext], work_path: &Path) -> Vec<ContextAnalysis> {
     contexts
@@ -179,10 +201,10 @@ pub fn commit_success(
     work_path: &Path,
     prepared: &PreparedStateUpdate,
 ) -> Result<(), ChangeDetectionError> {
-    if !context.persists_snapshot() {
+    let Some(path) = context.storage_path(work_path) else {
         return Ok(());
-    }
-    let storage = HashStorage::new(context.storage_path(work_path));
+    };
+    let storage = HashStorage::new(path);
     let snapshot = to_storage_snapshot(&prepared.snapshot);
     storage
         .commit_snapshot_with_identity(
@@ -237,10 +259,10 @@ pub fn commit_full_snapshot(
     work_path: &Path,
     prepared: &FullSnapshot,
 ) -> Result<(), ChangeDetectionError> {
-    if !context.persists_snapshot() {
+    let Some(path) = context.storage_path(work_path) else {
         return Ok(());
-    }
-    let storage = HashStorage::new(context.storage_path(work_path));
+    };
+    let storage = HashStorage::new(path);
     let generation = match storage.current_generation() {
         Ok(generation) => generation,
         Err(error) if error.is_recoverable() => {
@@ -506,7 +528,7 @@ mod tests {
         std::fs::create_dir(&staging).expect("staging");
         std::fs::write(staging.join("Module.bsl"), "exported").expect("export");
         let context = SourceSetContext::new("main", target.clone(), "designer-main")
-            .with_infobase_memory(Some("origin"), "safe-base-identity".to_owned());
+            .with_infobase_memory("origin", "safe-base-identity".to_owned());
         let prepared = super::prepare_full_snapshot(&context, &staging).expect("prepare");
         assert!(!work.exists(), "preparation never opens memory");
         std::fs::rename(&staging, &target).expect("publish");

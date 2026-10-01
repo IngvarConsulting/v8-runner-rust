@@ -65,30 +65,24 @@ impl<'a> SourceSetsService<'a> {
         if source_set.purpose.is_external() {
             return context;
         }
-        let original = absolutize_path(&self.config.base_path).join(&source_set.path);
+        let base_path = absolutize_path(&self.config.base_path);
+        // An unrecognized address, or an ad hoc base without a name, must never share memory.
+        let (Some(address), Some(infobase)) = (
+            self.config.infobase_memory_address(&base_path),
+            self.config.infobase_name.as_deref(),
+        ) else {
+            return context.without_memory();
+        };
+        let original = base_path.join(&source_set.path);
         let original = nearest_existing_canonical_path(&original).unwrap_or(original);
-        let address = match &self.config.infobase.standalone {
-            Some(standalone) => standalone
-                .gate_endpoint()
-                .ok()
-                .map(|(host, port)| format!("standalone:{host}:{port}")),
-            None => self
-                .config
-                .v8_connection()
-                .snapshot_identity(&absolutize_path(&self.config.base_path)),
-        };
-        let Some(address) = address else {
-            // An unrecognized address must never share a remembered target.
-            return context.with_infobase_memory(None, String::new());
-        };
         let identity = format!(
-            "{}; source={}; purpose={:?}; set={}",
+            "{}; source={}; purpose={}; set={}",
             address,
             snapshot_path_identity(&original),
-            source_set.purpose,
+            source_set.purpose.as_str(),
             source_set.name
         );
-        context.with_infobase_memory(self.config.infobase_name.as_deref(), identity)
+        context.with_infobase_memory(infobase, identity)
     }
 
     /// Return EDT source-set contexts (only meaningful in `EDT` format).
@@ -194,7 +188,7 @@ mod tests {
             .designer_contexts()
             .into_iter()
             .chain(service.edt_contexts())
-            .map(|context| context.storage_path(&config.work_path))
+            .filter_map(|context| context.storage_path(&config.work_path))
             .collect();
 
         let storage_root = config.work_path.join("hash-storages");
@@ -209,7 +203,7 @@ mod tests {
     #[test]
     fn base_snapshots_remain_separate_and_reject_a_retargeted_base() {
         use crate::change_detection::analyzer::{
-            analyze_context, rescan_and_commit_full, AnalysisOutcome,
+            analyze_context, rescan_and_commit_full, AnalysisOutcome, ChangeDetectionError,
         };
         let dir = tempfile::tempdir().expect("tempdir");
         let mut config = single_set_config(SourceFormat::Designer, "unused");
@@ -242,6 +236,10 @@ mod tests {
         let error = analyze_context(&foreign, &config.work_path)
             .outcome
             .expect_err("retargeted base");
+        assert!(
+            matches!(error, ChangeDetectionError::ForeignMemory { .. }),
+            "{error}"
+        );
         assert!(error.to_string().contains("full pull"));
         assert!(error.to_string().contains("/tmp/ib"));
         rescan_and_commit_full(&foreign, &config.work_path).expect("explicit rebuild");
@@ -278,15 +276,20 @@ mod tests {
         std::fs::write(dir.path().join("src/module.bsl"), "source").expect("write");
         rescan_and_commit_full(&context, &config.work_path).expect("no-op");
         assert!(!config.work_path.exists());
-        std::fs::create_dir_all(context.storage_path(&config.work_path))
-            .expect("unreadable old memory");
+        assert_eq!(context.storage_path(&config.work_path), None);
+        // An ad hoc base never touches the old shared file, even when it is unreadable.
+        let legacy = config
+            .work_path
+            .join("hash-storages")
+            .join(format!("designer-{}.redb", context.name()));
+        std::fs::create_dir_all(&legacy).expect("unreadable old memory");
         let Ok(AnalysisOutcome::Changes { prepared, .. }) =
             analyze_context(&context, &config.work_path).outcome
         else {
             panic!("ordinary added files");
         };
         commit_success(&context, &config.work_path, &prepared).expect("no-op");
-        assert!(context.storage_path(&config.work_path).is_dir());
+        assert!(legacy.is_dir());
     }
 
     #[test]

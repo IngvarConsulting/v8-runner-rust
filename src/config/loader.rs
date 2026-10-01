@@ -756,11 +756,11 @@ fn normalize_connection_string(connection: &str, config_dir: &Path) -> String {
         .split(';')
         .map(|part| {
             let part = part.trim();
-            match part.split_once('=') {
-                Some((key, value)) if key.trim().eq_ignore_ascii_case("file") => {
+            match crate::platform::connection::declared_parameter(part) {
+                Some((key, value)) if key == "file" => {
                     let normalized = normalize_connection_file_path(value, config_dir);
                     changed |= normalized != value;
-                    format!("{key}={normalized}")
+                    format!("File={normalized}")
                 }
                 _ => part.to_owned(),
             }

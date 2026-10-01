@@ -603,7 +603,7 @@ fn validate_ordinary_edt_source_set_layout(
             &source_set.name,
             format!(
                 "EDT project nature resolves to external objects but source-set declares {}: {}",
-                source_set_type_label(source_set.purpose),
+                source_set.purpose.as_str(),
                 path.display()
             ),
         ));
@@ -623,8 +623,8 @@ fn validate_ordinary_edt_source_set_layout(
             &source_set.name,
             format!(
                 "EDT project nature resolves to {} but source-set declares {}: {}",
-                source_set_type_label(detected),
-                source_set_type_label(source_set.purpose),
+                detected.as_str(),
+                source_set.purpose.as_str(),
                 path.display()
             ),
         ));
@@ -688,8 +688,8 @@ fn validate_edt_external_source_set_layout(
                     format!(
                         "EDT external child project '{}' resolves to {} but source-set declares {}",
                         child.display(),
-                        source_set_type_label(detected),
-                        source_set_type_label(source_set.purpose)
+                        detected.as_str(),
+                        source_set.purpose.as_str()
                     ),
                 ));
             }
@@ -699,7 +699,7 @@ fn validate_edt_external_source_set_layout(
                     format!(
                         "EDT external child project '{}' must contain descriptors for {}",
                         child.display(),
-                        source_set_type_label(source_set.purpose)
+                        source_set.purpose.as_str()
                     ),
                 ));
             }
@@ -721,7 +721,7 @@ fn validate_designer_external_source_set_layout(
             &source_set.name,
             format!(
                 "Designer external source-set must contain top-level XML descriptors for {}: {}",
-                source_set_type_label(source_set.purpose),
+                source_set.purpose.as_str(),
                 path.display()
             ),
         ));
@@ -747,8 +747,8 @@ fn validate_designer_external_source_set_layout(
                 format!(
                     "top-level XML descriptor '{}' resolves to {} but source-set declares {}",
                     descriptor.display(),
-                    source_set_type_label(detected),
-                    source_set_type_label(source_set.purpose)
+                    detected.as_str(),
+                    source_set.purpose.as_str()
                 ),
             ));
         }
@@ -805,15 +805,6 @@ fn source_set_layout_error(name: &str, details: impl Into<String>) -> ConfigVali
     ConfigValidationError::SourceSetLayoutInvalid {
         name: name.to_owned(),
         details: details.into(),
-    }
-}
-
-fn source_set_type_label(purpose: SourceSetPurpose) -> &'static str {
-    match purpose {
-        SourceSetPurpose::Configuration => "CONFIGURATION",
-        SourceSetPurpose::Extension => "EXTENSION",
-        SourceSetPurpose::ExternalDataProcessors => "EXTERNAL_DATA_PROCESSORS",
-        SourceSetPurpose::ExternalReports => "EXTERNAL_REPORTS",
     }
 }
 

@@ -12,8 +12,11 @@ pub const FILES_MTIME: TableDefinition<&str, u64> = TableDefinition::new("files_
 pub const FILES_HASH: TableDefinition<&str, &str> = TableDefinition::new("files_hash");
 /// `redb` table with storage metadata.
 pub const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
-/// Metadata key storing the latest scan watermark.
+/// `redb` table naming the base and source directory the snapshot describes.
 const IDENTITY: TableDefinition<&str, &str> = TableDefinition::new("identity");
+/// Key of the single row in [`IDENTITY`].
+const IDENTITY_KEY: &str = "target";
+/// Metadata key storing the latest scan watermark.
 pub const META_KEY_WATERMARK: &str = "watermark";
 /// Metadata key storing optimistic-lock generation.
 pub const META_KEY_GENERATION: &str = "generation";
@@ -32,6 +35,13 @@ pub struct StorageSnapshot {
     pub watermark: Option<u64>,
     pub generation: u64,
     pub identity: Option<String>,
+}
+
+impl StorageSnapshot {
+    /// Nothing has ever been committed: there is no memory to be foreign.
+    pub fn is_blank(&self) -> bool {
+        self.generation == 0 && self.watermark.is_none() && self.entries.is_empty()
+    }
 }
 
 /// Storage-layer failures split into recoverable and hard categories.
@@ -99,7 +109,7 @@ impl HashStorage {
 
         let identity = match tx.open_table(IDENTITY) {
             Ok(table) => table
-                .get("target")
+                .get(IDENTITY_KEY)
                 .map_err(|e| map_storage_error(&self.path, "read identity", e))?
                 .map(|value| value.value().to_owned()),
             Err(TableError::TableDoesNotExist(_)) => None,
@@ -230,7 +240,7 @@ impl HashStorage {
             if let Some(identity) = identity {
                 tx.open_table(IDENTITY)
                     .map_err(|e| map_table_error(&self.path, e))?
-                    .insert("target", identity)
+                    .insert(IDENTITY_KEY, identity)
                     .map_err(|e| map_storage_error(&self.path, "write identity", e))?;
             }
 
