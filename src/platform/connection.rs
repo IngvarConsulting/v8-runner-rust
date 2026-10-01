@@ -100,14 +100,14 @@ impl V8Connection {
         if let Some(address) = declared_server_address(&self.raw) {
             return Some(format!(
                 "server:{}\\{}",
-                address.server.to_ascii_lowercase(),
-                address.reference.to_ascii_lowercase()
+                address.server.to_lowercase(),
+                address.reference.to_lowercase()
             ));
         }
         self.connection_args
             .windows(2)
             .find(|pair| pair[0].eq_ignore_ascii_case("/s") || pair[0].eq_ignore_ascii_case("-s"))
-            .map(|pair| format!("server:{}", pair[1].to_ascii_lowercase()))
+            .map(|pair| format!("server:{}", pair[1].to_lowercase()))
     }
 
     /// Returns whether the raw value has a supported file or server connection shape.
@@ -320,6 +320,12 @@ mod tests {
         );
         let spelled = V8Connection::from_connection_string("srvr=HOST;ref=DB");
         let flagged = V8Connection::from_connection_string(r"/S Host\Db");
+        assert_eq!(
+            V8Connection::from_connection_string("Srvr=host;Ref=БАЗА")
+                .snapshot_identity(dir.path()),
+            V8Connection::from_connection_string(r"/S host\база").snapshot_identity(dir.path()),
+            "Cyrillic infobase names are case-insensitive too"
+        );
         assert_eq!(
             spelled.snapshot_identity(dir.path()),
             server.snapshot_identity(dir.path()),

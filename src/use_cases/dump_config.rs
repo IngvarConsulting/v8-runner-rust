@@ -146,6 +146,10 @@ fn publish_full_dump(
     } else {
         None
     };
+    // Hashing may take seconds: re-check right before replacing, not only before hashing.
+    validate_platform_target(resolved).map_err(|error| publication.cleanup_failure(error))?;
+    validate_full_dump_work_path(config, resolved)
+        .map_err(|error| publication.cleanup_failure(error))?;
 
     let published = publication
         .publish_dir(
@@ -1207,6 +1211,7 @@ mod tests {
         .expect("unreadable");
         if fs::read(publication.staging_path().join("Module.bsl")).is_ok() {
             // Running as root overrides the mode: the scan cannot be made to fail this way.
+            eprintln!("skipped: file mode does not deny reading to this user (root)");
             return;
         }
         let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump);
