@@ -96,15 +96,18 @@ impl V8Connection {
                 canonical.display()
             ));
         }
+        // Cluster host and infobase names are case-insensitive for the platform.
         if let Some(address) = declared_server_address(&self.raw) {
-            return Some(format!("server:{}\\{}", address.server, address.reference));
+            return Some(format!(
+                "server:{}\\{}",
+                address.server.to_ascii_lowercase(),
+                address.reference.to_ascii_lowercase()
+            ));
         }
-        for pair in self.connection_args.windows(2) {
-            if pair[0].eq_ignore_ascii_case("/s") || pair[0].eq_ignore_ascii_case("-s") {
-                return Some(format!("server:{}", pair[1]));
-            }
-        }
-        None
+        self.connection_args
+            .windows(2)
+            .find(|pair| pair[0].eq_ignore_ascii_case("/s") || pair[0].eq_ignore_ascii_case("-s"))
+            .map(|pair| format!("server:{}", pair[1].to_ascii_lowercase()))
     }
 
     /// Returns whether the raw value has a supported file or server connection shape.
@@ -231,11 +234,15 @@ pub fn declared_parameters(raw: &str) -> Option<Vec<(String, &str)>> {
     raw.split(';')
         .map(str::trim)
         .filter(|part| !part.is_empty())
-        .map(|part| {
-            part.split_once('=')
-                .map(|(key, value)| (key.trim().to_ascii_lowercase(), value.trim()))
-        })
+        .map(declared_parameter)
         .collect()
+}
+
+/// Одна часть объявленной формы: ключ строчными без пробелов, значение без пробелов
+/// по краям. Загрузчик конфигурации разбирает части той же функцией.
+pub fn declared_parameter(part: &str) -> Option<(String, &str)> {
+    part.split_once('=')
+        .map(|(key, value)| (key.trim().to_ascii_lowercase(), value.trim()))
 }
 
 /// Значение параметра строки подключения без обрамляющих кавычек: платформа принимает
@@ -310,6 +317,17 @@ mod tests {
         assert_eq!(
             server.snapshot_identity(dir.path()),
             args.snapshot_identity(dir.path())
+        );
+        let spelled = V8Connection::from_connection_string("srvr=HOST;ref=DB");
+        let flagged = V8Connection::from_connection_string(r"/S Host\Db");
+        assert_eq!(
+            spelled.snapshot_identity(dir.path()),
+            server.snapshot_identity(dir.path()),
+            "server and infobase names are case-insensitive"
+        );
+        assert_eq!(
+            flagged.snapshot_identity(dir.path()),
+            server.snapshot_identity(dir.path())
         );
         for connection in [&declared, &server, &args] {
             let identity = connection.snapshot_identity(dir.path()).expect("identity");

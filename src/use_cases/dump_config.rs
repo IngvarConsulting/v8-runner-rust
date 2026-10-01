@@ -130,15 +130,23 @@ fn publish_full_dump(
 ) -> Result<Option<String>, AppError> {
     use crate::change_detection::analyzer::{commit_full_snapshot, prepare_full_snapshot};
 
-    let inventory = SourceSetInventory::new(config);
-    let snapshot = inventory
-        .designer_context(&resolved.source_set_name)
-        .filter(|source| config.format == SourceFormat::Designer && source.persists_snapshot())
-        .map(|source| prepare_full_snapshot(source, publication.staging_path()));
-
     validate_platform_target(resolved).map_err(|error| publication.cleanup_failure(error))?;
     validate_full_dump_work_path(config, resolved)
         .map_err(|error| publication.cleanup_failure(error))?;
+    // Hashing a large staging tree takes seconds; honour a cancellation that came first.
+    if let Some(error) = interruption_before_publish(context, "dump publication") {
+        return Err(publication.cleanup_failure(error));
+    }
+
+    let snapshot = if config.format == SourceFormat::Designer {
+        SourceSetInventory::new(config)
+            .designer_context(&resolved.source_set_name)
+            .filter(|source| source.persists_snapshot())
+            .map(|source| prepare_full_snapshot(source, publication.staging_path()))
+    } else {
+        None
+    };
+
     let published = publication
         .publish_dir(
             context,
@@ -147,6 +155,7 @@ fn publish_full_dump(
             resolved.platform_consent(),
         )
         .map_err(|error| publication.cleanup_failure(error))?;
+    debug!(target = %resolved.platform_target_path.display(), "published staged dump");
 
     // Cancellation observed during publication must not leave a successfully published
     // tree unrecorded. This local commit starts no process and has no cancellation check.
@@ -1112,7 +1121,8 @@ mod tests {
         let inventory = super::SourceSetInventory::new(&config);
         let source = inventory.designer_context("main").expect("context");
         rescan_and_commit_full(source, &config.work_path).expect("old snapshot");
-        let before = fs::read(source.storage_path(&config.work_path)).expect("old memory");
+        let before = fs::read(source.storage_path(&config.work_path).expect("memory path"))
+            .expect("old memory");
         let cancel = CancellationToken::new();
         cancel.cancel();
         let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump)
@@ -1123,7 +1133,7 @@ mod tests {
             "old source"
         );
         assert_eq!(
-            fs::read(source.storage_path(&config.work_path)).expect("memory"),
+            fs::read(source.storage_path(&config.work_path).expect("memory path")).expect("memory"),
             before
         );
         assert!(matches!(
@@ -1164,7 +1174,7 @@ mod tests {
         let (_dir, config, resolved, publication) = publication_fixture();
         let inventory = super::SourceSetInventory::new(&config);
         let source = inventory.designer_context("main").expect("context");
-        let storage = source.storage_path(&config.work_path);
+        let storage = source.storage_path(&config.work_path).expect("memory path");
         fs::create_dir_all(storage.parent().expect("parent")).expect("parent dir");
         fs::create_dir(&storage).expect("block storage with a directory");
         let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump);
@@ -1188,12 +1198,17 @@ mod tests {
         let inventory = super::SourceSetInventory::new(&config);
         let source = inventory.designer_context("main").expect("context");
         rescan_and_commit_full(source, &config.work_path).expect("old memory");
-        let before = fs::read(source.storage_path(&config.work_path)).expect("memory");
+        let before =
+            fs::read(source.storage_path(&config.work_path).expect("memory path")).expect("memory");
         fs::set_permissions(
             publication.staging_path().join("Module.bsl"),
             fs::Permissions::from_mode(0o000),
         )
         .expect("unreadable");
+        if fs::read(publication.staging_path().join("Module.bsl")).is_ok() {
+            // Running as root overrides the mode: the scan cannot be made to fail this way.
+            return;
+        }
         let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump);
         let result = super::publish_full_dump(&context, &config, &resolved, &publication);
         fs::set_permissions(
@@ -1208,8 +1223,23 @@ mod tests {
             "database source"
         );
         assert_eq!(
-            fs::read(source.storage_path(&config.work_path)).expect("memory"),
+            fs::read(source.storage_path(&config.work_path).expect("memory path")).expect("memory"),
             before
+        );
+    }
+
+    #[test]
+    fn full_publication_rechecks_that_the_target_does_not_contain_work_path() {
+        let (_dir, mut config, resolved, publication) = publication_fixture();
+        // workPath moved under the target after the target was resolved.
+        config.work_path = resolved.platform_target_path.join("work");
+        let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump);
+        let error = super::publish_full_dump(&context, &config, &resolved, &publication)
+            .expect_err("refused before publication");
+        assert!(error.to_string().contains("contain workPath"), "{error}");
+        assert_eq!(
+            fs::read_to_string(resolved.platform_target_path.join("Module.bsl")).expect("source"),
+            "old source"
         );
     }
 
