@@ -30,7 +30,7 @@ use crate::use_cases::request::BuildRequest as BuildArgs;
 use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::tool_extension;
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempPath};
 use tracing::debug;
 
 mod agent;
@@ -539,7 +539,7 @@ fn execute_source_set_step(
                 designer_dsl
                     .load_config_from_files_partial(
                         load_context.path(),
-                        list_file.path(),
+                        &list_file,
                         extension_name(source_set),
                     )
                     .map_err(AppError::from)
@@ -610,8 +610,11 @@ fn write_partial_load_list_or_preserve(
     paths: &[PathBuf],
     source_root: &Path,
     list_file: NamedTempFile,
-) -> Result<NamedTempFile, AppError> {
-    match partial_load::write_list_file(paths, source_root, list_file.path()) {
+) -> Result<TempPath, AppError> {
+    // Designer on Windows rejects a list with a concurrent writer. Retain only
+    // its cleanup path; write_list_file closes its own writer before returning.
+    let list_file = list_file.into_temp_path();
+    match partial_load::write_list_file(paths, source_root, &list_file) {
         Ok(()) => Ok(list_file),
         Err(error) => {
             let partial_list = preserve_partial_load_list(list_file);
@@ -623,9 +626,9 @@ fn write_partial_load_list_or_preserve(
     }
 }
 
-fn preserve_partial_load_list(list_file: NamedTempFile) -> Result<PathBuf, String> {
-    let original_path = list_file.path().to_path_buf();
-    list_file.keep().map(|(_file, path)| path).map_err(|error| {
+fn preserve_partial_load_list(list_file: TempPath) -> Result<PathBuf, String> {
+    let original_path = list_file.to_path_buf();
+    list_file.keep().map_err(|error| {
         format!(
             "failed to preserve partial load list '{}': {}",
             original_path.display(),
@@ -3070,6 +3073,13 @@ mod tests {
         assert!(calls_text.contains("/UpdateDBCfg"));
         assert!(calls_text.contains("-listFile"));
         assert_eq!(storage_generation(&config, "main"), 2);
+        assert_eq!(
+            fs::read_dir(work.join("temp").join("partial-lists"))
+                .expect("partial lists directory")
+                .count(),
+            0,
+            "a successful partial load must remove its temporary list"
+        );
 
         let rerun = run_build(&config, &build_args(false)).expect("rerun");
         assert!(matches!(rerun.steps[0].mode, BuildMode::Skipped));
@@ -3176,6 +3186,76 @@ mod tests {
         assert!(!list_contents.lines().any(|line| line == "Catalogs.Items"));
         assert!(!calls.exists());
         assert_eq!(storage_generation(&config, "main"), 1);
+    }
+
+    #[test]
+    fn partial_load_list_releases_writer_before_reader_and_cleans_up_after_use() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().join("src");
+        fs::create_dir_all(&root).expect("source root");
+        let source = root.join("Модуль.bsl");
+        fs::write(&source, "module").expect("source file");
+        let list_file = tempfile::NamedTempFile::new_in(temp.path()).expect("list file");
+        let list_path = list_file.path().to_path_buf();
+
+        #[cfg(unix)]
+        let (creator_fd, creator_metadata) = {
+            use std::os::fd::AsRawFd;
+            (
+                list_file.as_raw_fd(),
+                list_file.as_file().metadata().expect("creator metadata"),
+            )
+        };
+
+        let list = super::write_partial_load_list_or_preserve(&[source], &root, list_file)
+            .expect("write partial load list");
+        let path: &Path = list.as_ref();
+        assert_eq!(path, list_path);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+            // SAFETY: fstat only writes to this valid output buffer. A descriptor closed
+            // by the helper is allowed; another test may already have reused its number.
+            let status = unsafe { libc::fstat(creator_fd, metadata.as_mut_ptr()) };
+            if status == 0 {
+                // SAFETY: a successful fstat initialized the complete stat structure.
+                let metadata = unsafe { metadata.assume_init() };
+                assert!(
+                    i128::from(metadata.st_dev) != i128::from(creator_metadata.dev())
+                        || i128::from(metadata.st_ino) != i128::from(creator_metadata.ino()),
+                    "the partial-list creator still holds its file open while the reader runs"
+                );
+            } else {
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EBADF)
+                );
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+            // Designer permits other readers, but no writer may remain open.
+            let reader = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ)
+                .open(path)
+                .expect("Designer-style reader must open the list while its owner is alive");
+            drop(reader);
+        }
+
+        assert_eq!(
+            fs::read(path).expect("read list"),
+            "\u{feff}Модуль.bsl".as_bytes()
+        );
+        drop(list);
+        assert!(!list_path.exists(), "the list must be removed after use");
     }
 
     #[test]

@@ -23,11 +23,12 @@ case "$CI_SCOPE" in
           "support::path::tests::filesystem_object_identity_changes_when_directory_is_replaced"
           "support::fs::tests::replace_file_restores_original_bytes_when_stage_disappeared"
           "use_cases::staged_publication::tests::orphan_cleanup_requires_exact_target_kind_and_run_name_contract"
+          "use_cases::build_project::tests::partial_load_list_releases_writer_before_reader_and_cleans_up_after_use"
         )
         listed_tests="$(cargo test --locked -- --list)"
         for test_name in "${windows_contract_tests[@]}"; do
           if ! grep -Fxq "$test_name: test" <<<"$listed_tests"; then
-            echo "Windows detached stdio regression is missing: $test_name" >&2
+            echo "Windows contract regression is missing: $test_name" >&2
             exit 2
           fi
           cargo test --locked "$test_name" -- --exact --nocapture
