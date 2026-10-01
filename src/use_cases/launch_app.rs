@@ -3,32 +3,45 @@ use std::time::Duration;
 
 use crate::config::model::AppConfig;
 use crate::domain::launch::{
-    ExternalEpfWaitResult, LaunchMode, LaunchPlan, LaunchResult, PlatformResolution,
+    ExternalEpfWaitResult, LaunchMode, LaunchPlan, LaunchResult, LaunchVia, PlatformResolution,
     PlatformResolutionSource,
 };
+use crate::domain::next_step::NextStep;
 use crate::domain::runner::{launch_key_alias_matches, LaunchOptions};
 use crate::platform::enterprise::{
-    build_launch_args, mask_launch_args, normalize_launch_payload_path, LaunchClientMode,
+    build_launch_args, normalize_launch_payload_path, LaunchAddress, LaunchClientMode,
 };
 use crate::platform::locator::{ResolutionSource, UtilityLocation, UtilityType, UtilityVersion};
 use crate::platform::process::{ManagedSpawnMode, ProcessRequest};
+use crate::platform::secrets::{mask_preview_args, mask_url_userinfo};
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
+use crate::support::error::CapabilityReason;
 use crate::use_cases::client_mcp_readiness;
-use crate::use_cases::context::{ExecutionContext, ExecutionInterruption, InterruptionSafetyClass};
+use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::launch_keys::vanessa_enterprise_launch_keys;
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::{
     ClientMcpAddonRequest, ClientMcpMode, ClientMcpOptionsRequest, EnterpriseLaunchTarget,
     LaunchRequest as LaunchArgs, LaunchTargetRequest,
 };
-use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::tool_extension;
 use tracing::debug;
 
 const LAUNCH_STARTUP_PROBE: Duration = Duration::from_millis(250);
 
+/// Единственный выход сценария: `provider_dispatched` ответа ставит отметка работы команды.
 pub fn execute(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &LaunchArgs,
+) -> UseCaseResult<LaunchResult> {
+    stamp_dispatch(run_launch(context, config, args), context.work())
+}
+
+fn run_launch(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &LaunchArgs,
@@ -39,7 +52,11 @@ pub fn execute(
         target = ?args.target,
         "executing launch use case"
     );
+    if args.target == LaunchTargetRequest::Web {
+        return execute_web(context, config, args);
+    }
     let (mode, utility, client_mode) = match args.target {
+        LaunchTargetRequest::Web => unreachable!("web launches are handled above"),
         LaunchTargetRequest::Designer => (
             LaunchMode::Designer,
             UtilityType::V8,
@@ -61,20 +78,50 @@ pub fn execute(
         }
     };
 
-    if let Some(interruption) = context.interruption() {
-        return Err(UseCaseFailure::without_payload(AppError::Runtime(format!(
-            "{} for command '{}'",
-            interruption_message(interruption),
-            context.command().as_str()
-        ))));
+    // Прямой шлюз автономной цели раннер пока не использует (#205), поэтому её
+    // открывает только клиентский адрес — а по нему ходит только тонкий клиент.
+    // Конфигуратор, толстый и обычный отказывают здесь ровно так же, как отказывали до
+    // появления второго пути.
+    let standalone = config.target_kind() == crate::domain::capability::TargetKind::Standalone;
+    if standalone && !matches!(client_mode, LaunchClientMode::Thin) {
+        return Err(UseCaseFailure::without_payload(
+            UseCaseError::new(
+                UseCaseErrorKind::Capability(CapabilityReason::Target),
+                "a standalone server is opened by its web address: use `launch web` with infobase.web.url; a client is not launched against the gate",
+            )
+            .with_next(NextStep::command("launch web")),
+        ));
     }
 
-    let launch = effective_launch_options(config, args)
-        .map_err(|error| UseCaseFailure::without_payload(error))?;
+    if let Some(cancel) = crate::use_cases::interruption::SafePointCancel::noticed(
+        context,
+        crate::use_cases::interruption::SafePoint::Command,
+    ) {
+        return Err(UseCaseFailure::without_payload(cancel.into_error()));
+    }
+
+    // Путь и адрес разрешаются до поиска утилиты: искать платформу, когда адреса нет,
+    // незачем, а отказ про адрес человеку понятнее отказа про платформу.
+    let via = resolve_launch_via(args.via, client_mode, standalone)
+        .map_err(UseCaseFailure::without_payload)?;
+    let web_url = match via {
+        LaunchVia::Connection => None,
+        LaunchVia::Web => Some(
+            client_address(config)
+                .map_err(UseCaseFailure::without_payload)?
+                .to_owned(),
+        ),
+    };
+
+    // В ответ и в план адрес идёт без пароля из userinfo: argv несёт настоящий,
+    // отчёт — замаскированный.
+    let reported_url = web_url.as_deref().map(mask_url_userinfo);
+
+    let launch = effective_launch_options(config, args).map_err(UseCaseFailure::without_payload)?;
     let external_epf_wait =
         external_epf_wait_plan(config, args, &launch).map_err(UseCaseFailure::without_payload)?;
-    let readiness_url = client_mcp_readiness_url(config, args)
-        .map_err(|error| UseCaseFailure::without_payload(error))?;
+    let readiness_url =
+        client_mcp_readiness_url(config, args).map_err(UseCaseFailure::without_payload)?;
     if args.dry_run {
         // Both options report an outcome observed from a running client, which a preview
         // never starts; answering them with a plan would be a fabricated observation.
@@ -99,15 +146,20 @@ pub fn execute(
     let location = utilities
         .locate(utility)
         .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
-    let platform_resolution = platform_resolution(&location);
+    let platform_resolution = Some(platform_resolution(&location));
+    let connection = config.v8_connection();
+    let address = match &web_url {
+        None => LaunchAddress::Connection(&connection),
+        // У автономной цели `infobase.user`/`password` — учётные данные SSH-шлюза, а не
+        // базы: клиенту они не принадлежат и в его командную строку не попадают.
+        Some(url) => LaunchAddress::Web {
+            url,
+            credentials: (!standalone).then_some(&connection),
+        },
+    };
     let process_request = ProcessRequest {
         program: location.path.clone(),
-        args: build_launch_args(
-            client_mode,
-            &config.v8_connection(),
-            &additional_launch_keys,
-            &launch,
-        ),
+        args: build_launch_args(client_mode, address, &additional_launch_keys, &launch),
         workdir: None,
         stdout_log_path: None,
         stderr_log_path: external_epf_wait
@@ -122,7 +174,7 @@ pub fn execute(
     if args.dry_run {
         let connection = config.v8_connection();
         let secrets: Vec<&str> = connection.password.as_deref().into_iter().collect();
-        let masked = mask_launch_args(&process_request.args, &secrets);
+        let masked = mask_preview_args(&process_request.args, &secrets);
         log_live_stage(
             "launch: preview",
             "[Launch] preview only, client process not dispatched",
@@ -131,8 +183,10 @@ pub fn execute(
             ok: true,
             mode,
             pid: None,
+            via,
             binary: location.path.clone(),
             platform_resolution,
+            url: reported_url.clone(),
             provider_dispatched: false,
             plan: Some(LaunchPlan {
                 program: process_request.program.clone(),
@@ -150,67 +204,107 @@ pub fn execute(
 
     if let Some(plan) = external_epf_wait {
         let managed = runner
-            .spawn_managed(&process_request, ManagedSpawnMode::Wait)
+            .spawn_managed(
+                &process_request,
+                ManagedSpawnMode::Wait,
+                Some(context.work()),
+            )
             .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
         let pid = managed.pid();
-        let outcome = managed
-            .wait_for_exit(&context.process_policy(
-                InterruptionSafetyClass::GracefulThenKill,
-                Some(Duration::from_millis(plan.timeout_ms)),
-            ))
-            .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
-        let message = if outcome.timed_out {
-            format!(
-                "External EPF client timed out after {}ms and was terminated",
-                plan.timeout_ms
-            )
-        } else {
-            format!(
-                "External EPF client exited with status {}",
-                outcome.exit_code.unwrap_or(-1)
-            )
+        // Чем кончилось ожидание уже запущенного клиента. Прерванное ожидание отвечает
+        // формой `launch`, и выхода у клиента в нём нет — ни кода, ни истёкшего срока.
+        enum WaitEnd {
+            Exited(Option<i32>),
+            TimedOut(Option<i32>),
+            Interrupted(AppError),
+        }
+        let end = match managed.wait_for_exit(&context.process_policy(
+            InterruptionSafetyClass::GracefulThenKill,
+            Some(Duration::from_millis(plan.timeout_ms)),
+        )) {
+            Ok(outcome) if outcome.timed_out => WaitEnd::TimedOut(outcome.exit_code),
+            Ok(outcome) => WaitEnd::Exited(outcome.exit_code),
+            Err(error) => WaitEnd::Interrupted(AppError::from(error)),
+        };
+        let (message, exit_code, timed_out) = match &end {
+            WaitEnd::Exited(exit_code) => (
+                format!(
+                    "External EPF client exited with status {}",
+                    exit_code.unwrap_or(-1)
+                ),
+                *exit_code,
+                false,
+            ),
+            WaitEnd::TimedOut(exit_code) => (
+                format!(
+                    "External EPF client timed out after {}ms and was terminated",
+                    plan.timeout_ms
+                ),
+                *exit_code,
+                true,
+            ),
+            WaitEnd::Interrupted(error) => (
+                format!(
+                    "External EPF client wait ended before the client exited on its own: {error}"
+                ),
+                None,
+                false,
+            ),
         };
         let result = LaunchResult {
-            ok: !outcome.timed_out,
+            ok: matches!(end, WaitEnd::Exited(_)),
             mode,
+            via,
             pid: Some(pid),
             binary: location.path,
             platform_resolution,
-            provider_dispatched: true,
+            url: reported_url.clone(),
+            provider_dispatched: false,
             plan: None,
             message: Some(message.clone()),
             mcp_readiness: None,
             external_epf_wait: Some(ExternalEpfWaitResult {
                 pid,
                 execute_path: plan.execute_path,
-                exit_code: outcome.exit_code,
-                timed_out: outcome.timed_out,
+                exit_code,
+                timed_out,
                 output_path: plan.output_path,
                 stderr_path: plan.stderr_path.display().to_string(),
             }),
         };
-        if outcome.timed_out {
-            return Err(UseCaseFailure::with_payload(
+        return match end {
+            WaitEnd::Exited(_) => Ok(result),
+            WaitEnd::TimedOut(_) => Err(UseCaseFailure::with_payload(
                 AppError::Runtime(message),
                 result,
-            ));
-        }
-        return Ok(result);
+            )),
+            WaitEnd::Interrupted(error) => Err(UseCaseFailure::after_possible_work(
+                error,
+                context.work(),
+                || result,
+            )),
+        };
     }
 
     if let Some(url) = readiness_url {
         let managed = runner
-            .spawn_managed(&process_request, ManagedSpawnMode::Detached)
+            .spawn_managed(
+                &process_request,
+                ManagedSpawnMode::Detached,
+                Some(context.work()),
+            )
             .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
         let pid = managed.pid();
         let binary = managed.binary().clone();
         let mut result = LaunchResult {
             ok: true,
             mode,
+            via,
             pid: Some(pid),
             binary: binary.clone(),
             platform_resolution: platform_resolution.clone(),
-            provider_dispatched: true,
+            url: reported_url.clone(),
+            provider_dispatched: false,
             plan: None,
             message: Some(launch_message(config, args, &binary, pid)),
             mcp_readiness: None,
@@ -228,12 +322,27 @@ pub fn execute(
                 let _ = managed.detach();
                 return Ok(result);
             }
-            Err(readiness) => {
-                let message = readiness
-                    .message
-                    .clone()
-                    .unwrap_or_else(|| "MCP endpoint did not become ready".to_owned());
-                managed.terminate();
+            Err(not_ready) => {
+                let unready = |readiness: &crate::domain::launch::McpReadinessResult| {
+                    readiness
+                        .message
+                        .clone()
+                        .unwrap_or_else(|| "MCP endpoint did not become ready".to_owned())
+                };
+                let (readiness, message, error) = match not_ready {
+                    client_mcp_readiness::NotReady::Failed(readiness) => {
+                        let message = unready(&readiness);
+                        managed.terminate();
+                        let error = AppError::Runtime(message.clone());
+                        (readiness, message, error)
+                    }
+                    // Клиент уже запущен: отмена снимает его и называется отменой его работы.
+                    client_mcp_readiness::NotReady::Cancelled(readiness) => {
+                        let message = unready(&readiness);
+                        let error = AppError::from(managed.cancel()).with_context(message.clone());
+                        (readiness, message, error)
+                    }
+                };
                 result.ok = false;
                 result.message = Some(format!(
                     "Launched {} via {} (pid {}) but {message}; process terminated",
@@ -242,25 +351,24 @@ pub fn execute(
                     pid
                 ));
                 result.mcp_readiness = Some(readiness);
-                return Err(UseCaseFailure::with_payload(
-                    AppError::Runtime(message),
-                    result,
-                ));
+                return Err(UseCaseFailure::with_payload(error, result));
             }
         }
     }
 
     let spawned = runner
-        .spawn(&process_request)
+        .spawn(&process_request, context.work())
         .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
 
     Ok(LaunchResult {
         ok: true,
         mode,
         pid: Some(spawned.pid),
+        via,
         binary: spawned.binary.clone(),
         platform_resolution,
-        provider_dispatched: true,
+        url: reported_url.clone(),
+        provider_dispatched: false,
         plan: None,
         message: Some(launch_message(config, args, &spawned.binary, spawned.pid)),
         mcp_readiness: None,
@@ -441,17 +549,6 @@ fn is_client_mcp_va_launch(args: &LaunchArgs) -> bool {
     })
 }
 
-fn interruption_message(interruption: ExecutionInterruption) -> &'static str {
-    match interruption {
-        ExecutionInterruption::Cancelled => {
-            "execution cancelled before reaching a safe completion point"
-        }
-        ExecutionInterruption::TimedOut => {
-            "execution timeout expired before reaching a safe completion point"
-        }
-    }
-}
-
 fn mode_label(target: LaunchTargetRequest) -> &'static str {
     match target {
         LaunchTargetRequest::Designer => "конфигуратор",
@@ -463,7 +560,139 @@ fn mode_label(target: LaunchTargetRequest) -> &'static str {
         LaunchTargetRequest::Enterprise(EnterpriseLaunchTarget::ClientMcp { .. }) => {
             "клиентский MCP-сервер"
         }
+        LaunchTargetRequest::Web => "веб-клиент",
     }
+}
+
+/// `launch web`: открыть объявленный клиентский адрес в браузере.
+///
+/// Без `infobase.web.url` — типизированный отказ: адрес появляется после публикации
+/// или задаётся вручную, выводить его раннер не берётся. Доступность адреса не
+/// проверяется: раннер не пингует публикацию и не чинит её.
+fn execute_web(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &LaunchArgs,
+) -> UseCaseResult<LaunchResult> {
+    let url = client_address(config).map_err(UseCaseFailure::without_payload)?;
+    if args.client_mcp.is_some() || args.launch.external_epf_wait.is_some() {
+        return Err(UseCaseFailure::without_payload(AppError::Validation(
+            "launch web opens a browser and takes no client launch options".to_owned(),
+        )));
+    }
+    // У `launch web` адрес один. Ключ, которому нечего выбирать, отвергается, а не
+    // принимается молча: молчаливое согласие читалось бы как выбор.
+    if args.via.is_some() {
+        return Err(UseCaseFailure::without_payload(AppError::Validation(
+            "--via selects the address for the thin client; launch web has only the client address"
+                .to_owned(),
+        )));
+    }
+    if let Some(cancel) = crate::use_cases::interruption::SafePointCancel::noticed(
+        context,
+        crate::use_cases::interruption::SafePoint::Command,
+    ) {
+        return Err(UseCaseFailure::without_payload(cancel.into_error()));
+    }
+
+    let (program, leading) = crate::platform::browser::opener();
+    let mut plan_args = leading.clone();
+    plan_args.push(url.to_owned());
+    // Браузеру идёт настоящий адрес, в отчёт — замаскированный. Считаем один раз:
+    // четыре независимых места маскировки разъехались бы.
+    let reported_url = mask_url_userinfo(url);
+    if args.dry_run {
+        let plan_args: Vec<String> = plan_args.iter().map(|arg| mask_url_userinfo(arg)).collect();
+        log_live_stage(
+            "launch: preview",
+            "[Launch] preview only, browser not opened",
+        );
+        return Ok(LaunchResult {
+            ok: true,
+            mode: LaunchMode::Web,
+            pid: None,
+            via: LaunchVia::Web,
+            binary: program.clone(),
+            platform_resolution: None,
+            url: Some(reported_url.clone()),
+            provider_dispatched: false,
+            plan: Some(LaunchPlan {
+                program,
+                args: plan_args,
+            }),
+            message: Some(format!(
+                "Previewed веб-клиент at {reported_url}; browser not opened"
+            )),
+            mcp_readiness: None,
+            external_epf_wait: None,
+        });
+    }
+
+    log_live_stage("launch: web", "[Launch] opening the published infobase");
+    let pid = crate::platform::browser::open_url(&program, &leading, url, context.work())
+        .map_err(|error| UseCaseFailure::without_payload(AppError::from(error)))?;
+    Ok(LaunchResult {
+        ok: true,
+        mode: LaunchMode::Web,
+        pid: Some(pid),
+        via: LaunchVia::Web,
+        binary: program,
+        platform_resolution: None,
+        url: Some(reported_url.clone()),
+        provider_dispatched: false,
+        plan: None,
+        message: Some(format!("Opened веб-клиент at {reported_url} (pid {pid})")),
+        mcp_readiness: None,
+        external_epf_wait: None,
+    })
+}
+
+/// Клиентский адрес цели. Один текст отказа на оба пути: `launch web` и тонкий клиент по
+/// вебу отказывают одинаково, потому что не хватает им одного и того же.
+fn client_address(config: &AppConfig) -> Result<&str, AppError> {
+    config
+        .infobase
+        .web
+        .as_ref()
+        .and_then(|web| web.url.as_deref())
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .ok_or_else(|| {
+            AppError::Validation(
+                "infobase.web.url is not declared: the client address appears after `publish` on a web server or is set by hand in infobase.web.url"
+                    .to_owned(),
+            )
+        })
+}
+
+/// Каким адресом открывать базу: то, что попросили, иначе умолчание по виду цели.
+///
+/// Вид цели берётся объявленным, а не разобранным из строки подключения. Строку прямого
+/// шлюза автономной цели раннер пока не использует (#205), поэтому умолчание для неё — веб.
+fn resolve_launch_via(
+    requested: Option<LaunchVia>,
+    client_mode: LaunchClientMode,
+    standalone: bool,
+) -> Result<LaunchVia, AppError> {
+    let default = if standalone {
+        LaunchVia::Web
+    } else {
+        LaunchVia::Connection
+    };
+    let Some(requested) = requested else {
+        return Ok(default);
+    };
+    if !matches!(client_mode, LaunchClientMode::Thin) {
+        return Err(AppError::Validation(
+            "--via selects the address for the thin client; the other launch modes have only one address".to_owned(),
+        ));
+    }
+    if requested == LaunchVia::Connection && standalone {
+        return Err(AppError::Validation(
+            "the direct gate address of a standalone server is not used by the runner yet (#205): the thin client goes by infobase.web.url — use --via web or launch web".to_owned(),
+        ));
+    }
+    Ok(requested)
 }
 
 fn client_mcp_launch_shape(mode: ClientMcpMode) -> (LaunchMode, UtilityType, LaunchClientMode) {
@@ -528,8 +757,8 @@ fn build_client_mcp_payload(
 mod tests {
     use super::{execute, platform_resolution};
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, EnterpriseToolConfig, PlatformToolConfig,
-        SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig, ToolExtensionArtifactConfig,
+        AppConfig, BuildConfig, EnterpriseToolConfig, PlatformToolConfig, SourceFormat,
+        SourceSetConfig, SourceSetPurpose, TestsConfig, ToolExtensionArtifactConfig,
         ToolExtensionConfig, ToolExtensionInput, ToolsConfig,
     };
     use crate::platform::locator::{ResolutionSource, UtilityLocation, UtilityType};
@@ -612,10 +841,12 @@ mod tests {
         AppConfig {
             base_path: base_path.to_path_buf(),
             work_path: work_path.to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -652,6 +883,7 @@ mod tests {
             &ExecutionContext::cli(CommandName::Launch),
             &config,
             &LaunchRequest {
+                via: None,
                 target: LaunchTargetRequest::thin_client(),
                 launch: Default::default(),
                 client_mcp: None,
@@ -681,6 +913,7 @@ mod tests {
             &ExecutionContext::cli(CommandName::Launch),
             &config,
             &LaunchRequest {
+                via: None,
                 target: LaunchTargetRequest::thin_client(),
                 launch: Default::default(),
                 client_mcp: None,
@@ -721,6 +954,7 @@ mod tests {
             &ExecutionContext::cli(CommandName::Launch),
             &config,
             &LaunchRequest {
+                via: None,
                 target: LaunchTargetRequest::thin_client(),
                 launch: Default::default(),
                 client_mcp: None,
@@ -753,6 +987,7 @@ mod tests {
             &ExecutionContext::cli(CommandName::Launch),
             &config,
             &LaunchRequest {
+                via: None,
                 target: LaunchTargetRequest::client_mcp_with_mode(ClientMcpMode::Thin),
                 launch: Default::default(),
                 client_mcp: Some(ClientMcpOptionsRequest {
@@ -785,6 +1020,7 @@ mod tests {
             &ExecutionContext::cli(CommandName::Launch),
             &config,
             &LaunchRequest {
+                via: None,
                 target: LaunchTargetRequest::designer(),
                 launch: Default::default(),
                 client_mcp: None,
@@ -814,6 +1050,7 @@ mod tests {
             &ExecutionContext::cli(CommandName::Launch),
             &config,
             &LaunchRequest {
+                via: None,
                 target: LaunchTargetRequest::ordinary_application(),
                 launch: Default::default(),
                 client_mcp: None,
@@ -850,6 +1087,7 @@ mod tests {
             &ExecutionContext::cli(CommandName::Launch),
             &config,
             &LaunchRequest {
+                via: None,
                 target: LaunchTargetRequest::client_mcp_with_mode(ClientMcpMode::Thin),
                 launch: Default::default(),
                 client_mcp: Some(ClientMcpOptionsRequest::default()),
@@ -882,6 +1120,7 @@ mod tests {
             &ExecutionContext::cli(CommandName::Launch),
             &config,
             &LaunchRequest {
+                via: None,
                 target: LaunchTargetRequest::client_mcp_with_mode(ClientMcpMode::Thin),
                 launch: Default::default(),
                 client_mcp: None,
@@ -901,6 +1140,7 @@ mod tests {
             &ExecutionContext::cli(CommandName::Launch),
             &config,
             &LaunchRequest {
+                via: None,
                 target: LaunchTargetRequest::thin_client(),
                 launch: Default::default(),
                 client_mcp: Some(ClientMcpOptionsRequest::default()),
@@ -928,6 +1168,7 @@ mod tests {
             &ExecutionContext::cli(CommandName::Launch),
             &config,
             &LaunchRequest {
+                via: None,
                 target: LaunchTargetRequest::client_mcp_with_mode(ClientMcpMode::Thin),
                 launch: Default::default(),
                 client_mcp: Some(ClientMcpOptionsRequest {

@@ -17,10 +17,10 @@ AI-агентам безопасную, уже ограниченную MCP-по
 
 ## Зачем это нужно
 
-- Быстрый feedback loop (цикл обратной связи): `build -> syntax/test -> diagnose`.
+- Быстрый feedback loop (цикл обратной связи): `push -> check/test -> diagnose`.
 - Один config (конфиг) `v8project.yaml` для исходников, рабочей ИБ, инструментов и тестов.
 - Поддержка source sets (наборов исходников) в форматах `DESIGNER` и `EDT`.
-- Builder backends (сборщики) `DESIGNER` и `IBCMD` там, где это разрешает контракт 1С.
+- Исполнителя каждой операции выбирает матрица возможностей — Конфигуратор или `ibcmd` там, где это разрешает контракт 1С; вручную назначается ключом `providers.<операция>`.
 - Machine-readable output (машиночитаемый вывод) через `--json-message` для CI и агентов.
 - MCP tools (MCP-инструменты) для управляемой работы AI-агентов без выдачи всей CLI-поверхности.
 - Изолированный `workPath` для hash storages (хранилищ хэшей), логов, временных файлов и
@@ -40,33 +40,47 @@ cargo build --release
 
 ### Release assets
 
-Начиная с `v0.7.0`, каждый выпуск сохраняет portable `.tar.gz`/`.zip` archives
-для ручной установки и публикует из тех же matrix builds три готовых бинарника для Unica:
-`v8-runner-darwin-arm64`, `v8-runner-linux-x64` и
-`v8-runner-win-x64.exe`. Единый `v8-runner-assets.json` schema v2 связывает
-исходные tag/commit с ролью, target, размером и SHA-256 всех остальных assets,
-а для архивов — также с путём и SHA-256 вложенного бинарника. Все семь payload
-assets и manifest имеют GitHub build attestations, которые подтверждают их
-происхождение; `license-v8-runner-AGPL-3.0-only.txt` и
-`notice-v8-runner-fork.txt` лежат рядом и также входят в manifest. Corresponding
-Source — неизменяемый tag того же release.
+Каждый выпуск публикует **один архив на платформу**. Внутри — бинарник `v8-runner`
+(на Windows `v8-runner.exe`), этот README, лицензия, уведомление о форке и каталог
+`examples/`:
+
+| Архив | Система | Процессор |
+| --- | --- | --- |
+| `v8-runner-linux-x86_64-musl.tar.gz` | Linux, любой дистрибутив (статическая сборка musl) | Intel/AMD 64 |
+| `v8-runner-macos-aarch64.tar.gz` | macOS | Apple Silicon (M1 и новее) |
+| `v8-runner-macos-x86_64.tar.gz` | macOS | Intel |
+| `v8-runner-windows-x86_64.zip` | Windows | Intel/AMD 64 |
+
+Отличить Apple Silicon от Intel: `uname -m` отвечает `arm64` или `x86_64`.
+
+Единый `v8-runner-assets.json` schema v2 связывает исходные tag/commit с ролью,
+target, размером и SHA-256 всех остальных assets, а для архивов — также с путём и
+SHA-256 вложенного бинарника. Все payload assets и manifest имеют GitHub build
+attestations, которые подтверждают их происхождение;
+`license-v8-runner-AGPL-3.0-only.txt` и `notice-v8-runner-fork.txt` лежат рядом и
+также входят в manifest. Corresponding Source — неизменяемый tag того же release.
+
+До `v0.11.0` включительно рядом с архивами выкладывались несжатые бинарники
+`v8-runner-darwin-arm64`, `v8-runner-linux-x64` и `v8-runner-win-x64.exe`. Это были
+байт в байт те же файлы, что лежат в архивах, и одна платформа выходила под двумя
+именами. Они больше не публикуются.
 
 В `v0.6.x` публиковались отдельные `.sha256` и `.provenance.json`. С `v0.7.0`
-их заменяет единый manifest; имена бинарников, архивов и юридических файлов не
-изменились.
+их заменяет единый manifest; имена архивов и юридических файлов при этом не
+менялись.
 
 Перед использованием проверьте release и конкретный бинарник:
 
 ```bash
 gh release verify v0.7.0 --repo IngvarConsulting/v8-runner-rust
 gh release download v0.7.0 --repo IngvarConsulting/v8-runner-rust \
-  --pattern v8-runner-assets.json --pattern v8-runner-linux-x64
+  --pattern v8-runner-assets.json --pattern v8-runner-linux-x86_64-musl.tar.gz
 gh release verify-asset v0.7.0 ./v8-runner-assets.json \
   --repo IngvarConsulting/v8-runner-rust
-gh release verify-asset v0.7.0 ./v8-runner-linux-x64 \
+gh release verify-asset v0.7.0 ./v8-runner-linux-x86_64-musl.tar.gz \
   --repo IngvarConsulting/v8-runner-rust
 source_commit="$(python3 -c 'import json; print(json.load(open("v8-runner-assets.json"))["release"]["sourceCommit"])')"
-for asset in v8-runner-assets.json v8-runner-linux-x64; do
+for asset in v8-runner-assets.json v8-runner-linux-x86_64-musl.tar.gz; do
   gh attestation verify "$asset" \
     --repo IngvarConsulting/v8-runner-rust \
     --signer-workflow IngvarConsulting/v8-runner-rust/.github/workflows/release.yml \
@@ -83,28 +97,30 @@ done
 ### Создайте стартовый config (конфиг) в текущем репозитории:
 
 ```bash
-v8-runner config init
+v8-runner init
 ```
 
 Команда анализирует структуру проекта, находит поддержанные `source-set` (наборы исходников),
-создает `v8project.yaml`, пустой `v8project.local.yaml` со schema modeline и добавляет local
-overlay в `.gitignore`, если он еще не указан.
+создает `v8project.yaml`, `v8project.local.yaml` со schema modeline и базой `origin`
+(`--connection`, по умолчанию `File=build/ib`) и добавляет local overlay в `.gitignore`, если
+он еще не указан.
 
-Machine-local пути, credentials и настройки инструментов можно вынести в `v8project.local.yaml`
-рядом с основным конфигом. Этот файл применяется автоматически и должен оставаться вне Git.
+Базы проекта объявляются в `v8project.local.yaml` картой `infobases`: умолчание — `origin`,
+другую выбирает `--infobase <имя|строка соединения>`. Там же живут machine-local пути,
+credentials и настройки инструментов. Файл применяется автоматически и должен оставаться вне Git.
 
 ### Или создайте проект из существующей информационной базы:
 
 ```bash
-v8-runner bootstrap \
+v8-runner clone \
   --connection "File=/path/to/ib" \
   --platform-version 8.3.27
 ```
 
 Команда создает `v8project.yaml`, локальный overlay, `.gitignore` и выгружает основную
-конфигурацию в `src/configuration`. Credentials передавайте через `--user` и `--password`; они
-попадают только в `v8project.local.yaml`. Автоматическое обнаружение расширений этим bootstrap
-slice не выполняется.
+конфигурацию в `src/configuration`. Адрес базы и credentials (`--user`, `--password`)
+попадают только в `v8project.local.yaml`, в секцию `infobases.origin`. Автоматическое обнаружение расширений этот `clone`
+slice не выполняет.
 
 ### Загрузите тестовые и MCP-инструменты:
 
@@ -122,7 +138,7 @@ Vanessa Automation single всегда скачивается как EPF в `bui
 ### Подготовьте рабочую информационную базу:
 
 ```bash
-v8-runner init
+v8-runner infobase create
 ```
 
 Команда создает или подготавливает ИБ и, для `EDT`, импортирует workspace (рабочую область).
@@ -130,7 +146,7 @@ v8-runner init
 ### Загрузите исходники в ИБ:
 
 ```bash
-v8-runner build
+v8-runner push
 ```
 
 Команда выполняет incremental build (инкрементальную сборку) или full path (полную сборку) по
@@ -139,12 +155,14 @@ v8-runner build
 ### Спланируйте или выгрузите состояние ИБ:
 
 ```bash
-v8-runner infobase configuration export --state working --output dist/main.cf --dry-run
+v8-runner download --state working --output dist/main.cf --dry-run
 v8-runner infobase dump --output dist/base.dt --dry-run
 ```
 
 `--dry-run` валидирует окружение и показывает выбранный provider без запуска платформы и без
 создания файлов. Уберите флаг, чтобы атомарно опубликовать CF/CFE или переносимый DT-файл.
+Ключ глобальный — его место в строке не важно, — а команда без превью (`version`, `init`,
+`tools download`, `test`, `mcp serve`) отвергает его с названной причиной.
 
 Обратная операция загружает ИБ из DT-файла:
 
@@ -160,7 +178,7 @@ v8-runner infobase restore --input dist/base.dt --create
 ### Проверьте синтаксис серверных модулей:
 
 ```bash
-v8-runner syntax designer-modules --server
+v8-runner check --server
 ```
 
 Команда запускает Designer syntax check (проверку синтаксиса Конфигуратором) для серверного
@@ -172,10 +190,10 @@ v8-runner syntax designer-modules --server
 v8-runner test yaxunit all
 ```
 
-Для уже подготовленной файловой или серверной ИБ можно явно пропустить build:
+Для уже подготовленной файловой или серверной ИБ можно явно пропустить `push`:
 
 ```bash
-v8-runner test --no-build yaxunit all
+v8-runner test --no-push yaxunit all
 ```
 
 Для файловой ИБ этот режим до запуска 1С проверяет наличие `1Cv8.1CD`.
@@ -189,8 +207,8 @@ v8-runner test --no-build yaxunit all
 v8-runner test va
 ```
 
-По умолчанию команда сначала выполняет `build`, затем запускает настроенный профиль Vanessa
-Automation. Для подготовленной ИБ используйте `v8-runner test --no-build va`.
+По умолчанию команда сначала выполняет `push`, затем запускает настроенный профиль Vanessa
+Automation. Для подготовленной ИБ используйте `v8-runner test --no-push va`.
 
 Для отладки и написания тестов Vanessa Automation запустите ее в режиме MCP и, если агенту нужно
 сразу подключаться к endpoint, дождитесь готовности:
@@ -226,18 +244,26 @@ v8-runner mcp serve stdio
 Команда запускает MCP server (сервер Model Context Protocol) поверх `stdio` transport
 (транспорта стандартного ввода-вывода).
 
-Если `config init` не покрывает вашу структуру репозитория, настройте `v8project.yaml` вручную по
+Если `init` не покрывает вашу структуру репозитория, настройте `v8project.yaml` вручную по
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ## Что умеет
 
 | Зона | Команды | Что делает |
 | --- | --- | --- |
-| Project setup (настройка проекта) | `bootstrap`, `config init`, `tools download`, `init`, `extensions`, `build` | Создает проект/config, скачивает инструменты, готовит ИБ, обновляет расширения и загружает исходники |
-| Verification (проверка) | `syntax`, `test` | Запускает syntax checks, YAxUnit и Vanessa Automation |
-| File materialization (материализация файлов) | `dump`, `convert`, `load`, `make`, `artifacts` | Выгружает, конвертирует, загружает и публикует `.cf`, `.cfe`, `.epf`, `.erf` |
-| Direct launch (прямой запуск) | `launch <designer|thin|thick|ordinary>`, `launch mcp [va]` | Запускает 1C clients (клиенты 1С), Designer и MCP/Vanessa сценарии |
+| Project setup (настройка проекта) | `clone`, `init`, `tools download`, `infobase create`, `extensions`, `push` | Создает проект/config, скачивает инструменты, готовит ИБ, обновляет расширения и загружает исходники |
+| Verification (проверка) | `check`, `test` | Запускает syntax checks, YAxUnit и Vanessa Automation |
+| File materialization (материализация файлов) | `pull`, `download`, `convert`, `upload`, `make`, `artifacts` | Выгружает, конвертирует, загружает и публикует `.cf`, `.cfe`, `.epf`, `.erf` |
+| Direct launch (прямой запуск) | `launch <designer\|thin\|thick\|ordinary>`, `launch mcp [va]` | Запускает 1C clients (клиенты 1С), Designer и MCP/Vanessa сценарии |
 | MCP automation (автоматизация через MCP) | `mcp serve stdio`, `mcp serve http` | Открывает 8 MCP tools для агентных workflow |
+
+Команды названы словарём гита. Прежние имена приняты ещё один цикл выпуска и в справке не
+печатаются: `bootstrap` → `clone`, `config init` → `init`, `build` → `push`, `load` → `upload`,
+`dump` → `pull`, `syntax` → `check`; прежний путь `infobase configuration export` тоже
+принимается. То же с ключами: `--full-rebuild` → `--full`, `--discard-uncommitted` → `--force`,
+`--no-build` → `--no-push`, `--mode merge` → `--mode combine`. Ответ приходит под новым именем.
+Создание базы синонима не имеет: имя `init` занято подготовкой проекта, база создаётся командой
+`infobase create`.
 
 ## Для кого
 
@@ -248,6 +274,16 @@ v8-runner mcp serve stdio
 - AI-assisted development (разработка с AI-агентами), где агент должен строить, проверять и
   диагностировать проект через узкую управляемую поверхность.
 
+Настроить безопасность отдельно установленного CFE, например YaXUnit:
+
+```bash
+v8-runner extensions --installed-name YAXUNIT --dry-run
+v8-runner extensions --installed-name YAXUNIT
+```
+
+Применение отключает безопасный режим и защиту от опасных действий. Имя не требует
+соответствующего `source-set`; для совместного выбора добавьте `--name TESTS`.
+
 ## Карта документации
 
 - [docs/CAPABILITIES.md](docs/CAPABILITIES.md): полный каталог команд, матрица поддержки,
@@ -256,10 +292,11 @@ v8-runner mcp serve stdio
   (ключи) и validation rules (правила валидации).
 - [docs/DEEP_DIVE.md](docs/DEEP_DIVE.md): execution semantics (семантика выполнения), runtime
   model (модель выполнения), lock/publication behavior (поведение блокировок и публикации).
-- [docs/README.md](docs/README.md): порядок чтения документации и source-of-truth (источник
-  истины).
-- [ARCHITECTURE.md](ARCHITECTURE.md): module map (карта модулей) и границы для контрибьюторов.
-- [spec/README.md](spec/README.md): внутренние ADR, architecture rules (архитектурные правила),
-  acceptance (приемка) и implementation backlog (план реализации).
+- [docs/README.md](docs/README.md): какой источник на что отвечает — код, правила,
+  описания.
+- [spec/arc42/](spec/arc42/architecture.md): устройство — карта модулей (раздел 5), потоки,
+  сквозные механизмы; для контрибьюторов.
+- [spec/README.md](spec/README.md): внутренний слой — правила продукта (architecture rules)
+  и архитектурное описание.
 - [references/1c/README.md](references/1c/README.md): сырой внешний reference corpus
   (корпус справочных материалов) по 1С, не source of truth проекта.

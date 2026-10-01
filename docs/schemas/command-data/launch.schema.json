@@ -1,0 +1,292 @@
+{
+  "$defs": {
+    "ExternalEpfWaitResult": {
+      "additionalProperties": false,
+      "description": "Observed outcome of an opt-in bounded external EPF client launch.",
+      "properties": {
+        "execute_path": {
+          "description": "The external data processor the client was asked to execute.",
+          "type": "string"
+        },
+        "exit_code": {
+          "description": "The client's exit code; `null` when the wait ended without one: the client was\nterminated at the timeout (`timed_out: true`), or the wait was interrupted before the\nclient exited (`timed_out: false`).",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "output_path": {
+          "description": "Where the external data processor was asked to write its output.",
+          "type": "string"
+        },
+        "pid": {
+          "description": "Process identifier of the waited client.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stderr_path": {
+          "description": "Where the client's stderr was captured.",
+          "type": "string"
+        },
+        "timed_out": {
+          "description": "`true` when the client was terminated at the declared timeout.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "pid",
+        "execute_path",
+        "timed_out",
+        "output_path",
+        "stderr_path"
+      ],
+      "type": "object"
+    },
+    "LaunchMode": {
+      "description": "Supported application launch modes.",
+      "enum": [
+        "designer",
+        "thin",
+        "thick",
+        "ordinary",
+        "mcp",
+        "web"
+      ],
+      "type": "string"
+    },
+    "LaunchPlan": {
+      "additionalProperties": false,
+      "description": "Compact machine-facing plan produced by a non-executing launch preview.\n\nThe plan names what the runner selected, because only the runner discovers a\nplatform installation: a caller cannot compose these arguments itself.",
+      "properties": {
+        "args": {
+          "description": "Composed arguments with every credential value masked.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "program": {
+          "description": "Program the runner would have spawned.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "program",
+        "args"
+      ],
+      "type": "object"
+    },
+    "LaunchVia": {
+      "description": "Which of the target's two addresses opens the base.\n\nA target has an administrative address and a client one, and a client can be opened by\neither. The target kind sets the default; `--via` overrides it.",
+      "oneOf": [
+        {
+          "const": "connection",
+          "description": "The administrative address — `infobase.connection`.",
+          "type": "string"
+        },
+        {
+          "const": "web",
+          "description": "The client address — `infobase.web.url`, as a ws connection.",
+          "type": "string"
+        }
+      ]
+    },
+    "McpReadinessResult": {
+      "additionalProperties": false,
+      "description": "Result of probing a client-side MCP endpoint after launch.",
+      "properties": {
+        "message": {
+          "description": "Human-readable readiness summary.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "missing_tools": {
+          "description": "Required tool names that were not returned by `tools/list`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "ok": {
+          "description": "`true` when initialize and tools/list succeeded and required tools were present.",
+          "type": "boolean"
+        },
+        "tools": {
+          "description": "Tool names returned by `tools/list`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "url": {
+          "description": "Probed HTTP endpoint URL.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok",
+        "url",
+        "tools",
+        "missing_tools"
+      ],
+      "type": "object"
+    },
+    "PlatformResolution": {
+      "additionalProperties": false,
+      "description": "Canonical platform installation metadata exposed by `launch` JSON results.",
+      "properties": {
+        "installation_root": {
+          "description": "Absolute canonical root shared by platform utilities from this installation.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Absolute canonical path to the selected executable.",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/PlatformResolutionSource",
+          "description": "Discovery source used for the selected executable."
+        },
+        "version": {
+          "description": "Platform version inferred from the canonical installation path, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "source",
+        "installation_root"
+      ],
+      "type": "object"
+    },
+    "PlatformResolutionSource": {
+      "description": "Typed discovery sources exposed by `launch` resolution metadata.",
+      "oneOf": [
+        {
+          "const": "explicit",
+          "description": "The configured utility or installation hint.",
+          "type": "string"
+        },
+        {
+          "const": "default-root",
+          "description": "An operating-system-specific default installation root.",
+          "type": "string"
+        },
+        {
+          "const": "path",
+          "description": "A directory captured from `PATH` when the locator was created.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/launch.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Structured result of a `launch` command.",
+  "properties": {
+    "binary": {
+      "description": "Selected binary path used to spawn the process; for `web` — the system URL opener.",
+      "type": "string"
+    },
+    "external_epf_wait": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExternalEpfWaitResult"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Direct external EPF wait outcome when explicitly requested."
+    },
+    "mcp_readiness": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/McpReadinessResult"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Client-side MCP endpoint readiness details when readiness was requested."
+    },
+    "message": {
+      "description": "Human-readable launch summary.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mode": {
+      "$ref": "#/$defs/LaunchMode",
+      "description": "Requested launch mode."
+    },
+    "ok": {
+      "description": "`true` when the process was spawned and, when the command waits on it, the wait\nsucceeded: under `--wait-for-exit` the client exited on its own, under `--wait-ready`\nits MCP endpoint became ready. A timeout, an interrupted wait or a failed readiness\ncheck answers `false` although the client was started. A preview answers `true`\nwithout starting anything: `provider_dispatched` tells the two apart.",
+      "type": "boolean"
+    },
+    "pid": {
+      "description": "OS process identifier if the launcher exposed one.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "plan": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LaunchPlan"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Compact machine-facing plan produced by a non-executing preview."
+    },
+    "platform_resolution": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PlatformResolution"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Canonical platform installation metadata for the selected binary. Absent for\n`web`: a browser is not a platform utility."
+    },
+    "provider_dispatched": {
+      "description": "Whether the program in `binary` was started: the client, or the system URL opener\nfor `launch web`. `false` in a preview. A refusal before the start, or a start that\nfailed, answers the shared refusal form, without this field; a failure after the\nstart answers this form with `true`.",
+      "type": "boolean"
+    },
+    "url": {
+      "description": "Client address opened by `launch web` or by a thin client going through the web.\nAny userinfo password in it is masked.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "via": {
+      "$ref": "#/$defs/LaunchVia",
+      "description": "Which address the base was opened by. Present for every mode, not only for the\nones that have a choice: no caller has to read an absent field as \"by connection\"."
+    }
+  },
+  "required": [
+    "ok",
+    "mode",
+    "binary",
+    "via",
+    "provider_dispatched"
+  ],
+  "title": "LaunchResult",
+  "type": "object"
+}

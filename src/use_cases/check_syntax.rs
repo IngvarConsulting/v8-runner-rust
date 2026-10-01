@@ -4,9 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crate::config::model::{AppConfig, BuilderBackend, SourceFormat, SourceSetConfig};
+use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig};
+use crate::domain::capability::{Operation, Provider};
 use crate::domain::issue::{EdtIssue, Issue, IssueSeverity, ObjectIssue};
-use crate::domain::syntax::{SyntaxCheckResult, SyntaxCheckStatus, SyntaxIssueSummary};
+use crate::domain::syntax::{CheckName, SyntaxCheckResult, SyntaxCheckStatus, SyntaxIssueSummary};
 use crate::parsers::designer_validation;
 use crate::parsers::edt_validation;
 use crate::platform::designer::DesignerDsl;
@@ -15,26 +16,25 @@ use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
 use crate::platform::locator::UtilityType;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
-use crate::support::error::AppError;
+use crate::support::error::{AppError, CapabilityReason};
 use crate::support::temp::platform_logs_dir;
 #[cfg(test)]
 use crate::use_cases::context::CommandName;
-use crate::use_cases::context::{ExecutionContext, ExecutionInterruption, InterruptionSafetyClass};
+use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::{
     DesignerClientScope, DesignerConfigCheck,
-    DesignerConfigSyntaxRequest as DesignerConfigSyntaxArgs,
-    DesignerModulesSyntaxRequest as DesignerModulesSyntaxArgs, ExtendedModulesPolicy,
+    DesignerConfigSyntaxRequest as DesignerConfigSyntaxArgs, ExtendedModulesPolicy,
     SyntaxExtensionScope, SyntaxRequest as SyntaxArgs, SyntaxTargetRequest as SyntaxTarget,
 };
-use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 use tracing::debug;
 
 const SUPPORTED_DESIGNER_SYNTAX_ERROR: &str =
-    "syntax currently supports only builder=DESIGNER and format=DESIGNER";
+    "check currently supports only the Designer provider and format=DESIGNER";
 const SUPPORTED_EDT_SYNTAX_ERROR: &str =
-    "syntax edt currently supports only builder=DESIGNER and format=EDT";
+    "check edt currently supports only the Designer provider and format=EDT";
 static LOG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub fn execute(
@@ -47,7 +47,7 @@ pub fn execute(
         transport = ?context.transport(),
         "executing syntax use case"
     );
-    run_syntax_with_context(context, config, args)
+    stamp_dispatch(run_syntax_branch(context, config, args), context.work())
 }
 
 type SyntaxExecutionFailure = UseCaseFailure<SyntaxCheckResult>;
@@ -55,69 +55,44 @@ type SyntaxExecutionFailure = UseCaseFailure<SyntaxCheckResult>;
 #[cfg(test)]
 fn run_syntax(config: &AppConfig, args: &SyntaxArgs) -> UseCaseResult<SyntaxCheckResult> {
     let context = ExecutionContext::cli(CommandName::Syntax);
-    run_syntax_with_context(&context, config, args)
+    execute(&context, config, args)
 }
 
-#[derive(Debug)]
-struct DesignerInvocation {
-    kind: DesignerCommandKind,
-    flags: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum DesignerCommandKind {
-    Config,
-    Modules,
-}
-
-impl DesignerCommandKind {
-    fn check_name(self) -> &'static str {
-        match self {
-            Self::Config => "designer-config",
-            Self::Modules => "designer-modules",
-        }
-    }
-}
-
-fn run_syntax_with_context(
+fn run_syntax_branch(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &SyntaxArgs,
 ) -> UseCaseResult<SyntaxCheckResult> {
     let started = Instant::now();
-    if let Some(failure) = interrupted_syntax_failure(context, "syntax", started, None) {
+    // Ветка выбирается раньше всего остального: иначе отказ уже отменённой проверки EDT
+    // назвался бы именем проверки конфигурации. У ветки EDT своя такая же проверка.
+    if let SyntaxTarget::Edt { projects } = &args.target {
+        return run_edt_syntax(context, config, projects, args.dry_run, started);
+    }
+    if let Some(failure) =
+        interrupted_syntax_failure(context, CheckName::DesignerConfig, started, None)
+    {
         return Err(failure);
     }
-    if let SyntaxTarget::Edt { projects } = &args.target {
-        return run_edt_syntax(context, config, projects, started);
+    // Отказ по предмету спрашивается на ветке платформы: проверку проекта EDT внешние
+    // наборы переживают — её выполняет EDT CLI, и предмет у неё свой.
+    if let Some(failure) = external_subject_refusal(config, started) {
+        return Err(failure);
     }
 
-    let invocation = match normalize_invocation(args) {
-        Ok(invocation) => invocation,
-        Err((kind, error)) => {
-            let error_message = error.to_string();
-            return Err(SyntaxExecutionFailure::with_payload(
-                error,
-                failed_result(
-                    kind.check_name(),
-                    SyntaxCheckStatus::ToolFailed,
-                    -1,
-                    started,
-                    vec![],
-                    None,
-                    Some(error_message),
-                    None,
-                ),
-            ));
-        }
-    };
+    // Ветка одна: проверку конфигурации выполняет `/CheckConfig`, а проверку проекта EDT
+    // — свой путь выше. Нормализация теперь только раскладывает режимы в argv.
+    let flags = normalize_config_flags(match &args.target {
+        SyntaxTarget::DesignerConfig(config_args) => config_args,
+        SyntaxTarget::Edt { .. } => unreachable!("EDT syntax is handled before normalization"),
+    });
 
     if let Some(error) = validate_designer_supported_matrix(config) {
         let error_message = error.to_string();
         return Err(SyntaxExecutionFailure::with_payload(
             error,
             failed_result(
-                invocation.kind.check_name(),
+                CheckName::DesignerConfig,
                 SyntaxCheckStatus::ToolFailed,
                 -1,
                 started,
@@ -129,9 +104,17 @@ fn run_syntax_with_context(
         ));
     }
 
+    // Превью отвечает раньше `platform_logs_dir`: каталог журналов платформы — первая
+    // собственная запись этой команды, и превью её не делает. Боевой порядок при этом
+    // остаётся прежним, поэтому первым отказом у нечитаемого рабочего каталога
+    // по-прежнему приходит отказ журнала, а не отказ поиска платформы.
+    if args.dry_run {
+        return preview_designer_config(config, &flags, started);
+    }
+
     debug!(
-        check = invocation.kind.check_name(),
-        flags = ?invocation.flags,
+        check = CheckName::DesignerConfig.as_str(),
+        flags = ?flags,
         "starting syntax check"
     );
     let log_dir = match platform_logs_dir(&config.work_path) {
@@ -145,7 +128,7 @@ fn run_syntax_with_context(
             return Err(SyntaxExecutionFailure::with_payload(
                 app_error,
                 failed_result(
-                    invocation.kind.check_name(),
+                    CheckName::DesignerConfig,
                     SyntaxCheckStatus::ToolFailed,
                     -1,
                     started,
@@ -158,30 +141,14 @@ fn run_syntax_with_context(
         }
     };
 
-    let log_path = unique_log_path(&log_dir, invocation.kind.check_name());
+    let log_path = unique_log_path(&log_dir, CheckName::DesignerConfig.as_str());
     debug!(path = %log_path.display(), "syntax platform log reserved");
 
-    let mut utilities = PlatformUtilities::from_config(config);
-    let location = match utilities.locate(UtilityType::V8) {
-        Ok(location) => location,
-        Err(error) => {
-            let message = error.to_string();
-            let app_error = AppError::from(error);
-            return Err(SyntaxExecutionFailure::with_payload(
-                app_error,
-                failed_result(
-                    invocation.kind.check_name(),
-                    SyntaxCheckStatus::ToolFailed,
-                    -1,
-                    started,
-                    vec![],
-                    None,
-                    Some(message),
-                    Some(log_path),
-                ),
-            ));
-        }
-    };
+    let SelectedDesigner {
+        utilities,
+        receipt,
+        location,
+    } = select_designer(config, started)?;
 
     let runner = utilities.runner_for(UtilityType::V8);
     let dsl = DesignerDsl::new(
@@ -189,44 +156,40 @@ fn run_syntax_with_context(
         config.v8_connection(),
         runner,
         Some(log_path.clone()),
-    )
-    .with_execution_policy(context.process_policy(InterruptionSafetyClass::GracefulThenKill, None));
+        context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+    );
 
-    let flags: Vec<&str> = invocation.flags.iter().map(String::as_str).collect();
-    let stage_label = match invocation.kind {
-        DesignerCommandKind::Config => "syntax: designer-config",
-        DesignerCommandKind::Modules => "syntax: designer-modules",
-    };
+    let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+    let stage_label = "check: designer-config";
     log_live_stage(stage_label, "[Конфигуратор] running syntax check");
-    let platform_result = match invocation.kind {
-        DesignerCommandKind::Config => dsl.check_config(&flags),
-        DesignerCommandKind::Modules => dsl.check_modules(&flags),
-    };
+    let platform_result = dsl.check_config(&flags);
 
     let platform_result = match platform_result {
         Ok(result) => result,
         Err(error) => {
             let app_error = AppError::from(error);
             let message = app_error.to_string();
-            return Err(SyntaxExecutionFailure::with_payload(
-                app_error,
-                failed_result(
-                    invocation.kind.check_name(),
-                    SyntaxCheckStatus::ToolFailed,
-                    -1,
-                    started,
-                    vec![],
-                    None,
-                    Some(message),
-                    Some(log_path),
-                ),
-            ));
+            let mut result = failed_result(
+                CheckName::DesignerConfig,
+                SyntaxCheckStatus::ToolFailed,
+                -1,
+                started,
+                vec![],
+                None,
+                Some(message),
+                Some(log_path),
+            );
+            result.provider = Some(receipt);
+            return Err(SyntaxExecutionFailure::with_payload(app_error, result));
         }
     };
 
-    let result = build_result(invocation.kind.check_name(), platform_result, started);
+    let mut result = build_result(CheckName::DesignerConfig, platform_result, started);
+    result.provider = Some(receipt);
     match result.status {
-        SyntaxCheckStatus::Clean => Ok(result),
+        // Превью сюда не доходит — оно возвращается раньше запуска, — но исход у него
+        // тот же: отказом становятся только приговоры конфигурации.
+        SyntaxCheckStatus::Clean | SyntaxCheckStatus::Planned => Ok(result),
         SyntaxCheckStatus::IssuesFound | SyntaxCheckStatus::ToolFailed => {
             Err(SyntaxExecutionFailure::with_payload(
                 AppError::Runtime(format!(
@@ -239,31 +202,130 @@ fn run_syntax_with_context(
     }
 }
 
-fn normalize_invocation(
-    args: &SyntaxArgs,
-) -> Result<DesignerInvocation, (DesignerCommandKind, AppError)> {
-    match &args.target {
-        SyntaxTarget::DesignerConfig(config_args) => Ok(DesignerInvocation {
-            kind: DesignerCommandKind::Config,
-            flags: normalize_config_flags(config_args),
-        }),
-        SyntaxTarget::DesignerModules(module_args) => {
-            if !modules_has_modes(module_args) {
-                return Err((
-                    DesignerCommandKind::Modules,
-                    AppError::Validation(
-                        "syntax designer-modules requires at least one mode flag".to_owned(),
-                    ),
-                ));
-            }
+/// Исполнитель, выбранный для проверки конфигурации: та же квитанция и тот же путь, что
+/// получает боевой прогон. Превью доходит ровно сюда и дальше не идёт.
+struct SelectedDesigner {
+    utilities: PlatformUtilities,
+    receipt: crate::domain::capability::ProviderReceipt,
+    location: crate::platform::locator::UtilityLocation,
+}
 
-            Ok(DesignerInvocation {
-                kind: DesignerCommandKind::Modules,
-                flags: normalize_modules_flags(module_args),
-            })
+fn select_designer(
+    config: &AppConfig,
+    started: Instant,
+) -> Result<SelectedDesigner, SyntaxExecutionFailure> {
+    let mut utilities = PlatformUtilities::from_config(config);
+    let selected = match crate::use_cases::provider_selection::select(
+        config,
+        &mut utilities,
+        crate::domain::capability::Operation::Syntax,
+    ) {
+        Ok(selected) => selected,
+        Err((error, receipt)) => {
+            let message = error.to_string();
+            let mut result = failed_result(
+                CheckName::DesignerConfig,
+                SyntaxCheckStatus::ToolFailed,
+                -1,
+                started,
+                vec![],
+                None,
+                Some(message),
+                None,
+            );
+            result.provider = Some(receipt);
+            return Err(SyntaxExecutionFailure::with_payload(error, result));
         }
-        SyntaxTarget::Edt { .. } => unreachable!("EDT syntax is handled before normalization"),
+    };
+    let receipt = selected.receipt;
+    let Some(location) = selected.location else {
+        return Err(SyntaxExecutionFailure::without_payload(
+            crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::Syntax,
+                selected.provider,
+            ),
+        ));
+    };
+    Ok(SelectedDesigner {
+        utilities,
+        receipt,
+        location,
+    })
+}
+
+/// Превью проверки конфигурации: та же проверка запроса, тот же поиск утилиты, и возврат
+/// раньше собственных записей команды. Каталог журналов платформы не создаётся, поэтому
+/// путь журнала превью не называет — файла не будет. Строку в журнале действий превью
+/// всё же оставляет: оно не прячется.
+fn preview_designer_config(
+    config: &AppConfig,
+    flags: &[String],
+    started: Instant,
+) -> UseCaseResult<SyntaxCheckResult> {
+    let selected = select_designer(config, started)?;
+    log_live_stage(
+        "check: preview",
+        "[Конфигуратор] preview only, configuration not checked",
+    );
+    let mut result = planned_result(CheckName::DesignerConfig, started);
+    result.provider = Some(selected.receipt);
+    result.message = Some(format!(
+        "would run `/CheckConfig {}` via {}; configuration not checked",
+        flags.join(" "),
+        selected.location.path.display()
+    ));
+    Ok(result)
+}
+
+/// Ответ превью: приговора конфигурации нет, потому что конфигурацию не смотрели.
+fn planned_result(check_name: CheckName, started: Instant) -> SyntaxCheckResult {
+    SyntaxCheckResult {
+        provider: None,
+        provider_dispatched: false,
+        message: None,
+        status: SyntaxCheckStatus::Planned,
+        // Кода выхода не наблюдалось: платформа не запускалась.
+        exit_code: -1,
+        check_name,
+        summary: summarize_issues(&[]),
+        issues: vec![],
+        duration_ms: elapsed_millis(started),
+        platform_log_path: None,
+        stderr: None,
+        log_read_warning: None,
     }
+}
+
+/// Проверка внешних обработок и отчётов платформой не описана: `/CheckConfig` проверяет
+/// конфигурацию базы, а не внешний файл. Проект, где других наборов нет, получил бы ответ
+/// «чисто», ничего не проверив, поэтому отказ — по предмету, и он не изменится со временем
+/// (`DEC.2026-09-21.CHECK-IS-CHECKCONFIG`).
+fn external_subject_refusal(
+    config: &AppConfig,
+    started: Instant,
+) -> Option<SyntaxExecutionFailure> {
+    let sets = &config.source_sets;
+    if sets.is_empty() || !sets.iter().all(|set| set.purpose.is_external()) {
+        return None;
+    }
+    let error = AppError::capability_for(
+        CapabilityReason::Subject,
+        "the project declares only external data processors and reports, and the platform describes no check for them: `check` checks the configuration",
+    );
+    let message = error.to_string();
+    Some(SyntaxExecutionFailure::with_payload(
+        error,
+        failed_result(
+            CheckName::DesignerConfig,
+            SyntaxCheckStatus::ToolFailed,
+            -1,
+            started,
+            vec![],
+            None,
+            Some(message),
+            None,
+        ),
+    ))
 }
 
 fn normalize_config_flags(args: &DesignerConfigSyntaxArgs) -> Vec<String> {
@@ -313,25 +375,6 @@ fn normalize_config_flags(args: &DesignerConfigSyntaxArgs) -> Vec<String> {
     flags
 }
 
-fn normalize_modules_flags(args: &DesignerModulesSyntaxArgs) -> Vec<String> {
-    let mut flags = Vec::new();
-    push_client_scope(&mut flags, args, DesignerClientScope::ThinClient);
-    push_client_scope(&mut flags, args, DesignerClientScope::WebClient);
-    push_client_scope(&mut flags, args, DesignerClientScope::Server);
-    push_client_scope(&mut flags, args, DesignerClientScope::ExternalConnection);
-    push_client_scope(
-        &mut flags,
-        args,
-        DesignerClientScope::ThickClientOrdinaryApplication,
-    );
-    push_client_scope(&mut flags, args, DesignerClientScope::MobileAppClient);
-    push_client_scope(&mut flags, args, DesignerClientScope::MobileAppServer);
-    push_client_scope(&mut flags, args, DesignerClientScope::MobileClient);
-    push_extended_modules_policy(&mut flags, args.extended_modules());
-    push_extension_scope(&mut flags, args.extension_scope());
-    flags
-}
-
 fn push_flag(flags: &mut Vec<String>, enabled: bool, flag: &str) {
     if enabled {
         flags.push(flag.to_owned());
@@ -373,10 +416,6 @@ fn push_extension_scope(flags: &mut Vec<String>, scope: &SyntaxExtensionScope) {
     }
 }
 
-fn modules_has_modes(args: &DesignerModulesSyntaxArgs) -> bool {
-    args.has_modes()
-}
-
 trait HasClientScopes {
     fn has_client_scope(&self, scope: DesignerClientScope) -> bool;
 }
@@ -387,14 +426,10 @@ impl HasClientScopes for DesignerConfigSyntaxArgs {
     }
 }
 
-impl HasClientScopes for DesignerModulesSyntaxArgs {
-    fn has_client_scope(&self, scope: DesignerClientScope) -> bool {
-        DesignerModulesSyntaxArgs::has_client_scope(self, scope)
-    }
-}
-
 fn validate_designer_supported_matrix(config: &AppConfig) -> Option<AppError> {
-    if config.builder != BuilderBackend::Designer || config.format != SourceFormat::Designer {
+    if config.default_provider(Operation::Syntax) != Some(Provider::Designer)
+        || config.format != SourceFormat::Designer
+    {
         Some(AppError::Validation(
             SUPPORTED_DESIGNER_SYNTAX_ERROR.to_owned(),
         ))
@@ -404,20 +439,74 @@ fn validate_designer_supported_matrix(config: &AppConfig) -> Option<AppError> {
 }
 
 fn validate_edt_supported_matrix(config: &AppConfig) -> Option<AppError> {
-    if config.builder != BuilderBackend::Designer || config.format != SourceFormat::Edt {
+    if config.default_provider(Operation::Syntax) != Some(Provider::Designer)
+        || config.format != SourceFormat::Edt
+    {
         Some(AppError::Validation(SUPPORTED_EDT_SYNTAX_ERROR.to_owned()))
     } else {
         None
     }
 }
 
+/// Утилита EDT CLI, найденная для проверки проекта. Ветка EDT ищет её напрямую и
+/// квитанции о выборе исполнителя не имеет: выбирать не из чего.
+fn locate_edt(
+    config: &AppConfig,
+    started: Instant,
+) -> Result<(PlatformUtilities, crate::platform::locator::UtilityLocation), SyntaxExecutionFailure>
+{
+    let mut utilities = PlatformUtilities::from_config(config);
+    match utilities.locate(UtilityType::EdtCli) {
+        Ok(location) => Ok((utilities, location)),
+        Err(error) => {
+            let message = error.to_string();
+            let app_error = AppError::from(error);
+            Err(SyntaxExecutionFailure::with_payload(
+                app_error,
+                failed_result(
+                    CheckName::Edt,
+                    SyntaxCheckStatus::ToolFailed,
+                    -1,
+                    started,
+                    vec![],
+                    None,
+                    Some(message),
+                    None,
+                ),
+            ))
+        }
+    }
+}
+
+/// Превью проверки проекта EDT. Квитанции здесь нет — её не имеет и боевой прогон.
+fn preview_edt(
+    config: &AppConfig,
+    source_sets: &[&SourceSetConfig],
+    started: Instant,
+) -> UseCaseResult<SyntaxCheckResult> {
+    let (_utilities, location) = locate_edt(config, started)?;
+    log_live_stage("check: preview", "[EDT] preview only, project not checked");
+    let mut result = planned_result(CheckName::Edt, started);
+    let names: Vec<&str> = source_sets
+        .iter()
+        .map(|source_set| source_set.name.as_str())
+        .collect();
+    result.message = Some(format!(
+        "would check {} by {}; project not checked",
+        names.join(", "),
+        location.path.display()
+    ));
+    Ok(result)
+}
+
 fn run_edt_syntax(
     context: &ExecutionContext,
     config: &AppConfig,
     projects: &[String],
+    dry_run: bool,
     started: Instant,
 ) -> UseCaseResult<SyntaxCheckResult> {
-    if let Some(failure) = interrupted_syntax_failure(context, "edt", started, None) {
+    if let Some(failure) = interrupted_syntax_failure(context, CheckName::Edt, started, None) {
         return Err(failure);
     }
     if let Some(error) = validate_edt_supported_matrix(config) {
@@ -425,7 +514,7 @@ fn run_edt_syntax(
         return Err(SyntaxExecutionFailure::with_payload(
             error,
             failed_result(
-                "edt",
+                CheckName::Edt,
                 SyntaxCheckStatus::ToolFailed,
                 -1,
                 started,
@@ -445,7 +534,7 @@ fn run_edt_syntax(
             return Err(SyntaxExecutionFailure::with_payload(
                 error,
                 failed_result(
-                    "edt",
+                    CheckName::Edt,
                     SyntaxCheckStatus::ToolFailed,
                     -1,
                     started,
@@ -457,6 +546,11 @@ fn run_edt_syntax(
             ));
         }
     };
+
+    // Та же остановка, что и у ветки Конфигуратора: раньше первой записи на диск.
+    if dry_run {
+        return preview_edt(config, &source_sets, started);
+    }
 
     let log_dir = match platform_logs_dir(&config.work_path) {
         Ok(dir) => dir,
@@ -469,7 +563,7 @@ fn run_edt_syntax(
             return Err(SyntaxExecutionFailure::with_payload(
                 app_error,
                 failed_result(
-                    "edt",
+                    CheckName::Edt,
                     SyntaxCheckStatus::ToolFailed,
                     -1,
                     started,
@@ -482,27 +576,7 @@ fn run_edt_syntax(
         }
     };
 
-    let mut utilities = PlatformUtilities::from_config(config);
-    let location = match utilities.locate(UtilityType::EdtCli) {
-        Ok(location) => location,
-        Err(error) => {
-            let message = error.to_string();
-            let app_error = AppError::from(error);
-            return Err(SyntaxExecutionFailure::with_payload(
-                app_error,
-                failed_result(
-                    "edt",
-                    SyntaxCheckStatus::ToolFailed,
-                    -1,
-                    started,
-                    vec![],
-                    None,
-                    Some(message),
-                    None,
-                ),
-            ));
-        }
-    };
+    let (utilities, location) = locate_edt(config, started)?;
 
     let edt_binary = location.path;
     let interactive_dsl = if config.tools.edt_cli.interactive_mode {
@@ -514,21 +588,19 @@ fn run_edt_syntax(
                 Arc::new(manager),
                 Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
                 Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
-            ) {
-                Ok(dsl) => Some(
-                    dsl.with_timeout(context.edt_timeout())
-                        .with_execution_policy(context.process_policy(
-                            InterruptionSafetyClass::GracefulThenKill,
-                            context.edt_timeout(),
-                        )),
+                context.process_policy(
+                    InterruptionSafetyClass::GracefulThenKill,
+                    context.edt_timeout(),
                 ),
+            ) {
+                Ok(dsl) => Some(dsl.with_timeout(context.edt_timeout())),
                 Err(error) => {
                     let app_error = AppError::from(error);
                     let message = app_error.to_string();
                     return Err(SyntaxExecutionFailure::with_payload(
                         app_error,
                         failed_result(
-                            "edt",
+                            CheckName::Edt,
                             SyntaxCheckStatus::ToolFailed,
                             -1,
                             started,
@@ -546,7 +618,7 @@ fn run_edt_syntax(
                 return Err(SyntaxExecutionFailure::with_payload(
                     app_error,
                     failed_result(
-                        "edt",
+                        CheckName::Edt,
                         SyntaxCheckStatus::ToolFailed,
                         -1,
                         started,
@@ -576,11 +648,11 @@ fn run_edt_syntax(
             &format!("edt_{}", source_set.name.replace(' ', "_")),
         );
         if let Some(failure) =
-            interrupted_syntax_failure(context, "edt", started, Some(log_path.clone()))
+            interrupted_syntax_failure(context, CheckName::Edt, started, Some(log_path.clone()))
         {
             return Err(failure);
         }
-        log_live_stage("syntax: edt", "[EDT] validating project");
+        log_live_stage("check: edt", "[EDT] validating project");
         let result = match if let Some(dsl) = interactive_dsl.as_ref() {
             dsl.validate_project(&source_path, &log_path)
         } else {
@@ -588,12 +660,12 @@ fn run_edt_syntax(
                 edt_binary.clone(),
                 config.work_path.join("edt-workspace"),
                 utilities.runner_for(UtilityType::EdtCli),
+                context.process_policy(
+                    InterruptionSafetyClass::GracefulThenKill,
+                    context.edt_timeout(),
+                ),
             )
             .with_timeout(context.edt_timeout())
-            .with_execution_policy(context.process_policy(
-                InterruptionSafetyClass::GracefulThenKill,
-                context.edt_timeout(),
-            ))
             .validate_project(&source_path, &log_path)
         } {
             Ok(result) => result,
@@ -603,7 +675,7 @@ fn run_edt_syntax(
                 return Err(SyntaxExecutionFailure::with_payload(
                     app_error,
                     failed_result(
-                        "edt",
+                        CheckName::Edt,
                         SyntaxCheckStatus::ToolFailed,
                         -1,
                         started,
@@ -636,7 +708,11 @@ fn run_edt_syntax(
             .as_deref()
             .map(edt_validation::parse)
             .unwrap_or_default();
-        let project_status = edt_status_from_result(result.process.exit_code, &project_issues);
+        let project_status = edt_status_from_result(
+            result.process.exit_code,
+            &project_issues,
+            result.platform_log_read_error.is_some(),
+        );
         status = combine_status(status, project_status);
 
         if result.process.exit_code != 0
@@ -665,9 +741,12 @@ fn run_edt_syntax(
     let stderr = (!stderr_lines.is_empty()).then_some(stderr_lines.join("\n"));
     let log_read_warning = (!log_warnings.is_empty()).then_some(log_warnings.join("\n"));
     let result = SyntaxCheckResult {
+        provider: None,
+        provider_dispatched: false,
+        message: None,
         status,
         exit_code,
-        check_name: "edt".to_owned(),
+        check_name: CheckName::Edt,
         summary: summarize_issues(&issues),
         issues,
         duration_ms: elapsed_millis(started),
@@ -677,7 +756,9 @@ fn run_edt_syntax(
     };
 
     match result.status {
-        SyntaxCheckStatus::Clean => Ok(result),
+        // Превью сюда не доходит — оно возвращается раньше запуска, — но исход у него
+        // тот же: отказом становятся только приговоры конфигурации.
+        SyntaxCheckStatus::Clean | SyntaxCheckStatus::Planned => Ok(result),
         SyntaxCheckStatus::IssuesFound | SyntaxCheckStatus::ToolFailed => {
             Err(SyntaxExecutionFailure::with_payload(
                 AppError::Runtime(format!(
@@ -692,18 +773,17 @@ fn run_edt_syntax(
 
 fn interrupted_syntax_failure(
     context: &ExecutionContext,
-    check_name: &str,
+    check_name: CheckName,
     started: Instant,
     platform_log_path: Option<PathBuf>,
 ) -> Option<SyntaxExecutionFailure> {
-    let interruption = context.interruption()?;
-    let message = format!(
-        "{} for command '{}'",
-        interruption_message(interruption),
-        context.command().as_str()
-    );
+    let cancel = crate::use_cases::interruption::SafePointCancel::noticed(
+        context,
+        crate::use_cases::interruption::SafePoint::Command,
+    )?;
+    let message = cancel.message().to_owned();
     Some(SyntaxExecutionFailure::with_payload(
-        AppError::Runtime(message.clone()),
+        cancel.into_error(),
         failed_result(
             check_name,
             SyntaxCheckStatus::ToolFailed,
@@ -717,24 +797,13 @@ fn interrupted_syntax_failure(
     ))
 }
 
-fn interruption_message(interruption: ExecutionInterruption) -> &'static str {
-    match interruption {
-        ExecutionInterruption::Cancelled => {
-            "execution cancelled before reaching a safe completion point"
-        }
-        ExecutionInterruption::TimedOut => {
-            "execution timeout expired before reaching a safe completion point"
-        }
-    }
-}
-
 fn resolve_edt_source_sets<'a>(
     inventory: &SourceSetInventory<'a>,
     projects: &[String],
 ) -> Result<Vec<&'a SourceSetConfig>, AppError> {
     if !inventory.has_edt_contexts() {
         return Err(AppError::Validation(
-            "syntax edt requires at least one source-set".to_owned(),
+            "check requires at least one source-set".to_owned(),
         ));
     }
 
@@ -763,7 +832,14 @@ fn resolve_edt_source_sets<'a>(
     Ok(selected)
 }
 
-fn edt_status_from_result(exit_code: i32, issues: &[Issue]) -> SyntaxCheckStatus {
+fn edt_status_from_result(
+    exit_code: i32,
+    issues: &[Issue],
+    log_unreadable: bool,
+) -> SyntaxCheckStatus {
+    if log_unreadable && exit_code == 0 && issues.is_empty() {
+        return SyntaxCheckStatus::ToolFailed;
+    }
     if exit_code == 0 && issues.is_empty() {
         SyntaxCheckStatus::Clean
     } else if !issues.is_empty() {
@@ -801,7 +877,7 @@ fn unique_log_path(dir: &Path, check_name: &str) -> PathBuf {
 }
 
 fn build_result(
-    check_name: &str,
+    check_name: CheckName,
     platform_result: PlatformCommandResult,
     started: Instant,
 ) -> SyntaxCheckResult {
@@ -818,9 +894,9 @@ fn build_result(
         .map(designer_validation::parse)
         .unwrap_or_default();
     let log_read_warning = platform_log_read_error;
-    let status = status_from_exit_code(exit_code);
+    let status = verdict(exit_code, log_read_warning.is_some());
 
-    if exit_code != 0 && issues.is_empty() {
+    if status != SyntaxCheckStatus::Clean && issues.is_empty() {
         issues.push(fallback_issue(
             exit_code,
             stderr.as_deref(),
@@ -830,9 +906,12 @@ fn build_result(
     }
 
     SyntaxCheckResult {
+        provider: None,
+        provider_dispatched: false,
+        message: None,
         status,
         exit_code,
-        check_name: check_name.to_owned(),
+        check_name,
         summary: summarize_issues(&issues),
         issues,
         duration_ms: elapsed_millis(started),
@@ -843,7 +922,7 @@ fn build_result(
 }
 
 fn failed_result(
-    check_name: &str,
+    check_name: CheckName,
     status: SyntaxCheckStatus,
     exit_code: i32,
     started: Instant,
@@ -853,9 +932,12 @@ fn failed_result(
     platform_log_path: Option<PathBuf>,
 ) -> SyntaxCheckResult {
     SyntaxCheckResult {
+        provider: None,
+        provider_dispatched: false,
+        message: None,
         status,
         exit_code,
-        check_name: check_name.to_owned(),
+        check_name,
         summary: summarize_issues(&issues),
         issues,
         duration_ms: elapsed_millis(started),
@@ -863,6 +945,22 @@ fn failed_result(
         stderr,
         log_read_warning,
     }
+}
+
+/// Вердикт проверки: код выхода инструмента и то, удалось ли прочитать его журнал.
+///
+/// Журнал, которого ждали и не прочитали, оставляет вердикт неизвестным, а неизвестность
+/// называется отдельным значением, а не сводится к чистоте: проверка, чьи замечания никто
+/// не прочитал, чистой не является, и зелёный CI на ней — худший из возможных ответов.
+fn verdict(exit_code: i32, log_unreadable: bool) -> SyntaxCheckStatus {
+    let status = status_from_exit_code(exit_code);
+    // Помета только ужесточает: непрочитанный журнал превращает чистоту в сбой, но уже
+    // известный вердикт не переписывает — про найденные замечания инструмент сказал
+    // кодом выхода, и это знание не пропадает оттого, что подробностей не видно.
+    if log_unreadable && status == SyntaxCheckStatus::Clean {
+        return SyntaxCheckStatus::ToolFailed;
+    }
+    status
 }
 
 fn status_from_exit_code(exit_code: i32) -> SyntaxCheckStatus {
@@ -974,29 +1072,27 @@ fn fallback_edt_issue(
 #[cfg(test)]
 mod tests {
     use super::{
-        edt_status_from_result, normalize_config_flags, normalize_modules_flags, run_syntax,
-        run_syntax_with_context, status_from_exit_code,
+        edt_status_from_result, execute, normalize_config_flags, run_syntax, status_from_exit_code,
     };
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, SourceFormat, SourceSetConfig, SourceSetPurpose,
-        TestsConfig, ToolsConfig,
+        AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
+        ToolsConfig,
     };
     use crate::domain::issue::{Issue, IssueSeverity};
-    use crate::domain::syntax::SyntaxCheckStatus;
+    use crate::domain::syntax::{CheckName, SyntaxCheckStatus};
     use crate::use_cases::context::{CommandName, ExecutionContext};
     use crate::use_cases::request::{
         DesignerClientScope, DesignerClientScopes, DesignerConfigChecks,
-        DesignerConfigSyntaxRequest as DesignerConfigSyntaxArgs,
-        DesignerModulesSyntaxRequest as DesignerModulesSyntaxArgs, ExtendedModulesPolicy,
+        DesignerConfigSyntaxRequest as DesignerConfigSyntaxArgs, ExtendedModulesPolicy,
         SyntaxExtensionScope, SyntaxRequest as SyntaxArgs, SyntaxTargetRequest as SyntaxTarget,
     };
     use crate::use_cases::result::UseCaseErrorKind;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     use tempfile::tempdir;
 
-    /// ADR-0029 admits prose as a *label* on a finding, never as a verdict, and that admission
+    /// DEC.2026-09-12.A-LABEL-MAY-ONLY-MAKE-A-VERDICT-STRICTER admits prose as a *label* on a finding, never as a verdict, and that admission
     /// rests on three properties. Two of them are proven here; the third — that the verdict comes
     /// from the exit code — is `status_from_exit_code` having no other input.
     #[test]
@@ -1016,22 +1112,22 @@ mod tests {
             severity: IssueSeverity::Error,
         })];
         assert_eq!(
-            edt_status_from_result(0, &[]),
+            edt_status_from_result(0, &[], false),
             SyntaxCheckStatus::Clean,
             "nothing recognised and the tool is happy: the exit code decides"
         );
         assert_eq!(
-            edt_status_from_result(0, &finding),
+            edt_status_from_result(0, &finding, false),
             SyntaxCheckStatus::IssuesFound,
             "a recognised finding may only tighten the verdict"
         );
         assert_eq!(
-            edt_status_from_result(7, &[]),
+            edt_status_from_result(7, &[], false),
             SyntaxCheckStatus::ToolFailed,
             "nothing recognised and the tool failed: still a failure, never a pass"
         );
         assert_eq!(
-            edt_status_from_result(7, &finding),
+            edt_status_from_result(7, &finding, false),
             SyntaxCheckStatus::IssuesFound
         );
     }
@@ -1184,10 +1280,12 @@ mod tests {
         AppConfig {
             base_path: base_path.to_path_buf(),
             work_path: work_path.to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -1213,10 +1311,12 @@ mod tests {
         AppConfig {
             base_path: base_path.to_path_buf(),
             work_path: work_path.to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![
                 SourceSetConfig {
                     name: "main".to_owned(),
@@ -1270,30 +1370,51 @@ mod tests {
         assert_eq!(flags, vec!["-ThinClient", "-Server", "-Extension", "Ext"]);
     }
 
+    /// Режимы проверки модулей выполняет та же `/CheckConfig`: проверок конфигурации в
+    /// таком запросе нет, а сам набор режимов доезжает до платформы прежним.
     #[test]
-    fn normalizes_modules_flags() {
-        let args = DesignerModulesSyntaxArgs::new(
+    fn module_modes_are_checked_by_check_config() {
+        let args = DesignerConfigSyntaxArgs::new(
+            DesignerConfigChecks::new([]),
             DesignerClientScopes::new([DesignerClientScope::Server]),
-            ExtendedModulesPolicy::basic(false),
+            ExtendedModulesPolicy::basic(true),
             SyntaxExtensionScope::AllExtensions,
-        )
-        .expect("modules args");
-        let flags = normalize_modules_flags(&args);
+        );
+        let flags = normalize_config_flags(&args);
 
-        assert_eq!(flags, vec!["-Server", "-AllExtensions"]);
+        assert_eq!(
+            flags,
+            vec!["-Server", "-ExtendedModulesCheck", "-AllExtensions"]
+        );
     }
 
+    /// Пустой запрос выполняет профиль по умолчанию: пустая `/CheckConfig` не проверяет
+    /// ничего и отвечает «чисто», а команда обещает проверку.
     #[test]
-    fn modules_without_modes_are_rejected() {
-        let error = DesignerModulesSyntaxArgs::new(
+    fn a_request_without_modes_runs_the_default_profile() {
+        let args = DesignerConfigSyntaxArgs::new(
+            DesignerConfigChecks::new([]),
             DesignerClientScopes::default(),
             ExtendedModulesPolicy::basic(false),
             SyntaxExtensionScope::MainConfiguration,
-        )
-        .expect_err("expected failure");
+        );
+        assert!(args.names_no_mode());
 
-        assert_eq!(error.kind(), UseCaseErrorKind::Validation);
-        assert!(error.message().contains("requires at least one mode"));
+        let profile =
+            DesignerConfigSyntaxArgs::default_profile(SyntaxExtensionScope::MainConfiguration);
+        let flags = normalize_config_flags(&profile);
+
+        assert_eq!(
+            flags,
+            vec![
+                "-ThinClient",
+                "-Server",
+                "-UnreferenceProcedures",
+                "-HandlersExistence",
+                "-EmptyHandlers",
+                "-ExtendedModulesCheck"
+            ]
+        );
     }
 
     #[test]
@@ -1302,6 +1423,7 @@ mod tests {
         let mut config = sample_config(dir.path(), dir.path(), dir.path());
         config.format = SourceFormat::Edt;
         let args = SyntaxArgs {
+            dry_run: false,
             target: SyntaxTarget::DesignerConfig(default_config_args()),
         };
 
@@ -1324,9 +1446,12 @@ mod tests {
         let binary = utility_path(&dir.path().join("platform").join("bin"), "1cv8");
         fs::create_dir_all(&base).expect("base");
         fs::create_dir_all(&work).expect("work");
-        write_designer_script(&binary, None, None, 0);
+        // Чистый прогон Конфигуратора журнал всё-таки пишет — пустым. Фейк без журнала
+        // изображал бы не чистоту, а потерю вердикта, и с 2026-09-17 это сбой, а не успех.
+        write_designer_script(&binary, Some(""), None, 0);
         let config = sample_config(&base, &work, &dir.path().join("platform"));
         let args = SyntaxArgs {
+            dry_run: false,
             target: SyntaxTarget::DesignerConfig(default_config_args()),
         };
 
@@ -1334,6 +1459,40 @@ mod tests {
 
         assert_eq!(result.status, SyntaxCheckStatus::Clean);
         assert_eq!(result.exit_code, 0);
+        assert!(result.log_read_warning.is_none());
+    }
+
+    /// Инструмент вышел нулём, но журнал, в который он пишет замечания, прочитать не
+    /// удалось. Вердикта нет — и чистотой он не становится: иначе CI зеленел бы на
+    /// проверке, чьих замечаний никто не видел.
+    #[cfg(unix)]
+    #[test]
+    fn a_clean_exit_with_an_unreadable_log_is_not_clean() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let binary = utility_path(&dir.path().join("platform").join("bin"), "1cv8");
+        fs::create_dir_all(&base).expect("base");
+        fs::create_dir_all(&work).expect("work");
+        write_designer_script(&binary, None, None, 0);
+        let config = sample_config(&base, &work, &dir.path().join("platform"));
+        let args = SyntaxArgs {
+            dry_run: false,
+            target: SyntaxTarget::DesignerConfig(default_config_args()),
+        };
+
+        let failure = run_syntax(&config, &args).expect_err("an unread verdict is not a success");
+        let result = failure
+            .payload
+            .expect("syntax failures should preserve a structured payload");
+
+        assert_eq!(result.status, SyntaxCheckStatus::ToolFailed);
+        assert!(result.log_read_warning.is_some());
+        assert_eq!(
+            result.issues.len(),
+            1,
+            "the refusal must name why the verdict is unknown"
+        );
     }
 
     #[cfg(unix)]
@@ -1353,9 +1512,13 @@ mod tests {
         );
         let config = sample_config(&base, &work, &dir.path().join("platform"));
         let args = SyntaxArgs {
-            target: SyntaxTarget::DesignerModules(modules_args_with_scopes([
-                DesignerClientScope::Server,
-            ])),
+            dry_run: false,
+            target: SyntaxTarget::DesignerConfig(DesignerConfigSyntaxArgs::new(
+                DesignerConfigChecks::new([]),
+                DesignerClientScopes::new([DesignerClientScope::Server]),
+                ExtendedModulesPolicy::basic(false),
+                SyntaxExtensionScope::MainConfiguration,
+            )),
         };
 
         let failure = run_syntax(&config, &args).expect_err("expected validation failure");
@@ -1384,9 +1547,13 @@ mod tests {
         write_designer_script(&binary, None, Some("license error"), 1);
         let config = sample_config(&base, &work, &dir.path().join("platform"));
         let args = SyntaxArgs {
-            target: SyntaxTarget::DesignerModules(modules_args_with_scopes([
-                DesignerClientScope::Server,
-            ])),
+            dry_run: false,
+            target: SyntaxTarget::DesignerConfig(DesignerConfigSyntaxArgs::new(
+                DesignerConfigChecks::new([]),
+                DesignerClientScopes::new([DesignerClientScope::Server]),
+                ExtendedModulesPolicy::basic(false),
+                SyntaxExtensionScope::MainConfiguration,
+            )),
         };
 
         let failure = run_syntax(&config, &args).expect_err("expected tool failure");
@@ -1416,9 +1583,13 @@ mod tests {
         write_script(&binary, "exit 101");
         let config = sample_config(&base, &work, &dir.path().join("platform"));
         let args = SyntaxArgs {
-            target: SyntaxTarget::DesignerModules(modules_args_with_scopes([
-                DesignerClientScope::Server,
-            ])),
+            dry_run: false,
+            target: SyntaxTarget::DesignerConfig(DesignerConfigSyntaxArgs::new(
+                DesignerConfigChecks::new([]),
+                DesignerClientScopes::new([DesignerClientScope::Server]),
+                ExtendedModulesPolicy::basic(false),
+                SyntaxExtensionScope::MainConfiguration,
+            )),
         };
 
         let failure = run_syntax(&config, &args).expect_err("expected failure");
@@ -1451,6 +1622,7 @@ mod tests {
         );
         let config = sample_edt_config(&base, &work, &binary);
         let args = SyntaxArgs {
+            dry_run: false,
             target: SyntaxTarget::Edt { projects: vec![] },
         };
 
@@ -1459,49 +1631,10 @@ mod tests {
             .payload
             .expect("syntax EDT failures should preserve a structured payload");
 
-        assert_eq!(result.check_name, "edt");
+        assert_eq!(result.check_name, CheckName::Edt);
         assert_eq!(result.status, SyntaxCheckStatus::IssuesFound);
         assert_eq!(result.summary.errors, 2);
         assert!(result.platform_log_path.is_none());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn syntax_edt_does_not_resolve_unused_infobase_binding() {
-        let dir = tempdir().expect("tempdir");
-        let base = dir.path().join("base");
-        let work = dir.path().join("work");
-        let binary = utility_path(&dir.path().join("edt"), "1cedtcli");
-        let calls = dir.path().join("edt-calls.log");
-        fs::create_dir_all(base.join("main-edt")).expect("main");
-        fs::create_dir_all(base.join("ext-edt")).expect("extension");
-        write_edt_script_with_calls(&binary, &calls);
-        let mut config = sample_edt_config(&base, &work, &binary);
-        let alias = dir.path().join("unavailable-ib");
-        std::os::unix::fs::symlink(dir.path().join("missing-ib"), &alias)
-            .expect("dangling infobase");
-        config.infobase.connection = format!("File={}", alias.display());
-        assert!(
-            crate::change_detection::source_sets::SourceSetsService::new(&config)
-                .designer_contexts()
-                .is_err(),
-            "runtime operations must still fail closed"
-        );
-        let result = run_syntax(
-            &config,
-            &SyntaxArgs {
-                target: SyntaxTarget::Edt { projects: vec![] },
-            },
-        )
-        .expect("source-only syntax remains available");
-        assert_eq!(result.status, SyntaxCheckStatus::Clean);
-        assert_eq!(
-            fs::read_to_string(calls)
-                .expect("EDT calls")
-                .lines()
-                .count(),
-            2
-        );
     }
 
     #[test]
@@ -1518,6 +1651,7 @@ mod tests {
         write_edt_script(&binary, None, None, 0);
         let config = sample_edt_config(&base, &work, &binary);
         let args = SyntaxArgs {
+            dry_run: false,
             target: SyntaxTarget::Edt {
                 projects: vec!["unknown".to_owned()],
             },
@@ -1550,6 +1684,7 @@ mod tests {
         );
         let config = sample_edt_config(&base, &work, &binary);
         let args = SyntaxArgs {
+            dry_run: false,
             target: SyntaxTarget::Edt { projects: vec![] },
         };
 
@@ -1578,6 +1713,7 @@ mod tests {
         let mut config = sample_edt_config(&base, &work, &binary);
         config.tools.edt_cli.command_timeout_ms = 20;
         let args = SyntaxArgs {
+            dry_run: false,
             target: SyntaxTarget::Edt {
                 projects: vec!["main".to_owned()],
             },
@@ -1585,8 +1721,7 @@ mod tests {
         let context = ExecutionContext::mcp_stdio(CommandName::Syntax)
             .with_edt_timeout(Some(Duration::from_millis(20)));
 
-        let failure =
-            run_syntax_with_context(&context, &config, &args).expect_err("expected timeout");
+        let failure = execute(&context, &config, &args).expect_err("expected timeout");
         let message = failure.error.to_string();
         let payload = failure
             .payload
@@ -1599,7 +1734,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn syntax_edt_recomputes_remaining_budget_for_each_project_in_one_shot_mode() {
+    fn syntax_edt_bounds_each_one_shot_project_by_the_edt_step_cap() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
@@ -1612,13 +1747,15 @@ mod tests {
         write_script(&binary, "sleep 0.06\nexit 0");
         let config = sample_edt_config(&base, &work, &binary);
         let args = SyntaxArgs {
+            dry_run: false,
             target: SyntaxTarget::Edt { projects: vec![] },
         };
+        // Запас нарочно большой: предел шага здесь свой у каждого проекта и ни от чего
+        // не убывает, поэтому 20 мс против sleep 0.06 срабатывают детерминированно.
         let context = ExecutionContext::mcp_stdio(CommandName::Syntax)
-            .with_deadline(Some(Instant::now() + Duration::from_millis(80)));
+            .with_edt_timeout(Some(Duration::from_millis(20)));
 
-        let failure =
-            run_syntax_with_context(&context, &config, &args).expect_err("expected timeout");
+        let failure = execute(&context, &config, &args).expect_err("expected timeout");
         let message = failure.error.to_string();
         let payload = failure
             .payload
@@ -1646,6 +1783,7 @@ mod tests {
         let mut config = sample_edt_config(&base, &work, &binary);
         config.tools.edt_cli.interactive_mode = false;
         let args = SyntaxArgs {
+            dry_run: false,
             target: SyntaxTarget::Edt {
                 projects: vec!["main".to_owned()],
             },
@@ -1676,6 +1814,7 @@ mod tests {
         let mut config = sample_edt_config(&base, &work, &binary);
         config.tools.edt_cli.interactive_mode = true;
         let args = SyntaxArgs {
+            dry_run: false,
             target: SyntaxTarget::Edt {
                 projects: vec!["main".to_owned()],
             },
@@ -1701,6 +1840,7 @@ mod tests {
         write_designer_script(&binary, None, None, 0);
         let config = sample_config(&base, &work_file, &dir.path().join("platform"));
         let args = SyntaxArgs {
+            dry_run: false,
             target: SyntaxTarget::DesignerConfig(default_config_args()),
         };
 
@@ -1721,16 +1861,5 @@ mod tests {
             ExtendedModulesPolicy::basic(false),
             SyntaxExtensionScope::MainConfiguration,
         )
-    }
-
-    fn modules_args_with_scopes(
-        scopes: impl IntoIterator<Item = DesignerClientScope>,
-    ) -> DesignerModulesSyntaxArgs {
-        DesignerModulesSyntaxArgs::new(
-            DesignerClientScopes::new(scopes),
-            ExtendedModulesPolicy::basic(false),
-            SyntaxExtensionScope::MainConfiguration,
-        )
-        .expect("modules args")
     }
 }

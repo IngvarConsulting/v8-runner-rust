@@ -3,18 +3,25 @@ use std::path::PathBuf;
 
 use crate::change_detection::analyzer::ContextAnalysis;
 use crate::change_detection::source_sets::SourceSetsService;
-use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose};
+use crate::config::model::{AppConfig, SourceSetConfig, SourceSetPurpose};
 use crate::domain::source_set::SourceSetContext;
-use crate::support::error::AppError;
 
 /// Read-only runtime index for source-set orchestration.
 pub(crate) struct SourceSetInventory<'a> {
     config: &'a AppConfig,
     source_sets_by_name: HashMap<&'a str, &'a SourceSetConfig>,
+    designer_contexts: Vec<SourceSetContext>,
+    designer_contexts_by_name: HashMap<String, SourceSetContext>,
+    edt_contexts: Vec<SourceSetContext>,
+    edt_contexts_by_name: HashMap<String, SourceSetContext>,
 }
 
 impl<'a> SourceSetInventory<'a> {
     pub(crate) fn new(config: &'a AppConfig) -> Self {
+        let service = SourceSetsService::new(config);
+        let designer_contexts = service.designer_contexts();
+        let edt_contexts = service.edt_contexts();
+
         Self {
             config,
             source_sets_by_name: config
@@ -22,6 +29,10 @@ impl<'a> SourceSetInventory<'a> {
                 .iter()
                 .map(|source_set| (source_set.name.as_str(), source_set))
                 .collect(),
+            designer_contexts_by_name: index_contexts(&designer_contexts),
+            designer_contexts,
+            edt_contexts_by_name: index_contexts(&edt_contexts),
+            edt_contexts,
         }
     }
 
@@ -73,26 +84,24 @@ impl<'a> SourceSetInventory<'a> {
         }
     }
 
-    pub(crate) fn designer_context(
-        &self,
-        name: &str,
-    ) -> Result<Option<SourceSetContext>, AppError> {
-        self.source_set(name)
-            .map(|source_set| SourceSetsService::new(self.config).designer_context(source_set))
-            .transpose()
+    pub(crate) fn designer_contexts(&self) -> &[SourceSetContext] {
+        &self.designer_contexts
     }
 
-    pub(crate) fn edt_context(&self, name: &str) -> Result<Option<SourceSetContext>, AppError> {
-        if self.config.format != SourceFormat::Edt {
-            return Ok(None);
-        }
-        self.source_set(name)
-            .map(|source_set| SourceSetsService::new(self.config).edt_context(source_set))
-            .transpose()
+    pub(crate) fn designer_context(&self, source_set_name: &str) -> Option<&SourceSetContext> {
+        self.designer_contexts_by_name.get(source_set_name)
+    }
+
+    pub(crate) fn edt_contexts(&self) -> &[SourceSetContext] {
+        &self.edt_contexts
+    }
+
+    pub(crate) fn edt_context(&self, source_set_name: &str) -> Option<&SourceSetContext> {
+        self.edt_contexts_by_name.get(source_set_name)
     }
 
     pub(crate) fn has_edt_contexts(&self) -> bool {
-        self.config.format == SourceFormat::Edt && !self.config.source_sets.is_empty()
+        !self.edt_contexts.is_empty()
     }
 
     pub(crate) fn analyze_contexts(&self, contexts: &[SourceSetContext]) -> Vec<ContextAnalysis> {
@@ -100,12 +109,20 @@ impl<'a> SourceSetInventory<'a> {
     }
 }
 
+fn index_contexts(contexts: &[SourceSetContext]) -> HashMap<String, SourceSetContext> {
+    contexts
+        .iter()
+        .cloned()
+        .map(|context| (context.name().to_owned(), context))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::SourceSetInventory;
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, InfobaseConfig, SourceFormat, SourceSetConfig,
-        SourceSetPurpose, TestsConfig, ToolsConfig,
+        AppConfig, BuildConfig, InfobaseConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
+        TestsConfig, ToolsConfig,
     };
 
     fn config(format: SourceFormat) -> AppConfig {
@@ -115,10 +132,12 @@ mod tests {
         AppConfig {
             base_path: root.join("base"),
             work_path: root.join("work"),
-            execution_timeout: 300_000,
             format,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![
                 SourceSetConfig {
                     name: "ext".to_owned(),
@@ -173,19 +192,11 @@ mod tests {
             config.base_path.join("configuration")
         );
         assert_eq!(
-            inventory
-                .designer_context("main")
-                .expect("binding")
-                .expect("designer")
-                .path(),
+            inventory.designer_context("main").expect("designer").path(),
             config.work_path.join("designer/main").as_path()
         );
         assert_eq!(
-            inventory
-                .edt_context("main")
-                .expect("binding")
-                .expect("edt")
-                .path(),
+            inventory.edt_context("main").expect("edt").path(),
             config.base_path.join("configuration").as_path()
         );
     }

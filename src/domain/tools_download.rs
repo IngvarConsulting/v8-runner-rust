@@ -15,7 +15,7 @@ pub enum ToolDownloadTarget {
     ClientMcp,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ToolsDownloadResult {
     pub ok: bool,
     pub tool: String,
@@ -26,7 +26,7 @@ pub struct ToolsDownloadResult {
     pub duration_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ToolDownloadDestination {
     pub tool: String,
     pub tag: String,

@@ -3,10 +3,14 @@ use std::time::Instant;
 
 use tracing::debug;
 
-use crate::config::model::{AppConfig, BuilderBackend, SourceFormat};
+use crate::config::model::{AppConfig, SourceFormat};
 use crate::domain::artifact::{ArtifactKind, ArtifactRef, ArtifactSet, ARTIFACT_ROLE_PLATFORM_LOG};
 use crate::domain::artifacts::ArtifactBuildMode;
-use crate::domain::execution::{ExecutionError, ExecutionOutcome, ExecutionStatus};
+use crate::domain::capability::{Operation, Provider};
+use crate::domain::execution::{
+    ExecutionError, ExecutionInterruptionDetails, ExecutionInterruptionPhase, ExecutionOutcome,
+    ExecutionStatus,
+};
 use crate::domain::load::{
     CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
 };
@@ -18,20 +22,19 @@ use crate::platform::process::ProcessRunner;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
+use crate::support::path::normalize_windows_verbatim_path;
 use crate::support::temp::platform_logs_dir;
-use crate::use_cases::context::{ExecutionContext, ExecutionInterruption, InterruptionSafetyClass};
+use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
 use crate::use_cases::interruption::{
-    command_interruption_details, command_interruption_status,
-    deferred_process_interruption_details, deferred_process_interruption_warning,
-    interruption_before_safe_point_message,
+    cancellation_record, deferred_process_interruption, SafePoint, SafePointCancel,
 };
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::LoadRequest;
-use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 
 const SUPPORTED_LOAD_ERROR: &str =
-    "load currently supports only builder=DESIGNER and format=DESIGNER";
+    "load currently supports only the Designer provider and format=DESIGNER";
 const UNSUPPORTED_EXTERNAL_ARTIFACTS_ERROR: &str =
     "load currently supports only .cf and .cfe artifacts";
 const UNSUPPORTED_UPDATE_MODE_ERROR: &str =
@@ -50,7 +53,7 @@ pub fn execute(
         extension = args.extension.as_deref().unwrap_or("<none>"),
         "executing load use case"
     );
-    run_load(context, config, args)
+    stamp_dispatch(run_load(context, config, args), context.work())
 }
 
 type LoadExecutionFailure = UseCaseFailure<LoadResult>;
@@ -88,16 +91,12 @@ fn run_load(
     args: &LoadRequest,
 ) -> UseCaseResult<LoadResult> {
     let started = Instant::now();
-    // One owner of the truth about the run: flipped where a platform process is actually
-    // started, and carried into every payload instead of a constant `true`.
-    let mut dispatched = false;
     let request_snapshot = request_snapshot_for_failure_payload(args);
 
     if let Some(error) = validate_supported_matrix(config) {
         return Err(LoadExecutionFailure::with_payload(
             error,
             empty_result(
-                dispatched,
                 args.mode,
                 PathBuf::from(&args.artifact_path),
                 request_snapshot.artifact_type,
@@ -119,7 +118,6 @@ fn run_load(
             return Err(LoadExecutionFailure::with_payload(
                 error,
                 empty_result(
-                    dispatched,
                     args.mode,
                     PathBuf::from(&args.artifact_path),
                     request_snapshot.artifact_type,
@@ -135,42 +133,72 @@ fn run_load(
         }
     };
 
-    if let Some(interruption) = context.interruption() {
-        let message = interruption_before_safe_point_message(context, interruption, "load probe");
+    if let Some(cancel) = SafePointCancel::noticed(context, SafePoint::Before("load probe")) {
+        let result = interrupted_result_from_resolved(
+            &resolved,
+            CompatibilityState::NotProbed,
+            started,
+            cancel.message().to_owned(),
+            cancel.record(),
+            None,
+        );
         return Err(LoadExecutionFailure::with_payload(
-            AppError::Runtime(message.clone()),
-            interrupted_result_from_resolved(
-                &resolved,
-                CompatibilityState::NotProbed,
-                started,
-                interruption,
-                message,
-                None,
-            ),
+            cancel.into_error(),
+            result,
         ));
     }
 
     let mut utilities = PlatformUtilities::from_config(config);
-    let location = match utilities.locate(UtilityType::V8) {
-        Ok(location) => location,
-        Err(error) => {
+    let selected = match crate::use_cases::provider_selection::select(
+        config,
+        &mut utilities,
+        crate::domain::capability::Operation::Load,
+    ) {
+        Ok(selected) => selected,
+        Err((error, receipt)) => {
             let message = error.to_string();
-            return Err(LoadExecutionFailure::with_payload(
-                AppError::from(error),
-                empty_result_from_resolved(
-                    dispatched,
-                    &resolved,
-                    CompatibilityState::NotProbed,
-                    started,
-                    Some(message),
-                    None,
-                    false,
-                ),
-            ));
+            let mut result = empty_result_from_resolved(
+                &resolved,
+                CompatibilityState::NotProbed,
+                started,
+                Some(message),
+                None,
+                false,
+            );
+            result.provider = Some(receipt);
+            return Err(LoadExecutionFailure::with_payload(error, result));
         }
+    };
+    let receipt = selected.receipt.clone();
+    let outcome = run_load_selected(
+        context, config, args, started, resolved, utilities, selected,
+    );
+    crate::use_cases::provider_selection::attach(outcome, &receipt)
+}
+
+fn run_load_selected(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &LoadRequest,
+    started: Instant,
+    resolved: ResolvedLoadRequest,
+    mut utilities: PlatformUtilities,
+    selected: crate::use_cases::provider_selection::SelectedProvider,
+) -> UseCaseResult<LoadResult> {
+    let Some(location) = selected.location else {
+        return Err(UseCaseFailure::without_payload(
+            crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::Load,
+                selected.provider,
+            ),
+        ));
     };
 
     if args.dry_run {
+        crate::use_cases::progress::log_live_stage(
+            "load: preview",
+            "[Load] preview only, nothing probed or applied",
+        );
         // The next step is the compatibility probe, and the probe is a Designer run against
         // the infobase. A preview must not dispatch it, so the compatibility state stays
         // `not_probed` — a named case, not a guess — and nothing is reported as applied.
@@ -187,6 +215,7 @@ fn run_load(
                 location.path.display()
             )]);
         return Ok(LoadResult {
+            provider: None,
             provider_dispatched: false,
             mode: resolved.mode,
             artifact_path: resolved.artifact_path,
@@ -210,24 +239,27 @@ fn run_load(
     ) {
         Ok(result) => result,
         Err((error, platform_log_path)) => {
-            let message = error.to_string();
-            return Err(LoadExecutionFailure::with_payload(
-                error,
-                empty_result_from_resolved(
-                    dispatched,
-                    &resolved,
-                    CompatibilityState::NotProbed,
-                    started,
-                    Some(message),
-                    platform_log_path,
-                    false,
-                ),
-            ));
+            // Проба, которую успели запустить, спросила и ответа не получила; `not_probed` —
+            // только когда не спрашивал никто.
+            let state = if context.work().given() {
+                CompatibilityState::NotEstablished
+            } else {
+                CompatibilityState::NotProbed
+            };
+            let result = failed_result_from_resolved(
+                &resolved,
+                state,
+                started,
+                &error,
+                ExecutionInterruptionPhase::ProviderCommand,
+                platform_log_path,
+                false,
+            );
+            return Err(LoadExecutionFailure::with_payload(error, result));
         }
     };
 
     let compatibility_state = probe_result.state;
-    dispatched = probe_result.dispatched;
     let probe_log_path = probe_result.platform_log_path;
     let probe_evidence = probe_result.diagnostic;
     if let Some(error) =
@@ -237,7 +269,6 @@ fn run_load(
         return Err(LoadExecutionFailure::with_payload(
             error,
             empty_result_from_resolved(
-                dispatched,
                 &resolved,
                 compatibility_state,
                 started,
@@ -248,7 +279,6 @@ fn run_load(
         ));
     }
 
-    dispatched = true;
     let apply_dsl = match build_designer_dsl(
         context,
         config,
@@ -263,19 +293,16 @@ fn run_load(
     ) {
         Ok(dsl) => dsl,
         Err((error, platform_log_path)) => {
-            let message = error.to_string();
-            return Err(LoadExecutionFailure::with_payload(
-                error,
-                empty_result_from_resolved(
-                    dispatched,
-                    &resolved,
-                    compatibility_state,
-                    started,
-                    Some(message),
-                    platform_log_path.or(probe_log_path),
-                    false,
-                ),
-            ));
+            let result = failed_result_from_resolved(
+                &resolved,
+                compatibility_state,
+                started,
+                &error,
+                ExecutionInterruptionPhase::Apply,
+                platform_log_path.or(probe_log_path),
+                false,
+            );
+            return Err(LoadExecutionFailure::with_payload(error, result));
         }
     };
 
@@ -305,19 +332,16 @@ fn run_load(
     let apply_result = match apply_result {
         Ok(result) => result,
         Err((error, platform_log_path)) => {
-            let message = error.to_string();
-            return Err(LoadExecutionFailure::with_payload(
-                error,
-                empty_result_from_resolved(
-                    dispatched,
-                    &resolved,
-                    compatibility_state,
-                    started,
-                    Some(message),
-                    platform_log_path.or(probe_log_path),
-                    false,
-                ),
-            ));
+            let result = failed_result_from_resolved(
+                &resolved,
+                compatibility_state,
+                started,
+                &error,
+                ExecutionInterruptionPhase::Apply,
+                platform_log_path.or(probe_log_path),
+                false,
+            );
+            return Err(LoadExecutionFailure::with_payload(error, result));
         }
     };
 
@@ -328,34 +352,46 @@ fn run_load(
     };
 
     if let Err(error) = ensure_platform_success(apply_action, &resolved, &apply_result) {
-        let message = error.to_string();
-        return Err(LoadExecutionFailure::with_payload(
-            error,
-            empty_result_from_resolved(
-                dispatched,
-                &resolved,
-                compatibility_state,
-                started,
-                Some(message),
-                apply_result.platform_log_path.or(probe_log_path),
-                false,
+        let mut result = failed_result_from_resolved(
+            &resolved,
+            compatibility_state,
+            started,
+            &error,
+            ExecutionInterruptionPhase::Apply,
+            apply_result.platform_log_path.clone().or(probe_log_path),
+            false,
+        );
+        name_deferral(
+            &mut result,
+            deferred_process_interruption(
+                ExecutionInterruptionPhase::Apply,
+                &format!("{apply_action} ended"),
+                apply_result.process.interruption,
             ),
-        ));
+        );
+        return Err(LoadExecutionFailure::with_payload(error, result));
     }
 
-    if let Some(interruption) = context.interruption() {
-        let message =
-            interruption_before_safe_point_message(context, interruption, "update_db_cfg");
+    let apply_deferral = deferred_process_interruption(
+        ExecutionInterruptionPhase::Apply,
+        "apply completed successfully",
+        apply_result.process.interruption,
+    );
+    if let Some(cancel) = SafePointCancel::noticed(context, SafePoint::Before("update_db_cfg")) {
+        let mut result = with_loaded_artifact(interrupted_result_from_resolved(
+            &resolved,
+            compatibility_state,
+            started,
+            cancel.message().to_owned(),
+            cancel.record(),
+            apply_result.platform_log_path.or(probe_log_path),
+        ));
+        // Если отмена пришла во время загрузки, загрузка её отложила и довела дело до конца;
+        // ответ называет это раньше остановки на безопасной точке.
+        name_deferral(&mut result, apply_deferral);
         return Err(LoadExecutionFailure::with_payload(
-            AppError::Runtime(message.clone()),
-            interrupted_result_from_resolved(
-                &resolved,
-                compatibility_state,
-                started,
-                interruption,
-                message,
-                apply_result.platform_log_path.or(probe_log_path),
-            ),
+            cancel.into_error(),
+            result,
         ));
     }
 
@@ -369,21 +405,18 @@ fn run_load(
     ) {
         Ok(dsl) => dsl,
         Err((error, platform_log_path)) => {
-            let message = error.to_string();
-            return Err(LoadExecutionFailure::with_payload(
-                error,
-                empty_result_from_resolved(
-                    dispatched,
-                    &resolved,
-                    compatibility_state,
-                    started,
-                    Some(message),
-                    platform_log_path
-                        .or(apply_result.platform_log_path)
-                        .or(probe_log_path),
-                    false,
-                ),
+            let result = with_loaded_artifact(failed_result_from_resolved(
+                &resolved,
+                compatibility_state,
+                started,
+                &error,
+                ExecutionInterruptionPhase::UpdateDbCfg,
+                platform_log_path
+                    .or(apply_result.platform_log_path)
+                    .or(probe_log_path),
+                false,
             ));
+            return Err(LoadExecutionFailure::with_payload(error, result));
         }
     };
 
@@ -398,63 +431,54 @@ fn run_load(
     let update_result = match update_result {
         Ok(result) => result,
         Err(error) => {
-            let message = error.to_string();
-            return Err(LoadExecutionFailure::with_payload(
-                error,
-                empty_result_from_resolved(
-                    dispatched,
-                    &resolved,
-                    compatibility_state,
-                    started,
-                    Some(message),
-                    apply_result.platform_log_path.or(probe_log_path),
-                    false,
-                ),
+            let result = with_loaded_artifact(failed_result_from_resolved(
+                &resolved,
+                compatibility_state,
+                started,
+                &error,
+                ExecutionInterruptionPhase::UpdateDbCfg,
+                apply_result.platform_log_path.or(probe_log_path),
+                false,
             ));
+            return Err(LoadExecutionFailure::with_payload(error, result));
         }
     };
 
     if let Err(error) = ensure_platform_success("update_db_cfg", &resolved, &update_result) {
-        let message = error.to_string();
-        return Err(LoadExecutionFailure::with_payload(
-            error,
-            empty_result_from_resolved(
-                dispatched,
-                &resolved,
-                compatibility_state,
-                started,
-                Some(message),
-                update_result
-                    .platform_log_path
-                    .or(apply_result.platform_log_path)
-                    .or(probe_log_path),
-                false,
-            ),
+        let mut result = with_loaded_artifact(failed_result_from_resolved(
+            &resolved,
+            compatibility_state,
+            started,
+            &error,
+            ExecutionInterruptionPhase::UpdateDbCfg,
+            update_result
+                .platform_log_path
+                .clone()
+                .or(apply_result.platform_log_path)
+                .or(probe_log_path),
+            true,
         ));
+        name_deferral(
+            &mut result,
+            deferred_process_interruption(
+                ExecutionInterruptionPhase::UpdateDbCfg,
+                "update_db_cfg ended",
+                update_result.process.interruption,
+            ),
+        );
+        return Err(LoadExecutionFailure::with_payload(error, result));
     }
 
-    let deferred_warnings = [
-        deferred_interruption_warning("apply", &apply_result),
-        deferred_interruption_warning("update_db_cfg", &update_result),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
-    let deferred_interruptions = [
-        deferred_process_interruption_details(
-            "apply",
-            "apply completed successfully",
-            &apply_result,
-        ),
-        deferred_process_interruption_details(
-            "update_db_cfg",
-            "update_db_cfg completed successfully",
-            &update_result,
-        ),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
+    let update_deferral = deferred_process_interruption(
+        ExecutionInterruptionPhase::UpdateDbCfg,
+        "update_db_cfg completed successfully",
+        update_result.process.interruption,
+    );
+    let (deferred_warnings, deferred_interruptions): (Vec<_>, Vec<_>) =
+        [apply_deferral, update_deferral]
+            .into_iter()
+            .flatten()
+            .unzip();
     let mut execution =
         ExecutionOutcome::new(ExecutionStatus::Succeeded).with_payload(LoadExecutionMetadata {
             applied: true,
@@ -469,7 +493,8 @@ fn run_load(
         execution = execution.with_interruptions(deferred_interruptions);
     }
     Ok(LoadResult {
-        provider_dispatched: true,
+        provider: None,
+        provider_dispatched: false,
         mode: resolved.mode,
         artifact_path: resolved.artifact_path,
         artifact_type: resolved.artifact_type,
@@ -487,9 +512,6 @@ fn run_load(
 
 struct ProbeResult {
     state: CompatibilityState,
-    /// Whether asking actually started a platform process. `provider_dispatched` on the wire
-    /// must be the truth about the run, not a constant.
-    dispatched: bool,
     platform_log_path: Option<PathBuf>,
     /// What the platform said about a probe that did not run — carried, never interpreted.
     diagnostic: Option<String>,
@@ -508,17 +530,17 @@ fn probe_compatibility(
     // interface language. Comparing the extension with its database copy told us nothing more
     // and told it in prose.
     if resolved.target_kind == LoadTargetKind::Extension {
-        let (state, diagnostic, dispatched) =
-            match installed_extension_state(context, config, utilities, resolved) {
-                ExtensionPresence::Absent => (CompatibilityState::Absent, None, true),
-                ExtensionPresence::Present => (CompatibilityState::Supported, None, true),
-                ExtensionPresence::NotEstablished(reason, dispatched) => {
-                    (CompatibilityState::NotEstablished, Some(reason), dispatched)
-                }
-            };
+        let presence = installed_extension_state(context, config, utilities, resolved)
+            .map_err(|cancelled| (cancelled, None))?;
+        let (state, diagnostic) = match presence {
+            ExtensionPresence::Absent => (CompatibilityState::Absent, None),
+            ExtensionPresence::Present => (CompatibilityState::Supported, None),
+            ExtensionPresence::NotEstablished(reason) => {
+                (CompatibilityState::NotEstablished, Some(reason))
+            }
+        };
         return Ok(ProbeResult {
             state,
-            dispatched,
             platform_log_path: None,
             diagnostic,
         });
@@ -526,10 +548,9 @@ fn probe_compatibility(
     let Some(comparison_name) = resolved.comparison_name() else {
         // Nothing to ask with: the platform will not compare a configuration without the
         // vendor configuration's name. Saying "not asked" is the honest answer; guessing the
-        // support state from the refusal text is what ADR-0029 forbids.
+        // support state from the refusal text is what DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES forbids.
         return Ok(ProbeResult {
             state: CompatibilityState::NotProbed,
-            dispatched: false,
             platform_log_path: None,
             diagnostic: None,
         });
@@ -585,7 +606,6 @@ fn probe_compatibility(
     let diagnostic = probe_evidence(&result);
     Ok(ProbeResult {
         state,
-        dispatched: true,
         platform_log_path: result.platform_log_path,
         diagnostic,
     })
@@ -594,48 +614,57 @@ fn probe_compatibility(
 enum ExtensionPresence {
     Present,
     Absent,
-    /// The list could not be read. Asked and not proven, so no change is permitted. The flag
-    /// says whether a platform process was started before the attempt gave up.
-    NotEstablished(String, bool),
+    /// The list could not be read. Asked and not proven, so no change is permitted. Whether
+    /// `ibcmd` had started is the command's work mark, not this answer.
+    NotEstablished(String),
 }
 
-/// Asks the infobase whether the extension is installed, by its own keyed list.
+/// Asks the infobase whether the extension is installed, by its own keyed list. `Err` is only a
+/// cancellation of the list read: it answers nothing about the extension, it ends the command.
 fn installed_extension_state(
     context: &ExecutionContext,
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
     resolved: &ResolvedLoadRequest,
-) -> ExtensionPresence {
+) -> Result<ExtensionPresence, AppError> {
     let Some(name) = resolved.extension.as_deref() else {
-        return ExtensionPresence::NotEstablished("the extension is not named".to_owned(), false);
+        return Ok(ExtensionPresence::NotEstablished(
+            "the extension is not named".to_owned(),
+        ));
     };
     let connection = match IbcmdConnection::from_infobase(&config.infobase) {
         Ok(connection) => connection,
-        Err(error) => return ExtensionPresence::NotEstablished(error.to_string(), false),
+        Err(error) => return Ok(ExtensionPresence::NotEstablished(error.to_string())),
     };
     let binary = match utilities.locate(UtilityType::Ibcmd) {
         Ok(location) => location.path,
-        Err(error) => return ExtensionPresence::NotEstablished(error.to_string(), false),
+        Err(error) => return Ok(ExtensionPresence::NotEstablished(error.to_string())),
     };
-    let dsl = IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
-        .with_execution_policy(
-            context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-        );
+    let dsl = IbcmdDsl::new(
+        binary,
+        connection,
+        utilities.runner_for(UtilityType::Ibcmd),
+        context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+    );
     let result = match dsl.infobase_extension_list() {
         Ok(result) => result,
-        // The spawn itself failed, so nothing ran.
-        Err(error) => return ExtensionPresence::NotEstablished(error.to_string(), false),
+        // Refused before the start or stopped after it: the runner has already marked the
+        // work if `ibcmd` started. A cancellation keeps its type — it is not an answer.
+        Err(error) => {
+            let error = AppError::from(error);
+            if error.cancellation().is_some() {
+                return Err(error);
+            }
+            return Ok(ExtensionPresence::NotEstablished(error.to_string()));
+        }
     };
     if result.process.exit_code != 0 {
-        return ExtensionPresence::NotEstablished(
-            format!(
-                "reading the extension list exited with {}",
-                result.process.exit_code
-            ),
-            true,
-        );
+        return Ok(ExtensionPresence::NotEstablished(format!(
+            "reading the extension list exited with {}",
+            result.process.exit_code
+        )));
     }
-    match parse_extension_inventory(&result.process.stdout) {
+    Ok(match parse_extension_inventory(&result.process.stdout) {
         Ok(extensions) => {
             if extensions.iter().any(|extension| extension.name == name) {
                 ExtensionPresence::Present
@@ -643,8 +672,8 @@ fn installed_extension_state(
                 ExtensionPresence::Absent
             }
         }
-        Err(error) => ExtensionPresence::NotEstablished(error, true),
-    }
+        Err(error) => ExtensionPresence::NotEstablished(error),
+    })
 }
 
 /// The platform's own words about a probe that did not run, kept as evidence for a human.
@@ -670,7 +699,7 @@ fn probe_evidence(result: &PlatformCommandResult) -> Option<String> {
 
 /// The whole decision, enumerated: target kind, requested mode, and what was established.
 ///
-/// No default-permit arm (ADR-0023, point 6): a new target kind, mode or state cannot slip
+/// No default-permit arm (DEC.2026-09-02.LOAD-COMPATIBILITY-STATES-ARE-CLOSED-AND-FAIL-CLOSED): a new target kind, mode or state cannot slip
 /// through as "allowed" by falling into a wildcard. Nothing here reads a platform message —
 /// `evidence` only travels into the refusal text so a human can see what was not interpreted.
 fn validate_probe_mode_compatibility(
@@ -697,7 +726,7 @@ fn validate_probe_mode_compatibility(
             UNSUPPORTED_UPDATE_MODE_ERROR.to_owned(),
         )),
         // Asked and not proven permits no change, in either mode and for either target: the
-        // fail-closed rule carried from ADR-0023. An unreadable extension list or an
+        // fail-closed rule carried from DEC.2026-09-02.LOAD-COMPATIBILITY-STATES-ARE-CLOSED-AND-FAIL-CLOSED. An unreadable extension list or an
         // infobase that will not open stops a load too.
         (Configuration | Extension, Load | Merge, NotEstablished) => unproven(),
         // An extension the infobase does not list is a first installation; merging into
@@ -737,7 +766,9 @@ fn validate_probe_mode_compatibility(
 }
 
 fn validate_supported_matrix(config: &AppConfig) -> Option<AppError> {
-    if config.builder == BuilderBackend::Designer && config.format == SourceFormat::Designer {
+    if config.default_provider(Operation::Load) == Some(Provider::Designer)
+        && config.format == SourceFormat::Designer
+    {
         None
     } else {
         Some(AppError::Validation(SUPPORTED_LOAD_ERROR.to_owned()))
@@ -871,12 +902,14 @@ fn resolve_existing_file(
             candidate.display()
         )));
     }
-    std::fs::canonicalize(&candidate).map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to canonicalize '{}': {error}",
-            candidate.display()
-        ))
-    })
+    std::fs::canonicalize(&candidate)
+        .map(|canonical| normalize_windows_verbatim_path(&canonical))
+        .map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to canonicalize '{}': {error}",
+                candidate.display()
+            ))
+        })
 }
 
 fn infer_artifact_type(raw_path: &str) -> Option<ArtifactBuildMode> {
@@ -920,8 +953,8 @@ fn build_designer_dsl<'a>(
         config.v8_connection(),
         runner,
         Some(log_file),
-    )
-    .with_execution_policy(context.process_policy(safety, None)))
+        context.process_policy(safety, None),
+    ))
 }
 
 fn ensure_platform_success(
@@ -959,35 +992,35 @@ fn target_label(resolved: &ResolvedLoadRequest) -> String {
     }
 }
 
+/// Итог загрузки, остановленной отменой: `message` — её текст, `record` — запись о
+/// прерывании. Получил ли исполнитель работу, ставит отметка команды на выходе `execute`;
+/// что пакет уже загружен, отмечает `with_loaded_artifact` у места вызова.
 fn interrupted_result_from_resolved(
     resolved: &ResolvedLoadRequest,
     compatibility_state: CompatibilityState,
     started: Instant,
-    interruption: ExecutionInterruption,
     message: String,
+    record: ExecutionInterruptionDetails,
     platform_log_path: Option<PathBuf>,
 ) -> LoadResult {
     LoadResult {
-        provider_dispatched: true,
+        provider: None,
+        provider_dispatched: false,
         mode: resolved.mode,
         artifact_path: resolved.artifact_path.clone(),
         artifact_type: resolved.artifact_type,
         extension: resolved.extension.clone(),
         duration_ms: started.elapsed().as_millis() as u64,
         execution: with_platform_log_artifact(
-            ExecutionOutcome::new(command_interruption_status(interruption))
+            ExecutionOutcome::new(ExecutionStatus::Cancelled)
                 .with_diagnostics(vec![message.clone()])
                 .with_errors(vec![ExecutionError::new(
                     "artifact_load_interrupted",
-                    message.clone(),
-                )])
-                .with_interruptions(vec![command_interruption_details(
-                    interruption,
-                    "update_db_cfg_safe_point",
                     message,
                 )])
+                .with_interruptions(vec![record])
                 .with_payload(LoadExecutionMetadata {
-                    applied: true,
+                    applied: false,
                     target_kind: resolved.target_kind,
                     compatibility_state,
                     update_db_cfg_ran: false,
@@ -997,12 +1030,64 @@ fn interrupted_result_from_resolved(
     }
 }
 
-fn deferred_interruption_warning(action: &str, result: &PlatformCommandResult) -> Option<String> {
-    deferred_process_interruption_warning(&format!("{action} completed successfully"), result)
+/// Отказ загрузки. Отмена — прерывание: статус `cancelled` и запись о нём, фазу которой
+/// называет ошибка — безопасная точка или оборванная работа `work_phase`. Прочий отказ —
+/// `failed`, как был.
+fn failed_result_from_resolved(
+    resolved: &ResolvedLoadRequest,
+    compatibility_state: CompatibilityState,
+    started: Instant,
+    error: &AppError,
+    work_phase: ExecutionInterruptionPhase,
+    platform_log_path: Option<PathBuf>,
+    update_db_cfg_ran: bool,
+) -> LoadResult {
+    let message = error.to_string();
+    match cancellation_record(error, work_phase, message.clone()) {
+        Some(record) => interrupted_result_from_resolved(
+            resolved,
+            compatibility_state,
+            started,
+            message,
+            record,
+            platform_log_path,
+        ),
+        None => empty_result_from_resolved(
+            resolved,
+            compatibility_state,
+            started,
+            Some(message),
+            platform_log_path,
+            update_db_cfg_ran,
+        ),
+    }
+}
+
+/// Отмену, которую процесс отложил и пережил, ответ называет первой — и тогда, когда процесс
+/// потом не удался: оператор просил остановить, и ответ говорит, почему его не послушали.
+fn name_deferral(
+    result: &mut LoadResult,
+    deferral: Option<(String, ExecutionInterruptionDetails)>,
+) {
+    if let Some((warning, details)) = deferral {
+        result.execution.diagnostics.insert(0, warning);
+        result.execution.interruptions.insert(0, details);
+    }
+}
+
+// The artifact has already been loaded. A later database update failure, or an interruption
+// before the update, must not erase that effect from the receipt.
+fn with_loaded_artifact(mut result: LoadResult) -> LoadResult {
+    result
+        .execution
+        .payload
+        .as_mut()
+        .expect("load failure always carries execution metadata")
+        .applied = true;
+    result
 }
 
 fn empty_result_from_resolved(
-    provider_dispatched: bool,
     resolved: &ResolvedLoadRequest,
     compatibility_state: CompatibilityState,
     started: Instant,
@@ -1011,7 +1096,6 @@ fn empty_result_from_resolved(
     update_db_cfg_ran: bool,
 ) -> LoadResult {
     empty_result(
-        provider_dispatched,
         resolved.mode,
         resolved.artifact_path.clone(),
         resolved.artifact_type,
@@ -1025,8 +1109,11 @@ fn empty_result_from_resolved(
     )
 }
 
+// Принятый waiver: пустой результат перечисляет поля отчёта поимённо, потому что
+// собирается до того, как появилась хоть одна его часть. Структура-аргумент здесь
+// была бы копией самого результата.
+#[allow(clippy::too_many_arguments)]
 fn empty_result(
-    provider_dispatched: bool,
     mode: LoadMode,
     artifact_path: PathBuf,
     artifact_type: ArtifactBuildMode,
@@ -1042,7 +1129,8 @@ fn empty_result(
         .clone()
         .unwrap_or_else(|| "artifact load failed".to_owned());
     LoadResult {
-        provider_dispatched,
+        provider: None,
+        provider_dispatched: false,
         mode,
         artifact_path,
         artifact_type,
@@ -1084,14 +1172,17 @@ fn with_platform_log_artifact(
 mod tests {
     use super::{execute, resolve_request, ResolvedLoadRequest};
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, PlatformToolConfig, SourceFormat, TestsConfig,
-        ToolsConfig,
+        AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, TestsConfig, ToolsConfig,
     };
     use crate::domain::artifacts::ArtifactBuildMode;
-    use crate::domain::execution::ExecutionStatus;
+    use crate::domain::execution::{
+        ExecutionInterruptionKind, ExecutionInterruptionPhase, ExecutionStatus,
+    };
     use crate::domain::load::{
         CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
     };
+    #[cfg(unix)]
+    use crate::platform::process::HeldCommand;
     use crate::platform::process::ProcessResult;
     use crate::platform::result::PlatformCommandResult;
     use crate::use_cases::context::{CommandName, ExecutionContext};
@@ -1099,6 +1190,8 @@ mod tests {
     use crate::use_cases::result::UseCaseErrorKind;
     use std::fs;
     use std::path::{Path, PathBuf};
+    #[cfg(unix)]
+    use std::thread;
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
 
@@ -1138,7 +1231,7 @@ mod tests {
     #[test]
     fn a_probe_that_ran_is_the_only_proof_of_support() {
         // The whole classification, and the reason the four prose tests that used to stand
-        // here are gone (ADR-0029): exit zero means the comparison ran, and nothing else is
+        // here are gone (DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES): exit zero means the comparison ran, and nothing else is
         // guaranteed. The platform's sentence is carried as evidence, never read.
         let ran = PlatformCommandResult {
             process: ProcessResult {
@@ -1166,6 +1259,50 @@ mod tests {
         );
     }
 
+    /// Матрица «цель — режим — состояние» перебирается целиком: у каждой пары есть
+    /// названный исход, и ни одно неустановленное состояние не разрешает изменение.
+    /// Разрешающая ветка по умолчанию провалила бы именно этот перебор.
+    #[test]
+    fn the_compatibility_matrix_answers_every_combination_and_never_permits_an_unproven_one() {
+        use CompatibilityState::{Absent, NotEstablished, NotProbed, Supported};
+        use LoadMode::{Load, Merge, Update};
+        use LoadTargetKind::{Configuration, Extension, Unknown};
+
+        let states = [Supported, Absent, NotEstablished, NotProbed];
+        let modes = [Load, Merge, Update];
+        let kinds = [Configuration, Extension, Unknown];
+
+        for kind in kinds {
+            for mode in modes {
+                for state in states {
+                    let resolved = ResolvedLoadRequest {
+                        mode,
+                        artifact_path: PathBuf::from("dist/main.cf"),
+                        artifact_type: ArtifactBuildMode::ConfigurationCf,
+                        target_kind: kind,
+                        settings_path: None,
+                        extension: None,
+                        vendor_name: None,
+                    };
+                    let verdict = super::validate_probe_mode_compatibility(&resolved, state, None);
+
+                    if matches!(state, NotEstablished) || matches!(kind, Unknown) {
+                        assert!(
+                            verdict.is_some(),
+                            "{kind:?}/{mode:?}/{state:?} must refuse: an unproven state permits no change"
+                        );
+                    }
+                    if matches!(mode, Update) {
+                        assert!(
+                            verdict.is_some(),
+                            "{kind:?}/{mode:?}/{state:?} must refuse: update mode is not supported"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn an_unestablished_state_refuses_a_merge_and_lets_a_first_load_through() {
         let configuration = ResolvedLoadRequest {
@@ -1178,7 +1315,7 @@ mod tests {
             vendor_name: None,
         };
 
-        // Asked and not proven permits no change, in either mode (ADR-0029, point 5).
+        // Asked and not proven permits no change, in either mode (DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES).
         assert!(
             super::validate_probe_mode_compatibility(
                 &configuration,
@@ -1299,18 +1436,14 @@ mod tests {
 
     #[cfg(unix)]
     fn write_designer_script(path: &Path, calls_log: &Path) {
-        write_designer_script_with_merge_failure(path, calls_log, false);
+        write_designer_script_with(path, calls_log, "");
     }
 
+    /// Подставной Конфигуратор; `extra` — строки оболочки перед его успешным выходом.
     #[cfg(unix)]
-    fn write_designer_script_with_merge_failure(path: &Path, calls_log: &Path, fail_merge: bool) {
-        let merge_block = if fail_merge {
-            "if printf '%s' \"$*\" | grep -F -q -- '/MergeCfg'; then\n  printf 'merge failed\\n' >&2\n  exit 23\nfi\n"
-        } else {
-            ""
-        };
+    fn write_designer_script_with(path: &Path, calls_log: &Path, extra: &str) {
         let body = format!(
-            "args=\"$*\"\nout=\"\"\nreport=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"-ReportFile\" ]; then report=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"{}\"\nif [ -n \"$out\" ]; then mkdir -p \"$(dirname \"$out\")\"; : > \"$out\"; fi\nif printf '%s' \"$args\" | grep -F -q -- '/CompareCfg'; then\n  if printf '%s' \"$args\" | grep -F -q -- 'VendorConfiguration'; then\n    printf 'Configuration Vendor configuration is not available\\n' > \"$out\"\n    exit 17\n  fi\n  if printf '%s' \"$args\" | grep -F -q -- 'ExtensionDBConfiguration'; then\n    if printf '%s' \"$args\" | grep -F -q -- 'ExistingExt'; then\n      : > \"$report\"\n      exit 0\n    fi\n    if printf '%s' \"$args\" | grep -F -q -- 'UnsupportedExt'; then\n      printf 'Configuration extension is not supported\\n' > \"$out\"\n      exit 18\n    fi\n    printf 'extension not found\\n' > \"$out\"\n    exit 19\n  fi\nfi\n{merge_block}exit 0",
+            "args=\"$*\"\nout=\"\"\nreport=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"-ReportFile\" ]; then report=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> \"{}\"\nif [ -n \"$out\" ]; then mkdir -p \"$(dirname \"$out\")\"; : > \"$out\"; fi\nif printf '%s' \"$args\" | grep -F -q -- '/CompareCfg'; then\n  if printf '%s' \"$args\" | grep -F -q -- 'VendorConfiguration'; then\n    printf 'Configuration Vendor configuration is not available\\n' > \"$out\"\n    exit 17\n  fi\n  if printf '%s' \"$args\" | grep -F -q -- 'ExtensionDBConfiguration'; then\n    if printf '%s' \"$args\" | grep -F -q -- 'ExistingExt'; then\n      : > \"$report\"\n      exit 0\n    fi\n    if printf '%s' \"$args\" | grep -F -q -- 'UnsupportedExt'; then\n      printf 'Configuration extension is not supported\\n' > \"$out\"\n      exit 18\n    fi\n    printf 'extension not found\\n' > \"$out\"\n    exit 19\n  fi\nfi\n{extra}exit 0",
             calls_log.display()
         );
         fs::write(path, format!("#!/bin/sh\n{body}\n")).expect("write script");
@@ -1321,10 +1454,12 @@ mod tests {
         AppConfig {
             base_path: root.to_path_buf(),
             work_path: root.join("work"),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![],
             build: BuildConfig::default(),
             tools: ToolsConfig {
@@ -1431,7 +1566,7 @@ mod tests {
 
     /// Four tests used to stand here, each proving that a particular mix of stdout, stderr and
     /// `/Out` lines kept the state `unknown` and blocked the load. They classified the
-    /// platform's prose, which ADR-0029 forbids, so the rule they protected is proven with a
+    /// platform's prose, which DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES forbids, so the rule they protected is proven with a
     /// structural input instead: the infobase cannot be asked at all, and nothing is applied.
     #[cfg(unix)]
     #[test]
@@ -1551,6 +1686,40 @@ mod tests {
             .contains("require --extension"));
     }
 
+    /// `std::fs::canonicalize` returns a `\\?\`-prefixed extended-length path on Windows.
+    /// Passed straight to `1cv8.exe /LoadCfg`, that prefix makes the platform build a
+    /// malformed `file://\\?\C:\...` URI and report "Файл не обнаружен" for a file that is
+    /// physically present. `resolve_existing_file` must strip the prefix, the way every
+    /// other canonicalize call site in this codebase already does.
+    #[cfg(windows)]
+    #[test]
+    fn resolve_request_strips_windows_verbatim_prefix_from_the_artifact_path() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(root.join("main.cf"), "cf").expect("write");
+        let config = sample_config(root, &root.join("1cv8.exe"));
+
+        let resolved = resolve_request(
+            &config,
+            &LoadRequest {
+                vendor_name: None,
+                dry_run: false,
+                mode: LoadMode::Load,
+                artifact_path: "main.cf".to_owned(),
+                settings_path: None,
+                extension: None,
+            },
+        )
+        .expect("load of an existing .cf must resolve");
+
+        let resolved_path = resolved.artifact_path.display().to_string();
+        assert!(
+            !resolved_path.starts_with(r"\\?\"),
+            "the resolved artifact path must not carry the Windows verbatim prefix, \
+             or the platform builds a malformed file:// URI from it: {resolved_path}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn execute_load_cf_loads_and_updates_without_asking() {
@@ -1580,7 +1749,7 @@ mod tests {
             load_payload(&result).compatibility_state,
             CompatibilityState::NotProbed
         );
-        assert_eq!(load_payload(&result).update_db_cfg_ran, true);
+        assert!(load_payload(&result).update_db_cfg_ran);
         let calls_text = fs::read_to_string(calls).expect("calls");
         assert!(
             !calls_text.contains("/CompareCfg"),
@@ -1598,7 +1767,13 @@ mod tests {
         let root = dir.path();
         fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
         let mut config = sample_config(root, &root.join("1cv8"));
-        config.builder = BuilderBackend::Ibcmd;
+        // Валидация конфига такого ключа не пропустит: у `load` один исполнитель. Здесь
+        // проверяется вторая линия — сценарий отказывает сам, если матрицу обошли.
+        config.providers = [(
+            crate::domain::capability::Operation::Load,
+            crate::domain::capability::Provider::Ibcmd,
+        )]
+        .into();
 
         let request = LoadRequest {
             vendor_name: None,
@@ -1621,7 +1796,7 @@ mod tests {
             LoadTargetKind::Extension
         );
         assert_eq!(payload.extension.as_deref(), Some("ExistingExt"));
-        assert!(load_message(&payload).contains("builder=DESIGNER and format=DESIGNER"));
+        assert!(load_message(&payload).contains("the Designer provider and format=DESIGNER"));
     }
 
     #[cfg(unix)]
@@ -1648,13 +1823,338 @@ mod tests {
         let context = ExecutionContext::cli(CommandName::Load).with_cancellation(cancellation);
 
         let failure = execute(&context, &config, &request).expect_err("cancelled");
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Cancelled(crate::support::error::CancelledAt::Boundary)
+        );
         let payload = failure.payload.expect("payload");
 
         assert_eq!(payload.execution.status, ExecutionStatus::Cancelled);
-        assert_eq!(payload.execution.interruptions.len(), 1);
         assert!(payload.execution.errors[0]
             .message
             .contains("before entering load probe"));
+        // До проверки базы исполнитель не выбран и ничего не загружено.
+        let [interruption] = payload.execution.interruptions.as_slice() else {
+            panic!(
+                "one interruption expected: {:?}",
+                payload.execution.interruptions
+            );
+        };
+        assert!(!interruption.deferred);
+        assert_eq!(
+            interruption.phase,
+            Some(ExecutionInterruptionPhase::CommandBoundary)
+        );
+        assert!(!payload.provider_dispatched);
+        assert!(!load_payload(&payload).applied);
+    }
+
+    /// Отмена, пришедшая во время загрузки, её не рвёт: пакет догружается, ответ называет
+    /// отложенное прерывание, и команда останавливается на безопасной точке перед обновлением
+    /// конфигурации базы данных. Порядок задан рукопожатиями: отмена приходит, когда загрузка
+    /// уже идёт, а загрузка кончается, когда раннер уже отложил отмену
+    /// (`HeldCommand::interrupt_during`).
+    #[cfg(unix)]
+    #[test]
+    fn execute_reports_cancelled_status_at_update_db_cfg_safe_point() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("work")).expect("work");
+        let binary = root.join("1cv8");
+        let calls = root.join("calls.log");
+        let held = HeldCommand::in_dir(root);
+        fs::write(root.join("main.cf"), "cf").expect("artifact");
+        write_designer_script_with(&binary, &calls, &held.script_branch("/LoadCfg", 0));
+        let config = sample_config(root, &binary);
+        let request = LoadRequest {
+            vendor_name: None,
+            dry_run: false,
+            mode: LoadMode::Load,
+            artifact_path: "main.cf".to_owned(),
+            settings_path: None,
+            extension: None,
+        };
+        let cancellation = CancellationToken::new();
+
+        let failure = held
+            .interrupt_during(cancellation.clone(), || {
+                execute(
+                    &ExecutionContext::cli(CommandName::Load).with_cancellation(cancellation),
+                    &config,
+                    &request,
+                )
+            })
+            .expect_err("the command stops before update_db_cfg");
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Cancelled(crate::support::error::CancelledAt::Boundary)
+        );
+        let payload = failure.payload.expect("payload");
+
+        assert_eq!(payload.execution.status, ExecutionStatus::Cancelled);
+        assert!(payload.execution.errors[0]
+            .message
+            .contains("before entering update_db_cfg safe point"));
+        // Сначала отложенная отмена загрузки, затем остановка на безопасной точке.
+        let [deferred, boundary] = payload.execution.interruptions.as_slice() else {
+            panic!(
+                "two interruptions expected: {:?}",
+                payload.execution.interruptions
+            );
+        };
+        assert!(deferred.deferred);
+        assert_eq!(deferred.kind, ExecutionInterruptionKind::Cancelled);
+        assert_eq!(deferred.phase, Some(ExecutionInterruptionPhase::Apply));
+        assert!(!boundary.deferred);
+        assert_eq!(
+            boundary.phase,
+            Some(ExecutionInterruptionPhase::CommandBoundary)
+        );
+        assert!(
+            payload.execution.diagnostics[0].contains(
+                "apply completed successfully after cancellation request during critical phase"
+            ),
+            "{:?}",
+            payload.execution.diagnostics
+        );
+        // Платформа запускалась, и пакет уже загружен; до обновления базы дело не дошло.
+        assert!(payload.provider_dispatched);
+        assert!(load_payload(&payload).applied);
+        assert!(!load_payload(&payload).update_db_cfg_ran);
+        let calls_text = fs::read_to_string(&calls).expect("calls");
+        assert!(calls_text.contains("/LoadCfg"), "{calls_text}");
+        assert!(!calls_text.contains("/UpdateDBCfg"), "{calls_text}");
+    }
+
+    /// Загрузка, отложившая отмену и потом не удавшаяся, остаётся отказом, а не отменой: сигнал
+    /// отказа не переписывает. Но отложенную отмену ответ называет — оператор просил
+    /// остановить, и ответ говорит, почему его не послушали (как у `infobase restore`).
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_load_after_a_deferred_cancellation_still_names_it() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("work")).expect("work");
+        let binary = root.join("1cv8");
+        let calls = root.join("calls.log");
+        let held = HeldCommand::in_dir(root);
+        fs::write(root.join("main.cf"), "cf").expect("artifact");
+        write_designer_script_with(&binary, &calls, &held.script_branch("/LoadCfg", 5));
+        let config = sample_config(root, &binary);
+        let request = LoadRequest {
+            vendor_name: None,
+            dry_run: false,
+            mode: LoadMode::Load,
+            artifact_path: "main.cf".to_owned(),
+            settings_path: None,
+            extension: None,
+        };
+        let cancellation = CancellationToken::new();
+
+        let failure = held
+            .interrupt_during(cancellation.clone(), || {
+                execute(
+                    &ExecutionContext::cli(CommandName::Load).with_cancellation(cancellation),
+                    &config,
+                    &request,
+                )
+            })
+            .expect_err("the load failed");
+
+        assert_eq!(failure.error.kind(), UseCaseErrorKind::Platform);
+        let payload = failure.payload.expect("payload");
+        assert_eq!(payload.execution.status, ExecutionStatus::Failed);
+        let [deferred] = payload.execution.interruptions.as_slice() else {
+            panic!(
+                "the deferred cancellation must be named: {:?}",
+                payload.execution.interruptions
+            );
+        };
+        assert!(deferred.deferred);
+        assert_eq!(deferred.kind, ExecutionInterruptionKind::Cancelled);
+        assert_eq!(deferred.phase, Some(ExecutionInterruptionPhase::Apply));
+        assert!(
+            payload.execution.diagnostics[0]
+                .contains("load ended after cancellation request during critical phase"),
+            "{:?}",
+            payload.execution.diagnostics
+        );
+        assert!(!load_payload(&payload).applied);
+        assert!(!fs::read_to_string(&calls)
+            .expect("calls")
+            .contains("/UpdateDBCfg"));
+    }
+
+    /// Подставная программа, которая отмечается, что запущена, и ждёт, пока её не отпустят.
+    #[cfg(unix)]
+    fn write_waiting_program(path: &Path, started: &Path, release: &Path, when: &str) {
+        fs::write(
+            path,
+            format!(
+                "#!/bin/sh\nif printf '%s' \"$*\" | grep -F -q -- '{when}'; then\n  : > '{}'\n  while [ ! -e '{}' ]; do sleep 0.05; done\nfi\nexit 0\n",
+                started.display(),
+                release.display()
+            ),
+        )
+        .expect("write program");
+        make_executable(path);
+    }
+
+    /// Отменяет команду, когда подставная программа отметилась, что запущена, и отпускает её.
+    /// Поток отвечает, дождался ли он отметки.
+    #[cfg(unix)]
+    fn cancel_once_started(
+        started: &Path,
+        release: PathBuf,
+    ) -> (CancellationToken, thread::JoinHandle<bool>) {
+        let cancellation = CancellationToken::new();
+        let canceller =
+            crate::platform::process::cancel_when_started(started, cancellation.clone());
+        let operator = thread::spawn(move || {
+            let began = canceller
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            fs::write(&release, "").expect("release");
+            began
+        });
+        (cancellation, operator)
+    }
+
+    /// Проба списка расширений, отменённая уже после запуска `ibcmd`, работу получила, и ответ
+    /// говорит `provider_dispatched: true` (#309: прежде он отвечал `false`). Отмена остаётся
+    /// отменой, а не ответом о расширении: команда прервана в фазе `provider_command`, и
+    /// совместимость не установлена — спросили, а ответа нет (#308).
+    #[cfg(unix)]
+    #[test]
+    fn an_extension_probe_cancelled_after_its_start_reports_the_work() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("work")).expect("work");
+        let binary = root.join("1cv8");
+        write_designer_script(&binary, &root.join("calls.log"));
+        let (started, release) = (root.join("started"), root.join("release"));
+        write_waiting_program(&root.join("ibcmd"), &started, &release, "extension");
+        fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
+        let request = LoadRequest {
+            vendor_name: None,
+            dry_run: false,
+            mode: LoadMode::Load,
+            artifact_path: "ext.cfe".to_owned(),
+            settings_path: None,
+            extension: Some("ExistingExt".to_owned()),
+        };
+        let (cancellation, operator) = cancel_once_started(&started, release);
+
+        let failure = execute(
+            &ExecutionContext::cli(CommandName::Load).with_cancellation(cancellation),
+            &sample_config(root, &binary),
+            &request,
+        )
+        .expect_err("the cancelled probe stops the command");
+        assert!(
+            operator.join().expect("operator"),
+            "the command never marked its start"
+        );
+
+        assert_cancelled_probe(failure);
+    }
+
+    /// Проба совместимости конфигурации, отменённая после запуска Конфигуратора, — тоже
+    /// работа (#309) и тоже прерывание в фазе `provider_command` (#308).
+    #[cfg(unix)]
+    #[test]
+    fn a_configuration_probe_cancelled_after_its_start_reports_the_work() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("work")).expect("work");
+        let binary = root.join("1cv8");
+        let (started, release) = (root.join("started"), root.join("release"));
+        write_waiting_program(&binary, &started, &release, "/CompareCfg");
+        fs::write(root.join("main.cf"), "cf").expect("artifact");
+        let request = LoadRequest {
+            vendor_name: Some("Vendor".to_owned()),
+            dry_run: false,
+            mode: LoadMode::Merge,
+            artifact_path: "main.cf".to_owned(),
+            settings_path: Some("merge.xml".to_owned()),
+            extension: None,
+        };
+        fs::write(root.join("merge.xml"), "<settings/>").expect("settings");
+        let (cancellation, operator) = cancel_once_started(&started, release);
+
+        let failure = execute(
+            &ExecutionContext::cli(CommandName::Load).with_cancellation(cancellation),
+            &sample_config(root, &binary),
+            &request,
+        )
+        .expect_err("the cancelled probe stops the command");
+        assert!(
+            operator.join().expect("operator"),
+            "the command never marked its start"
+        );
+
+        assert_cancelled_probe(failure);
+    }
+
+    #[cfg(unix)]
+    fn assert_cancelled_probe(failure: crate::use_cases::result::UseCaseFailure<LoadResult>) {
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Cancelled(crate::support::error::CancelledAt::Work)
+        );
+        let payload = failure.payload.expect("the refusal carries the form");
+        assert!(payload.provider_dispatched, "the probe had started");
+        assert_eq!(payload.execution.status, ExecutionStatus::Cancelled);
+        let [interruption] = payload.execution.interruptions.as_slice() else {
+            panic!(
+                "one interruption expected: {:?}",
+                payload.execution.interruptions
+            );
+        };
+        assert!(!interruption.deferred);
+        assert_eq!(
+            interruption.phase,
+            Some(ExecutionInterruptionPhase::ProviderCommand)
+        );
+        assert_eq!(
+            load_payload(&payload).compatibility_state,
+            CompatibilityState::NotEstablished,
+            "the probe was asked and did not answer"
+        );
+        assert!(!load_payload(&payload).applied);
+    }
+
+    /// Отказ до первого процесса работы не дал, даже если проба не шла и прежде признак
+    /// ставился заранее (#309): рабочий каталог — файл, и журнал платформы некуда писать.
+    #[cfg(unix)]
+    #[test]
+    fn a_load_refused_before_its_first_process_reports_no_work() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(root.join("work"), "not a directory").expect("work is a file");
+        let binary = root.join("1cv8");
+        let calls = root.join("calls.log");
+        write_designer_script(&binary, &calls);
+        fs::write(root.join("main.cf"), "cf").expect("artifact");
+        let request = LoadRequest {
+            vendor_name: None,
+            dry_run: false,
+            mode: LoadMode::Load,
+            artifact_path: "main.cf".to_owned(),
+            settings_path: None,
+            extension: None,
+        };
+
+        let failure = execute(
+            &ExecutionContext::cli(CommandName::Load),
+            &sample_config(root, &binary),
+            &request,
+        )
+        .expect_err("no platform log directory");
+
+        let payload = failure.payload.expect("the refusal carries the form");
+        assert!(!payload.provider_dispatched, "no process was started");
+        assert!(!calls.exists(), "the platform never ran");
     }
 
     #[cfg(unix)]

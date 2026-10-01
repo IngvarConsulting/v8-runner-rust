@@ -10,9 +10,9 @@ Use this skill to operate `v8-runner` as the automation layer for local 1C devel
 Keep this file as the decision entrypoint. Load only the reference file that matches the task:
 
 - `references/command-selection.md` for choosing the right command sequence.
-- `references/config-and-backends.md` for `v8project.yaml`, source sets, formats, builders, and backend limits.
-- `references/project-workflows.md` for common build, syntax, dump, launch, and source sync workflows across Designer and EDT projects.
-- `references/file-and-artifact-workflows.md` for dump, convert, load, make/artifacts, and staged publication.
+- `references/config-and-backends.md` for `v8project.yaml`, source sets, formats, per-operation providers, and backend limits.
+- `references/project-workflows.md` for common push, check, pull, launch, and source sync workflows across Designer and EDT projects.
+- `references/file-and-artifact-workflows.md` for pull, convert, upload, make/artifacts, and staged publication.
 - `references/testing.md` for YaXUnit, Vanessa Automation, syntax checks, and artifacts.
 - `references/troubleshooting.md` for setup failures, stale state, and environment diagnostics.
 
@@ -20,14 +20,14 @@ Keep this file as the decision entrypoint. Load only the reference file that mat
 
 Use the available `v8-runner` binary directly. If it is not on `PATH`, ask for the binary path or use a project-provided wrapper script.
 
-`v8project.yaml` is the default project config name. A sibling `v8project.local.yaml` is loaded automatically for machine-local paths, credentials, tools, tests, and MCP settings. Do not pass `--config v8project.yaml` unless the user explicitly wants a non-default command shape or the active config path differs from the default; never pass `v8project.local.yaml` as `--config`.
+`v8project.yaml` is the default project config name. A sibling `v8project.local.yaml` declares the project's infobases (`infobases` map, `origin` by default) and holds machine-local paths, credentials, tools, tests, and MCP settings. Do not pass `--config v8project.yaml` unless the user explicitly wants a non-default command shape or the active config path differs from the default; never pass `v8project.local.yaml` as `--config`.
 
-Generated `v8project.yaml` files include a `yaml-language-server` modeline that points to the published `master` JSON Schema artifact. `config init` and `bootstrap` also create sibling `v8project.local.yaml` with the local overlay schema modeline and add it to `.gitignore` when needed.
+Generated `v8project.yaml` files include a `yaml-language-server` modeline that points to the published `master` JSON Schema artifact. `init` and `clone` also create sibling `v8project.local.yaml` with the local overlay schema modeline and add it to `.gitignore` when needed.
 
 Use JSON output only when another tool, script, or final answer needs structured results:
 
 ```bash
-v8-runner --json-message build
+v8-runner --json-message push
 ```
 
 Use text output for direct human diagnostics.
@@ -40,6 +40,7 @@ Useful global flags:
 - `--config <CONFIG>` when the active config is not `./v8project.yaml`.
 - `--json-message` for machine-readable CLI envelopes.
 - `--workdir <WORKDIR>` to override `workPath`; it wins over `v8project.local.yaml`.
+- `--infobase <NAME|CONNECTION>` to work with another declared infobase or an ad hoc connection string; defaults to `origin`.
 - `--clean-before-execution` to clear logs before execution.
 - `--log-level <error|warn|info|debug|trace>` for diagnostics.
 - `--no-color` for plain text output.
@@ -47,68 +48,97 @@ Useful global flags:
 ## First Pass
 
 1. Check whether `v8project.yaml` exists in the 1C project root.
-2. If it is missing and source files already exist, run the narrowest `v8-runner config init ...` command that fits the project shape.
+2. If it is missing and source files already exist, run the narrowest `v8-runner init ...` command that fits the project shape.
 3. If it is missing and the only goal is to export CF/CFE/DT from an existing infobase, create a
-   minimal `v8project.yaml` with `workPath`, `builder`, `infobase`, platform discovery settings and
-   `source-set: []`; do not bootstrap project sources that the user did not request.
+   minimal `v8project.yaml` with `workPath`, `format`, platform discovery settings and
+   `source-set: []`, plus a sibling `v8project.local.yaml` with `infobases.origin.connection`; do not bootstrap project sources that the user did not request.
 4. If it is missing and the current source of truth is an existing infobase that must become
-   project sources, run `v8-runner bootstrap --connection <CONNECTION> --platform-version <VERSION>`.
+   project sources, run `v8-runner clone --connection <CONNECTION> --platform-version <VERSION>`.
+   Add `--dry-run` first: it names the four paths it would write and the dump utility it found,
+   and creates nothing — not even the project directory.
 5. Inspect generated `v8project.yaml` and keep machine-local overrides in generated `v8project.local.yaml`.
-6. Run `v8-runner init` only when the file infobase or EDT workspace needs to be created.
+6. Run `v8-runner infobase create` only when the file infobase or EDT workspace needs to be created.
 7. Run the narrowest validation command that answers the user's goal.
 
-Minimal infobase-only shape:
+Minimal infobase-only shape (two files):
 
 ```yaml
+# v8project.yaml
 workPath: build/v8-runner
 format: DESIGNER
-builder: DESIGNER
-infobase:
-  connection: "File=/absolute/path/to/ib"
 source-set: []
 ```
 
-Useful bootstrap commands:
+```yaml
+# v8project.local.yaml
+infobases:
+  origin:
+    connection: "File=/absolute/path/to/ib"
+```
+
+`infobase:` in either file is a one-cycle synonym for `infobases.origin` and warns.
+
+Useful setup commands:
 
 ```bash
-v8-runner config init
-v8-runner config init --connection "File=build/ib"
-v8-runner config init --format edt
-v8-runner config init --builder IBCMD
-v8-runner bootstrap --connection "File=/path/to/ib" --platform-version 8.3.27
+v8-runner init
+v8-runner init --connection "File=build/ib"
+v8-runner init --format edt
+v8-runner clone --connection "File=/path/to/ib" --platform-version 8.3.27
 v8-runner tools download yaxunit --sources
 v8-runner tools download vanessa
 v8-runner tools download client-mcp --sources
-v8-runner init
+v8-runner infobase create
 ```
 
 ## Default Use-Case Routing
 
-- Source files changed and infobase may be stale: run `v8-runner build`.
+- Source files changed and infobase may be stale: run `v8-runner push`.
 - Only one source-set changed: use commands that accept `--source-set <NAME>` instead of rebuilding or materializing everything.
-- Branch switch, rebase, large object moves, stale source-backed tool extension state, or suspicious incremental state: run `v8-runner build --full-rebuild`.
-- Syntax check: inspect `format` and `builder`, then choose `syntax designer-modules`, `syntax designer-config`, or `syntax edt`.
-- Behavior validation: run the relevant `v8-runner test ...` command; tests build first unless the
-  caller explicitly requests `--no-build` for an already prepared infobase.
+- After successful full `pull` in `DESIGNER` format, the next unchanged `push` skips loading for the same named base/source set. If the response says sources were published without updating hash memory, repeat full `pull`; do not repair a failed pull by pushing old sources.
+- Hash memory is separate per named base; ad hoc connection strings do not reuse it. Foreign memory is named in the refusal: use full `pull` to establish a baseline from that base.
+- Full `pull` refuses a target containing `workPath`, including symlink aliases. EDT export cache stays shared; per-base agent generation/version-file memory remains pending in #214.
+- Branch switch, rebase, large object moves, stale source-backed tool extension state, or suspicious incremental state: run `v8-runner push --full`.
+- Configuration check: run `v8-runner check`. The project `format` picks the branch — `/CheckConfig` for DESIGNER, EDT validation for EDT — and a key the branch does not execute is refused. With no mode key the default profile runs; name modes to narrow it. One executor (Designer), no `providers` key. A project of external data processors and reports only is refused with `error.code: subject`. `--dry-run` stops after the utility is located and before the platform runs: no platform log directory is created, and the answer names `status: planned`, `provider_dispatched: false` and `exit_code: -1`.
+- Behavior validation: run the relevant `v8-runner test ...` command; tests run `push` first unless the
+  caller explicitly requests `--no-push` for an already prepared infobase.
 - Missing local YAxUnit, Vanessa Automation, or onec-client-mcp-devkit setup: run
   `v8-runner tools download yaxunit --sources`, `v8-runner tools download vanessa`, and
   `v8-runner tools download client-mcp --sources` for source-backed setup. Omit
-  `--sources` on `yaxunit` or `client-mcp` to download `.cfe` artifacts when
-  `builder=DESIGNER`.
+  `--sources` on `yaxunit` or `client-mcp` to download `.cfe` artifacts; loading a
+  `.cfe` needs the Designer executor.
 - Vanessa Automation debugging or scenario authoring: use `v8-runner launch mcp va --wait-ready ...` to start the client MCP server with VA loaded and verify the VA MCP tools before driving `.feature` workflows.
-- Extension properties need synchronization: use `v8-runner extensions` or `extensions --name <SOURCE_SET>`.
-- Infobase changes need to become Git-visible files: check `git status`, then run the relevant `v8-runner dump ...` command.
+- Extension security properties: use `extensions --name <SOURCE_SET>` or
+  `extensions --installed-name <PLATFORM_NAME>` for a separately loaded CFE such as YAXUNIT.
+  Repeat/combine selectors for explicit targets; neither selector means all configured extensions.
+  Append `--dry-run` to preview without platform calls. Apply disables safe mode and unsafe action protection.
+- Infobase changes need to become Git-visible files: check `git status`, then run the relevant `v8-runner pull ...` command.
 - Need a CF/CFE package of the state currently stored in the infobase: use
-  `v8-runner infobase configuration export --state <working|database> --output <file.cf>`;
+  `v8-runner download --state <working|database> --output <file.cf>`;
   add `--extension <name>` and use `.cfe` for an extension. This is not `make`, which builds
   artifacts from project sources.
 - Need a complete portable DT image including data: use `v8-runner infobase dump --output <file.dt>`.
-  A DT is not a backup. Runner treats `builder` as a provider preference for infobase exports,
-  skips experimental IBCMD DT, and selects a ready Designer before spawn when available.
+  A DT is not a backup. The executor comes from the matrix (`providers.infobase.dump`),
+  experimental IBCMD DT is skipped unless named explicitly, and a ready Designer is
+  selected before spawn when available.
+- `error.kind` and `error.code` are closed enumerations. Within `capability`, the code says why:
+  `capability_unavailable`, `target` (not for this target), `soon` (not yet). A refusal that has a
+  way out names it in `error.next` — `{command, source_set?, keys?}` — so an orchestrator reads the
+  step instead of parsing the message.
+- When an operator's interrupt (Ctrl+C, SIGTERM) ends a command, the CLI envelope answers
+  `error.kind: interruption`, `error.code: cancelled` and exit 4 for every command; MCP folds it
+  into `platform_failure`. A pending interrupt alone decides nothing: an unrelated failure keeps
+  its own code, and a critical phase such as a database write runs to its end — a success stays
+  a success and names the interrupt with `deferred: true`. In `upload`, `infobase restore`, `push`,
+  `extensions` and `infobase create` a later failure or a stop at the next safe point names it too
+  (forms without `execution` say it in the step message). In forms with `execution`, the
+  interruption record's `phase` says where it stopped: `command_boundary` — a safe point, no work
+  of the command was cut short; `provider_command`, `run`, `apply`, `update_db_cfg`,
+  `publication` — the executor's work was cut short or, with `deferred: true`, waited for.
 - For infobase export failures, distinguish `capability_unavailable` (no implemented adapter)
   from `environment_unavailable` (adapter exists, but binary/version/connection is not ready).
   Never retry another provider after the selected provider has been spawned.
-- Before an orchestrator applies either infobase export, append `--dry-run` to obtain the exact
+- Before an orchestrator applies `download` or `infobase dump`, append `--dry-run` to obtain the exact
   provider selection and output plan without creating `workPath`, locks, output paths, or a
   platform process. Treat `mode=preview` and `provider_dispatched=false` as the non-execution proof.
 - Need to load a complete infobase back from a DT image: use
@@ -117,43 +147,71 @@ v8-runner init
   not match the observed target is refused before the platform starts; neither provider asks, and
   there is no staging step that could undo a load. Append `--dry-run` first to see the selected
   provider and the planned input without touching the infobase.
+- `pull` and `convert` replace the target source directory as a whole, so they first ask git what
+  inside it exists nowhere else — untracked files, ignored files, a worktree edit on top of the
+  index, unresolved merge markers. Finding any, the command refuses before touching anything with
+  exit 2 and names them. Commit or stash them, or pass `--force` to replace the
+  directory anyway; the flag destroys them and keeps no copy. Staged content is not a loss: it is
+  recoverable from the index. Where git cannot answer — no git, outside a worktree, a git error, a
+  directory git could not read — the command proceeds exactly as it did before this check existed,
+  and the guard claims no protection there.
+- `--dry-run` is a global key: it means the same before and after the command. Commands with no
+  preview — `version`, `init`, `tools download`, `test`, `mcp serve` — refuse it
+  with a named reason instead of running.
 - Before any command that starts the platform or touches the infobase, append `--dry-run` to see
-  what it would do: `init`, `build`, `load`, `dump`, `convert`, `artifacts`, `launch`,
-  `infobase restore` and both `infobase` exports accept it. A preview locates the platform first,
+  what it would do: `clone`, `infobase create`, `push`, `upload`, `pull`, `convert`, `artifacts`,
+  `launch`, `check`, `infobase restore`, `download` and `infobase dump` accept it. A preview locates the platform first,
   so a missing one is refused before the plan is approved, and it takes no locks and creates
-  nothing, and it neither takes nor waits for the workspace lock, so a preview works while
-  another command holds it. Proof that nothing ran: `provider_dispatched: false` for the
-  launch-shaped verbs, `mode: preview` for the `infobase` ones — each form carries its own
-  closed signal. Two limits are named
-  rather than guessed: `load` reports `compatibility_state: not_probed` because the probe is
-  itself a Designer run, and `init` against a server infobase cannot tell "created" from
+  nothing — not the target, not `workPath`, not the action log — so a preview also runs under a
+  read-only sandbox. The record of the call is the envelope on stdout, not a log file. It
+  neither takes nor waits for the workspace lock, so a preview works while
+  another command holds it. `provider_dispatched: false` means no executor got the
+  command's work; export-shaped verbs also answer `mode: preview`. The flag is not a preview
+  marker — refusals before any work and runs with nothing to do answer `false` too — so know
+  the preview from your own `--dry-run`. `true` means an executor got the work: a failure
+  with `true` is not "nothing ran", so check the target before a retry. A failure after the
+  executor got the work answers the command's own form; the shared refusal form, without the
+  flag, means no executor got work. Two limits are named
+  rather than guessed: `upload` reports `compatibility_state: not_probed` because the probe is
+  itself a Designer run, and `infobase create` against a server infobase cannot tell "created" from
   "already existed" without creating it.
 - Source files need conversion between Designer and EDT: use `v8-runner convert`; this is CLI-only and does not use the infobase.
-- Existing `.cf` or `.cfe` artifacts need to be applied to an infobase: use `v8-runner load ...`.
+- Existing `.cf` or `.cfe` artifacts need to be applied to an infobase: use `v8-runner upload ...`.
 - Release artifacts need to be exported or external artifacts published: use `v8-runner make ...` or the `artifacts` alias.
 - Need to know which extensions are installed in an infobase, or to change that composition:
   use `v8-runner extensions list|info|create|delete|activate`. These subcommands address the
   infobase, not the workspace — bare `v8-runner extensions` still means "update the security
-  properties of the configured extension source-sets". The family is IBCMD-only because Designer
-  cannot report installed extensions, and the platform does not report a name prefix on read.
-  Every subcommand, reads included, accepts `--dry-run`: reading the composition starts the
-  platform, authenticates and leaves a journal trace, so it is an action. The preview names the
+  properties of the configured extension source-sets". For `ibcmd`, a successful read
+  reports `name_prefix` from the applied DB configuration; for the standalone agent it is
+  `null` until that provider can attest the applied prefix. Never fill it from source files
+  or the working configuration after `upload` without `apply`. A read that fails after the
+  platform got the request answers `ok: false` with an empty `extensions`: the composition is
+  unknown, not empty — check `ok` first.
+  Every subcommand of this family, reads included, accepts `--dry-run`: reading the composition
+  starts the platform, authenticates and leaves a journal trace, so it is an action. The preview names the
   target infobase, the account and the utility, and never echoes the connection string.
 - Need a 1C UI session: use `v8-runner launch designer`, `launch thin`, `launch thick`, or `launch ordinary`.
+- Need the thin client against a published base: `launch thin --via web` opens `infobase.web.url` as a ws connection. A standalone-server target takes that path by default — its direct gate address, when declared, is not used by the runner yet — while `launch web` still opens the same address in a browser. `--via` is accepted only where the client is thin.
 - Need to know which binary and arguments a launch would use without starting a client: append
   `--dry-run` to `launch designer|thin|thick|ordinary`. It returns `provider_dispatched=false`,
   `pid=null`, and a `plan` with the selected `program` and the composed `args`; credential values
   inside `plan.args` are replaced by `***`, so the plan is readable but not reusable as a manual
   command line. It cannot be combined with `--wait-for-exit` or `--wait-ready`.
-- Need an observable local external EPF runtime gate: use `launch thin --execute <file.epf> --output <out> --stderr-output <stderr> --wait-for-exit --wait-timeout-ms <ms>`. This opt-in mode is limited to explicit `.epf` files, reports PID/exit-or-timeout/artifacts, treats timeout as a CLI failure after terminating the client group, and rejects raw or configured `/C`, `/Execute`, and `/Out` aliases; callers must inspect the reported exit code because non-zero EPF exit is observational rather than a CLI failure; plain launch remains asynchronous.
-- Need onec-client-mcp-devkit launched inside 1C without VA authoring: use `v8-runner launch mcp --wait-ready ...` when the caller needs a ready MCP endpoint; tune readiness with `tools.client_mcp.wait_ready_timeout_ms` when the project needs a shorter or longer wait, raise `execution_timeout` too when extending beyond the global command budget, and use bare `launch mcp` only for fire-and-forget startup.
+- Need to read a failed launch: the command in the error text and in `logs/mcp/actions.log` is
+  masked the same way, and there the user name is hidden too (`/N ***`, `Usr=***`) because those
+  lines outlive the run. Server, base and paths stay readable; run `--dry-run` to see the account.
+- Need an observable local external EPF runtime gate: use `launch thin --execute <file.epf> --output <out> --stderr-output <stderr> --wait-for-exit --wait-timeout-ms <ms>`. This opt-in mode is limited to explicit `.epf` files, reports PID/exit-or-timeout/artifacts, treats timeout as a CLI failure after terminating the client group, answers an interrupted wait with `exit_code: null` and `timed_out: false`, and rejects raw or configured `/C`, `/Execute`, and `/Out` aliases; callers must inspect the reported exit code because non-zero EPF exit is observational rather than a CLI failure; plain launch remains asynchronous.
+- Need onec-client-mcp-devkit launched inside 1C without VA authoring: use `v8-runner launch mcp --wait-ready ...` when the caller needs a ready MCP endpoint; tune readiness with `tools.client_mcp.wait_ready_timeout_ms` when the project needs a shorter or longer wait, and use bare `launch mcp` only for fire-and-forget startup.
 
 ## Guardrails
 
 - Do not delete or recreate an infobase, workspace, temp directory, or generated state unless the user explicitly asks or the command itself is the documented recovery path.
 - Never pass `infobase restore --replace` to recover from a failed command: it discards the data of the target infobase, and `target_state: uncertain` after a failed restore means an unknown amount of data was already replaced. Dump first.
 - Do not invent raw `1cv8`, `ibcmd`, or `1cedtcli` flags; prefer the `v8-runner` command surface.
-- Check `git status` before `dump` when the result may overwrite or mix with existing source changes.
+- Check `git status` before `pull` when the result may overwrite or mix with existing source changes.
+- Give each git worktree or clone its own file infobase (`origin` in its own `v8project.local.yaml`):
+  the runner does not yet detect two working copies sharing one base; pushes from different
+  branches silently mix in it, and a test run in one copy blocks apply in the other.
 - Preserve failed test artifacts under `workPath/temp/<runner-id>/runs/<run-id>/` for diagnosis instead of cleaning them immediately.
 - Report missing local 1C utilities as environment/setup issues, not as project source failures.
 - Keep final answers concrete: command run, result, relevant artifact path, and any follow-up command.

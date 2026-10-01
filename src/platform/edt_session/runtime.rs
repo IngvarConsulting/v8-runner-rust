@@ -20,10 +20,13 @@ use super::{
 pub(super) trait ManagedSession: Send {
     fn pid(&self) -> Option<u32>;
 
+    /// `delivered` вызывается, как только команда доставлена в процесс; служебные команды
+    /// сессии передают пустой вызов.
     fn execute(
         &mut self,
         command: &str,
         timeout: Duration,
+        delivered: &dyn Fn(),
     ) -> Result<InteractiveCommandOutput, InteractiveProcessError>;
 
     fn shutdown(&mut self, timeout: Duration) -> Result<ShutdownOutcome, InteractiveProcessError>;
@@ -40,8 +43,9 @@ impl ManagedSession for InteractiveProcessExecutor {
         &mut self,
         command: &str,
         timeout: Duration,
+        delivered: &dyn Fn(),
     ) -> Result<InteractiveCommandOutput, InteractiveProcessError> {
-        Self::execute(self, command, timeout)
+        Self::execute_delivering(self, command, timeout, delivered)
     }
 
     fn shutdown(&mut self, timeout: Duration) -> Result<ShutdownOutcome, InteractiveProcessError> {
@@ -66,6 +70,12 @@ pub(super) trait SessionFactory: Send + Sync {
 
     #[cfg(test)]
     fn post_mark_running(&self, _request: &EdtSessionRequest) {}
+
+    /// Тестовый шов: воркер вот-вот встанет на условную переменную, всё ещё держа
+    /// `queue`. Позволяет воспроизвести окно, в котором потерянный сигнал от
+    /// `begin_shutdown` усыплял воркера навсегда.
+    #[cfg(test)]
+    fn pre_queue_park(&self) {}
 }
 
 #[derive(Clone)]
@@ -133,7 +143,7 @@ pub(super) fn run_worker(
             }
         }
     }
-    while let Some(queued) = inner.next_request() {
+    while let Some(queued) = inner.next_request(factory.as_ref()) {
         if inner.shutdown_token.is_cancelled() {
             queued.state.release_queued();
             queued.reply(Err(EdtSessionError::DrainedByRestartOrShutdown {
@@ -234,10 +244,20 @@ pub(super) fn run_worker(
         factory.post_mark_running(&queued.request);
         if queued.request.cancellation.is_cancelled() {
             queued.state.finish();
-            queued.reply(Err(EdtSessionError::RunningCancelled));
+            queued.reply(Err(EdtSessionError::RunningCancelled { delivered: false }));
             continue;
         }
-        let execution = active_session.execute(&queued.request.command, remaining);
+        // Доставку запроса видят и отметка работы команды, и сам запрос: отмена, заставшая
+        // его в работе, называет по нему, дошла ли работа до процесса. Отметка ставится
+        // первой, чтобы запрос не назвал доставку, которой отметка ещё не знает.
+        let request = &queued.request;
+        let state = &queued.state;
+        let execution = active_session.execute(&request.command, remaining, &|| {
+            if let Some(work) = &request.work {
+                work.mark_work_given();
+                state.mark_delivered();
+            }
+        });
         match execution {
             Ok(output) => {
                 queued.state.finish();
@@ -313,11 +333,9 @@ pub(super) fn shutdown_session(
     active_pid: &AtomicU32,
 ) {
     if let Some(mut session) = session.take() {
-        if session.shutdown(timeout).is_err() {
-            if session.kill().is_err() {
-                let pid = active_pid.load(Ordering::SeqCst);
-                let _ = super::kill_process_group_by_pid(pid);
-            }
+        if session.shutdown(timeout).is_err() && session.kill().is_err() {
+            let pid = active_pid.load(Ordering::SeqCst);
+            let _ = super::kill_process_group_by_pid(pid);
         }
     } else {
         let pid = active_pid.load(Ordering::SeqCst);
@@ -359,6 +377,7 @@ pub(super) fn run_baseline_reset(
         .execute(
             &super::render_interactive_change_dir_command(workspace),
             reset_timeout.duration,
+            &|| {},
         )
         .map_err(|error| baseline_error("reset", error, reset_timeout.clamped_by_budget))?;
     if !reset_output.stderr.trim().is_empty() {
@@ -379,6 +398,7 @@ pub(super) fn run_baseline_reset(
         .execute(
             &super::render_interactive_probe_workdir_command(),
             probe_timeout.duration,
+            &|| {},
         )
         .map_err(|error| baseline_error("probe", error, probe_timeout.clamped_by_budget))?;
     if !probe_output.stderr.trim().is_empty() {

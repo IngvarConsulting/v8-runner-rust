@@ -60,12 +60,13 @@ class ReleaseGovernanceTest(unittest.TestCase):
         self.assertIn("SECONDS >= verify_deadline", freeze)
         self.assertIn("sleep 5", freeze)
 
-    def test_release_publishes_attested_direct_unica_assets(self) -> None:
+    def test_release_publishes_one_attested_archive_per_platform(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         for asset in (
-            "v8-runner-darwin-arm64",
-            "v8-runner-linux-x64",
-            "v8-runner-win-x64.exe",
+            "v8-runner-linux-x86_64-musl",
+            "v8-runner-macos-aarch64",
+            "v8-runner-macos-x86_64",
+            "v8-runner-windows-x86_64",
         ):
             self.assertIn(asset, workflow)
         self.assertIn("actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be", workflow)
@@ -77,7 +78,83 @@ class ReleaseGovernanceTest(unittest.TestCase):
         self.assertIn("notice-v8-runner-fork.txt", workflow)
         self.assertIn("gh attestation verify", workflow)
         self.assertIn("--deny-self-hosted-runners", workflow)
-        self.assertIn('chmod +x "dist/${{ matrix.asset }}"', workflow)
+
+    @staticmethod
+    def _release_jobs() -> dict[str, str]:
+        """Работы рабочего процесса и их тела, без сторонних библиотек.
+
+        Питон здесь живёт на стандартной библиотеке: `pip install` в CI нет ни
+        одного, и разбор YAML пришлось бы туда завозить ради одной проверки.
+        Структура читается по отступам — так же, как реестр читает своё
+        front matter.
+        """
+        text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        body = text.split("\njobs:\n", 1)[1]
+        jobs: dict[str, list[str]] = {}
+        current: str | None = None
+        for line in body.splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            header = re.fullmatch(r"  ([A-Za-z0-9_-]+):", line)
+            if header:
+                current = header.group(1)
+                jobs[current] = []
+                continue
+            if not line.startswith("  "):
+                break
+            if current is not None:
+                jobs[current].append(line)
+        return {name: "\n".join(lines) for name, lines in jobs.items()}
+
+    def test_only_the_publish_job_publishes(self) -> None:
+        """Шаги публикации живут в своей работе и никуда не съезжают.
+
+        Разрешимость `needs` по всем файлам держит
+        `test_every_workflow_job_graph_resolves`; здесь — то, чего она не видит.
+        Однажды удаление шага унесло заголовок работы `publish`, и её пять шагов
+        оказались внутри матричной сборки: у той нет прав на запись в релиз, а
+        выполнялись бы они по разу на платформу, затирая друг другу `dist`.
+        """
+        jobs = self._release_jobs()
+        self.assertEqual(
+            set(jobs),
+            {"preflight", "build", "publish", "audit-native", "audit-draft", "freeze"},
+        )
+        self.assertIn("      contents: write", jobs["publish"])
+        self.assertIn("      contents: read", jobs["build"])
+        for step in ("softprops/action-gh-release", "write-manifest", "download-artifact"):
+            self.assertNotIn(step, jobs["build"], f"{step} drifted into the matrix job")
+            self.assertIn(step, jobs["publish"], f"{step} left the publish job")
+
+    def test_a_platform_is_published_in_one_form_only(self) -> None:
+        """Одна платформа — один ассет.
+
+        До v0.11.0 та же сборка выкладывалась дважды: архивом и голым бинарником
+        под другим именем, и «что из этого что» приходилось объяснять словами.
+        Примета держит то, что убрано: имена вернувшихся бинарников, отдельную
+        роль в манифесте и таблицу, из которой их собирали.
+        """
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        script = (ROOT / "scripts/release/release_assets.py").read_text(encoding="utf-8")
+        body = workflow.split("body: |", 1)[1].split("files: |", 1)[0]
+
+        for gone in ("v8-runner-darwin-arm64", "v8-runner-linux-x64", "v8-runner-win-x64.exe"):
+            # В теле релиза они названы нарочно: чтобы искавший их узнал, что их нет.
+            self.assertNotIn(gone, workflow.replace(body, ""), f"{gone} is published again")
+            self.assertNotIn(gone, script, f"{gone} is built again")
+        self.assertNotIn("DIRECT_ASSETS", script)
+        self.assertNotIn("direct-binary", script)
+        self.assertNotIn("unica_asset_name", workflow)
+
+        # Каждая платформа названа в аудите ровно один раз.
+        audit = workflow.split("  audit-native:\n", 1)[1].split("  audit-draft:\n", 1)[0]
+        for target in (
+            "x86_64-unknown-linux-musl",
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+            "x86_64-pc-windows-msvc",
+        ):
+            self.assertEqual(audit.count(f"target: {target}"), 1, f"{target} is audited once")
 
     def test_release_publishes_one_manifest_instead_of_per_asset_sidecars(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
@@ -93,7 +170,6 @@ class ReleaseGovernanceTest(unittest.TestCase):
     def test_all_payload_assets_and_manifest_have_build_attestations(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         self.assertIn("Attest portable archive", workflow)
-        self.assertIn("Attest direct Unica asset", workflow)
         self.assertIn("Attest consolidated release manifest", workflow)
         self.assertIn("for asset in $(python3 scripts/release/release_assets.py attested-assets)", workflow)
 
@@ -117,6 +193,116 @@ class ReleaseGovernanceTest(unittest.TestCase):
         self.assertIn("MIN_CONSOLIDATED_MANIFEST_VERSION", verifier)
         self.assertIn("consolidated release assets require", verifier)
 
+    def test_ci_and_release_pin_the_same_toolchain(self) -> None:
+        """CI обязана проверять тот компилятор, которым собирается выпуск.
+
+        Пин живёт в трёх местах и разъехаться может молча: следующий подъём версии в
+        release.yml оставил бы CI на прежней, а свойство «CI гоняет релизный компилятор»
+        умерло бы незаметно. Кавычки не требуются: значение без них — та же версия и
+        та же дыра.
+        """
+        pins = {}
+        for name in ("ci.yml", "release.yml"):
+            workflow = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
+            steps = re.findall(r"uses:\s*dtolnay/rust-toolchain@\S+", workflow)
+            found = set(re.findall(r'toolchain:\s*"?([0-9]+\.[0-9]+(?:\.[0-9]+)?)"?', workflow))
+            self.assertEqual(
+                len(steps),
+                len(re.findall(r"toolchain:\s*\S+", workflow)),
+                f"{name}: every rust-toolchain step must pin a version explicitly",
+            )
+            self.assertEqual(
+                1, len(found), f"{name} must pin exactly one toolchain version: {found}"
+            )
+            pins[name] = found.pop()
+
+        self.assertEqual(
+            pins["ci.yml"],
+            pins["release.yml"],
+            "ci.yml and release.yml must pin the same toolchain, "
+            f"got {pins['ci.yml']} and {pins['release.yml']}",
+        )
+
+        # MSRV — обещание того же компилятора, а не отдельное число.
+        cargo = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+        msrv = re.search(r'^rust-version\s*=\s*"([^"]+)"', cargo, re.M)
+        self.assertIsNotNone(msrv, "Cargo.toml must declare rust-version")
+        self.assertTrue(
+            pins["ci.yml"].startswith(msrv.group(1)),
+            f"rust-version {msrv.group(1)} must match the pinned toolchain {pins['ci.yml']}",
+        )
+
+    def test_ci_enforces_formatting_and_lints(self) -> None:
+        """Гейты живут шагами джобы Contract и блокируют по-настоящему.
+
+        Список обязательных проверок ветки master привязан к именам джоб: вынеси их в
+        новую джобу — и они перестанут блокировать, пока его не поправит администратор.
+        Поэтому проверяется не наличие строк в файле, а то, что команды стоят шагами
+        именно этой джобы, без continue-on-error и без сужения до одной площадки.
+        """
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        job = self._workflow_job(ci, "contract")
+
+        gates = {
+            "cargo fmt --all --check": "ubuntu-latest",
+            "cargo clippy --locked --all-targets -- -D warnings": None,
+            "cargo deny check licenses sources": "ubuntu-latest",
+        }
+        for command, _ in gates.items():
+            self.assertIn(
+                command,
+                job,
+                f"{command!r} must be a step of the Contract job, not of a new one",
+            )
+
+        # Команда, закомментированная или обёрнутая в continue-on-error, перестаёт быть
+        # гейтом, оставаясь подстрокой файла.
+        for line in job.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                self.assertNotIn(
+                    "cargo clippy",
+                    stripped,
+                    "the lint gate must not be commented out",
+                )
+
+        blocking = job.split("- name: Run contract regression scope")[0]
+        soft = [
+            step
+            for step in blocking.split("      - name: ")[1:]
+            if "continue-on-error" in step
+        ]
+        self.assertEqual(
+            ["Report dependency advisories and duplicates"],
+            [step.splitlines()[0].strip() for step in soft],
+            "only the advisories report may be non-blocking",
+        )
+
+        # Линтер обязан идти и на Windows: код под cfg(windows) на Linux не собирается.
+        # Цель там боевая, а не все: тестовая полна мёртвого кода из-за cfg(unix)-гейтов
+        # на самих тестах, и это снимается отдельной работой.
+        self.assertIn("cargo clippy --locked --bins -- -D warnings", job)
+        windows_lint = job.split("- name: Lint (production target)")[1]
+        self.assertIn("matrix.os == 'windows-latest'", windows_lint.split("run:")[0])
+
+        assignments = re.findall(r"^\s*RUSTFLAGS\s*[:=]", ci, re.M)
+        self.assertEqual(
+            [],
+            assignments,
+            "-D warnings must be an argument: RUSTFLAGS would reach dependencies "
+            "and invalidate the shared build cache",
+        )
+
+    @staticmethod
+    def _workflow_job(workflow: str, name: str) -> str:
+        """Тело одной джобы: от её ключа до следующего на том же отступе."""
+        lines = workflow.splitlines()
+        start = next(i for i, line in enumerate(lines) if line == f"  {name}:")
+        for offset, line in enumerate(lines[start + 1 :], start=start + 1):
+            if line.startswith("  ") and not line.startswith("   ") and line.strip():
+                return "\n".join(lines[start:offset])
+        return "\n".join(lines[start:])
+
     def test_consolidated_contract_accepts_v07_prereleases_only(self) -> None:
         verifier = load_release_verifier()
 
@@ -132,7 +318,9 @@ class ReleaseGovernanceTest(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("gh release verify-asset v0.7.0 ./v8-runner-assets.json", readme)
         self.assertIn('source_commit="$(python3', readme)
-        self.assertIn("for asset in v8-runner-assets.json v8-runner-linux-x64", readme)
+        self.assertIn(
+            "for asset in v8-runner-assets.json v8-runner-linux-x86_64-musl.tar.gz", readme
+        )
         self.assertIn('--source-digest "$source_commit"', readme)
 
     def test_pr_ci_runs_release_asset_contract_tests(self) -> None:
@@ -145,6 +333,64 @@ class ReleaseGovernanceTest(unittest.TestCase):
             workflow = path.read_text(encoding="utf-8")
             floating = re.findall(r"^\s*uses:\s*[^\s@]+@(?![0-9a-f]{40}(?:\s|$))[^\s]+", workflow, re.M)
             self.assertEqual([], floating, f"floating action refs in {path}: {floating}")
+
+    def test_every_workflow_job_graph_resolves(self) -> None:
+        """Каждая работа, названная в `needs`, существует.
+
+        GitHub не запускает рабочий процесс с висячей зависимостью — ни одного шага,
+        то есть релиз или проверку просто нечем выпустить. Однажды удаление шага
+        унесло с собой заголовок работы, и оба набора тестов остались зелёными:
+        они сверяли подстроки, а строка `needs: [publish, audit-native]` осталась
+        на месте — пропала работа.
+
+        Это та же проверка, что делает actionlint выше по гейту, но без него: он
+        внешний двоичный файл, а эта примета живёт в дереве и не зависит ни от
+        сети, ни от сторонних модулей. PyYAML здесь нет намеренно — в CI нет ни
+        одного `pip install`, поэтому структура читается по отступам.
+        """
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            jobs = self._workflow_jobs(path)
+            self.assertTrue(jobs, f"{path.name} declares no jobs")
+            for name, block in jobs.items():
+                self.assertIn("\n    steps:", f"\n{block}", f"{path.name}: {name} has no steps")
+                declared = re.search(r"^    needs: (.+)$", block, re.M)
+                if not declared:
+                    continue
+                value = declared.group(1).strip()
+                needs = (
+                    [item.strip() for item in value.strip("[]").split(",")]
+                    if value.startswith("[")
+                    else [value]
+                )
+                for dependency in needs:
+                    self.assertIn(
+                        dependency,
+                        jobs,
+                        f"{path.name}: {name} needs {dependency}, which is not a job there",
+                    )
+
+    @staticmethod
+    def _workflow_jobs(path: Path) -> dict[str, str]:
+        """Работы рабочего процесса и их тела, разбором отступов."""
+        text = path.read_text(encoding="utf-8")
+        if "\njobs:\n" not in text:
+            return {}
+        body = text.split("\njobs:\n", 1)[1]
+        jobs: dict[str, list[str]] = {}
+        current: str | None = None
+        for line in body.splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            header = re.fullmatch(r"  ([A-Za-z0-9_-]+):", line)
+            if header:
+                current = header.group(1)
+                jobs[current] = []
+                continue
+            if not line.startswith("  "):
+                break
+            if current is not None:
+                jobs[current].append(line)
+        return {name: "\n".join(lines) for name, lines in jobs.items()}
 
     def test_package_metadata_names_fork_and_license(self) -> None:
         cargo = (ROOT / "Cargo.toml").read_text(encoding="utf-8")

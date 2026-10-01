@@ -10,7 +10,7 @@ pub const CFE_RUNNER_ID: &str = "designer-cfe";
 pub const EPF_RUNNER_ID: &str = "designer-epf";
 pub const ERF_RUNNER_ID: &str = "designer-erf";
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactBuildMode {
     Unknown,
@@ -32,7 +32,7 @@ impl ArtifactBuildMode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ArtifactBuildMetadata {
     pub artifact_type: ArtifactBuildMode,
     pub output_path: PathBuf,
@@ -41,9 +41,17 @@ pub struct ArtifactBuildMetadata {
     pub published: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ArtifactsResult {
-    /// `false` when the run stopped at a preview instead of dispatching the platform.
+    /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<crate::domain::capability::ProviderReceipt>,
+
+    /// Whether an executor got this command's work: a process was started to do it, or the
+    /// request's command was handed to a running session. Starting or opening a session and
+    /// its own service commands are not work. `false` whenever the executor got none — a
+    /// preview, a refusal or interruption before any work, a run with nothing to do, or a
+    /// process that could not be started.
     pub provider_dispatched: bool,
     pub mode: ArtifactBuildMode,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,6 +77,7 @@ mod tests {
     #[test]
     fn artifacts_result_serializes_canonical_execution_without_legacy_fields() {
         let result = ArtifactsResult {
+            provider: None,
             provider_dispatched: true,
             mode: ArtifactBuildMode::ConfigurationCf,
             source_set: Some("main".to_owned()),

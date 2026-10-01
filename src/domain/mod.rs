@@ -6,6 +6,8 @@ pub mod artifacts;
 pub mod bootstrap;
 /// Build domain models.
 pub mod build;
+/// Capability matrix: who executes which operation on which target.
+pub mod capability;
 /// Config bootstrap domain models.
 pub mod config_init;
 /// Source-format conversion domain models.
@@ -26,8 +28,12 @@ pub mod issue;
 pub mod launch;
 /// Artifact load/import domain models.
 pub mod load;
+/// Следующий шаг, который называет отказ.
+pub mod next_step;
 /// Canonical selectors for partial dumps.
 pub mod partial_dump_selector;
+/// Web publication domain models.
+pub mod publish;
 /// Shared runner models.
 pub mod runner;
 /// Source set domain models.

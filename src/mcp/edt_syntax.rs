@@ -4,20 +4,22 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::config::model::{AppConfig, BuilderBackend, SourceFormat, SourceSetConfig};
+use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig};
+use crate::domain::capability::{Operation, Provider};
 use crate::domain::issue::{EdtIssue, Issue, IssueSeverity};
-use crate::domain::syntax::{SyntaxCheckResult, SyntaxCheckStatus, SyntaxIssueSummary};
+use crate::domain::syntax::{CheckName, SyntaxCheckResult, SyntaxCheckStatus, SyntaxIssueSummary};
 use crate::parsers::edt_validation;
 use crate::platform::edt::render_interactive_validate_command;
 use crate::platform::edt_session::{EdtSessionError, EdtSessionManager, EdtSessionRequest};
+use crate::platform::process::WorkGiven;
 use crate::support::error::AppError;
 use crate::support::temp::platform_logs_dir;
 use crate::use_cases::request::{SyntaxRequest, SyntaxTargetRequest};
-use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 
 const SUPPORTED_EDT_SYNTAX_ERROR: &str =
-    "syntax edt currently supports only builder=DESIGNER and format=EDT";
+    "check edt currently supports only the Designer provider and format=EDT";
 static LOG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Executes MCP `check_syntax_edt` through the shared EDT session actor.
@@ -25,12 +27,30 @@ static LOG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// Transport-level queued cancellation and timeout are returned separately so the
 /// MCP transport can preserve admission semantics. Running cancellation and timeout
 /// wait for terminal state and are converted into the normal use-case payload contract.
+/// A project that is cancelled or times out in the shared EDT queue after an earlier
+/// project was delivered is a failure after work: the call was admitted and ran, so it
+/// answers in the `check` form rather than as a protocol error.
 pub async fn execute(
     manager: &EdtSessionManager,
     config: &AppConfig,
     request: &SyntaxRequest,
     timeout: Duration,
     cancellation: CancellationToken,
+) -> Result<UseCaseResult<SyntaxCheckResult>, EdtSyntaxTransportError> {
+    // У этого пути нет контекста команды, и отметку работы заводит сам вызов.
+    let work = WorkGiven::for_command();
+    run(manager, config, request, timeout, cancellation, &work)
+        .await
+        .map(|outcome| stamp_dispatch(outcome, &work))
+}
+
+async fn run(
+    manager: &EdtSessionManager,
+    config: &AppConfig,
+    request: &SyntaxRequest,
+    timeout: Duration,
+    cancellation: CancellationToken,
+    work: &WorkGiven,
 ) -> Result<UseCaseResult<SyntaxCheckResult>, EdtSyntaxTransportError> {
     let started = Instant::now();
     let projects = match &request.target {
@@ -43,7 +63,7 @@ pub async fn execute(
             return Ok(Err(SyntaxExecutionFailure::with_payload(
                 error,
                 failed_result(
-                    "edt",
+                    CheckName::Edt,
                     SyntaxCheckStatus::ToolFailed,
                     -1,
                     started,
@@ -56,12 +76,14 @@ pub async fn execute(
         }
     };
 
-    if config.builder != BuilderBackend::Designer || config.format != SourceFormat::Edt {
+    if config.default_provider(Operation::Syntax) != Some(Provider::Designer)
+        || config.format != SourceFormat::Edt
+    {
         let error = AppError::Validation(SUPPORTED_EDT_SYNTAX_ERROR.to_owned());
         return Ok(Err(SyntaxExecutionFailure::with_payload(
             error,
             failed_result(
-                "edt",
+                CheckName::Edt,
                 SyntaxCheckStatus::ToolFailed,
                 -1,
                 started,
@@ -81,7 +103,7 @@ pub async fn execute(
             return Ok(Err(SyntaxExecutionFailure::with_payload(
                 error,
                 failed_result(
-                    "edt",
+                    CheckName::Edt,
                     SyntaxCheckStatus::ToolFailed,
                     -1,
                     started,
@@ -105,7 +127,7 @@ pub async fn execute(
             return Ok(Err(SyntaxExecutionFailure::with_payload(
                 app_error,
                 failed_result(
-                    "edt",
+                    CheckName::Edt,
                     SyntaxCheckStatus::ToolFailed,
                     -1,
                     started,
@@ -134,51 +156,27 @@ pub async fn execute(
             &format!("edt_{}", source_set.name.replace(' ', "_")),
         );
         let command = render_interactive_validate_command(&source_path, &log_path);
-        let execution = manager
+        // Запрос, брошенный отменой или сроком, пока работал, доводится до конца: ответ о нём
+        // строится после его конца, когда известно, дошёл ли он до процесса.
+        let result = manager
             .execute_observed(
-                EdtSessionRequest::new(command, deadline).with_cancellation(cancellation.clone()),
+                EdtSessionRequest::new(command, deadline, work.clone())
+                    .with_cancellation(cancellation.clone()),
             )
+            .await
+            .finished()
             .await;
-        let response = match execution.result {
+        let response = match result {
             Ok(response) => response,
-            Err(EdtSessionError::QueuedCancelled) => {
-                return Err(EdtSyntaxTransportError::QueuedCancelled);
-            }
-            Err(EdtSessionError::QueuedTimeout) => {
-                return Err(EdtSyntaxTransportError::QueuedTimeout);
-            }
-            Err(EdtSessionError::RunningCancelled) => {
-                if let Some(completion) = execution.completion {
-                    completion.wait().await;
-                }
-                let message = format!(
-                    "execution cancelled for command 'syntax' while shared EDT command was running; terminal state was observed before returning the result"
-                );
-                return Ok(Err(SyntaxExecutionFailure::with_payload(
-                    AppError::Runtime(message.clone()),
-                    failed_result(
-                        "edt",
-                        SyntaxCheckStatus::ToolFailed,
-                        -1,
-                        started,
-                        vec![],
-                        None,
-                        Some(message),
-                        single_source_set.then_some(log_path.clone()),
-                    ),
-                )));
+            Err(error) if error.ended_in_queue() => {
+                return missed_session(error, &source_set.name, work, started);
             }
             Err(EdtSessionError::RunningTimeout) => {
-                if let Some(completion) = execution.completion {
-                    completion.wait().await;
-                }
-                let message = format!(
-                    "execution timeout expired for command 'syntax' while shared EDT command was running; terminal state was observed before returning the result"
-                );
+                let message = "execution timeout expired for command 'syntax' while shared EDT command was running; terminal state was observed before returning the result".to_string();
                 return Ok(Err(SyntaxExecutionFailure::with_payload(
                     AppError::Runtime(message.clone()),
                     failed_result(
-                        "edt",
+                        CheckName::Edt,
                         SyntaxCheckStatus::ToolFailed,
                         -1,
                         started,
@@ -190,20 +188,11 @@ pub async fn execute(
                 )));
             }
             Err(error) => {
-                let message = error.to_string();
-                let app_error = AppError::Runtime(message.clone());
-                return Ok(Err(SyntaxExecutionFailure::with_payload(
-                    app_error,
-                    failed_result(
-                        "edt",
-                        SyntaxCheckStatus::ToolFailed,
-                        -1,
-                        started,
-                        vec![],
-                        None,
-                        Some(message),
-                        Some(log_path),
-                    ),
+                return Ok(Err(session_failure(
+                    error,
+                    started,
+                    log_path,
+                    single_source_set,
                 )));
             }
         };
@@ -226,16 +215,17 @@ pub async fn execute(
             ));
         }
 
-        let (platform_log, log_read_warning) = match std::fs::read_to_string(&log_path) {
-            Ok(contents) => (Some(contents), None),
-            Err(error) => (
-                None,
-                Some(format!(
-                    "failed to read edt --file log '{}': {error}",
-                    log_path.display()
-                )),
-            ),
-        };
+        let (platform_log, log_read_warning) =
+            match crate::support::fs::read_platform_log(&log_path) {
+                Ok(contents) => (Some(contents), None),
+                Err(error) => (
+                    None,
+                    Some(format!(
+                        "failed to read edt --file log '{}': {error}",
+                        log_path.display()
+                    )),
+                ),
+            };
         if let Some(log_warning) = &log_read_warning {
             log_warnings.push(format!("{}: {log_warning}", source_set.name));
         }
@@ -248,6 +238,7 @@ pub async fn execute(
             response.stdout.trim(),
             response.stderr.trim(),
             &project_issues,
+            log_read_warning.is_some(),
         );
         status = combine_status(status, project_status);
         let project_exit_code = actor_exit_code(project_status);
@@ -274,9 +265,12 @@ pub async fn execute(
     let stderr = (!stderr_lines.is_empty()).then_some(stderr_lines.join("\n"));
     let log_read_warning = (!log_warnings.is_empty()).then_some(log_warnings.join("\n"));
     let result = SyntaxCheckResult {
+        provider: None,
+        provider_dispatched: false,
+        message: None,
         status,
         exit_code,
-        check_name: "edt".to_owned(),
+        check_name: CheckName::Edt,
         summary: summarize_issues(&issues),
         issues,
         duration_ms: elapsed_millis(started),
@@ -286,7 +280,8 @@ pub async fn execute(
     };
 
     match result.status {
-        SyntaxCheckStatus::Clean => Ok(Ok(result)),
+        // Превью сервер не предлагает, поэтому `Planned` сюда не приходит.
+        SyntaxCheckStatus::Clean | SyntaxCheckStatus::Planned => Ok(Ok(result)),
         SyntaxCheckStatus::IssuesFound | SyntaxCheckStatus::ToolFailed => {
             Ok(Err(SyntaxExecutionFailure::with_payload(
                 AppError::Runtime(format!(
@@ -351,12 +346,21 @@ fn unique_log_path(dir: &Path, check_name: &str) -> PathBuf {
     ))
 }
 
-fn actor_status_from_result(stdout: &str, stderr: &str, issues: &[Issue]) -> SyntaxCheckStatus {
+fn actor_status_from_result(
+    stdout: &str,
+    stderr: &str,
+    issues: &[Issue],
+    log_unreadable: bool,
+) -> SyntaxCheckStatus {
     if !stderr.is_empty() {
         SyntaxCheckStatus::ToolFailed
     } else if !issues.is_empty() {
         SyntaxCheckStatus::IssuesFound
     } else if !stdout.is_empty() {
+        SyntaxCheckStatus::ToolFailed
+    } else if log_unreadable {
+        // На этом пути страховки кодом возврата нет вовсе: тихий EDT с непрочитанным
+        // журналом без этой ветки читался бы как «чисто».
         SyntaxCheckStatus::ToolFailed
     } else {
         SyntaxCheckStatus::Clean
@@ -367,7 +371,8 @@ fn actor_exit_code(status: SyntaxCheckStatus) -> i32 {
     match status {
         SyntaxCheckStatus::Clean => 0,
         SyntaxCheckStatus::IssuesFound => 101,
-        SyntaxCheckStatus::ToolFailed => -1,
+        // `-1` — принятый здесь знак «кода выхода не наблюдалось».
+        SyntaxCheckStatus::ToolFailed | SyntaxCheckStatus::Planned => -1,
     }
 }
 
@@ -379,12 +384,18 @@ fn combine_status(current: SyntaxCheckStatus, next: SyntaxCheckStatus) -> Syntax
         (SyntaxCheckStatus::IssuesFound, _) | (_, SyntaxCheckStatus::IssuesFound) => {
             SyntaxCheckStatus::IssuesFound
         }
-        _ => SyntaxCheckStatus::Clean,
+        // `planned` здесь недостижим — сервер превью не предлагает, — но общей веткой он
+        // молча стал бы `clean`, то есть приговором, которого никто не выносил. Поэтому
+        // «запланировано» поглощает «чисто», а не наоборот.
+        (SyntaxCheckStatus::Planned, _) | (_, SyntaxCheckStatus::Planned) => {
+            SyntaxCheckStatus::Planned
+        }
+        (SyntaxCheckStatus::Clean, SyntaxCheckStatus::Clean) => SyntaxCheckStatus::Clean,
     }
 }
 
 fn failed_result(
-    check_name: &str,
+    check_name: CheckName,
     status: SyntaxCheckStatus,
     exit_code: i32,
     started: Instant,
@@ -394,9 +405,12 @@ fn failed_result(
     platform_log_path: Option<PathBuf>,
 ) -> SyntaxCheckResult {
     SyntaxCheckResult {
+        provider: None,
+        provider_dispatched: false,
+        message: None,
         status,
         exit_code,
-        check_name: check_name.to_owned(),
+        check_name,
         summary: summarize_issues(&issues),
         issues,
         duration_ms: elapsed_millis(started),
@@ -473,7 +487,186 @@ fn elapsed_millis(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+/// Отказ общей сессии формой `check`. Отмену, заставшую запрос в работе, называет сама
+/// ошибка — доставлен ли запрос до процесса, решает сессия; прочие отказы сессии — отказы
+/// выполнения.
+fn session_failure(
+    error: EdtSessionError,
+    started: Instant,
+    log_path: PathBuf,
+    single_source_set: bool,
+) -> SyntaxExecutionFailure {
+    let message = error.to_string();
+    let error = AppError::from(error);
+    if error.cancellation().is_some() {
+        let message = "execution cancelled for command 'syntax' while shared EDT command was running; terminal state was observed before returning the result";
+        return SyntaxExecutionFailure::with_payload(
+            error.with_context(message),
+            failed_result(
+                CheckName::Edt,
+                SyntaxCheckStatus::ToolFailed,
+                -1,
+                started,
+                vec![],
+                None,
+                Some(message.to_owned()),
+                single_source_set.then_some(log_path),
+            ),
+        );
+    }
+    SyntaxExecutionFailure::with_payload(
+        AppError::Runtime(message.clone()),
+        failed_result(
+            CheckName::Edt,
+            SyntaxCheckStatus::ToolFailed,
+            -1,
+            started,
+            vec![],
+            None,
+            Some(message),
+            Some(log_path),
+        ),
+    )
+}
+
+/// Проект не дождался общей сессии. Если до него уже проверялся другой проект, работа была,
+/// и ответ — форма `check`; иначе вызов работы не дал, и это ошибка протокола, как у всякого
+/// недопущенного вызова. Какая из двух, решает `after_possible_work`, как у всех сценариев.
+fn missed_session(
+    error: EdtSessionError,
+    project: &str,
+    work: &WorkGiven,
+    started: Instant,
+) -> Result<UseCaseResult<SyntaxCheckResult>, EdtSyntaxTransportError> {
+    debug_assert!(error.ended_in_queue(), "not a missed session: {error}");
+    let error = AppError::from(error);
+    // Отмену в очереди узнаёт сама ошибка — это безопасная точка: запрос до процесса не
+    // дошёл. Истёкшее ожидание — отказ выполнения.
+    let cancelled = error.cancellation().is_some();
+    let (waited, transport) = if cancelled {
+        ("was cancelled", EdtSyntaxTransportError::QueuedCancelled)
+    } else {
+        ("timed out", EdtSyntaxTransportError::QueuedTimeout)
+    };
+    let message = format!(
+        "project '{project}' {waited} while waiting for the shared EDT session after earlier projects were checked"
+    );
+    let error = if cancelled {
+        error.with_context(message.clone())
+    } else {
+        AppError::Runtime(message.clone())
+    };
+    let failure = SyntaxExecutionFailure::after_possible_work(error, work, || {
+        failed_result(
+            CheckName::Edt,
+            SyntaxCheckStatus::ToolFailed,
+            -1,
+            started,
+            vec![],
+            None,
+            Some(message),
+            None,
+        )
+    });
+    match failure.payload {
+        Some(_) => Ok(Err(failure)),
+        None => Err(transport),
+    }
+}
+
 pub(crate) enum EdtSyntaxTransportError {
     QueuedCancelled,
     QueuedTimeout,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{missed_session, session_failure, EdtSyntaxTransportError};
+    use crate::platform::edt_session::EdtSessionError;
+    use crate::platform::process::WorkGiven;
+    use crate::support::error::CancelledAt;
+    use crate::use_cases::result::UseCaseErrorKind;
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    /// Отмена, заставшая запрос общей сессии в работе, — отмена, и где она остановила
+    /// команду, говорит сессия: запрос, не дошедший до процесса, — безопасная точка, дошедший —
+    /// оборванная работа. Прочий отказ сессии — отказ выполнения (#308).
+    #[test]
+    fn a_running_session_cancel_is_classified_by_its_delivery() {
+        for (delivered, at) in [(false, CancelledAt::Boundary), (true, CancelledAt::Work)] {
+            let failure = session_failure(
+                EdtSessionError::RunningCancelled { delivered },
+                Instant::now(),
+                PathBuf::from("edt.log"),
+                true,
+            );
+            assert_eq!(failure.error.kind(), UseCaseErrorKind::Cancelled(at));
+            assert_eq!(failure.error.cancellation(), Some(at));
+            assert!(
+                failure.payload.is_some(),
+                "the refusal keeps the `check` form"
+            );
+        }
+        let failed = session_failure(
+            EdtSessionError::SessionFailed {
+                message: "EDT exited".to_owned(),
+            },
+            Instant::now(),
+            PathBuf::from("edt.log"),
+            true,
+        );
+        assert_eq!(failed.error.kind(), UseCaseErrorKind::Runtime);
+    }
+
+    /// Проект, не дождавшийся общей сессии, пока работы не было, — ошибка протокола, как у
+    /// недопущенного вызова. После работы — отказ формой `check`, и в нём названы проект и
+    /// причина: отмена или истёкшее время.
+    #[test]
+    fn a_project_that_misses_the_session_answers_by_the_work_mark() {
+        let idle = WorkGiven::for_command();
+        assert!(matches!(
+            missed_session(
+                EdtSessionError::QueuedCancelled,
+                "main",
+                &idle,
+                Instant::now()
+            ),
+            Err(EdtSyntaxTransportError::QueuedCancelled)
+        ));
+        assert!(matches!(
+            missed_session(
+                EdtSessionError::QueuedTimeout,
+                "main",
+                &idle,
+                Instant::now()
+            ),
+            Err(EdtSyntaxTransportError::QueuedTimeout)
+        ));
+
+        let worked = WorkGiven::for_command();
+        worked.mark_work_given();
+        for (error, waited) in [
+            (EdtSessionError::QueuedCancelled, "was cancelled"),
+            (EdtSessionError::QueuedTimeout, "timed out"),
+        ] {
+            let cancelled = error == EdtSessionError::QueuedCancelled;
+            let Ok(Err(failure)) = missed_session(error, "second", &worked, Instant::now()) else {
+                panic!("a project missed after work must answer in the `check` form");
+            };
+            // Отмена в очереди — безопасная точка: до процесса запрос не дошёл.
+            assert_eq!(
+                failure.error.cancellation(),
+                cancelled.then_some(CancelledAt::Boundary)
+            );
+            let stderr = failure
+                .payload
+                .and_then(|form| form.stderr)
+                .unwrap_or_default();
+            assert!(
+                stderr.contains("'second'") && stderr.contains(waited),
+                "{stderr}"
+            );
+        }
+    }
 }

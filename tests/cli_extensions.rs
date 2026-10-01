@@ -9,6 +9,7 @@ use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use support::command_data::assert_data_matches_one_of;
 use support::{
     temp_workspace, v8_runner_command, wait_for_received_line, write_shell_script as write_script,
 };
@@ -104,7 +105,7 @@ fn setup_extensions_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) 
     );
 
     let config = format!(
-        "workPath: '{}'\nformat: EDT\nbuilder: DESIGNER\ninfobase:\n  connection: 'File={}'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: configuration\n  - name: client_mcp\n    type: EXTENSION\n    path: exts/client-mcp\n  - name: tests\n    type: EXTENSION\n    path: tests\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File={}'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: configuration\n  - name: client_mcp\n    type: EXTENSION\n    path: exts/client-mcp\n  - name: tests\n    type: EXTENSION\n    path: tests\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         dir.path().join("ib").display(),
         ibcmd_path.display(),
@@ -120,7 +121,7 @@ fn write_inventory_ibcmd(ibcmd_path: &Path, calls_log: &Path, inventory: &str) {
     write_script(
         ibcmd_path,
         &format!(
-            "printf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  *\"extension list\"*|*\"extension info\"*) printf '%s' '{}' ;;\nesac\nexit 0",
+            "printf '%s\\n' \"$*\" >> '{}'\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$*\" in\n  *\"extension list\"*|*\"extension info\"*) printf '%s' '{}' ;;\n  *\" save \"*) printf 'saved database extension' > \"$last\" ;;\n  *\" export \"*) mkdir -p \"$last\"; printf '%s' '<MetaDataObject><Configuration><Properties><Name>Проба</Name><Version/><ConfigurationExtensionPurpose>AddOn</ConfigurationExtensionPurpose><NamePrefix>Пр_</NamePrefix></Properties></Configuration></MetaDataObject>' > \"$last/Configuration.xml\" ;;\nesac\nexit 0",
             calls_log.display(),
             inventory
         ),
@@ -128,6 +129,61 @@ fn write_inventory_ibcmd(ibcmd_path: &Path, calls_log: &Path, inventory: &str) {
 }
 
 const MEASURED_INVENTORY: &str = "name                         : \"Проба\"\nversion                      : \nactive                       : yes\npurpose                      : add-on\nsafe-mode                    : yes\nsecurity-profile-name        : \nunsafe-action-protection     : yes\nused-in-distributed-infobase : no\nscope                        : infobase\nhash-sum                     : \"9hfFb6YVX2OwLKZaL1L69Eq0Vrg=\"\n";
+
+/// Исполнителю `ibcmd` секция `infobase.dbms` нужна по-прежнему: в СУБД он идёт сам.
+/// Подключение строится уже после выбора исполнителя, и отказ называет секцию, не
+/// запуская платформу, — у свойств, у состава и у его изменения.
+#[test]
+fn ibcmd_on_a_server_base_without_dbms_is_refused_naming_the_section() {
+    let (_dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+    let config = fs::read_to_string(&config_path).expect("config");
+    let file_connection = config
+        .lines()
+        .find(|line| line.trim_start().starts_with("connection: 'File="))
+        .expect("file connection line")
+        .to_owned();
+    let indent = &file_connection[..file_connection.len() - file_connection.trim_start().len()];
+    fs::write(
+        &config_path,
+        config.replacen(
+            &file_connection,
+            &format!("{indent}connection: 'Srvr=127.0.0.1:1541;Ref=demo'"),
+            1,
+        ),
+    )
+    .expect("server config");
+
+    for arguments in [
+        vec!["extensions"],
+        vec!["extensions", "list"],
+        vec![
+            "extensions",
+            "create",
+            "--name",
+            "Проба",
+            "--name-prefix",
+            "Пр_",
+        ],
+    ] {
+        let output = v8_runner_command()
+            .args(["--config", config_path.to_str().expect("utf-8 path")])
+            .arg("--json-message")
+            .args(&arguments)
+            .output()
+            .expect("run command");
+
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}");
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("json envelope");
+        assert!(
+            envelope["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("infobase.dbms")),
+            "{arguments:?}: {envelope}"
+        );
+    }
+    assert!(!calls_log.exists(), "ibcmd must not be started");
+}
 
 #[test]
 fn extensions_read_is_previewed_because_it_starts_the_platform() {
@@ -167,6 +223,51 @@ fn extensions_read_is_previewed_because_it_starts_the_platform() {
         "{plan}"
     );
     assert!(plan.contains("file infobase"), "{plan}");
+    // The subject of the read is a field, not a phrase: a caller fences on it
+    // without parsing `plan`.
+    assert_eq!(data["requested"], serde_json::json!({"kind": "all"}));
+    assert!(!calls_log.exists(), "preview must not dispatch ibcmd");
+}
+
+/// `info --dry-run` names the requested extension structurally, the same way a
+/// change preview names its `target`: the wording of `plan` is for people.
+#[test]
+fn extensions_info_preview_names_the_requested_extension_as_data() {
+    let (_dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "extensions",
+            "info",
+            "--name",
+            "Проба",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("json envelope");
+    let data = &envelope["data"];
+    assert_eq!(data["provider_dispatched"], false);
+    assert_eq!(
+        data["requested"],
+        serde_json::json!({"kind": "named", "name": "Проба"})
+    );
+    assert!(data["extensions"]
+        .as_array()
+        .expect("extensions")
+        .is_empty());
+    assert!(data["plan"].as_str().expect("plan").contains("'Проба'"));
     assert!(!calls_log.exists(), "preview must not dispatch ibcmd");
 }
 
@@ -241,7 +342,7 @@ fn extension_preview_never_echoes_the_infobase_password() {
 
 #[test]
 fn extensions_list_reports_the_installed_composition() {
-    let (_dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
+    let (dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
     write_inventory_ibcmd(&ibcmd_path, &calls_log, MEASURED_INVENTORY);
 
     let output = v8_runner_command()
@@ -267,14 +368,185 @@ fn extensions_list_reports_the_installed_composition() {
         .as_array()
         .expect("extensions");
     assert_eq!(extensions.len(), 1);
+    // The answer says what was asked, so a caller can pair it with its request.
+    assert_eq!(
+        envelope["data"]["requested"],
+        serde_json::json!({"kind": "all"})
+    );
     assert_eq!(extensions[0]["name"], "Проба");
     assert_eq!(extensions[0]["purpose"], "add-on");
     assert_eq!(extensions[0]["active"], true);
+    assert_eq!(extensions[0]["name_prefix"], "Пр_");
     // An empty platform field is an absent value, not an empty string.
     assert!(extensions[0].get("version").is_none());
-    assert!(fs::read_to_string(calls_log)
-        .expect("calls")
-        .contains("extension list"));
+    let calls = fs::read_to_string(calls_log).expect("calls");
+    let calls = calls.lines().collect::<Vec<_>>();
+    assert_eq!(calls.len(), 4, "{calls:?}");
+    assert!(calls[0].contains("extension list"), "{calls:?}");
+    assert!(
+        calls[1].contains(" save --db --extension Проба"),
+        "{calls:?}"
+    );
+    assert!(calls[2].contains(" export --file="), "{calls:?}");
+    assert!(calls[3].contains("extension list"), "{calls:?}");
+    let saved = calls[1].split_whitespace().last().expect("saved path");
+    assert!(calls[2].contains(&format!("--file={saved}")), "{calls:?}");
+    let temp = dir.path().join("work/temp");
+    assert_eq!(fs::read_dir(temp).expect("temp root").count(), 0);
+}
+
+#[test]
+fn extension_inventory_refuses_a_drifted_applied_record() {
+    let (dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
+    let state = dir.path().join("read-count");
+    let drifted = MEASURED_INVENTORY.replace("9hfFb6YVX2OwLKZaL1L69Eq0Vrg=", "changed-hash");
+    write_script(
+        &ibcmd_path,
+        &format!(
+            "printf '%s\\n' \"$*\" >> '{}'\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$*\" in\n  *\"extension list\"*) if test -e '{}'; then printf '%s' '{}'; else touch '{}'; printf '%s' '{}'; fi ;;\n  *\" save \"*) printf 'applied' > \"$last\" ;;\n  *\" export \"*) mkdir -p \"$last\"; printf '%s' '<MetaDataObject><Configuration><Properties><Name>Проба</Name><Version/><ConfigurationExtensionPurpose>AddOn</ConfigurationExtensionPurpose><NamePrefix>Пр_</NamePrefix></Properties></Configuration></MetaDataObject>' > \"$last/Configuration.xml\" ;;\nesac\nexit 0",
+            calls_log.display(),
+            state.display(),
+            drifted,
+            state.display(),
+            MEASURED_INVENTORY,
+        ),
+    );
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "extensions",
+            "list",
+        ])
+        .output()
+        .expect("run command");
+    assert!(!output.status.success());
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("json envelope");
+    assert!(envelope["error"]["message"]
+        .as_str()
+        .expect("error")
+        .contains("changed while reading applied prefixes"));
+    assert_eq!(
+        fs::read_dir(dir.path().join("work/temp"))
+            .expect("temp root")
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn extension_inventory_refuses_unattested_prefix_and_cleans_private_snapshots() {
+    for failure in ["save", "export", "descriptor"] {
+        let (dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
+        let descriptor = if failure == "descriptor" {
+            "<MetaDataObject><Configuration><Properties><Name>Wrong</Name><Version/><ConfigurationExtensionPurpose>AddOn</ConfigurationExtensionPurpose><NamePrefix>Пр_</NamePrefix></Properties></Configuration></MetaDataObject>"
+        } else {
+            "<MetaDataObject><Configuration><Properties><Name>Проба</Name><Version/><ConfigurationExtensionPurpose>AddOn</ConfigurationExtensionPurpose><NamePrefix>Пр_</NamePrefix></Properties></Configuration></MetaDataObject>"
+        };
+        write_script(
+            &ibcmd_path,
+            &format!(
+                "printf '%s\\n' \"$*\" >> '{}'\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$*\" in\n  *\"extension list\"*) printf '%s' '{}' ;;\n  *\" save \"*) if test '{}' = save; then printf '%s' 'Pwd=secret' >&2; exit 7; fi; printf 'applied' > \"$last\" ;;\n  *\" export \"*) if test '{}' = export; then printf '%s' 'Pwd=secret' >&2; exit 7; fi; mkdir -p \"$last\"; printf '%s' '{}' > \"$last/Configuration.xml\" ;;\nesac\nexit 0",
+                calls_log.display(),
+                MEASURED_INVENTORY,
+                failure,
+                failure,
+                descriptor,
+            ),
+        );
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "extensions",
+                "list",
+            ])
+            .output()
+            .expect("run command");
+        assert!(!output.status.success(), "{failure}: {output:?}");
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("json envelope");
+        let message = envelope["error"]["message"].as_str().expect("error");
+        assert!(!message.contains("Pwd=secret"), "{failure}: {message}");
+        assert_eq!(
+            fs::read_dir(dir.path().join("work/temp"))
+                .expect("temp root")
+                .count(),
+            0,
+            "{failure}"
+        );
+    }
+}
+
+#[test]
+fn extension_inventory_does_not_echo_initial_platform_credentials() {
+    let (_dir, config_path, _calls_log, ibcmd_path) = setup_extensions_project();
+    write_script(&ibcmd_path, "printf '%s' 'Pwd=secret' >&2\nexit 17");
+    for (command, subject) in [
+        (&["extensions", "list"][..], "all installed extensions"),
+        (
+            &["extensions", "info", "--name", "A8Probe"][..],
+            "extension 'A8Probe'",
+        ),
+    ] {
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+            ])
+            .args(command)
+            .output()
+            .expect("run command");
+        assert!(!output.status.success());
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("json envelope");
+        let message = envelope["error"]["message"].as_str().expect("error");
+        assert!(message.contains("exit code 17"), "{message}");
+        assert!(message.contains(subject), "{message}");
+        assert!(!message.contains("'requested'"), "{message}");
+        assert!(!message.contains("Pwd=secret"), "{message}");
+    }
+}
+
+/// Пустое имя и имя, не являющееся идентификатором 1С, отклоняются до того, как
+/// раннер пойдёт в базу: цена ошибки не должна включать запуск утилиты.
+#[test]
+fn extensions_info_rejects_a_name_that_is_not_an_identifier_before_touching_the_infobase() {
+    for name in ["", "   ", "имя с пробелом", "1начинается-с-цифры"] {
+        let (_dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
+        write_inventory_ibcmd(&ibcmd_path, &calls_log, MEASURED_INVENTORY);
+
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--no-color",
+                "extensions",
+                "info",
+                "--name",
+                name,
+            ])
+            .output()
+            .expect("run command");
+
+        let reported = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !output.status.success(),
+            "name {name:?} must be refused: {reported}"
+        );
+        assert!(
+            !calls_log.exists(),
+            "name {name:?} must be refused before the platform is called: {reported}"
+        );
+    }
 }
 
 #[test]
@@ -302,6 +574,46 @@ fn extensions_info_refuses_a_reply_about_another_extension() {
     );
     assert!(!output.status.success(), "{reported}");
     assert!(reported.contains("Другая"), "{reported}");
+}
+
+/// Платформа ответила о другом расширении: запрос она получила, поэтому отказ отвечает
+/// формой чтения — `ok: false`, состав неизвестен, `provider_dispatched: true`, — а не общей
+/// формой отказа.
+#[test]
+fn extensions_info_that_fails_after_the_platform_ran_answers_in_its_form() {
+    let (_dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
+    write_inventory_ibcmd(&ibcmd_path, &calls_log, MEASURED_INVENTORY);
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "extensions",
+            "info",
+            "--name",
+            "Другая",
+        ])
+        .output()
+        .expect("run command");
+
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json envelope");
+    assert!(!output.status.success(), "{payload}");
+    assert_eq!(payload["command"], "extensions", "{payload}");
+    assert_eq!(payload["data"]["ok"], false, "{payload}");
+    assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
+    assert_eq!(
+        payload["data"]["extensions"],
+        serde_json::json!([]),
+        "{payload}"
+    );
+    assert_data_matches_one_of(
+        &payload["data"],
+        "`extensions info` after the platform ran",
+        &["extensions-inventory"],
+    );
+    let calls = fs::read_to_string(&calls_log).expect("ibcmd was called");
+    assert!(calls.contains("extension info"), "{calls}");
 }
 
 #[test]
@@ -369,12 +681,12 @@ fn extensions_command_updates_all_extension_properties() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("│"));
-    assert!(stdout.contains("● client_mcp: disable_safety"));
+    assert!(stdout.contains("◌ client_mcp: disable_safety"));
     assert!(stdout.contains("updating extension properties"));
     assert!(stdout.contains("│   безопасный режим"));
-    assert!(stdout.contains("● tests: disable_safety"));
+    assert!(stdout.contains("◌ tests: disable_safety"));
     assert!(stdout.contains("● Extension properties updated successfully"));
-    assert_eq!(stdout.matches("● client_mcp: disable_safety").count(), 1);
+    assert_eq!(stdout.matches("◌ client_mcp: disable_safety").count(), 1);
     assert!(!stdout.contains("[Расширения]"));
 
     let calls = fs::read_to_string(calls_log).expect("calls");
@@ -421,7 +733,7 @@ fn extensions_command_streams_stage_before_pipeline_finishes() {
         &rx,
         Duration::from_secs(15),
         Duration::from_millis(50),
-        |line| line.contains("● client_mcp: disable_safety"),
+        |line| line.contains("◌ client_mcp: disable_safety"),
     );
 
     let still_running = child.try_wait().expect("try wait").is_none();
@@ -455,6 +767,41 @@ fn extensions_command_filters_by_requested_source_set_names() {
     let calls = fs::read_to_string(calls_log).expect("calls");
     assert!(calls.contains("--name client_mcp"));
     assert!(!calls.contains("--name tests"));
+}
+
+/// Без целей настройка работы не даёт, и `provider_dispatched` говорит `false`. Текст при
+/// этом не выдаёт боевой прогон за превью: слова превью берутся из `--dry-run`, а не из
+/// признака (#312).
+#[test]
+fn extensions_command_without_targets_does_not_read_as_a_preview() {
+    let (_dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+    let config = fs::read_to_string(&config_path).expect("config");
+    let extensions = "  - name: client_mcp\n    type: EXTENSION\n    path: exts/client-mcp\n  - name: tests\n    type: EXTENSION\n    path: tests\n";
+    assert!(config.contains(extensions), "{config}");
+    fs::write(&config_path, config.replace(extensions, "")).expect("config without targets");
+    let text = |extra: &[&str]| {
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--no-color",
+                "extensions",
+            ])
+            .args(extra)
+            .output()
+            .expect("run command");
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+
+    // Слова превью на месте там, где им место: иначе их отсутствие ниже ничего не значило бы.
+    assert!(text(&["--dry-run"]).contains("preview"));
+    let applied = text(&[]);
+    assert!(
+        !applied.contains("preview") && !applied.contains("planned"),
+        "{applied}"
+    );
+    assert!(!calls_log.exists(), "ibcmd ran without a target");
 }
 
 #[test]
@@ -521,4 +868,658 @@ fn extensions_command_json_failure_without_payload_keeps_machine_readable_error(
         .as_str()
         .expect("data message")
         .contains("unknown extension source-set 'missing'"));
+}
+
+#[test]
+fn installed_extension_can_be_configured_without_an_extension_source_set() {
+    let (_dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+    let config = fs::read_to_string(&config_path).expect("config");
+    let start = config.find("  - name: client_mcp\n").expect("extensions");
+    let end = config.find("tools:\n").expect("tools");
+    fs::write(
+        &config_path,
+        format!("{}{}", &config[..start], &config[end..]),
+    )
+    .expect("main-only config");
+
+    let output = v8_runner_command()
+        .arg("--config")
+        .arg(&config_path)
+        .args([
+            "--json-message",
+            "extensions",
+            "--installed-name",
+            "YaXUnit",
+        ])
+        .output()
+        .expect("configure installed extension");
+
+    assert!(output.status.success(), "{output:?}");
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["data"]["provider_dispatched"], true);
+    assert_eq!(payload["data"]["steps"].as_array().expect("steps").len(), 1);
+    assert_eq!(payload["data"]["steps"][0]["target"], "YaXUnit");
+    let calls = fs::read_to_string(calls_log).expect("calls");
+    assert_eq!(calls.lines().count(), 1, "{calls}");
+    assert!(calls.contains("extension update"), "{calls}");
+    assert!(calls.contains("--name YaXUnit"), "{calls}");
+    assert!(calls.contains("--safe-mode no"), "{calls}");
+    assert!(calls.contains("--unsafe-action-protection no"), "{calls}");
+}
+
+#[test]
+fn mixed_extension_selectors_preserve_exact_names_and_deduplicate_in_dispatch_order() {
+    let (_dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
+    write_script(
+        &ibcmd_path,
+        &format!(
+            "printf '%s\\n' \"$@\" >> '{}'\nprintf '%s\\n' '__END_CALL__' >> '{}'\nexit 0",
+            calls_log.display(),
+            calls_log.display(),
+        ),
+    );
+    let output = v8_runner_command()
+        .arg("--config")
+        .arg(&config_path)
+        .args([
+            "--json-message",
+            "extensions",
+            "--installed-name",
+            "YaXUnit",
+            "--name",
+            "tests",
+            "--installed-name",
+            "tests",
+            "--installed-name",
+            "YaXUnit",
+            "--installed-name",
+            "yaXUnit",
+            "--installed-name",
+            " Тестовое расширение ",
+        ])
+        .output()
+        .expect("configure mixed targets");
+
+    assert!(output.status.success(), "{output:?}");
+    let calls = fs::read_to_string(calls_log).expect("calls");
+    let targets: Vec<&str> = calls
+        .split("__END_CALL__\n")
+        .filter(|call| !call.is_empty())
+        .map(|call| {
+            let args: Vec<_> = call.lines().collect();
+            assert!(args.windows(2).any(|pair| pair == ["extension", "update"]));
+            let name_arg = args
+                .iter()
+                .position(|arg| *arg == "--name")
+                .expect("name flag");
+            args[name_arg + 1]
+        })
+        .collect();
+    assert_eq!(
+        targets,
+        ["tests", "YaXUnit", "yaXUnit", " Тестовое расширение "]
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    let reported: Vec<_> = payload["data"]["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .map(|step| step["target"].as_str().expect("target"))
+        .collect();
+    assert_eq!(reported, targets);
+}
+
+#[test]
+fn invalid_configured_selector_in_a_mixed_request_fails_before_clean_or_platform() {
+    let (dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
+    let work_path = dir.path().join("work");
+    fs::create_dir_all(work_path.join("logs")).expect("logs");
+    let sentinel = work_path.join("logs").join("existing.log");
+    fs::write(&sentinel, "preserve prior diagnostics").expect("log");
+    fs::remove_file(ibcmd_path).expect("remove utility to check validation order");
+    let output = v8_runner_command()
+        .arg("--config")
+        .arg(&config_path)
+        .args([
+            "--json-message",
+            "--clean-before-execution",
+            "extensions",
+            "--installed-name",
+            "YaXUnit",
+            "--name",
+            "missing",
+        ])
+        .output()
+        .expect("reject invalid source-set");
+
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["error"]["code"], "invalid_argument");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(
+        message.contains("unknown extension source-set 'missing'"),
+        "{message}"
+    );
+    // Имя установленного расширения выбирает другой селектор, и отказ его называет.
+    assert!(message.contains("--installed-name"), "{message}");
+    assert_eq!(
+        fs::read_to_string(sentinel).expect("preserved log"),
+        "preserve prior diagnostics"
+    );
+    assert!(!calls_log.exists());
+    assert!(!work_path.join(".v8-runner.workspace.lock").exists());
+}
+
+#[test]
+fn invalid_installed_names_never_dispatch_or_clean() {
+    for invalid in ["", "   ", "bad\nname", "bad\tname", "-unsafe"] {
+        let (dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+        let sentinel = dir.path().join("work/logs/existing.log");
+        fs::create_dir_all(sentinel.parent().expect("logs parent")).expect("logs");
+        fs::write(&sentinel, "keep").expect("log");
+        let output = v8_runner_command()
+            .arg("--config")
+            .arg(&config_path)
+            .args([
+                "--json-message",
+                "--clean-before-execution",
+                "extensions",
+                "--installed-name",
+                "YaXUnit",
+            ])
+            .arg(format!("--installed-name={invalid}"))
+            .output()
+            .expect("reject invalid installed name");
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "name={invalid:?}: {output:?}"
+        );
+        assert!(!calls_log.exists(), "name={invalid:?}");
+        assert_eq!(fs::read_to_string(sentinel).expect("preserved log"), "keep");
+    }
+}
+
+#[test]
+fn installed_extension_platform_failure_keeps_target_and_exit_code_in_json() {
+    let (_dir, config_path, _calls_log, ibcmd_path) = setup_extensions_project();
+    write_script(
+        &ibcmd_path,
+        "echo 'installed extension unavailable' >&2\nexit 17",
+    );
+    let output = v8_runner_command()
+        .arg("--config")
+        .arg(&config_path)
+        .args([
+            "--json-message",
+            "extensions",
+            "--installed-name",
+            "YaXUnit",
+        ])
+        .output()
+        .expect("failed installed extension update");
+
+    assert_eq!(output.status.code(), Some(4), "{output:?}");
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["ok"], false);
+    assert_eq!(payload["data"]["provider_dispatched"], true);
+    assert_eq!(payload["data"]["steps"][0]["target"], "YaXUnit");
+    assert_eq!(payload["data"]["steps"][0]["ok"], false);
+    let message = payload["data"]["steps"][0]["message"]
+        .as_str()
+        .expect("message");
+    assert!(
+        message.contains("extension 'YaXUnit' with exit code 17"),
+        "{message}"
+    );
+    assert!(
+        message.contains("stderr: installed extension unavailable"),
+        "{message}"
+    );
+}
+
+#[test]
+fn extensions_parent_preview_is_read_only_and_redacts_credentials() {
+    let (dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+    let work_path = dir.path().join("work");
+    fs::remove_dir_all(&work_path).expect("remove fixture workspace");
+    let config = fs::read_to_string(&config_path).expect("config");
+    fs::write(
+        &config_path,
+        config.replace(
+            "infobase:\n  connection: '",
+            "infobase:\n  user: Админ\n  password: parent-preview-secret\n  connection: '",
+        ),
+    )
+    .expect("credential config");
+
+    for json in [true, false] {
+        let output = v8_runner_command()
+            .arg("--config")
+            .arg(&config_path)
+            .arg(if json { "--json-message" } else { "--no-color" })
+            .args(["--log-level", "debug"])
+            .args(["extensions", "--installed-name", "YaXUnit", "--dry-run"])
+            .output()
+            .expect("preview installed extension update");
+        assert!(output.status.success(), "{output:?}");
+        let reported = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!reported.contains("parent-preview-secret"), "{reported}");
+        assert!(reported.contains("YaXUnit"), "{reported}");
+        if json {
+            let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+            assert_eq!(payload["data"]["provider_dispatched"], false);
+            assert_eq!(payload["data"]["steps"].as_array().expect("steps").len(), 1);
+            assert_eq!(payload["data"]["steps"][0]["target"], "YaXUnit");
+        } else {
+            assert!(reported.contains("-> planned"), "{reported}");
+            assert!(!reported.contains("-> ok"), "{reported}");
+        }
+        assert!(!calls_log.exists(), "preview must not launch the platform");
+        assert!(
+            !work_path.exists(),
+            "preview must not create workPath or locks: entries={:?}; output={reported}",
+            fs::read_dir(&work_path).map(|entries| entries
+                .map(|entry| entry.expect("entry").path())
+                .collect::<Vec<_>>())
+        );
+    }
+}
+
+#[test]
+fn extensions_parent_preview_bypasses_a_live_workspace_lock_but_apply_does_not() {
+    let (dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+    let lock_path = dir.path().join("work/.v8-runner.workspace.lock");
+    let lock = format!(
+        "{{\"tool\":\"v8-runner\",\"pid\":{},\"owner_id\":\"another-owner\",\"created_at\":\"2026-09-13T00:00:00Z\"}}",
+        std::process::id()
+    );
+    fs::write(&lock_path, &lock).expect("live workspace lock");
+    for preview in [true, false] {
+        let mut command = v8_runner_command();
+        command.arg("--config").arg(&config_path).args([
+            "--json-message",
+            "extensions",
+            "--installed-name",
+            "YaXUnit",
+        ]);
+        if preview {
+            command.arg("--dry-run");
+        }
+        let output = command.output().expect("run with live lock");
+        assert_eq!(output.status.success(), preview, "{output:?}");
+        if !preview {
+            let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+            assert!(payload["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains("workspace"));
+        }
+        assert!(!calls_log.exists());
+        assert_eq!(fs::read_to_string(&lock_path).expect("retained lock"), lock);
+    }
+}
+
+#[test]
+fn extensions_parent_preview_rejects_clean_and_requires_the_platform_utility() {
+    for (clean, workspace_exists) in [(true, true), (true, false), (false, true)] {
+        let (dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
+        let sentinel = dir.path().join("work/logs/existing.log");
+        if workspace_exists {
+            fs::create_dir_all(sentinel.parent().expect("logs parent")).expect("logs");
+            fs::write(&sentinel, "keep").expect("log");
+        } else {
+            fs::remove_dir_all(dir.path().join("work")).expect("remove fixture workspace");
+        }
+        if !clean {
+            fs::remove_file(ibcmd_path).expect("missing utility");
+        }
+        let mut command = v8_runner_command();
+        command
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--json-message");
+        if clean {
+            command.arg("--clean-before-execution");
+        }
+        let output = command
+            .args(["extensions", "--installed-name", "YaXUnit", "--dry-run"])
+            .output()
+            .expect("invalid preview");
+        assert!(!output.status.success(), "{output:?}");
+        let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+        assert_eq!(payload["command"], "extensions", "{payload}");
+        assert_eq!(payload["ok"], false, "{payload}");
+        let message = payload["error"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("missing error message (clean={clean}): {payload}"));
+        if clean {
+            assert_eq!(output.status.code(), Some(2), "{output:?}");
+            assert_eq!(payload["error"]["code"], "invalid_argument", "{payload}");
+            assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+            assert!(
+                message.contains("preview must not modify workPath"),
+                "{message}"
+            );
+        } else {
+            assert!(message.contains("ibcmd"), "{message}");
+        }
+        assert!(!calls_log.exists());
+        if workspace_exists {
+            assert_eq!(fs::read_to_string(sentinel).expect("preserved log"), "keep");
+        } else {
+            assert!(
+                !dir.path().join("work").exists(),
+                "rejected preview must not create workPath"
+            );
+        }
+    }
+}
+
+#[test]
+fn init_preview_clean_rejection_uses_the_shared_canonical_error_envelope() {
+    let (_dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+    let output = v8_runner_command()
+        .arg("--config")
+        .arg(&config_path)
+        .args([
+            "--json-message",
+            "--clean-before-execution",
+            "infobase",
+            "create",
+            "--dry-run",
+        ])
+        .output()
+        .expect("reject init preview with clean");
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(output.status.code(), Some(2), "{payload}");
+    assert_eq!(payload["command"], "infobase create", "{payload}");
+    assert_eq!(payload["ok"], false, "{payload}");
+    assert_eq!(payload["error"]["code"], "invalid_argument", "{payload}");
+    assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+    assert!(!calls_log.exists(), "rejection must not dispatch ibcmd");
+}
+
+#[test]
+fn extensions_parent_preview_validates_designer_work_path_without_mutation() {
+    let (dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+    let project = config_path.parent().expect("project root");
+    let config = fs::read_to_string(&config_path).expect("config");
+    fs::write(
+        &config_path,
+        config.replace("format: EDT", "format: DESIGNER"),
+    )
+    .expect("Designer config");
+    for source in ["configuration", "exts/client-mcp", "tests"] {
+        let source_path = project.join(source);
+        let descriptor = fs::read(source_path.join("metadata/Configuration.xml"))
+            .expect("configuration descriptor");
+        fs::remove_dir_all(&source_path).expect("remove EDT source");
+        fs::create_dir_all(&source_path).expect("Designer source directory");
+        fs::write(source_path.join("Configuration.xml"), descriptor).expect("Designer descriptor");
+    }
+
+    let sentinel = dir.path().join("work/logs/existing.log");
+    fs::create_dir_all(sentinel.parent().expect("logs parent")).expect("logs");
+    fs::write(&sentinel, "keep").expect("log");
+    let blocker = dir.path().join("blocker");
+    fs::write(&blocker, "keep file").expect("file work path");
+    let dangling = dir.path().join("dangling");
+    let missing_target = dir.path().join("missing-target");
+    std::os::unix::fs::symlink(&missing_target, &dangling).expect("dangling symlink");
+    let work_alias = dir.path().join("work-alias");
+    std::os::unix::fs::symlink(dir.path().join("work"), &work_alias)
+        .expect("valid directory alias");
+    let symlink_loop = dir.path().join("symlink-loop");
+    std::os::unix::fs::symlink(&symlink_loop, &symlink_loop).expect("symlink loop");
+
+    for (relative_path, valid) in [
+        ("work", true),
+        ("work-alias/new-work", true),
+        ("missing/work", true),
+        ("scratch/../parent-work", true),
+        ("blocker", false),
+        ("scratch/../blocker", false),
+        ("blocker/child", false),
+        ("dangling", false),
+        ("dangling/child", false),
+        ("symlink-loop/child", false),
+    ] {
+        let output = v8_runner_command()
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--workdir")
+            .arg(dir.path().join(relative_path))
+            .args([
+                "--json-message",
+                "extensions",
+                "--installed-name",
+                "YaXUnit",
+                "--dry-run",
+            ])
+            .output()
+            .expect("Designer preview");
+        let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+        assert_eq!(output.status.success(), valid, "{relative_path}: {payload}");
+        assert_eq!(
+            payload["command"], "extensions",
+            "{relative_path}: {payload}"
+        );
+        if valid {
+            assert_eq!(payload["data"]["provider_dispatched"], false, "{payload}");
+        } else {
+            assert_eq!(output.status.code(), Some(2), "{relative_path}: {payload}");
+            assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+            assert!(
+                payload["error"]["message"]
+                    .as_str()
+                    .expect("validation message")
+                    .contains("workPath"),
+                "{relative_path}: {payload}"
+            );
+        }
+        assert!(!calls_log.exists(), "preview must not dispatch ibcmd");
+        assert_eq!(
+            fs::read_to_string(&sentinel).expect("preserved log"),
+            "keep"
+        );
+        assert_eq!(
+            fs::read_to_string(&blocker).expect("preserved file"),
+            "keep file"
+        );
+        assert_eq!(
+            fs::read_link(&dangling).expect("preserved symlink"),
+            missing_target
+        );
+        for missing in ["missing", "scratch", "parent-work", "missing-target"] {
+            assert!(
+                !dir.path().join(missing).exists(),
+                "preview created {missing}"
+            );
+        }
+        assert!(!dir.path().join("work/new-work").exists());
+        assert!(!dir.path().join("work/.v8-runner.workspace.lock").exists());
+    }
+}
+
+#[test]
+fn extensions_parent_preview_still_validates_project_sources_without_creating_work_path() {
+    let (dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+    let work_path = dir.path().join("work");
+    fs::remove_dir_all(&work_path).expect("remove fixture workspace");
+    let config = fs::read_to_string(&config_path).expect("config");
+    fs::write(
+        &config_path,
+        config.replace("path: exts/client-mcp", "path: missing-extension-source"),
+    )
+    .expect("invalid source config");
+
+    let output = v8_runner_command()
+        .arg("--config")
+        .arg(&config_path)
+        .args([
+            "--json-message",
+            "extensions",
+            "--installed-name",
+            "YaXUnit",
+            "--dry-run",
+        ])
+        .output()
+        .expect("preview with invalid project source");
+
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["ok"], false);
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .expect("validation message")
+            .contains("missing-extension-source"),
+        "{payload}"
+    );
+    assert!(!calls_log.exists());
+    assert!(
+        !work_path.exists(),
+        "invalid preview must not create workPath"
+    );
+}
+
+#[test]
+fn extensions_parent_preview_rejects_missing_work_path_inside_edt_source_via_symlink() {
+    let (dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+    let project = config_path.parent().expect("project root");
+    let alias = dir.path().join("project-alias");
+    std::os::unix::fs::symlink(project, &alias).expect("project alias");
+    let work_path = alias.join("configuration/new-work");
+    let output = v8_runner_command()
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--workdir")
+        .arg(&work_path)
+        .args([
+            "--json-message",
+            "extensions",
+            "--installed-name",
+            "YaXUnit",
+            "--dry-run",
+        ])
+        .output()
+        .expect("preview with work path overlapping source");
+
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["ok"], false);
+    let message = payload["error"]["message"]
+        .as_str()
+        .expect("validation message");
+    assert!(
+        message.contains("overlaps generated work target"),
+        "{message}"
+    );
+    assert!(message.contains("configuration"), "{message}");
+    assert!(
+        !work_path.exists(),
+        "validation must not create workPath inside sources"
+    );
+    assert!(!calls_log.exists());
+}
+
+#[test]
+fn extensions_parent_options_with_subcommands_fail_before_clean_or_dispatch() {
+    for parent_options in [
+        vec!["--name", "tests"],
+        vec!["--installed-name", "YaXUnit"],
+        vec!["--dry-run"],
+    ] {
+        let (dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+        let sentinel = dir.path().join("work/logs/existing.log");
+        fs::create_dir_all(sentinel.parent().expect("logs parent")).expect("logs");
+        fs::write(&sentinel, "keep").expect("log");
+        let output = v8_runner_command()
+            .arg("--config")
+            .arg(&config_path)
+            .args(["--json-message", "--clean-before-execution", "extensions"])
+            .args(&parent_options)
+            .args(["delete", "--name", "Other"])
+            .output()
+            .expect("reject parent options with subcommand");
+
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{parent_options:?}: {output:?}"
+        );
+        assert!(
+            !calls_log.exists(),
+            "invalid request must never delete Other"
+        );
+        assert_eq!(fs::read_to_string(sentinel).expect("preserved log"), "keep");
+    }
+}
+
+#[test]
+fn extension_subcommands_accept_global_flags_before_and_after_the_subcommand() {
+    let (_dir, config_path, calls_log, ibcmd_path) = setup_extensions_project();
+    write_inventory_ibcmd(&ibcmd_path, &calls_log, MEASURED_INVENTORY);
+    let output = v8_runner_command()
+        .args(["extensions", "--json-message", "list", "--config"])
+        .arg(&config_path)
+        .output()
+        .expect("inventory with global options around subcommand");
+
+    assert!(output.status.success(), "{output:?}");
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["data"]["provider_dispatched"], true);
+    assert_eq!(payload["data"]["extensions"][0]["name"], "Проба");
+    let calls = fs::read_to_string(calls_log).expect("inventory calls");
+    assert!(calls.contains("extension list"), "{calls}");
+    assert!(!calls.contains("extension update"), "{calls}");
+}
+
+#[test]
+fn extensions_preview_and_apply_accept_missing_work_path_with_parent_components() {
+    let (dir, config_path, calls_log, _ibcmd_path) = setup_extensions_project();
+    let work_path = dir.path().join("work");
+    let scratch_path = dir.path().join("scratch");
+    fs::remove_dir_all(&work_path).expect("remove fixture workspace");
+    let requested_work_path = scratch_path.join("../work");
+
+    for preview in [true, false] {
+        let mut command = v8_runner_command();
+        command
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--workdir")
+            .arg(&requested_work_path)
+            .args([
+                "--json-message",
+                "extensions",
+                "--installed-name",
+                "YaXUnit",
+            ]);
+        if preview {
+            command.arg("--dry-run");
+        }
+        let output = command.output().expect("work path with parent components");
+        assert!(output.status.success(), "preview={preview}: {output:?}");
+        let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+        assert_eq!(payload["data"]["provider_dispatched"], !preview);
+        if preview {
+            assert!(
+                !scratch_path.exists(),
+                "preview must not create transient ancestors"
+            );
+            assert!(!work_path.exists(), "preview must not create workPath");
+            assert!(!calls_log.exists());
+        } else {
+            assert!(work_path.is_dir(), "apply must prepare workPath");
+            assert!(fs::read_to_string(&calls_log)
+                .expect("apply calls")
+                .contains("--name YaXUnit"));
+        }
+    }
 }

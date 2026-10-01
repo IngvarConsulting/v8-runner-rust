@@ -1,0 +1,273 @@
+{
+  "$defs": {
+    "InstalledExtension": {
+      "additionalProperties": false,
+      "description": "One extension installed in the target infobase, as reported by the platform.\n\n`ibcmd` reads the applied name prefix from a saved DB configuration.\nThe agent provider cannot attest that property and reports `None`.",
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "hash_sum": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "name_prefix": {
+          "description": "`None` means the selected provider cannot attest the applied prefix;\n`Some(\"\")` is a known empty prefix.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "safe_mode": {
+          "type": "boolean"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "security_profile_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unsafe_action_protection": {
+          "type": "boolean"
+        },
+        "used_in_distributed_infobase": {
+          "type": "boolean"
+        },
+        "version": {
+          "description": "`None` when the platform reported the field empty.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "name_prefix",
+        "active",
+        "purpose",
+        "safe_mode",
+        "unsafe_action_protection",
+        "used_in_distributed_infobase",
+        "scope",
+        "hash_sum"
+      ],
+      "type": "object"
+    },
+    "Provider": {
+      "description": "Исполнитель. Имя называет того, кто делает работу, а не способ его запуска.",
+      "oneOf": [
+        {
+          "const": "designer",
+          "description": "Конфигуратор пакетным процессом на операцию.",
+          "type": "string"
+        },
+        {
+          "const": "agent",
+          "description": "Агентский shell: Конфигуратор в агентском режиме или шлюз автономного сервера.",
+          "type": "string"
+        },
+        {
+          "const": "ibcmd",
+          "description": "Утилита `ibcmd`.",
+          "type": "string"
+        },
+        {
+          "const": "ibcmd-rs",
+          "description": "Конвертер XML ↔ CF без платформы.",
+          "type": "string"
+        },
+        {
+          "const": "webinst",
+          "description": "Публикация базы на веб-сервере.",
+          "type": "string"
+        }
+      ]
+    },
+    "ProviderOrigin": {
+      "description": "Откуда взялся выбранный исполнитель.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Первый готовый из цепочки умолчаний.",
+          "properties": {
+            "kind": {
+              "const": "default",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Назначен ключом `providers.<операция>` в названном файле.",
+          "properties": {
+            "file": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "override",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "file"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ProviderReceipt": {
+      "additionalProperties": false,
+      "description": "Квитанция о выборе исполнителя — одна форма у всех операций.\n\nОбъясняет принятое решение и не предлагает другого: неиспользованные альтернативы\nне перечисляются, потому что выбор вызывающему не принадлежит. `selected: null`\nзначит, что выбор состоялся и никто не подошёл: каждый пропущенный назван с причиной.",
+      "properties": {
+        "origin": {
+          "$ref": "#/$defs/ProviderOrigin"
+        },
+        "selected": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provider"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "skipped": {
+          "items": {
+            "$ref": "#/$defs/SkippedProvider"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "origin"
+      ],
+      "type": "object"
+    },
+    "RequestedInventory": {
+      "description": "What the read was asked for, named as data.\n\nA change preview names its `target` and `action` as fields; the read names its\nsubject the same way, so a caller pairs the answer with its request without\nparsing the wording of `plan`.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Every extension installed in the infobase.",
+          "properties": {
+            "kind": {
+              "const": "all",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "One extension by its platform name.",
+          "properties": {
+            "kind": {
+              "const": "named",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SkippedProvider": {
+      "additionalProperties": false,
+      "description": "Исполнитель, пропущенный до выбранного, и почему.",
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/Provider"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "reason"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/extensions-inventory.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Result of reading the extension composition of an infobase.",
+  "properties": {
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "extensions": {
+      "description": "Extensions in the order the platform reported them.\n\nThat order is not the creation order and the platform does not document one,\nso callers must not rely on it.",
+      "items": {
+        "$ref": "#/$defs/InstalledExtension"
+      },
+      "type": "array"
+    },
+    "ok": {
+      "description": "`false` when the read failed after the executor got the work: the composition is then\nunknown, not empty.",
+      "type": "boolean"
+    },
+    "plan": {
+      "description": "What the apply would do, named without any secret from the connection string.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "provider": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProviderReceipt"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Квитанция о выборе исполнителя; `None`, пока выбор не начинался."
+    },
+    "provider_dispatched": {
+      "description": "Whether an executor got this command's work: a process was started to do it, or the\nrequest's command was handed to a running session. Starting or opening a session and\nits own service commands are not work. `false` in a preview. A refusal before any work\nanswers the shared refusal form, without this field; a failure after the executor got\nthe work answers this form with `ok: false`, an empty `extensions` and `true`.\n\nReading the composition is an action, not a look: the platform starts, a session\nopens, the account authenticates and a journal trace is left. So the read has a\npreview too, and in it `extensions` is empty because nothing was asked.",
+      "type": "boolean"
+    },
+    "requested": {
+      "$ref": "#/$defs/RequestedInventory",
+      "description": "The subject of the read, present in the preview and in the answer alike."
+    }
+  },
+  "required": [
+    "ok",
+    "provider_dispatched",
+    "requested",
+    "extensions",
+    "duration_ms"
+  ],
+  "title": "ExtensionInventoryResult",
+  "type": "object"
+}

@@ -1,4 +1,4 @@
-//! Guard for ADR-0029: a tool's prose is never a decision input.
+//! Guard for DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES: a tool's prose is never a decision input.
 //!
 //! The runner decides on what an external tool guarantees — its exit code, the artefacts
 //! it produced, and output it documents as machine-readable. A sentence printed for a
@@ -22,8 +22,9 @@
 //! *caller* (tolerance on input is a feature, not a decision on output), while
 //! `support/logging.rs` and `cli/execute.rs` match the runner's own text to colour and format
 //! it. Those are presentation and input, so the layers stay out; a decision taken on a tool's
-//! answer belongs in `platform`, `parsers` or `use_cases` by the layering of ADR-0006 and
-//! ADR-0008.
+//! answer belongs in `platform`, `parsers` or `use_cases` by the layering of
+//! DEC.2026-04-20.USE-CASES-STAY-TRANSPORT-NEUTRAL and
+//! DEC.2026-04-20.PLATFORM-DSL-STAYS-OUT-OF-ORCHESTRATION.
 //!
 //! One blind spot is deliberate: a regular expression is not inspected. A legitimate Designer
 //! parser must carry Cyrillic character classes, because 1C object names are Cyrillic, so a
@@ -34,7 +35,7 @@ mod guardrail_support;
 
 use guardrail_support::{collect_rust_files, production_items};
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use syn::visit::Visit;
 use syn::{BinOp, Expr, ExprBinary, ExprMatch, ExprMethodCall, ItemConst, ItemStatic, Lit, Pat};
 
@@ -63,7 +64,7 @@ const PROSE_DEBT: &[(&str, &str)] = &[];
 
 /// Prose that labels text the runner passes through, and never decides what it does.
 ///
-/// The distinction is ADR-0029's, and it is narrow. A label is admitted only where all three
+/// The distinction is DEC.2026-09-12.A-LABEL-MAY-ONLY-MAKE-A-VERDICT-STRICTER's, and it is narrow. A label is admitted only where all three
 /// hold, and `labels_can_only_make_a_verdict_stricter` in `check_syntax` proves the last two:
 ///
 /// 1. the pass/fail verdict comes from a structural signal — the exit code;
@@ -74,9 +75,10 @@ const PROSE_DEBT: &[(&str, &str)] = &[];
 /// finding is a sentence the platform wrote for a human, and the runner carries it. Labelling it
 /// is not the same act as deciding whether to change an infobase.
 const LABELS_NOT_VERDICTS: &[(&str, &str)] = &[
-    // Designer syntax check. The verdict is `status_from_exit_code` alone (0 clean, 101 issues
-    // found, anything else tool failed); these markers decide whether a line is a finding and
-    // how severe it reads, and an unrecognised severity is an error.
+    // Designer syntax check. The verdict is the exit code plus whether the tool's log could be
+    // read at all (0 clean, 101 issues found, anything else tool failed; an expected-but-unread
+    // log turns clean into tool failed) — never the prose. These markers decide whether a line is
+    // a finding and how severe it reads, and an unrecognised severity is an error.
     ("src/parsers/designer_validation.rs", "неразрешим"),
     ("src/parsers/designer_validation.rs", "ошиб"),
     ("src/parsers/designer_validation.rs", "ошибок не обнаружено"),
@@ -298,7 +300,7 @@ impl<'ast> Visit<'ast> for DecisionLiterals {
     }
 }
 
-fn relative_path(path: &PathBuf) -> String {
+fn relative_path(path: &Path) -> String {
     path.strip_prefix(repo_root())
         .expect("path inside repository")
         .to_string_lossy()
@@ -354,7 +356,7 @@ fn tool_prose_never_decides_and_the_declared_debt_only_shrinks() {
 
     assert!(
         undeclared.is_empty(),
-        "ADR-0029: these decisions read a tool's prose. Decide on the exit code, a produced \
+        "DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES: these decisions read a tool's prose. Decide on the exit code, a produced \
          artefact, or documented machine-readable output instead; if that work is not this \
          change, add the site to PROSE_DEBT with the issue that removes it.\n{}",
         render(&undeclared)
@@ -370,7 +372,7 @@ fn tool_prose_never_decides_and_the_declared_debt_only_shrinks() {
 #[test]
 fn the_guard_sees_a_sentence_hidden_behind_a_constant_or_a_tuple_arm() {
     // The shapes the first version of this guard missed. Without them the defect that
-    // prompted ADR-0029 stayed invisible: a regex over comparisons saw neither the
+    // prompted DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES stayed invisible: a regex over comparisons saw neither the
     // constant nor the literal inside a tuple pattern.
     let source = r#"
         const ABSENT: &str = "Конфигурация 'Расширение' недоступна";

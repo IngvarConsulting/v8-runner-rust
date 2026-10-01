@@ -15,6 +15,7 @@ use crate::platform::process::{
     ProcessError, ProcessExecutionPolicy, ProcessInterruptionReason, ProcessRequest, ProcessRunner,
 };
 use crate::platform::result::PlatformCommandResult;
+use crate::platform::secrets::render_masked_command;
 
 const INTERACTIVE_EDT_ERROR_MARKER: &str = "Run '$exception printStackTrace' for error details";
 
@@ -48,13 +49,20 @@ pub struct EdtDsl<'a> {
 
 impl<'a> EdtDsl<'a> {
     /// Create a new EDT DSL bound to one executable path and runner.
-    pub fn new(binary: PathBuf, workspace: PathBuf, runner: &'a dyn ProcessRunner) -> Self {
+    ///
+    /// The policy is required: it carries the command's interrupt and its work mark.
+    pub fn new(
+        binary: PathBuf,
+        workspace: PathBuf,
+        runner: &'a dyn ProcessRunner,
+        execution_policy: ProcessExecutionPolicy,
+    ) -> Self {
         Self {
             binary,
             workspace,
             backend: EdtBackend::OneShot { runner },
             timeout: None,
-            execution_policy: ProcessExecutionPolicy::default(),
+            execution_policy,
             budget_started_at: Instant::now(),
         }
     }
@@ -66,18 +74,16 @@ impl<'a> EdtDsl<'a> {
         workspace: PathBuf,
         startup_timeout: Duration,
         command_timeout: Duration,
+        execution_policy: ProcessExecutionPolicy,
     ) -> Result<Self, EdtError> {
         std::fs::create_dir_all(&workspace).map_err(|source| EdtError::PrepareWorkspace {
             path: workspace.clone(),
             source,
         })?;
-        let request = InteractiveProcessRequest::new(binary.clone())
-            .with_args(["-data".to_owned(), workspace.display().to_string()]);
+        let args = vec!["-data".to_owned(), workspace.display().to_string()];
+        let request = InteractiveProcessRequest::new(binary.clone()).with_args(args.clone());
         debug!(
-            command = render_process_command(
-                &binary,
-                &["-data".to_owned(), workspace.display().to_string()]
-            ),
+            command = render_masked_command(&binary, &args),
             startup_timeout_ms = startup_timeout.as_millis() as u64,
             command_timeout_ms = command_timeout.as_millis() as u64,
             "starting interactive edt session"
@@ -100,7 +106,7 @@ impl<'a> EdtDsl<'a> {
                 shutdown_timeout: command_timeout.min(Duration::from_secs(5)),
             },
             timeout: None,
-            execution_policy: ProcessExecutionPolicy::default(),
+            execution_policy,
             budget_started_at: Instant::now(),
         })
     }
@@ -112,6 +118,7 @@ impl<'a> EdtDsl<'a> {
         manager: Arc<EdtSessionManager>,
         startup_timeout: Duration,
         command_timeout: Duration,
+        execution_policy: ProcessExecutionPolicy,
     ) -> Result<Self, EdtError> {
         std::fs::create_dir_all(&workspace).map_err(|source| EdtError::PrepareWorkspace {
             path: workspace.clone(),
@@ -127,7 +134,7 @@ impl<'a> EdtDsl<'a> {
                 command_timeout,
             },
             timeout: None,
-            execution_policy: ProcessExecutionPolicy::default(),
+            execution_policy,
             budget_started_at: Instant::now(),
         })
     }
@@ -135,13 +142,6 @@ impl<'a> EdtDsl<'a> {
     /// Overrides the timeout cap used for EDT command execution.
     pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.timeout = timeout;
-        self.budget_started_at = Instant::now();
-        self
-    }
-
-    /// Overrides the shared execution policy for EDT command execution.
-    pub fn with_execution_policy(mut self, execution_policy: ProcessExecutionPolicy) -> Self {
-        self.execution_policy = execution_policy;
         self.budget_started_at = Instant::now();
         self
     }
@@ -238,7 +238,7 @@ impl<'a> EdtDsl<'a> {
 
         let process = match &self.backend {
             EdtBackend::OneShot { runner } => {
-                let rendered_command = render_process_command(&self.binary, args);
+                let rendered_command = render_masked_command(&self.binary, args);
                 debug!(
                     command = rendered_command.as_str(),
                     timeout_ms = self.timeout.map(|value| value.as_millis() as u64),
@@ -290,11 +290,13 @@ impl<'a> EdtDsl<'a> {
                     timeout_ms = effective_timeout.as_millis() as u64,
                     "running interactive edt command"
                 );
+                // Переход в рабочее пространство — служебная команда: работы он не отмечает.
+                let service_policy = execution_policy.without_work();
                 let change_dir = session
                     .execute_with_policy(
                         &change_dir_command,
                         remaining_interactive_timeout(deadline),
-                        &execution_policy,
+                        &service_policy,
                     )
                     .map_err(|error| {
                         map_interactive_command_error(
@@ -359,7 +361,7 @@ impl<'a> EdtDsl<'a> {
                 if !manager.has_live_session() {
                     manager
                         .execute_blocking(
-                            EdtSessionRequest::new(
+                            EdtSessionRequest::service(
                                 render_interactive_change_dir_command(&self.workspace),
                                 Instant::now() + *startup_timeout,
                             )
@@ -390,13 +392,17 @@ impl<'a> EdtDsl<'a> {
                     timeout_ms = effective_timeout.as_millis() as u64,
                     "running shared edt command"
                 );
+                let deadline = Instant::now() + effective_timeout;
+                // Политика DSL без отметки — шаг самой платформы: его команда служебная.
+                let request = match self.execution_policy.work.clone() {
+                    Some(work) => {
+                        EdtSessionRequest::new(interactive_command.to_owned(), deadline, work)
+                    }
+                    None => EdtSessionRequest::service(interactive_command.to_owned(), deadline),
+                };
                 let output = manager
                     .execute_blocking(
-                        EdtSessionRequest::new(
-                            interactive_command.to_owned(),
-                            Instant::now() + effective_timeout,
-                        )
-                        .with_cancellation(self.execution_policy.cancellation.clone()),
+                        request.with_cancellation(self.execution_policy.cancellation.clone()),
                     )
                     .map_err(|error| {
                         map_shared_session_error(
@@ -431,7 +437,7 @@ impl<'a> EdtDsl<'a> {
 
         let (platform_log_path, platform_log, platform_log_read_error) = if let Some(path) = out_log
         {
-            match std::fs::read_to_string(path) {
+            match crate::support::fs::read_platform_log(path) {
                 Ok(contents) => (Some(path.to_path_buf()), Some(contents), None),
                 Err(error) => (
                     Some(path.to_path_buf()),
@@ -466,9 +472,10 @@ fn map_interactive_command_error(
     error: InteractiveProcessError,
 ) -> EdtError {
     match error {
-        InteractiveProcessError::CommandCancelled { .. } => {
+        InteractiveProcessError::CommandCancelled { delivered, .. } => {
             EdtError::Spawn(ProcessError::Cancelled {
                 cmd: render_interactive_session_command(binary, workspace, command),
+                delivered,
             })
         }
         InteractiveProcessError::CommandTimeout { timeout_ms, .. } => {
@@ -501,9 +508,14 @@ fn map_shared_session_error(
     timeout: Duration,
 ) -> EdtError {
     match error {
-        EdtSessionError::QueuedCancelled | EdtSessionError::RunningCancelled => {
+        EdtSessionError::QueuedCancelled => EdtError::Spawn(ProcessError::Cancelled {
+            cmd: render_interactive_session_command(binary, workspace, command),
+            delivered: false,
+        }),
+        EdtSessionError::RunningCancelled { delivered } => {
             EdtError::Spawn(ProcessError::Cancelled {
                 cmd: render_interactive_session_command(binary, workspace, command),
+                delivered,
             })
         }
         EdtSessionError::QueuedTimeout | EdtSessionError::RunningTimeout => {
@@ -520,6 +532,8 @@ fn map_shared_session_error(
     }
 }
 
+/// Прерывание, которое переход в рабочее пространство отложил: команда запроса после него
+/// не отправлялась, и работы команда не дала.
 fn process_error_from_interruption(
     binary: &Path,
     workspace: &Path,
@@ -530,6 +544,7 @@ fn process_error_from_interruption(
     match reason {
         ProcessInterruptionReason::Cancelled => ProcessError::Cancelled {
             cmd: render_interactive_session_command(binary, workspace, command),
+            delivered: false,
         },
         ProcessInterruptionReason::TimedOut => ProcessError::TimedOut {
             cmd: render_interactive_session_command(binary, workspace, command),
@@ -615,12 +630,6 @@ fn process_arguments(workspace: &Path, command_arguments: &[String]) -> Vec<Stri
     ];
     args.extend(command_arguments.iter().cloned());
     args
-}
-
-fn render_process_command(binary: &Path, args: &[String]) -> String {
-    let mut parts = vec![binary.display().to_string()];
-    parts.extend(args.iter().cloned());
-    parts.join(" ")
 }
 
 fn render_interactive_session_command(binary: &Path, workspace: &Path, command: &str) -> String {
@@ -759,14 +768,14 @@ mod tests {
         render_interactive_validate_command, EdtDsl, EdtError, INTERACTIVE_EDT_ERROR_MARKER,
     };
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, SourceFormat, SourceSetConfig, SourceSetPurpose,
-        TestsConfig, ToolsConfig,
+        AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
+        ToolsConfig,
     };
     use crate::platform::edt_session::{EdtSessionHostOptions, EdtSessionManager};
     use crate::platform::process::{
         ProcessError, ProcessExecutionPolicy, ProcessExecutor, ProcessInterruptionAction,
         ProcessInterruptionReason, ProcessInterruptionSafety, ProcessRequest, ProcessResult,
-        ProcessRunner, SpawnResult,
+        ProcessRunner, SpawnResult, WorkGiven,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -844,10 +853,12 @@ mod tests {
         AppConfig {
             base_path: base_path.to_path_buf(),
             work_path: work_path.to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -883,7 +894,12 @@ mod tests {
         );
 
         let runner = ProcessExecutor;
-        let dsl = EdtDsl::new(script, dir.path().join("ws"), &runner as &dyn ProcessRunner);
+        let dsl = EdtDsl::new(
+            script,
+            dir.path().join("ws"),
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
 
         let result = dsl
             .export_project("project", Path::new("/tmp/out"))
@@ -912,7 +928,12 @@ mod tests {
         );
 
         let runner = ProcessExecutor;
-        let dsl = EdtDsl::new(script, dir.path().join("ws"), &runner as &dyn ProcessRunner);
+        let dsl = EdtDsl::new(
+            script,
+            dir.path().join("ws"),
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
 
         let result = dsl
             .export_project_path(Path::new("/tmp/project"), Path::new("/tmp/out"))
@@ -944,7 +965,12 @@ mod tests {
         let out_log = dir.path().join("validate.log");
 
         let runner = ProcessExecutor;
-        let dsl = EdtDsl::new(script, dir.path().join("ws"), &runner as &dyn ProcessRunner);
+        let dsl = EdtDsl::new(
+            script,
+            dir.path().join("ws"),
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
         let result = dsl
             .validate_project(Path::new("/tmp/project"), &out_log)
             .expect("validate project");
@@ -969,7 +995,12 @@ mod tests {
         let out_log = dir.path().join("missing").join("validate.log");
 
         let runner = ProcessExecutor;
-        let dsl = EdtDsl::new(script, dir.path().join("ws"), &runner as &dyn ProcessRunner);
+        let dsl = EdtDsl::new(
+            script,
+            dir.path().join("ws"),
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
         let result = dsl
             .validate_project(Path::new("/tmp/project"), &out_log)
             .expect("validate project");
@@ -996,7 +1027,12 @@ mod tests {
         let workspace = dir.path().join("missing").join("ws");
 
         let runner = ProcessExecutor;
-        let dsl = EdtDsl::new(script, workspace.clone(), &runner as &dyn ProcessRunner);
+        let dsl = EdtDsl::new(
+            script,
+            workspace.clone(),
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
         let result = dsl
             .export_project("project", Path::new("/tmp/out"))
             .expect("export project");
@@ -1017,7 +1053,12 @@ mod tests {
         );
 
         let runner = ProcessExecutor;
-        let dsl = EdtDsl::new(script, dir.path().join("ws"), &runner as &dyn ProcessRunner);
+        let dsl = EdtDsl::new(
+            script,
+            dir.path().join("ws"),
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
 
         let result = dsl
             .import_project(Path::new("/tmp/project"))
@@ -1043,7 +1084,12 @@ mod tests {
         );
 
         let runner = ProcessExecutor;
-        let dsl = EdtDsl::new(script, dir.path().join("ws"), &runner as &dyn ProcessRunner);
+        let dsl = EdtDsl::new(
+            script,
+            dir.path().join("ws"),
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
 
         let result = dsl
             .import_configuration_files(
@@ -1077,7 +1123,22 @@ mod tests {
     }
 
     impl ProcessRunner for RecordingRunner {
-        fn run(&self, _request: &ProcessRequest) -> Result<ProcessResult, ProcessError> {
+        fn run_with_policy(
+            &self,
+            request: &ProcessRequest,
+            policy: &ProcessExecutionPolicy,
+        ) -> Result<ProcessResult, ProcessError> {
+            // Двойник записывает предел, но отмену обязан слушать по-настоящему: иначе
+            // тест на EDT прошёл бы и в мире, где Ctrl+C до процесса не доходит.
+            if policy.cancellation.is_cancelled() {
+                return Err(ProcessError::Cancelled {
+                    cmd: request.program.display().to_string(),
+                    delivered: false,
+                });
+            }
+            *self.timeout.lock().expect("timeout lock") = policy.timeout;
+            // Как настоящий исполнитель, двойник отмечает работу, едва «запустил» процесс.
+            policy.mark_started_for_test();
             Ok(ProcessResult {
                 exit_code: 0,
                 stdout: String::new(),
@@ -1086,16 +1147,11 @@ mod tests {
             })
         }
 
-        fn run_with_timeout(
+        fn spawn(
             &self,
-            request: &ProcessRequest,
-            timeout: Duration,
-        ) -> Result<ProcessResult, ProcessError> {
-            *self.timeout.lock().expect("timeout lock") = Some(timeout);
-            self.run(request)
-        }
-
-        fn spawn(&self, _request: &ProcessRequest) -> Result<SpawnResult, ProcessError> {
+            _request: &ProcessRequest,
+            _work: &WorkGiven,
+        ) -> Result<SpawnResult, ProcessError> {
             panic!("spawn must not be called in EDT DSL tests")
         }
     }
@@ -1107,6 +1163,7 @@ mod tests {
             PathBuf::from("/tmp/1cedtcli"),
             PathBuf::from("/tmp/ws"),
             &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
         )
         .with_timeout(Some(Duration::from_secs(7)));
 
@@ -1183,6 +1240,7 @@ mod tests {
             dir.path().join("ws"),
             TEST_INTERACTIVE_STARTUP_TIMEOUT,
             TEST_INTERACTIVE_COMMAND_TIMEOUT,
+            ProcessExecutionPolicy::default(),
         )
         .expect("interactive dsl");
 
@@ -1196,6 +1254,59 @@ mod tests {
         assert!(commands.contains("export --project-name project --configuration-files /tmp/out"));
         assert!(commands.contains("import --project /tmp/project"));
         assert!(!commands.contains("-command"));
+    }
+
+    /// Переход в рабочее пространство — служебная команда интерактивной сессии: работу
+    /// команды отмечает только доставка самой команды запроса. Сессия, которая выходит на
+    /// `cd`, до команды запроса не доходит, и отметка остаётся пустой.
+    #[cfg(unix)]
+    #[test]
+    fn an_interactive_session_marks_only_the_request_command() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("1cedtcli");
+        let refuse = dir.path().join("refuse-cd");
+        let body = format!(
+            "prompt() {{ printf '1C:EDT>'; }}\n\
+             prompt\n\
+             while IFS= read -r line; do\n\
+               case \"$line\" in\n\
+                 cd*) if [ -e '{}' ]; then exit 3; fi; prompt ;;\n\
+                 *) prompt ;;\n\
+               esac\n\
+             done\n",
+            refuse.display()
+        );
+        write_script(&script, &body);
+        let session = |work: &WorkGiven| {
+            EdtDsl::new_interactive(
+                script.clone(),
+                dir.path().join("ws"),
+                TEST_INTERACTIVE_STARTUP_TIMEOUT,
+                TEST_INTERACTIVE_COMMAND_TIMEOUT,
+                ProcessExecutionPolicy {
+                    work: Some(work.clone()),
+                    ..ProcessExecutionPolicy::default()
+                },
+            )
+            .expect("interactive dsl")
+        };
+
+        let refused = WorkGiven::for_command();
+        let dsl = session(&refused);
+        fs::write(&refuse, "").expect("refuse the cd");
+        dsl.import_project(Path::new("/tmp/project"))
+            .expect_err("the session exits on cd");
+        assert!(!refused.given(), "the cd prelude is not the command's work");
+
+        fs::remove_file(&refuse).expect("accept the cd");
+        let delivered = WorkGiven::for_command();
+        session(&delivered)
+            .import_project(Path::new("/tmp/project"))
+            .expect("import");
+        assert!(
+            delivered.given(),
+            "the delivered request is the command's work"
+        );
     }
 
     #[cfg(unix)]
@@ -1221,6 +1332,7 @@ mod tests {
             manager.clone(),
             Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
             Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
+            ProcessExecutionPolicy::default(),
         )
         .expect("first dsl");
         let second = EdtDsl::new_shared_session(
@@ -1229,6 +1341,7 @@ mod tests {
             manager,
             Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
             Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
+            ProcessExecutionPolicy::default(),
         )
         .expect("second dsl");
 
@@ -1286,6 +1399,7 @@ OUT\n\
             dir.path().join("ws"),
             TEST_INTERACTIVE_STARTUP_TIMEOUT,
             TEST_INTERACTIVE_COMMAND_TIMEOUT,
+            ProcessExecutionPolicy::default(),
         )
         .expect("interactive dsl");
 
@@ -1331,13 +1445,14 @@ OUT\n\
             dir.path().join("ws"),
             TEST_INTERACTIVE_STARTUP_TIMEOUT,
             TEST_INTERACTIVE_COMMAND_TIMEOUT,
+            ProcessExecutionPolicy::new(
+                Some(Duration::from_millis(50)),
+                CancellationToken::new(),
+                ProcessInterruptionSafety::GracefulThenKill,
+                WorkGiven::for_command(),
+            ),
         )
-        .expect("interactive dsl")
-        .with_execution_policy(ProcessExecutionPolicy::new(
-            Some(Duration::from_millis(50)),
-            CancellationToken::new(),
-            ProcessInterruptionSafety::GracefulThenKill,
-        ));
+        .expect("interactive dsl");
 
         let error = dsl
             .export_project("project", Path::new("/tmp/out"))
@@ -1384,13 +1499,14 @@ OUT\n\
             dir.path().join("ws"),
             TEST_INTERACTIVE_STARTUP_TIMEOUT,
             TEST_INTERACTIVE_COMMAND_TIMEOUT,
+            ProcessExecutionPolicy::new(
+                Some(Duration::from_millis(100)),
+                CancellationToken::new(),
+                ProcessInterruptionSafety::GracefulThenKill,
+                WorkGiven::for_command(),
+            ),
         )
-        .expect("interactive dsl")
-        .with_execution_policy(ProcessExecutionPolicy::new(
-            Some(Duration::from_millis(100)),
-            CancellationToken::new(),
-            ProcessInterruptionSafety::GracefulThenKill,
-        ));
+        .expect("interactive dsl");
 
         let error = dsl
             .export_project("project", Path::new("/tmp/out"))
@@ -1441,13 +1557,14 @@ OUT\n\
             dir.path().join("ws"),
             TEST_INTERACTIVE_STARTUP_TIMEOUT,
             TEST_INTERACTIVE_COMMAND_TIMEOUT,
+            ProcessExecutionPolicy::new(
+                Some(Duration::from_millis(400)),
+                CancellationToken::new(),
+                ProcessInterruptionSafety::GracefulThenKill,
+                WorkGiven::for_command(),
+            ),
         )
-        .expect("interactive dsl")
-        .with_execution_policy(ProcessExecutionPolicy::new(
-            Some(Duration::from_millis(400)),
-            CancellationToken::new(),
-            ProcessInterruptionSafety::GracefulThenKill,
-        ));
+        .expect("interactive dsl");
 
         dsl.export_project("first", Path::new("/tmp/out1"))
             .expect("first export");
@@ -1502,13 +1619,14 @@ OUT\n\
             dir.path().join("ws"),
             TEST_INTERACTIVE_STARTUP_TIMEOUT,
             TEST_INTERACTIVE_COMMAND_TIMEOUT,
+            ProcessExecutionPolicy::new(
+                Some(Duration::from_secs(1)),
+                cancellation,
+                ProcessInterruptionSafety::GracefulThenKill,
+                WorkGiven::for_command(),
+            ),
         )
-        .expect("interactive dsl")
-        .with_execution_policy(ProcessExecutionPolicy::new(
-            Some(Duration::from_secs(1)),
-            cancellation,
-            ProcessInterruptionSafety::GracefulThenKill,
-        ));
+        .expect("interactive dsl");
 
         let error = dsl
             .export_project("project", Path::new("/tmp/out"))
@@ -1518,6 +1636,92 @@ OUT\n\
             error,
             EdtError::Spawn(ProcessError::Cancelled { .. })
         ));
+    }
+
+    /// Команда EDT, снятая после доставки, — оборванная работа команды; отмена, заставшая
+    /// служебный переход в рабочее пространство, работы не обрывает: команда запроса ещё не
+    /// отправлена.
+    #[cfg(unix)]
+    #[test]
+    fn interactive_dsl_names_whether_the_cancelled_command_was_delivered() {
+        for cancel_during_cd in [false, true] {
+            let dir = tempdir().expect("tempdir");
+            let cd_marker = dir.path().join("cd");
+            let export_marker = dir.path().join("export");
+            let script = dir.path().join("1cedtcli");
+            let cd_wait = if cancel_during_cd { "sleep 30\n" } else { "" };
+            write_script(
+                &script,
+                &format!(
+                    "set -eu\n\
+                     prompt() {{ printf '1C:EDT>'; }}\n\
+                     prompt\n\
+                     while IFS= read -r line; do\n\
+                       eval \"set -- $line\"\n\
+                       cmd=\"${{1:-}}\"\n\
+                       case \"$cmd\" in\n\
+                         cd)\n\
+                           : > '{cd}'\n\
+                           {cd_wait}\
+                           prompt\n\
+                           ;;\n\
+                         export)\n\
+                           : > '{export}'\n\
+                           sleep 30\n\
+                           prompt\n\
+                           ;;\n\
+                         *)\n\
+                           prompt\n\
+                           ;;\n\
+                       esac\n\
+                     done\n",
+                    cd = cd_marker.display(),
+                    export = export_marker.display(),
+                ),
+            );
+            let cancellation = CancellationToken::new();
+            let work = WorkGiven::for_command();
+            let marker = if cancel_during_cd {
+                &cd_marker
+            } else {
+                &export_marker
+            };
+            let operator =
+                crate::platform::process::cancel_when_started(marker, cancellation.clone());
+            let dsl = EdtDsl::new_interactive(
+                script,
+                dir.path().join("ws"),
+                TEST_INTERACTIVE_STARTUP_TIMEOUT,
+                TEST_INTERACTIVE_COMMAND_TIMEOUT,
+                ProcessExecutionPolicy::new(
+                    None,
+                    cancellation,
+                    ProcessInterruptionSafety::GracefulThenKill,
+                    work.clone(),
+                ),
+            )
+            .expect("interactive dsl");
+
+            let error = dsl
+                .export_project("project", Path::new("/tmp/out"))
+                .expect_err("cancelled error");
+            assert!(
+                operator.join().expect("operator"),
+                "the command never marked its start"
+            );
+
+            let delivered = !cancel_during_cd;
+            assert!(
+                matches!(
+                    &error,
+                    EdtError::Spawn(ProcessError::Cancelled { delivered: named, .. })
+                        if *named == delivered
+                ),
+                "cancelled during cd: {cancel_during_cd}: {error:?}"
+            );
+            assert_eq!(work.given(), delivered);
+            assert_eq!(export_marker.exists(), delivered);
+        }
     }
 
     #[cfg(unix)]
@@ -1554,13 +1758,14 @@ OUT\n\
             dir.path().join("ws"),
             TEST_INTERACTIVE_STARTUP_TIMEOUT,
             TEST_INTERACTIVE_COMMAND_TIMEOUT,
+            ProcessExecutionPolicy::new(
+                Some(Duration::from_millis(250)),
+                CancellationToken::new(),
+                ProcessInterruptionSafety::CriticalNonAbortable,
+                WorkGiven::for_command(),
+            ),
         )
-        .expect("interactive dsl")
-        .with_execution_policy(ProcessExecutionPolicy::new(
-            Some(Duration::from_millis(250)),
-            CancellationToken::new(),
-            ProcessInterruptionSafety::CriticalNonAbortable,
-        ));
+        .expect("interactive dsl");
 
         let result = dsl
             .export_project("project", Path::new("/tmp/out"))

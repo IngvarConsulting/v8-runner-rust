@@ -80,7 +80,7 @@ fn write_config(
     format: &str,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: {}\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: {}\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         format,
         platform_path.display(),
@@ -175,7 +175,7 @@ fn load_cf_json_success_loads_and_updates_without_asking() {
     assert!(output.status.success());
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], true);
-    assert_eq!(payload["command"], "load");
+    assert_eq!(payload["command"], "upload");
     assert_eq!(payload["data"]["artifact_type"], "configuration_cf");
     assert_eq!(payload["data"]["compatibility_state"], "not_probed");
     assert_eq!(payload["data"]["execution"]["payload"]["applied"], true);
@@ -192,6 +192,51 @@ fn load_cf_json_success_loads_and_updates_without_asking() {
     );
     assert!(calls.contains("/LoadCfg"));
     assert!(calls.contains("/UpdateDBCfg"));
+}
+
+#[test]
+fn upload_update_failure_preserves_the_completed_load_receipt() {
+    let (_dir, config_path, binary_path, base_path, calls_log) = setup_project();
+    fs::write(base_path.join("release.cf"), "cf").expect("artifact");
+
+    let script = fs::read_to_string(&binary_path).expect("designer script");
+    let final_exit = script.rfind("\nexit 0").expect("final success exit");
+    fs::write(
+        &binary_path,
+        format!(
+            "{}\nif printf '%s' \"$args\" | grep -F -q -- '/UpdateDBCfg'; then exit 23; fi\nexit 0\n",
+            &script[..final_exit]
+        ),
+    )
+    .expect("failing designer script");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "upload",
+            "--path",
+            "release.cf",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(!output.status.success());
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["ok"], false);
+    assert_eq!(payload["command"], "upload");
+    let data = &payload["data"];
+    assert_eq!(data["provider"]["selected"], "designer");
+    assert_eq!(data["provider_dispatched"], true);
+    assert_eq!(data["execution"]["status"], "failed");
+    assert_eq!(data["execution"]["payload"]["applied"], true);
+    assert_eq!(data["execution"]["payload"]["update_db_cfg_ran"], true);
+
+    let calls = fs::read_to_string(calls_log).expect("calls");
+    let load = calls.find("/LoadCfg").expect("load ran");
+    let update = calls.find("/UpdateDBCfg").expect("update ran");
+    assert!(load < update, "load must precede failed update: {calls}");
 }
 
 #[test]
@@ -333,7 +378,7 @@ fn load_update_mode_returns_validation_payload() {
     assert_eq!(output.status.code(), Some(2));
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], false);
-    assert_eq!(payload["command"], "load");
+    assert_eq!(payload["command"], "upload");
     assert_eq!(payload["data"]["mode"], "update");
     assert_eq!(payload["data"]["execution"]["payload"]["applied"], false);
     assert!(payload["data"]["message"]
@@ -365,7 +410,7 @@ fn load_text_failure_surfaces_structured_error() {
     assert_eq!(output.status.code(), Some(2));
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("● Artifact load failed"));
+    assert!(stdout.contains("✖ Artifact load failed"));
     assert!(stdout.contains("[error:artifact_load_failed]"));
     assert!(stdout.contains("not supported"));
 }
@@ -401,7 +446,7 @@ fn load_rejects_edt_format_even_with_designer_builder() {
     assert!(payload["data"]["message"]
         .as_str()
         .expect("message")
-        .contains("builder=DESIGNER and format=DESIGNER"));
+        .contains("the Designer provider and format=DESIGNER"));
 }
 
 #[test]
@@ -461,4 +506,45 @@ fn load_rejects_external_artifact_type_with_unknown_target_kind_payload_metadata
         .as_str()
         .expect("message")
         .contains("only .cf and .cfe"));
+}
+
+/// Режим назван именем словаря: `upload --mode combine` доходит до платформы, ответ
+/// называет режим новым именем, а прежнее `merge` принимается ещё один цикл выпуска.
+#[test]
+fn upload_mode_combine_reaches_the_platform_and_answers_under_the_new_name() {
+    for mode in ["combine", "merge"] {
+        let (_dir, config_path, _binary_path, base_path, calls_log) = setup_project();
+        fs::write(base_path.join("release.cfe"), "cfe").expect("artifact");
+        fs::write(base_path.join("merge.xml"), "<settings/>").expect("settings");
+
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "upload",
+                "--path",
+                "release.cfe",
+                "--mode",
+                mode,
+                "--settings",
+                "merge.xml",
+                "--extension",
+                "ExistingExt",
+            ])
+            .output()
+            .expect("run command");
+
+        assert!(
+            output.status.success(),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+        assert_eq!(payload["ok"], true, "{mode}: {payload}");
+        assert_eq!(payload["command"], "upload", "{mode}: {payload}");
+        assert_eq!(payload["data"]["mode"], "combine", "{mode}: {payload}");
+        let calls = fs::read_to_string(&calls_log).expect("calls");
+        assert!(calls.contains("/MergeCfg"), "{mode}: {calls}");
+    }
 }

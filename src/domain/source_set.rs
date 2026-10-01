@@ -11,8 +11,14 @@ pub struct SourceSetContext {
     path: PathBuf,
     /// Key used to name the redb hash-storage file (`workPath/hash-storages/<key>.redb`).
     storage_key: String,
-    /// Opaque binding of this snapshot to its source and runtime target.
-    runtime_binding: Option<String>,
+    memory: SnapshotMemory,
+}
+
+#[derive(Debug, Clone)]
+enum SnapshotMemory {
+    Shared,
+    Disabled,
+    Infobase { name: String, identity: String },
 }
 
 impl SourceSetContext {
@@ -33,17 +39,40 @@ impl SourceSetContext {
             name,
             path,
             storage_key,
-            runtime_binding: None,
+            memory: SnapshotMemory::Shared,
         }
     }
 
-    pub fn with_runtime_binding(mut self, binding: String) -> Self {
-        self.runtime_binding = Some(binding);
+    pub fn with_infobase_memory(mut self, name: Option<&str>, identity: String) -> Self {
+        self.memory = match name {
+            Some(name) => {
+                assert!(
+                    is_safe_path_segment(&self.name),
+                    "source set name must be a safe path segment"
+                );
+                assert!(
+                    is_safe_path_segment(name),
+                    "infobase name must be a safe path segment"
+                );
+                SnapshotMemory::Infobase {
+                    name: name.to_owned(),
+                    identity,
+                }
+            }
+            None => SnapshotMemory::Disabled,
+        };
         self
     }
 
-    pub fn runtime_binding(&self) -> Option<&str> {
-        self.runtime_binding.as_deref()
+    pub fn persists_snapshot(&self) -> bool {
+        !matches!(self.memory, SnapshotMemory::Disabled)
+    }
+
+    pub fn storage_identity(&self) -> Option<&str> {
+        match &self.memory {
+            SnapshotMemory::Infobase { identity, .. } => Some(identity),
+            SnapshotMemory::Shared | SnapshotMemory::Disabled => None,
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -56,6 +85,13 @@ impl SourceSetContext {
 
     /// Absolute path to the redb hash-storage file for this context.
     pub fn storage_path(&self, work_path: &Path) -> PathBuf {
+        if let SnapshotMemory::Infobase { name, .. } = &self.memory {
+            return work_path
+                .join("infobases")
+                .join(name)
+                .join("hashes")
+                .join(format!("{}.redb", self.name));
+        }
         work_path
             .join("hash-storages")
             .join(format!("{}.redb", self.storage_key))

@@ -4,7 +4,8 @@ use std::time::Instant;
 
 use tempfile::NamedTempFile;
 
-use crate::config::model::{AppConfig, BuilderBackend, SourceSetPurpose};
+use crate::config::model::{AppConfig, SourceSetPurpose};
+use crate::domain::capability::{Operation, Provider};
 use crate::domain::dump::{DumpMode, DumpResult, DumpSelectorResult};
 use crate::domain::partial_dump_selector::PartialDumpSelector;
 use crate::platform::designer::DesignerDsl;
@@ -27,8 +28,8 @@ use super::ResolvedDumpTarget;
 
 pub(super) fn validate_supported_matrix(config: &AppConfig) -> Option<AppError> {
     if matches!(
-        config.builder,
-        BuilderBackend::Designer | BuilderBackend::Ibcmd
+        config.selected_provider(Operation::Dump),
+        Provider::Designer | Provider::Ibcmd | Provider::Agent
     ) {
         None
     } else {
@@ -83,13 +84,6 @@ fn validate_publish_target_path(
     if canonical_target_path == canonical_work_path {
         return Err(AppError::Validation(
             "dump target must not equal workPath".to_owned(),
-        ));
-    }
-    // Publication must not rename/unlink its own snapshot storage or workspace lock.
-    // The reverse nesting is valid for generated Designer trees beneath workPath.
-    if canonical_work_path.starts_with(canonical_target_path) {
-        return Err(AppError::Validation(
-            "workPath must not be inside dump target".to_owned(),
         ));
     }
     if is_filesystem_root(canonical_target_path) {
@@ -220,8 +214,8 @@ pub(super) fn build_designer_dsl<'a>(
         config.v8_connection(),
         runner,
         Some(log_file),
-    )
-    .with_execution_policy(context.process_policy(InterruptionSafetyClass::GracefulThenKill, None)))
+        context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+    ))
 }
 
 pub(super) fn build_ibcmd_dsl<'a>(
@@ -240,11 +234,13 @@ pub(super) fn build_ibcmd_dsl<'a>(
         ))
     })?;
 
-    Ok(IbcmdDsl::new(binary.to_path_buf(), connection, runner)
-        .with_data_path(data_path)
-        .with_execution_policy(
-            context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-        ))
+    Ok(IbcmdDsl::new(
+        binary.to_path_buf(),
+        connection,
+        runner,
+        context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+    )
+    .with_data_path(data_path))
 }
 
 pub(super) fn map_ibcmd_error(error: IbcmdError) -> AppError {
@@ -385,7 +381,12 @@ pub(super) fn empty_result(
     message: Option<String>,
 ) -> DumpResult {
     DumpResult {
-        provider_dispatched: true,
+        provider: None,
+        // Ответ без исполнения: все одиннадцать мест, которые его строят, лежат выше
+        // запуска платформы — десять отказов и само превью. Настоящий запуск строит ответ
+        // буквально и ставит признак сам.
+        provider_dispatched: false,
+        up_to_date: false,
         ok: false,
         source_set,
         extension,

@@ -2,24 +2,40 @@ use std::time::Instant;
 
 use crate::config::model::{AppConfig, SourceSetPurpose};
 use crate::domain::extensions::{ExtensionsResult, ExtensionsStep};
-use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl, IbcmdError};
+use crate::platform::ibcmd::{IbcmdDsl, IbcmdError};
 use crate::platform::locator::UtilityType;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::extension_agent::ExtensionAgent;
 use crate::use_cases::extension_identity::platform_extension_name;
+use crate::use_cases::extension_inventory::Executor;
 use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
-use crate::use_cases::interruption;
+use crate::use_cases::interruption::{
+    self, append_warnings, collecting_deferrals, prefix_warnings,
+};
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::ConfigureExtensionsRequest;
-use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use tracing::{debug, info};
 
 const DISABLE_SAFETY_ACTION: &str = "disable_safety";
+/// Чем предупреждение об отложенной отмене называет запись свойств — одно слово для обоих
+/// исполнителей; `DISABLE_SAFETY_ACTION` — имя шага в ответе.
+const SAFETY_UPDATE_LABEL: &str = "extension properties update";
 const EXTENSIONS_SUCCESS_LABEL: &str = "Extension properties updated successfully";
 const EXTENSIONS_FAILURE_LABEL: &str = "Extension property update failed";
 
+/// Единственный выход сценария: `provider_dispatched` ответа ставит отметка работы команды.
 pub fn execute(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &ConfigureExtensionsRequest,
+) -> UseCaseResult<ExtensionsResult> {
+    stamp_dispatch(run_configure(context, config, args), context.work())
+}
+
+fn run_configure(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &ConfigureExtensionsRequest,
@@ -37,43 +53,158 @@ pub fn execute(
         }
     };
 
-    let connection = match IbcmdConnection::from_infobase(&config.infobase) {
-        Ok(connection) => connection,
-        Err(error) => {
-            return Err(UseCaseFailure::without_payload(AppError::from(error)));
-        }
-    };
-
     let mut utilities = PlatformUtilities::from_config(config);
-    let binary = match utilities.locate(UtilityType::Ibcmd) {
-        Ok(location) => location.path,
-        Err(error) => {
-            return Err(UseCaseFailure::without_payload(AppError::from(error)));
+    let selected = match crate::use_cases::provider_selection::select(
+        config,
+        &mut utilities,
+        crate::domain::capability::Operation::Extensions,
+    ) {
+        Ok(selected) => selected,
+        Err((error, receipt)) => {
+            let mut result = ExtensionsResult {
+                provider: None,
+                ok: false,
+                provider_dispatched: false,
+                steps: Vec::new(),
+                duration_ms: started.elapsed().as_millis() as u64,
+            };
+            result.provider = Some(receipt);
+            return Err(UseCaseFailure::with_payload(error, result));
         }
     };
-    let dsl = IbcmdDsl::new(binary, connection, utilities.runner_for(UtilityType::Ibcmd))
-        .with_execution_policy(
-            context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
-        );
+    let receipt = selected.receipt;
+    let executor = Executor::of(selected.provider, selected.location, config)
+        .map_err(UseCaseFailure::without_payload)?;
+    // Превью называет цели и исполнителя и ничего не трогает: установленное состояние
+    // расширения не опрашивается, потому что опрос — это уже запуск платформы.
+    if args.dry_run {
+        let target_name = executor.target_label(config);
+        let executor_label = executor.label();
+        return Ok(ExtensionsResult {
+            provider: Some(receipt),
+            provider_dispatched: false,
+            ok: true,
+            steps: targets
+                .into_iter()
+                .map(|target| ExtensionsStep {
+                    message: Some(format!(
+                        "would disable safe mode and unsafe action protection for '{target}' in {target_name} via {executor_label}; installed state is not probed"
+                    )),
+                    target,
+                    action: DISABLE_SAFETY_ACTION.to_owned(),
+                    ok: true,
+                    duration_ms: 0,
+                })
+                .collect(),
+            duration_ms: started.elapsed().as_millis() as u64,
+        });
+    }
 
+    let mut setter = match executor {
+        Executor::Agent { v8 } => match ExtensionAgent::open(context, config, v8.as_deref()) {
+            Ok(agent) => SafetySetter::Agent(Box::new(agent)),
+            Err(error) => return Err(UseCaseFailure::without_payload(error)),
+        },
+        Executor::Ibcmd { binary, connection } => SafetySetter::Ibcmd(Box::new(IbcmdDsl::new(
+            binary,
+            connection,
+            utilities.runner_for(UtilityType::Ibcmd),
+            context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
+        ))),
+    };
+
+    let outcome = disable_safety_for(context, &mut setter, targets, started);
+    setter.close();
+    outcome.map(|steps| ExtensionsResult {
+        provider: Some(receipt),
+        provider_dispatched: false,
+        ok: true,
+        duration_ms: started.elapsed().as_millis() as u64,
+        steps,
+    })
+}
+
+/// Исполнитель одного и того же действия: `ibcmd` — процессом на цель, агент — одной
+/// сессией на команду.
+// Обе ветки тяжёлые — сессия агента и DSL ibcmd, — и без упаковки размер большей
+// платил бы каждый экземпляр независимо от того, какой исполнитель выбран.
+enum SafetySetter<'a> {
+    Ibcmd(Box<IbcmdDsl<'a>>),
+    Agent(Box<ExtensionAgent>),
+}
+
+impl SafetySetter<'_> {
+    /// Итог шага: удача с сообщением, отказ платформы с уликой или ошибка раннера.
+    fn disable(&mut self, target: &str) -> Result<String, StepFailure> {
+        match self {
+            Self::Ibcmd(dsl) => {
+                let (result, warnings) = collecting_deferrals(|deferrals| {
+                    let result = dsl
+                        .infobase_extension_update_properties(target, false, false)
+                        .map_err(|error| map_extension_update_error(target, error))?;
+                    deferrals.note_result(SAFETY_UPDATE_LABEL, &result);
+                    Ok(result)
+                })
+                .map_err(StepFailure::Error)?;
+                if result.process.exit_code == 0 {
+                    Ok(append_warnings(SAFETY_DISABLED.to_owned(), &warnings))
+                } else {
+                    // Отказ несёт текст шага, а не ошибку: отмену, отложенную до конца
+                    // записи, он называет первой.
+                    Err(StepFailure::Platform(prefix_warnings(
+                        &warnings,
+                        format_ibcmd_failure_details(
+                            "extension update",
+                            "extension",
+                            target,
+                            result.process.exit_code,
+                            &result.process.stdout,
+                            &result.process.stderr,
+                            None,
+                            None,
+                        ),
+                    )))
+                }
+            }
+            Self::Agent(agent) => collecting_deferrals(|deferrals| {
+                agent.disable_safety(SAFETY_UPDATE_LABEL, target, deferrals)
+            })
+            .map(|((), warnings)| append_warnings(SAFETY_DISABLED.to_owned(), &warnings))
+            .map_err(StepFailure::Error),
+        }
+    }
+
+    fn close(self) {
+        if let Self::Agent(agent) = self {
+            agent.close();
+        }
+    }
+}
+
+enum StepFailure {
+    Platform(String),
+    Error(AppError),
+}
+
+fn disable_safety_for(
+    context: &ExecutionContext,
+    setter: &mut SafetySetter<'_>,
+    targets: Vec<String>,
+    started: Instant,
+) -> Result<Vec<ExtensionsStep>, UseCaseFailure<ExtensionsResult>> {
     let mut steps = Vec::new();
     for target in targets {
-        if let Some(interruption) = context.interruption() {
-            let message = interruption::interruption_before_safe_point_message(
-                context,
-                interruption,
-                "extension update",
-            );
+        if let Some(error) =
+            interruption::interruption_before_safe_point(context, "extension update")
+        {
             let payload = ExtensionsResult {
-                provider_dispatched: true,
+                provider: None,
+                provider_dispatched: false,
                 ok: false,
                 steps,
                 duration_ms: started.elapsed().as_millis() as u64,
             };
-            return Err(UseCaseFailure::with_payload(
-                AppError::Runtime(message),
-                payload,
-            ));
+            return Err(UseCaseFailure::with_payload(error, payload));
         }
         let step_started = Instant::now();
         debug!(
@@ -86,14 +217,8 @@ pub fn execute(
             "running",
             "updating extension properties",
         );
-        match dsl.infobase_extension_update_properties(&target, false, false) {
-            Ok(result) if result.process.exit_code == 0 => {
-                let mut message =
-                    "безопасный режим и защита от опасных действий отключены".to_owned();
-                if let Some(warning) = deferred_interruption_warning(&result) {
-                    message.push_str("; ");
-                    message.push_str(&warning);
-                }
+        match setter.disable(&target) {
+            Ok(message) => {
                 let step = ExtensionsStep {
                     target,
                     action: DISABLE_SAFETY_ACTION.to_owned(),
@@ -104,17 +229,7 @@ pub fn execute(
                 log_extension_step(&step);
                 steps.push(step);
             }
-            Ok(result) => {
-                let message = format_ibcmd_failure_details(
-                    "extension update",
-                    "extension",
-                    &target,
-                    result.process.exit_code,
-                    &result.process.stdout,
-                    &result.process.stderr,
-                    None,
-                    None,
-                );
+            Err(StepFailure::Platform(message)) => {
                 let step = ExtensionsStep {
                     target: target.clone(),
                     action: DISABLE_SAFETY_ACTION.to_owned(),
@@ -126,7 +241,8 @@ pub fn execute(
                 steps.push(step);
                 log_extensions_summary(false);
                 let payload = ExtensionsResult {
-                    provider_dispatched: true,
+                    provider: None,
+                    provider_dispatched: false,
                     ok: false,
                     steps,
                     duration_ms: started.elapsed().as_millis() as u64,
@@ -136,8 +252,7 @@ pub fn execute(
                     payload,
                 ));
             }
-            Err(error) => {
-                let app_error = map_extension_update_error(&target, error);
+            Err(StepFailure::Error(app_error)) => {
                 let message = app_error.to_string();
                 let step = ExtensionsStep {
                     target: target.clone(),
@@ -150,7 +265,8 @@ pub fn execute(
                 steps.push(step);
                 log_extensions_summary(false);
                 let payload = ExtensionsResult {
-                    provider_dispatched: true,
+                    provider: None,
+                    provider_dispatched: false,
                     ok: false,
                     steps,
                     duration_ms: started.elapsed().as_millis() as u64,
@@ -161,12 +277,7 @@ pub fn execute(
     }
 
     log_extensions_summary(true);
-    Ok(ExtensionsResult {
-        provider_dispatched: true,
-        ok: true,
-        steps,
-        duration_ms: started.elapsed().as_millis() as u64,
-    })
+    Ok(steps)
 }
 
 fn log_extension_step(step: &ExtensionsStep) {
@@ -203,14 +314,7 @@ fn log_extensions_summary(ok: bool) {
     );
 }
 
-fn deferred_interruption_warning(
-    result: &crate::platform::result::PlatformCommandResult,
-) -> Option<String> {
-    interruption::deferred_process_interruption_warning(
-        "extension properties updated successfully",
-        result,
-    )
-}
+const SAFETY_DISABLED: &str = "безопасный режим и защита от опасных действий отключены";
 
 fn map_extension_update_error(target: &str, error: IbcmdError) -> AppError {
     AppError::from(error).with_context(format!(
@@ -218,7 +322,9 @@ fn map_extension_update_error(target: &str, error: IbcmdError) -> AppError {
     ))
 }
 
-fn resolve_targets(
+/// Resolves and validates the entire selection before lock/cleanup or platform dispatch.
+/// The execution boundary repeats this pure check for non-CLI callers.
+pub(crate) fn resolve_targets(
     config: &AppConfig,
     args: &ConfigureExtensionsRequest,
 ) -> Result<Vec<String>, AppError> {
@@ -234,7 +340,7 @@ fn resolve_targets(
         })
         .collect::<Vec<_>>();
 
-    if args.names.is_empty() {
+    if args.names.is_empty() && args.installed_names.is_empty() {
         return Ok(available.into_iter().map(|(_, name)| name).collect());
     }
 
@@ -244,11 +350,25 @@ fn resolve_targets(
             .iter()
             .find(|(name, _)| *name == requested.as_str())
         else {
+            // Селекторы принимают одну и ту же строку, и перепутать их легко: отказ
+            // называет селектор установленного расширения.
             return Err(AppError::Validation(format!(
-                "unknown extension source-set '{requested}'"
+                "unknown extension source-set '{requested}'; an extension installed in the infobase is selected with --installed-name"
             )));
         };
-        targets.push(resolved.clone());
+        if !targets.contains(resolved) {
+            targets.push(resolved.clone());
+        }
+    }
+    for name in &args.installed_names {
+        if name.trim().is_empty() || name.chars().any(char::is_control) || name.starts_with('-') {
+            return Err(AppError::Validation(
+                "installed extension name must be nonblank, contain no control characters, and not start with '-'".to_owned(),
+            ));
+        }
+        if !targets.contains(name) {
+            targets.push(name.clone());
+        }
     }
     Ok(targets)
 }
@@ -257,10 +377,12 @@ fn resolve_targets(
 mod tests {
     use super::{execute, map_extension_update_error, resolve_targets};
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, PlatformToolConfig, SourceFormat, SourceSetConfig,
+        AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
         SourceSetPurpose, TestsConfig, ToolsConfig,
     };
     use crate::platform::ibcmd::IbcmdError;
+    #[cfg(unix)]
+    use crate::platform::process::HeldCommand;
     use crate::platform::process::ProcessError;
     use crate::support::error::AppError;
     use crate::use_cases::context::{CommandName, ExecutionContext};
@@ -292,10 +414,12 @@ mod tests {
         AppConfig {
             base_path: base.to_path_buf(),
             work_path: work.to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![
                 SourceSetConfig {
                     name: "configuration".to_owned(),
@@ -333,10 +457,74 @@ mod tests {
         .expect("project file");
         let config = sample_config(dir.path(), dir.path(), Path::new("/tmp/ibcmd"));
 
-        let targets = resolve_targets(&config, &ConfigureExtensionsRequest { names: vec![] })
-            .expect("targets");
+        let targets =
+            resolve_targets(&config, &ConfigureExtensionsRequest::default()).expect("targets");
 
         assert_eq!(targets, vec!["client_mcp"]);
+    }
+
+    #[test]
+    fn installed_targets_do_not_require_source_sets_or_normalize_names() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = sample_config(dir.path(), dir.path(), Path::new("/tmp/ibcmd"));
+        config.source_sets.clear();
+        let names = vec![
+            "YAXUNIT".to_owned(),
+            " Проба ".to_owned(),
+            "yaxunit".to_owned(),
+        ];
+        let request = ConfigureExtensionsRequest {
+            installed_names: names.clone(),
+            ..Default::default()
+        };
+        assert_eq!(resolve_targets(&config, &request).expect("targets"), names);
+    }
+
+    #[test]
+    fn explicit_selection_is_ordered_union_without_implicit_all() {
+        let dir = tempdir().expect("tempdir");
+        let config = sample_config(dir.path(), dir.path(), Path::new("/tmp/ibcmd"));
+        let mut request = ConfigureExtensionsRequest {
+            installed_names: vec!["YAXUNIT".to_owned()],
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_targets(&config, &request).expect("direct"),
+            ["YAXUNIT"]
+        );
+        request.names = vec!["client_mcp".to_owned(), "client_mcp".to_owned()];
+        request
+            .installed_names
+            .extend(["client_mcp".to_owned(), "YAXUNIT".to_owned()]);
+        assert_eq!(
+            resolve_targets(&config, &request).expect("mixed"),
+            ["client_mcp", "YAXUNIT"]
+        );
+    }
+
+    #[test]
+    fn invalid_direct_names_and_unknown_source_sets_fail_validation() {
+        let dir = tempdir().expect("tempdir");
+        let config = sample_config(dir.path(), dir.path(), Path::new("/tmp/ibcmd"));
+        for name in ["", "  ", "\t", "YAX\nUNIT", "YAX\0UNIT", "--all"] {
+            let request = ConfigureExtensionsRequest {
+                installed_names: vec!["YAXUNIT".to_owned(), name.to_owned()],
+                ..Default::default()
+            };
+            assert!(matches!(
+                resolve_targets(&config, &request),
+                Err(AppError::Validation(_))
+            ));
+        }
+        for name in ["YAXUNIT", "configuration"] {
+            let request = ConfigureExtensionsRequest {
+                names: vec![name.to_owned()],
+                installed_names: vec![name.to_owned()],
+                ..Default::default()
+            };
+            let error = resolve_targets(&config, &request).expect_err("unknown source-set");
+            assert!(error.to_string().contains("unknown extension source-set"));
+        }
     }
 
     #[test]
@@ -382,7 +570,7 @@ mod tests {
         let result = execute(
             &ExecutionContext::cli(CommandName::Extensions),
             &config,
-            &ConfigureExtensionsRequest { names: vec![] },
+            &ConfigureExtensionsRequest::default(),
         )
         .expect("execute");
 
@@ -421,7 +609,7 @@ mod tests {
         let result = execute(
             &ExecutionContext::cli(CommandName::Extensions),
             &config,
-            &ConfigureExtensionsRequest { names: vec![] },
+            &ConfigureExtensionsRequest::default(),
         )
         .expect("execute");
 
@@ -453,7 +641,7 @@ mod tests {
         let failure = execute(
             &ExecutionContext::cli(CommandName::Extensions),
             &config,
-            &ConfigureExtensionsRequest { names: vec![] },
+            &ConfigureExtensionsRequest::default(),
         )
         .expect_err("failure");
 
@@ -466,6 +654,88 @@ mod tests {
             .error
             .message()
             .contains("stderr: bad extension state"));
+    }
+
+    /// Запись свойств расширения через `ibcmd`, отложившая отмену: удача называет её в
+    /// сообщении шага.
+    #[cfg(unix)]
+    #[test]
+    fn a_safety_update_that_deferred_the_cancellation_names_it() {
+        let dir = tempdir().expect("tempdir");
+        let (config, held) = config_with_held_update(dir.path(), 0);
+
+        let result = safety_update_interrupted_while_held(&config, &held)
+            .expect("the update finishes despite the cancellation");
+
+        assert!(result.ok);
+        let message = result.steps[0].message.as_deref().expect("step message");
+        assert!(
+            message.contains(
+                "extension properties update completed successfully after cancellation request \
+                 during critical phase"
+            ),
+            "{message}"
+        );
+    }
+
+    /// Запись свойств расширения через `ibcmd`, отложившая отмену и потом не удавшаяся:
+    /// ответ остаётся отказом, а отложенную отмену называет первой.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_safety_update_after_a_deferred_cancellation_names_it() {
+        let dir = tempdir().expect("tempdir");
+        let (config, held) = config_with_held_update(dir.path(), 17);
+
+        let failure =
+            safety_update_interrupted_while_held(&config, &held).expect_err("the update failed");
+
+        assert_eq!(failure.error.kind(), UseCaseErrorKind::Platform);
+        let message = failure.error.message();
+        assert!(
+            message.starts_with(
+                "extension properties update ended after cancellation request during critical phase"
+            ),
+            "{message}"
+        );
+        assert!(message.contains("exit code 17"), "{message}");
+        let payload = failure.payload.expect("payload");
+        assert_eq!(payload.steps[0].message.as_deref(), Some(message));
+    }
+
+    #[cfg(unix)]
+    fn config_with_held_update(root: &Path, exit_code: i32) -> (AppConfig, HeldCommand) {
+        let ibcmd = root.join("ibcmd");
+        fs::create_dir_all(root.join("exts").join("client-mcp")).expect("ext dir");
+        fs::write(
+            root.join("exts").join("client-mcp").join(".project"),
+            "<projectDescription><name>client_mcp</name></projectDescription>",
+        )
+        .expect("project file");
+        let held = HeldCommand::in_dir(root);
+        write_script(
+            &ibcmd,
+            &format!(
+                "args=\"$*\"\n{}exit 0",
+                held.script_branch("extension update", exit_code)
+            ),
+        );
+        (sample_config(root, root, &ibcmd), held)
+    }
+
+    #[cfg(unix)]
+    #[track_caller]
+    fn safety_update_interrupted_while_held(
+        config: &AppConfig,
+        held: &HeldCommand,
+    ) -> crate::use_cases::result::UseCaseResult<crate::domain::extensions::ExtensionsResult> {
+        let cancellation = CancellationToken::new();
+        held.interrupt_during(cancellation.clone(), || {
+            execute(
+                &ExecutionContext::cli(CommandName::Extensions).with_cancellation(cancellation),
+                config,
+                &ConfigureExtensionsRequest::default(),
+            )
+        })
     }
 
     #[cfg(unix)]
@@ -491,7 +761,7 @@ mod tests {
         let failure = execute(
             &ExecutionContext::cli(CommandName::Extensions).with_cancellation(cancellation),
             &config,
-            &ConfigureExtensionsRequest { names: vec![] },
+            &ConfigureExtensionsRequest::default(),
         )
         .expect_err("interrupted execution");
         let payload = failure.payload.expect("payload");

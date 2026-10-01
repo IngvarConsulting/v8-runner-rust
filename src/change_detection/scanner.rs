@@ -33,11 +33,10 @@ pub enum ScanError {
     RelativePath { root: PathBuf, path: PathBuf },
 }
 
-/// Child directory names excluded from scanning; the selected root is always scanned.
+/// Directory/file names that are always excluded from scanning.
 const IGNORED_DIRS: &[&str] = &[
     ".git", ".gradle", "build", "target", "temp", "tmp", ".yaxunit",
 ];
-/// File names excluded at every depth.
 const IGNORED_FILES: &[&str] = &["ConfigDumpInfo.xml"];
 
 /// Coarse filesystem mtime guard (2 seconds).
@@ -87,7 +86,7 @@ pub fn scan(
     for entry in WalkDir::new(root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|e| !is_ignored_dir(e))
+        .filter_entry(|e| e.depth() == 0 || !is_ignored_dir(e))
     {
         let entry = entry.map_err(|e| ScanError::Walk {
             path: root.to_path_buf(),
@@ -174,9 +173,7 @@ fn rel_path(root: &Path, path: &Path) -> Result<String, ScanError> {
 }
 
 fn is_ignored_dir(entry: &walkdir::DirEntry) -> bool {
-    // Exclusions apply to children, never the selected source root. Staged and
-    // published trees must have identical coverage regardless of their root names.
-    if entry.depth() == 0 || !entry.file_type().is_dir() {
+    if !entry.file_type().is_dir() {
         return false;
     }
     let Some(name) = entry.file_name().to_str() else {
@@ -187,17 +184,14 @@ fn is_ignored_dir(entry: &walkdir::DirEntry) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{scan, IGNORED_DIRS};
-    use std::collections::HashSet;
-
     #[test]
     fn selected_roots_are_scanned_while_ignored_descendants_stay_excluded() {
         let dir = tempfile::tempdir().expect("tempdir");
-        for root_name in IGNORED_DIRS {
+        for root_name in super::IGNORED_DIRS {
             let root = dir.path().join(root_name);
             std::fs::create_dir(&root).expect("root");
             std::fs::write(root.join("Module.bsl"), "source").expect("source");
-            for child_name in IGNORED_DIRS {
+            for child_name in super::IGNORED_DIRS {
                 let child = root.join(child_name);
                 std::fs::create_dir(&child).expect("ignored child");
                 std::fs::write(child.join("Module.bsl"), "generated").expect("child source");
@@ -207,5 +201,79 @@ mod tests {
             assert_eq!(scanned.candidates.len(), 1, "root {root_name}");
             assert_eq!(scanned.candidates[0].rel_path, "Module.bsl");
         }
+    }
+    use super::{scan, ScanSnapshot, COARSE_MARGIN_NS};
+    use crate::change_detection::file_state::mtime_nanos;
+    use std::collections::HashSet;
+    use std::fs::{self, File};
+    use std::path::Path;
+    use std::time::{Duration, SystemTime};
+    use tempfile::tempdir;
+
+    fn write_touched(path: &Path, contents: &str, modified: SystemTime) {
+        fs::write(path, contents).expect("write");
+        File::options()
+            .write(true)
+            .open(path)
+            .expect("open")
+            .set_modified(modified)
+            .expect("set mtime");
+    }
+
+    fn candidates(snapshot: &ScanSnapshot) -> Vec<&str> {
+        let mut names: Vec<&str> = snapshot
+            .candidates
+            .iter()
+            .map(|candidate| candidate.rel_path.as_str())
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// Известный прошлому снимку файл хешируется, только если тронут не раньше водяного
+    /// знака за вычетом запаса: грубые часы файловой системы правку не прячут, а нетронутое
+    /// не читается. Новый файл хешируется всегда.
+    #[test]
+    fn a_known_file_is_hashed_only_when_touched_within_the_margin() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        let margin = Duration::from_nanos(COARSE_MARGIN_NS);
+        let watermark = SystemTime::now() - 10 * margin;
+        write_touched(&root.join("Old.bsl"), "old", watermark - 2 * margin);
+        write_touched(&root.join("Near.bsl"), "near", watermark - margin / 2);
+        write_touched(&root.join("New.bsl"), "new", watermark - 2 * margin);
+        let known: HashSet<String> = ["Old.bsl", "Near.bsl"].map(str::to_owned).into();
+        let watermark_ns = mtime_nanos(watermark, root).expect("watermark");
+
+        let snapshot = scan(root, Some(watermark_ns), &known).expect("scan");
+
+        assert_eq!(snapshot.seen_files.len(), 3);
+        assert_eq!(candidates(&snapshot), ["Near.bsl", "New.bsl"]);
+    }
+
+    /// Служебные и порождённые каталоги и файл состояния выгрузки в обход не входят.
+    #[test]
+    fn service_and_generated_paths_are_never_scanned() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(root.join("Module.bsl"), "module").expect("module");
+        fs::write(root.join("ConfigDumpInfo.xml"), "<info/>").expect("dump info");
+        for ignored in [
+            ".git", ".gradle", "build", "target", "temp", "tmp", ".yaxunit",
+        ] {
+            let nested = root.join(ignored).join("nested");
+            fs::create_dir_all(&nested).expect("ignored dir");
+            fs::write(nested.join("File.bsl"), "generated").expect("ignored file");
+        }
+
+        let snapshot = scan(root, None, &HashSet::new()).expect("scan");
+
+        let seen: Vec<&str> = snapshot
+            .seen_files
+            .iter()
+            .map(|file| file.rel_path.as_str())
+            .collect();
+        assert_eq!(seen, ["Module.bsl"]);
+        assert_eq!(candidates(&snapshot), ["Module.bsl"]);
     }
 }

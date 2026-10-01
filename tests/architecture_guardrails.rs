@@ -1,11 +1,14 @@
 mod guardrail_support;
 
 use regex::Regex;
+use std::ffi::OsString;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::LazyLock;
 
 use guardrail_support::{
-    collect_rust_files, free_function_tokens, production_tokens, trait_impl_method_tokens,
+    collect_rust_files, free_function_tokens, has_cfg_test, item_has_cfg_test, normalize_tokens,
+    parse_rust_file, production_source, production_tokens,
 };
 
 const EXPECTED_MCP_TOOLS: &[&str] = &[
@@ -93,7 +96,7 @@ fn mcp_surface_snapshot_stays_explicit_and_documented() {
     let source_section = extract_between(
         &source,
         "const fn as_str(self) -> &'static str {",
-        "fn execution_policy",
+        "fn admission_timeout",
     );
     let source_tools = Regex::new(r#""([a-z_]+)""#)
         .expect("regex")
@@ -101,21 +104,27 @@ fn mcp_surface_snapshot_stays_explicit_and_documented() {
         .map(|capture| capture[1].to_owned())
         .collect::<Vec<_>>();
 
-    let invariants = read("spec/architecture/invariants.md");
-    let invariants_section = extract_between(
-        &invariants,
-        "3. Текущая MCP-поверхность состоит из 8 tool-операций:",
-        "4. Добавление",
+    let contract = read("spec/rules/mcp/published-tool-surface.md");
+    // Числительное прозы сверяется со счётом, а не служит якорем: прежде девятый
+    // инструмент с обновлённым перечнем и прежней прозой проходил молча.
+    let published = contract
+        .lines()
+        .find(|line| line.starts_with("Опубликованы ") && line.ends_with(" инструментов:"))
+        .expect("contract announces the published tools");
+    let counted = published
+        .trim_start_matches("Опубликованы ")
+        .trim_end_matches(" инструментов:");
+    let contract_section = extract_between(
+        &contract,
+        published,
+        "Состав меняется только вместе с версией этой формы.",
     );
-    let invariants_tools = extract_backticked_items(invariants_section);
-
-    let adr = read("spec/decisions/0005-razdelit-cli-i-mcp-publichnye-poverhnosti.md");
-    let adr_section = extract_between(
-        &adr,
-        "2. Текущая MCP-поверхность состоит ровно из 8 опубликованных tool-операций:",
-        "3. CLI может иметь команды, не опубликованные в MCP.",
+    let contract_tools = extract_backticked_items(contract_section);
+    assert_eq!(
+        counted,
+        russian_numeral(contract_tools.len()),
+        "проза называет другое число инструментов, чем перечисляет"
     );
-    let adr_tools = extract_backticked_items(adr_section);
 
     let expected = EXPECTED_MCP_TOOLS
         .iter()
@@ -123,68 +132,4233 @@ fn mcp_surface_snapshot_stays_explicit_and_documented() {
         .collect::<Vec<_>>();
 
     assert_eq!(source_tools, expected);
-    assert_eq!(invariants_tools, expected);
-    assert_eq!(adr_tools, expected);
+    assert_eq!(contract_tools, expected);
+}
+
+/// Сценарий уходит в работу только под замком `workPath`, и держит это сам код, а не
+/// перечень адаптеров, записанный руками.
+///
+/// Как читается код:
+/// - сценарий — свободная функция модуля `use_cases` или `mcp::edt_syntax` (единственного
+///   сценария, который живёт в адаптере, — arc42 §5.1, §6.7); ссылка на него — любой путь
+///   в выражении: вызов или указатель на функцию, после разрешения через `use` модуля и
+///   функции, `crate`, `self` и `super`. Типы и их методы (`ExecutionContext::cli`) —
+///   не сценарии;
+/// - помощник замка узнаётся по устройству, а не по имени: он берёт замок
+///   (`acquire_workspace_lock` или функцию, которая зовёт его сама) и зовёт переданное ему
+///   замыкание либо отдаёт его другому помощнику; область под замком — замыкания в
+///   аргументах вызова помощника;
+/// - ссылка вне слоя сценариев лежит в области под замком либо внутри свободной функции,
+///   на которую ссылаются только из областей под замком (одна ступень);
+/// - сценарии, которые по правилу идут без замка, названы ниже поимённо — с причиной.
+///
+/// Не видит: пути внутри макросов, реэкспорт модуля (реэкспорт функции прослежен),
+/// сценарий, вызванный через трейт или метод, и помощника, который отпускает замок до
+/// вызова замыкания. Замыкание, вызванное раньше захвата, помощника не делает. Точный счёт ссылок ловит ссылку, ушедшую в макрос;
+/// как проверка читает код, держит `the_lock_guard_tells_locked_dispatches_from_unlocked_ones`.
+#[test]
+fn every_scenario_is_dispatched_under_the_workspace_lock() {
+    let report = LockBoundaryReport::of(&SourceIndex::of_src(), UNLOCKED_SCENARIOS);
+
+    assert!(
+        report.violations.is_empty(),
+        "a scenario is dispatched outside the workspace lock:\n{}",
+        report.violations.join("\n")
+    );
+    let unused = UNLOCKED_SCENARIOS
+        .iter()
+        .map(|(path, _)| *path)
+        .filter(|path| !report.exempted.contains(*path))
+        .collect::<Vec<_>>();
+    assert!(
+        unused.is_empty(),
+        "an exemption names a scenario no adapter reaches any more: {unused:?}"
+    );
+    assert_eq!(
+        report.accepted, 24,
+        "the number of locked dispatches changed: update it when a command is added or removed, \
+         or find the dispatch that moved out of the guard's sight"
+    );
+    for module in [
+        "crate::app",
+        "crate::cli::execute",
+        "crate::mcp::port",
+        "crate::mcp::server",
+    ] {
+        assert!(
+            report.accepted_in.contains(module),
+            "no locked dispatch seen in {module}: {:?}",
+            report.accepted_in
+        );
+    }
+}
+
+/// Как проверка замка читает код — на исходниках, где ответ известен заранее: вызов в
+/// замыкании помощника принят, прямой вызов, вызов через `use … as` и указатель на функцию
+/// — нет; функция, которую зовут только под замком, принята, а зовут ещё и без него — нет;
+/// «помощник», который замка не берёт, никого не прикрывает.
+#[test]
+fn the_lock_guard_tells_locked_dispatches_from_unlocked_ones() {
+    let index = SourceIndex::from_sources(&[
+        (
+            "crate::use_cases::workspace_lock",
+            "pub(crate) fn acquire_workspace_lock() -> Guard { Guard }",
+        ),
+        (
+            "crate::use_cases::transport",
+            "use crate::use_cases::workspace_lock::acquire_workspace_lock;\n\
+             fn acquire() -> Guard { acquire_workspace_lock() }\n\
+             pub fn with_lock<T>(run: impl FnOnce() -> T) -> T { let _guard = acquire(); run() }\n\
+             pub fn with_lock_too<T>(run: impl FnOnce() -> T) -> T { with_lock(run) }\n\
+             pub fn pretends<T>(run: impl FnOnce() -> T) -> T { run() }\n\
+             pub fn runs_first<T>(run: impl FnOnce() -> T) -> T { let value = run(); let _guard = acquire(); value }",
+        ),
+        ("crate::use_cases::dump", "pub fn execute() {}"),
+        (
+            "crate::cli::adapter",
+            "use crate::use_cases::dump;\n\
+             use crate::use_cases::transport::{pretends, runs_first, with_lock, with_lock_too};\n\
+             fn locked() { with_lock(|| dump::execute()); }\n\
+             fn locked_too() { with_lock_too(|| crate::use_cases::dump::execute()); }\n\
+             fn only_under_the_lock() { dump::execute(); }\n\
+             fn caller() { with_lock(|| only_under_the_lock()); }\n\
+             fn also_unlocked() { dump::execute(); }\n\
+             fn first() { with_lock(|| also_unlocked()); }\n\
+             fn second() { also_unlocked(); }\n\
+             fn direct() { dump::execute(); }\n\
+             fn renamed() { use crate::use_cases::dump::execute as run_now; run_now(); }\n\
+             fn pointer() { let run: fn() = dump::execute; with_lock(run); }\n\
+             fn fake() { pretends(|| dump::execute()); }\n\
+             fn early() { runs_first(|| dump::execute()); }\n\
+             fn globbed() { use crate::use_cases::dump::*; execute(); }",
+        ),
+    ]);
+
+    let report = LockBoundaryReport::of(&index, &[]);
+
+    let mut unlocked = report
+        .violations
+        .iter()
+        .map(|violation| {
+            let context = violation.split(['(', ')']).nth(1).unwrap_or_default();
+            let target = violation.split('`').nth(1).unwrap_or_default();
+            format!("{context} {target}")
+        })
+        .collect::<Vec<_>>();
+    unlocked.sort();
+    assert_eq!(
+        unlocked,
+        [
+            "also_unlocked crate::use_cases::dump::execute",
+            "direct crate::use_cases::dump::execute",
+            "early crate::use_cases::dump::execute",
+            "early crate::use_cases::transport::runs_first",
+            "fake crate::use_cases::dump::execute",
+            "fake crate::use_cases::transport::pretends",
+            "globbed crate::use_cases::dump",
+            "pointer crate::use_cases::dump::execute",
+            "renamed crate::use_cases::dump::execute",
+        ]
+    );
+    assert_eq!(report.accepted, 3, "{:?}", report.violations);
+}
+
+/// Сценарии, которые по правилу идут без замка `workPath`, с причиной. Запись, которой
+/// больше никто не пользуется, валит проверку.
+const UNLOCKED_SCENARIOS: &[(&str, &str)] = &[
+    (
+        "crate::use_cases::config_init::execute",
+        "`init` пишет описание проекта, в `workPath` ничего",
+    ),
+    (
+        "crate::use_cases::bootstrap_project::plan",
+        "план клона ничего не пишет; замок берётся по нему",
+    ),
+    (
+        "crate::use_cases::configure_extensions::resolve_targets",
+        "проверка запроса до замка",
+    ),
+    (
+        "crate::use_cases::convert_sources::preflight_validate",
+        "проверка запроса до замка",
+    ),
+    (
+        "crate::use_cases::infobase_export::validate_configuration_request",
+        "проверка запроса до замка",
+    ),
+    (
+        "crate::use_cases::infobase_export::validate_snapshot_output",
+        "проверка запроса до замка",
+    ),
+    (
+        "crate::use_cases::infobase_export::validate_restore_request",
+        "проверка запроса до замка",
+    ),
+    (
+        "crate::use_cases::infobase_export::prepare_configuration_export",
+        "выбор исполнителя до замка: превью возвращается раньше него",
+    ),
+    (
+        "crate::use_cases::infobase_export::prepare_infobase_snapshot",
+        "выбор исполнителя до замка: превью возвращается раньше него",
+    ),
+    (
+        "crate::use_cases::infobase_export::prepare_infobase_restore",
+        "выбор исполнителя до замка: превью возвращается раньше него",
+    ),
+    (
+        "crate::use_cases::infobase_export::preview_configuration_export",
+        "превью замка не берёт",
+    ),
+    (
+        "crate::use_cases::infobase_export::preview_infobase_snapshot",
+        "превью замка не берёт",
+    ),
+    (
+        "crate::use_cases::infobase_export::preview_infobase_restore",
+        "превью замка не берёт",
+    ),
+    (
+        "crate::use_cases::request::effective_test_timeouts",
+        "чистая функция над запросом",
+    ),
+];
+
+/// Подключение `ibcmd` — а с ним требование секции `infobase.dbms` — строится только
+/// там, где сценарий зовёт `ibcmd`: исполнителем после выбора или для пробы. Перечень
+/// мест закрыт: новое место валит проверку, пока ревью не решит, что оно после выбора
+/// исполнителя, а не до него.
+#[test]
+fn an_ibcmd_connection_is_built_only_where_ibcmd_runs() {
+    const BUILT_FOR_IBCMD: &[(&str, &str)] = &[
+        (
+            "crate::use_cases::extension_inventory::Executor::of",
+            "исполнитель `extensions`: ветка `ibcmd` после выбора",
+        ),
+        (
+            "crate::use_cases::load_artifact::installed_extension_state",
+            "проба расширения перед `upload`",
+        ),
+        (
+            "crate::use_cases::infobase_export::readiness",
+            "готовность кандидата `ibcmd` в его же переборе",
+        ),
+        (
+            "crate::use_cases::infobase_export::run_configuration_provider",
+            "ветка `ibcmd` после выбора",
+        ),
+        (
+            "crate::use_cases::init_project::create_infobase_via_ibcmd",
+            "создание базы, когда выбран `ibcmd`",
+        ),
+        (
+            "crate::use_cases::build_project::helpers::build_ibcmd_dsl",
+            "шаг `ibcmd` сборки",
+        ),
+        (
+            "crate::use_cases::dump_config::helpers::build_ibcmd_dsl",
+            "шаг `ibcmd` выгрузки",
+        ),
+        (
+            "crate::use_cases::tool_extension::build_ibcmd_dsl",
+            "расширение-инструмент, когда сборку ведёт `ibcmd`",
+        ),
+    ];
+    let expected = BUILT_FOR_IBCMD
+        .iter()
+        .map(|(site, _)| (*site).to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(
+        ibcmd_connection_sites(&SourceIndex::of_src()),
+        expected,
+        "the places that build an ibcmd connection changed; each must run after ibcmd was selected or be its probe"
+    );
+}
+
+/// Место постройки называет модуль, тип и метод: одноимённые методы разных типов не
+/// сливаются в одно место, модуль внутри файла прочитан вместе с ним, а обёртка через
+/// `Self::` в самом `ibcmd.rs` — тоже место.
+#[test]
+fn the_ibcmd_site_finder_names_the_type_and_reads_nested_modules() {
+    let index = SourceIndex::from_sources(&[
+        (
+            "crate::platform::ibcmd",
+            "pub struct IbcmdConnection;\n\
+             impl IbcmdConnection {\n\
+                 pub fn from_infobase() -> Self { Self }\n\
+                 pub fn wrapped() -> Self { Self::from_infobase() }\n\
+             }",
+        ),
+        (
+            "crate::use_cases::family",
+            "use crate::platform::ibcmd::IbcmdConnection;\n\
+             struct Executor;\n\
+             impl Executor { fn of() { IbcmdConnection::from_infobase(); } }\n\
+             struct Probe;\n\
+             impl Probe { fn of() {} }\n\
+             mod inner { fn eager() { crate::platform::ibcmd::IbcmdConnection::from_infobase(); } }",
+        ),
+    ]);
+
+    assert_eq!(
+        ibcmd_connection_sites(&index),
+        [
+            "crate::platform::ibcmd::IbcmdConnection::wrapped",
+            "crate::use_cases::family::Executor::of",
+            "crate::use_cases::family::inner::eager",
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .collect()
+    );
+}
+
+fn ibcmd_connection_sites(index: &SourceIndex) -> std::collections::BTreeSet<String> {
+    let constructor = path_of("crate::platform::ibcmd::IbcmdConnection::from_infobase");
+    production_bodies(index)
+        .into_iter()
+        .filter(|body| {
+            let mut finder = PathFinder {
+                index,
+                module: &body.module,
+                local_uses: body.local_uses(index),
+                target: &constructor,
+                found: false,
+            };
+            syn::visit::visit_block(&mut finder, body.block);
+            finder.found
+        })
+        .map(|body| format!("{}::{}", body.module.join("::"), body.context))
+        .collect()
+}
+
+fn path_of(path: &str) -> Vec<String> {
+    path.split("::").map(str::to_owned).collect()
+}
+
+/// Итог проверки замка: что нарушено, что принято и где, какие исключения пригодились.
+#[derive(Default)]
+struct LockBoundaryReport {
+    violations: Vec<String>,
+    accepted: usize,
+    accepted_in: std::collections::BTreeSet<String>,
+    exempted: std::collections::BTreeSet<String>,
+}
+
+impl LockBoundaryReport {
+    fn of(index: &SourceIndex, exemptions: &[(&str, &str)]) -> Self {
+        let lock = index.lock_api();
+        let mut scan = DispatchScan::default();
+        for body in production_bodies(index) {
+            if body.unit.in_scenario_layer() {
+                continue;
+            }
+            for glob in body
+                .globs
+                .iter()
+                .chain(&block_uses(index, &body.module, body.block).globs)
+            {
+                if is_scenario_module(glob) {
+                    scan.violations.push(format!(
+                        "{} ({}): a glob import from `{}` hides what it dispatches",
+                        body.unit.file.display(),
+                        body.context,
+                        glob.join("::")
+                    ));
+                }
+            }
+            let mut walker = DispatchWalker {
+                index,
+                helpers: &lock.helpers,
+                body: &body,
+                local_uses: body.local_uses(index),
+                locked: 0,
+                scan: &mut scan,
+            };
+            syn::visit::visit_block(&mut walker, body.block);
+        }
+
+        // Ссылки на каждую функцию: все ли под замком.
+        let mut callers: std::collections::HashMap<&[String], bool> =
+            std::collections::HashMap::new();
+        for (target, locked) in &scan.function_references {
+            *callers.entry(target.as_slice()).or_insert(true) &= *locked;
+        }
+
+        let mut report = Self {
+            violations: std::mem::take(&mut scan.violations),
+            ..Self::default()
+        };
+        for reference in &scan.scenario_references {
+            let target = reference.target.join("::");
+            if exemptions.iter().any(|(path, _)| *path == target) {
+                report.exempted.insert(target);
+                continue;
+            }
+            let covered = reference.locked
+                || reference
+                    .enclosing
+                    .as_deref()
+                    .and_then(|enclosing| callers.get(enclosing))
+                    .copied()
+                    .unwrap_or(false);
+            if covered {
+                report.accepted += 1;
+                report.accepted_in.insert(reference.module.join("::"));
+            } else {
+                report.violations.push(format!(
+                    "{} ({}): `{target}` runs without the workspace lock",
+                    reference.file.display(),
+                    reference.context
+                ));
+            }
+        }
+        report
+    }
+}
+
+/// Один исходный файл программы: его модуль и разобранное дерево.
+struct SourceUnit {
+    file: PathBuf,
+    module: Vec<String>,
+    syntax: syn::File,
+}
+
+impl SourceUnit {
+    fn in_scenario_layer(&self) -> bool {
+        is_scenario_module(&self.module)
+    }
+}
+
+/// Производственный код: модули, их `use` и свободные функции.
+struct SourceIndex {
+    units: Vec<SourceUnit>,
+    /// Импорты модуля: имя → полный путь.
+    uses: std::collections::HashMap<Vec<String>, std::collections::HashMap<String, Vec<String>>>,
+    /// Имена, объявленные в модуле: функции, модули, типы.
+    items: std::collections::HashMap<Vec<String>, std::collections::HashSet<String>>,
+    /// Свободные функции по полному пути.
+    functions: std::collections::HashMap<Vec<String>, IndexedFunction>,
+}
+
+struct IndexedFunction {
+    module: Vec<String>,
+    item: syn::ItemFn,
+}
+
+impl SourceIndex {
+    fn of_src() -> Self {
+        let root = repo_path("src");
+        let units = collect_rust_files(&root)
+            .into_iter()
+            .map(|file| {
+                let relative = file.strip_prefix(&root).expect("under src");
+                let mut parts = relative
+                    .iter()
+                    .map(|part| part.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
+                let last = parts.pop().expect("file name");
+                let mut module = vec!["crate".to_owned()];
+                module.extend(parts);
+                match last.as_str() {
+                    "main.rs" | "mod.rs" => {}
+                    name => module.push(name.trim_end_matches(".rs").to_owned()),
+                }
+                let syntax = parse_rust_file(&file);
+                SourceUnit {
+                    file,
+                    module,
+                    syntax,
+                }
+            })
+            .collect();
+        Self::build(units)
+    }
+
+    /// Индекс исходников, заданных строками: модуль и текст.
+    fn from_sources(sources: &[(&str, &str)]) -> Self {
+        let units = sources
+            .iter()
+            .map(|(module, source)| SourceUnit {
+                file: PathBuf::from(format!("{}.rs", module.replace("::", "/"))),
+                module: path_of(module),
+                syntax: syn::parse_file(source).expect("parse source"),
+            })
+            .collect();
+        Self::build(units)
+    }
+
+    /// Сначала имена всех модулей, затем `use`: относительный `use` разрешается по именам
+    /// своего модуля, где бы они ни стояли.
+    fn build(units: Vec<SourceUnit>) -> Self {
+        let mut index = Self {
+            units: Vec::new(),
+            uses: Default::default(),
+            items: Default::default(),
+            functions: Default::default(),
+        };
+        for unit in &units {
+            index.index_names(&unit.module, &unit.syntax.items);
+        }
+        for unit in &units {
+            index.index_uses(&unit.module, &unit.syntax.items);
+        }
+        index.units = units;
+        index
+    }
+
+    fn index_names(&mut self, module: &[String], items: &[syn::Item]) {
+        for item in items {
+            if item_has_cfg_test(item) {
+                continue;
+            }
+            let name = match item {
+                syn::Item::Fn(item_fn) => {
+                    let name = item_fn.sig.ident.to_string();
+                    self.functions.insert(
+                        [module, std::slice::from_ref(&name)].concat(),
+                        IndexedFunction {
+                            module: module.to_vec(),
+                            item: item_fn.clone(),
+                        },
+                    );
+                    Some(name)
+                }
+                syn::Item::Mod(item_mod) => {
+                    let name = item_mod.ident.to_string();
+                    if let Some((_, nested)) = &item_mod.content {
+                        self.index_names(&[module, std::slice::from_ref(&name)].concat(), nested);
+                    }
+                    Some(name)
+                }
+                syn::Item::Struct(item) => Some(item.ident.to_string()),
+                syn::Item::Enum(item) => Some(item.ident.to_string()),
+                syn::Item::Const(item) => Some(item.ident.to_string()),
+                syn::Item::Static(item) => Some(item.ident.to_string()),
+                syn::Item::Trait(item) => Some(item.ident.to_string()),
+                syn::Item::Type(item) => Some(item.ident.to_string()),
+                _ => None,
+            };
+            if let Some(name) = name {
+                self.items.entry(module.to_vec()).or_default().insert(name);
+            }
+        }
+    }
+
+    fn index_uses(&mut self, module: &[String], items: &[syn::Item]) {
+        for item in items {
+            if item_has_cfg_test(item) {
+                continue;
+            }
+            match item {
+                syn::Item::Use(item_use) => {
+                    for (alias, path) in flatten_use(&item_use.tree).names {
+                        let full = self.absolute(module, &path);
+                        self.uses
+                            .entry(module.to_vec())
+                            .or_default()
+                            .insert(alias, full);
+                    }
+                }
+                syn::Item::Mod(item_mod) => {
+                    if let Some((_, nested)) = &item_mod.content {
+                        let inner = [module, &[item_mod.ident.to_string()]].concat();
+                        self.index_uses(&inner, nested);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Путь из `use` как полный: `crate`, `self`, `super` или имя, объявленное в модуле.
+    fn absolute(&self, module: &[String], path: &[String]) -> Vec<String> {
+        match path.first().map(String::as_str) {
+            Some("crate") => path.to_vec(),
+            Some("self") => [module, &path[1..]].concat(),
+            Some("super") => {
+                let mut base = module.to_vec();
+                let mut rest = path;
+                while rest.first().map(String::as_str) == Some("super") {
+                    base.pop();
+                    rest = &rest[1..];
+                }
+                [base.as_slice(), rest].concat()
+            }
+            Some(first)
+                if self
+                    .items
+                    .get(module)
+                    .is_some_and(|items| items.contains(first)) =>
+            {
+                [module, path].concat()
+            }
+            _ => path.to_vec(),
+        }
+    }
+
+    /// Полный путь выражения: через `use` функции, затем модуля, затем имена модуля. Одно
+    /// слово `self`, `super` или `crate` — значение, а не путь к функции.
+    fn resolve(
+        &self,
+        module: &[String],
+        local_uses: &std::collections::HashMap<String, Vec<String>>,
+        path: &syn::Path,
+    ) -> Option<Vec<String>> {
+        let segments = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        let first = segments.first()?.as_str();
+        match first {
+            "crate" | "self" | "super" if segments.len() == 1 => None,
+            "crate" | "self" | "super" => Some(self.absolute(module, &segments)),
+            _ => {
+                if let Some(prefix) = local_uses
+                    .get(first)
+                    .or_else(|| self.uses.get(module).and_then(|uses| uses.get(first)))
+                {
+                    return Some([prefix.as_slice(), &segments[1..]].concat());
+                }
+                self.items
+                    .get(module)
+                    .is_some_and(|items| items.contains(first))
+                    .then(|| [module, segments.as_slice()].concat())
+            }
+        }
+    }
+
+    /// Путь выражения после реэкспорта функции: помощник или захват под чужим именем —
+    /// всё тот же помощник. Путь не к свободной функции — к методу типа — остаётся как есть.
+    fn resolve_target(
+        &self,
+        module: &[String],
+        local_uses: &std::collections::HashMap<String, Vec<String>>,
+        path: &syn::Path,
+    ) -> Option<Vec<String>> {
+        self.resolve(module, local_uses, path)
+            .map(|path| self.function_at(path.clone()).unwrap_or(path))
+    }
+
+    /// Свободная функция, куда ведёт путь, — через `use` модуля-владельца, если имя в нём
+    /// лишь реэкспорт. Путь к модулю, типу или переменной функцией не считается.
+    fn function_at(&self, path: Vec<String>) -> Option<Vec<String>> {
+        let mut path = path;
+        for _ in 0..4 {
+            if self.functions.contains_key(&path) {
+                return Some(path);
+            }
+            let (name, owner) = path.split_last()?;
+            path = self.uses.get(owner)?.get(name)?.clone();
+        }
+        None
+    }
+
+    /// Замок по устройству кода. Берёт его `acquire_workspace_lock` или функция без
+    /// замыканий, которая зовёт его сама; помощник с замыканием берёт замок и зовёт своё
+    /// замыкание либо отдаёт его другому помощнику. Точка неподвижная: помощники зовут
+    /// друг друга.
+    fn lock_api(&self) -> LockApi {
+        let acquire = path_of("crate::use_cases::workspace_lock::acquire_workspace_lock");
+        let mut acquirers = std::collections::HashSet::from([acquire.clone()]);
+        for (path, function) in &self.functions {
+            if closure_parameters(&function.item.sig).is_empty()
+                && self.body_references(function, &acquire)
+            {
+                acquirers.insert(path.clone());
+            }
+        }
+        let mut helpers = std::collections::HashSet::new();
+        loop {
+            let before = helpers.len();
+            for (path, function) in &self.functions {
+                if helpers.contains(path) {
+                    continue;
+                }
+                let closures = closure_parameters(&function.item.sig);
+                if closures.is_empty() {
+                    continue;
+                }
+                let mut probe = HelperProbe {
+                    index: self,
+                    module: &function.module,
+                    local_uses: block_local_uses(self, &function.module, &function.item.block),
+                    closures: &closures,
+                    helpers: &helpers,
+                    acquirers: &acquirers,
+                    takes_lock: false,
+                    calls_closure: false,
+                    hands_closure_on: false,
+                    inside_helper_call: 0,
+                };
+                syn::visit::visit_block(&mut probe, &function.item.block);
+                if (probe.takes_lock && probe.calls_closure) || probe.hands_closure_on {
+                    helpers.insert(path.clone());
+                }
+            }
+            if helpers.len() == before {
+                return LockApi { acquirers, helpers };
+            }
+        }
+    }
+
+    fn body_references(&self, function: &IndexedFunction, target: &[String]) -> bool {
+        let mut finder = PathFinder {
+            index: self,
+            module: &function.module,
+            local_uses: block_local_uses(self, &function.module, &function.item.block),
+            target,
+            found: false,
+        };
+        syn::visit::visit_block(&mut finder, &function.item.block);
+        finder.found
+    }
+}
+
+/// Кто берёт замок: функции захвата и помощники с замыканием.
+struct LockApi {
+    acquirers: std::collections::HashSet<Vec<String>>,
+    helpers: std::collections::HashSet<Vec<String>>,
+}
+
+/// Тело производственного кода: где лежит, как называется в отчёте, какая свободная
+/// функция его объемлет и какие звёздочки импортирует его модуль.
+struct Body<'a> {
+    unit: &'a SourceUnit,
+    module: Vec<String>,
+    /// Имя функции или `Тип::метод`.
+    context: String,
+    /// Полный путь свободной функции; у метода его нет.
+    enclosing: Option<Vec<String>>,
+    /// Тип, чей это метод: `Self::` в теле ведёт к нему.
+    owner: Option<String>,
+    block: &'a syn::Block,
+    globs: Vec<Vec<String>>,
+}
+
+impl Body<'_> {
+    /// `use` тела и `Self` метода.
+    fn local_uses(&self, index: &SourceIndex) -> std::collections::HashMap<String, Vec<String>> {
+        let mut uses = block_local_uses(index, &self.module, self.block);
+        if let Some(owner) = &self.owner {
+            uses.insert(
+                "Self".to_owned(),
+                [self.module.as_slice(), std::slice::from_ref(owner)].concat(),
+            );
+        }
+        uses
+    }
+}
+
+/// Все тела производственного кода: свободные функции, методы типов и методы трейтов по
+/// умолчанию, в том числе в модулях внутри файла. Один обход на обе проверки.
+fn production_bodies(index: &SourceIndex) -> Vec<Body<'_>> {
+    fn walk<'a>(
+        index: &SourceIndex,
+        unit: &'a SourceUnit,
+        module: &[String],
+        items: &'a [syn::Item],
+        bodies: &mut Vec<Body<'a>>,
+    ) {
+        let globs = items
+            .iter()
+            .filter(|item| !item_has_cfg_test(item))
+            .filter_map(|item| match item {
+                syn::Item::Use(item_use) => Some(flatten_use(&item_use.tree).globs),
+                _ => None,
+            })
+            .flatten()
+            .map(|glob| index.absolute(module, &glob))
+            .collect::<Vec<_>>();
+        let mut push = |context: String,
+                        enclosing: Option<Vec<String>>,
+                        owner: Option<String>,
+                        block: &'a syn::Block| {
+            bodies.push(Body {
+                unit,
+                module: module.to_vec(),
+                context,
+                enclosing,
+                owner,
+                block,
+                globs: globs.clone(),
+            });
+        };
+        let mut nested_modules = Vec::new();
+        for item in items {
+            if item_has_cfg_test(item) {
+                continue;
+            }
+            match item {
+                syn::Item::Fn(item_fn) => {
+                    let name = item_fn.sig.ident.to_string();
+                    push(
+                        name.clone(),
+                        Some([module, &[name]].concat()),
+                        None,
+                        &item_fn.block,
+                    );
+                }
+                syn::Item::Impl(item_impl) => {
+                    let owner = match item_impl.self_ty.as_ref() {
+                        syn::Type::Path(type_path) => type_path
+                            .path
+                            .segments
+                            .last()
+                            .map(|segment| segment.ident.to_string()),
+                        _ => None,
+                    }
+                    .unwrap_or_else(|| "_".to_owned());
+                    for impl_item in &item_impl.items {
+                        if let syn::ImplItem::Fn(method) = impl_item {
+                            if !has_cfg_test(&method.attrs) {
+                                push(
+                                    format!("{owner}::{}", method.sig.ident),
+                                    None,
+                                    Some(owner.clone()),
+                                    &method.block,
+                                );
+                            }
+                        }
+                    }
+                }
+                syn::Item::Trait(item_trait) => {
+                    for trait_item in &item_trait.items {
+                        if let syn::TraitItem::Fn(method) = trait_item {
+                            if let Some(block) = &method.default {
+                                if !has_cfg_test(&method.attrs) {
+                                    push(
+                                        format!("{}::{}", item_trait.ident, method.sig.ident),
+                                        None,
+                                        None,
+                                        block,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                syn::Item::Mod(item_mod) => {
+                    if let Some((_, nested)) = &item_mod.content {
+                        nested_modules
+                            .push(([module, &[item_mod.ident.to_string()]].concat(), nested));
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (inner, nested) in nested_modules {
+            walk(index, unit, &inner, nested, bodies);
+        }
+    }
+
+    let mut bodies = Vec::new();
+    for unit in &index.units {
+        walk(index, unit, &unit.module, &unit.syntax.items, &mut bodies);
+    }
+    bodies
+}
+
+/// Имена и звёздочки одного `use`: `self` в группе — сам префикс, переименование — своим
+/// именем.
+#[derive(Default)]
+struct FlatUse {
+    names: Vec<(String, Vec<String>)>,
+    globs: Vec<Vec<String>>,
+}
+
+fn flatten_use(tree: &syn::UseTree) -> FlatUse {
+    fn walk(tree: &syn::UseTree, prefix: &mut Vec<String>, out: &mut FlatUse) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                walk(&path.tree, prefix, out);
+                prefix.pop();
+            }
+            syn::UseTree::Name(name) if name.ident == "self" => {
+                if let Some(last) = prefix.last() {
+                    out.names.push((last.clone(), prefix.clone()));
+                }
+            }
+            syn::UseTree::Name(name) => {
+                let mut path = prefix.clone();
+                path.push(name.ident.to_string());
+                out.names.push((name.ident.to_string(), path));
+            }
+            syn::UseTree::Rename(rename) => {
+                let mut path = prefix.clone();
+                if rename.ident != "self" {
+                    path.push(rename.ident.to_string());
+                }
+                out.names.push((rename.rename.to_string(), path));
+            }
+            syn::UseTree::Glob(_) => out.globs.push(prefix.clone()),
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    walk(item, prefix, out);
+                }
+            }
+        }
+    }
+    let mut out = FlatUse::default();
+    walk(tree, &mut Vec::new(), &mut out);
+    out
+}
+
+/// `use` внутри тела — на всё тело сразу: область видимости блока проверке не нужна.
+fn block_local_uses(
+    index: &SourceIndex,
+    module: &[String],
+    block: &syn::Block,
+) -> std::collections::HashMap<String, Vec<String>> {
+    block_uses(index, module, block).names
+}
+
+/// Разрешённые `use` тела: имена и звёздочки.
+struct BlockUses {
+    names: std::collections::HashMap<String, Vec<String>>,
+    globs: Vec<Vec<String>>,
+}
+
+fn block_uses(index: &SourceIndex, module: &[String], block: &syn::Block) -> BlockUses {
+    struct Uses<'a> {
+        index: &'a SourceIndex,
+        module: &'a [String],
+        found: BlockUses,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Uses<'_> {
+        fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+            let flat = flatten_use(&node.tree);
+            for (alias, path) in flat.names {
+                let full = self.index.absolute(self.module, &path);
+                self.found.names.insert(alias, full);
+            }
+            for glob in flat.globs {
+                let full = self.index.absolute(self.module, &glob);
+                self.found.globs.push(full);
+            }
+        }
+    }
+    let mut uses = Uses {
+        index,
+        module,
+        found: BlockUses {
+            names: Default::default(),
+            globs: Vec::new(),
+        },
+    };
+    syn::visit::visit_block(&mut uses, block);
+    uses.found
+}
+
+/// Имена параметров-замыканий: `impl Fn*` или параметр типа, ограниченный `Fn*`.
+fn closure_parameters(sig: &syn::Signature) -> Vec<String> {
+    fn is_fn_bound(bound: &syn::TypeParamBound) -> bool {
+        matches!(bound, syn::TypeParamBound::Trait(trait_bound)
+        if trait_bound.path.segments.last().is_some_and(|segment| {
+            matches!(segment.ident.to_string().as_str(), "Fn" | "FnMut" | "FnOnce")
+        }))
+    }
+    let mut closure_types = std::collections::HashSet::new();
+    for param in &sig.generics.params {
+        if let syn::GenericParam::Type(type_param) = param {
+            if type_param.bounds.iter().any(is_fn_bound) {
+                closure_types.insert(type_param.ident.to_string());
+            }
+        }
+    }
+    if let Some(where_clause) = &sig.generics.where_clause {
+        for predicate in &where_clause.predicates {
+            if let syn::WherePredicate::Type(predicate) = predicate {
+                if predicate.bounds.iter().any(is_fn_bound) {
+                    if let syn::Type::Path(bounded) = &predicate.bounded_ty {
+                        if let Some(ident) = bounded.path.get_ident() {
+                            closure_types.insert(ident.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    sig.inputs
+        .iter()
+        .filter_map(|input| match input {
+            syn::FnArg::Typed(typed) => Some(typed),
+            syn::FnArg::Receiver(_) => None,
+        })
+        .filter_map(|typed| {
+            let syn::Pat::Ident(name) = typed.pat.as_ref() else {
+                return None;
+            };
+            let is_closure = match typed.ty.as_ref() {
+                syn::Type::ImplTrait(impl_trait) => impl_trait.bounds.iter().any(is_fn_bound),
+                syn::Type::Path(type_path) => type_path
+                    .path
+                    .get_ident()
+                    .is_some_and(|ident| closure_types.contains(&ident.to_string())),
+                _ => false,
+            };
+            is_closure.then(|| name.ident.to_string())
+        })
+        .collect()
+}
+
+/// Что делает функция с замком и своими замыканиями.
+struct HelperProbe<'a> {
+    index: &'a SourceIndex,
+    module: &'a [String],
+    local_uses: std::collections::HashMap<String, Vec<String>>,
+    closures: &'a [String],
+    helpers: &'a std::collections::HashSet<Vec<String>>,
+    acquirers: &'a std::collections::HashSet<Vec<String>>,
+    takes_lock: bool,
+    calls_closure: bool,
+    hands_closure_on: bool,
+    inside_helper_call: usize,
+}
+
+impl HelperProbe<'_> {
+    fn is_closure_parameter(&self, expr: &syn::Expr) -> bool {
+        matches!(expr, syn::Expr::Path(path)
+            if path.path.get_ident().is_some_and(|ident| self.closures.contains(&ident.to_string())))
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for HelperProbe<'_> {
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if self
+            .index
+            .resolve_target(self.module, &self.local_uses, &node.path)
+            .is_some_and(|target| self.acquirers.contains(&target))
+        {
+            self.takes_lock = true;
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        // Замыкание засчитано, только если зовётся после захвата: код читается в порядке
+        // текста, и вызов до захвата замка ничем не прикрыт.
+        if self.is_closure_parameter(&node.func) {
+            self.calls_closure |= self.takes_lock;
+            if self.inside_helper_call > 0 {
+                self.hands_closure_on = true;
+            }
+        }
+        let calls_helper = matches!(node.func.as_ref(), syn::Expr::Path(path)
+            if self.index.resolve_target(self.module, &self.local_uses, &path.path)
+                .is_some_and(|target| self.helpers.contains(&target)));
+        if calls_helper {
+            if node.args.iter().any(|arg| self.is_closure_parameter(arg)) {
+                self.hands_closure_on = true;
+            }
+            self.inside_helper_call += 1;
+            syn::visit::visit_expr_call(self, node);
+            self.inside_helper_call -= 1;
+        } else {
+            syn::visit::visit_expr_call(self, node);
+        }
+    }
+}
+
+/// Есть ли в теле путь, ведущий к `target`.
+struct PathFinder<'a> {
+    index: &'a SourceIndex,
+    module: &'a [String],
+    local_uses: std::collections::HashMap<String, Vec<String>>,
+    target: &'a [String],
+    found: bool,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for PathFinder<'_> {
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if self
+            .index
+            .resolve_target(self.module, &self.local_uses, &node.path)
+            .is_some_and(|path| path == self.target)
+        {
+            self.found = true;
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+}
+
+/// Ссылка на сценарий: куда ведёт, откуда и под замком ли.
+struct ScenarioReference {
+    target: Vec<String>,
+    file: PathBuf,
+    module: Vec<String>,
+    context: String,
+    enclosing: Option<Vec<String>>,
+    locked: bool,
+}
+
+#[derive(Default)]
+struct DispatchScan {
+    scenario_references: Vec<ScenarioReference>,
+    /// Ссылки на свободные функции программы: куда и под замком ли.
+    function_references: Vec<(Vec<String>, bool)>,
+    violations: Vec<String>,
+}
+
+fn is_scenario_module(path: &[String]) -> bool {
+    path.starts_with(&path_of("crate::use_cases"))
+        || path.starts_with(&path_of("crate::mcp::edt_syntax"))
+}
+
+/// Свободная функция сценария: модульный путь и имя в `snake_case`, без типов.
+fn is_scenario_function(path: &[String]) -> bool {
+    is_scenario_module(path)
+        && path.len() > 2
+        && path[1..].iter().all(|segment| {
+            segment
+                .chars()
+                .next()
+                .is_some_and(|first| first.is_ascii_lowercase())
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        })
+}
+
+struct DispatchWalker<'a, 'b> {
+    index: &'a SourceIndex,
+    helpers: &'a std::collections::HashSet<Vec<String>>,
+    body: &'a Body<'b>,
+    local_uses: std::collections::HashMap<String, Vec<String>>,
+    locked: usize,
+    scan: &'a mut DispatchScan,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for DispatchWalker<'_, '_> {
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if let Some(target) = self
+            .index
+            .resolve(&self.body.module, &self.local_uses, &node.path)
+            .and_then(|path| self.index.function_at(path))
+        {
+            let locked = self.locked > 0;
+            self.scan.function_references.push((target.clone(), locked));
+            if is_scenario_function(&target) && !self.helpers.contains(&target) {
+                self.scan.scenario_references.push(ScenarioReference {
+                    target,
+                    file: self.body.unit.file.clone(),
+                    module: self.body.module.clone(),
+                    context: self.body.context.clone(),
+                    enclosing: self.body.enclosing.clone(),
+                    locked,
+                });
+            }
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        let calls_helper = matches!(node.func.as_ref(), syn::Expr::Path(path)
+            if self.index.resolve_target(&self.body.module, &self.local_uses, &path.path)
+                .is_some_and(|target| self.helpers.contains(&target)));
+        if !calls_helper {
+            syn::visit::visit_expr_call(self, node);
+            return;
+        }
+        self.visit_expr(&node.func);
+        for arg in &node.args {
+            if matches!(arg, syn::Expr::Closure(_)) {
+                self.locked += 1;
+                self.visit_expr(arg);
+                self.locked -= 1;
+            } else {
+                self.visit_expr(arg);
+            }
+        }
+    }
+}
+
+/// Числительное для счёта, который эта проверка сверяет с прозой. Перечень короткий
+/// намеренно: он покрывает правдоподобный размер поверхности, а не русский язык.
+fn russian_numeral(count: usize) -> &'static str {
+    match count {
+        5 => "пять",
+        6 => "шесть",
+        7 => "семь",
+        8 => "восемь",
+        9 => "девять",
+        10 => "десять",
+        11 => "одиннадцать",
+        12 => "двенадцать",
+        other => panic!("числительного для {other} в проверке нет — допишите"),
+    }
+}
+
+/// Вложенные шаги не берут блокировку повторно: замок рабочего каталога живёт на
+/// границе адаптера, а сценарии зовут друг друга через входы без замка. Второй захват
+/// изнутри дал бы «занято» самому себе.
+///
+/// Захват узнаётся по устройству, как у проверки границы: и `acquire_workspace_lock`, и
+/// любой помощник замка, под каким бы именем он ни был.
+#[test]
+fn nested_orchestration_never_acquires_the_workspace_lock_inside_use_cases() {
+    let relocks = relocks_in_the_scenario_layer(&SourceIndex::of_src());
+    assert!(
+        relocks.is_empty(),
+        "a use case takes the workspace lock; nested steps run under the caller's lock:\n{}",
+        relocks.join("\n")
+    );
+
+    // `test` строит перед прогоном тем же сценарием сборки, не выходя на границу адаптера.
+    let run_tests = read("src/use_cases/run_tests/coordinator.rs");
+    assert!(
+        run_tests.contains("build_project::execute("),
+        "run_tests must reuse the build use case directly, under the lock already held by the caller"
+    );
+}
+
+/// Ссылки слоя сценариев на захват замка или его помощников. `workspace_lock` замок
+/// реализует, `transport` — граница адаптера, где он берётся один раз за команду.
+fn relocks_in_the_scenario_layer(index: &SourceIndex) -> Vec<String> {
+    let lock = index.lock_api();
+    let boundary = [
+        path_of("crate::use_cases::workspace_lock"),
+        path_of("crate::use_cases::transport"),
+    ];
+    let mut relocks = Vec::new();
+    for body in production_bodies(index) {
+        if !body.unit.in_scenario_layer() || boundary.contains(&body.module) {
+            continue;
+        }
+        for target in lock.acquirers.iter().chain(&lock.helpers) {
+            let mut finder = PathFinder {
+                index,
+                module: &body.module,
+                local_uses: body.local_uses(index),
+                target,
+                found: false,
+            };
+            syn::visit::visit_block(&mut finder, body.block);
+            if finder.found {
+                relocks.push(format!(
+                    "{} ({}): `{}`",
+                    body.unit.file.display(),
+                    body.context,
+                    target.join("::")
+                ));
+            }
+        }
+    }
+    relocks.sort();
+    relocks
+}
+
+/// Проверка повторного захвата видит его и через помощника под любым именем.
+#[test]
+fn the_relock_guard_sees_a_lock_taken_through_a_helper() {
+    let index = SourceIndex::from_sources(&[
+        (
+            "crate::use_cases::workspace_lock",
+            "pub(crate) fn acquire_workspace_lock() -> Guard { Guard }",
+        ),
+        (
+            "crate::use_cases::transport",
+            "use crate::use_cases::workspace_lock::acquire_workspace_lock;\n\
+             pub fn hold<T>(run: impl FnOnce() -> T) -> T { let _guard = acquire_workspace_lock(); run() }",
+        ),
+        (
+            "crate::use_cases",
+            "pub(crate) use self::transport::hold as relock;",
+        ),
+        (
+            "crate::use_cases::nested",
+            "use crate::use_cases::transport::hold;\n\
+             pub fn execute() { hold(|| ()); }\n\
+             pub fn renamed() { crate::use_cases::relock(|| ()); }\n\
+             pub fn plain() {}",
+        ),
+    ]);
+
+    assert_eq!(
+        relocks_in_the_scenario_layer(&index),
+        [
+            "crate/use_cases/nested.rs (execute): `crate::use_cases::transport::hold`",
+            "crate/use_cases/nested.rs (renamed): `crate::use_cases::transport::hold`",
+        ]
+    );
+}
+
+/// Лимит одновременных вызовов общий для обоих транспортов: семафор допуска создаётся
+/// в одном месте, и оба конструктора — stdio и http — приходят к нему одной дорогой.
+/// Второй `Semaphore::new` означал бы второй лимит, о котором конфиг не знает.
+#[test]
+fn mcp_admission_is_built_once_and_shared_by_both_transports() {
+    let source = read("src/mcp/server.rs");
+    let production = production_tokens(repo_path("src/mcp/server.rs").as_path());
+    assert_eq!(
+        production.matches("Semaphore::new(").count(),
+        1,
+        "admission must be built in exactly one place"
+    );
+
+    for constructor in ["fn stdio(", "fn http("] {
+        let start = source
+            .find(constructor)
+            .unwrap_or_else(|| panic!("{constructor} constructor is missing"));
+        let body = &source[start..];
+        let end = body[constructor.len()..]
+            .find("\n    pub fn ")
+            .map(|offset| offset + constructor.len())
+            .unwrap_or(body.len());
+        let window = &body[..end];
+        assert!(
+            window.contains("with_port(") || window.contains("Self::new("),
+            "{constructor} must build the server through the shared constructor"
+        );
+        assert!(
+            !window.contains("Semaphore::new("),
+            "{constructor} builds its own admission limit"
+        );
+    }
+}
+
+/// Слово исхода в подписи узла пишет presenter, а не рендерер.
+///
+/// Пока его писал каждый рендерер сам, подпись расходилась со знаком: `syntax` называл
+/// проверку успешной, имея предупреждение среди подробностей, `test` обещал
+/// предупреждения, не имея их. Оба расхождения нашли тесты, а не правило. Теперь слово
+/// и знак берутся из одного значения (`NodeMark`), и рендереру незачем их произносить.
+#[test]
+fn a_renderer_never_spells_the_outcome_word_itself() {
+    const OUTCOME_WORDS: &[&str] = &["completed successfully", "completed with warnings"];
+    let renderers = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/cli/execute.rs");
+    let text = fs::read_to_string(&renderers).expect("renderers are readable");
+    for word in OUTCOME_WORDS {
+        assert!(
+            !text.contains(word),
+            "{}: the outcome word `{word}` belongs to the presenter; name the subject and let it pick the word and the sign together",
+            renderers.display()
+        );
+    }
+}
+
+/// Показ команды маскирует один владелец — `platform::secrets`. Пока его писала каждая
+/// поверхность сама, превью запуска печатало `Pwd=***`, а отказ настоящего запуска той
+/// же базы — `Pwd=s3cret`, и в stderr, и в журнал действий: правило, у которого четыре
+/// исполнителя, — это четыре разных правила. Признак повтора — модуль, который строит
+/// показ запрошенного процесса сам, не позвав владельца.
+#[test]
+fn a_process_command_is_shown_only_through_the_secrets_owner() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let owner = repo_path("src/platform/secrets.rs");
+
+    for file in collect_rust_files(&repo_path("src")) {
+        if file == owner {
+            continue;
+        }
+        let production = production_tokens(&file);
+        // `cmd:` — это поле показа у `ProcessError`; вместе с типом запроса оно и
+        // означает, что модуль показывает argv запрошенного процесса. Поле `command`
+        // журнала само по себе не признак: им называют и имя команды CLI.
+        let requests_a_process = production.contains("ProcessRequest")
+            || production.contains("InteractiveProcessRequest");
+        if !(requests_a_process && production.contains("cmd:")) {
+            continue;
+        }
+
+        assert!(
+            production.contains("render_masked_command"),
+            "{} shows a process command and must take the string from platform::secrets",
+            file.strip_prefix(repo_root)
+                .expect("relative path")
+                .display()
+        );
+    }
+}
+
+/// Ключ `builder` снят решением `DEC.2026-09-14.BUILDER-KEY-IS-REMOVED`: конфиг с ним
+/// не проходит валидацию. `tests/provider_matrix.rs` держит отказ со стороны рантайма,
+/// а здесь — со стороны поставляемого навыка: `SKILL/` читают в чужих проектах, и
+/// вернувшееся туда упоминание снова научило бы агентов писать конфиг, который раннер
+/// отвергает. Единственный владелец выбора исполнителя — `providers.<операция>`.
+#[test]
+fn the_shipped_skill_never_names_the_removed_builder_key() {
+    let skill_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("SKILL");
+    let mut offenders = Vec::new();
+    let mut stack = vec![skill_root.clone()];
+
+    while let Some(path) = stack.pop() {
+        for entry in fs::read_dir(&path).expect("read SKILL directory") {
+            let entry = entry.expect("SKILL directory entry");
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                stack.push(entry_path);
+                continue;
+            }
+            // Расширение не фильтруется: ключ может вернуться и в yaml рядом с навыком,
+            // а «то же самое под другим именем» — это ровно то, что ловит эта проверка.
+            if entry_path.extension().is_none() {
+                continue;
+            }
+            let text = fs::read_to_string(&entry_path).expect("read SKILL file");
+            for (index, line) in text.lines().enumerate() {
+                if line.contains("builder") {
+                    offenders.push(format!(
+                        "{}:{}: {}",
+                        entry_path
+                            .strip_prefix(&skill_root)
+                            .unwrap_or(&entry_path)
+                            .display(),
+                        index + 1,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "SKILL/ must not name the removed `builder` key; use `providers.<operation>` instead:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// Маскирование секретов имеет одного владельца, и второй набор правил рядом с ним —
+/// то, как эта дыра появилась в прошлый раз.
+///
+/// `run_tests` вёл собственный словарь флагов: знал `/P` и `/N` и не знал `/WSP`, `/UC`,
+/// `/AccessToken`. Предыдущий guard его не видел, потому что смотрел только на модули,
+/// показывающие argv процесса, а этот чистил чужую прозу. Здесь признак другой: файл,
+/// который сам пишет регулярное выражение по секретному ключу, обязан звать владельца.
+#[test]
+fn secret_masking_rules_live_with_their_owner() {
+    let owner = repo_path("src/platform/secrets.rs");
+    // Ключи взяты из словаря владельца: их появление в регулярном выражении и означает
+    // «здесь маскируют секрет».
+    const SECRET_KEY_MARKERS: &[&str] = &["/P", "pwd=", "password=", "/WSP", "/UC"];
+    let mut offenders = Vec::new();
+
+    for file in collect_rust_files(&repo_path("src")) {
+        if file == owner {
+            continue;
+        }
+        // `production_tokens` убирает пробелы целиком, поэтому `Regex :: new` из текста
+        // токенов снова читается как `Regex::new`. Искомые ключи пробелов не содержат.
+        let production = production_tokens(&file);
+        let writes_a_secret_regex = production.contains("Regex::new")
+            && SECRET_KEY_MARKERS
+                .iter()
+                .any(|marker| production.contains(marker));
+        if !writes_a_secret_regex {
+            continue;
+        }
+        // Нужен вызов, а не упоминание: `platform::secrets` встречается и в прозе
+        // комментария, поэтому признаком делегирования служит путь к элементу.
+        if !production.contains("platform::secrets::") {
+            offenders.push(file.display().to_string());
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these modules mask secrets with their own rules instead of calling \
+         platform::secrets, which is the single owner:\n{}",
+        offenders.join("\n")
+    );
 }
 
 #[test]
-fn public_command_adapters_keep_workspace_lock_boundary() {
-    for function in [
-        "execute_extensions",
-        "execute_init",
-        "execute_build",
-        "execute_test",
-        "execute_load",
-        "execute_dump",
-        "execute_infobase_configuration_export",
-        "execute_infobase_dump",
-        "execute_convert",
-        "execute_artifacts",
-        "execute_syntax",
-        "execute_launch",
-    ] {
-        let window = free_function_tokens(repo_path("src/cli/execute.rs").as_path(), function);
-        assert!(
-            window.contains("with_cli_workspace_lock(")
-                || window.contains("with_cli_workspace_lock_observed("),
-            "{function} must keep the CLI workspace-lock boundary"
-        );
+fn the_loopback_question_is_answered_in_one_place() {
+    // Корень проблемы: «петлевой ли адрес» решали сравнением подстрок, и `127.evil.com`
+    // с `127.0.0.1@evil.com` проходили проверку. Владелец ответа один — `support::authority`,
+    // потому что только разбор адреса знает про userinfo, скобки IPv6 и запись байтов.
+    let owner = repo_path("src/support/authority.rs");
+    // Первыми идут формы, которыми ошибка и была написана: сравнение по подстроке
+    // и по префиксу. Без них защита стерегла бы только аккуратные написания — те,
+    // которые и так безобидны, — и молчала бы ровно про тот дефект, чьё имя носит.
+    const LOOPBACK_DECISION_MARKERS: &[&str] = &[
+        "starts_with(\"127",
+        "starts_with(\"::1",
+        "contains(\"127",
+        "contains(\"localhost",
+        "ends_with(\"localhost",
+        // Целиком закрытые литералы: `"127.0.0.1:3000"` из значения по умолчанию
+        // ни под один из них не подходит, а плечо `match` и `Some("127")` — да.
+        "\"127.\"",
+        "\"127\"",
+        "\"localhost\"",
+        "\"::1\"",
+        ".is_loopback()",
+    ];
+    let mut offenders = Vec::new();
+
+    for file in collect_rust_files(&repo_path("src")) {
+        if file == owner {
+            continue;
+        }
+        let production = production_tokens(&file);
+        let decides_about_loopback = LOOPBACK_DECISION_MARKERS
+            .iter()
+            .any(|marker| production.contains(marker));
+        if !decides_about_loopback {
+            continue;
+        }
+        if !production.contains("support::authority::") {
+            offenders.push(file.display().to_string());
+        }
     }
 
-    for function in [
-        "build_project",
-        "run_tests",
-        "dump_config",
-        "launch_app",
-        "check_syntax",
-    ] {
-        let window = trait_impl_method_tokens(
-            repo_path("src/mcp/port.rs").as_path(),
-            "McpUseCasePort",
-            "DefaultMcpUseCasePort",
-            function,
-        );
-        assert!(
-            window.contains("with_workspace_lock("),
-            "{function} must keep the MCP workspace-lock boundary"
-        );
-    }
+    assert!(
+        offenders.is_empty(),
+        "these modules decide what a loopback address is on their own instead of calling \
+         support::authority, which is the single owner:\n{}",
+        offenders.join("\n")
+    );
 }
 
 #[test]
-fn change_checklist_covers_mcp_workspace_lock_and_config_contract() {
-    let checklist = read("spec/architecture/change-checklist.md");
+fn a_host_port_record_is_read_in_one_place() {
+    // Корень проблемы: запись `host:port` резали по последнему двоеточию в двух местах —
+    // у SSH-шлюза автономного сервера и у `attach` агента, — и скобки IPv6 оставались в
+    // хосте, который затем не разрешался. Владелец чтения один — `support::authority`:
+    // только разбор адреса знает про скобки, порт, IDNA и запрещённые символы. Свои
+    // правила поверх (порт обязателен) модули добавляют к его ответу, а не к строке.
+    let owner = repo_path("src/support/authority.rs");
+    // Маркеры порождаются разбором сниппетов: так они совпадают с тем, как `syn` печатает
+    // токены, и не зависят от пробелов. Первые — формы, которыми дефект был написан.
+    // Известная дыра: `parse::<SocketAddr>()` — тоже читатель адреса, но у него есть
+    // законные места (`mcp.http.bind_address` — числовой адрес привязки), и маркером он
+    // станет вместе со своим allowlist.
+    let markers: Vec<(String, &str)> = [
+        "rsplit_once(':')",
+        "rsplit_once(\":\")",
+        "rsplitn(2, ':')",
+        "rsplitn(2, \":\")",
+        "rfind(':')",
+        "rfind(\":\")",
+        "split_once(':')",
+        "split_once(\":\")",
+    ]
+    .into_iter()
+    .map(|call| (cut_marker(call), call))
+    .collect();
+    // Строки `ключ: значение` режут по первому двоеточию законно: это не адреса. Список
+    // может только сокращаться.
+    const KEY_VALUE_LINE_READERS: &[&str] = &[
+        "src/platform/extension_inventory.rs",
+        "src/support/edt_project.rs",
+    ];
+    let mut offenders = Vec::new();
+
+    for file in collect_rust_files(&repo_path("src")) {
+        if file == owner {
+            continue;
+        }
+        let relative = file
+            .strip_prefix(repo_path(""))
+            .expect("inside the repository")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let source = without_doc_comments(&production_source(&file));
+        for (marker, call) in &markers {
+            if !source.contains(marker.as_str()) {
+                continue;
+            }
+            if call.starts_with("split_once") && KEY_VALUE_LINE_READERS.contains(&relative.as_str())
+            {
+                continue;
+            }
+            offenders.push(format!("{relative}: {call}"));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these modules cut a host:port record by a colon on their own instead of calling \
+         support::authority::host_and_port_of_authority, which is the single owner:\n{}",
+        offenders.join("\n")
+    );
+
+    // Запись allowlist, за которой больше нет `split_once` по двоеточию, устарела: список
+    // может только сокращаться, и стареть молча ему нельзя.
+    let split_once_markers: Vec<&String> = markers
+        .iter()
+        .filter(|(_, call)| call.starts_with("split_once"))
+        .map(|(marker, _)| marker)
+        .collect();
+    let stale: Vec<&str> = KEY_VALUE_LINE_READERS
+        .iter()
+        .copied()
+        .filter(|relative| {
+            let source = without_doc_comments(&production_source(&repo_path(relative)));
+            !split_once_markers
+                .iter()
+                .any(|marker| source.contains(marker.as_str()))
+        })
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "stale KEY_VALUE_LINE_READERS entries — the files no longer split a line by a colon, \
+         remove them from the allowlist:\n{}",
+        stale.join("\n")
+    );
+}
+
+#[test]
+fn an_agent_deferral_is_read_in_one_place() {
+    // Корень проблемы (#317): `with_session` жил в двух копиях, и каждая брала отмену,
+    // которую агентская сессия отложила, только у удачи, — отказ после отложенной отмены
+    // терял её. Владелец один — `use_cases::agent_session`: его `with_session` и
+    // `run_critical` отдают этот факт и удаче, и отказу. Копия, которая читает сессию сама,
+    // ловится здесь под любым именем; копия, которая её не читает, — ниже, по критической
+    // команде.
+    const SESSION_DEFERRAL_READERS: &[&str] =
+        &[".deferred_interruption()", ".last_command_deferral()"];
+    let owner = repo_path("src/use_cases/agent_session.rs");
+    // Сессия сама объявляет эти чтения; её модуль — не читатель.
+    let session = repo_path("src/platform/agent.rs");
+    let owner_tokens = production_tokens(&owner);
+    for reader in SESSION_DEFERRAL_READERS {
+        assert!(
+            owner_tokens.contains(reader),
+            "use_cases::agent_session no longer reads `{reader}`: the guard must name the \
+             reader that replaced it"
+        );
+    }
+    let mut offenders = Vec::new();
+
+    for file in collect_rust_files(&repo_path("src")) {
+        if file == owner || file == session {
+            continue;
+        }
+        let production = production_tokens(&file);
+        for reader in SESSION_DEFERRAL_READERS {
+            if production.contains(reader) {
+                offenders.push(format!("{}: {reader}", file.display()));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these modules read the agent session's deferred cancellation on their own instead \
+         of going through use_cases::agent_session, which is the single owner:\n{}",
+        offenders.join("\n")
+    );
+
+    // Та же потеря без второго читателя: критическую команду отправили там, где отсрочку не
+    // читает никто. Отсрочку называют `run_critical` и сессия `with_session`, поэтому
+    // политику критической сценарии делают только в них; `restore-ib` идёт внутри
+    // `with_session`. Список может только сокращаться.
+    const CRITICAL_AGENT_COMMAND_SITES: &[&str] = &[
+        "src/use_cases/agent_session.rs",
+        "src/use_cases/infobase_export/agent.rs",
+    ];
+    let mut critical_sites = Vec::new();
+    for file in collect_rust_files(&repo_path("src/use_cases")) {
+        let relative = file
+            .strip_prefix(repo_path(""))
+            .expect("inside the repository")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if production_tokens(&file).contains(".critical()") {
+            critical_sites.push(relative);
+        }
+    }
+    let unexpected: Vec<&String> = critical_sites
+        .iter()
+        .filter(|site| !CRITICAL_AGENT_COMMAND_SITES.contains(&site.as_str()))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "these modules send a critical agent command where nobody reads its deferral; use \
+         agent_session::run_critical:\n{unexpected:?}"
+    );
+    let stale: Vec<&&str> = CRITICAL_AGENT_COMMAND_SITES
+        .iter()
+        .filter(|site| !critical_sites.iter().any(|found| found == *site))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "stale CRITICAL_AGENT_COMMAND_SITES entries, remove them: {stale:?}"
+    );
+
+    // Одну отсрочку помнят две защёлки: сессия целиком (её читает `with_session`) и
+    // последняя команда (её читает `run_critical`). Встретившись в одном сценарии, они
+    // назвали бы одну отмену дважды.
+    let doubled: Vec<String> = collect_rust_files(&repo_path("src/use_cases"))
+        .into_iter()
+        .filter(|file| *file != owner)
+        .filter(|file| {
+            let production = production_tokens(file);
+            production.contains("with_session(") && production.contains("run_critical(")
+        })
+        .map(|file| file.display().to_string())
+        .collect();
+    assert!(
+        doubled.is_empty(),
+        "these modules run `run_critical` and `with_session` together and would name one \
+         deferral twice:\n{}",
+        doubled.join("\n")
+    );
+}
+
+#[test]
+fn a_critical_phase_names_its_deferral_through_the_owner() {
+    // Корень проблемы (#317 и следом `infobase create`): критическая команда откладывает
+    // отмену до своего исхода, а сценарий читал её результат только ради статуса, и ранний
+    // выход — отказ, `?`, безопасная точка — уносил отсрочку. Владелец называния — учёт
+    // `use_cases::interruption` (`Deferrals`, `collecting_deferrals`, `record_deferral`,
+    // `deferred_process_interruption`) и агентские `run_critical` и `with_session`. Функция,
+    // которая объявляет критическую фазу процесса, сама называет её отсрочку через них.
+    //
+    // Строитель критического DSL отсрочку не видит: её называет хозяин из `DELEGATED` —
+    // функция того же модуля, которой достаются команда или её итог. Строитель принят, когда
+    // хозяин ниже него или когда каждая цепочка вызовов над ним доходит до самого хозяина;
+    // прямой вызывающий может и сам отдать итог хозяину. Вызов в обход хозяина назван как
+    // обход. Строка устарела, когда нет строителя или хозяина, когда строитель больше не
+    // объявляет фазу или называет её сам или когда хозяин отсрочки не называет.
+    //
+    // Не видит: вторую фазу внутри функции, которая учёт уже вызывает, — её ловят проверки
+    // правила INV.USE-CASES.A-DEFERRED-CANCELLATION-OUTLIVES-A-LATER-FAILURE; второго
+    // потребителя DSL ниже строителя, когда хозяин тоже ниже; фазу, объявленную вне тела
+    // функции — в константе или внутри макроса; вызов строителя из другого модуля. Вызов и
+    // ссылка на функцию узнаются по имени: метод — по имени метода, без типа приёмника.
+    const DELEGATED: &[(&str, &str)] = &[
+        (
+            "crate::use_cases::configure_extensions::run_configure",
+            "crate::use_cases::configure_extensions::SafetySetter::disable",
+        ),
+        (
+            "crate::use_cases::infobase_export::run_restore_provider",
+            "crate::use_cases::infobase_export::execute_infobase_restore",
+        ),
+        (
+            "crate::use_cases::init_project::create_infobase_via_designer",
+            "crate::use_cases::init_project::infobase_create_step",
+        ),
+        (
+            "crate::use_cases::init_project::create_infobase_via_ibcmd",
+            "crate::use_cases::init_project::infobase_create_step",
+        ),
+        (
+            "crate::use_cases::tool_extension::build_designer_dsl",
+            "crate::use_cases::tool_extension::ensure_written",
+        ),
+        (
+            "crate::use_cases::tool_extension::build_ibcmd_dsl",
+            "crate::use_cases::tool_extension::ensure_written",
+        ),
+    ];
+
+    let report = deferral_report(&SourceIndex::of_src(), DELEGATED);
+
+    assert!(
+        report.any_critical,
+        "no scenario declares a critical phase any more: the guard must name what replaced it"
+    );
+    assert!(
+        report.stale.is_empty(),
+        "stale DELEGATED entries, remove or fix them:\n{}",
+        report.stale.join("\n")
+    );
+    assert!(
+        report.unnamed.is_empty(),
+        "these functions declare a critical phase but never name its deferral through \
+         use_cases::interruption or the agent session helpers:\n{}",
+        report.unnamed.join("\n")
+    );
+}
+
+/// Как страж связывает фазу с учётом — на исходнике, где ответ известен заранее:
+/// - фаза, чья функция называет отсрочку, принята; фаза рядом, чью отсрочку не называет
+///   никто, — нет, хотя учёт в модуле есть; одноимённые методы разных типов не сливаются;
+/// - `.critical()` объявляет фазу; `.critical(флаг)`, образец в `match` и метод под
+///   `#[cfg(test)]` — нет;
+/// - строитель принят, когда каждая цепочка над ним доходит до хозяина, — и тогда, когда
+///   звено цепочки зовёт одноимённый метод; вызов в обход хозяина снимает принятие, даже
+///   если выше этот обход зовёт функция, которая зовёт и хозяина;
+/// - строитель принят, когда хозяин ниже него, и не принят, когда вниз до хозяина не дойти;
+/// - строка без строителя, строка, чей строитель называет отсрочку сам, и строка, чей
+///   хозяин отсрочки не называет, — устаревшие.
+#[test]
+fn the_deferral_guard_checks_each_critical_phase() {
+    let index = SourceIndex::from_sources(&[(
+        "crate::use_cases::family",
+        "fn named(context: &Context, deferrals: &mut Deferrals) {\n\
+             let result = run(context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None));\n\
+             deferrals.note_result(\"load\", &result);\n\
+         }\n\
+         fn forgotten(context: &Context) {\n\
+             let _ = run(context.process_policy(InterruptionSafetyClass::NoExternalProcess, None));\n\
+         }\n\
+         fn build_dsl(context: &Context) -> Dsl {\n\
+             Dsl::new(context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None))\n\
+         }\n\
+         fn create(context: &Context) -> Output { build_dsl(context).create() }\n\
+         fn step(context: &Context) {\n\
+             let _ = collecting_deferrals(|deferrals| {\n\
+                 let result = create(context);\n\
+                 deferrals.note_result(\"step\", &result);\n\
+                 Ok(())\n\
+             });\n\
+         }\n\
+         fn build_other(context: &Context) -> Dsl {\n\
+             Dsl::new(context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None))\n\
+         }\n\
+         fn ensure(deferrals: &mut Deferrals, result: &Output) { deferrals.note_result(\"other\", result); }\n\
+         fn with_owner(context: &Context, deferrals: &mut Deferrals) { ensure(deferrals, &build_other(context).run()); }\n\
+         fn bypass(context: &Context) -> bool { build_other(context).run().ok }\n\
+         fn build_third(context: &Context) -> Dsl {\n\
+             Dsl::new(context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None))\n\
+         }\n\
+         fn probe_third(context: &Context) -> bool { build_third(context).run().ok }\n\
+         fn with_probe(context: &Context, deferrals: &mut Deferrals) {\n\
+             if probe_third(context) { ensure(deferrals, &build_third(context).run()); }\n\
+         }\n\
+         struct Setter { dsl: Dsl }\n\
+         impl Setter {\n\
+             fn disable(&mut self, deferrals: &mut Deferrals) { deferrals.note_result(\"safety\", &self.dsl.update()); }\n\
+         }\n\
+         fn configure(context: &Context, deferrals: &mut Deferrals) {\n\
+             let mut setter = Setter { dsl: Dsl::new(context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None)) };\n\
+             apply(&mut setter, deferrals);\n\
+         }\n\
+         fn apply(setter: &mut Setter, deferrals: &mut Deferrals) { setter.disable(deferrals); }\n\
+         fn configure_alone(context: &Context) {\n\
+             let setter = Setter { dsl: Dsl::new(context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None)) };\n\
+             let _ = setter.dsl.update();\n\
+         }\n\
+         fn self_named(context: &Context, deferrals: &mut Deferrals) {\n\
+             let result = run(context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None));\n\
+             deferrals.note_result(\"self\", &result);\n\
+         }\n\
+         fn agent(wait: &WaitPolicy) { let _ = run_command(&wait.critical()); }\n\
+         fn flagged(wait: &WaitPolicy) { let _ = wait.critical(true); }\n\
+         fn classify(class: InterruptionSafetyClass) -> bool {\n\
+             match class { InterruptionSafetyClass::CriticalNonAbortable => true, _ => false }\n\
+         }\n\
+         struct Writer;\n\
+         impl Writer {\n\
+             fn run(&self, context: &Context) {\n\
+                 let _ = go(context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None));\n\
+             }\n\
+         }\n\
+         struct Reader;\n\
+         impl Reader {\n\
+             fn run(&self, deferrals: &mut Deferrals, result: &Output) { deferrals.note_result(\"read\", result); }\n\
+             #[cfg(test)]\n\
+             fn only_in_tests(context: &Context) {\n\
+                 let _ = go(context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None));\n\
+             }\n\
+         }",
+    )]);
+
+    let report = deferral_report(
+        &index,
+        &[
+            (
+                "crate::use_cases::family::build_dsl",
+                "crate::use_cases::family::step",
+            ),
+            (
+                "crate::use_cases::family::build_other",
+                "crate::use_cases::family::ensure",
+            ),
+            (
+                "crate::use_cases::family::build_third",
+                "crate::use_cases::family::ensure",
+            ),
+            (
+                "crate::use_cases::family::configure",
+                "crate::use_cases::family::Setter::disable",
+            ),
+            (
+                "crate::use_cases::family::configure_alone",
+                "crate::use_cases::family::Setter::disable",
+            ),
+            (
+                "crate::use_cases::family::gone",
+                "crate::use_cases::family::step",
+            ),
+            (
+                "crate::use_cases::family::self_named",
+                "crate::use_cases::family::step",
+            ),
+            (
+                "crate::use_cases::family::forgotten",
+                "crate::use_cases::family::create",
+            ),
+        ],
+    );
+
+    assert!(report.any_critical);
+    assert_eq!(
+        report.unnamed,
+        [
+            "crate::use_cases::family::Writer::run",
+            "crate::use_cases::family::agent",
+            "crate::use_cases::family::build_other (not every call reaches crate::use_cases::family::ensure)",
+            "crate::use_cases::family::build_third (not every call reaches crate::use_cases::family::ensure)",
+            "crate::use_cases::family::configure_alone (not every call reaches crate::use_cases::family::Setter::disable)",
+            "crate::use_cases::family::forgotten",
+        ]
+    );
+    assert_eq!(
+        report.stale,
+        [
+            "crate::use_cases::family::gone → crate::use_cases::family::step",
+            "crate::use_cases::family::self_named → crate::use_cases::family::step",
+            "crate::use_cases::family::forgotten → crate::use_cases::family::create",
+        ]
+    );
+}
+
+#[test]
+fn a_cancel_test_operator_lives_in_the_process_module() {
+    // Корень проблемы: тесты отмены сами собирали оператора — поток, который ждёт, пока
+    // подставная программа отметит своё начало файлом, и отменяет команду. Семь повторяли
+    // обвязку вокруг прежнего `HeldCommand::interrupt`, четыре писали поток оператора сами.
+    // Владелец один — `src/platform/process.rs`: `HeldCommand::interrupt_during` для
+    // критической команды и `cancel_when_started` для некритической. `DeferralWatch` вне
+    // модуля не видно, так что оператора, который ждёт отметку отложенной отмены, в другом
+    // модуле не собрать. Здесь ловится цикл `while` или `loop` в тестовом коде, который
+    // спрашивает, есть ли файл, — в условии или в теле, как бы ни звались файл и срок. Не
+    // видит: цикл `for` с выходом по отметке, ожидание, которое файла не спрашивает, и
+    // тестовый модуль в отдельном файле (`#[cfg(test)] mod x;`).
+    let owner = repo_path("src/platform/process.rs");
+    let owner_file = parse_rust_file(&owner);
+    let free_helper = owner_file.items.iter().any(|item| {
+        matches!(item, syn::Item::Fn(function) if function.sig.ident == "cancel_when_started")
+    });
+    let held_helper = owner_file.items.iter().any(|item| match item {
+        syn::Item::Impl(block) => {
+            matches!(&*block.self_ty, syn::Type::Path(path) if path.path.is_ident("HeldCommand"))
+                && block.items.iter().any(|inner| {
+                    matches!(inner, syn::ImplItem::Fn(method) if method.sig.ident == "interrupt_during")
+                })
+        }
+        _ => false,
+    });
+    assert!(
+        free_helper && held_helper,
+        "src/platform/process.rs no longer has the free `cancel_when_started` or \
+         `HeldCommand::interrupt_during`: the guard must name what replaced them"
+    );
+
+    let offenders: Vec<String> = collect_rust_files(&repo_path("src"))
+        .into_iter()
+        .filter(|file| *file != owner)
+        .filter(|file| test_code_polls_a_file(&parse_rust_file(file)))
+        .map(|file| repo_relative(&file))
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "these files wait for a file in a `while` loop of their own in test code; use \
+         HeldCommand::interrupt_during or platform::process::cancel_when_started:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// Как страж читает циклы ожидания — на исходниках, где ответ известен заранее: файл
+/// спрашивают методом или функцией, в условии или в теле, в `while` или в `loop`, в тестовом
+/// модуле или в тестовом методе рабочего `impl`; цикл рабочего кода и цикл, который файла не
+/// спрашивает, стражу не интересны.
+#[test]
+fn the_file_polling_guard_reads_every_shape() {
+    let polls = |source: &str| test_code_polls_a_file(&syn::parse_str(source).expect("fixture"));
+
+    for caught in [
+        "#[cfg(test)] mod tests { fn wait(p: &Path) { while !p.exists() {} } }",
+        "#[cfg(test)] mod tests { fn wait(p: &Path) { while !p.try_exists().unwrap() {} } }",
+        "#[cfg(test)] mod tests { fn wait(p: &Path) { while !std::fs::exists(p).unwrap() {} } }",
+        "#[cfg(test)] mod tests { fn wait(p: &Path) { loop { if Path::exists(p) { break; } } } }",
+        "#[cfg(test)] mod tests { fn wait(p: &Path, d: Instant) { while Instant::now() < d { if p.exists() { break; } } } }",
+        "struct Probe; impl Probe { #[cfg(test)] fn wait(p: &Path) { while !p.exists() {} } }",
+    ] {
+        assert!(polls(caught), "the guard missed: {caught}");
+    }
+    for passed in [
+        "fn wait(p: &Path) { while !p.exists() {} }",
+        "#[cfg(test)] mod tests { fn count() { let mut n = 0; while n < 3 { n += 1; } } }",
+        "#[cfg(test)] mod tests { fn check(p: &Path) { assert!(p.exists()); } }",
+    ] {
+        assert!(!polls(passed), "the guard flagged: {passed}");
+    }
+}
+
+/// Есть ли в тестовом коде файла — под `#[cfg(test)]`, в том числе внутри модулей и `impl`
+/// — цикл `while` или `loop`, который спрашивает `exists` или `try_exists`: методом, как
+/// `path.exists()`, или функцией, как `std::fs::exists(&path)` и `Path::exists(&path)`.
+fn test_code_polls_a_file(file: &syn::File) -> bool {
+    const ASKS: &[&str] = &["exists", "try_exists"];
+    #[derive(Default)]
+    struct AsksForAFile(bool);
+    impl<'ast> syn::visit::Visit<'ast> for AsksForAFile {
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            self.0 |= ASKS.iter().any(|name| node.method == name);
+            syn::visit::visit_expr_method_call(self, node);
+        }
+
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = &*node.func {
+                self.0 |= path
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| ASKS.iter().any(|name| segment.ident == name));
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+    }
+    #[derive(Default)]
+    struct Loops {
+        in_test: bool,
+        found: bool,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Loops {
+        fn visit_item(&mut self, node: &'ast syn::Item) {
+            let outer = self.in_test;
+            self.in_test |= item_has_cfg_test(node);
+            syn::visit::visit_item(self, node);
+            self.in_test = outer;
+        }
+
+        fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+            let outer = self.in_test;
+            self.in_test |= has_cfg_test(&node.attrs);
+            syn::visit::visit_impl_item_fn(self, node);
+            self.in_test = outer;
+        }
+
+        fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+            if self.in_test {
+                let mut asks = AsksForAFile::default();
+                syn::visit::Visit::visit_expr_while(&mut asks, node);
+                self.found |= asks.0;
+            }
+            syn::visit::visit_expr_while(self, node);
+        }
+
+        fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
+            if self.in_test {
+                let mut asks = AsksForAFile::default();
+                syn::visit::Visit::visit_expr_loop(&mut asks, node);
+                self.found |= asks.0;
+            }
+            syn::visit::visit_expr_loop(self, node);
+        }
+    }
+    let mut loops = Loops::default();
+    syn::visit::Visit::visit_file(&mut loops, file);
+    loops.found
+}
+
+/// Вызовы учёта, которые называют отложенную отмену.
+const DEFERRAL_OWNER_CALLS: &[&str] = &[
+    "note_result",
+    "note_outcome",
+    "record_deferral",
+    "deferred_process_interruption",
+    "run_critical",
+    "with_session",
+];
+
+/// Что страж знает о теле функции: объявляет ли оно критическую фазу, называет ли
+/// отсрочку и кого зовёт — свободные функции и методы по имени.
+#[derive(Default)]
+struct PhaseFacts {
+    module: Vec<String>,
+    /// Имя функции или `Тип::метод`.
+    context: String,
+    critical: bool,
+    names_deferral: bool,
+    function_calls: std::collections::BTreeSet<String>,
+    method_calls: std::collections::BTreeSet<String>,
+}
+
+impl PhaseFacts {
+    /// Тело объявляет критическую фазу, а её отсрочку само не называет.
+    fn unnamed(&self) -> bool {
+        self.critical && !self.names_deferral
+    }
+
+    /// Зовёт ли это тело функцию или метод `callee` из своего модуля. Свободную функцию
+    /// зовут по пути, метод — и по пути, и через приёмник.
+    fn calls(&self, callee: &PhaseFacts) -> bool {
+        self.module == callee.module
+            && match callee.context.rsplit_once("::") {
+                Some((_, method)) => {
+                    self.method_calls.contains(method) || self.function_calls.contains(method)
+                }
+                None => self.function_calls.contains(&callee.context),
+            }
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for PhaseFacts {
+    fn visit_item(&mut self, node: &'ast syn::Item) {
+        if !item_has_cfg_test(node) {
+            syn::visit::visit_item(self, node);
+        }
+    }
+
+    /// Образец в `match` фазы не объявляет.
+    fn visit_pat(&mut self, node: &'ast syn::Pat) {
+        if !matches!(node, syn::Pat::Path(_)) {
+            syn::visit::visit_pat(self, node);
+        }
+    }
+
+    /// Путь к функции — вызов или ссылка на неё, как `let make = build_dsl;`, — ребро.
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if let Some(last) = node.path.segments.last() {
+            self.function_calls.insert(last.ident.to_string());
+        }
+        let mut segments = node.path.segments.iter().rev();
+        if let (Some(variant), Some(class)) = (segments.next(), segments.next()) {
+            self.critical |= class.ident == "InterruptionSafetyClass"
+                && (variant.ident == "CriticalNonAbortable"
+                    || variant.ident == "NoExternalProcess");
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = &*node.func {
+            self.names_deferral |= path.path.segments.last().is_some_and(|segment| {
+                DEFERRAL_OWNER_CALLS.contains(&segment.ident.to_string().as_str())
+            });
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        self.critical |= node.method == "critical" && node.args.is_empty();
+        let name = node.method.to_string();
+        self.names_deferral |= DEFERRAL_OWNER_CALLS.contains(&name.as_str());
+        self.method_calls.insert(name);
+        syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+/// Итог стража: есть ли критические фазы, какие из них без названной отсрочки и какие
+/// строки `DELEGATED` устарели.
+struct PhaseReport {
+    any_critical: bool,
+    unnamed: Vec<String>,
+    stale: Vec<String>,
+}
+
+/// Тела сценариев, кроме самого учёта, по полному пути — модуль и функция или
+/// `Тип::метод` — и что о каждом знает страж; дальше — фазы без названной отсрочки.
+fn deferral_report(index: &SourceIndex, delegated: &[(&str, &str)]) -> PhaseReport {
+    let scenarios = path_of("crate::use_cases");
+    let ledger = path_of("crate::use_cases::interruption");
+    let mut facts: std::collections::BTreeMap<String, PhaseFacts> = Default::default();
+    for body in production_bodies(index) {
+        if !body.module.starts_with(&scenarios) || body.module == ledger {
+            continue;
+        }
+        let entry = facts
+            .entry(format!("{}::{}", body.module.join("::"), body.context))
+            .or_default();
+        syn::visit::Visit::visit_block(entry, body.block);
+        entry.module = body.module;
+        entry.context = body.context;
+    }
+
+    let valid = |(builder, owner): &(&str, &str)| match (facts.get(*builder), facts.get(*owner)) {
+        (Some(built), Some(named)) => {
+            built.unnamed() && named.names_deferral && built.module == named.module
+        }
+        _ => false,
+    };
+    let unnamed = facts
+        .iter()
+        .filter(|(_, body)| body.unnamed())
+        .filter_map(|(path, _)| {
+            let owners: Vec<&str> = delegated
+                .iter()
+                .filter(|row| valid(row) && row.0 == path)
+                .map(|(_, owner)| *owner)
+                .collect();
+            if owners.is_empty() {
+                Some(path.clone())
+            } else if owners
+                .iter()
+                .any(|owner| reaches_owner(&facts, path, owner))
+            {
+                None
+            } else {
+                Some(format!(
+                    "{path} (not every call reaches {})",
+                    owners.join(", ")
+                ))
+            }
+        })
+        .collect();
+    let stale = delegated
+        .iter()
+        .filter(|row| !valid(row))
+        .map(|(builder, owner)| format!("{builder} → {owner}"))
+        .collect();
+    PhaseReport {
+        any_critical: facts.values().any(|body| body.critical),
+        unnamed,
+        stale,
+    }
+}
+
+/// Хозяин ниже строителя, или каждая цепочка вызовов над строителем доходит до хозяина.
+fn reaches_owner(
+    facts: &std::collections::BTreeMap<String, PhaseFacts>,
+    builder: &str,
+    owner: &str,
+) -> bool {
+    let Some(named) = facts.get(owner) else {
+        return false;
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut below = vec![builder];
+    while let Some(path) = below.pop() {
+        if !seen.insert(path) {
+            continue;
+        }
+        let Some(caller) = facts.get(path) else {
+            continue;
+        };
+        if caller.calls(named) {
+            return true;
+        }
+        below.extend(
+            facts
+                .iter()
+                .filter(|(_, callee)| caller.calls(callee))
+                .map(|(callee, _)| callee.as_str()),
+        );
+    }
+    covered_above(facts, builder, owner, true, &mut Default::default())
+}
+
+/// Каждая цепочка вызовов над `path` в его модуле доходит до хозяина `owner`; прямой
+/// вызывающий строителя (`direct`) может и сам отдать итог хозяину. Выше хозяина отдача
+/// ничего не значит: там итог строителя уже не в руках. Функция без вызывающих и цикл не
+/// покрыты; вызов самой себя по совпавшему имени не считается.
+fn covered_above(
+    facts: &std::collections::BTreeMap<String, PhaseFacts>,
+    path: &str,
+    owner: &str,
+    direct: bool,
+    visiting: &mut std::collections::BTreeSet<String>,
+) -> bool {
+    let (Some(callee), Some(named)) = (facts.get(path), facts.get(owner)) else {
+        return false;
+    };
+    if !visiting.insert(path.to_owned()) {
+        return false;
+    }
+    let callers: Vec<(&String, &PhaseFacts)> = facts
+        .iter()
+        .filter(|(caller_path, caller)| caller_path.as_str() != path && caller.calls(callee))
+        .collect();
+    let covered = !callers.is_empty()
+        && callers.iter().all(|(caller_path, caller)| {
+            caller_path.as_str() == owner
+                || (direct && caller.calls(named))
+                || covered_above(facts, caller_path, owner, false, visiting)
+        });
+    visiting.remove(path);
+    covered
+}
+
+/// Токены вызова `.<call>` в том виде, в каком их печатает `syn`, без приёмника.
+fn cut_marker(call: &str) -> String {
+    let expression: syn::Expr =
+        syn::parse_str(&format!("v.{call}")).unwrap_or_else(|_| panic!("parse {call}"));
+    let rendered = quote::ToTokens::to_token_stream(&expression).to_string();
+    rendered
+        .strip_prefix("v . ")
+        .unwrap_or_else(|| panic!("receiver in {rendered}"))
+        .to_owned()
+}
+
+/// Убирает `# [doc = "..."]` из исходного вида токенов, оставляя сам код. Литерал
+/// документации читается до неэкранированной закрывающей кавычки: `]` внутри прозы
+/// (`[v6]:port`) — не конец атрибута.
+fn without_doc_comments(source: &str) -> String {
+    const OPENING: &str = "# [doc = ";
+    let mut kept = String::with_capacity(source.len());
+    let mut rest = source;
+
+    while let Some(at) = rest.find(OPENING) {
+        kept.push_str(&rest[..at]);
+        let after = &rest[at + OPENING.len()..];
+        let Some(literal) = string_literal_len(after) else {
+            return kept;
+        };
+        match after[literal..].find(']') {
+            Some(close) => rest = &after[literal + close + 1..],
+            None => return kept,
+        }
+    }
+    kept.push_str(rest);
+    kept
+}
+
+/// Длина строкового литерала в начале `text`, с кавычками, если он там стоит.
+fn string_literal_len(text: &str) -> Option<usize> {
+    let mut chars = text.char_indices();
+    let Some((_, '"')) = chars.next() else {
+        return None;
+    };
+    let mut escaped = false;
+    for (index, ch) in chars {
+        match ch {
+            '\\' if !escaped => escaped = true,
+            '"' if !escaped => return Some(index + 1),
+            _ => escaped = false,
+        }
+    }
+    None
+}
+
+#[test]
+fn the_http_listener_never_hands_out_a_cross_origin_permission() {
+    // Проверка `Origin` у слушателя MCP мягкая нарочно: она пускает любой петлевой
+    // порт и все имена из `mcp.http.allowed_hosts`. Держится это на том, что
+    // межисточниковый запрос браузер гасит сам, не получив разрешения. Стоит выдать
+    // его — и мягкость превратится в дыру: каждое имя из списка станет читаемым из
+    // чужого источника. Поэтому разрешения нет нигде.
+    //
+    // Приметы сравниваются в нижнем регистре: `HeaderName` приводит имя к нему сам,
+    // поэтому написание в исходнике роли не играет, а точное совпадение по регистру
+    // пропустило бы рабочую выдачу.
+    const CROSS_ORIGIN_GRANTS: &[&str] = &[
+        "access-control-allow-origin",
+        "access_control_allow_origin",
+        "corslayer",
+        "tower_http::cors",
+    ];
+    let mut offenders = Vec::new();
+
+    for file in collect_rust_files(&repo_path("src")) {
+        // Документация про правило — не нарушение правила: `///` попадает в токены
+        // как `#[doc="..."]`, и без этого описать запрет рядом с кодом было бы нельзя.
+        let production = without_doc_attributes(&production_tokens(&file)).to_ascii_lowercase();
+        if CROSS_ORIGIN_GRANTS
+            .iter()
+            .any(|grant| production.contains(grant))
+        {
+            offenders.push(file.display().to_string());
+        }
+    }
+
+    let manifest = read("Cargo.toml").to_ascii_lowercase();
+    assert!(
+        !manifest.contains("\"cors\"") && !manifest.contains("'cors'"),
+        "Cargo.toml enables a CORS layer; the MCP Origin rule assumes none is ever built"
+    );
+    assert!(
+        offenders.is_empty(),
+        "these modules hand out a cross-origin permission, which turns the deliberately \
+         lenient MCP Origin rule into a readable cross-origin surface:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// Убирает из токенов содержимое `#[doc="..."]`, оставляя сам код.
+fn without_doc_attributes(tokens: &str) -> String {
+    const OPENING: &str = "#[doc=";
+    let mut kept = String::with_capacity(tokens.len());
+    let mut rest = tokens;
+
+    while let Some(at) = rest.find(OPENING) {
+        kept.push_str(&rest[..at]);
+        let after = &rest[at + OPENING.len()..];
+        match after.find(']') {
+            Some(close) => rest = &after[close + 1..],
+            None => return kept,
+        }
+    }
+    kept.push_str(rest);
+    kept
+}
+
+#[test]
+fn the_http_listener_is_never_served_without_its_host_check() {
+    // Проверка имени хоста — слой поверх маршрутизатора, и снять её можно одной
+    // строкой: сборка останется зелёной везде, кроме `tests/mcp_http.rs`, а тот
+    // объявлен `#![cfg(unix)]` и до Windows не доезжает. Поэтому саму проводку
+    // держит примета: тот, кто поднимает слушатель, обязан навесить слой.
+    let window = free_function_tokens(repo_path("src/mcp/server.rs").as_path(), "serve_http");
+
+    assert!(
+        !window.is_empty(),
+        "serve_http is gone from src/mcp/server.rs; this guard names the wrong function"
+    );
     for required in [
-        "## Изменение MCP public surface",
-        "## Новая public CLI/MCP команда, работающая с `workPath`",
-        "## Новый public config field, `source-set` type или `infobase` subtree",
-        "src/config/model.rs",
-        "src/config/validate.rs",
-        "spec/architecture/invariants.md",
+        "axum::serve",
+        "from_fn_with_state",
+        "refuse_a_request_that_names_another_host",
     ] {
         assert!(
-            checklist.contains(required),
-            "checklist must mention '{required}'"
+            window.contains(required),
+            "serve_http no longer wires the host check ({required} is missing): a listener \
+             built without it answers any name, which is the DNS-rebinding hole itself"
         );
     }
+}
+
+#[test]
+fn a_command_carries_no_deadline_anywhere_it_could_be_put_back() {
+    // Корень проблемы: общий срок на команду не защищал базу, а ломал её — истёкший срок
+    // означал, что загрузка одного набора исходников уже зафиксирована, а следующий отказан
+    // на безопасной точке, то есть конфигурация обновлена наполовину
+    // (DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE).
+    //
+    // Владелец ответа один — `ExecutionContext`: у него нет поля срока и нет способа его
+    // поставить, поэтому вернуть срок можно только заведя это поле заново. Страж стоит на
+    // самих именах, а не на поведении: тест поведения проходит и без срока, и со сроком,
+    // который никто не выставил, и потому регресс пропустит.
+    const BANNED_IN_CONTEXT: &[&str] = &["deadline", "remaining_budget", "TimedOut"];
+
+    let context =
+        without_doc_attributes(&production_tokens(&repo_path("src/use_cases/context.rs")));
+    let offenders: Vec<&str> = BANNED_IN_CONTEXT
+        .iter()
+        .copied()
+        .filter(|marker| context.contains(marker))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "src/use_cases/context.rs names {offenders:?}: a command budget is back on the execution \
+         context. A bound belongs to the step that declares it, not above it."
+    );
+
+    // Срок уже однажды воскресал под другим именем: остаток допускного бюджета укорачивал
+    // предел шага EDT в MCP. Допускной срок обязан кончаться вместе с допуском.
+    let server = without_doc_attributes(&production_tokens(&repo_path("src/mcp/server.rs")));
+    assert!(
+        !server.contains("remaining_timeout"),
+        "src/mcp/server.rs computes a remainder of the admission budget: an admitted call must \
+         run to its terminal outcome, and a step cap must not be shortened by the queue wait."
+    );
+}
+
+#[test]
+fn a_reply_is_checked_against_its_form_through_one_reader() {
+    // Корень проблемы: тесты сверяли `data` с формами своими копиями чтения схемы, и копии
+    // расходились с общей — одна брала первую из общих форм, другая жёстко записанный путь,
+    // и ни одна не знала, что общая форма отказа проходит за любую. Владелец один —
+    // `tests/support/command_data.rs`; схему конверта и примеры правил сверяют свои
+    // проверки. Страж стоит на имени крейта: без него схему не прочитать.
+    const SCHEMA_READERS: &[&str] = &[
+        "tests/support/command_data.rs",
+        "tests/contract_envelope.rs",
+        "tests/arch_rules.rs",
+        // Сам страж называет искомое имя.
+        "tests/architecture_guardrails.rs",
+    ];
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for file in collect_rust_files(&repo_path("tests")) {
+        let relative = file.strip_prefix(repo_root).expect("relative path");
+        if SCHEMA_READERS
+            .iter()
+            .any(|reader| relative == Path::new(reader))
+        {
+            continue;
+        }
+        if fs::read_to_string(&file)
+            .expect("read test source")
+            .contains("jsonschema")
+        {
+            offenders.push(relative.display().to_string());
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these tests read a data form themselves; check a reply through \
+         tests/support/command_data.rs instead:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn every_staged_publication_rechecks_its_target_first() {
+    // Корень проблемы: цель сверялась при разрешении, а публикация шла после работы
+    // исполнителя; у `make` путь, который за это время стал указывать в другое место,
+    // публиковался молча. Перепроверку ставит каждое место публикации само — единого
+    // владельца у неё пока нет (#300), — поэтому страж смотрит на каждое место: в теле
+    // сценария вызов публикации через промежуточную копию идёт после перепроверки цели, а
+    // перепроверка — после подготовки копии и после проверки исхода исполнителя, если та
+    // стоит между ними. Страж держится на именах перепроверок, а их тела держат
+    // поведенческие тесты правила `INV.USE-CASES.A-TARGET-IS-RECHECKED-BEFORE-PUBLICATION`.
+    const RECHECKS: &[&str] = &[
+        "refusal_before_publication(",
+        "validate_platform_target(",
+        "validate_publish_target(",
+        "revalidate_before_publish(",
+    ];
+    // Проверки исхода исполнителя: перепроверка, поставленная раньше них, сверяла бы цель до
+    // работы исполнителя.
+    const EXECUTOR_OUTCOME: &[&str] = &[
+        "ensure_platform_success(",
+        "ensure_import_success(",
+        "validate_platform_success(",
+    ];
+    // Места публикации названы: вызов, ушедший туда, где страж его не видит, не пройдёт
+    // молча, а новое место попадёт в перечень осознанно.
+    const SITES: &[&str] = &[
+        "crate::use_cases::artifacts::agent::run_agent_export",
+        "crate::use_cases::artifacts::agent::run_external_agent_export",
+        "crate::use_cases::artifacts::run_designer_export",
+        "crate::use_cases::artifacts::run_external_designer_export",
+        "crate::use_cases::dump_config::finalize_edt_dump",
+        "crate::use_cases::dump_config::publish_full_dump",
+        "crate::use_cases::infobase_export::execute_configuration_export",
+        "crate::use_cases::infobase_export::execute_infobase_snapshot",
+    ];
+
+    let index = SourceIndex::of_src();
+    let owner = path_of("crate::use_cases::staged_publication");
+    let (publish, prepare) = staged_publication_methods(&index, &owner);
+    let scenarios = path_of("crate::use_cases");
+    let mut sites = Vec::new();
+    let mut offenders = Vec::new();
+    for body in production_bodies(&index) {
+        if !body.module.starts_with(&scenarios) || body.module == owner {
+            continue;
+        }
+        let tokens = normalize_tokens(body.block);
+        let site = format!("{}::{}", body.module.join("::"), body.context);
+        for at in publish
+            .iter()
+            .flat_map(|needle| tokens.match_indices(needle.as_str()).map(|(at, _)| at))
+        {
+            sites.push(site.clone());
+            let prepared = prepare
+                .iter()
+                .filter_map(|needle| tokens[..at].rfind(needle.as_str()))
+                .max()
+                .unwrap_or(0);
+            let executed = EXECUTOR_OUTCOME
+                .iter()
+                .filter_map(|needle| tokens[prepared..at].rfind(needle).map(|i| prepared + i))
+                .max()
+                .unwrap_or(prepared);
+            if !RECHECKS
+                .iter()
+                .any(|needle| tokens[executed..at].contains(needle))
+            {
+                offenders.push(site.clone());
+            }
+        }
+    }
+    sites.sort();
+    assert!(
+        offenders.is_empty(),
+        "these scenarios publish without re-checking the target after the executor ran:\n{}",
+        offenders.join("\n")
+    );
+    assert_eq!(
+        sites, SITES,
+        "the staged publications changed; name each one here after it re-checks its target"
+    );
+}
+
+/// Вызовы публикации и подготовки у владельца промежуточной копии — в виде, в котором их
+/// ищут в теле сценария: методом (`.publish_dir(`) и путём (`::publish_dir(`). Имена берутся
+/// из самого `impl StagedPublication`, поэтому новый метод попадёт под страж сам.
+fn staged_publication_methods(index: &SourceIndex, owner: &[String]) -> (Vec<String>, Vec<String>) {
+    let unit = index
+        .units
+        .iter()
+        .find(|unit| unit.module == owner)
+        .expect("the staged publication owner is indexed");
+    let mut publish = Vec::new();
+    let mut prepare = Vec::new();
+    for item in &unit.syntax.items {
+        let syn::Item::Impl(item_impl) = item else {
+            continue;
+        };
+        let is_owner = matches!(
+            item_impl.self_ty.as_ref(),
+            syn::Type::Path(type_path)
+                if type_path.path.segments.last().is_some_and(|segment| segment.ident == "StagedPublication")
+        );
+        if !is_owner || item_impl.trait_.is_some() {
+            continue;
+        }
+        for impl_item in &item_impl.items {
+            let syn::ImplItem::Fn(method) = impl_item else {
+                continue;
+            };
+            if matches!(method.vis, syn::Visibility::Inherited) {
+                continue;
+            }
+            let name = method.sig.ident.to_string();
+            let needles = [format!(".{name}("), format!("::{name}(")];
+            if name.starts_with("publish") {
+                publish.extend(needles);
+            } else if name.starts_with("prepare") {
+                prepare.extend(needles);
+            }
+        }
+    }
+    assert!(
+        !publish.is_empty() && !prepare.is_empty(),
+        "StagedPublication no longer names its publish and prepare methods"
+    );
+    (publish, prepare)
+}
+
+#[test]
+fn change_detection_has_no_background_watcher() {
+    // Изменения ищет та команда, которой нужен ответ; фонового наблюдателя нет. Наблюдатель —
+    // это поток рядом с командой или крейт слежения за файловой системой: слой анализа
+    // потоков не заводит, а раннер такого крейта не тянет.
+    const WATCHER_CRATES: &[&str] = &["notify", "notify-debouncer-mini", "hotwatch"];
+    const BACKGROUND_WORK: &[&str] = &["spawn", "thread::"];
+
+    let manifest = read("Cargo.toml");
+    let watchers: Vec<&str> = manifest
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(name, _)| name.trim())
+        .filter(|name| WATCHER_CRATES.contains(name))
+        .collect();
+    assert!(
+        watchers.is_empty(),
+        "Cargo.toml depends on a file-system watcher {watchers:?}: change detection runs when \
+         a command needs the answer, not in the background"
+    );
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for file in collect_rust_files(&repo_path("src/change_detection")) {
+        let relative = file.strip_prefix(repo_root).expect("relative path");
+        let production = without_doc_attributes(&production_tokens(&file));
+        for marker in BACKGROUND_WORK {
+            if production.contains(marker) {
+                offenders.push(format!("{} names `{marker}`", relative.display()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "change detection starts background work; it must run only when a command asks:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn change_detection_never_reads_the_executor_choice() {
+    // Анализ изменений отвечает, нужен ли шаг; чем его выполнить, решает выбор исполнителя.
+    // Прочитай слой анализа этот выбор — и ответ «что делать» начал бы зависеть от того,
+    // кто делает: смена исполнителя меняла бы решение о загрузке. Страж стоит на именах:
+    // слой не называет ни ключей выбора, ни матрицы исполнителей, ни адаптеров платформы.
+    // Конфигурацию слой читать вправе — наборы, формат и `workPath` берутся из неё.
+    const EXECUTOR_CHOICE: &[&str] = &["provider", "Provider", "capability", "platform::"];
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let files = collect_rust_files(&repo_path("src/change_detection"));
+    assert!(
+        !files.is_empty(),
+        "the change-detection layer is not where it was"
+    );
+    let mut offenders = Vec::new();
+    for file in files {
+        let relative = file.strip_prefix(repo_root).expect("relative path");
+        let production = without_doc_attributes(&production_tokens(&file));
+        for name in EXECUTOR_CHOICE {
+            if production.contains(name) {
+                offenders.push(format!("{} names `{name}`", relative.display()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "change detection reads the executor choice; whether a step is needed must not depend \
+         on who performs it:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn every_top_level_module_is_a_block_of_the_module_map() {
+    // Корень проблемы: карта модулей жила в двух файлах, на маршруте агента лежал один, и ни
+    // один не был привязан к изменениям кода — три модуля так и не попали ни в один. Владелец
+    // карты один — таблица 5.1 раздела 5 arc42. Модуль без строки в ней валит этот страж, где
+    // бы вторую карту ни завели; ссылка в прозе рядом строки не заменяет.
+    let main = parse_rust_file(&repo_path("src/main.rs"));
+    let modules: Vec<String> = main
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Mod(module) if !has_cfg_test(&module.attrs) => {
+                Some(module.ident.to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !modules.is_empty(),
+        "src/main.rs declares no modules: the module list was not read"
+    );
+    let map = read("spec/arc42/05-building-block-view.md");
+    // Строку модуля называет её первая ячейка: ссылка в чужой строке таблицы или в прозе
+    // строку не заменяет.
+    let first_cells: Vec<&str> = extract_between(&map, "### 5.1", "### 5.2")
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix('|'))
+        .filter_map(|row| row.split('|').next())
+        .collect();
+    let missing: Vec<&str> = modules
+        .iter()
+        .map(String::as_str)
+        .filter(|name| {
+            let as_dir = format!("](../../src/{name}/)");
+            let as_file = format!("](../../src/{name}.rs)");
+            !first_cells
+                .iter()
+                .any(|cell| cell.contains(&as_dir) || cell.contains(&as_file))
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "table 5.1 of spec/arc42/05-building-block-view.md has no row linking {missing:?}: the \
+         module map names every top-level module of src/main.rs"
+    );
+}
+
+/// Документы маршрута агента, чьи ссылки сторожит `every_link_on_the_agent_route_resolves`;
+/// к ним — каждый файл `spec/arc42/`.
+const AGENT_ROUTE_DOCUMENTS: &[&str] = &[
+    "AGENTS.md",
+    "AI_DEV.md",
+    "README.md",
+    "docs/README.md",
+    "spec/README.md",
+    "spec/rules/README.md",
+];
+
+#[test]
+fn every_link_on_the_agent_route_resolves() {
+    // Описание устройства называет модули и файлы ссылками, маршрут агента — документы.
+    // Переименованный файл делает адрес ложным молча, и агент, пришедший по нему, остаётся
+    // без ответа. Страж привязывает эти тексты к изменениям дерева. Регистр сверяется точно:
+    // macOS и Windows его прощают, Linux и GitHub — нет.
+    let root = repo_path("");
+    let arc42 = repo_path("spec/arc42");
+    let mut documents: Vec<PathBuf> = AGENT_ROUTE_DOCUMENTS
+        .iter()
+        .map(|relative| repo_path(relative))
+        .collect();
+    documents.extend(
+        fs::read_dir(&arc42)
+            .unwrap_or_else(|error| panic!("{}: {error}", arc42.display()))
+            .map(|entry| entry.expect("directory entry").path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "md")),
+    );
+    documents.sort();
+
+    let mut seen = 0usize;
+    let mut broken = Vec::new();
+    for document in &documents {
+        let text = fs::read_to_string(document)
+            .unwrap_or_else(|error| panic!("{}: {error}", document.display()));
+        let base = document
+            .parent()
+            .expect("a document has a parent directory");
+        for target in relative_link_targets(&text) {
+            seen += 1;
+            if !resolves_with_exact_case(&root, base, &target) {
+                broken.push(format!("{}: {target}", repo_relative(document)));
+            }
+        }
+    }
+    // Разбор, который не нашёл ни одной ссылки, прошёл бы зелёным и ничего не сторожил.
+    assert!(
+        seen >= 50,
+        "only {seen} relative links found on the agent route: the link reader is broken"
+    );
+    assert!(
+        broken.is_empty(),
+        "links on the agent route point at nothing (case is compared exactly):\n{}",
+        broken.join("\n")
+    );
+}
+
+/// Путь от корня репозитория, всегда через косую черту: `Path::display()` на Windows дал бы
+/// обратную.
+fn repo_relative(path: &Path) -> String {
+    path.strip_prefix(repo_path(""))
+        .unwrap_or(path)
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Встроенная ссылка `[текст](адрес)` или `[текст](<адрес>)`, с заголовком или без. Голый
+/// адрес может нести парные скобки: `guide(v2).md`.
+static INLINE_LINK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"\]\((?:<([^>]*)>|((?:[^()\s]|\([^()\s]*\))+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)"#,
+    )
+    .expect("regex")
+});
+/// Сноска `[метка]: адрес` или `[метка]: <адрес>`; `[^метка]:` — примечание, а не ссылка.
+static REFERENCE_LINK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^ {0,3}\[[^\]^][^\]]*\]:\s*(?:<([^>]*)>|(\S+))").expect("regex")
+});
+/// Строка, с которой начинается новый блок: пункт списка или строка таблицы. Код в строке
+/// через границу блока не переходит.
+static BLOCK_START: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\s*(?:[-*+]\s|\d+[.)]\s|\|)").expect("regex"));
+
+/// Относительные адреса ссылок — встроенных и сносок — вне огороженных блоков и вне кода в
+/// строке. Внешние адреса и якоря своей страницы сторожа не касаются.
+fn relative_link_targets(text: &str) -> Vec<String> {
+    // Огороженный блок выпадает целиком, а его строки остаются пустыми, чтобы соседние абзацы
+    // не склеились.
+    let mut prose = String::with_capacity(text.len());
+    let mut fence: Option<(char, usize)> = None;
+    for line in text.lines() {
+        match (fence, fence_marker(line)) {
+            (None, Some(opened)) => fence = Some(opened),
+            // Ограду закрывает тот же знак, серия не короче открывшей и ничего после неё.
+            (Some((open, length)), Some((close, run)))
+                if close == open && run >= length && closes_alone(line, run) =>
+            {
+                fence = None;
+            }
+            // Строка внутри ограды, в том числе с чужим или коротким знаком.
+            (Some(_), _) => {}
+            (None, None) => prose.push_str(line),
+        }
+        prose.push('\n');
+    }
+    let mut targets = Vec::new();
+    for block in blocks(&prose) {
+        let paragraph = without_code_spans(&block);
+        let inline = INLINE_LINK
+            .captures_iter(&paragraph)
+            .filter_map(|capture| capture.get(1).or_else(|| capture.get(2)));
+        let reference = REFERENCE_LINK
+            .captures_iter(&paragraph)
+            .filter_map(|capture| capture.get(1).or_else(|| capture.get(2)));
+        for found in inline.chain(reference) {
+            let path = found.as_str().split('#').next().unwrap_or_default();
+            if !path.is_empty() && !path.contains(':') {
+                targets.push(path.to_owned());
+            }
+        }
+    }
+    targets
+}
+
+/// Знак ограды CommonMark: не больше трёх пробелов отступа, затем серия не короче трёх
+/// одинаковых знаков — обратных кавычек или тильд. Четыре пробела отступа делают строку
+/// кодом с отступом, а не оградой.
+fn fence_marker(line: &str) -> Option<(char, usize)> {
+    let rest = line.trim_start_matches(' ');
+    if line.len() - rest.len() > 3 {
+        return None;
+    }
+    let mark = rest.chars().next().filter(|ch| *ch == '`' || *ch == '~')?;
+    let run = rest.chars().take_while(|ch| *ch == mark).count();
+    (run >= 3).then_some((mark, run))
+}
+
+/// Строка закрытия ограды: после серии знаков — только пробелы.
+fn closes_alone(line: &str, run: usize) -> bool {
+    line.trim_start_matches(' ')[run..].trim().is_empty()
+}
+
+/// Блоки текста, в пределах которых живёт код в строке: абзацы между пустыми строками, а
+/// внутри них — пункты списка и строки таблицы.
+fn blocks(prose: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current = String::new();
+    for line in prose.lines() {
+        let starts_block = line.trim().is_empty() || BLOCK_START.is_match(line);
+        if starts_block && !current.is_empty() {
+            blocks.push(std::mem::take(&mut current));
+        }
+        current.push_str(line);
+        current.push('\n');
+    }
+    if !current.is_empty() {
+        blocks.push(current);
+    }
+    blocks
+}
+
+/// Блок без кода в строке — так, как его читает CommonMark: код открывает серия обратных
+/// кавычек и закрывает серия той же длины в том же блоке, а серия без пары и кавычка после
+/// обратной косой черты — просто знаки. Поэтому лишняя кавычка не прячет ни одной ссылки, а
+/// текст ссылки в кавычках пустеет, но её адрес остаётся. Переводы строк из кода
+/// сохраняются: сноска должна остаться в начале своей строки.
+fn without_code_spans(paragraph: &str) -> String {
+    let mut kept = String::with_capacity(paragraph.len());
+    let mut rest = paragraph;
+    while let Some(open) = rest.find('`') {
+        let slashes = rest[..open]
+            .bytes()
+            .rev()
+            .take_while(|&byte| byte == b'\\')
+            .count();
+        if slashes % 2 == 1 {
+            kept.push_str(&rest[..=open]);
+            rest = &rest[open + 1..];
+            continue;
+        }
+        kept.push_str(&rest[..open]);
+        let run = backtick_run(&rest[open..]);
+        let body = &rest[open + run..];
+        match closing_run(body, run) {
+            Some(close) => {
+                kept.extend(body[..close].chars().filter(|&ch| ch == '\n'));
+                rest = &body[close + run..];
+            }
+            None => {
+                kept.push_str(&rest[open..open + run]);
+                rest = body;
+            }
+        }
+    }
+    kept.push_str(rest);
+    kept
+}
+
+/// Длина серии обратных кавычек в начале строки, в байтах: знак однобайтовый.
+fn backtick_run(text: &str) -> usize {
+    text.bytes().take_while(|&byte| byte == b'`').count()
+}
+
+/// Начало первой серии ровно из `run` обратных кавычек.
+fn closing_run(text: &str, run: usize) -> Option<usize> {
+    let mut offset = 0;
+    while let Some(found) = text[offset..].find('`') {
+        let start = offset + found;
+        let length = backtick_run(&text[start..]);
+        if length == run {
+            return Some(start);
+        }
+        offset = start + length;
+    }
+    None
+}
+
+#[test]
+fn the_link_reader_sees_what_markdown_renders() {
+    // Страж ссылок стоит на этом разборе: пропущенная им ссылка не проверяется вовсе, и
+    // страж остаётся зелёным. Здесь — случаи, на которых разбор уже ошибался.
+    let text = "\
+[a](one.md) и [`b`](two.md \"заголовок\") и [c](<three four.md>)
+
+```
+[x](fenced.md)
+```
+
+~~~
+[y](tilde.md)
+~~~
+
+Нажмите клавишу ` — [d](five.md)
+
+``код с ` внутри [z](code.md)`` и затем [e](six.md)
+
+- пункт с лишней ` кавычкой
+- следующий пункт: [g](nine.md 'заголовок')
+
+| ` | ячейка |
+| --- | [h](ten.md (заголовок)) |
+
+Экранированная \\` кавычка и [i](eleven.md)
+
+[j](guide(v2).md)
+
+[angle ref]: <twelve thirteen.md>
+
+    ```
+[k](fourteen.md)
+
+````
+```
+[w](inside-long-fence.md)
+````
+
+[ref]: seven.md
+[^note]: примечание, а не ссылка
+
+[ext](https://example.com) [якорь](#here) [f](eight.md#part)
+";
+    let mut found = relative_link_targets(text);
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            "eight.md",
+            "eleven.md",
+            "five.md",
+            "fourteen.md",
+            "guide(v2).md",
+            "nine.md",
+            "one.md",
+            "seven.md",
+            "six.md",
+            "ten.md",
+            "three four.md",
+            "twelve thirteen.md",
+            "two.md"
+        ]
+    );
+}
+
+/// Путь существует с точностью до регистра: `..` сворачивается по тексту, а каждый
+/// компонент сверяется с перечнем своего каталога, а не с ответом файловой системы.
+fn resolves_with_exact_case(root: &Path, base: &Path, target: &str) -> bool {
+    let Ok(relative_base) = base.strip_prefix(root) else {
+        return false;
+    };
+    let mut parts: Vec<OsString> = Vec::new();
+    for component in relative_base.join(target).components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_os_string()),
+            Component::ParentDir => {
+                if parts.pop().is_none() {
+                    return false;
+                }
+            }
+            Component::CurDir => {}
+            Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    let mut current = root.to_path_buf();
+    for part in parts {
+        let Ok(entries) = fs::read_dir(&current) else {
+            return false;
+        };
+        if !entries.flatten().any(|entry| entry.file_name() == part) {
+            return false;
+        }
+        current.push(part);
+    }
+    true
+}
+
+/// Что тело кода делает с признаком `provider_dispatched` и с отметкой работы исполнителя.
+#[derive(Default)]
+struct DispatchUse {
+    /// Значения признака в литералах структур и в присваиваниях, которыми он мог бы сказать
+    /// о работе: не `false`, не `None`, не `Some(false)` и не копия чужого признака.
+    decided: Vec<String>,
+    /// Копии чужого признака: `provider_dispatched: other.provider_dispatched`.
+    copies: usize,
+    /// Изменяемые заимствования признака и составные присваивания (`|=`, `&=`, …).
+    writes: usize,
+    /// Макросы с признаком, чьё тело не разбирается как список выражений: заглянуть в него
+    /// страж не может.
+    opaque_macros: usize,
+    marks: usize,
+    stamp_work: usize,
+    for_command: usize,
+    /// Запуск `spawn_managed` без отметки: последним аргументом не `Some(..)`. Прочие шаги
+    /// «не работы» вне платформы не выразить вовсе — поля отметки и конструкторы без неё
+    /// видны только платформе.
+    without_work: usize,
+    policies: usize,
+    contexts: usize,
+    stamps: usize,
+    returns: usize,
+    tries: usize,
+}
+
+impl DispatchUse {
+    fn of(block: &syn::Block) -> Self {
+        let mut found = Self::default();
+        syn::visit::Visit::visit_block(&mut found, block);
+        found
+    }
+
+    fn note_value(&mut self, value: &syn::Expr) {
+        if is_dispatch_field(value) {
+            self.copies += 1;
+        } else if !is_honest_dispatch(value) {
+            self.decided.push(normalize_tokens(value));
+        }
+    }
+}
+
+fn is_dispatch_field(expr: &syn::Expr) -> bool {
+    matches!(expr, syn::Expr::Field(field)
+        if matches!(&field.member, syn::Member::Named(name) if name == "provider_dispatched"))
+}
+
+fn is_literal_false(expr: &syn::Expr) -> bool {
+    matches!(expr, syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Bool(value), .. }) if !value.value)
+}
+
+fn is_none(expr: &syn::Expr) -> bool {
+    matches!(expr, syn::Expr::Path(path) if path.path.is_ident("None"))
+}
+
+fn is_dispatch_key(expr: &syn::Expr) -> bool {
+    matches!(expr, syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(key), .. })
+        if key.value() == "provider_dispatched")
+}
+
+fn is_some_call(expr: &syn::Expr) -> bool {
+    matches!(expr, syn::Expr::Call(call) if matches!(call.func.as_ref(), syn::Expr::Path(path)
+        if path.path.segments.last().is_some_and(|segment| segment.ident == "Some")))
+}
+
+/// Значение, которым признак о работе сказать не может: `false`, `None`, `Some(false)`.
+fn is_honest_dispatch(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Call(call) => {
+            matches!(call.func.as_ref(), syn::Expr::Path(path) if path.path.is_ident("Some"))
+                && call.args.len() == 1
+                && call.args.first().is_some_and(is_literal_false)
+        }
+        other => is_literal_false(other) || is_none(other),
+    }
+}
+
+fn is_stamp_call(call: &syn::ExprCall) -> bool {
+    matches!(call.func.as_ref(), syn::Expr::Path(path)
+        if path.path.segments.last().is_some_and(|segment| segment.ident == "stamp_dispatch"))
+}
+
+/// Хвост, на котором штамп стоит на всяком исходе: сам вызов штампа или `.map(|x| штамп)`
+/// над исходом, чья ошибка — транспортная — формы не несёт.
+fn is_stamped_tail(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Call(call) => is_stamp_call(call),
+        syn::Expr::MethodCall(method) if method.method == "map" && method.args.len() == 1 => {
+            matches!(method.args.first(), Some(syn::Expr::Closure(closure))
+                if matches!(closure.body.as_ref(), syn::Expr::Call(call) if is_stamp_call(call)))
+        }
+        _ => false,
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for DispatchUse {
+    fn visit_field_value(&mut self, node: &'ast syn::FieldValue) {
+        if let syn::Member::Named(name) = &node.member {
+            if name == "provider_dispatched" {
+                if node.colon_token.is_none() {
+                    // `R { provider_dispatched }`: значение пришло из переменной.
+                    self.decided.push(name.to_string());
+                } else {
+                    self.note_value(&node.expr);
+                }
+            }
+        }
+        syn::visit::visit_field_value(self, node);
+    }
+
+    fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+        if is_dispatch_field(&node.left) {
+            self.note_value(&node.right);
+        }
+        // `data["provider_dispatched"] = …` — поле ответа, записанное руками мимо формы.
+        if matches!(node.left.as_ref(), syn::Expr::Index(index) if is_dispatch_key(&index.index)) {
+            self.decided.push(normalize_tokens(node));
+        }
+        syn::visit::visit_expr_assign(self, node);
+    }
+
+    fn visit_expr_binary(&mut self, node: &'ast syn::ExprBinary) {
+        let compound = matches!(
+            node.op,
+            syn::BinOp::AddAssign(_)
+                | syn::BinOp::SubAssign(_)
+                | syn::BinOp::MulAssign(_)
+                | syn::BinOp::DivAssign(_)
+                | syn::BinOp::RemAssign(_)
+                | syn::BinOp::BitXorAssign(_)
+                | syn::BinOp::BitAndAssign(_)
+                | syn::BinOp::BitOrAssign(_)
+                | syn::BinOp::ShlAssign(_)
+                | syn::BinOp::ShrAssign(_)
+        );
+        if compound && is_dispatch_field(&node.left) {
+            self.writes += 1;
+        }
+        syn::visit::visit_expr_binary(self, node);
+    }
+
+    fn visit_expr_reference(&mut self, node: &'ast syn::ExprReference) {
+        if node.mutability.is_some() && is_dispatch_field(&node.expr) {
+            self.writes += 1;
+        }
+        syn::visit::visit_expr_reference(self, node);
+    }
+
+    /// Тело макроса проверяется как код, если оно — список выражений (`vec![…]`,
+    /// `format!(…)`, `dbg!(…)`). У событий журнала пара `ключ = значение` — имя поля и его
+    /// значение, и проверяется только значение; у `matches!` — проверяемое выражение и условие
+    /// после `if`. В остальное страж не заглядывает, и упоминание в нём признака или отметки
+    /// работы — уже нарушение.
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        let name = node
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+            .unwrap_or_default();
+        if matches!(
+            name.as_str(),
+            "matches" | "assert_matches" | "debug_assert_matches"
+        ) {
+            let parts = node.parse_body_with(|input: syn::parse::ParseStream| {
+                let scrutinee: syn::Expr = input.parse()?;
+                input.parse::<syn::Token![,]>()?;
+                syn::Pat::parse_multi_with_leading_vert(input)?;
+                let guard = if input.peek(syn::Token![if]) {
+                    input.parse::<syn::Token![if]>()?;
+                    Some(input.parse::<syn::Expr>()?)
+                } else {
+                    None
+                };
+                input.step(|cursor| {
+                    let mut rest = *cursor;
+                    while let Some((_, next)) = rest.token_tree() {
+                        rest = next;
+                    }
+                    Ok(((), rest))
+                })?;
+                Ok((scrutinee, guard))
+            });
+            if let Ok((scrutinee, guard)) = parts {
+                syn::visit::Visit::visit_expr(self, &scrutinee);
+                if let Some(guard) = &guard {
+                    syn::visit::Visit::visit_expr(self, guard);
+                }
+                return;
+            }
+        }
+        let logging = matches!(
+            name.as_str(),
+            "trace"
+                | "debug"
+                | "info"
+                | "warn"
+                | "error"
+                | "event"
+                | "span"
+                | "trace_span"
+                | "debug_span"
+                | "info_span"
+                | "warn_span"
+                | "error_span"
+        );
+        match node.parse_body_with(
+            syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated,
+        ) {
+            Ok(arguments) => {
+                for argument in &arguments {
+                    match argument {
+                        syn::Expr::Assign(pair) if logging => {
+                            syn::visit::Visit::visit_expr(self, &pair.right)
+                        }
+                        other => syn::visit::Visit::visit_expr(self, other),
+                    }
+                }
+            }
+            Err(_) if mentions_watched(&node.tokens) => self.opaque_macros += 1,
+            Err(_) => {}
+        }
+    }
+
+    /// `data["provider_dispatched"]` — чтение поля ответа: ключ здесь не решение.
+    fn visit_expr_index(&mut self, node: &'ast syn::ExprIndex) {
+        if is_dispatch_key(&node.index) {
+            syn::visit::Visit::visit_expr(self, &node.expr);
+            return;
+        }
+        syn::visit::visit_expr_index(self, node);
+    }
+
+    /// Путь как значение или как вызов в полной форме: `WorkGiven::for_command`,
+    /// `WorkGiven::mark_work_given(&w)`, `CarriesDispatch::stamp_work(r, w)`.
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        let segments = node
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        match segments.as_slice() {
+            [.., owner, name] if owner == "WorkGiven" && name == "for_command" => {
+                self.for_command += 1
+            }
+            [.., name] if name == "mark_work_given" => self.marks += 1,
+            [.., name] if name == "stamp_work" => self.stamp_work += 1,
+            _ => {}
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if node.method == "mark_work_given" {
+            self.marks += 1;
+        }
+        if node.method == "stamp_work" {
+            self.stamp_work += 1;
+        }
+        if node.method == "spawn_managed" && !node.args.last().is_some_and(is_some_call) {
+            self.without_work += 1;
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref() {
+            let segments = path
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            match segments.as_slice() {
+                [.., owner, name] if owner == "ProcessExecutionPolicy" && name == "new" => {
+                    self.policies += 1
+                }
+                [.., owner, _] if owner == "ExecutionContext" => self.contexts += 1,
+                [.., name] if name == "stamp_dispatch" => self.stamps += 1,
+                [.., name]
+                    if name == "spawn_managed" && !node.args.last().is_some_and(is_some_call) =>
+                {
+                    self.without_work += 1
+                }
+                _ => {}
+            }
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    /// Ключ `"provider_dispatched"`, собранный руками, — поле ответа мимо формы и штампа.
+    fn visit_lit_str(&mut self, node: &'ast syn::LitStr) {
+        if node.value() == "provider_dispatched" {
+            self.decided.push(normalize_tokens(node));
+        }
+    }
+
+    fn visit_expr_return(&mut self, node: &'ast syn::ExprReturn) {
+        self.returns += 1;
+        syn::visit::visit_expr_return(self, node);
+    }
+
+    fn visit_expr_try(&mut self, node: &'ast syn::ExprTry) {
+        self.tries += 1;
+        syn::visit::visit_expr_try(self, node);
+    }
+}
+
+/// Имена, которые страж ищет в телах макросов, куда сам не заглядывает: признак, отметка
+/// работы и те, кто её заводит, ставит и переносит.
+const WATCHED: &[&str] = &[
+    "provider_dispatched",
+    "mark_work_given",
+    "stamp_work",
+    "stamp_dispatch",
+    "for_command",
+    "spawn_managed",
+    "ProcessExecutionPolicy",
+    "ExecutionContext",
+];
+
+/// Упоминает ли поток токенов наблюдаемое имя. Обходятся идентификаторы, а не текст:
+/// литерал — не идентификатор, и `format!("{provider_dispatched}")` только печатает. Строка,
+/// равная ровно имени признака, — ключ ответа, собранного руками (`json!`), и она в счёт.
+fn mentions_watched(tokens: &impl quote::ToTokens) -> bool {
+    let buffer = syn::buffer::TokenBuffer::new2(tokens.to_token_stream());
+    let mut pending = vec![buffer.begin()];
+    while let Some(mut cursor) = pending.pop() {
+        while !cursor.eof() {
+            if let Some((ident, next)) = cursor.ident() {
+                if WATCHED.iter().any(|name| ident == *name) {
+                    return true;
+                }
+                cursor = next;
+            } else if let Some((literal, next)) = cursor.literal() {
+                if literal.to_string() == "\"provider_dispatched\"" {
+                    return true;
+                }
+                cursor = next;
+            } else if let Some((inside, _, _, next)) = cursor.any_group() {
+                pending.push(inside);
+                cursor = next;
+            } else if let Some((_, next)) = cursor.token_tree() {
+                cursor = next;
+            } else {
+                break;
+            }
+        }
+    }
+    false
+}
+
+/// Макросы уровня элементов, чьи токены упоминают признак или отметку работы:
+/// `модуль::имя!`. Макросы внутри тел смотрит `DispatchUse`.
+struct DispatchMacros {
+    module: Vec<String>,
+    found: Vec<String>,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for DispatchMacros {
+    fn visit_item(&mut self, node: &'ast syn::Item) {
+        if !item_has_cfg_test(node) {
+            syn::visit::visit_item(self, node);
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        if !has_cfg_test(&node.attrs) {
+            syn::visit::visit_impl_item_fn(self, node);
+        }
+    }
+
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        self.module.push(node.ident.to_string());
+        syn::visit::visit_item_mod(self, node);
+        self.module.pop();
+    }
+
+    fn visit_block(&mut self, _node: &'ast syn::Block) {}
+
+    fn visit_item_macro(&mut self, node: &'ast syn::ItemMacro) {
+        if mentions_watched(&node.mac.tokens) {
+            let name = node
+                .ident
+                .as_ref()
+                .map_or_else(|| normalize_tokens(&node.mac.path), ToString::to_string);
+            self.found
+                .push(format!("{}::{name}!", self.module.join("::")));
+        }
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        if mentions_watched(&node.tokens) {
+            self.found.push(format!(
+                "{}::{}!",
+                self.module.join("::"),
+                normalize_tokens(&node.path)
+            ));
+        }
+    }
+}
+
+fn dispatch_macros(index: &SourceIndex) -> Vec<String> {
+    let mut finder = DispatchMacros {
+        module: Vec::new(),
+        found: Vec::new(),
+    };
+    for unit in &index.units {
+        finder.module = unit.module.clone();
+        for item in &unit.syntax.items {
+            syn::visit::Visit::visit_item(&mut finder, item);
+        }
+    }
+    finder.found.sort();
+    finder.found
+}
+
+/// Формы, несущие признак: типы, перечисленные в единственном `carries_dispatch!`, по
+/// последнему сегменту пути.
+fn dispatch_forms(index: &SourceIndex) -> Vec<String> {
+    let invocations = index
+        .units
+        .iter()
+        .flat_map(|unit| &unit.syntax.items)
+        .filter(|item| !item_has_cfg_test(item))
+        .filter_map(|item| match item {
+            syn::Item::Macro(item_macro) if item_macro.mac.path.is_ident("carries_dispatch") => {
+                Some(&item_macro.mac)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        invocations.len(),
+        1,
+        "the forms that carry the flag are listed once, in carries_dispatch!"
+    );
+    let types = invocations[0]
+        .parse_body_with(syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
+        .expect("carries_dispatch! lists type paths");
+    let mut forms = types
+        .iter()
+        .filter_map(|path| path.segments.last())
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    // Псевдоним, чьё определение называет форму, — тоже форма: вход, отвечающий
+    // `Result<_, SyntaxExecutionFailure>`, несёт признак так же.
+    let aliases = index
+        .units
+        .iter()
+        .flat_map(|unit| &unit.syntax.items)
+        .filter(|item| !item_has_cfg_test(item))
+        .filter_map(|item| match item {
+            syn::Item::Type(alias) => Some((alias.ident.to_string(), normalize_tokens(&alias.ty))),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    loop {
+        let found = aliases
+            .iter()
+            .filter(|(name, _)| !forms.contains(name))
+            .filter(|(_, definition)| names_a_form(definition, &forms))
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        if found.is_empty() {
+            return forms;
+        }
+        forms.extend(found);
+    }
+}
+
+/// Называет ли текст типа одну из форм — целым словом.
+fn names_a_form(text: &str, forms: &[String]) -> bool {
+    text.split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+        .any(|word| forms.iter().any(|form| form == word))
+}
+
+/// Входы сценариев, чей ответ несёт признак: функции сценариев и MCP, видимые снаружи
+/// сценария — `pub`, или `pub(crate)` в самом модуле сценария, а не в его подмодулях, — которые
+/// возвращают такую форму и могут дать работу: берут контекст команды или заводят свою
+/// отметку. Выводятся из типов, а не перечнем: вход, забывший штамп, не ускользнёт.
+fn dispatch_entries(index: &SourceIndex, forms: &[String]) -> Vec<String> {
+    let scenarios = path_of("crate::use_cases");
+    let mcp = path_of("crate::mcp");
+    let mut entries = index
+        .functions
+        .iter()
+        .filter(|(_, function)| {
+            function.module.starts_with(&scenarios) || function.module.starts_with(&mcp)
+        })
+        .filter(|(_, function)| match &function.item.vis {
+            syn::Visibility::Public(_) => true,
+            syn::Visibility::Restricted(restricted) => {
+                restricted.path.is_ident("crate") && function.module.len() == 3
+            }
+            syn::Visibility::Inherited => false,
+        })
+        .filter(|(_, function)| names_a_form(&normalize_tokens(&function.item.sig.output), forms))
+        .filter(|(_, function)| {
+            let inputs = normalize_tokens(&function.item.sig.inputs);
+            inputs.contains("ExecutionContext")
+                || DispatchUse::of(&function.item.block).for_command > 0
+        })
+        .map(|(path, _)| path.join("::"))
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries
+}
+
+/// Корень #312: сценарии решали признак сами, чаще всего постоянной `true` на всяком
+/// отказе. Владелец теперь один — отметка работы команды: её ставит только платформа, а
+/// значение признаку — только `stamp_dispatch` в хвосте входа сценария. Объявить шаг «не
+/// работой» вне платформы не даёт компилятор: поля отметки и конструкторы без неё видны только
+/// ей. Остальное держит страж и узнаёт ту же ошибку под другим именем: решённое по месту
+/// значение в сценарии, MCP, домене или CLI, ключ ответа, собранный руками, составное
+/// присваивание, признак или отметку в непрочитанном макросе, `stamp_work` мимо штампа,
+/// отметку вне платформы, свою отметку, политику или контекст в сценарии, `spawn_managed` без
+/// отметки и вход, возвращающий форму с признаком без штампа в хвосте.
+#[test]
+fn provider_dispatched_takes_its_value_only_from_the_work_mark() {
+    let index = SourceIndex::of_src();
+    let scenarios = path_of("crate::use_cases");
+    let mcp = path_of("crate::mcp");
+    let cli = path_of("crate::cli");
+    let domain = path_of("crate::domain");
+    let platform = path_of("crate::platform");
+    let result = path_of("crate::use_cases::result");
+    let context = path_of("crate::use_cases::context");
+    let owners_of_command_work = [context.clone(), path_of("crate::mcp::edt_syntax")];
+
+    let mut violations = Vec::new();
+    let mut stamping = Vec::new();
+    for body in production_bodies(&index) {
+        let site = format!("{}::{}", body.module.join("::"), body.context);
+        let found = DispatchUse::of(body.block);
+        let in_scenarios = body.module.starts_with(&scenarios) || body.module.starts_with(&mcp);
+        let mut violation = |what: String| violations.push(format!("{site}: {what}"));
+        if !found.decided.is_empty() {
+            violation(format!("decides the flag: {:?}", found.decided));
+        }
+        if found.copies > 0 && in_scenarios {
+            violation("copies another answer's flag".to_owned());
+        }
+        if found.copies > 0
+            && !in_scenarios
+            && !body.module.starts_with(&cli)
+            && !body.module.starts_with(&domain)
+        {
+            violation("copies the flag outside the wire forms".to_owned());
+        }
+        if found.writes > 0 {
+            violation("writes the flag through &mut or a compound assignment".to_owned());
+        }
+        if found.opaque_macros > 0 {
+            violation("names the flag inside a macro the guard cannot read".to_owned());
+        }
+        if found.marks > 0 && !body.module.starts_with(&platform) {
+            violation("marks the command's work outside the platform".to_owned());
+        }
+        if found.stamp_work > 0 && body.module != result {
+            violation("stamps a form past stamp_dispatch".to_owned());
+        }
+        if found.for_command > 0 && !owners_of_command_work.contains(&body.module) {
+            violation("creates its own work mark".to_owned());
+        }
+        if found.without_work > 0 && !body.module.starts_with(&platform) {
+            violation("declares a step not to be the command's work".to_owned());
+        }
+        if found.policies > 0 && !body.module.starts_with(&platform) && body.module != context {
+            violation("builds a process policy past the command's context".to_owned());
+        }
+        if found.contexts > 0 && body.module.starts_with(&scenarios) && body.module != context {
+            violation("opens a second command context inside a scenario".to_owned());
+        }
+        if found.stamps > 0 {
+            stamping.push(match &body.enclosing {
+                Some(path) if body.owner.is_none() => path.join("::"),
+                _ => site,
+            });
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "provider_dispatched must take its value only from the work mark:\n{}",
+        violations.join("\n")
+    );
+    assert_eq!(
+        dispatch_macros(&index),
+        ["crate::use_cases::result::carries_dispatch!"],
+        "only carries_dispatch! may name the flag in an item-level macro"
+    );
+
+    let entries = dispatch_entries(&index, &dispatch_forms(&index));
+    stamping.sort();
+    assert_eq!(
+        stamping, entries,
+        "the flag is stamped exactly at the entries whose answer carries it"
+    );
+    for entry in &entries {
+        let function = &index.functions[&path_of(entry)].item;
+        let found = DispatchUse::of(&function.block);
+        let tail = match function.block.stmts.last() {
+            Some(syn::Stmt::Expr(expr, None)) => Some(expr),
+            _ => None,
+        };
+        assert!(
+            (found.stamps, found.returns, found.tries) == (1, 0, 0)
+                && tail.is_some_and(is_stamped_tail),
+            "{entry} must leave through one exit, its tail, and stamp the work there"
+        );
+    }
+}
+
+/// Страж выше смотрит глазами этих поисков, поэтому они проверены на образце.
+#[test]
+fn the_dispatch_finder_sees_decisions_marks_and_exits() {
+    let index = SourceIndex::from_sources(&[
+        (
+            "crate::use_cases::result",
+            "macro_rules! carries_dispatch { ($t:ty) => { impl C for $t { fn stamp_work(&mut self, w: &W) { self.provider_dispatched = w.given(); } } }; }\n\
+             carries_dispatch!(crate::domain::sample::R, crate::domain::sample::Q);",
+        ),
+        (
+            "crate::use_cases::sample",
+            "type QFailure = UseCaseFailure<Q>;\n\
+             pub fn decides(ok: bool) -> R { R { provider_dispatched: ok } }\n\
+             pub fn shorthand(provider_dispatched: bool) -> R { R { provider_dispatched } }\n\
+             pub fn copies(r: R) -> R { R { provider_dispatched: r.provider_dispatched } }\n\
+             pub fn assigns(mut r: R) -> R { r.provider_dispatched = true; r }\n\
+             pub fn honest(mut r: R) -> Q { r.provider_dispatched = Some(false); Q { provider_dispatched: false, other: None } }\n\
+             pub fn compounds(mut r: R, ok: bool) { r.provider_dispatched |= ok; }\n\
+             pub fn borrows(mut r: R) { let flag = &mut r.provider_dispatched; *flag = true; }\n\
+             pub fn marks(work: &WorkGiven) { work.mark_work_given(); WorkGiven::mark_work_given(work); }\n\
+             pub fn stamps_by_hand(r: &mut R, w: &WorkGiven) { r.stamp_work(w); CarriesDispatch::stamp_work(r, w); }\n\
+             pub fn mints(w: Option<WorkGiven>) -> WorkGiven { w.unwrap_or_else(WorkGiven::for_command) }\n\
+             pub fn builds(w: WorkGiven) -> P { ProcessExecutionPolicy::new(a, b, c, w) }\n\
+             pub fn launches(r: &Runner, w: Option<&WorkGiven>) { r.spawn_managed(&q, Mode::Wait, None); ProcessRunner::spawn_managed(r, &q, Mode::Wait, w); }\n\
+             pub fn launches_work(r: &Runner, c: &C) { r.spawn_managed(&q, Mode::Wait, Some(c.work())); }\n\
+             pub fn opens() -> ExecutionContext { ExecutionContext::cli(C::X) }\n\
+             pub fn logs(r: &R, x: bool) { debug!(\"{}\", r.provider_dispatched); format!(\"{provider_dispatched}\"); info!(r.provider_dispatched = x); assert!(matches!(r, R { provider_dispatched: true, .. })); }\n\
+             pub fn hides(ok: bool) -> Vec<R> { vec![R { provider_dispatched: ok }] }\n\
+             pub fn inserts(m: &mut Map) { m.insert(\"provider_dispatched\".into(), true.into()); }\n\
+             pub fn reads_key(v: &Value) -> bool { v[\"provider_dispatched\"] == true }\n\
+             pub fn writes_key(v: &mut Value) { v[\"provider_dispatched\"] = json!(true); }\n\
+             pub fn debugs(mut r: R, ok: bool) { dbg!(r.provider_dispatched = ok); }\n\
+             pub fn guards(mut r: R) -> bool { matches!(r, _ if { r.provider_dispatched = true; true }) }\n\
+             pub fn keys() -> Value { json!({\"provider_dispatched\": true}) }\n\
+             pub fn obscures(r: &R, w: &WorkGiven) { weird!(provider_dispatched => true); debug!(f = ?r.provider_dispatched); select! { x = w.mark_work_given() => {} } }\n\
+             pub fn exits(c: &ExecutionContext) -> UseCaseResult<R> { stamp_dispatch(run(c), c.work()) }\n\
+             pub fn maps(c: &M) -> Result<UseCaseResult<Q>, T> { let w = WorkGiven::for_command(); run(c).map(|o| stamp_dispatch(o, &w)) }\n\
+             pub fn branches(c: &ExecutionContext, d: bool) -> UseCaseResult<R> { if d { stamp_dispatch(run(c), c.work()) } else { run(c) } }\n\
+             pub fn forgets(c: &ExecutionContext) -> UseCaseResult<R> { run(c) }\n\
+             pub(crate) fn aliased(c: &ExecutionContext) -> Result<X, QFailure> { run(c) }\n\
+             pub fn plans(p: &Plan) -> Result<X, UseCaseFailure<R>> { plan(p) }",
+        ),
+        (
+            "crate::use_cases::sample::helpers",
+            "pub(crate) fn inner(c: &ExecutionContext) -> UseCaseResult<R> { run(c) }",
+        ),
+    ]);
+    let found = |name: &str| {
+        let function = &index.functions[&path_of(&format!("crate::use_cases::sample::{name}"))];
+        DispatchUse::of(&function.item.block)
+    };
+    assert_eq!(found("decides").decided, ["ok"]);
+    assert_eq!(found("shorthand").decided, ["provider_dispatched"]);
+    assert_eq!(found("copies").copies, 1);
+    assert_eq!(found("assigns").decided, ["true"]);
+    let honest = found("honest");
+    assert!(honest.decided.is_empty() && honest.copies == 0);
+    assert_eq!(found("compounds").writes, 1);
+    assert_eq!(found("borrows").writes, 1);
+    assert_eq!(found("marks").marks, 2, "a method call and a full path");
+    assert_eq!(
+        found("stamps_by_hand").stamp_work,
+        2,
+        "a method call and a full path"
+    );
+    assert_eq!(found("mints").for_command, 1, "a path used as a value");
+    assert_eq!(found("builds").policies, 1);
+    assert_eq!(
+        found("launches").without_work,
+        2,
+        "a None and a ledger that may be None"
+    );
+    assert_eq!(found("launches_work").without_work, 0);
+    assert_eq!(found("opens").contexts, 1);
+    let logs = found("logs");
+    assert!(
+        logs.decided.is_empty() && logs.copies == 0 && logs.opaque_macros == 0,
+        "reads, log fields and patterns are not decisions"
+    );
+    assert_eq!(found("hides").decided, ["ok"]);
+    assert_eq!(found("inserts").decided, ["\"provider_dispatched\""]);
+    assert!(
+        found("reads_key").decided.is_empty(),
+        "a read by key is not a decision"
+    );
+    assert_eq!(found("writes_key").decided.len(), 1, "a write by key is");
+    assert_eq!(found("debugs").decided, ["ok"], "dbg! is not a log field");
+    assert_eq!(
+        found("guards").decided,
+        ["true"],
+        "a matches! guard is code"
+    );
+    assert_eq!(found("keys").opaque_macros, 1, "a wire key built by hand");
+    assert_eq!(
+        found("obscures").opaque_macros,
+        3,
+        "an unreadable body may not name the flag or the work mark"
+    );
+    assert_eq!(
+        dispatch_macros(&index),
+        ["crate::use_cases::result::carries_dispatch!"]
+    );
+
+    let forms = dispatch_forms(&index);
+    assert_eq!(forms, ["R", "Q", "QFailure"]);
+    assert_eq!(
+        dispatch_entries(&index, &forms),
+        [
+            "crate::use_cases::sample::aliased",
+            "crate::use_cases::sample::branches",
+            "crate::use_cases::sample::exits",
+            "crate::use_cases::sample::forgets",
+            "crate::use_cases::sample::maps",
+        ],
+        "an entry is found by its answer, even through an alias, and by its context; \
+         the plan without a context and a submodule helper are not entries"
+    );
+    let tail = |name: &str| {
+        let function = &index.functions[&path_of(&format!("crate::use_cases::sample::{name}"))];
+        match function.item.block.stmts.last() {
+            Some(syn::Stmt::Expr(expr, None)) => is_stamped_tail(expr),
+            _ => false,
+        }
+    };
+    assert!(tail("exits") && tail("maps"));
+    assert!(!tail("branches") && !tail("forgets") && !tail("aliased"));
+}
+
+/// Где код может объявить шаг «не работой»: поле с отметкой, которой может не быть,
+/// функция, которая такую отметку берёт или собирает `work: None`, и метод трейта с такой
+/// отметкой. Для каждого — место и видимость.
+fn work_opt_outs(index: &SourceIndex) -> Vec<(String, String)> {
+    fn may_skip(tokens: &str) -> bool {
+        tokens.contains("Option<WorkGiven>") || tokens.contains("Option<&WorkGiven>")
+    }
+    fn scope(visibility: &syn::Visibility) -> String {
+        match visibility {
+            syn::Visibility::Public(_) => "pub".to_owned(),
+            syn::Visibility::Inherited => "private".to_owned(),
+            syn::Visibility::Restricted(restricted) => normalize_tokens(&restricted.path),
+        }
+    }
+    /// `work: None` в литерале структуры.
+    struct BuildsWithoutWork(bool);
+    impl<'ast> syn::visit::Visit<'ast> for BuildsWithoutWork {
+        fn visit_field_value(&mut self, node: &'ast syn::FieldValue) {
+            if matches!(&node.member, syn::Member::Named(name) if name == "work")
+                && is_none(&node.expr)
+            {
+                self.0 = true;
+            }
+            syn::visit::visit_field_value(self, node);
+        }
+    }
+    fn builds_without_work(block: &syn::Block) -> bool {
+        let mut finder = BuildsWithoutWork(false);
+        syn::visit::Visit::visit_block(&mut finder, block);
+        finder.0
+    }
+    fn walk(module: &[String], items: &[syn::Item], found: &mut Vec<(String, String)>) {
+        let at = |name: &str| format!("{}::{name}", module.join("::"));
+        for item in items.iter().filter(|item| !item_has_cfg_test(item)) {
+            match item {
+                syn::Item::Struct(item) => {
+                    for field in &item.fields {
+                        let named = field.ident.as_ref().is_some_and(|name| name == "work");
+                        if named && may_skip(&normalize_tokens(&field.ty)) {
+                            found.push((at(&format!("{}.work", item.ident)), scope(&field.vis)));
+                        }
+                    }
+                }
+                syn::Item::Fn(item)
+                    if may_skip(&normalize_tokens(&item.sig.inputs))
+                        || builds_without_work(&item.block) =>
+                {
+                    found.push((at(&item.sig.ident.to_string()), scope(&item.vis)));
+                }
+                syn::Item::Impl(item) if item.trait_.is_none() => {
+                    let owner = normalize_tokens(item.self_ty.as_ref());
+                    for member in &item.items {
+                        if let syn::ImplItem::Fn(method) = member {
+                            if has_cfg_test(&method.attrs) {
+                                continue;
+                            }
+                            if may_skip(&normalize_tokens(&method.sig.inputs))
+                                || builds_without_work(&method.block)
+                            {
+                                found.push((
+                                    at(&format!("{owner}::{}", method.sig.ident)),
+                                    scope(&method.vis),
+                                ));
+                            }
+                        }
+                    }
+                }
+                syn::Item::Trait(item) => {
+                    for member in &item.items {
+                        if let syn::TraitItem::Fn(method) = member {
+                            if may_skip(&normalize_tokens(&method.sig.inputs)) {
+                                found.push((
+                                    at(&format!("{}::{}", item.ident, method.sig.ident)),
+                                    scope(&item.vis),
+                                ));
+                            }
+                        }
+                    }
+                }
+                syn::Item::Mod(item) => {
+                    if let Some((_, nested)) = &item.content {
+                        let inner = [module, &[item.ident.to_string()]].concat();
+                        walk(&inner, nested, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut found = Vec::new();
+    for unit in &index.units {
+        walk(&unit.module, &unit.syntax.items, &mut found);
+    }
+    found.sort();
+    found
+}
+
+/// Шаг, который не работа команды, объявляет только платформа: поле отметки, конструктор
+/// без неё и доставка без неё видны лишь внутри `crate::platform`. Это держит компилятор —
+/// а этот страж держит саму видимость: расширь её ради удобства двойника, и `p.work = None`
+/// в сценарии снова скомпилируется. Единственное открытое место — `spawn_managed`, чьи вызовы
+/// вне платформы страж признака требует с `Some(..)`.
+#[test]
+fn a_step_may_skip_the_work_mark_only_inside_the_platform() {
+    let index = SourceIndex::of_src();
+    let found = work_opt_outs(&index);
+    let known = [
+        "crate::platform::agent::WaitPolicy.work",
+        "crate::platform::edt_session::EdtSessionRequest.work",
+        "crate::platform::process::ProcessExecutionPolicy.work",
+    ];
+    for site in known {
+        assert!(
+            found.iter().any(|(at, _)| at == site),
+            "the finder no longer sees {site}: {found:?}"
+        );
+    }
+    let open = found
+        .iter()
+        .filter(|(at, scope)| {
+            let inside = at.starts_with("crate::platform::");
+            let hidden = matches!(
+                scope.as_str(),
+                "private" | "crate::platform" | "super" | "self"
+            );
+            let held_by_the_dispatch_guard =
+                at == "crate::platform::process::ProcessRunner::spawn_managed";
+            let allowed = (inside && hidden) || held_by_the_dispatch_guard;
+            !allowed
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        open.is_empty(),
+        "a step may be declared not to be the command's work only inside the platform: {open:?}"
+    );
+}
+
+/// Варианты отмены. Назвать их вне платформы и владельца значило бы решить «отменено» в
+/// обход классификатора — и потерять, получил ли исполнитель работу.
+const CANCEL_VARIANTS: &[&str] = &[
+    "crate::platform::process::ProcessError::Cancelled",
+    "crate::platform::agent::AgentError::Cancelled",
+    "crate::platform::download::DownloadError::Cancelled",
+    "crate::platform::interactive::InteractiveProcessError::CommandCancelled",
+    "crate::platform::edt_session::EdtSessionError::QueuedCancelled",
+    "crate::platform::edt_session::EdtSessionError::RunningCancelled",
+    "crate::support::error::AppError::Cancelled",
+];
+
+/// Чтение сигнала отмены в обход безопасной точки.
+const SIGNAL_READS: &[&str] = &["is_cancelled", "cancelled", "interruption"];
+
+/// Кто называет варианты отмены: платформа их строит, владельцы классифицируют —
+/// `support::error` узнаёт отмену в любой обёртке, `use_cases::result` отдаёт её роду
+/// отказа, `use_cases::interruption` строит отмену безопасной точки.
+fn may_name_cancel_variants(module: &[String]) -> bool {
+    module.starts_with(&path_of("crate::platform"))
+        || module == path_of("crate::support::error").as_slice()
+        || module == path_of("crate::use_cases::result").as_slice()
+        || module == path_of("crate::use_cases::interruption").as_slice()
+}
+
+/// Кто читает сигнал сам: платформа, контекст команды, безопасные точки и допуск вызова MCP.
+fn may_read_the_signal(module: &[String]) -> bool {
+    module.starts_with(&path_of("crate::platform"))
+        || module == path_of("crate::use_cases::context").as_slice()
+        || module == path_of("crate::use_cases::interruption").as_slice()
+        || module == path_of("crate::mcp::server").as_slice()
+}
+
+/// Места производственного кода, где отмену решают в обход владельца.
+fn cancellation_bypasses(index: &SourceIndex) -> Vec<String> {
+    struct Scan<'a, 'b> {
+        index: &'a SourceIndex,
+        body: &'a Body<'b>,
+        local_uses: std::collections::HashMap<String, Vec<String>>,
+        found: Vec<String>,
+    }
+
+    impl Scan<'_, '_> {
+        fn note(&mut self, what: impl std::fmt::Display) {
+            self.found.push(format!(
+                "{} ({}): {what}",
+                self.body.unit.file.display(),
+                self.body.context
+            ));
+        }
+
+        /// Тело макроса проверяется по словам: `Тип::Вариант` и `.метод(`, как бы его ни
+        /// разбирал сам макрос.
+        fn scan_tokens(&mut self, tokens: &impl quote::ToTokens) {
+            let flat = flat_tokens(tokens);
+            for window in flat.windows(4) {
+                if let [Tok::Ident(owner), Tok::Punct(':'), Tok::Punct(':'), Tok::Ident(variant)] =
+                    window
+                {
+                    let named = format!("{owner}::{variant}");
+                    if !may_name_cancel_variants(&self.body.module)
+                        && CANCEL_VARIANTS
+                            .iter()
+                            .any(|full| full.ends_with(&format!("::{named}")))
+                    {
+                        self.note(format!("names {named} in a macro"));
+                    }
+                }
+            }
+            for window in flat.windows(3) {
+                if let [Tok::Punct('.'), Tok::Ident(method), Tok::Group { empty: true }] = window {
+                    if !may_read_the_signal(&self.body.module)
+                        && SIGNAL_READS.contains(&method.as_str())
+                    {
+                        self.note(format!("reads the signal with .{method}() in a macro"));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Слова тела макроса подряд: группа отмечена и раскрыта сразу за отметкой.
+    enum Tok {
+        Ident(String),
+        Punct(char),
+        Group { empty: bool },
+        Other,
+    }
+
+    fn flat_tokens(tokens: &impl quote::ToTokens) -> Vec<Tok> {
+        fn walk(mut cursor: syn::buffer::Cursor<'_>, out: &mut Vec<Tok>) {
+            while !cursor.eof() {
+                if let Some((ident, next)) = cursor.ident() {
+                    out.push(Tok::Ident(ident.to_string()));
+                    cursor = next;
+                } else if let Some((punct, next)) = cursor.punct() {
+                    out.push(Tok::Punct(punct.as_char()));
+                    cursor = next;
+                } else if let Some((inside, _, _, next)) = cursor.any_group() {
+                    out.push(Tok::Group {
+                        empty: inside.eof(),
+                    });
+                    walk(inside, out);
+                    cursor = next;
+                } else if let Some((_, next)) = cursor.token_tree() {
+                    out.push(Tok::Other);
+                    cursor = next;
+                } else {
+                    break;
+                }
+            }
+        }
+        let buffer = syn::buffer::TokenBuffer::new2(tokens.to_token_stream());
+        let mut out = Vec::new();
+        walk(buffer.begin(), &mut out);
+        out
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for Scan<'_, '_> {
+        fn visit_path(&mut self, node: &'ast syn::Path) {
+            if !may_name_cancel_variants(&self.body.module) {
+                let resolved = self
+                    .index
+                    .resolve(&self.body.module, &self.local_uses, node)
+                    .into_iter();
+                // Одно имя из звёздочного `use` — `use ProcessError::*` и затем `Cancelled`.
+                let through_globs = if node.segments.len() == 1 {
+                    let name = node.segments[0].ident.to_string();
+                    self.body
+                        .globs
+                        .iter()
+                        .map(|glob| [glob.as_slice(), std::slice::from_ref(&name)].concat())
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                for path in resolved.chain(through_globs) {
+                    let joined = path.join("::");
+                    if CANCEL_VARIANTS.contains(&joined.as_str()) {
+                        self.note(format!("names {joined}"));
+                    }
+                }
+            }
+            syn::visit::visit_path(self, node);
+        }
+
+        /// Чтение сигнала вызовом по пути — `CancellationToken::is_cancelled(&token)` — и род
+        /// отмены, собранный в обход классификатора: `UseCaseErrorKind::Cancelled(..)`.
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(function) = node.func.as_ref() {
+                let builds_the_kind = self
+                    .index
+                    .resolve(&self.body.module, &self.local_uses, &function.path)
+                    .is_some_and(|path| {
+                        path.join("::") == "crate::use_cases::result::UseCaseErrorKind::Cancelled"
+                    });
+                if builds_the_kind && !may_name_cancel_variants(&self.body.module) {
+                    self.note("builds UseCaseErrorKind::Cancelled around the classifier");
+                }
+                let last = function
+                    .path
+                    .segments
+                    .last()
+                    .map(|segment| segment.ident.to_string())
+                    .unwrap_or_default();
+                if function.path.segments.len() > 1
+                    && node.args.len() == 1
+                    && SIGNAL_READS.contains(&last.as_str())
+                    && !may_read_the_signal(&self.body.module)
+                {
+                    self.note(format!("reads the signal with ::{last}(..)"));
+                }
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            let method = node.method.to_string();
+            if node.args.is_empty()
+                && SIGNAL_READS.contains(&method.as_str())
+                && !may_read_the_signal(&self.body.module)
+            {
+                self.note(format!("reads the signal with .{method}()"));
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+
+        fn visit_macro(&mut self, node: &'ast syn::Macro) {
+            self.scan_tokens(&node.tokens);
+        }
+    }
+
+    let mut found = Vec::new();
+    for body in production_bodies(index) {
+        let mut scan = Scan {
+            index,
+            body: &body,
+            local_uses: body.local_uses(index),
+            found: Vec::new(),
+        };
+        syn::visit::Visit::visit_block(&mut scan, body.block);
+        found.extend(scan.found);
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// Отмену и её место решает один владелец — `AppError::cancellation()`, а безопасные
+/// точки — `src/use_cases/interruption.rs` (#308). Корень прежней ошибки: команды решали
+/// «отменено» по сигналу или тексту, а не по ошибке, и отмена становилась отказом
+/// выполнения, а снятый процесс — отказом платформы. Страж ловит возвращение под любым
+/// именем: вне платформы и владельцев производственный код не называет вариантов отмены —
+/// ни в выражении, ни в образце, ни в макросе — и не читает сигнал сам.
+///
+/// Чего страж не видит: ошибку платформы, превращённую в текст, —
+/// `AppError::Runtime(format!("…{error}"))` теряет отмену так же, как её теряли
+/// `tools download` и ожидание `launch` до #308, — а ещё переименованный тип внутри макроса
+/// и код вне тел функций. Это ловит разбор: ошибку, которая может нести отмену, в текст не
+/// превращают, а оборачивают `with_context`.
+#[test]
+fn a_cancellation_is_classified_only_by_its_owner() {
+    let bypasses = cancellation_bypasses(&SourceIndex::of_src());
+    assert!(
+        bypasses.is_empty(),
+        "a cancellation is decided around its owner; classify it with `AppError::cancellation()` \
+         and notice a safe point through `crate::use_cases::interruption`:\n{}",
+        bypasses.join("\n")
+    );
+}
+
+/// Страж видит обход в каждом виде, в каком он уже бывал, и не видит законных мест.
+#[test]
+fn the_cancellation_guard_sees_every_bypass() {
+    let index = SourceIndex::from_sources(&[
+        (
+            "crate::use_cases::sample",
+            "use crate::platform::process::ProcessError;\n\
+             use crate::platform::ibcmd::IbcmdError;\n\
+             use crate::support::error::AppError;\n\
+             use crate::use_cases::result::UseCaseErrorKind;\n\
+             fn by_pattern(error: ProcessError) -> bool {\n\
+                 match error { ProcessError::Cancelled { .. } => true, _ => false }\n\
+             }\n\
+             fn by_macro(error: &IbcmdError) -> bool {\n\
+                 matches!(error, IbcmdError::Spawn(ProcessError::Cancelled { .. }))\n\
+             }\n\
+             fn by_signal(context: &ExecutionContext) -> bool {\n\
+                 context.cancellation().is_cancelled()\n\
+             }\n\
+             fn by_interruption(context: &ExecutionContext) -> bool {\n\
+                 context.interruption().is_some()\n\
+             }\n\
+             fn by_hand() -> AppError {\n\
+                 AppError::Cancelled { message: String::new(), at: todo!() }\n\
+             }\n\
+             fn by_classifier(error: &AppError) -> bool {\n\
+                 error.cancellation().is_some()\n\
+             }\n\
+             fn by_path_call(token: &CancellationToken) -> bool {\n\
+                 CancellationToken::is_cancelled(token)\n\
+             }\n\
+             fn by_kind(at: CancelledAt) -> UseCaseError {\n\
+                 UseCaseError::new(UseCaseErrorKind::Cancelled(at), String::new())\n\
+             }\n\
+             fn by_reading_the_kind(error: &UseCaseError) -> bool {\n\
+                 matches!(error.kind(), UseCaseErrorKind::Cancelled(_))\n\
+             }",
+        ),
+        (
+            "crate::use_cases::globbed",
+            "use crate::platform::process::ProcessError::*;\n\
+             fn by_glob(error: crate::platform::process::ProcessError) -> bool {\n\
+                 match error { Cancelled { .. } => true, _ => false }\n\
+             }",
+        ),
+        (
+            "crate::platform::process",
+            "pub enum ProcessError { Cancelled { cmd: String, delivered: bool } }\n\
+             fn refuse(policy: &Policy) -> Result<(), ProcessError> {\n\
+                 if policy.cancellation.is_cancelled() {\n\
+                     return Err(ProcessError::Cancelled { cmd: String::new(), delivered: false });\n\
+                 }\n\
+                 Ok(())\n\
+             }",
+        ),
+        (
+            "crate::support::error",
+            "pub enum AppError { Cancelled { message: String, at: CancelledAt } }\n\
+             impl AppError {\n\
+                 fn cancellation(&self) -> Option<CancelledAt> {\n\
+                     match self { Self::Cancelled { at, .. } => Some(*at) }\n\
+                 }\n\
+             }",
+        ),
+    ]);
+
+    let found = cancellation_bypasses(&index);
+
+    for (context, what) in [
+        (
+            "by_pattern",
+            "crate::platform::process::ProcessError::Cancelled",
+        ),
+        ("by_macro", "ProcessError::Cancelled in a macro"),
+        ("by_signal", ".is_cancelled()"),
+        ("by_interruption", ".interruption()"),
+        ("by_hand", "crate::support::error::AppError::Cancelled"),
+        ("by_path_call", "::is_cancelled(..)"),
+        ("by_kind", "builds UseCaseErrorKind::Cancelled"),
+        (
+            "by_glob",
+            "crate::platform::process::ProcessError::Cancelled",
+        ),
+    ] {
+        assert!(
+            found
+                .iter()
+                .any(|line| line.contains(&format!("({context})")) && line.contains(what)),
+            "the guard misses {context}: {found:?}"
+        );
+    }
+    assert!(
+        !found.iter().any(|line| line.contains("by_classifier")
+            || line.contains("by_reading_the_kind")
+            || line.contains("refuse")
+            || line.contains("AppError::cancellation")),
+        "the guard flags a legitimate place: {found:?}"
+    );
 }

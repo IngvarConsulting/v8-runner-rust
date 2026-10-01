@@ -1,24 +1,22 @@
 # Spec Guide
 
-`spec/` stores the active internal truth layer for planning, architecture rules, ADRs, and
-acceptance.
+`spec/` хранит внутренний слой: согласованные гарантии продукта и его архитектурное
+описание.
 
-## Active Entry Points
+## Что где
 
-- `IMPLEMENTATION_TODO.md`: open implementation tasks only.
-- `ADR_DERIVED_BACKLOG.md`: open ADR-derived gaps that still need planning or execution.
-- `decisions/README.md`: accepted architecture decisions and their owning ADR files.
-- `architecture/invariants.md`: non-negotiable rules that changes must preserve.
-- `architecture/change-checklist.md`: required sync/checklist for contract and boundary changes.
-- `architecture/arc42/`: detailed architecture and risk set for maintainers.
-- `acceptance/real-environment-validation.md`: active real-environment acceptance and smoke plan.
+- `rules/`: правила продукта — согласованные гарантии; каждая называет свою проверку,
+  а пока не выполнена — задачу в `gap`.
+  Начинать с [`rules/README.md`](rules/README.md).
+- `arc42/`: подробное описание архитектуры и набор рисков. Оно рассказывает,
+  как устроено, и ничего не обещает.
+- Открытые задачи ведутся в GitHub issues; сводный план по целевой модели — issue #233.
 
-## Archive
+История правил — в Git. Замеры на живой платформе 1С лежат в
+[`references/1c/`](../references/1c/README.md).
 
-- Historical snapshots and closed delivery records live in `spec/archive/`.
-- Raw external 1C references live in `references/1c/`.
+## Как применять
 
-## Usage Rule
-
-If a statement here conflicts with current code, CLI help, or the public docs layer, trust the
-current code first and then update the active doc layer.
+Описание, разошедшееся с кодом или справкой командной строки, правят вслед за кодом. Правило
+под код не переписывают: порядок разбора — в разделе «When a Rule and the Code Disagree»
+файла [`AGENTS.md`](../AGENTS.md).

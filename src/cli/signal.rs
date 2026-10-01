@@ -3,6 +3,10 @@ use std::thread::{self, JoinHandle};
 
 use tokio_util::sync::CancellationToken;
 
+/// Строка журнала, которой раннер отмечает, что прерывание оператора дошло до команды:
+/// отмена уже выставлена, когда она записана.
+const OPERATOR_INTERRUPT_RECEIVED: &str = "operator interrupt received; the command is cancelled";
+
 /// Lifetime guard that forwards CLI termination signals into a shared cancellation token.
 pub struct CliSignalGuard {
     stop_tx: Option<mpsc::Sender<()>>,
@@ -41,12 +45,14 @@ impl CliSignalGuard {
                 tokio::select! {
                     _ = tokio::signal::ctrl_c() => {
                         cancellation.cancel();
+                        tracing::info!("{}", OPERATOR_INTERRUPT_RECEIVED);
                     }
                     _ = tokio::task::spawn_blocking(move || {
                         let _ = stop_rx.recv();
                     }) => {}
                     _ = termination => {
                         cancellation.cancel();
+                        tracing::info!("{}", OPERATOR_INTERRUPT_RECEIVED);
                     }
                 }
             });

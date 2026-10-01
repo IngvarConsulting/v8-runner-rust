@@ -4,10 +4,12 @@ use std::path::Path;
 use thiserror::Error;
 
 use crate::config::model::{
-    AppConfig, BuilderBackend, SourceFormat, SourceSetConfig, SourceSetPurpose,
-    ToolExtensionConfig, ToolExtensionInput, ToolExtensionSourceConfig, VanessaProfileConfig,
+    AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, ToolExtensionConfig,
+    ToolExtensionInput, ToolExtensionSourceConfig, VanessaProfileConfig,
 };
+use crate::platform::connection::V8Connection;
 use crate::platform::locator::PlatformVersionRequirement;
+use crate::support::authority::{host_and_port_of_authority, host_of_authority};
 use crate::support::edt_project::{self, EdtProjectKind};
 use crate::support::path::is_safe_path_segment;
 use crate::support::source_descriptor::{self, SourceDescriptorPurpose, SourceSetRootScanError};
@@ -56,6 +58,40 @@ pub enum ConfigValidationError {
     #[error("infobase.connection is empty")]
     EmptyConnection,
 
+    #[error(
+        "infobase.standalone names a standalone server: infobase.connection is its direct gate `Srvr=<host[:port]>;Ref=<name>` or empty; a standalone server has no file address"
+    )]
+    StandaloneConnectionIsNotADirectGate,
+
+    #[error(
+        "infobase.connection is neither a file address `File=…` nor a server address `Srvr=<host[:port]>;Ref=<name>` (or `/S server\\ref`): the target kind is declared, not guessed"
+    )]
+    ConnectionShapeUnsupported,
+
+    #[error("infobase.dbms is not allowed for a standalone server: the server opens its database itself")]
+    DbmsNotAllowedForStandalone,
+
+    #[error("infobase.standalone.gate: {0}")]
+    StandaloneGateInvalid(String),
+
+    #[error("{key} must be an SSH key fingerprint like `SHA256:<base64>`: {value}")]
+    InvalidHostFingerprint { key: &'static str, value: String },
+
+    #[error(
+        "files travel between the runner and a standalone server only through a declared channel: set infobase.standalone.exchange to `sftp` (through the gate) or to `{{ dir: … }}` — the gate user's directory (`<users-data>/<user>` of ibsrv) as the runner sees it"
+    )]
+    StandaloneExchangeMissing,
+
+    #[error(
+        "workPath stays on the runner's side: '{work_path}' overlaps the target-side directory infobase.standalone.exchange.dir '{dir}'"
+    )]
+    WorkPathOverlapsTargetSideDir { work_path: String, dir: String },
+
+    #[error(
+        "tools.designer_agent.{keys} do not apply to a standalone server: it is reached through infobase.standalone.gate and is never started by the runner"
+    )]
+    DesignerAgentDoesNotApplyToStandalone { keys: String },
+
     #[error("legacy top-level key 'connection' is not supported; use infobase.connection")]
     LegacyTopLevelConnection,
 
@@ -69,21 +105,86 @@ pub enum ConfigValidationError {
     LegacyVanessaEpfPath,
 
     #[error(
-        "top-level key 'execution_timeout_seconds' is not supported; use execution_timeout in milliseconds or tests.execution_timeout_seconds for test runs"
+        "top-level key 'execution_timeout_seconds' is not supported; use tests.execution_timeout_seconds for test runs"
     )]
     LegacyTopLevelExecutionTimeoutSeconds,
 
     #[error("infobase.dbms is not allowed for file-based infobase.connection")]
     DbmsNotAllowedForFileConnection,
 
-    #[error("builder=IBCMD with server-based infobase.connection requires infobase.dbms.{0}")]
-    MissingIbcmdServerDbmsField(&'static str),
+    #[error(
+        "infobase.cluster is not allowed for a file infobase: a file base has no cluster and no administration server"
+    )]
+    ClusterNotAllowedForFileConnection,
+
+    #[error(
+        "infobase.cluster does not apply to a standalone server: ibsrv is one process instead of a cluster, and ras does not manage it"
+    )]
+    ClusterNotAllowedForStandalone,
+
+    #[error(
+        "{key} must be a host with an optional port 1–65535 — `host`, `host:port` or `[v6]:port`: '{value}'"
+    )]
+    ClusterAddressInvalid { key: &'static str, value: String },
+
+    #[error(
+        "infobase.connection 'ws=…' is a web-client address, not an administrative channel: put it into infobase.web.url and declare the target with File=… or Srvr=…;Ref=…"
+    )]
+    WebConnectionIsNotAnAdministrativeChannel,
+
+    #[error("infobase.web.{field} is required to publish on {server}")]
+    WebPublicationFieldMissing {
+        field: &'static str,
+        server: &'static str,
+    },
+
+    #[error("infobase.web.os-auth is supported only for iis, not for {server}")]
+    WebOsAuthRequiresIis { server: &'static str },
+
+    #[error("infobase.web.dir does not exist or is not a directory: {0}")]
+    WebPublicationDirMissing(String),
+
+    #[error(
+        "top-level key 'builder' is not supported: the executor is chosen per operation; name one with providers.<operation> (for example providers.push: ibcmd) or remove the key to use the defaults"
+    )]
+    BuilderKeyRemoved,
+
+    #[error(
+        "providers.{operation} is not allowed: on a {target} infobase this operation has exactly one executor and nothing to choose from"
+    )]
+    ProviderKeyWithoutChoice {
+        operation: &'static str,
+        target: &'static str,
+    },
+
+    #[error(
+        "providers.{operation}: '{provider}' does not implement this operation on a {target} infobase; implemented: {implemented}"
+    )]
+    ProviderDoesNotImplement {
+        operation: &'static str,
+        provider: &'static str,
+        target: &'static str,
+        implemented: String,
+    },
+
+    #[error(
+        "tools.designer_agent.attach names an agent started outside the runner; launch keys {keys} do not apply to it — drop either attach or the launch keys"
+    )]
+    DesignerAgentAttachConflictsWithLaunchKeys { keys: String },
+
+    #[error("tools.designer_agent.attach: {0}")]
+    DesignerAgentAttachInvalid(String),
+
+    #[error(
+        "tools.designer_agent.{keys} describe an agent started outside the runner and need attach next to them; the managed agent works under workPath"
+    )]
+    DesignerAgentAttachedKeysWithoutAttach { keys: String },
+
+    #[error("tools.designer_agent.startup_timeout_ms must be greater than 0")]
+    InvalidDesignerAgentStartupTimeoutMs,
 
     #[error("format EDT requires at least one source-set with a valid EDT project path")]
     EdtNoProjects,
-
-    #[error("external source-set '{name}' requires builder=DESIGNER")]
-    ExternalSourceSetRequiresDesigner { name: String },
 
     #[error(
         "external EDT source-set '{name}' must contain at least one child project with .project"
@@ -103,11 +204,16 @@ pub enum ConfigValidationError {
     #[error("platform version must use format major.minor, major.minor.patch or major.minor.patch.build: {0}")]
     InvalidPlatformVersion(String),
 
-    #[error("build.partialLoadThreshold must be greater than or equal to 1")]
+    #[error("push.partialLoadThreshold must be greater than or equal to 1")]
     InvalidPartialLoadThreshold,
 
-    #[error("execution_timeout must be between 1 and 86400000 milliseconds")]
-    InvalidExecutionTimeout,
+    #[error("mcp.execution.admission_timeout_ms must be between 1 and 86400000 milliseconds")]
+    InvalidMcpAdmissionTimeout,
+
+    #[error(
+        "top-level key 'execution_timeout' is not supported: a command has no deadline, it runs until it reaches a terminal outcome. Bound a step instead — tools.edt_cli.command_timeout_ms, tests.execution_timeout_seconds, tools.client_mcp.wait_ready_timeout_ms — or bound how long an MCP call waits for a free slot with mcp.execution.admission_timeout_ms"
+    )]
+    ExecutionTimeoutKeyRemoved,
 
     #[error("tests.execution_timeout_seconds must be between 1 and 86400 seconds")]
     InvalidTestExecutionTimeout,
@@ -154,6 +260,9 @@ pub enum ConfigValidationError {
     #[error("mcp.http.idle_ttl_secs must be greater than or equal to 1")]
     InvalidMcpIdleTtlSecs,
 
+    #[error("mcp.http.allowed_hosts entry must be a host, optionally with a port: {0}")]
+    InvalidMcpAllowedHost(String),
+
     #[error("mcp.execution.max_concurrent_calls must be greater than or equal to 1")]
     InvalidMcpMaxConcurrentCalls,
 
@@ -178,7 +287,7 @@ pub enum ConfigValidationError {
     #[error("tools.client_mcp.extension.artifact.path must point to an existing .cfe file: {0}")]
     ToolExtensionArtifactPathInvalid(String),
 
-    #[error("tools.client_mcp.extension.artifact is supported only with builder=DESIGNER")]
+    #[error("tools.client_mcp.extension.artifact is loaded by the Designer only; providers.push names another executor")]
     ToolExtensionArtifactRequiresDesigner,
 
     #[error("tools.edt_cli.startup_timeout_ms must be greater than or equal to 1")]
@@ -186,23 +295,129 @@ pub enum ConfigValidationError {
 
     #[error("tools.edt_cli.command_timeout_ms must be greater than or equal to 1")]
     InvalidEdtCliCommandTimeoutMs,
+
+    #[error(
+        "`infobases` is declared only in v8project.local.yaml: which infobase a checkout is attached to is known to this machine, not to the project; the project file may still carry `infobase:` as a one-cycle synonym for `infobases.origin`"
+    )]
+    InfobasesBelongToTheLocalLayer,
+
+    #[error(
+        "{file} declares both `infobase` and `infobases`: `infobase` is the one-cycle synonym for `infobases.origin`, keep one of them"
+    )]
+    InfobaseKeysMixed { file: String },
+
+    #[error(
+        "{file} names both `push:` and `build:`: `build:` is a one-cycle synonym for `push:`, keep one"
+    )]
+    PushSectionKeysMixed { file: String },
+
+    #[error(
+        "{file} names the executor of one command twice: `providers.{previous}` is a one-cycle synonym for `providers.{canonical}`, keep one"
+    )]
+    ProviderKeysMixed {
+        file: String,
+        canonical: &'static str,
+        previous: &'static str,
+    },
+
+    #[error(
+        "infobases.{name}: an infobase name is a plain identifier matching {pattern} — it names a directory under workPath"
+    )]
+    InfobaseNameInvalid { name: String, pattern: &'static str },
+
+    #[error(
+        "infobase '{name}' is not declared in v8project.local.yaml (declared: {declared}); a standalone server is declared by its `standalone` section, not by a connection string"
+    )]
+    InfobaseNotDeclared { name: String, declared: String },
+
+    #[error(
+        "no infobase is selected: `origin` is not declared in v8project.local.yaml (declared: {declared}); pass --infobase <name|connection string> or declare infobases.origin.connection there (a new project starts with `init`)"
+    )]
+    OriginNotDeclared { declared: String },
+
+    #[error(
+        "--infobase connection string must not carry credentials (`Usr=`/`Pwd=` or `/N`/`/P`): declare the base under infobases.<name> with user and password"
+    )]
+    AdHocConnectionCarriesCredentials,
+
+    #[error("infobases.{name}: {source}")]
+    InfobaseSectionInvalid {
+        name: String,
+        #[source]
+        source: Box<ConfigValidationError>,
+    },
 }
 
 /// Validate high-level application configuration consistency and filesystem references.
 pub fn validate(config: &AppConfig) -> Result<(), ConfigValidationError> {
     validate_base_path(&config.base_path)?;
     validate_work_path(&config.work_path)?;
-    validate_matrix(config)?;
+    validate_project_checks(config)
+}
+
+/// Полная проверка проекта без создания рабочего каталога: превью и применение делят
+/// смысловые проверки, и только применение готовит `workPath`.
+pub fn validate_read_only(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    validate_base_path(&config.base_path)?;
+    validate_planned_work_path(config)?;
+    validate_project_checks(config)
+}
+
+/// Та же проверка проекта для каталога, которого ещё нет на диске: его пишет сама команда.
+/// От [`validate_read_only`] отличается одним — существования каталога проекта не требует,
+/// потому что проверяемые настройки в него ещё не записаны.
+pub fn validate_planned(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    validate_planned_work_path(config)?;
+    validate_project_checks(config)
+}
+
+/// Рабочий каталог глазами того, кто его не создаёт.
+///
+/// Живёт отдельной функцией, а не строками внутри одного из режимов: режимов без создания
+/// каталога уже два, и повторённый перечень проверок разошёлся бы молча.
+fn validate_planned_work_path(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    // Resolve without creating directories, even for Designer sources (which do
+    // not enter the EDT overlap checks). Inspect the resolved candidate so a
+    // missing component followed by `..` cannot hide an existing non-directory.
+    let work_path = crate::support::path::nearest_existing_canonical_path(&config.work_path)
+        .map_err(|error| {
+            ConfigValidationError::WorkPathInvalid(format!(
+                "cannot resolve '{}': {error}",
+                config.work_path.display()
+            ))
+        })?;
+    match std::fs::metadata(&work_path) {
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(ConfigValidationError::WorkPathInvalid(format!(
+                "'{}' is not a directory",
+                work_path.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(ConfigValidationError::WorkPathInvalid(format!(
+                "cannot inspect '{}': {error}",
+                work_path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_project_checks(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    validate_providers(config)?;
     validate_source_sets(config)?;
     validate_connection_contract(config)?;
-    validate_ibcmd_server_dbms(config)?;
+    validate_web_publication(config)?;
     validate_platform_version(config)?;
     validate_build_config(config)?;
-    validate_execution_timeout(config)?;
+    validate_mcp_admission_timeout(config)?;
     validate_test_config(config)?;
     validate_mcp_config(config)?;
     validate_client_mcp_tool_extension(config)?;
     validate_edt_cli_config(config)?;
+    validate_designer_agent_config(config)?;
     Ok(())
 }
 
@@ -213,12 +428,11 @@ pub fn validate(config: &AppConfig) -> Result<(), ConfigValidationError> {
 pub fn validate_tools_download_bootstrap(config: &AppConfig) -> Result<(), ConfigValidationError> {
     validate_base_path(&config.base_path)?;
     validate_work_path(&config.work_path)?;
-    validate_matrix(config)?;
+    validate_providers(config)?;
     validate_connection_contract(config)?;
-    validate_ibcmd_server_dbms(config)?;
     validate_platform_version(config)?;
     validate_build_config(config)?;
-    validate_execution_timeout(config)?;
+    validate_mcp_admission_timeout(config)?;
     validate_mcp_config(config)?;
     validate_edt_cli_config(config)?;
     Ok(())
@@ -233,7 +447,7 @@ pub fn validate_prepared_test(config: &AppConfig) -> Result<(), ConfigValidation
     validate_work_path(&config.work_path)?;
     validate_connection_contract(config)?;
     validate_platform_version(config)?;
-    validate_execution_timeout(config)?;
+    validate_mcp_admission_timeout(config)?;
     validate_test_config(config)?;
     Ok(())
 }
@@ -248,7 +462,7 @@ pub fn validate_infobase_export(config: &AppConfig) -> Result<(), ConfigValidati
     // created only when the selected command acquires its workspace lock.
     validate_connection_contract(config)?;
     validate_platform_version(config)?;
-    validate_execution_timeout(config)?;
+    validate_mcp_admission_timeout(config)?;
     Ok(())
 }
 
@@ -329,12 +543,6 @@ fn validate_source_sets(config: &AppConfig) -> Result<(), ConfigValidationError>
                 &ss.name,
                 format!("path must be a directory: {}", full_path.display()),
             ));
-        }
-
-        if ss.purpose.is_external() && config.builder != BuilderBackend::Designer {
-            return Err(ConfigValidationError::ExternalSourceSetRequiresDesigner {
-                name: ss.name.clone(),
-            });
         }
 
         validate_source_set_layout(config.format, ss, &full_path)?;
@@ -617,60 +825,184 @@ fn validate_source_set_name(name: &str) -> Result<(), ConfigValidationError> {
     Ok(())
 }
 
+/// Форма каждой объявленной секции и среда выбранной.
+///
+/// Форму — что база объявлена один раз, адрес есть и он административный — держат все
+/// секции карты: опечатка в `prod` не должна ждать, пока кто-то выберет `prod`. Среда —
+/// каталоги этой машины — проверяется только у выбранной базы: чужой каталог обмена не
+/// мешает работать с `origin`. Ошибка невыбранной секции называет её имя; выбранная
+/// отвечает так же, как отвечала единственная.
 fn validate_connection_contract(config: &AppConfig) -> Result<(), ConfigValidationError> {
-    if config.infobase.connection.trim().is_empty() {
+    for (name, infobase) in &config.infobases {
+        if config.infobase_name.as_deref() == Some(name) {
+            continue;
+        }
+        validate_infobase_form(infobase).map_err(|source| {
+            ConfigValidationError::InfobaseSectionInvalid {
+                name: name.clone(),
+                source: Box::new(source),
+            }
+        })?;
+    }
+    validate_infobase_form(&config.infobase)?;
+    validate_selected_infobase_environment(config)
+}
+
+/// Вид цели отвечает на три вопроса по порядку: есть секция `standalone` — автономный
+/// сервер; иначе в строке есть `File=` — файловая база; иначе — кластер, и третий ответ
+/// получает только строка серверной формы, которую платформа примет
+/// (`DEC.2026-09-21.TARGET-KIND-IS-ANSWERED-BY-THREE-QUESTIONS`).
+fn validate_infobase_form(
+    infobase: &crate::config::model::InfobaseConfig,
+) -> Result<(), ConfigValidationError> {
+    let connection = infobase.connection.trim();
+    // Вид цели объявляется, а не угадывается: за `ws=` может стоять файловая база,
+    // кластер или автономный сервер, и чем базу администрировать, из адреса не следует.
+    if connection.to_ascii_lowercase().starts_with("ws=") {
+        return Err(ConfigValidationError::WebConnectionIsNotAnAdministrativeChannel);
+    }
+    if let Some(standalone) = infobase.standalone.as_ref() {
+        return validate_standalone_target_form(infobase, standalone);
+    }
+    if connection.is_empty() {
         return Err(ConfigValidationError::EmptyConnection);
     }
 
-    let is_file_connection = config.v8_connection().file_path().is_some();
-    if is_file_connection {
-        if config.infobase.dbms.is_some() {
+    let parsed = V8Connection::from_connection_string(connection);
+    if !parsed.has_supported_shape() {
+        return Err(ConfigValidationError::ConnectionShapeUnsupported);
+    }
+    if parsed.file_path().is_some() {
+        if infobase.dbms.is_some() {
             return Err(ConfigValidationError::DbmsNotAllowedForFileConnection);
+        }
+        if infobase.cluster.is_some() {
+            return Err(ConfigValidationError::ClusterNotAllowedForFileConnection);
         }
         return Ok(());
     }
+    if let Some(cluster) = infobase.cluster.as_ref() {
+        validate_cluster_section(cluster)?;
+    }
 
     Ok(())
 }
 
-fn validate_ibcmd_server_dbms(config: &AppConfig) -> Result<(), ConfigValidationError> {
-    let is_file_connection = config.v8_connection().file_path().is_some();
-    if is_file_connection {
-        return Ok(());
-    }
-    if config.builder != BuilderBackend::Ibcmd {
-        return Ok(());
-    }
+/// Секция `cluster` держит то, что есть только у кластера
+/// (`DEC.2026-09-21.THE-CLUSTER-SECTION-HOLDS-RAS-AND-TWO-ADMIN-LEVELS`): адреса —
+/// `host[:port]`, как их примут `rac` и `ras`; учётные данные здесь не проверяются —
+/// какого уровня не хватает, скажет операция, которой он нужен.
+fn validate_cluster_section(
+    cluster: &crate::config::model::InfobaseClusterConfig,
+) -> Result<(), ConfigValidationError> {
+    validate_cluster_address("infobase.cluster.ras", cluster.ras.as_deref())?;
+    validate_cluster_address(
+        "infobase.cluster.agent.address",
+        cluster
+            .agent
+            .as_ref()
+            .and_then(|agent| agent.address.as_deref()),
+    )
+}
 
-    let Some(dbms) = config.infobase.dbms.as_ref() else {
-        return Err(ConfigValidationError::MissingIbcmdServerDbmsField("kind"));
+fn validate_cluster_address(
+    key: &'static str,
+    value: Option<&str>,
+) -> Result<(), ConfigValidationError> {
+    let Some(value) = value else {
+        return Ok(());
     };
-    if option_is_blank(dbms.kind.as_deref()) {
-        return Err(ConfigValidationError::MissingIbcmdServerDbmsField("kind"));
+    // Проверяется ровно та запись, что уйдёт утилите: пробелы по краям — не адрес.
+    if host_and_port_of_authority(value).is_none() {
+        return Err(ConfigValidationError::ClusterAddressInvalid {
+            key,
+            value: value.to_owned(),
+        });
     }
-    if option_is_blank(dbms.server.as_deref()) {
-        return Err(ConfigValidationError::MissingIbcmdServerDbmsField("server"));
-    }
-    if option_is_blank(dbms.name.as_deref()) {
-        return Err(ConfigValidationError::MissingIbcmdServerDbmsField("name"));
-    }
-
     Ok(())
 }
 
-fn option_is_blank(value: Option<&str>) -> bool {
-    match value {
-        Some(value) => value.trim().is_empty(),
-        None => true,
+/// Каталог обмена автономного сервера лежит на той стороне; `workPath` — на этой.
+fn validate_selected_infobase_environment(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    if let Some(dir) = config
+        .infobase
+        .standalone
+        .as_ref()
+        .and_then(|standalone| standalone.exchange_dir())
+    {
+        if paths_overlap(&config.work_path, dir) {
+            return Err(ConfigValidationError::WorkPathOverlapsTargetSideDir {
+                work_path: config.work_path.display().to_string(),
+                dir: dir.display().to_string(),
+            });
+        }
     }
+    Ok(())
+}
+
+/// Проверяется только форма: разбирается ли запись как отпечаток ключа. Тот ли это
+/// ключ — вопрос к серверу, и его задаёт сессия.
+fn validate_host_fingerprint(
+    key: &'static str,
+    value: Option<&str>,
+) -> Result<(), ConfigValidationError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    crate::platform::agent::HostKeyExpectation::declared(value)
+        .map(|_| ())
+        .map_err(|_| ConfigValidationError::InvalidHostFingerprint {
+            key,
+            value: value.to_owned(),
+        })
+}
+
+/// Автономный сервер: секция первична, строка рядом с ней — адрес прямого шлюза
+/// (серверной формы) или пусто, файлового адреса у сервера нет; шлюз назван, канал
+/// обмена объявлен.
+fn validate_standalone_target_form(
+    infobase: &crate::config::model::InfobaseConfig,
+    standalone: &crate::config::model::StandaloneConfig,
+) -> Result<(), ConfigValidationError> {
+    let connection = infobase.connection.trim();
+    if !connection.is_empty() {
+        let parsed = V8Connection::from_connection_string(connection);
+        if parsed.file_path().is_some() || !parsed.has_supported_shape() {
+            return Err(ConfigValidationError::StandaloneConnectionIsNotADirectGate);
+        }
+    }
+    if infobase.dbms.is_some() {
+        return Err(ConfigValidationError::DbmsNotAllowedForStandalone);
+    }
+    if infobase.cluster.is_some() {
+        return Err(ConfigValidationError::ClusterNotAllowedForStandalone);
+    }
+    standalone
+        .gate_endpoint()
+        .map_err(ConfigValidationError::StandaloneGateInvalid)?;
+    validate_host_fingerprint(
+        "infobase.standalone.host-fingerprint",
+        standalone.host_fingerprint.as_deref(),
+    )?;
+    if standalone.exchange.is_none() {
+        return Err(ConfigValidationError::StandaloneExchangeMissing);
+    }
+    Ok(())
 }
 
 fn validate_edt_runtime_paths(
     config: &AppConfig,
     edt_source_paths: &[(String, std::path::PathBuf)],
 ) -> Result<(), ConfigValidationError> {
-    let canonical_work_path =
-        std::fs::canonicalize(&config.work_path).unwrap_or_else(|_| config.work_path.clone());
+    let canonical_work_path = crate::support::path::nearest_existing_canonical_path(
+        &config.work_path,
+    )
+    .map_err(|error| {
+        ConfigValidationError::WorkPathInvalid(format!(
+            "cannot resolve '{}': {error}",
+            config.work_path.display()
+        ))
+    })?;
 
     for (generated_for, _) in edt_source_paths {
         let generated_path = canonical_work_path.join("designer").join(generated_for);
@@ -703,7 +1035,81 @@ fn is_reserved_workdir_name(name: &str) -> bool {
     )
 }
 
-fn validate_matrix(_config: &AppConfig) -> Result<(), ConfigValidationError> {
+/// Предусловия `webinst` называются до запуска: у Apache 2.0 и 2.2 нет пути к конфигу
+/// по умолчанию, `-osauth` знает только IIS, а каталог публикации утилита не создаёт.
+fn validate_web_publication(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    let Some(web) = config.infobase.web.as_ref() else {
+        return Ok(());
+    };
+    let Some(server) = web.server else {
+        return Ok(());
+    };
+    let server_name = server.as_str();
+    if web
+        .wsdir
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Err(ConfigValidationError::WebPublicationFieldMissing {
+            field: "wsdir",
+            server: server_name,
+        });
+    }
+    let Some(dir) = web.dir.as_ref() else {
+        return Err(ConfigValidationError::WebPublicationFieldMissing {
+            field: "dir",
+            server: server_name,
+        });
+    };
+    if !dir.is_dir() {
+        return Err(ConfigValidationError::WebPublicationDirMissing(
+            dir.display().to_string(),
+        ));
+    }
+    if server.requires_conf() && web.conf.is_none() {
+        return Err(ConfigValidationError::WebPublicationFieldMissing {
+            field: "conf",
+            server: server_name,
+        });
+    }
+    if web.os_auth && server != crate::config::model::WebServerKind::Iis {
+        return Err(ConfigValidationError::WebOsAuthRequiresIis {
+            server: server_name,
+        });
+    }
+    Ok(())
+}
+
+/// Переопределение провайдера принимается только там, где есть развилка, и только
+/// для исполнителя, который операцию реализует. Ключ для операции с одним исполнителем —
+/// ошибка, а не подтверждение очевидного.
+fn validate_providers(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    use crate::domain::capability::{capabilities, capability_of, has_a_choice};
+
+    let target = config.target_kind();
+    for (operation, provider) in &config.providers {
+        if !has_a_choice(*operation, target) {
+            return Err(ConfigValidationError::ProviderKeyWithoutChoice {
+                operation: operation.as_str(),
+                target: target.as_str(),
+            });
+        }
+        if capability_of(*operation, target, *provider).is_none() {
+            let implemented = capabilities(*operation, target)
+                .iter()
+                .map(|capability| capability.provider.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(ConfigValidationError::ProviderDoesNotImplement {
+                operation: operation.as_str(),
+                provider: provider.as_str(),
+                target: target.as_str(),
+                implemented,
+            });
+        }
+    }
     Ok(())
 }
 
@@ -727,9 +1133,9 @@ fn validate_build_config(config: &AppConfig) -> Result<(), ConfigValidationError
     Ok(())
 }
 
-fn validate_execution_timeout(config: &AppConfig) -> Result<(), ConfigValidationError> {
-    if !(1..=86_400_000).contains(&config.execution_timeout) {
-        return Err(ConfigValidationError::InvalidExecutionTimeout);
+fn validate_mcp_admission_timeout(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    if !(1..=86_400_000).contains(&config.mcp.execution.admission_timeout_ms) {
+        return Err(ConfigValidationError::InvalidMcpAdmissionTimeout);
     }
 
     Ok(())
@@ -861,6 +1267,16 @@ fn validate_mcp_config(config: &AppConfig) -> Result<(), ConfigValidationError> 
         return Err(ConfigValidationError::InvalidMcpIdleTtlSecs);
     }
 
+    // Проверяется только форма: разбирается ли запись как хост. Годится ли этот
+    // хост по существу — вопрос политики, и его задаёт сам слушатель.
+    for allowed in &config.mcp.http.allowed_hosts {
+        if host_of_authority(allowed).is_none() {
+            return Err(ConfigValidationError::InvalidMcpAllowedHost(
+                allowed.clone(),
+            ));
+        }
+    }
+
     if config.mcp.execution.max_concurrent_calls == 0 {
         return Err(ConfigValidationError::InvalidMcpMaxConcurrentCalls);
     }
@@ -897,6 +1313,57 @@ fn validate_edt_cli_config(config: &AppConfig) -> Result<(), ConfigValidationErr
     Ok(())
 }
 
+/// Режим агента объявлен ключами, и ключи двух режимов не смешиваются: к чужому
+/// процессу раннер не добавляет флагов запуска, значит и в конфиге им рядом не место.
+fn validate_designer_agent_config(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    let agent = &config.tools.designer_agent;
+    if config.infobase.standalone.is_some() {
+        let mut keys = Vec::new();
+        if agent.attach.is_some() {
+            keys.push("attach");
+        }
+        keys.extend(agent.attached_keys_present());
+        keys.extend(agent.managed_keys_present());
+        if !keys.is_empty() {
+            return Err(
+                ConfigValidationError::DesignerAgentDoesNotApplyToStandalone {
+                    keys: keys.join(", "),
+                },
+            );
+        }
+    }
+    if agent.startup_timeout_ms == 0 {
+        return Err(ConfigValidationError::InvalidDesignerAgentStartupTimeoutMs);
+    }
+    validate_host_fingerprint(
+        "tools.designer_agent.host-fingerprint",
+        agent.host_fingerprint.as_deref(),
+    )?;
+    if agent.attach.is_some() {
+        let keys = agent.managed_keys_present();
+        if !keys.is_empty() {
+            return Err(
+                ConfigValidationError::DesignerAgentAttachConflictsWithLaunchKeys {
+                    keys: keys.join(", "),
+                },
+            );
+        }
+    } else {
+        let keys = agent.attached_keys_present();
+        if !keys.is_empty() {
+            return Err(
+                ConfigValidationError::DesignerAgentAttachedKeysWithoutAttach {
+                    keys: keys.join(", "),
+                },
+            );
+        }
+    }
+    agent
+        .mode()
+        .map(|_| ())
+        .map_err(ConfigValidationError::DesignerAgentAttachInvalid)
+}
+
 fn validate_client_mcp_tool_extension(config: &AppConfig) -> Result<(), ConfigValidationError> {
     let Some(extension) = config.tools.client_mcp.extension.as_ref() else {
         return Ok(());
@@ -917,7 +1384,9 @@ fn validate_client_mcp_tool_extension(config: &AppConfig) -> Result<(), ConfigVa
             validate_tool_extension_source(config, extension, source)
         }
         ToolExtensionInput::Artifact(artifact) => {
-            if config.builder != BuilderBackend::Designer {
+            if config.selected_provider(crate::domain::capability::Operation::Build)
+                != crate::domain::capability::Provider::Designer
+            {
                 return Err(ConfigValidationError::ToolExtensionArtifactRequiresDesigner);
             }
             let has_cfe_extension = artifact
@@ -1005,8 +1474,13 @@ fn validate_tool_extension_edt_runtime_path(
     source: &ToolExtensionSourceConfig,
 ) -> Result<(), ConfigValidationError> {
     let source_path = std::fs::canonicalize(&source.path).unwrap_or_else(|_| source.path.clone());
-    let work_path =
-        std::fs::canonicalize(&config.work_path).unwrap_or_else(|_| config.work_path.clone());
+    let work_path = crate::support::path::nearest_existing_canonical_path(&config.work_path)
+        .map_err(|error| {
+            ConfigValidationError::WorkPathInvalid(format!(
+                "cannot resolve '{}': {error}",
+                config.work_path.display()
+            ))
+        })?;
     let generated_path = work_path
         .join("designer")
         .join("tool-extensions")
@@ -1027,7 +1501,7 @@ fn validate_tool_extension_edt_runtime_path(
 mod tests {
     use super::{validate, ConfigValidationError};
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, PlatformToolConfig, SourceFormat, SourceSetConfig,
+        AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
         SourceSetPurpose, TestsConfig, ToolExtensionArtifactConfig, ToolExtensionConfig,
         ToolExtensionInput, ToolExtensionSourceConfig, ToolsConfig, VanessaProfileConfig,
     };
@@ -1044,7 +1518,10 @@ mod tests {
         base: &Path,
         work: &Path,
         format: SourceFormat,
-        builder: BuilderBackend,
+        providers: std::collections::BTreeMap<
+            crate::domain::capability::Operation,
+            crate::domain::capability::Provider,
+        >,
         purpose: SourceSetPurpose,
         name: &str,
         path: &Path,
@@ -1052,10 +1529,12 @@ mod tests {
         AppConfig {
             base_path: base.to_path_buf(),
             work_path: work.to_path_buf(),
-            execution_timeout: 300_000,
             format,
-            builder,
+            providers,
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: name.to_owned(),
                 purpose,
@@ -1155,10 +1634,12 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -1193,10 +1674,12 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -1231,10 +1714,12 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -1273,10 +1758,12 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "../outside".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -1308,10 +1795,12 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "bad/name".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -1343,10 +1832,12 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main-config_01".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -1374,10 +1865,12 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -1411,10 +1904,12 @@ mod tests {
         let mut config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -1438,7 +1933,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_zero_global_execution_timeout() {
+    fn rejects_zero_mcp_admission_timeout() {
         let base = tempdir().expect("base");
         let work = tempdir().expect("work");
         let source_dir = base.path().join("src");
@@ -1447,10 +1942,12 @@ mod tests {
         let mut config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -1464,12 +1961,12 @@ mod tests {
             mcp: Default::default(),
             tests: TestsConfig::default(),
         };
-        config.execution_timeout = 0;
+        config.mcp.execution.admission_timeout_ms = 0;
 
         let err = validate(&config).expect_err("expected invalid execution timeout");
         assert!(matches!(
             err,
-            ConfigValidationError::InvalidExecutionTimeout
+            ConfigValidationError::InvalidMcpAdmissionTimeout
         ));
     }
 
@@ -1489,7 +1986,7 @@ mod tests {
             base.path(),
             work.path(),
             SourceFormat::Designer,
-            BuilderBackend::Designer,
+            Default::default(),
             SourceSetPurpose::ExternalDataProcessors,
             "external",
             &source_dir,
@@ -1514,7 +2011,7 @@ mod tests {
             base.path(),
             work.path(),
             SourceFormat::Designer,
-            BuilderBackend::Designer,
+            Default::default(),
             SourceSetPurpose::ExternalDataProcessors,
             "external",
             &source_dir,
@@ -1556,7 +2053,7 @@ mod tests {
             base.path(),
             work.path(),
             SourceFormat::Designer,
-            BuilderBackend::Designer,
+            Default::default(),
             SourceSetPurpose::ExternalDataProcessors,
             "external",
             &source_dir,
@@ -1576,7 +2073,7 @@ mod tests {
             base.path(),
             work.path(),
             SourceFormat::Edt,
-            BuilderBackend::Designer,
+            Default::default(),
             SourceSetPurpose::Configuration,
             "main",
             &source_dir,
@@ -1606,7 +2103,7 @@ mod tests {
             base.path(),
             work.path(),
             SourceFormat::Edt,
-            BuilderBackend::Designer,
+            Default::default(),
             SourceSetPurpose::Configuration,
             "main",
             &source_dir,
@@ -1632,7 +2129,7 @@ mod tests {
             base.path(),
             work.path(),
             SourceFormat::Edt,
-            BuilderBackend::Designer,
+            Default::default(),
             SourceSetPurpose::Configuration,
             "main",
             &source_dir,
@@ -1662,7 +2159,7 @@ mod tests {
             base.path(),
             work.path(),
             SourceFormat::Edt,
-            BuilderBackend::Designer,
+            Default::default(),
             SourceSetPurpose::Configuration,
             "main",
             &source_dir,
@@ -1698,10 +2195,12 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![
                 SourceSetConfig {
                     name: "main".to_owned(),
@@ -1740,7 +2239,7 @@ mod tests {
             base.path(),
             work.path(),
             SourceFormat::Edt,
-            BuilderBackend::Designer,
+            Default::default(),
             SourceSetPurpose::Configuration,
             "main",
             &source_dir,
@@ -1772,7 +2271,7 @@ mod tests {
             base.path(),
             work.path(),
             SourceFormat::Edt,
-            BuilderBackend::Designer,
+            Default::default(),
             SourceSetPurpose::Configuration,
             "main",
             &source_dir,
@@ -1807,7 +2306,7 @@ mod tests {
             base.path(),
             work.path(),
             SourceFormat::Edt,
-            BuilderBackend::Designer,
+            Default::default(),
             SourceSetPurpose::Configuration,
             "main",
             &source_dir,
@@ -1832,7 +2331,7 @@ mod tests {
             base.path(),
             work.path(),
             SourceFormat::Edt,
-            BuilderBackend::Designer,
+            Default::default(),
             SourceSetPurpose::ExternalDataProcessors,
             "external",
             &source_dir,
@@ -1867,7 +2366,7 @@ mod tests {
             base.path(),
             work.path(),
             SourceFormat::Edt,
-            BuilderBackend::Designer,
+            Default::default(),
             SourceSetPurpose::ExternalDataProcessors,
             "external",
             &source_dir,
@@ -1903,7 +2402,7 @@ mod tests {
             base.path(),
             work.path(),
             SourceFormat::Edt,
-            BuilderBackend::Designer,
+            Default::default(),
             SourceSetPurpose::ExternalDataProcessors,
             "external",
             &source_dir,
@@ -1942,7 +2441,7 @@ mod tests {
             base.path(),
             work.path(),
             SourceFormat::Edt,
-            BuilderBackend::Designer,
+            Default::default(),
             SourceSetPurpose::ExternalDataProcessors,
             "external",
             &source_dir,
@@ -1966,10 +2465,12 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
-            builder: BuilderBackend::Ibcmd,
+            providers: crate::domain::capability::ibcmd_for_every_choice(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -1996,10 +2497,12 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2027,10 +2530,12 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Ibcmd,
+            providers: crate::domain::capability::ibcmd_for_every_choice(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("/F /tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2057,10 +2562,12 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2091,10 +2598,12 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![],
             build: BuildConfig::default(),
             tools: ToolsConfig::default(),
@@ -2120,10 +2629,12 @@ mod tests {
         let config = AppConfig {
             base_path: shared.path().to_path_buf(),
             work_path: shared.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2156,10 +2667,12 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "hash-storages".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2181,8 +2694,11 @@ mod tests {
         ));
     }
 
+    /// `infobase.dbms` — доступ к СУБД, а не к базе: серверное подключение без неё
+    /// проходит валидацию. Секцию спрашивает тот, кто идёт в СУБД сам: создание серверной
+    /// базы и `ibcmd`.
     #[test]
-    fn edt_ibcmd_returns_matrix_error_before_connection_check() {
+    fn a_server_connection_without_dbms_is_valid_for_every_provider() {
         let base = tempdir().expect("base");
         let work = tempdir().expect("work");
         let source_dir = base.path().join("edt-main");
@@ -2196,15 +2712,20 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
-            builder: BuilderBackend::Ibcmd,
+            providers: crate::domain::capability::ibcmd_for_every_choice(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig {
                 connection: "Srvr=localhost;Ref=ib".to_owned(),
                 user: None,
                 password: None,
                 dbms: None,
+                web: None,
+                standalone: None,
+                cluster: None,
             },
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2219,50 +2740,227 @@ mod tests {
             tests: TestsConfig::default(),
         };
 
-        let err = validate(&config).expect_err("expected IBCMD connection validation error");
+        validate(&config).expect("a server connection needs no DBMS contract to be valid");
+    }
+
+    /// Ключ переопределения принимается только там, где есть развилка, и только для
+    /// исполнителя, который операцию реализует.
+    #[test]
+    fn provider_overrides_are_checked_against_the_matrix() {
+        use crate::domain::capability::{Operation, Provider};
+
+        let base = tempdir().expect("base");
+        let work = tempdir().expect("work");
+        std::fs::create_dir_all(base.path().join("src")).expect("src");
+        std::fs::write(
+            base.path().join("src/Configuration.xml"),
+            "<MetaDataObject/>",
+        )
+        .expect("marker");
+        let mut config = AppConfig {
+            base_path: base.path().to_path_buf(),
+            work_path: work.path().to_path_buf(),
+            format: SourceFormat::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
+            infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
+            source_sets: vec![SourceSetConfig {
+                name: "main".to_owned(),
+                purpose: SourceSetPurpose::Configuration,
+                path: PathBuf::from("src"),
+            }],
+            build: BuildConfig::default(),
+            tools: ToolsConfig::default(),
+            mcp: Default::default(),
+            tests: TestsConfig::default(),
+        };
+
+        config.providers = [(Operation::Build, Provider::Ibcmd)].into();
+        validate(&config).expect("build has a choice and ibcmd implements it");
+
+        config.providers = [(Operation::Load, Provider::Designer)].into();
+        let error = validate(&config).expect_err("load has one executor");
         assert!(matches!(
-            err,
-            ConfigValidationError::MissingIbcmdServerDbmsField("kind")
+            error,
+            ConfigValidationError::ProviderKeyWithoutChoice {
+                operation: "upload",
+                ..
+            }
+        ));
+
+        config.providers = [(Operation::Build, Provider::Webinst)].into();
+        let error = validate(&config).expect_err("webinst does not build");
+        assert!(matches!(
+            error,
+            ConfigValidationError::ProviderDoesNotImplement {
+                provider: "webinst",
+                ..
+            }
         ));
     }
 
+    fn infobase(yaml: &str) -> crate::config::model::InfobaseConfig {
+        serde_yaml::from_str(yaml).expect("infobase section")
+    }
+
+    /// Секция `cluster` держит то, что есть только у кластера: у файловой базы и у
+    /// автономного сервера она отклоняется
+    /// (`INV.CONFIG.A-CLUSTER-SECTION-IS-REJECTED-OUTSIDE-A-CLUSTER-BASE`).
     #[test]
-    fn ibcmd_server_connection_accepts_complete_dbms_contract() {
-        let base = tempdir().expect("base");
-        let work = tempdir().expect("work");
-        let source_dir = base.path().join("edt-main");
-        write_native_edt_project(
-            &source_dir,
-            "BaseProject",
-            crate::support::edt_project::V8_CONFIGURATION_NATURE,
-            None,
+    fn the_cluster_section_is_rejected_for_a_file_base_and_a_standalone_server() {
+        let file = infobase("connection: 'File=/srv/ib'\ncluster:\n  ras: srv:1545\n");
+        assert!(matches!(
+            super::validate_infobase_form(&file),
+            Err(ConfigValidationError::ClusterNotAllowedForFileConnection)
+        ));
+
+        let standalone = infobase(
+            "standalone:\n  gate: srv:1543\n  exchange: sftp\ncluster:\n  user: cluster-admin\n",
         );
+        assert!(matches!(
+            super::validate_infobase_form(&standalone),
+            Err(ConfigValidationError::ClusterNotAllowedForStandalone)
+        ));
 
-        let config = AppConfig {
-            base_path: base.path().to_path_buf(),
-            work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
-            format: SourceFormat::Edt,
-            builder: BuilderBackend::Ibcmd,
-            infobase: crate::config::model::InfobaseConfig::server(
-                "Srvr=localhost;Ref=ib",
-                crate::config::model::InfobaseDbmsConfig::new("PostgreSQL", "localhost", "ib"),
-            ),
-            source_sets: vec![SourceSetConfig {
-                name: "main".to_owned(),
-                purpose: SourceSetPurpose::Configuration,
-                path: source_dir
-                    .strip_prefix(base.path())
-                    .expect("relative")
-                    .to_path_buf(),
-            }],
-            build: BuildConfig::default(),
-            tools: ToolsConfig::default(),
-            mcp: Default::default(),
-            tests: TestsConfig::default(),
-        };
+        let cluster = infobase(
+            "connection: 'Srvr=srv:1541;Ref=demo'\ncluster:\n  ras: srv:1545\n  user: cluster-admin\n  password: cluster-secret\n  agent:\n    address: srv:1540\n    user: agent-admin\n    password: agent-secret\n",
+        );
+        super::validate_infobase_form(&cluster)
+            .expect("a cluster base carries its cluster section");
+    }
 
-        validate(&config).expect("server IBCMD config should be valid with dbms contract");
+    /// Адреса секции — `host[:port]`, как их примут `rac` и `ras`: IPv6 в скобках, порт
+    /// не обязателен и не равен нулю, пробелы по краям — не адрес; отказ называет ключ.
+    #[test]
+    fn a_cluster_address_is_a_host_with_an_optional_port() {
+        for address in ["srv", "srv:1545", "10.0.0.5:1540", "[::1]:1545"] {
+            let section = infobase(&format!(
+                "connection: 'Srvr=srv:1541;Ref=demo'\ncluster:\n  ras: '{address}'\n  agent:\n    address: '{address}'\n"
+            ));
+            assert!(super::validate_infobase_form(&section).is_ok(), "{address}");
+        }
+        for address in [
+            "",
+            ":1545",
+            "srv:0",
+            "srv:x",
+            "::1",
+            " srv:1545",
+            "srv:1545 ",
+        ] {
+            let section = infobase(&format!(
+                "connection: 'Srvr=srv:1541;Ref=demo'\ncluster:\n  ras: '{address}'\n"
+            ));
+            let error = super::validate_infobase_form(&section).expect_err(address);
+            assert!(
+                matches!(
+                    &error,
+                    ConfigValidationError::ClusterAddressInvalid {
+                        key: "infobase.cluster.ras",
+                        ..
+                    }
+                ),
+                "{address}: {error}"
+            );
+
+            let section = infobase(&format!(
+                "connection: 'Srvr=srv:1541;Ref=demo'\ncluster:\n  agent:\n    address: '{address}'\n"
+            ));
+            let error = super::validate_infobase_form(&section).expect_err(address);
+            assert!(
+                matches!(
+                    &error,
+                    ConfigValidationError::ClusterAddressInvalid {
+                        key: "infobase.cluster.agent.address",
+                        ..
+                    }
+                ),
+                "{address}: {error}"
+            );
+        }
+    }
+
+    /// Три вопроса по порядку: секция первична, строка рядом с ней — серверный адрес.
+    #[test]
+    fn a_direct_gate_address_next_to_the_standalone_section_passes_the_form_check() {
+        for connection in [
+            "Srvr=srv:1541;Ref=demo",
+            "Srvr=\"srv\";Ref=\"demo\";",
+            "/S srv\\demo",
+            "",
+        ] {
+            let section = infobase(&format!(
+                "connection: '{connection}'\nstandalone:\n  gate: srv:1543\n  exchange: sftp\n"
+            ));
+            assert!(
+                super::validate_infobase_form(&section).is_ok(),
+                "{connection}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_or_shapeless_address_next_to_the_standalone_section_is_refused_by_the_form_check() {
+        for connection in [
+            "File=/srv/ib",
+            "File = /srv/ib",
+            "not a connection",
+            "/S srv",
+        ] {
+            let section = infobase(&format!(
+                "connection: '{connection}'\nstandalone:\n  gate: srv:1543\n  exchange: sftp\n"
+            ));
+            assert!(
+                matches!(
+                    super::validate_infobase_form(&section),
+                    Err(ConfigValidationError::StandaloneConnectionIsNotADirectGate)
+                ),
+                "{connection}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_web_address_is_refused_as_an_administrative_channel_for_every_target_kind() {
+        for yaml in [
+            "connection: 'ws=http://srv/demo'\n",
+            "connection: 'ws=http://srv/demo'\nstandalone:\n  gate: srv:1543\n  exchange: sftp\n",
+        ] {
+            assert!(matches!(
+                super::validate_infobase_form(&infobase(yaml)),
+                Err(ConfigValidationError::WebConnectionIsNotAnAdministrativeChannel)
+            ));
+        }
+    }
+
+    /// Третий ответ — кластер — получает только строка серверной формы; канонические
+    /// формы платформы (завершающая `;`, кавычки) проходят.
+    #[test]
+    fn the_cluster_answer_needs_a_server_shaped_connection() {
+        for connection in [
+            "Srvr=srv;Ref=demo;",
+            "Srvr=\"srv:1541\";Ref=\"demo\";",
+            "/S srv\\demo",
+        ] {
+            assert!(
+                super::validate_infobase_form(&infobase(&format!("connection: '{connection}'\n")))
+                    .is_ok(),
+                "{connection}"
+            );
+        }
+        for connection in ["not a connection", "Srvr=srv", "Srvr=srv;Ref=", "/S srv"] {
+            assert!(
+                matches!(
+                    super::validate_infobase_form(&infobase(&format!(
+                        "connection: '{connection}'\n"
+                    ))),
+                    Err(ConfigValidationError::ConnectionShapeUnsupported)
+                ),
+                "{connection}"
+            );
+        }
     }
 
     #[test]
@@ -2275,13 +2973,15 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Ibcmd,
+            providers: crate::domain::capability::ibcmd_for_every_choice(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::server(
                 "File=/tmp/ib",
                 crate::config::model::InfobaseDbmsConfig::new("PostgreSQL", "localhost", "ib"),
             ),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2313,10 +3013,12 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "Logs".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2346,10 +3048,12 @@ mod tests {
         let config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Edt,
-            builder: BuilderBackend::Ibcmd,
+            providers: crate::domain::capability::ibcmd_for_every_choice(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2378,10 +3082,12 @@ mod tests {
         let mut config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2405,6 +3111,112 @@ mod tests {
     }
 
     #[test]
+    fn rejects_an_allowed_host_that_is_not_a_host() {
+        let base = tempdir().expect("base");
+        let work = tempdir().expect("work");
+        let source_dir = base.path().join("src");
+        std::fs::create_dir_all(&source_dir).expect("source dir");
+
+        let config = |allowed: &str| AppConfig {
+            base_path: base.path().to_path_buf(),
+            work_path: work.path().to_path_buf(),
+            format: SourceFormat::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
+            infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
+            source_sets: vec![SourceSetConfig {
+                name: "main".to_owned(),
+                purpose: SourceSetPurpose::Configuration,
+                path: source_dir
+                    .strip_prefix(base.path())
+                    .expect("relative")
+                    .to_path_buf(),
+            }],
+            build: BuildConfig::default(),
+            tools: ToolsConfig::default(),
+            mcp: crate::config::model::McpConfig {
+                http: crate::config::model::McpHttpConfig {
+                    allowed_hosts: vec![allowed.to_owned()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            tests: TestsConfig::default(),
+        };
+
+        for allowed in ["", "runner/../evil", "evil.com@runner", "http://runner"] {
+            let err = validate(&config(allowed)).expect_err("expected an invalid allowed host");
+            assert!(
+                matches!(err, ConfigValidationError::InvalidMcpAllowedHost(ref value) if value == allowed),
+                "{allowed:?} is rejected, got {err:?}"
+            );
+        }
+
+        for allowed in ["runner", "runner.local:3000", "10.0.0.5", "[::1]"] {
+            validate(&config(allowed))
+                .unwrap_or_else(|error| panic!("{allowed:?} is accepted: {error}"));
+        }
+    }
+
+    #[test]
+    fn rejects_a_host_fingerprint_that_is_not_one() {
+        let base = tempdir().expect("base");
+        let work = tempdir().expect("work");
+        let source_dir = base.path().join("src");
+        std::fs::create_dir_all(&source_dir).expect("source dir");
+
+        let config = |fingerprint: &str| AppConfig {
+            base_path: base.path().to_path_buf(),
+            work_path: work.path().to_path_buf(),
+            format: SourceFormat::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
+            infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
+            source_sets: vec![SourceSetConfig {
+                name: "main".to_owned(),
+                purpose: SourceSetPurpose::Configuration,
+                path: source_dir
+                    .strip_prefix(base.path())
+                    .expect("relative")
+                    .to_path_buf(),
+            }],
+            build: BuildConfig::default(),
+            tools: ToolsConfig {
+                designer_agent: crate::config::model::DesignerAgentConfig {
+                    attach: Some("127.0.0.1:1543".to_owned()),
+                    base_dir: Some(std::path::PathBuf::from("/tmp/agent")),
+                    host_fingerprint: Some(fingerprint.to_owned()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            mcp: Default::default(),
+            tests: TestsConfig::default(),
+        };
+
+        for fingerprint in ["", "SHA1:abc", "deadbeef", "SHA256", "ssh-ed25519 AAAA"] {
+            let err = validate(&config(fingerprint)).expect_err("expected an invalid fingerprint");
+            assert!(
+                matches!(
+                    err,
+                    ConfigValidationError::InvalidHostFingerprint { key, ref value }
+                        if key == "tools.designer_agent.host-fingerprint" && value == fingerprint
+                ),
+                "{fingerprint:?} is rejected, got {err:?}"
+            );
+        }
+
+        validate(&config(
+            "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
+        ))
+        .expect("a well-formed fingerprint is accepted");
+    }
+
+    #[test]
     fn rejects_invalid_mcp_http_limits() {
         let base = tempdir().expect("base");
         let work = tempdir().expect("work");
@@ -2414,10 +3226,12 @@ mod tests {
         let mut config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2486,7 +3300,7 @@ mod tests {
             base.path(),
             work.path(),
             SourceFormat::Designer,
-            BuilderBackend::Designer,
+            Default::default(),
             SourceSetPurpose::Configuration,
             "main",
             &source_dir,
@@ -2529,7 +3343,7 @@ mod tests {
             base.path(),
             work.path(),
             SourceFormat::Designer,
-            BuilderBackend::Designer,
+            Default::default(),
             SourceSetPurpose::Configuration,
             "main",
             &source_dir,
@@ -2572,7 +3386,7 @@ mod tests {
             base.path(),
             work.path(),
             SourceFormat::Designer,
-            BuilderBackend::Designer,
+            Default::default(),
             SourceSetPurpose::Configuration,
             "main",
             &source_dir,
@@ -2620,7 +3434,7 @@ mod tests {
             base.path(),
             work.path(),
             SourceFormat::Edt,
-            BuilderBackend::Ibcmd,
+            crate::domain::capability::ibcmd_for_every_choice(),
             SourceSetPurpose::Configuration,
             "main",
             &source_dir,
@@ -2641,6 +3455,60 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn preview_rejects_tool_source_overlap_through_missing_workspace_symlink() {
+        let base = tempdir().expect("base");
+        let source_dir = base.path().join("src");
+        let tool_source = base.path().join("tool-source");
+        write_native_edt_project(
+            &source_dir,
+            "main",
+            crate::support::edt_project::V8_CONFIGURATION_NATURE,
+            None,
+        );
+        write_native_edt_project(
+            &tool_source,
+            "client_mcp",
+            crate::support::edt_project::V8_EXTENSION_NATURE,
+            Some("main"),
+        );
+        let alias = base.path().join("tool-alias");
+        std::os::unix::fs::symlink(&tool_source, &alias).expect("alias");
+        let work = alias.join("new-work");
+        let mut config = single_source_set_config(
+            base.path(),
+            &work,
+            SourceFormat::Edt,
+            Default::default(),
+            SourceSetPurpose::Configuration,
+            "main",
+            &source_dir,
+        );
+        config.tools.client_mcp.extension = Some(ToolExtensionConfig {
+            name: "client_mcp".to_owned(),
+            input: ToolExtensionInput::Source(ToolExtensionSourceConfig {
+                path: tool_source,
+                format: Some(SourceFormat::Edt),
+            }),
+        });
+
+        let error = super::validate_read_only(&config).expect_err("preview overlap");
+        assert!(
+            matches!(error, ConfigValidationError::ToolExtensionSourceLayoutInvalid(details)
+            if details.contains("overlaps generated export target"))
+        );
+        assert!(
+            !work.exists(),
+            "preview must not create the aliased workspace"
+        );
+        let error = validate(&config).expect_err("apply overlap");
+        assert!(
+            matches!(error, ConfigValidationError::ToolExtensionSourceLayoutInvalid(details)
+            if details.contains("overlaps generated export target"))
+        );
+    }
+
     #[test]
     fn rejects_client_mcp_cfe_artifact_with_ibcmd_builder() {
         let base = tempdir().expect("base");
@@ -2654,7 +3522,7 @@ mod tests {
             base.path(),
             work.path(),
             SourceFormat::Designer,
-            BuilderBackend::Ibcmd,
+            crate::domain::capability::ibcmd_for_every_choice(),
             SourceSetPurpose::Configuration,
             "main",
             &source_dir,
@@ -2681,10 +3549,12 @@ mod tests {
         let mut config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2729,10 +3599,12 @@ mod tests {
         let mut config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2773,10 +3645,12 @@ mod tests {
         let mut config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2824,10 +3698,12 @@ mod tests {
         let mut config = AppConfig {
             base_path: base.path().to_path_buf(),
             work_path: work.path().to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,

@@ -3,26 +3,69 @@ use std::path::PathBuf;
 use crate::domain::issue::Issue;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SyntaxCheckStatus {
     Clean,
     IssuesFound,
     ToolFailed,
+    /// Превью: проверка запланирована, но не выполнялась. Остальные три значения —
+    /// приговоры конфигурации, и `clean` из превью был бы приговором выдуманным:
+    /// платформа конфигурацию не смотрела. Предел знания называется своим значением.
+    Planned,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Чем платформа выполнила проверку. Набор закрыт: прежнее `designer-modules` исчезло
+/// вместе с отдельным путём `/CheckModules` — режимы проверки модулей выполняет
+/// `/CheckConfig`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum CheckName {
+    /// `/CheckConfig` Конфигуратора.
+    DesignerConfig,
+    /// Проверка проекта средствами EDT CLI.
+    Edt,
+}
+
+impl CheckName {
+    /// Имя проверки на проводе; оно же попадает в имя файла журнала платформы.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DesignerConfig => "designer-config",
+            Self::Edt => "edt",
+        }
+    }
+}
+
+impl std::fmt::Display for CheckName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SyntaxIssueSummary {
     pub errors: usize,
     pub warnings: usize,
     pub info: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SyntaxCheckResult {
+    /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<crate::domain::capability::ProviderReceipt>,
+
+    /// Получил ли исполнитель — платформа или EDT CLI — работу этой команды: запущен
+    /// процесс, который её выполняет, либо работающей сессии EDT отдана команда запроса.
+    /// Подъём сессии и её служебные команды работой не считаются. `false`, если работы не
+    /// было: превью, отказ или прерывание до передачи работы, процесс, который не удалось
+    /// запустить.
+    pub provider_dispatched: bool,
+
     pub status: SyntaxCheckStatus,
     pub exit_code: i32,
-    pub check_name: String,
+    pub check_name: CheckName,
     pub issues: Vec<Issue>,
     pub summary: SyntaxIssueSummary,
     pub duration_ms: u64,
@@ -32,4 +75,7 @@ pub struct SyntaxCheckResult {
     pub stderr: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_read_warning: Option<String>,
+    /// Фраза о предмете. Превью называет ею, что было бы выполнено.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }

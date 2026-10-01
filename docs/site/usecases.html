@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v8-runner · Сценарии</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="styles.css?v=16">
+<style>
+  .uc { border-top: 1px solid var(--line); padding: 20px 0 8px; }
+  .uc h3 { margin: 0 0 4px; font-size: 1.1rem; }
+  .uc .meta { color: var(--ink-3); font-size: 0.88rem; margin-bottom: 10px; }
+  .uc table { font-size: 0.9rem; }
+  .uc .diagram { margin: 12px 0 4px; }
+  .io { color: var(--ink-2); }
+  .io .a { white-space: nowrap; }
+  .cov td.c { text-align: center; }
+  .cov .no { color: var(--no); font-weight: 700; }
+</style>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">v8-runner</a>
+  <nav>
+    <a href="index.html">Начало</a>
+    <a href="platform.html">Платформа</a>
+    <a href="problems.html">Трудности</a>
+    <a href="architecture.html">Компоненты</a>
+    <a href="sources.html">Исходники</a>
+    <a href="cli.html">CLI</a>
+    <a href="scenarios.html">Подбор</a>
+    <a href="usecases.html" aria-current="page">Сценарии</a>
+    <a href="deployments.html">Расстановки</a>
+    <a class="gh" href="https://github.com/IngvarConsulting/v8-runner-rust" aria-label="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span class="gh-stars" hidden></span></a>
+  </nav>
+</div></div>
+
+<main class="page">
+<h1>Сценарии</h1>
+<p class="lede">Зачем раннер запускают. У каждого сценария — поток данных: что на входе, что переходит между командами, что на выходе. Внизу — проверка, что каждая команда попала хотя бы в один сценарий.</p>
+<p class="hint">На схемах: документ — данные, цилиндр — база или хранилище, пилюля — команда раннера, серый прямоугольник — внешняя система; пунктирная пилюля — шаг, который делает не раннер.</p>
+
+<div id="list"></div>
+
+<h2>Покрытие команд</h2>
+<div class="tablewrap"><table class="cov">
+<thead><tr><th>Команда</th><th>Сценариев</th><th>Каких</th></tr></thead>
+<tbody id="cov"></tbody>
+</table></div>
+<p id="gap" class="hint"></p>
+</main>
+
+<script src="data.js?v=15"></script>
+<script src="usecases.js?v=7"></script>
+<script>
+(function () {
+  var D = window.RUNNER_DATA, U = window.RUNNER_USECASES, A = window.RUNNER_ARTEFACTS;
+  var byId = {}; D.SCENARIOS.forEach(function (s) { byId[s.id] = s; });
+  var ctx = { format: 'DESIGNER', type: 'CONFIGURATION', target: 'file', tools: {} };
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function flowSvg(u, idx) {
+    // Цепочка слева направо: входы шага стоят перед командой, выходы — после неё.
+    // Артефакт, который один шаг отдаёт, а следующий берёт, рисуется один раз между ними.
+    var GAP = 46, ROW = 70;
+    function textW(s) { return s.length * 7.6; }
+    function wrap(label) {
+      if (label.length <= 20) return [label];
+      var i = label.lastIndexOf(' ', Math.ceil(label.length / 2) + 4);
+      if (i < 5) i = label.indexOf(' ', 5);
+      return i < 0 ? [label] : [label.slice(0, i), label.slice(i + 1)];
+    }
+    function artNode(k) {
+      var a = A[k], lines = wrap(a.label);
+      return { key: k, kind: a.kind === 'store' ? 'cyl' : a.kind === 'ext' ? 'off' : 'doc', lines: lines,
+               w: Math.max(110, Math.round(Math.max.apply(null, lines.map(textW)) + 30)), h: lines.length > 1 ? 58 : 44 };
+    }
+    function cmdNode(st) {
+      var s = byId[st.id], lines = wrap(st.manual ? st.title : (s ? s.verb : st.id));
+      return { kind: st.manual ? 'manual' : 'cmd', lines: lines,
+               w: Math.max(120, Math.round(Math.max.apply(null, lines.map(textW)) + 48)), h: lines.length > 1 ? 58 : 44 };
+    }
+    // ячейки: [артефакты] команда [артефакты] команда … [артефакты]
+    var cells = [], edges = [];
+    cells.push({ arts: true, nodes: (u.steps[0].in || []).map(artNode) });
+    u.steps.forEach(function (st, i) {
+      var c = cmdNode(st); cells.push({ cmd: true, nodes: [c], step: st });
+      var outs = st.out || [], next = u.steps[i + 1] ? (u.steps[i + 1].in || []) : [];
+      var mid = [], seen = {};
+      outs.forEach(function (k) { var n = artNode(k); n.fromCmd = true; mid.push(n); seen[k] = n; });
+      next.forEach(function (k) { if (!seen[k]) { var n = artNode(k); mid.push(n); seen[k] = n; } });
+      cells.push({ arts: true, nodes: mid });
+    });
+    function cellW(cell) { return cell.nodes.length ? Math.max.apply(null, cell.nodes.map(function (n) { return n.w; })) : 0; }
+    function clone(cell, keys) { return { arts: true, nodes: cell.nodes.filter(function (n) { return keys.indexOf(n.key) >= 0; }).map(function (n) { var m = {}; for (var k in n) m[k] = n[k]; m.fromCmd = false; return m; }) }; }
+    // раскладка по строкам: строка заканчивается артефактами, следующая начинается с них же
+    var MAXW = 1040, rows = [[]], x = 0;
+    for (var ci = 0; ci < cells.length; ci++) {
+      var cell = cells[ci], w = cellW(cell);
+      if (cell.cmd) {
+        var nextW = cellW(cells[ci + 1]);
+        if (rows[rows.length - 1].length > 1 && x + w + GAP + nextW > MAXW) {
+          var carried = clone(cells[ci - 1], cell.step.in || []);
+          // свежие входы этого шага рисуются только в начале новой строки
+          cells[ci - 1].nodes = cells[ci - 1].nodes.filter(function (n) { return n.fromCmd; });
+          carried.x = cellW(carried) / 2; rows.push([carried]); x = cellW(carried) + GAP;
+          cell.prevNodes = carried.nodes;
+        }
+      }
+      if (!cell.prevNodes && cell.cmd) cell.prevNodes = cells[ci - 1].nodes;
+      cell.x = x + w / 2; rows[rows.length - 1].push(cell);
+      if (w) x += w + GAP;
+      if (cell.cmd) {
+        var c = cell.nodes[0];
+        var ins = cell.step.in || [];
+        cell.prevNodes.forEach(function (n) { if (ins.indexOf(n.key) >= 0) edges.push([n, c]); });
+        cells[ci + 1].nodes.forEach(function (n) { if (n.fromCmd) edges.push([c, n]); });
+      }
+    }
+    var y = 0, totalW = 0;
+    rows.forEach(function (row, r) {
+      var stack = Math.max.apply(null, row.map(function (cell) { return cell.nodes.length; }));
+      var half = ((stack - 1) / 2) * ROW + 30;
+      var cy = y + half;
+      row.forEach(function (cell) { cell.nodes.forEach(function (n, k) { n.x = cell.x; n.y = cy + (k - (cell.nodes.length - 1) / 2) * ROW; }); });
+      var last = row[row.length - 1]; totalW = Math.max(totalW, last.x + cellW(last) / 2);
+      y += 2 * half + (r < rows.length - 1 ? 16 : 0);
+    });
+    var columns = [];
+    rows.forEach(function (row) { row.forEach(function (cell) { columns.push(cell); }); });
+    var arr = 'arr-uc-' + idx, out = [];
+    edges.forEach(function (e) {
+      var a = e[0], b = e[1], x1 = a.x + a.w / 2, y1 = a.y, x2 = b.x - b.w / 2, y2 = b.y, k = Math.max(20, (x2 - x1) * 0.5);
+      out.push('<path class="e" marker-end="url(#' + arr + ')" d="M' + x1 + ',' + y1 + ' C' + (x1 + k) + ',' + y1 + ' ' + (x2 - k) + ',' + y2 + ' ' + x2 + ',' + y2 + '"/>');
+    });
+    columns.forEach(function (col) { col.nodes.forEach(function (n) {
+      var x0 = n.x - n.w / 2, y0 = n.y - n.h / 2, shape;
+      if (n.kind === 'doc') shape = '<path d="M' + x0 + ',' + y0 + ' h' + n.w + ' v' + (n.h - 8) + ' q' + (-n.w / 4) + ',12 ' + (-n.w / 2) + ',0 q' + (-n.w / 4) + ',-12 ' + (-n.w / 2) + ',0 z"/>';
+      else if (n.kind === 'cyl') shape = '<path d="M' + x0 + ',' + (y0 + 7) + ' v' + (n.h - 14) + ' a' + (n.w / 2) + ',7 0 0 0 ' + n.w + ',0 v' + (-(n.h - 14)) + '"/><ellipse cx="' + n.x + '" cy="' + (y0 + 7) + '" rx="' + (n.w / 2) + '" ry="7"/>';
+      else if (n.kind === 'cmd' || n.kind === 'manual') shape = '<rect x="' + x0 + '" y="' + y0 + '" width="' + n.w + '" height="' + n.h + '" rx="' + (n.h / 2) + '"/>';
+      else shape = '<rect x="' + x0 + '" y="' + y0 + '" width="' + n.w + '" height="' + n.h + '" rx="8"/>';
+      var ty = n.y - (n.lines.length - 1) * 9;
+      var text = n.lines.map(function (l, i) { return '<tspan x="' + n.x + '" y="' + (ty + i * 18) + '">' + esc(l) + '</tspan>'; }).join('');
+      out.push('<g class="n n-' + n.kind + '">' + shape + '<text>' + text + '</text></g>');
+    }); });
+    var m = 12, vw = totalW + 2 * m, vh = y + 2 * m;
+    return '<div class="diagram" role="img" aria-label="' + esc('Поток данных: ' + u.title) + '"><svg viewBox="' + (-m) + ' ' + (-m) + ' ' + vw + ' ' + vh + '" xmlns="http://www.w3.org/2000/svg" style="max-width:' + Math.round(vw) + 'px">' +
+           '<defs><marker id="' + arr + '" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>' + out.join('') + '</svg></div>';
+  }
+
+  var html = '';
+  U.forEach(function (u, i) {
+    html += '<div class="uc" id="' + u.id + '"><h3>' + (i + 1) + '. ' + esc(u.title) + '</h3>' +
+            '<div class="meta">' + esc(u.who) + ' · заранее: ' + esc(u.pre) + '</div>' +
+            flowSvg(u, i) +
+            '<div class="tablewrap"><table><thead><tr><th>Команда</th><th>Вход</th><th>Выход</th><th>Зачем</th></tr></thead><tbody>';
+    u.steps.forEach(function (st) {
+      var s = byId[st.id];
+      html += '<tr><td class="k">' + (st.manual ? '<span class="dash">не раннер: ' + esc(st.title) + '</span>'
+                                                 : '<code>' + esc(st.cmd || (s ? s.cmd(ctx) : st.id)) + '</code>') + '</td>' +
+              '<td class="io">' + (st.in || []).map(function (k) { return '<span class="a">' + esc(A[k].label) + '</span>'; }).join(', ') + '</td>' +
+              '<td class="io">' + (st.out || []).map(function (k) { return '<span class="a">' + esc(A[k].label) + '</span>'; }).join(', ') + '</td>' +
+              '<td>' + esc(st.note) + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+    if (u.warn) html += '<div class="note">' + esc(u.warn) + '</div>';
+    html += '</div>';
+  });
+  document.getElementById('list').innerHTML = html;
+
+  var used = {};
+  U.forEach(function (u) { u.steps.forEach(function (st) { if (st.manual) return; (used[st.id] = used[st.id] || []).push(u); }); });
+  var rows = '', gaps = [];
+  D.SCENARIOS.forEach(function (s) {
+    var list = (used[s.id] || []).filter(function (u, i, arr) { return arr.indexOf(u) === i; });
+    if (!list.length) gaps.push(s.verb);
+    rows += '<tr><td class="k"><code>' + esc(s.verb) + '</code></td>' +
+            '<td class="c' + (list.length ? '' : ' no') + '">' + list.length + '</td>' +
+            '<td>' + (list.length ? list.map(function (u) { return '<a href="#' + u.id + '">' + esc(u.title) + '</a>'; }).join(', ') : '—') + '</td></tr>';
+  });
+  document.getElementById('cov').innerHTML = rows;
+  document.getElementById('gap').textContent = gaps.length
+    ? 'Ни в один сценарий не попали: ' + gaps.join(', ')
+    : 'Все ' + D.SCENARIOS.length + ' команд покрыты сценариями.';
+
+})();
+</script>
+<script src="site.js?v=7" defer></script>
+</body>
+</html>

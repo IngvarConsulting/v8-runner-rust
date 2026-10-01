@@ -14,14 +14,15 @@ use rmcp::{
     ServiceError, ServiceExt,
 };
 use serde_json::{json, Value};
+use support::command_data::{assert_data_matches_its_command_form, assert_data_matches_one_of};
 use support::{
-    read_line_count, temp_workspace, v8_runner_binary, v8_runner_command,
+    hold_workspace_lock, read_line_count, temp_workspace, v8_runner_binary, v8_runner_command,
     wait_for_line_count as wait_for_invocation_count, write_shell_script as write_script,
 };
 
 const V8_CONFIGURATION_NATURE: &str = "com._1c.g5.v8.dt.core.V8ConfigurationNature";
 const EDT_RUNTIME_VERSION: &str = "8.3.27";
-const MCP_EXECUTION_TIMEOUT_MS: u64 = 300_000;
+const MCP_ADMISSION_TIMEOUT_MS: u64 = 300_000;
 const EDT_COMMAND_TIMEOUT_MS: u64 = 5_000;
 const EDT_TIMEOUT_TEST_MS: u64 = 5_000;
 
@@ -37,6 +38,14 @@ fn assert_envelope_business_failure(payload: &Value, command: &str) {
     assert!(payload["error"]["code"].is_string());
     assert!(payload["error"]["kind"].is_string());
     assert!(payload["error"]["message"].is_string());
+}
+
+/// Отказ адаптера MCP печатает `data` закреплённой формы, а не произвольный объект.
+///
+/// Клиент разбирает его до того, как узнал об отказе, поэтому состав полей — такое же
+/// обещание, как и состав успешного ответа.
+fn assert_matches_the_mcp_refusal_form(data: &Value) {
+    assert_data_matches_one_of(data, "the MCP refusal", &["mcp-refusal"]);
 }
 
 fn assert_launch_platform_resolution(data: &Value) {
@@ -90,7 +99,7 @@ fn run_cli_json_with_status(config_path: &Path, args: &[&str]) -> (bool, Value) 
 
 fn write_config(path: &Path, _base_path: &Path, work_path: &Path, platform_path: &Path) {
     let config = format!(
-        "workPath: '{}'\nexecution_timeout: 300000\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         platform_path.display(),
     );
@@ -102,15 +111,15 @@ fn write_edt_config_with_options(
     _base_path: &Path,
     work_path: &Path,
     edt_path: &Path,
-    execution_timeout_ms: u64,
+    admission_timeout_ms: u64,
     command_timeout_ms: u64,
     max_concurrent_calls: usize,
 ) {
     let config = format!(
-        "workPath: '{}'\nexecution_timeout: {}\nformat: EDT\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main-edt\nmcp:\n  execution:\n    max_concurrent_calls: {}\ntools:\n  edt_cli:\n    path: '{}'\n    interactive-mode: true\n    command_timeout_ms: {}\n",
+        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main-edt\nmcp:\n  execution:\n    max_concurrent_calls: {}\n    admission_timeout_ms: {}\ntools:\n  edt_cli:\n    path: '{}'\n    interactive-mode: true\n    command_timeout_ms: {}\n",
         work_path.display(),
-        execution_timeout_ms,
         max_concurrent_calls,
+        admission_timeout_ms,
         edt_path.display(),
         command_timeout_ms,
     );
@@ -126,7 +135,7 @@ fn write_designer_config_with_options(
     max_concurrent_calls: usize,
 ) {
     let config = format!(
-        "workPath: '{}'\nexecution_timeout: 300000\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\nmcp:\n  execution:\n    max_concurrent_calls: {}\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    command_timeout_ms: {}\n",
+        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\nmcp:\n  execution:\n    max_concurrent_calls: {}\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    command_timeout_ms: {}\n",
         work_path.display(),
         max_concurrent_calls,
         platform_path.display(),
@@ -188,7 +197,7 @@ fn setup_project() -> (tempfile::TempDir, PathBuf) {
 fn setup_edt_project() -> (tempfile::TempDir, PathBuf) {
     setup_edt_project_with_options(
         "if [ \"$validate_count\" -eq 1 ]; then\n  if [ -n \"$out\" ]; then : > \"$out\"; fi\n  prompt\nelse\n  sleep 8\n  prompt\nfi",
-        MCP_EXECUTION_TIMEOUT_MS,
+        MCP_ADMISSION_TIMEOUT_MS,
         EDT_TIMEOUT_TEST_MS,
         1,
     )
@@ -196,7 +205,7 @@ fn setup_edt_project() -> (tempfile::TempDir, PathBuf) {
 
 fn setup_edt_project_with_options(
     validate_handler: &str,
-    execution_timeout_ms: u64,
+    admission_timeout_ms: u64,
     command_timeout_ms: u64,
     max_concurrent_calls: usize,
 ) -> (tempfile::TempDir, PathBuf) {
@@ -221,7 +230,7 @@ fn setup_edt_project_with_options(
         &base_path,
         &work_path,
         &edt_path,
-        execution_timeout_ms,
+        admission_timeout_ms,
         command_timeout_ms,
         max_concurrent_calls,
     );
@@ -262,7 +271,7 @@ fn write_designer_suite_config(
     platform_path: &Path,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\ntests:\n  execution_timeout_seconds: 5\nmcp:\n  execution:\n    max_concurrent_calls: 1\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\ntests:\n  execution_timeout_seconds: 5\nmcp:\n  execution:\n    max_concurrent_calls: 1\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         platform_path.display(),
     );
@@ -289,7 +298,7 @@ fn setup_designer_suite_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathB
     .expect("module");
 
     let designer_script = format!(
-        "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> '{}'\nif [ -n \"$out\" ]; then\n  mkdir -p \"$(dirname \"$out\")\"\n  case \"$args\" in\n    *\"/CheckModules\"*)\n      cat <<'LOG' > \"$out\"\n{{CommonModules.TestModule(4,2)}}: Ошибка компиляции\n{{1}}: context\nLOG\n      exit 101\n      ;;\n    *)\n      : > \"$out\"\n      ;;\n  esac\nfi\nexit 0",
+        "args=\"$*\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprintf '%s\\n' \"$args\" >> '{}'\nif [ -n \"$out\" ]; then\n  mkdir -p \"$(dirname \"$out\")\"\n  case \"$args\" in\n    *\"/CheckConfig\"*)\n      cat <<'LOG' > \"$out\"\n{{CommonModules.TestModule(4,2)}}: Ошибка компиляции\n{{1}}: context\nLOG\n      exit 101\n      ;;\n    *)\n      : > \"$out\"\n      ;;\n  esac\nfi\nexit 0",
         designer_calls_log.display()
     );
     write_script(&platform_dir.join("bin").join("1cv8"), &designer_script);
@@ -320,7 +329,7 @@ fn write_ibcmd_config_with_infobase(
     infobase_yaml: &str,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nbuilder: IBCMD\ninfobase:\n{}mcp:\n  execution:\n    max_concurrent_calls: 1\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n{}mcp:\n  execution:\n    max_concurrent_calls: 1\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         infobase_yaml,
         ibcmd_path.display(),
@@ -477,7 +486,7 @@ fn mcp_legacy_top_level_connection_reports_error_on_stderr() {
     fs::write(
         &config_path,
         format!(
-            "basePath: '{}'\nworkPath: '{}'\nformat: DESIGNER\nbuilder: DESIGNER\nconnection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n",
+            "basePath: '{}'\nworkPath: '{}'\nformat: DESIGNER\nconnection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n",
             base_path.display(),
             work_path.display()
         ),
@@ -513,7 +522,7 @@ fn mcp_legacy_top_level_credentials_reports_error_on_stderr() {
     fs::write(
         &config_path,
         format!(
-            "basePath: '{}'\nworkPath: '{}'\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\ncredentials:\n  user: Admin\n  password: secret\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n",
+            "basePath: '{}'\nworkPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\ncredentials:\n  user: Admin\n  password: secret\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n",
             base_path.display(),
             work_path.display()
         ),
@@ -549,7 +558,7 @@ fn mcp_top_level_execution_timeout_seconds_reports_error_on_stderr() {
     fs::write(
         &config_path,
         format!(
-            "basePath: '{}'\nworkPath: '{}'\nexecution_timeout_seconds: 300\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n",
+            "basePath: '{}'\nworkPath: '{}'\nexecution_timeout_seconds: 300\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n",
             base_path.display(),
             work_path.display()
         ),
@@ -572,7 +581,7 @@ fn mcp_top_level_execution_timeout_seconds_reports_error_on_stderr() {
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("top-level key 'execution_timeout_seconds'"));
-    assert!(stderr.contains("execution_timeout in milliseconds"));
+    assert!(stderr.contains("tests.execution_timeout_seconds"));
 }
 
 #[test]
@@ -586,7 +595,7 @@ fn mcp_unsupported_main_config_shape_reports_error_on_stderr() {
     fs::write(
         &config_path,
         format!(
-            "workPath: '{}'\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    typo: value\n",
+            "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\ntools:\n  platform:\n    typo: value\n",
             work_path.display()
         ),
     )
@@ -869,7 +878,7 @@ async fn mcp_stdio_structured_content_matches_cli_json_envelope() {
     let build_payload: Value = build_response
         .structured_content
         .expect("build structured payload");
-    assert_envelope_success(&build_payload, "build");
+    assert_envelope_success(&build_payload, "push");
     assert_eq!(build_payload["ok"], cli_build["ok"]);
     assert_eq!(build_payload["command"], cli_build["command"]);
     assert_eq!(build_payload["data"]["ok"], cli_build["data"]["ok"]);
@@ -900,7 +909,7 @@ async fn mcp_stdio_structured_content_matches_cli_json_envelope() {
     let dump_payload: Value = dump_response
         .structured_content
         .expect("dump structured payload");
-    assert_envelope_success(&dump_payload, "dump");
+    assert_envelope_success(&dump_payload, "pull");
     assert_eq!(dump_payload["ok"], cli_dump["ok"]);
     assert_eq!(dump_payload["command"], cli_dump["command"]);
     assert_eq!(dump_payload["data"]["ok"], cli_dump["data"]["ok"]);
@@ -914,7 +923,7 @@ async fn mcp_stdio_structured_content_matches_cli_json_envelope() {
     let syntax_payload: Value = syntax_response
         .structured_content
         .expect("syntax structured payload");
-    assert_envelope_business_failure(&syntax_payload, "syntax");
+    assert_envelope_business_failure(&syntax_payload, "check");
     assert_eq!(syntax_payload["ok"], cli_syntax["ok"]);
     assert_eq!(syntax_payload["command"], cli_syntax["command"]);
     assert_eq!(syntax_payload["error"], cli_syntax["error"]);
@@ -933,6 +942,248 @@ async fn mcp_stdio_structured_content_matches_cli_json_envelope() {
     assert_eq!(
         syntax_payload["data"]["issues"][0]["path"],
         cli_syntax["data"]["issues"][0]["path"]
+    );
+
+    client.cancel().await.expect("cancel client");
+}
+
+/// Инструменты MCP отвечают теми же формами `data`, что и их команды в CLI. Сверка идёт
+/// только с формами самой команды: общая форма отказа тоже объявлена, и ответ без предмета
+/// команды иначе прошёл бы проверку. Перечень вызовов сверяется с поверхностью сервера, так
+/// что новый инструмент без вызова здесь тест валит.
+#[tokio::test]
+async fn mcp_stdio_tools_answer_in_the_forms_of_their_commands() {
+    // Живую проверку EDT проект Конфигуратора не поднимет; её форму держит
+    // `mcp_stdio_the_live_edt_check_answers_in_the_form_of_check`.
+    const CHECKED_ELSEWHERE: &[&str] = &["check_syntax_edt"];
+    let (_dir, config_path, _designer_calls_log, _enterprise_calls_log, _captured_config) =
+        setup_designer_suite_project();
+    let client = serve_stdio(&config_path).await;
+
+    // Инструмент, команда, чьей формой он отвечает, и аргументы вызова.
+    let calls = [
+        ("run_all_tests", "test", json!({})),
+        (
+            "run_module_tests",
+            "test",
+            json!({ "moduleName": "Billing" }),
+        ),
+        ("build_project", "push", json!({ "fullRebuild": true })),
+        ("dump_config", "pull", json!({ "mode": "FULL" })),
+        (
+            "dump_config",
+            "pull",
+            json!({ "mode": "PARTIAL", "objects": ["Catalog.Items"] }),
+        ),
+        ("launch_app", "launch", json!({ "utilityType": "thin" })),
+        ("check_syntax_designer_config", "check", json!({})),
+        (
+            "check_syntax_designer_modules",
+            "check",
+            json!({ "server": true }),
+        ),
+    ];
+    let mut published: Vec<String> = client
+        .peer()
+        .list_all_tools()
+        .await
+        .expect("list tools")
+        .into_iter()
+        .map(|tool| tool.name.into_owned())
+        .collect();
+    published.sort_unstable();
+    let mut called: Vec<&str> = calls
+        .iter()
+        .map(|(tool, _, _)| *tool)
+        .chain(CHECKED_ELSEWHERE.iter().copied())
+        .collect();
+    called.sort_unstable();
+    called.dedup();
+    assert_eq!(
+        called, published,
+        "every published tool must be called here or named as checked elsewhere"
+    );
+
+    for (tool, command, arguments) in calls {
+        let response = client
+            .peer()
+            .call_tool(
+                CallToolRequestParams::new(tool)
+                    .with_arguments(serde_json::from_value(arguments).expect("arguments")),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{tool}: {error}"));
+        let Some(payload) = response.structured_content else {
+            panic!("{tool}: no structured payload");
+        };
+        assert_eq!(payload["command"], command, "{tool}: {payload}");
+        assert_data_matches_its_command_form(&payload, tool);
+        // Заглушки исполнителей здесь действительно запускаются, и признак, поставленный
+        // сценарием, доходит до ответа MCP. У формы `test` признака нет.
+        if command != "test" {
+            assert_eq!(
+                payload["data"]["provider_dispatched"], true,
+                "{tool}: {payload}"
+            );
+        }
+    }
+
+    client.cancel().await.expect("cancel client");
+}
+
+/// Живая проверка EDT собирает `data` своим кодом, мимо сценария CLI, — и отвечает той же
+/// формой `check`, вместе с замечанием вида EDT.
+#[tokio::test]
+async fn mcp_stdio_the_live_edt_check_answers_in_the_form_of_check() {
+    let validate_handler = "if [ -n \"$out\" ]; then printf 'ERROR\\tCatalogs.Items\\t1\\t2\\tUnusedVariables\\tunused variable\\n' > \"$out\"; fi\nprompt";
+    let (_dir, config_path) = setup_edt_project_with_options(
+        validate_handler,
+        MCP_ADMISSION_TIMEOUT_MS,
+        EDT_COMMAND_TIMEOUT_MS,
+        1,
+    );
+    let client = serve_stdio(&config_path).await;
+
+    let response = client
+        .peer()
+        .call_tool(check_syntax_edt_call())
+        .await
+        .expect("edt syntax call");
+
+    let payload = response.structured_content.expect("structured payload");
+    assert_eq!(payload["data"]["status"], "issues_found", "{payload}");
+    assert_eq!(payload["data"]["issues"][0]["kind"], "edt", "{payload}");
+    assert_data_matches_its_command_form(&payload, "check_syntax_edt");
+    // Команда проверки доставлена в общую сессию: исполнитель работу получил.
+    assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
+
+    client.cancel().await.expect("cancel client");
+}
+
+/// Живая проверка EDT, чья сессия так и не поднялась, работы исполнителю не дала: команда
+/// проверки в процесс не попала, и признак это говорит.
+#[tokio::test]
+async fn mcp_stdio_a_live_edt_check_whose_session_never_started_reports_no_work() {
+    let (dir, config_path) = setup_edt_project_with_options(
+        "prompt",
+        MCP_ADMISSION_TIMEOUT_MS,
+        EDT_COMMAND_TIMEOUT_MS,
+        1,
+    );
+    // Тот же файл, права прежние: EDT CLI выходит, не выдав подсказки.
+    fs::write(
+        dir.path().join("edt").join("1cedtcli"),
+        "#!/bin/sh\nexit 1\n",
+    )
+    .expect("broken edt cli");
+    let client = serve_stdio(&config_path).await;
+
+    let response = client
+        .peer()
+        .call_tool(check_syntax_edt_call())
+        .await
+        .expect("edt syntax call");
+
+    let payload = response.structured_content.expect("structured payload");
+    assert_eq!(payload["data"]["provider_dispatched"], false, "{payload}");
+
+    client.cancel().await.expect("cancel client");
+}
+
+/// Проверка по нескольким проектам: первый доставлен в общую сессию и проверен, а второй её
+/// не дождался — сброс перед ним завис дольше, чем осталось времени у вызова. Работа уже
+/// была, поэтому вызов отказывает формой `check` с `provider_dispatched: true`, а не ошибкой
+/// протокола. Время вызова не больше потолка сброса: иначе зависший сброс считался бы сбоем
+/// сессии, а не ожиданием её; сессия поднята заранее, чтобы первый проект в это время уложился.
+#[tokio::test]
+async fn mcp_stdio_a_project_that_misses_the_edt_session_after_work_answers_in_the_check_form() {
+    let validate_handler = "if [ -n \"$out\" ]; then : > \"$out\"; fi\nprompt";
+    let (dir, config_path) =
+        setup_edt_project_with_options(validate_handler, MCP_ADMISSION_TIMEOUT_MS, 1_000, 1);
+    let second = dir.path().join("project").join("second-edt");
+    write_edt_configuration_source(&second, "second");
+    fs::write(
+        second.join(".project"),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<projectDescription>\n  <name>second</name>\n  <natures>\n    <nature>com._1c.g5.v8.dt.core.V8ExtensionNature</nature>\n  </natures>\n</projectDescription>\n",
+    )
+    .expect("extension project");
+    fs::write(
+        second.join("DT-INF").join("PROJECT.PMF"),
+        format!(
+            "Manifest-Version: 1.0\nRuntime-Version: {EDT_RUNTIME_VERSION}\nBase-Project: main\n"
+        ),
+    )
+    .expect("extension manifest");
+    fs::write(
+        second.join("metadata").join("Configuration.xml"),
+        "<Configuration><ConfigurationExtensionPurpose>Extension</ConfigurationExtensionPurpose></Configuration>",
+    )
+    .expect("extension descriptor");
+    let config = fs::read_to_string(&config_path).expect("config");
+    let with_second = config
+        .replace(
+            "    path: project/main-edt\n",
+            "    path: project/main-edt\n  - name: second\n    type: EXTENSION\n    path: project/second-edt\n",
+        )
+        .replace(
+            "    interactive-mode: true\n",
+            "    interactive-mode: true\n    auto-start: true\n",
+        );
+    assert_ne!(config, with_second, "the sample names its source sets");
+    fs::write(&config_path, with_second).expect("config with a second project");
+    // Сброс перед вторым проектом зависает: заглушка спит на переходе в рабочее пространство,
+    // когда проверка уже была.
+    let script = dir.path().join("edt").join("1cedtcli");
+    let session_started = dir.path().join("edt-session-started");
+    let body = fs::read_to_string(&script).expect("edt script");
+    let stalled = body
+        .replace(
+            "cwd=\"$1\"\n",
+            "if [ \"$validate_count\" -ge 1 ]; then sleep 5; fi\ncwd=\"$1\"\n",
+        )
+        .replacen(
+            "set -eu\n",
+            &format!(
+                "set -eu\nprintf started > '{}'\n",
+                session_started.display()
+            ),
+            1,
+        );
+    assert_ne!(body, stalled, "the stub changes directory on cd");
+    fs::write(&script, stalled).expect("stalled edt script");
+    let client = serve_stdio(&config_path).await;
+    // Сессия поднимается при старте сервера; вызов ждёт её, чтобы время вызова ушло на
+    // проекты, а не на запуск EDT.
+    assert!(
+        support::wait_for_file(&session_started, Duration::from_secs(30)),
+        "the shared EDT session never started"
+    );
+
+    let response = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("check_syntax_edt"))
+        .await
+        .expect("edt syntax call");
+
+    assert_eq!(response.is_error, Some(true), "{response:?}");
+    let payload = response.structured_content.expect("structured payload");
+    assert_eq!(payload["command"], "check", "{payload}");
+    assert_eq!(payload["data"]["provider_dispatched"], true, "{payload}");
+    assert_data_matches_its_command_form(&payload, "check_syntax_edt after work");
+    assert_eq!(payload["data"]["status"], "tool_failed", "{payload}");
+    let message = payload["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("second") && message.contains("timed out"),
+        "{payload}"
+    );
+    let commands = fs::read_to_string(dir.path().join("edt-commands.log")).expect("command log");
+    assert_eq!(
+        commands
+            .lines()
+            .filter(|line| line.starts_with("validate "))
+            .count(),
+        1,
+        "only the first project was checked: {commands}"
     );
 
     client.cancel().await.expect("cancel client");
@@ -969,6 +1220,7 @@ async fn mcp_stdio_returns_structured_business_failure() {
     assert_eq!(payload["error"]["code"], "invalid_argument");
     assert_eq!(payload["data"]["field"], "module_name");
     assert_eq!(payload["data"]["tool"], "run_module_tests");
+    assert_matches_the_mcp_refusal_form(&payload["data"]);
 
     client.cancel().await.expect("cancel client");
 }
@@ -1078,7 +1330,7 @@ async fn mcp_stdio_build_project_runs_full_rebuild_successfully() {
 
     assert_eq!(response.is_error, Some(false));
     let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_success(&payload, "build");
+    assert_envelope_success(&payload, "push");
     assert_eq!(payload["data"]["ok"], true);
     assert!(fs::read_to_string(designer_calls_log)
         .expect("designer calls")
@@ -1115,11 +1367,49 @@ async fn mcp_stdio_launch_app_returns_success_for_thin_client() {
     let payload: Value = response.structured_content.expect("structured payload");
     assert_envelope_success(&payload, "launch");
     assert_eq!(payload["data"]["ok"], true);
+    // Настоящий запуск, не превью: адрес назван и здесь.
+    assert_eq!(payload["data"]["via"], "connection", "{payload}");
     assert_launch_platform_resolution(&payload["data"]);
     wait_for_invocation_count(&enterprise_calls_log, 1).await;
     assert!(!fs::read_to_string(enterprise_calls_log)
         .expect("enterprise calls")
         .contains("RunUnitTests="));
+
+    client.cancel().await.expect("cancel client");
+}
+
+/// Поверхности не расходятся: `via` есть и у MCP, и отвергается он там по тем же
+/// правилам — у толстого клиента развилки нет.
+#[tokio::test]
+async fn mcp_stdio_launch_app_refuses_via_where_there_is_no_choice() {
+    let (_dir, config_path, _designer_calls_log, _enterprise_calls_log, _captured_config) =
+        setup_designer_suite_project();
+    let transport = TokioChildProcess::new(
+        tokio::process::Command::new(v8_runner_binary()).configure(|cmd| {
+            cmd.arg("--config")
+                .arg(config_path.as_os_str())
+                .arg("mcp")
+                .arg("serve")
+                .arg("stdio");
+        }),
+    )
+    .expect("spawn stdio transport");
+
+    let client = ().serve(transport).await.expect("connect rmcp client");
+    let response = client
+        .peer()
+        .call_tool(
+            CallToolRequestParams::new("launch_app").with_arguments(
+                serde_json::from_value(json!({ "utilityType": "thick", "via": "web" }))
+                    .expect("arguments"),
+            ),
+        )
+        .await
+        .expect("call tool");
+
+    assert_eq!(response.is_error, Some(true));
+    let payload: Value = response.structured_content.expect("structured payload");
+    assert_eq!(payload["error"]["kind"], "validation", "{payload}");
 
     client.cancel().await.expect("cancel client");
 }
@@ -1152,7 +1442,7 @@ async fn mcp_stdio_check_syntax_designer_modules_returns_structured_issues() {
 
     assert_eq!(response.is_error, Some(true));
     let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_business_failure(&payload, "syntax");
+    assert_envelope_business_failure(&payload, "check");
     assert_eq!(payload["data"]["status"], "issues_found");
     assert_eq!(payload["data"]["issues"][0]["kind"], "module");
     assert_eq!(
@@ -1161,7 +1451,7 @@ async fn mcp_stdio_check_syntax_designer_modules_returns_structured_issues() {
     );
     assert!(fs::read_to_string(designer_calls_log)
         .expect("designer calls")
-        .contains("/CheckModules"));
+        .contains("/CheckConfig"));
 
     client.cancel().await.expect("cancel client");
 }
@@ -1193,7 +1483,7 @@ async fn mcp_stdio_dump_config_full_returns_success_payload() {
 
     assert_eq!(response.is_error, Some(false));
     let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_success(&payload, "dump");
+    assert_envelope_success(&payload, "pull");
     assert_eq!(payload["data"]["ok"], true);
     assert_eq!(payload["data"]["mode"], "FULL");
     assert!(fs::read_to_string(designer_calls_log)
@@ -1235,7 +1525,7 @@ async fn mcp_stdio_dump_config_partial_designer_preserves_partial_mode() {
 
     assert_eq!(response.is_error, Some(false));
     let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_success(&payload, "dump");
+    assert_envelope_success(&payload, "pull");
     assert_eq!(payload["data"]["ok"], true);
     assert_eq!(payload["data"]["mode"], "PARTIAL");
     let calls = fs::read_to_string(designer_calls_log).expect("designer calls");
@@ -1276,7 +1566,7 @@ async fn mcp_stdio_dump_config_partial_ibcmd_returns_degraded_success() {
 
     assert_eq!(response.is_error, Some(false));
     let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_success(&payload, "dump");
+    assert_envelope_success(&payload, "pull");
     assert_eq!(payload["data"]["ok"], true);
     assert_eq!(payload["data"]["mode"], "PARTIAL");
     assert!(payload["data"]["message"]
@@ -1319,7 +1609,7 @@ async fn mcp_stdio_dump_config_full_ibcmd_server_contract_passes_dbms_and_infoba
 
     assert_eq!(response.is_error, Some(false));
     let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_success(&payload, "dump");
+    assert_envelope_success(&payload, "pull");
     assert_eq!(payload["data"]["ok"], true);
     let calls = fs::read_to_string(calls_log).expect("ibcmd calls");
     assert!(calls.contains("--dbms PostgreSQL --database-server localhost --database-name maindb"));
@@ -1360,7 +1650,7 @@ async fn mcp_stdio_dump_config_partial_ibcmd_preserves_partial_mode_on_failure()
 
     assert_eq!(response.is_error, Some(true));
     let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_business_failure(&payload, "dump");
+    assert_envelope_business_failure(&payload, "pull");
     assert_eq!(payload["data"]["mode"], "PARTIAL");
     assert!(payload["data"]["message"]
         .as_str()
@@ -1403,7 +1693,7 @@ async fn mcp_stdio_returns_terminal_business_failure_for_edt_syntax_timeout() {
         .expect("EDT readiness call");
     assert_eq!(ready.is_error, Some(false));
     let ready_payload: Value = ready.structured_content.expect("readiness payload");
-    assert_envelope_success(&ready_payload, "syntax");
+    assert_envelope_success(&ready_payload, "check");
 
     let response = client
         .peer()
@@ -1417,7 +1707,7 @@ async fn mcp_stdio_returns_terminal_business_failure_for_edt_syntax_timeout() {
 
     assert_eq!(response.is_error, Some(true));
     let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_business_failure(&payload, "syntax");
+    assert_envelope_business_failure(&payload, "check");
     assert_eq!(payload["data"]["status"], "tool_failed");
     assert!(payload["error"]["message"]
         .as_str()
@@ -1432,7 +1722,7 @@ async fn mcp_stdio_edt_syntax_resets_interactive_state_before_each_call() {
     let validate_handler = "if [ \"$cwd\" != \"$workspace\" ]; then\n  printf 'cwd mismatch:%s\\n' \"$cwd\"\nelif [ \"$dirty\" -ne 0 ]; then\n  printf 'state leaked\\n'\nelse\n  if [ -n \"$out\" ]; then : > \"$out\"; fi\n  dirty=1\nfi\nprompt";
     let (dir, config_path) = setup_edt_project_with_options(
         validate_handler,
-        MCP_EXECUTION_TIMEOUT_MS,
+        MCP_ADMISSION_TIMEOUT_MS,
         EDT_COMMAND_TIMEOUT_MS,
         1,
     );
@@ -1460,7 +1750,7 @@ async fn mcp_stdio_edt_syntax_resets_interactive_state_before_each_call() {
             .expect("edt syntax call");
         assert_eq!(response.is_error, Some(false));
         let payload: Value = response.structured_content.expect("structured payload");
-        assert_envelope_success(&payload, "syntax");
+        assert_envelope_success(&payload, "check");
     }
 
     let commands = fs::read_to_string(dir.path().join("edt-commands.log")).expect("command log");
@@ -1477,6 +1767,231 @@ async fn mcp_stdio_edt_syntax_resets_interactive_state_before_each_call() {
     client.cancel().await.expect("cancel client");
 }
 
+/// Читает stdout сервера до ответа с номером `id`; всё прочитанное остаётся в `seen`.
+async fn read_until_reply(
+    lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    id: u64,
+    seen: &mut Vec<String>,
+) {
+    let reply = async {
+        loop {
+            let line = lines
+                .next_line()
+                .await
+                .expect("read stdout")
+                .unwrap_or_else(|| panic!("stdout closed before reply {id}"));
+            let is_reply =
+                serde_json::from_str::<Value>(&line).is_ok_and(|frame| frame["id"] == id);
+            seen.push(line);
+            if is_reply {
+                return;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), reply)
+        .await
+        .unwrap_or_else(|_| panic!("no reply {id} in time; stdout so far: {seen:?}"));
+}
+
+/// stdout сервера по stdio занят протоколом: на нём только кадры JSON-RPC, а предупреждение
+/// загрузки конфигурации — прежний ключ `infobase` в проектном файле — уходит в журнал
+/// действий. Сервер читается сырым, без клиента, который мог бы простить лишнюю строку.
+#[tokio::test]
+async fn mcp_stdio_stdout_carries_only_protocol_frames() {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+    let (dir, config_path) = setup_project();
+    let mut server = tokio::process::Command::new(v8_runner_binary())
+        .arg("--config")
+        .arg(&config_path)
+        .args(["mcp", "serve", "stdio"])
+        .env_remove("V8TR_ACTION_LOG_FILE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn server");
+    let mut stdin = server.stdin.take().expect("stdin");
+    let mut lines = tokio::io::BufReader::new(server.stdout.take().expect("stdout")).lines();
+    let mut seen = Vec::new();
+
+    let requests = [
+        (
+            1,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "raw-stdio-test", "version": "1.0.0"}
+            }}),
+        ),
+        (
+            2,
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+        ),
+        (
+            3,
+            json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+                "name": "run_module_tests",
+                "arguments": {"moduleName": "   "}
+            }}),
+        ),
+    ];
+    for (id, request) in requests {
+        if id == 2 {
+            let initialized = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+            stdin
+                .write_all(format!("{initialized}\n").as_bytes())
+                .await
+                .expect("write notification");
+        }
+        stdin
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .expect("write request");
+        stdin.flush().await.expect("flush");
+        read_until_reply(&mut lines, id, &mut seen).await;
+    }
+    drop(stdin);
+    let drained = async {
+        while let Some(line) = lines.next_line().await.expect("read stdout") {
+            seen.push(line);
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), drained)
+        .await
+        .expect("server closes stdout after stdin");
+    tokio::time::timeout(Duration::from_secs(10), server.wait())
+        .await
+        .expect("server exits after stdin closes")
+        .expect("wait server");
+
+    for line in &seen {
+        let frame: Value = serde_json::from_str(line)
+            .unwrap_or_else(|error| panic!("stdout carries a non-JSON line {line:?}: {error}"));
+        assert_eq!(frame["jsonrpc"], "2.0", "not a JSON-RPC frame: {line}");
+    }
+    let action_log = fs::read_to_string(dir.path().join("work/logs/mcp/actions.log"))
+        .expect("the action log is written");
+    assert!(
+        action_log.contains("moves to v8project.local.yaml"),
+        "the load warning did not reach the action log:\n{action_log}"
+    );
+}
+
+/// Файл, которым тест отпускает двойника, — и на выходе из теста, как бы он ни кончился.
+struct ReleaseOnDrop(PathBuf);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        let _ = fs::write(&self.0, "");
+    }
+}
+
+/// Сервер MCP по stdio над проектом из `config_path`.
+async fn serve_stdio(config_path: &Path) -> rmcp::service::RunningService<rmcp::RoleClient, ()> {
+    let transport = TokioChildProcess::new(
+        tokio::process::Command::new(v8_runner_binary()).configure(|cmd| {
+            cmd.arg("--config")
+                .arg(config_path.as_os_str())
+                .arg("mcp")
+                .arg("serve")
+                .arg("stdio");
+        }),
+    )
+    .expect("spawn stdio transport");
+    ().serve(transport).await.expect("connect rmcp client")
+}
+
+fn check_syntax_edt_call() -> CallToolRequestParams {
+    CallToolRequestParams::new("check_syntax_edt").with_arguments(
+        serde_json::from_value(json!({ "projectName": "main" })).expect("arguments"),
+    )
+}
+
+/// Отказ занятого каталога: один конверт отказа, названа команда, и EDT не спрашивали.
+fn assert_refused_as_busy(response: &rmcp::model::CallToolResult) {
+    assert_eq!(response.is_error, Some(true));
+    let payload = response
+        .structured_content
+        .as_ref()
+        .expect("structured payload");
+    assert_envelope_business_failure(payload, "check");
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("cannot start check")),
+        "{payload}"
+    );
+    assert_matches_the_mcp_refusal_form(&payload["data"]);
+}
+
+/// Живая EDT-проверка берёт замок `workPath`, как любой инструмент порта: занятый каталог —
+/// отказ сразу, и до EDT вызов не доходит.
+#[tokio::test]
+async fn mcp_stdio_edt_syntax_refuses_a_busy_workspace() {
+    let (dir, config_path) = setup_edt_project();
+    hold_workspace_lock(&dir.path().join("work"));
+    let client = serve_stdio(&config_path).await;
+
+    let response = client
+        .peer()
+        .call_tool(check_syntax_edt_call())
+        .await
+        .expect("edt syntax call");
+
+    assert_refused_as_busy(&response);
+    let commands = fs::read_to_string(dir.path().join("edt-commands.log")).unwrap_or_default();
+    assert!(
+        !commands.lines().any(|line| line.starts_with("validate")),
+        "{commands}"
+    );
+
+    client.cancel().await.expect("cancel client");
+}
+
+/// При двух слотах допуска вторая проверка на том же `workPath` не встаёт в очередь сессии
+/// EDT, а отказывает сразу, как любой инструмент порта: каталог держит первая. Двойник EDT
+/// держит первую проверку, пока тест не отпустит её, — порядок задан, а не угадан.
+#[tokio::test]
+async fn mcp_stdio_a_second_edt_syntax_call_on_a_busy_workspace_is_refused_at_once() {
+    // Рабочая область EDT ещё может не существовать, поэтому корень стенда берётся от её
+    // имени строкой, а не путём `../..`.
+    let validate_handler = "if [ \"$validate_count\" -eq 1 ]; then\n  root=$(dirname \"$(dirname \"$workspace\")\")\n  : > \"$root/validate-started\"\n  waited=0\n  while [ ! -e \"$root/validate-release\" ] && [ \"$waited\" -lt 600 ]; do\n    sleep 0.05\n    waited=$((waited + 1))\n  done\nfi\nif [ -n \"$out\" ]; then : > \"$out\"; fi\nprompt";
+    let (dir, config_path) =
+        setup_edt_project_with_options(validate_handler, MCP_ADMISSION_TIMEOUT_MS, 60_000, 2);
+    let client = serve_stdio(&config_path).await;
+    // Первую проверку отпускает и упавшее утверждение: двойник EDT не ждёт до конца срока.
+    let release = ReleaseOnDrop(dir.path().join("validate-release"));
+
+    let first = tokio::spawn({
+        let peer = client.peer().clone();
+        async move { peer.call_tool(check_syntax_edt_call()).await }
+    });
+    let started = dir.path().join("validate-started");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !started.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the first check never reached EDT"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let second = client
+        .peer()
+        .call_tool(check_syntax_edt_call())
+        .await
+        .expect("second call");
+    assert_refused_as_busy(&second);
+
+    drop(release);
+    let first = first.await.expect("first call task").expect("first call");
+    assert_eq!(first.is_error, Some(false));
+
+    client.cancel().await.expect("cancel client");
+}
+
 #[tokio::test]
 async fn mcp_stdio_cancels_running_edt_tool_and_retains_capacity_until_detached_completion() {
     let dir = temp_workspace();
@@ -1487,7 +2002,7 @@ async fn mcp_stdio_cancels_running_edt_tool_and_retains_capacity_until_detached_
     );
     let (_project, config_path) = setup_edt_project_with_options(
         &validate_handler,
-        MCP_EXECUTION_TIMEOUT_MS,
+        MCP_ADMISSION_TIMEOUT_MS,
         EDT_COMMAND_TIMEOUT_MS,
         1,
     );
@@ -1566,7 +2081,7 @@ async fn mcp_stdio_edt_syntax_preserves_issues_found_when_stdout_is_non_empty() 
     let validate_handler = "printf 'informational stdout\\n'\nif [ -n \"$out\" ]; then printf 'ERROR\\tCatalogs.Items\\t1\\t2\\tUnusedVariables\\tunused variable\\n' > \"$out\"; fi\nprompt";
     let (_dir, config_path) = setup_edt_project_with_options(
         validate_handler,
-        MCP_EXECUTION_TIMEOUT_MS,
+        MCP_ADMISSION_TIMEOUT_MS,
         EDT_COMMAND_TIMEOUT_MS,
         1,
     );
@@ -1594,7 +2109,7 @@ async fn mcp_stdio_edt_syntax_preserves_issues_found_when_stdout_is_non_empty() 
 
     assert_eq!(response.is_error, Some(true));
     let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_business_failure(&payload, "syntax");
+    assert_envelope_business_failure(&payload, "check");
     assert_eq!(payload["data"]["status"], "issues_found");
     assert_eq!(payload["data"]["issues"][0]["path"], "Catalogs.Items");
 
@@ -1607,7 +2122,7 @@ async fn mcp_stdio_edt_syntax_treats_stdout_without_issues_as_tool_failure() {
         "printf 'unexpected stdout\\n'\nif [ -n \"$out\" ]; then : > \"$out\"; fi\nprompt";
     let (_dir, config_path) = setup_edt_project_with_options(
         validate_handler,
-        MCP_EXECUTION_TIMEOUT_MS,
+        MCP_ADMISSION_TIMEOUT_MS,
         EDT_COMMAND_TIMEOUT_MS,
         1,
     );
@@ -1635,7 +2150,7 @@ async fn mcp_stdio_edt_syntax_treats_stdout_without_issues_as_tool_failure() {
 
     assert_eq!(response.is_error, Some(true));
     let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_business_failure(&payload, "syntax");
+    assert_envelope_business_failure(&payload, "check");
     assert_eq!(payload["data"]["status"], "tool_failed");
 
     client.cancel().await.expect("cancel client");
@@ -1738,7 +2253,7 @@ async fn mcp_stdio_standard_tools_do_not_inherit_edt_running_timeout() {
 
     assert_eq!(response.is_error, Some(false));
     let payload: Value = response.structured_content.expect("structured payload");
-    assert_envelope_success(&payload, "syntax");
+    assert_envelope_success(&payload, "check");
     assert_eq!(payload["data"]["status"], "clean");
 
     client.cancel().await.expect("cancel client");

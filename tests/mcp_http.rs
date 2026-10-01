@@ -145,7 +145,7 @@ fn write_http_designer_config(
     idle_ttl_secs: u64,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\nmcp:\n  http:\n    bind_address: {}\n    path: /mcp\n    stateful_sessions: {}\n    max_sessions: {}\n    idle_ttl_secs: {}\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\nmcp:\n  http:\n    bind_address: {}\n    path: /mcp\n    stateful_sessions: {}\n    max_sessions: {}\n    idle_ttl_secs: {}\n    allowed_hosts:\n      - runner.test\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         bind_address,
         stateful_sessions,
@@ -167,7 +167,7 @@ fn write_http_ibcmd_config_with_infobase(
     infobase_yaml: &str,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nbuilder: IBCMD\ninfobase:\n{}source-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\nmcp:\n  http:\n    bind_address: {}\n    path: /mcp\n    stateful_sessions: true\n    max_sessions: {}\n    idle_ttl_secs: {}\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n{}source-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\nmcp:\n  http:\n    bind_address: {}\n    path: /mcp\n    stateful_sessions: true\n    max_sessions: {}\n    idle_ttl_secs: {}\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         infobase_yaml,
         bind_address,
@@ -230,25 +230,32 @@ fn write_edt_configuration_source(path: &Path, project_name: &str) {
     .expect("module marker");
 }
 
+/// Поднимает ли сервер общую сессию EDT сам, при старте (`tools.edt_cli.auto-start`).
+#[derive(Clone, Copy)]
+enum AutoStart {
+    Off,
+    On,
+}
+
 fn write_http_edt_config(
     path: &Path,
-    _base_path: &Path,
     work_path: &Path,
     edt_path: &Path,
     bind_address: &str,
-    max_sessions: usize,
-    idle_ttl_secs: u64,
-    max_concurrent_calls: usize,
     command_timeout_ms: u64,
+    auto_start: AutoStart,
 ) {
+    // Без прогрева ключа в конфиге нет — как у пользователя, который его не задал.
+    let auto_start = match auto_start {
+        AutoStart::Off => "",
+        AutoStart::On => "    auto-start: true\n",
+    };
     let config = format!(
-        "workPath: '{}'\nformat: EDT\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main-edt\nmcp:\n  http:\n    bind_address: {}\n    path: /mcp\n    stateful_sessions: true\n    max_sessions: {}\n    idle_ttl_secs: {}\n  execution:\n    max_concurrent_calls: {}\ntools:\n  edt_cli:\n    path: '{}'\n    interactive-mode: true\n    command_timeout_ms: {}\n",
+        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main-edt\nmcp:\n  http:\n    bind_address: {}\n    path: /mcp\n    stateful_sessions: true\n    max_sessions: 4\n    idle_ttl_secs: 900\n  execution:\n    max_concurrent_calls: 1\ntools:\n  edt_cli:\n    path: '{}'\n    interactive-mode: true\n{}    command_timeout_ms: {}\n",
         work_path.display(),
         bind_address,
-        max_sessions,
-        idle_ttl_secs,
-        max_concurrent_calls,
         edt_path.display(),
+        auto_start,
         command_timeout_ms,
     );
     fs::write(path, config).expect("edt config");
@@ -349,10 +356,8 @@ fn setup_http_ibcmd_dump_project_with_infobase(
 
 fn setup_http_edt_project(
     validate_handler: &str,
-    max_sessions: usize,
-    idle_ttl_secs: u64,
-    max_concurrent_calls: usize,
     command_timeout_ms: u64,
+    auto_start: AutoStart,
 ) -> (tempfile::TempDir, PathBuf, String, PathBuf) {
     let dir = temp_workspace();
     let base_path = dir.path().join("project");
@@ -376,14 +381,11 @@ fn setup_http_edt_project(
     );
     write_http_edt_config(
         &config_path,
-        &base_path,
         &work_path,
         &edt_path,
         &bind_address,
-        max_sessions,
-        idle_ttl_secs,
-        max_concurrent_calls,
         command_timeout_ms,
+        auto_start,
     );
 
     (
@@ -419,6 +421,9 @@ impl HttpServerProcess {
             .arg("mcp")
             .arg("serve")
             .arg("http")
+            // Упавший тест не доходит до `shutdown`: без этого сервер переживал бы его и
+            // держал порт и вывод прогона.
+            .kill_on_drop(true)
             .spawn()
             .expect("spawn http server");
 
@@ -497,21 +502,25 @@ async fn initialize_session(client: &reqwest::Client, url: &str) -> (String, Val
     (session_id, extract_sse_json(&body))
 }
 
+fn initialize_payload() -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": { "name": "http-test", "version": "1.0.0" }
+        }
+    })
+}
+
 async fn initialize_stateless(client: &reqwest::Client, url: &str) -> reqwest::Response {
     client
         .post(url)
         .header("Accept", ACCEPT_BOTH)
         .header("Content-Type", "application/json")
-        .json(&json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-11-25",
-                "capabilities": {},
-                "clientInfo": { "name": "http-test", "version": "1.0.0" }
-            }
-        }))
+        .json(&initialize_payload())
         .send()
         .await
         .expect("stateless initialize request")
@@ -632,9 +641,70 @@ async fn mcp_http_initialize_reuses_session_and_lists_tools() {
     let list_response = tools_list(&client, &url, &session_id).await;
     assert_eq!(list_response.status(), reqwest::StatusCode::OK);
     let list_payload = extract_sse_json(&list_response.text().await.expect("tools/list body"));
-    let mut names = list_payload["result"]["tools"]
+    // Форма поверхности закреплена артефактом: имя и схема входа каждого инструмента.
+    // Сверяется именно она, потому что клиент строит вызов по схеме, а не по имени.
+    // Обновление артефакта: UPDATE_MCP_SURFACE=1 cargo test --test mcp_http tools_list
+    if std::env::var_os("UPDATE_MCP_SURFACE").is_some() {
+        let mut map = serde_json::Map::new();
+        for tool in list_payload["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+        {
+            map.insert(
+                tool["name"].as_str().expect("tool name").to_owned(),
+                tool["inputSchema"].clone(),
+            );
+        }
+        let document = serde_json::json!({
+            "_comment": "Закреплённая форма поверхности MCP: имя инструмента и его схема входа. Порождается тестом при UPDATE_MCP_SURFACE=1, руками не правится.",
+            "tools": map,
+        });
+        std::fs::write(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/schemas/mcp-tools.json"),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&document).expect("pretty")
+            ),
+        )
+        .expect("write pinned surface");
+    }
+
+    let pinned: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/schemas/mcp-tools.json"),
+        )
+        .expect("pinned MCP surface artefact"),
+    )
+    .expect("pinned surface is valid json");
+
+    let live = list_payload["result"]["tools"]
         .as_array()
-        .expect("tools array")
+        .expect("tools array");
+    for tool in live {
+        let name = tool["name"].as_str().expect("tool name");
+        let expected = &pinned["tools"][name];
+        assert!(
+            !expected.is_null(),
+            "tool {name} is published but missing from docs/schemas/mcp-tools.json"
+        );
+        assert_eq!(
+            &tool["inputSchema"], expected,
+            "input schema of {name} drifted from the pinned form"
+        );
+    }
+    let pinned_names = pinned["tools"]
+        .as_object()
+        .expect("pinned tools object")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        live.len(),
+        pinned_names.len(),
+        "published surface and the pinned artefact must list the same tools"
+    );
+
+    let mut names = live
         .iter()
         .map(|tool| tool["name"].as_str().expect("tool name").to_owned())
         .collect::<Vec<_>>();
@@ -685,7 +755,7 @@ async fn mcp_http_dump_config_full_ibcmd_server_contract_passes_dbms_and_infobas
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let payload = extract_sse_json(&response.text().await.expect("dump body"));
     let structured = &payload["result"]["structuredContent"];
-    assert_envelope_success(structured, "dump");
+    assert_envelope_success(structured, "pull");
     assert_eq!(structured["data"]["ok"], true);
     let calls = fs::read_to_string(calls_log).expect("ibcmd calls");
     assert!(calls.contains("--dbms PostgreSQL --database-server localhost --database-name maindb"));
@@ -753,7 +823,7 @@ async fn mcp_http_dump_config_partial_ibcmd_returns_degraded_success() {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let payload = extract_sse_json(&response.text().await.expect("dump body"));
     let structured = &payload["result"]["structuredContent"];
-    assert_envelope_success(structured, "dump");
+    assert_envelope_success(structured, "pull");
     assert_eq!(structured["data"]["ok"], true);
     assert_eq!(structured["data"]["mode"], "PARTIAL");
     assert!(structured["data"]["message"]
@@ -794,7 +864,7 @@ async fn mcp_http_dump_config_partial_ibcmd_preserves_partial_mode_on_failure() 
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let payload = extract_sse_json(&response.text().await.expect("dump failure body"));
     let structured = &payload["result"]["structuredContent"];
-    assert_envelope_business_failure(structured, "dump");
+    assert_envelope_business_failure(structured, "pull");
     assert_eq!(structured["data"]["mode"], "PARTIAL");
     assert!(structured["data"]["message"]
         .as_str()
@@ -1036,6 +1106,77 @@ async fn mcp_http_initialize_burst_respects_capacity_and_recovers_after_delete()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_http_answers_only_the_hosts_it_was_told() {
+    let (_dir, config_path, url) = setup_http_designer_project(true, 4, 900);
+    let mut server = HttpServerProcess::spawn(&config_path, &url).await;
+    let client = reqwest::Client::builder()
+        .timeout(HTTP_CLIENT_TIMEOUT)
+        .build()
+        .expect("http client");
+
+    // Так выглядит страница, переразрешившая своё имя в петлю: соединение идёт на
+    // `127.0.0.1`, а `Host` называет чужое имя, подделать которое браузер не может.
+    let rebound = client
+        .post(&url)
+        .header("Host", "evil.com")
+        .header("Accept", ACCEPT_BOTH)
+        .header("Content-Type", "application/json")
+        .json(&initialize_payload())
+        .send()
+        .await
+        .expect("a request naming another host");
+    assert_eq!(rebound.status(), reqwest::StatusCode::FORBIDDEN);
+    let body = rebound.text().await.expect("refusal body");
+    assert!(
+        body.contains("Host"),
+        "the refusal names the header: {body}"
+    );
+    assert!(
+        !body.contains("evil.com"),
+        "the refusal does not echo the value back: {body}"
+    );
+
+    let foreign_origin = client
+        .post(&url)
+        .header("Origin", "http://evil.com")
+        .header("Accept", ACCEPT_BOTH)
+        .header("Content-Type", "application/json")
+        .json(&initialize_payload())
+        .send()
+        .await
+        .expect("a request from another origin");
+    assert_eq!(foreign_origin.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Проверка стоит слоем, а не в обработчике маршрута: путь, которого нет,
+    // отвечает тем же отказом, а не 404 мимо проверки.
+    let off_route = client
+        .get(url.replace("/mcp", "/nowhere"))
+        .header("Host", "evil.com")
+        .send()
+        .await
+        .expect("a request off the route");
+    assert_eq!(off_route.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let loopback = initialize_stateless(&client, &url).await;
+    assert_eq!(loopback.status(), reqwest::StatusCode::OK);
+
+    // Названный в `mcp.http.allowed_hosts` отвечает так же, как петля: иначе ключ
+    // умел бы только запрещать, и открыть слушатель им было бы нельзя.
+    let listed = client
+        .post(&url)
+        .header("Host", "runner.test")
+        .header("Accept", ACCEPT_BOTH)
+        .header("Content-Type", "application/json")
+        .json(&initialize_payload())
+        .send()
+        .await
+        .expect("a request naming a listed host");
+    assert_eq!(listed.status(), reqwest::StatusCode::OK);
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_http_max_sessions_returns_503_and_non_initialize_stays_400() {
     let (_dir, config_path, url) = setup_http_designer_project(true, 1, 900);
     let mut server = HttpServerProcess::spawn(&config_path, &url).await;
@@ -1105,7 +1246,7 @@ async fn mcp_http_parallel_initialize_respects_max_sessions() {
 async fn mcp_http_reuses_one_edt_process_across_sessions_and_shares_capacity() {
     let validate_handler = "printf 'start\\n' >> \"$lifecycle_log\"\nif [ -n \"$out\" ]; then : > \"$out\"; fi\nsleep 0.15\nprintf 'finish\\n' >> \"$lifecycle_log\"\nprompt";
     let (_dir, config_path, url, lifecycle_log) =
-        setup_http_edt_project(validate_handler, 4, 900, 1, EDT_COMMAND_TIMEOUT_MS);
+        setup_http_edt_project(validate_handler, EDT_COMMAND_TIMEOUT_MS, AutoStart::Off);
     let mut server = HttpServerProcess::spawn(&config_path, &url).await;
     let client = reqwest::Client::builder()
         .timeout(HTTP_CLIENT_TIMEOUT)
@@ -1138,8 +1279,8 @@ async fn mcp_http_reuses_one_edt_process_across_sessions_and_shares_capacity() {
     assert_eq!(second.status(), reqwest::StatusCode::OK);
     let first_payload = extract_sse_json(&first.text().await.expect("first edt body"));
     let second_payload = extract_sse_json(&second.text().await.expect("second edt body"));
-    assert_envelope_success(&first_payload["result"]["structuredContent"], "syntax");
-    assert_envelope_success(&second_payload["result"]["structuredContent"], "syntax");
+    assert_envelope_success(&first_payload["result"]["structuredContent"], "check");
+    assert_envelope_success(&second_payload["result"]["structuredContent"], "check");
 
     let lifecycle = fs::read_to_string(&lifecycle_log).expect("lifecycle log");
     let lines = lifecycle.lines().collect::<Vec<_>>();
@@ -1149,11 +1290,51 @@ async fn mcp_http_reuses_one_edt_process_across_sessions_and_shares_capacity() {
     server.shutdown().await;
 }
 
+/// Сервер MCP живёт между вызовами, поэтому с `auto-start` поднимает общую сессию EDT сам,
+/// ещё до первого вызова, — и первый вызов идёт уже в неё, второго запуска EDT нет.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_http_prewarms_the_shared_edt_session_before_the_first_call() {
+    let validate_handler = "if [ -n \"$out\" ]; then : > \"$out\"; fi\nprompt";
+    let (_dir, config_path, url, lifecycle_log) =
+        setup_http_edt_project(validate_handler, EDT_COMMAND_TIMEOUT_MS, AutoStart::On);
+    let mut server = HttpServerProcess::spawn(&config_path, &url).await;
+
+    let prewarmed = support::wait_until_async(200, Duration::from_millis(50), || {
+        fs::read_to_string(&lifecycle_log).is_ok_and(|log| log.lines().eq(["startup"]))
+    })
+    .await;
+    assert!(prewarmed, "EDT was not started before the first call");
+
+    let client = reqwest::Client::builder()
+        .timeout(HTTP_CLIENT_TIMEOUT)
+        .build()
+        .expect("http client");
+    let (session, _) = initialize_session(&client, &url).await;
+    send_initialized(&client, &url, &session).await;
+    let response = call_tool(
+        &client,
+        &url,
+        &session,
+        "check_syntax_edt",
+        json!({ "projectName": "main" }),
+        10,
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let payload = extract_sse_json(&response.text().await.expect("edt body"));
+    assert_envelope_success(&payload["result"]["structuredContent"], "check");
+
+    let lifecycle = fs::read_to_string(&lifecycle_log).expect("lifecycle log");
+    assert_eq!(lifecycle.lines().collect::<Vec<_>>(), ["startup"]);
+
+    server.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_http_returns_terminal_business_failure_for_edt_syntax_timeout() {
     let validate_handler = "if [ \"$validate_count\" -eq 1 ]; then\n  if [ -n \"$out\" ]; then : > \"$out\"; fi\n  prompt\nelse\n  sleep 8\n  prompt\nfi";
     let (_dir, config_path, url, _lifecycle_log) =
-        setup_http_edt_project(validate_handler, 4, 900, 1, EDT_TIMEOUT_TEST_MS);
+        setup_http_edt_project(validate_handler, EDT_TIMEOUT_TEST_MS, AutoStart::Off);
     let mut server = HttpServerProcess::spawn(&config_path, &url).await;
     let client = reqwest::Client::builder()
         .timeout(HTTP_CLIENT_TIMEOUT)
@@ -1174,7 +1355,7 @@ async fn mcp_http_returns_terminal_business_failure_for_edt_syntax_timeout() {
     .await;
     assert_eq!(ready.status(), reqwest::StatusCode::OK);
     let ready_payload = extract_sse_json(&ready.text().await.expect("EDT readiness body"));
-    assert_envelope_success(&ready_payload["result"]["structuredContent"], "syntax");
+    assert_envelope_success(&ready_payload["result"]["structuredContent"], "check");
 
     let response = call_tool(
         &client,
@@ -1188,7 +1369,7 @@ async fn mcp_http_returns_terminal_business_failure_for_edt_syntax_timeout() {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let payload = extract_sse_json(&response.text().await.expect("edt timeout body"));
     let structured = &payload["result"]["structuredContent"];
-    assert_envelope_business_failure(structured, "syntax");
+    assert_envelope_business_failure(structured, "check");
     assert_eq!(structured["data"]["status"], "tool_failed");
     assert!(structured["error"]["message"]
         .as_str()
@@ -1202,7 +1383,7 @@ async fn mcp_http_returns_terminal_business_failure_for_edt_syntax_timeout() {
 async fn mcp_http_edt_action_log_contains_runtime_telemetry_events() {
     let validate_handler = "if [ -n \"$out\" ]; then : > \"$out\"; fi\nsleep 0.05\nprompt";
     let (dir, config_path, url, _lifecycle_log) =
-        setup_http_edt_project(validate_handler, 4, 900, 1, EDT_COMMAND_TIMEOUT_MS);
+        setup_http_edt_project(validate_handler, EDT_COMMAND_TIMEOUT_MS, AutoStart::Off);
     let action_log = dir
         .path()
         .join("work")
@@ -1229,7 +1410,7 @@ async fn mcp_http_edt_action_log_contains_runtime_telemetry_events() {
     .await;
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let payload = extract_sse_json(&response.text().await.expect("edt body"));
-    assert_envelope_success(&payload["result"]["structuredContent"], "syntax");
+    assert_envelope_success(&payload["result"]["structuredContent"], "check");
 
     wait_for_log_contains(&action_log, "mcp_execution_semaphore_wait").await;
     wait_for_log_contains(&action_log, "mcp_edt_queue_depth").await;

@@ -1,15 +1,14 @@
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
-
 use crate::change_detection::analyzer::{self, ContextAnalysis};
-use crate::config::loader::normalize_connection_file_path;
 use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig};
 use crate::domain::source_set::SourceSetContext;
-use crate::support::error::AppError;
-use crate::support::path::nearest_existing_canonical_path;
 
-/// Builds source contexts and owns their source/runtime snapshot binding.
+/// Builds the list of [`SourceSetContext`] instances for the given config.
+///
+/// - `DESIGNER` format: one context per source-set, rooted at project base path + `ss.path`.
+/// - `EDT` format (Wave 2): two contexts per source-set — the original EDT path
+///   and a generated Designer copy under `workPath/designer/<name>/`.
 pub struct SourceSetsService<'a> {
     config: &'a AppConfig,
 }
@@ -19,184 +18,152 @@ impl<'a> SourceSetsService<'a> {
         Self { config }
     }
 
-    /// Designer source contexts, including generated Designer output for EDT projects.
-    #[cfg(test)]
-    pub fn designer_contexts(&self) -> Result<Vec<SourceSetContext>, AppError> {
-        self.config
-            .source_sets
-            .iter()
-            .map(|source_set| self.designer_context(source_set))
-            .collect()
-    }
+    /// Return all Designer-format contexts that should be scanned and built.
+    ///
+    /// In `DESIGNER` mode this is simply each source-set resolved against the project base path.
+    /// In `EDT` mode (Wave 2) this returns the generated Designer copies in
+    /// `workPath/designer`.
+    pub fn designer_contexts(&self) -> Vec<SourceSetContext> {
+        let base_path = absolutize_path(&self.config.base_path);
+        let work_path = absolutize_path(&self.config.work_path);
 
-    /// Metadata-only path resolution does not require a live infobase binding.
-    pub(crate) fn designer_path(&self, source_set: &SourceSetConfig) -> Result<PathBuf, AppError> {
         match self.config.format {
-            SourceFormat::Designer => {
-                Ok(absolutize_path(&self.config.base_path)?.join(&source_set.path))
-            }
-            SourceFormat::Edt => Ok(absolutize_path(&self.config.work_path)?
-                .join("designer")
-                .join(&source_set.name)),
+            SourceFormat::Designer => self
+                .config
+                .source_sets
+                .iter()
+                .map(|ss| {
+                    let path = if ss.path.is_absolute() {
+                        ss.path.clone()
+                    } else {
+                        base_path.join(&ss.path)
+                    };
+                    self.designer_context(ss, path)
+                })
+                .collect(),
+
+            SourceFormat::Edt => self
+                .config
+                .source_sets
+                .iter()
+                .map(|ss| {
+                    // Generated Designer copy lives at workPath/designer/<name>/
+                    let path = work_path.join("designer").join(&ss.name);
+                    self.designer_context(ss, path)
+                })
+                .collect(),
         }
     }
 
-    pub(crate) fn designer_context(
-        &self,
-        source_set: &SourceSetConfig,
-    ) -> Result<SourceSetContext, AppError> {
-        self.bind_context(
-            SourceSetContext::new(
-                &source_set.name,
-                self.designer_path(source_set)?,
-                format!("designer-{}", source_set.name),
-            ),
-            source_set,
-            self.config.format,
-        )
+    fn designer_context(&self, source_set: &SourceSetConfig, path: PathBuf) -> SourceSetContext {
+        use crate::support::path::{nearest_existing_canonical_path, stable_path_identity};
+        let context = SourceSetContext::new(
+            &source_set.name,
+            path,
+            format!("designer-{}", source_set.name),
+        );
+        if source_set.purpose.is_external() {
+            return context;
+        }
+        let original = absolutize_path(&self.config.base_path).join(&source_set.path);
+        let original = nearest_existing_canonical_path(&original).unwrap_or(original);
+        let address = match &self.config.infobase.standalone {
+            Some(standalone) => standalone
+                .gate_endpoint()
+                .ok()
+                .map(|(host, port)| format!("standalone:{host}:{port}")),
+            None => self
+                .config
+                .v8_connection()
+                .snapshot_identity(&absolutize_path(&self.config.base_path)),
+        };
+        let Some(address) = address else {
+            // An unrecognized address must never share a remembered target.
+            return context.with_infobase_memory(None, String::new());
+        };
+        let identity = format!(
+            "{}; source={}; purpose={:?}; set={}",
+            address,
+            stable_path_identity(&original),
+            source_set.purpose,
+            source_set.name
+        );
+        context.with_infobase_memory(self.config.infobase_name.as_deref(), identity)
     }
 
-    /// EDT source contexts, separate from their generated Designer load contexts.
-    #[cfg(test)]
-    pub fn edt_contexts(&self) -> Result<Vec<SourceSetContext>, AppError> {
+    /// Return EDT source-set contexts (only meaningful in `EDT` format).
+    pub fn edt_contexts(&self) -> Vec<SourceSetContext> {
         if self.config.format != SourceFormat::Edt {
-            return Ok(vec![]);
+            return vec![];
         }
+        let base_path = absolutize_path(&self.config.base_path);
         self.config
             .source_sets
             .iter()
-            .map(|source_set| self.edt_context(source_set))
+            .map(|ss| {
+                let path = if ss.path.is_absolute() {
+                    ss.path.clone()
+                } else {
+                    base_path.join(&ss.path)
+                };
+                SourceSetContext::new(&ss.name, path, format!("edt-{}", ss.name))
+            })
             .collect()
     }
-
-    pub(crate) fn edt_context(
-        &self,
-        source_set: &SourceSetConfig,
-    ) -> Result<SourceSetContext, AppError> {
-        self.bind_context(
-            SourceSetContext::new(
-                &source_set.name,
-                absolutize_path(&self.config.base_path)?.join(&source_set.path),
-                format!("edt-{}", source_set.name),
-            ),
-            source_set,
-            SourceFormat::Edt,
-        )
-    }
-
-    /// Bind ordinary and tool-extension contexts through the same identity owner.
-    pub(crate) fn bind_context(
-        &self,
-        context: SourceSetContext,
-        source_set: &SourceSetConfig,
-        source_format: SourceFormat,
-    ) -> Result<SourceSetContext, AppError> {
-        let base_path = canonical_binding_path(&self.config.base_path)?;
-        let context_path = canonical_binding_path(context.path())?;
-        let source_path = canonical_binding_path(&base_path.join(&source_set.path))?;
-        let connection = self.config.v8_connection();
-        // Resolve against the actual working directory, just as the platform resolves /F.
-        // The exact connection is also retained in the digest: uncertain aliases rebuild.
-        // External artifact preparation/export is source-only; an IB is not its target.
-        let uses_infobase = !source_set.purpose.is_external();
-        let file_target = connection
-            .file_path()
-            .filter(|_| uses_infobase)
-            .map(|path| {
-                let working_directory = absolutize_path(Path::new("."))?;
-                canonical_binding_path(Path::new(&normalize_connection_file_path(
-                    path,
-                    &working_directory,
-                )))
-            })
-            .transpose()?;
-        let dbms_target = self
-            .config
-            .infobase
-            .dbms
-            .as_ref()
-            .filter(|_| uses_infobase)
-            .map(|dbms| (&dbms.kind, &dbms.server, &dbms.name));
-        let bytes = serde_json::to_vec(&(
-            "source-runtime-binding-v1",
-            context.name(),
-            &context_path,
-            &source_path,
-            &base_path,
-            &source_set.name,
-            source_set.purpose,
-            source_format,
-            self.config.builder,
-            uses_infobase.then_some(&self.config.infobase.connection),
-            &file_target,
-            dbms_target,
-        ))
-        .map_err(|error| {
-            AppError::Runtime(format!(
-                "failed to encode snapshot runtime binding: {error}"
-            ))
-        })?;
-        Ok(context.with_runtime_binding(format!("{:x}", Sha256::digest(bytes))))
-    }
-
+    /// Analyze all provided contexts and return context-tagged outcomes.
     pub fn analyze_contexts(&self, contexts: &[SourceSetContext]) -> Vec<ContextAnalysis> {
         analyzer::analyze_contexts(contexts, &self.config.work_path)
     }
 }
 
-fn absolutize_path(path: &Path) -> Result<PathBuf, AppError> {
+fn absolutize_path(path: &Path) -> PathBuf {
     if path.is_absolute() {
-        return Ok(path.to_path_buf());
+        return path.to_path_buf();
     }
-    std::env::current_dir()
-        .map(|cwd| cwd.join(path))
-        .map_err(|error| {
-            AppError::Runtime(format!(
-                "failed to resolve current working directory: {error}"
-            ))
-        })
-}
 
-fn canonical_binding_path(path: &Path) -> Result<PathBuf, AppError> {
-    nearest_existing_canonical_path(&absolutize_path(path)?).map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to resolve snapshot runtime path '{}': {error}",
-            path.display()
-        ))
-    })
+    std::env::current_dir()
+        .expect("failed to resolve current working directory")
+        .join(path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::SourceSetsService;
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, SourceFormat, SourceSetConfig, SourceSetPurpose,
-        TestsConfig, ToolsConfig,
+        AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
+        ToolsConfig,
     };
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
-    #[test]
-    fn designer_contexts_absolutize_relative_base_path() {
-        let config = AppConfig {
-            base_path: std::path::PathBuf::from("."),
-            work_path: std::path::PathBuf::from("target/tmp-work"),
-            execution_timeout: 300_000,
-            format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+    /// Проект с одним набором `main` в `src` и рабочим каталогом `work_path`.
+    fn single_set_config(format: SourceFormat, work_path: &str) -> AppConfig {
+        AppConfig {
+            base_path: PathBuf::from("."),
+            work_path: PathBuf::from(work_path),
+            format,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: Some("main".to_owned()),
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
-                path: std::path::PathBuf::from("src"),
+                path: PathBuf::from("src"),
             }],
             build: BuildConfig::default(),
             tools: ToolsConfig::default(),
             mcp: Default::default(),
             tests: TestsConfig::default(),
-        };
+        }
+    }
+
+    #[test]
+    fn designer_contexts_absolutize_relative_base_path() {
+        let config = single_set_config(SourceFormat::Designer, "target/tmp-work");
 
         let service = SourceSetsService::new(&config);
-        let contexts = service.designer_contexts().expect("contexts");
+        let contexts = service.designer_contexts();
 
         assert_eq!(contexts.len(), 1);
         assert!(contexts[0].path().is_absolute());
@@ -205,26 +172,10 @@ mod tests {
 
     #[test]
     fn edt_designer_contexts_use_nested_designer_directory() {
-        let config = AppConfig {
-            base_path: std::path::PathBuf::from("."),
-            work_path: std::path::PathBuf::from("target/tmp-work"),
-            execution_timeout: 300_000,
-            format: SourceFormat::Edt,
-            builder: BuilderBackend::Designer,
-            infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
-            source_sets: vec![SourceSetConfig {
-                name: "main".to_owned(),
-                purpose: SourceSetPurpose::Configuration,
-                path: std::path::PathBuf::from("src"),
-            }],
-            build: BuildConfig::default(),
-            tools: ToolsConfig::default(),
-            mcp: Default::default(),
-            tests: TestsConfig::default(),
-        };
+        let config = single_set_config(SourceFormat::Edt, "target/tmp-work");
 
         let service = SourceSetsService::new(&config);
-        let contexts = service.designer_contexts().expect("contexts");
+        let contexts = service.designer_contexts();
 
         assert_eq!(contexts.len(), 1);
         assert!(contexts[0]
@@ -232,253 +183,169 @@ mod tests {
             .ends_with(Path::new("target/tmp-work/designer/main")));
     }
 
-    fn binding_config(root: &Path) -> AppConfig {
-        AppConfig {
-            base_path: root.join("base"),
-            work_path: root.join("work"),
-            execution_timeout: 300_000,
-            format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
-            infobase: crate::config::model::InfobaseConfig::file(format!(
-                "File={}",
-                root.join("ib").display()
-            )),
-            source_sets: vec![SourceSetConfig {
-                name: "main".to_owned(),
-                purpose: SourceSetPurpose::Configuration,
-                path: "src".into(),
-            }],
-            build: BuildConfig::default(),
-            tools: ToolsConfig::default(),
-            mcp: Default::default(),
-            tests: TestsConfig::default(),
-        }
-    }
-
-    fn binding(config: &AppConfig) -> String {
-        SourceSetsService::new(config)
-            .designer_contexts()
-            .expect("contexts")[0]
-            .runtime_binding()
-            .expect("bound production context")
-            .to_owned()
-    }
-
+    /// Состояние анализа лежит под `workPath`, у каждого логического контекста набора своё:
+    /// у набора EDT контекстов два, и хранилища у них разные.
     #[test]
-    fn runtime_binding_tracks_source_and_target_without_changing_storage_slot() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let config = binding_config(dir.path());
-        let before = binding(&config);
-        let mut other_source = config.clone();
-        other_source.source_sets[0].path = "other-src".into();
-        let mut other_ib = config.clone();
-        other_ib.infobase.connection = format!("File={}", dir.path().join("other-ib").display());
-        let mut other_purpose = config.clone();
-        other_purpose.source_sets[0].purpose = SourceSetPurpose::Extension;
-        let mut other_builder = config.clone();
-        other_builder.builder = BuilderBackend::Ibcmd;
-        let original_slot = SourceSetsService::new(&config)
-            .designer_contexts()
-            .expect("contexts")[0]
-            .storage_path(&config.work_path);
-        for changed in [other_source, other_ib, other_purpose, other_builder] {
-            assert_ne!(before, binding(&changed));
-            let context = SourceSetsService::new(&changed)
-                .designer_contexts()
-                .expect("contexts")
-                .remove(0);
-            assert_eq!(original_slot, context.storage_path(&config.work_path));
-        }
-        assert_eq!(before, binding(&config));
-    }
+    fn analysis_state_lies_under_the_work_path_by_logical_context() {
+        let config = single_set_config(SourceFormat::Edt, "/tmp/work");
+        let service = SourceSetsService::new(&config);
 
-    #[test]
-    fn runtime_binding_ignores_separate_authentication_fields_and_source_bytes() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut config = binding_config(dir.path());
-        std::fs::create_dir_all(config.base_path.join("src")).expect("source");
-        let before = binding(&config);
-        config.infobase.user = Some("user".to_owned());
-        config.infobase.password = Some("secret".to_owned());
-        std::fs::write(config.base_path.join("src/Module.bsl"), "changed").expect("source bytes");
-        assert_eq!(before, binding(&config));
-    }
-
-    #[test]
-    fn generated_designer_binding_includes_original_edt_source_root() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut config = binding_config(dir.path());
-        config.format = SourceFormat::Edt;
-        let before = binding(&config);
-        let original_generated_path = SourceSetsService::new(&config)
+        let storages: Vec<PathBuf> = service
             .designer_contexts()
-            .expect("contexts")[0]
-            .path()
-            .to_path_buf();
-        config.source_sets[0].path = "other-edt-src".into();
-        assert_ne!(before, binding(&config));
+            .into_iter()
+            .chain(service.edt_contexts())
+            .map(|context| context.storage_path(&config.work_path))
+            .collect();
+
+        let storage_root = config.work_path.join("hash-storages");
         assert_eq!(
-            original_generated_path,
-            SourceSetsService::new(&config)
-                .designer_contexts()
-                .expect("contexts")[0]
-                .path()
+            storages,
+            [
+                config.work_path.join("infobases/main/hashes/main.redb"),
+                storage_root.join("edt-main.redb"),
+            ]
         );
     }
-
     #[test]
-    fn runtime_binding_includes_effective_ibcmd_dbms_target() {
+    fn base_snapshots_remain_separate_and_reject_a_retargeted_base() {
+        use crate::change_detection::analyzer::{
+            analyze_context, rescan_and_commit_full, AnalysisOutcome,
+        };
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut config = binding_config(dir.path());
-        config.builder = BuilderBackend::Ibcmd;
-        config.infobase.connection = "Srvr=server;Ref=database".to_owned();
-        config.infobase.dbms = Some(crate::config::model::InfobaseDbmsConfig {
-            kind: Some("PostgreSQL".to_owned()),
-            server: Some("db-server".to_owned()),
-            name: Some("db-a".to_owned()),
-            ..Default::default()
-        });
-        let before = binding(&config);
-        config.infobase.dbms.as_mut().expect("dbms").name = Some("db-b".to_owned());
-        assert_ne!(before, binding(&config));
+        let mut config = single_set_config(SourceFormat::Designer, "unused");
+        config.base_path = dir.path().to_path_buf();
+        config.work_path = dir.path().join("work");
+        std::fs::create_dir(dir.path().join("src")).expect("source");
+        std::fs::write(dir.path().join("src/module.bsl"), "source").expect("write");
+        let a = SourceSetsService::new(&config)
+            .designer_contexts()
+            .remove(0);
+        rescan_and_commit_full(&a, &config.work_path).expect("snapshot A");
+        config.infobase_name = Some("B".to_owned());
+        config.infobase.connection = "File=/tmp/B".to_owned();
+        let b = SourceSetsService::new(&config)
+            .designer_contexts()
+            .remove(0);
+        assert!(matches!(
+            analyze_context(&b, &config.work_path).outcome,
+            Ok(AnalysisOutcome::Changes { .. })
+        ));
+        rescan_and_commit_full(&b, &config.work_path).expect("snapshot B");
+        assert!(matches!(
+            analyze_context(&a, &config.work_path).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+        config.infobase_name = Some("main".to_owned());
+        let foreign = SourceSetsService::new(&config)
+            .designer_contexts()
+            .remove(0);
+        let error = analyze_context(&foreign, &config.work_path)
+            .outcome
+            .expect_err("retargeted base");
+        assert!(error.to_string().contains("full pull"));
+        assert!(error.to_string().contains("/tmp/ib"));
+        rescan_and_commit_full(&foreign, &config.work_path).expect("explicit rebuild");
+        assert!(matches!(
+            analyze_context(&foreign, &config.work_path).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+        config.source_sets[0].path = PathBuf::from("moved");
+        std::fs::rename(dir.path().join("src"), dir.path().join("moved")).expect("move source");
+        let moved = SourceSetsService::new(&config)
+            .designer_contexts()
+            .remove(0);
+        assert!(analyze_context(&moved, &config.work_path).outcome.is_err());
     }
 
-    #[cfg(unix)]
     #[test]
-    fn runtime_binding_detects_retargeted_infobase_symlink() {
-        use std::os::unix::fs::symlink;
+    fn ad_hoc_analysis_never_reads_or_writes_memory_and_empty_sources_skip() {
+        use crate::change_detection::analyzer::{
+            analyze_context, commit_success, rescan_and_commit_full, AnalysisOutcome,
+        };
         let dir = tempfile::tempdir().expect("tempdir");
-        let config = binding_config(dir.path());
-        let first = dir.path().join("ib-first");
-        let second = dir.path().join("ib-second");
-        let link = dir.path().join("ib");
-        std::fs::create_dir(&first).expect("first ib");
-        std::fs::create_dir(&second).expect("second ib");
-        symlink(&first, &link).expect("link");
-        let before = binding(&config);
-        std::fs::remove_file(&link).expect("unlink");
-        symlink(&second, &link).expect("retarget");
-        assert_ne!(before, binding(&config));
+        let mut config = single_set_config(SourceFormat::Designer, "unused");
+        config.base_path = dir.path().to_path_buf();
+        config.work_path = dir.path().join("work");
+        config.infobase_name = None;
+        std::fs::create_dir(dir.path().join("src")).expect("source");
+        let context = SourceSetsService::new(&config)
+            .designer_contexts()
+            .remove(0);
+        assert!(matches!(
+            analyze_context(&context, &config.work_path).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+        std::fs::write(dir.path().join("src/module.bsl"), "source").expect("write");
+        rescan_and_commit_full(&context, &config.work_path).expect("no-op");
+        assert!(!config.work_path.exists());
+        std::fs::create_dir_all(context.storage_path(&config.work_path))
+            .expect("unreadable old memory");
+        let Ok(AnalysisOutcome::Changes { prepared, .. }) =
+            analyze_context(&context, &config.work_path).outcome
+        else {
+            panic!("ordinary added files");
+        };
+        commit_success(&context, &config.work_path, &prepared).expect("no-op");
+        assert!(context.storage_path(&config.work_path).is_dir());
     }
 
-    #[cfg(unix)]
     #[test]
-    fn runtime_binding_detects_retargeted_quoted_file_infobase() {
-        use std::os::unix::fs::symlink;
-        for quote in ['"', '\''] {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let mut config = binding_config(dir.path());
-            let first = dir.path().join("ib first");
-            let second = dir.path().join("ib second");
-            let link = dir.path().join("ib alias");
-            std::fs::create_dir(&first).expect("first ib");
-            std::fs::create_dir(&second).expect("second ib");
-            symlink(&first, &link).expect("link");
-            config.infobase.connection = format!("File={quote}{}{quote};", link.display());
-            std::fs::create_dir_all(config.base_path.join("src")).expect("source");
-            let yaml_path = dir.path().join("v8project.yaml");
-            let yaml = format!(
-                "workPath: {}\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: {}\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: base/src\n",
-                config.work_path.display(),
-                serde_json::to_string(&config.infobase.connection).expect("connection YAML string"),
-            );
-            std::fs::write(&yaml_path, yaml).expect("config YAML");
-            let loaded = crate::config::loader::load_config(
-                Some(yaml_path.to_str().expect("config path")),
-                None,
-            )
-            .expect("loaded config");
-            let loaded_before = binding(&loaded);
-            let before = binding(&config);
-            std::fs::remove_file(&link).expect("unlink");
-            symlink(&second, &link).expect("retarget");
-            assert_ne!(
-                before,
-                binding(&config),
-                "quoted File alias must track actual infobase target"
-            );
-            assert_ne!(
-                loaded_before,
-                binding(&loaded),
-                "loaded config must track actual infobase target"
-            );
-        }
+    fn edt_and_external_memory_is_shared_but_designer_identity_ignores_credentials() {
+        let mut config = single_set_config(SourceFormat::Edt, "/tmp/work");
+        let edt = SourceSetsService::new(&config).edt_contexts().remove(0);
+        let designer = SourceSetsService::new(&config)
+            .designer_contexts()
+            .remove(0);
+        config.infobase.connection = "File=/tmp/ib;Usr=alice;Pwd=secret".to_owned();
+        let with_credentials = SourceSetsService::new(&config)
+            .designer_contexts()
+            .remove(0);
+        assert_eq!(
+            designer.storage_identity(),
+            with_credentials.storage_identity()
+        );
+        config.infobase_name = Some("other".to_owned());
+        let other_edt = SourceSetsService::new(&config).edt_contexts().remove(0);
+        assert_eq!(
+            edt.storage_path(&config.work_path),
+            other_edt.storage_path(&config.work_path)
+        );
+        config.source_sets[0].purpose = SourceSetPurpose::ExternalReports;
+        let external = SourceSetsService::new(&config)
+            .designer_contexts()
+            .remove(0);
+        assert!(external.storage_identity().is_none());
+        assert!(external.persists_snapshot());
     }
-
-    #[cfg(unix)]
     #[test]
-    fn runtime_binding_detects_retargeted_source_symlink() {
-        use std::os::unix::fs::symlink;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let config = binding_config(dir.path());
-        std::fs::create_dir(&config.base_path).expect("base");
-        let first = dir.path().join("source-first");
-        let second = dir.path().join("source-second");
-        let link = config.base_path.join("src");
-        std::fs::create_dir(&first).expect("first source");
-        std::fs::create_dir(&second).expect("second source");
-        symlink(&first, &link).expect("link");
-        let before = binding(&config);
-        std::fs::remove_file(&link).expect("unlink");
-        symlink(&second, &link).expect("retarget");
-        assert_ne!(before, binding(&config));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn runtime_binding_propagates_dangling_source_symlink_error() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let config = binding_config(dir.path());
-        std::fs::create_dir(&config.base_path).expect("base");
-        std::os::unix::fs::symlink(dir.path().join("missing"), config.base_path.join("src"))
-            .expect("dangling source");
-        assert!(SourceSetsService::new(&config).designer_contexts().is_err());
-    }
-    #[cfg(unix)]
-    #[test]
-    fn external_build_remains_source_only_with_unavailable_infobase() {
-        for (purpose, root_tag) in [
-            (
-                SourceSetPurpose::ExternalDataProcessors,
-                "ExternalDataProcessor",
-            ),
-            (SourceSetPurpose::ExternalReports, "ExternalReport"),
-        ] {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let mut config = binding_config(dir.path());
-            config.source_sets[0].purpose = purpose;
-            let source = config.base_path.join("src");
-            std::fs::create_dir_all(&source).expect("source");
-            std::fs::write(
-                source.join("Example.xml"),
-                format!("<{root_tag}><Properties><Name>Example</Name></Properties></{root_tag}>"),
-            )
-            .expect("descriptor");
-            let alias = dir.path().join("unavailable-ib");
-            std::os::unix::fs::symlink(dir.path().join("absent"), &alias).expect("dangling IB");
-            config.infobase.connection = format!("File=\"{}\"", alias.display());
-            let before = binding(&config);
-            let result = crate::use_cases::build_project::run_build(
-                &config,
-                &crate::use_cases::request::BuildRequest {
-                    full_rebuild: false,
-                    source_set: Some(config.source_sets[0].name.clone()),
-                    dry_run: false,
-                },
-            )
-            .expect("source-only external build");
-            assert!(result.ok);
-            assert_eq!(result.steps.len(), 1);
-            assert_eq!(
-                result.steps[0].mode,
-                crate::domain::build::BuildMode::Skipped
-            );
-            config.infobase.connection = "File=/another/unavailable/ib".to_owned();
-            assert_eq!(
-                before,
-                binding(&config),
-                "IB changes must not affect source-only contexts"
-            );
-        }
+    fn standalone_snapshot_uses_gate_address_without_secrets_or_transport_settings() {
+        let mut config = single_set_config(SourceFormat::Designer, "/tmp/work");
+        config.infobase.connection.clear();
+        config.infobase.standalone =
+            Some(serde_yaml::from_str("gate: 'HOST:1543'\n").expect("standalone"));
+        let before = SourceSetsService::new(&config)
+            .designer_contexts()
+            .remove(0);
+        assert!(before.persists_snapshot());
+        assert!(before
+            .storage_identity()
+            .expect("identity")
+            .contains("standalone:host:1543"));
+        config.infobase.user = Some("alice".to_owned());
+        config.infobase.password = Some("secret".to_owned());
+        let after = SourceSetsService::new(&config)
+            .designer_contexts()
+            .remove(0);
+        assert_eq!(before.storage_identity(), after.storage_identity());
+        config
+            .infobase
+            .standalone
+            .as_mut()
+            .expect("standalone")
+            .gate = "host:1544".to_owned();
+        let moved = SourceSetsService::new(&config)
+            .designer_contexts()
+            .remove(0);
+        assert_ne!(before.storage_identity(), moved.storage_identity());
     }
 }

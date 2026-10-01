@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::artifact::ArtifactSet;
 
 /// Shared execution status used by runner and package-like flows.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionStatus {
     Succeeded,
@@ -22,7 +22,7 @@ impl ExecutionStatus {
 }
 
 /// Shared counters emitted by parsers and execution adapters.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, schemars::JsonSchema)]
 pub struct ExecutionMetrics {
     pub total: u32,
     pub passed: u32,
@@ -34,7 +34,7 @@ pub struct ExecutionMetrics {
 }
 
 /// Shared timeout budget for execution scenarios.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, schemars::JsonSchema)]
 pub struct ExecutionTimeouts {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub startup_ms: Option<u64>,
@@ -45,7 +45,7 @@ pub struct ExecutionTimeouts {
 }
 
 /// Structured execution error that can point to related artifacts.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExecutionError {
     pub code: String,
     pub message: String,
@@ -75,20 +75,55 @@ impl ExecutionError {
 }
 
 /// Command-level interruption kind preserved in serialized execution results.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionInterruptionKind {
     Cancelled,
     TimedOut,
 }
 
-/// Structured interruption metadata for actual or deferred command-boundary interruptions.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// What was interrupted: one closed vocabulary shared by every form that carries an execution
+/// outcome. Each command uses the values that name its own work.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionInterruptionPhase {
+    /// A safe point of the command: its own check between steps, or a refusal before a process
+    /// started or a request command was sent. No work of the command was cut short.
+    CommandBoundary,
+    /// A platform command the command ran — a process of its own or a command of an agent
+    /// session. The interruption reached it after it started: it cut the command short or, in
+    /// a critical phase, waited for its end.
+    ProviderCommand,
+    /// The test run in the 1C client (`test`).
+    Run,
+    /// Loading or merging the package into the infobase (`upload`).
+    Apply,
+    /// Updating the database configuration (`upload`).
+    UpdateDbCfg,
+    /// Publishing the result through a staged copy (`make`, `download`, `infobase dump`).
+    Publication,
+}
+
+impl ExecutionInterruptionPhase {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CommandBoundary => "command_boundary",
+            Self::ProviderCommand => "provider_command",
+            Self::Run => "run",
+            Self::Apply => "apply",
+            Self::UpdateDbCfg => "update_db_cfg",
+            Self::Publication => "publication",
+        }
+    }
+}
+
+/// Structured metadata of an actual or deferred interruption.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExecutionInterruptionDetails {
     pub kind: ExecutionInterruptionKind,
     pub deferred: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
+    pub phase: Option<ExecutionInterruptionPhase>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
@@ -103,8 +138,8 @@ impl ExecutionInterruptionDetails {
         }
     }
 
-    pub fn with_phase(mut self, phase: impl Into<String>) -> Self {
-        self.phase = Some(phase.into());
+    pub fn with_phase(mut self, phase: ExecutionInterruptionPhase) -> Self {
+        self.phase = Some(phase);
         self
     }
 
@@ -115,7 +150,7 @@ impl ExecutionInterruptionDetails {
 }
 
 /// Stable pipeline vocabulary for significant execution blocks.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionStepKind {
     Validation,
@@ -130,7 +165,7 @@ pub enum ExecutionStepKind {
 }
 
 /// Richer step status beyond the legacy boolean `ok`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionStepStatus {
     Succeeded,
@@ -146,7 +181,7 @@ impl ExecutionStepStatus {
 }
 
 /// A transport-neutral execution step shared by CLI envelopes and use-case payloads.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct StepResult {
     pub name: String,
     pub ok: bool,
@@ -220,7 +255,7 @@ impl StepResult {
 }
 
 /// Shared execution envelope for runner-like flows.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExecutionOutcome<T> {
     pub status: ExecutionStatus,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -288,5 +323,27 @@ impl<T> ExecutionOutcome<T> {
     pub fn with_payload(mut self, payload: T) -> Self {
         self.payload = Some(payload);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExecutionInterruptionPhase;
+
+    /// Текст CLI пишет фазу через `as_str`, провод — через serde. Значения берутся из схемы,
+    /// которую описание типа порождает само, поэтому новый вариант попадает в проверку без
+    /// правки теста.
+    #[test]
+    fn interruption_phase_text_spelling_matches_the_wire() {
+        let schema = serde_json::to_value(schemars::schema_for!(ExecutionInterruptionPhase))
+            .expect("phase schema json");
+        let spellings = crate::support::schema::enum_values(&schema);
+        assert!(!spellings.is_empty());
+        for spelling in spellings {
+            let phase: ExecutionInterruptionPhase =
+                serde_json::from_value(serde_json::Value::from(spelling.as_str()))
+                    .expect("a known phase");
+            assert_eq!(phase.as_str(), spelling);
+        }
     }
 }

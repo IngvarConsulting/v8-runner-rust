@@ -2,11 +2,21 @@
 # package ecosystems to update and where the package manifests are located.
 # Please see the documentation for more information:
 # https://docs.github.com/github/administering-a-repository/configuration-options-for-dependency-updates
-# https://containers.dev/guide/dependabot
 
 version: 2
 updates:
- - package-ecosystem: "devcontainers"
+ # Зависимости Rust не обновлялись автоматически вовсе: без этого блока ни обновление
+ # версии, снятой по уязвимости, ни выход стабильной замены предрелизной крипты никто
+ # не увидит.
+ - package-ecosystem: "cargo"
+   directory: "/"
+   schedule:
+     interval: weekly
+   open-pull-requests-limit: 5
+
+ # Экшены запинены по SHA (это требует tests/release_governance.py), поэтому без
+ # обновлятора пины гниют: исправления безопасности в самих экшенах не доезжают.
+ - package-ecosystem: "github-actions"
    directory: "/"
    schedule:
      interval: weekly

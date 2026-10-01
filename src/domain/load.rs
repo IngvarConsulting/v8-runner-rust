@@ -5,15 +5,18 @@ use serde::{Deserialize, Serialize};
 use crate::domain::artifacts::ArtifactBuildMode;
 use crate::domain::execution::ExecutionOutcome;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LoadMode {
     Load,
+    /// Объединение по файлу настроек. Прежнее имя режима — `merge`, оно принимается
+    /// ещё один цикл выпуска, а ответ называет режим новым именем.
+    #[serde(rename = "combine", alias = "merge")]
     Merge,
     Update,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LoadTargetKind {
     Unknown,
@@ -26,8 +29,8 @@ pub enum LoadTargetKind {
 /// The probe asks the platform to compare the target with its counterpart, and the only part
 /// of the answer the platform guarantees is whether the comparison ran: exit code zero, and
 /// exactly then a comparison report appears. Why it did not run is said in prose, and prose is
-/// not a contract — see ADR-0029 — so this enum has no variant for a reason.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+/// not a contract — see INV.PLATFORM.PROSE-DEBT-ONLY-SHRINKS — so this enum has no variant for a reason.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CompatibilityState {
     /// The comparison ran, so both sides exist: a configuration is on support, an extension
@@ -45,7 +48,7 @@ pub enum CompatibilityState {
     NotProbed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct LoadExecutionMetadata {
     pub applied: bool,
     pub target_kind: LoadTargetKind,
@@ -53,9 +56,17 @@ pub struct LoadExecutionMetadata {
     pub update_db_cfg_ran: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LoadResult {
-    /// `false` when the run stopped at a preview instead of dispatching the platform.
+    /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<crate::domain::capability::ProviderReceipt>,
+
+    /// Whether an executor got this command's work: a process was started to do it, or the
+    /// request's command was handed to a running session. Starting or opening a session and
+    /// its own service commands are not work. `false` whenever the executor got none — a
+    /// preview, a refusal or interruption before any work, a run with nothing to do, or a
+    /// process that could not be started.
     pub provider_dispatched: bool,
     pub mode: LoadMode,
     pub artifact_path: PathBuf,
@@ -76,6 +87,7 @@ mod tests {
     #[test]
     fn load_result_serializes_canonical_execution_without_legacy_fields() {
         let result = LoadResult {
+            provider: None,
             provider_dispatched: true,
             mode: LoadMode::Load,
             artifact_path: PathBuf::from("/tmp/main.cf"),

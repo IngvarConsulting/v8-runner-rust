@@ -7,12 +7,10 @@ workPath: build
 # Source format: DESIGNER or EDT
 format: DESIGNER
 
-# Builder backend: DESIGNER or IBCMD
-builder: DESIGNER
+# Executor overrides are optional: providers.<operation>: designer | ibcmd
 
-# 1C infobase connection string
-infobase:
-  connection: "File=build/ib"
+# Infobases are declared in v8project.local.yaml (map `infobases`, default `origin`):
+# which infobase a checkout is attached to is known to the machine, not to the project.
 
 # Source sets: list of configurations and extensions
 source-set:
@@ -25,8 +23,8 @@ source-set:
   #   type: EXTENSION
   #   path: extensions/my-extension
 
-# Build pipeline settings (optional)
-build:
+# Push settings: how sources reach the infobase (optional)
+push:
   # Switch to full load when the expanded partial file list grows beyond this number.
   partialLoadThreshold: 20
 
@@ -60,7 +58,7 @@ tools:
   client_mcp:
     port: 9874
     wait_ready_timeout_ms: 300000
-    # Tool extension is prepared by `v8-runner build`, not by `launch mcp`.
+    # Tool extension is prepared by `v8-runner push`, not by `launch mcp`.
     # extension:
     #   name: client_mcp
     #   source:
@@ -97,6 +95,9 @@ mcp:
     stateful_sessions: true
     max_sessions: 64
     idle_ttl_secs: 900
+    # Слушатель отвечает петле всегда; здесь называют остальные имена, под
+    # которыми к нему обращаются. Пустой список — только петля.
+    allowed_hosts: []
   execution:
     max_concurrent_calls: 1
     shutdown_grace_period_secs: 30

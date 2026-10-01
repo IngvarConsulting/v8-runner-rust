@@ -151,6 +151,33 @@ live-mcp-http.py
 | `V8TR_CI_SKIP_DUPLICATE_RUST_TESTS` | `ci-happy-path.sh`, `.github/workflows/ci.yml` | Явный CI hook для пропуска дублирующего `cargo test` в happy-path, когда contract job уже владеет Rust test coverage |
 | `V8TR_REAL_CONFIG` | `live-mcp-http.py` | Реальный config для MCP HTTP smoke |
 
+## Известные нестабильные тесты
+
+Эти тесты падают на `Contract (macos-latest)`, хотя проверяемое изменение их не касается, и
+проходят при перезапуске:
+
+- `src/platform/edt_session.rs::cancellation_during_baseline_returns_queued_cancel_without_user_command`
+  проверяет состояние в конкретный момент, а не выполнение условия: после отменённой базовой
+  линии сессия иногда успевает записать следующую команду. Случаи записаны в #103.
+- `tests/cli_launch.rs::launch_mcp_wait_ready_terminates_process_on_readiness_failure` не
+  дожидается метки, которую поддельный клиент пишет из `trap … TERM`. Причина не установлена.
+  v8-runner шлёт `SIGTERM` всей группе процессов, так что `sleep` в клиенте ловушку не
+  задерживает; `SIGKILL` приходит через 250 мс. Возможно, на загруженной машине оболочку не
+  успевают запланировать за это время.
+
+Прежде чем разбирать такое падение, проверьте, меняет ли дифф код этого пути. Не меняет —
+перезапустите упавшее задание.
+
+## PR из форка без проверок
+
+PR внешнего участника из форка стоит в `BLOCKED` с пустым списком проверок: CI не
+запускался. Так действует политика репозитория `first_time_contributors` (Settings → Actions →
+Fork pull request workflows): если у автора PR или у того, чьё действие запустило прогон, нет
+в этом репозитории ни влитого коммита, ни влитого PR, GitHub держит прогон в
+`action_required` (`gh run list --commit <sha>`) до одобрения мейнтейнера. При более строгой
+политике одобрения ждут прогоны любого внешнего участника. Одобряют после чтения диффа:
+прогон исполняет чужой код.
+
 ## Типовые сценарии запуска
 
 ### Contract / Rust CI
@@ -169,7 +196,7 @@ V8_RUNNER_CI_SCOPE=happy-path bash scripts/test/ci-rust.sh
 
 `.github/workflows/ci.yml` запускает install/config/ibsrv/upload helpers only when `live_available=true`, то есть когда для текущей matrix OS настроены `V8TR_PLATFORM_BUNDLE_URL_*` и `V8TR_PLATFORM_BUNDLE_SHA256_*`. Без этой пары secrets happy-path остаётся blocking для Rust build/check, получает `V8TR_CI_SKIP_DUPLICATE_RUST_TESTS=1`, полагается на contract job для Rust test coverage и soft-skips real 1C smoke.
 
-Windows contract scope runs `cargo check --locked --all-targets` and targeted detached and managed-detached stdio EOF regressions; it first verifies that both tests are present in the Windows test list. Full `cargo test --locked` remains Linux-owned until the Windows-specific test suite is hardened. Exit criterion: switch Windows contract back to `cargo test --locked` after fixing the tracked path separator, fake-binary, ACL, and process-lifecycle failures in `spec/acceptance/real-environment-validation.md`.
+Windows contract scope runs `cli_infobase_cross_platform`, the `support::fs` unit tests and five named OS regressions (detached and managed-detached stdio EOF, directory identity, staged-file restore, orphan cleanup); it first verifies that each named test is present in the test list. Its lint step checks the production target only (`cargo clippy --bins`): most integration tests there sit under `#![cfg(unix)]`. Full `cargo test --locked` remains Linux- and macOS-owned until the Windows-specific test suite is hardened. Owner of this contract: this file. Exit criterion: switch Windows contract back to `cargo test --locked` after the path separator, fake-binary, ACL, and process-lifecycle failure groups pass on `windows-latest`.
 
 ```bash
 bash scripts/test/ci-platform-install.sh

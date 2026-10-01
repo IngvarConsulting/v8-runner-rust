@@ -1,10 +1,9 @@
-#![cfg(unix)]
-
 mod support;
 
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
+use support::command_data::assert_data_matches_its_command_form;
 use support::{temp_workspace, v8_runner_command};
 
 const V8_EXTERNAL_OBJECTS_NATURE: &str = "com._1c.g5.v8.dt.core.V8ExternalObjectsNature";
@@ -91,8 +90,10 @@ fn config_init_creates_yaml_with_detected_designer_sources() {
     assert!(config.contains("format: DESIGNER"));
     assert!(!config.contains("basePath:"));
     assert!(config.contains("workPath: 'build'"));
-    assert!(config.contains("infobase:"));
-    assert!(config.contains("  connection: 'File=build/ib'"));
+    assert!(
+        !config.contains("infobase"),
+        "the project file names no base:\n{config}"
+    );
     assert!(config.contains("#     wait_ready_timeout_ms: 300000"));
     assert!(config.contains("path: 'src/configuration'"));
     assert!(config.contains("name: 'SalesAddon'"));
@@ -101,6 +102,10 @@ fn config_init_creates_yaml_with_detected_designer_sources() {
     let local_config =
         fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("local config");
     assert!(local_config.starts_with(LOCAL_CONFIG_SCHEMA_MODEL_LINE));
+    assert!(
+        local_config.contains("infobases:\n  origin:\n    connection: 'File=build/ib'\n"),
+        "the local layer declares origin:\n{local_config}"
+    );
     serde_yaml::from_str::<serde_yaml::Value>(&local_config)
         .expect("generated local config remains YAML");
     let gitignore = fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
@@ -131,7 +136,10 @@ fn config_init_uses_json_envelope_and_output_override() {
     assert!(config_path.exists());
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], true);
-    assert_eq!(payload["command"], "config init");
+    assert_eq!(payload["command"], "init");
+    // Живая сверка формы: схема держит состав `data` только вместе с прогоном, иначе
+    // команда вправе печатать не то, что за ней объявлено.
+    assert_data_matches_its_command_form(&payload, "`config init --output`");
     let canonical_dir = fs::canonicalize(dir.path()).expect("canonical project dir");
     assert_eq!(
         payload["data"]["local_path"],
@@ -147,9 +155,18 @@ fn config_init_uses_json_envelope_and_output_override() {
     assert_eq!(payload["data"]["source_sets"][0]["path"], ".");
     assert_eq!(payload["data"]["source_sets"][0]["type"], "CONFIGURATION");
     let config = fs::read_to_string(config_path).expect("config");
-    assert!(config.contains("infobase:"));
-    assert!(config.contains("  connection: 'File=/tmp/test-ib'"));
+    assert!(!config.contains("infobase"), "{config}");
     assert!(!config.contains("basePath:"));
+    let local_config = fs::read_to_string(
+        payload["data"]["local_path"]
+            .as_str()
+            .expect("local path in the payload"),
+    )
+    .expect("local config");
+    assert!(
+        local_config.contains("infobases:\n  origin:\n    connection: 'File=/tmp/test-ib'\n"),
+        "{local_config}"
+    );
 }
 
 #[test]
@@ -190,9 +207,8 @@ fn config_init_rejects_global_config_shortcut_in_text_mode() {
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains(
-        "global --config flag is not supported for `config init`; use `config init --output <FILE>`"
-    ));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("global --config flag is not supported for `init`; use `init --output <FILE>`"));
 }
 
 #[test]
@@ -216,13 +232,13 @@ fn config_init_rejects_global_config_shortcut_in_json_mode() {
     assert_eq!(output.status.code(), Some(2));
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], false);
-    assert_eq!(payload["command"], "config init");
+    assert_eq!(payload["command"], "init");
     assert_eq!(payload["error"]["code"], "invalid_argument");
     assert_eq!(payload["error"]["kind"], "validation");
     assert!(payload["data"]["message"]
         .as_str()
         .expect("message")
-        .contains("use `config init --output <FILE>`"));
+        .contains("use `init --output <FILE>`"));
 }
 
 #[test]
@@ -358,7 +374,7 @@ fn config_init_refuses_to_overwrite_without_force() {
     assert_eq!(json_output.status.code(), Some(2));
     let payload: Value = serde_json::from_slice(&json_output.stdout).expect("json");
     assert_eq!(payload["ok"], false);
-    assert_eq!(payload["command"], "config init");
+    assert_eq!(payload["command"], "init");
     assert_eq!(payload["error"]["code"], "invalid_argument");
     assert!(payload["data"]["message"]
         .as_str()
@@ -496,4 +512,178 @@ fn config_init_ignores_non_edt_root_project_marker_when_nested_project_exists() 
     let config = fs::read_to_string(dir.path().join("v8project.yaml")).expect("config");
     assert!(config.contains("path: 'workspace/configuration'"));
     assert!(config.contains("type: CONFIGURATION"));
+}
+
+/// `init` сменил предмет: раньше под этим именем создавали базу. Набравший его по старой
+/// памяти в проекте с объявленной базой получает отказ с именем нужной команды, а не
+/// совет перезаписать свой конфиг ключом `--force`.
+#[test]
+fn init_over_a_config_that_declares_an_infobase_names_infobase_create() {
+    let dir = temp_workspace();
+    let config_path = dir.path().join("v8project.yaml");
+    fs::write(
+        &config_path,
+        "workPath: build\nformat: DESIGNER\ninfobases:\n  origin:\n    connection: 'File=build/ib'\nsource-set: []\n",
+    )
+    .expect("config");
+
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .args(["--json-message", "init"])
+        .output()
+        .expect("run init");
+
+    assert_eq!(output.status.code(), Some(2));
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json envelope");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("infobase create"), "{message}");
+    assert!(message.contains("origin"), "{message}");
+    assert!(!message.contains("--force"), "{message}");
+    assert_eq!(payload["command"], "init", "{payload}");
+}
+
+/// Порождённый конфиг назван словарём команд: иначе первая же следующая команда
+/// предупреждает о синониме, который выписал сам раннер.
+#[test]
+fn a_generated_config_names_the_push_section_by_its_command() {
+    let dir = temp_workspace();
+    fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
+
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .args(["init"])
+        .output()
+        .expect("run init");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let generated = fs::read_to_string(dir.path().join("v8project.yaml")).expect("generated");
+    assert!(generated.contains("push:"), "{generated}");
+    assert!(!generated.contains("build:"), "{generated}");
+    assert!(
+        generated.contains("# Generated by v8-runner init\n"),
+        "the header names the command that wrote the file:\n{generated}"
+    );
+}
+
+/// `init` объявляет базу, а не выбирает её: глобальный ключ здесь называет адрес, который
+/// уезжает в `infobases.origin` местного слоя.
+#[test]
+fn init_writes_the_address_named_by_the_global_key_into_origin() {
+    let dir = temp_workspace();
+    fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
+
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .args(["init", "--infobase", "Srvr=srv;Ref=erp"])
+        .output()
+        .expect("run init");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let local = fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("local");
+    // Адрес проверяется по пути, а не по строке: `connection` в другом месте документа
+    // подстроку даст, а базу не объявит.
+    let document: serde_yaml::Value = serde_yaml::from_str(&local).expect("local is YAML");
+    assert_eq!(
+        document["infobases"]["origin"]["connection"].as_str(),
+        Some("Srvr=srv;Ref=erp"),
+        "{local}"
+    );
+}
+
+/// Имя базы разрешать не по чему: местного слоя ещё нет, и `init` отвечает отказом.
+#[test]
+fn init_refuses_a_base_named_by_name_because_it_has_nothing_to_resolve_it_against() {
+    let dir = temp_workspace();
+    fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
+
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .args(["init", "--infobase", "test"])
+        .output()
+        .expect("run init");
+
+    assert_eq!(output.status.code(), Some(2));
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(reported.contains("connection string"), "{reported}");
+    assert!(reported.contains("test"), "{reported}");
+    assert!(
+        !dir.path().join("v8project.yaml").exists(),
+        "отказ случается до того, как проект написан"
+    );
+    assert!(
+        !dir.path().join("v8project.local.yaml").exists(),
+        "и до того, как объявлен местный слой"
+    );
+}
+
+/// Два ключа об одном адресе — отказ: выбирать за вызывающего раннер не станет.
+#[test]
+fn init_refuses_two_keys_naming_one_address() {
+    let dir = temp_workspace();
+    fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
+
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .args([
+            "init",
+            "--connection",
+            "File=build/ib",
+            "--infobase",
+            "Srvr=srv;Ref=erp",
+        ])
+        .output()
+        .expect("run init");
+
+    assert_eq!(output.status.code(), Some(2));
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(reported.contains("--connection"), "{reported}");
+    assert!(reported.contains("--infobase"), "{reported}");
+}
+
+/// Отказ существующего слоя называет тот ключ, которым адрес передали.
+#[test]
+fn an_existing_origin_is_not_replaced_and_the_refusal_names_the_key_that_was_used() {
+    let dir = temp_workspace();
+    fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("xml");
+    fs::write(
+        dir.path().join("v8project.local.yaml"),
+        "infobases:\n  origin:\n    connection: 'File=/srv/ib'\n",
+    )
+    .expect("local");
+
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .args(["init", "--infobase", "Srvr=srv;Ref=erp"])
+        .output()
+        .expect("run init");
+
+    assert_eq!(output.status.code(), Some(2));
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(reported.contains("--infobase"), "{reported}");
+    assert!(!reported.contains("--connection"), "{reported}");
+    // Объявленный адрес переживает отказ дословно: отказ на то и отказ, чтобы его не терять.
+    assert_eq!(
+        fs::read_to_string(dir.path().join("v8project.local.yaml")).expect("local"),
+        "infobases:\n  origin:\n    connection: 'File=/srv/ib'\n"
+    );
 }

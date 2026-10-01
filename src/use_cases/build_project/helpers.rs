@@ -456,7 +456,8 @@ pub(super) fn commit_step_state(
 }
 
 fn storage_needs_recovery(context: &SourceSetContext, work_path: &Path) -> bool {
-    HashStorage::new(context.storage_path(work_path)).needs_recovery()
+    context.persists_snapshot()
+        && HashStorage::new(context.storage_path(work_path)).needs_recovery()
 }
 
 pub(super) fn remove_storage_path(path: &Path) -> std::io::Result<()> {
@@ -494,8 +495,8 @@ pub(super) fn build_designer_dsl<'a>(
         config.v8_connection(),
         runner,
         Some(log_file),
-    )
-    .with_execution_policy(context.process_policy(safety, None)))
+        context.process_policy(safety, None),
+    ))
 }
 
 pub(super) fn build_ibcmd_dsl<'a>(
@@ -507,8 +508,12 @@ pub(super) fn build_ibcmd_dsl<'a>(
 ) -> Result<IbcmdDsl<'a>, AppError> {
     let connection = IbcmdConnection::from_infobase(&config.infobase).map_err(map_ibcmd_error)?;
 
-    Ok(IbcmdDsl::new(binary.to_path_buf(), connection, runner)
-        .with_execution_policy(context.process_policy(safety, None)))
+    Ok(IbcmdDsl::new(
+        binary.to_path_buf(),
+        connection,
+        runner,
+        context.process_policy(safety, None),
+    ))
 }
 
 pub(super) fn map_ibcmd_error(error: IbcmdError) -> AppError {
@@ -520,24 +525,6 @@ pub(super) fn interruption_before_safe_point(
     safe_point: String,
 ) -> Option<AppError> {
     interruption::interruption_before_safe_point(context, safe_point)
-}
-
-pub(super) fn deferred_interruption_warning(
-    action: &str,
-    result: &PlatformCommandResult,
-) -> Option<String> {
-    interruption::deferred_process_interruption_warning(
-        &format!("{action} completed successfully"),
-        result,
-    )
-}
-
-pub(super) fn merge_step_message(message: String, warnings: &[String]) -> String {
-    if warnings.is_empty() {
-        message
-    } else {
-        format!("{message}; {}", warnings.join("; "))
-    }
 }
 
 pub(super) fn extension_name(source_set: &SourceSetConfig) -> Option<&str> {
@@ -598,7 +585,8 @@ pub(super) fn fail_with_remaining_steps(
     }
 
     BuildResult {
-        provider_dispatched: true,
+        provider: None,
+        provider_dispatched: false,
         ok: false,
         steps: completed_steps,
         duration_ms: started.elapsed().as_millis() as u64,

@@ -10,9 +10,25 @@ pub fn format_ibcmd_failure_details(
     platform_log: Option<&str>,
     platform_log_path: Option<&Path>,
 ) -> String {
-    let mut details = vec![format!(
-        "{action} failed for {target_kind} '{target}' with exit code {exit_code}"
-    )];
+    format_failure_evidence(
+        format!("{action} failed for {target_kind} '{target}' with exit code {exit_code}"),
+        stdout,
+        stderr,
+        platform_log,
+        platform_log_path,
+    )
+}
+
+/// Улики отказа команды платформы: вывод и журнал идут за `headline`, который называет, что
+/// не удалось и с каким кодом.
+pub fn format_failure_evidence(
+    headline: String,
+    stdout: &str,
+    stderr: &str,
+    platform_log: Option<&str>,
+    platform_log_path: Option<&Path>,
+) -> String {
+    let mut details = vec![headline];
     if !stdout.trim().is_empty() {
         details.push(format!("stdout: {}", stdout.trim()));
     }

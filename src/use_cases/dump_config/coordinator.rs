@@ -1,4 +1,5 @@
 use super::*;
+use crate::domain::capability::{Operation, Provider};
 
 pub(super) fn run_dump_with_context(
     context: &ExecutionContext,
@@ -81,29 +82,62 @@ pub(super) fn run_dump_with_context(
     };
 
     let mut utilities = PlatformUtilities::from_config(config);
-    let utility = match config.builder {
-        BuilderBackend::Designer => UtilityType::V8,
-        BuilderBackend::Ibcmd => UtilityType::Ibcmd,
-    };
-    let location = match utilities.locate(utility) {
-        Ok(location) => location,
-        Err(error) => {
-            let message = error.to_string();
-            let app_error = AppError::from(error);
-            return Err(DumpExecutionFailure::with_payload(
-                app_error,
-                empty_result(
+    let selected =
+        match crate::use_cases::provider_selection::select(config, &mut utilities, Operation::Dump)
+        {
+            Ok(selected) => selected,
+            Err((error, receipt)) => {
+                let message = error.to_string();
+                let mut result = empty_result(
                     mode,
                     started,
-                    Some(resolved.source_set_name.clone()),
-                    resolved.extension.clone(),
+                    args.source_set.clone(),
+                    args.extension.clone(),
                     selectors.clone(),
-                    Some(resolved.target_path.clone()),
+                    None,
                     Some(message),
-                ),
-            ));
-        }
-    };
+                );
+                result.provider = Some(receipt);
+                return Err(DumpExecutionFailure::with_payload(error, result));
+            }
+        };
+    let receipt = selected.receipt.clone();
+    let outcome = run_dump_selected(
+        context,
+        config,
+        args,
+        mode,
+        started,
+        selectors,
+        partial_objects,
+        resolved,
+        utilities,
+        selected,
+    );
+    crate::use_cases::provider_selection::attach(outcome, &receipt)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_dump_selected(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &DumpArgs,
+    mode: DumpMode,
+    started: Instant,
+    selectors: Option<Vec<DumpSelectorResult>>,
+    partial_objects: Option<Vec<PartialDumpSelector>>,
+    resolved: ResolvedDumpTarget,
+    mut utilities: PlatformUtilities,
+    selected: crate::use_cases::provider_selection::SelectedProvider,
+) -> Result<DumpResult, DumpExecutionFailure> {
+    let provider = selected.provider;
+    let location = selected.location;
+    // Исполнителю без утилиты (чужой агент) путь не нужен; остальным его даёт выбор,
+    // и пустой путь ниже недостижим — арка-страж перед матчем отказывает раньше.
+    let binary = location
+        .as_ref()
+        .map(|found| found.path.clone())
+        .unwrap_or_default();
     let edt_binary = if config.format == SourceFormat::Edt {
         Some(match utilities.locate(UtilityType::EdtCli) {
             Ok(location) => location.path,
@@ -130,7 +164,13 @@ pub(super) fn run_dump_with_context(
 
     if args.dry_run {
         // Both utilities are located above, so a missing platform refuses in the preview; the
-        // dump lock below is this command's first filesystem write.
+        // dump lock below is this command's first filesystem write. Следа превью не
+        // оставляет вовсе — ни рабочего каталога, ни журнала действий; запись о вызове
+        // несёт конверт на stdout (`DEC.2026-09-23.A-PREVIEW-LEAVES-NO-TRACE`).
+        crate::use_cases::progress::log_live_stage(
+            "dump: preview",
+            "[Dump] preview only, nothing written",
+        );
         let mut preview = empty_result(
             mode.clone(),
             started,
@@ -142,11 +182,13 @@ pub(super) fn run_dump_with_context(
                 "would dump {:?} into '{}' via {}; nothing written",
                 mode.clone(),
                 resolved.target_path.display(),
-                location.path.display()
+                match location.as_ref() {
+                    Some(found) => found.path.display().to_string(),
+                    None => "the attached Designer agent".to_owned(),
+                }
             )),
         );
         preview.ok = true;
-        preview.provider_dispatched = false;
         return Ok(preview);
     }
 
@@ -243,161 +285,182 @@ pub(super) fn run_dump_with_context(
 
     let partial_objects = partial_objects.as_deref();
     let edt_binary = edt_binary.as_deref();
-    let result = match (
-        config.format,
-        &mode,
-        &config.builder,
-        partial_objects,
-        edt_binary,
-    ) {
-        (SourceFormat::Designer, DumpMode::Incremental, BuilderBackend::Designer, _, _) => {
-            run_incremental_dump_designer(
-                context,
-                config,
-                &resolved,
-                location.path.as_path(),
-                utilities.runner_for(UtilityType::V8),
-            )
+    // Агент отвечает ещё и «выгружать нечего» — это состояние ответа, а не проза, и
+    // у остальных исполнителей его нет.
+    let (result, up_to_date) = if provider == Provider::Agent
+        && config.format == SourceFormat::Designer
+    {
+        match super::agent::run_dump_agent(
+            context,
+            config,
+            &resolved,
+            &mode,
+            partial_objects,
+            location.as_ref(),
+            &mut utilities,
+        ) {
+            Ok((platform_result, message, up_to_date)) => {
+                (Ok((platform_result, message)), up_to_date)
+            }
+            Err(error) => (Err(error), false),
         }
-        (SourceFormat::Designer, DumpMode::Incremental, BuilderBackend::Ibcmd, _, _) => {
-            run_incremental_dump_ibcmd(
+    } else {
+        let result = match (config.format, &mode, provider, partial_objects, edt_binary) {
+            (_, _, other, _, _) if location.is_none() && other != Provider::Agent => Err(
+                crate::use_cases::unimplemented_provider(Operation::Dump, other),
+            ),
+            (SourceFormat::Designer, DumpMode::Incremental, Provider::Designer, _, _) => {
+                run_incremental_dump_designer(
+                    context,
+                    config,
+                    &resolved,
+                    binary.as_path(),
+                    utilities.runner_for(UtilityType::V8),
+                )
+            }
+            (SourceFormat::Designer, DumpMode::Incremental, Provider::Ibcmd, _, _) => {
+                run_incremental_dump_ibcmd(
+                    context,
+                    config,
+                    &resolved,
+                    binary.as_path(),
+                    utilities.runner_for(UtilityType::Ibcmd),
+                )
+            }
+            (SourceFormat::Designer, DumpMode::Full, Provider::Designer, _, _) => {
+                run_full_dump_designer(
+                    context,
+                    config,
+                    &resolved,
+                    binary.as_path(),
+                    utilities.runner_for(UtilityType::V8),
+                )
+            }
+            (SourceFormat::Designer, DumpMode::Full, Provider::Ibcmd, _, _) => run_full_dump_ibcmd(
                 context,
                 config,
                 &resolved,
-                location.path.as_path(),
+                binary.as_path(),
                 utilities.runner_for(UtilityType::Ibcmd),
-            )
-        }
-        (SourceFormat::Designer, DumpMode::Full, BuilderBackend::Designer, _, _) => {
-            run_full_dump_designer(
+            ),
+            (SourceFormat::Designer, DumpMode::Partial, Provider::Designer, Some(objects), _) => {
+                run_partial_dump_designer(
+                    context,
+                    config,
+                    &resolved,
+                    binary.as_path(),
+                    utilities.runner_for(UtilityType::V8),
+                    objects,
+                )
+            }
+            (SourceFormat::Designer, DumpMode::Partial, Provider::Ibcmd, Some(objects), _) => {
+                run_partial_dump_ibcmd(
+                    context,
+                    config,
+                    &resolved,
+                    binary.as_path(),
+                    utilities.runner_for(UtilityType::Ibcmd),
+                    objects,
+                )
+            }
+            (SourceFormat::Edt, DumpMode::Incremental, Provider::Designer, _, Some(edt_binary)) => {
+                run_incremental_dump_edt_designer(
+                    context,
+                    config,
+                    &resolved,
+                    binary.as_path(),
+                    edt_binary,
+                    utilities.runner_for(UtilityType::V8),
+                    utilities.runner_for(UtilityType::EdtCli),
+                )
+            }
+            (SourceFormat::Edt, DumpMode::Incremental, Provider::Ibcmd, _, Some(edt_binary)) => {
+                run_incremental_dump_edt_ibcmd(
+                    context,
+                    config,
+                    &resolved,
+                    binary.as_path(),
+                    edt_binary,
+                    utilities.runner_for(UtilityType::Ibcmd),
+                    utilities.runner_for(UtilityType::EdtCli),
+                )
+            }
+            (SourceFormat::Edt, DumpMode::Full, Provider::Designer, _, Some(edt_binary)) => {
+                run_full_dump_edt_designer(
+                    context,
+                    config,
+                    &resolved,
+                    binary.as_path(),
+                    edt_binary,
+                    utilities.runner_for(UtilityType::V8),
+                    utilities.runner_for(UtilityType::EdtCli),
+                )
+            }
+            (SourceFormat::Edt, DumpMode::Full, Provider::Ibcmd, _, Some(edt_binary)) => {
+                run_full_dump_edt_ibcmd(
+                    context,
+                    config,
+                    &resolved,
+                    binary.as_path(),
+                    edt_binary,
+                    utilities.runner_for(UtilityType::Ibcmd),
+                    utilities.runner_for(UtilityType::EdtCli),
+                )
+            }
+            (
+                SourceFormat::Edt,
+                DumpMode::Partial,
+                Provider::Designer,
+                Some(objects),
+                Some(edt_binary),
+            ) => run_partial_dump_edt_designer(
                 context,
                 config,
                 &resolved,
-                location.path.as_path(),
+                binary.as_path(),
+                edt_binary,
                 utilities.runner_for(UtilityType::V8),
-            )
-        }
-        (SourceFormat::Designer, DumpMode::Full, BuilderBackend::Ibcmd, _, _) => {
-            run_full_dump_ibcmd(
-                context,
-                config,
-                &resolved,
-                location.path.as_path(),
-                utilities.runner_for(UtilityType::Ibcmd),
-            )
-        }
-        (SourceFormat::Designer, DumpMode::Partial, BuilderBackend::Designer, Some(objects), _) => {
-            run_partial_dump_designer(
-                context,
-                config,
-                &resolved,
-                location.path.as_path(),
-                utilities.runner_for(UtilityType::V8),
+                utilities.runner_for(UtilityType::EdtCli),
                 objects,
-            )
-        }
-        (SourceFormat::Designer, DumpMode::Partial, BuilderBackend::Ibcmd, Some(objects), _) => {
-            run_partial_dump_ibcmd(
+            ),
+            (
+                SourceFormat::Edt,
+                DumpMode::Partial,
+                Provider::Ibcmd,
+                Some(objects),
+                Some(edt_binary),
+            ) => run_partial_dump_edt_ibcmd(
                 context,
                 config,
                 &resolved,
-                location.path.as_path(),
+                binary.as_path(),
+                edt_binary,
                 utilities.runner_for(UtilityType::Ibcmd),
+                utilities.runner_for(UtilityType::EdtCli),
                 objects,
-            )
-        }
-        (
-            SourceFormat::Edt,
-            DumpMode::Incremental,
-            BuilderBackend::Designer,
-            _,
-            Some(edt_binary),
-        ) => run_incremental_dump_edt_designer(
-            context,
-            config,
-            &resolved,
-            location.path.as_path(),
-            edt_binary,
-            utilities.runner_for(UtilityType::V8),
-            utilities.runner_for(UtilityType::EdtCli),
-        ),
-        (SourceFormat::Edt, DumpMode::Incremental, BuilderBackend::Ibcmd, _, Some(edt_binary)) => {
-            run_incremental_dump_edt_ibcmd(
-                context,
-                config,
-                &resolved,
-                location.path.as_path(),
-                edt_binary,
-                utilities.runner_for(UtilityType::Ibcmd),
-                utilities.runner_for(UtilityType::EdtCli),
-            )
-        }
-        (SourceFormat::Edt, DumpMode::Full, BuilderBackend::Designer, _, Some(edt_binary)) => {
-            run_full_dump_edt_designer(
-                context,
-                config,
-                &resolved,
-                location.path.as_path(),
-                edt_binary,
-                utilities.runner_for(UtilityType::V8),
-                utilities.runner_for(UtilityType::EdtCli),
-            )
-        }
-        (SourceFormat::Edt, DumpMode::Full, BuilderBackend::Ibcmd, _, Some(edt_binary)) => {
-            run_full_dump_edt_ibcmd(
-                context,
-                config,
-                &resolved,
-                location.path.as_path(),
-                edt_binary,
-                utilities.runner_for(UtilityType::Ibcmd),
-                utilities.runner_for(UtilityType::EdtCli),
-            )
-        }
-        (
-            SourceFormat::Edt,
-            DumpMode::Partial,
-            BuilderBackend::Designer,
-            Some(objects),
-            Some(edt_binary),
-        ) => run_partial_dump_edt_designer(
-            context,
-            config,
-            &resolved,
-            location.path.as_path(),
-            edt_binary,
-            utilities.runner_for(UtilityType::V8),
-            utilities.runner_for(UtilityType::EdtCli),
-            objects,
-        ),
-        (
-            SourceFormat::Edt,
-            DumpMode::Partial,
-            BuilderBackend::Ibcmd,
-            Some(objects),
-            Some(edt_binary),
-        ) => run_partial_dump_edt_ibcmd(
-            context,
-            config,
-            &resolved,
-            location.path.as_path(),
-            edt_binary,
-            utilities.runner_for(UtilityType::Ibcmd),
-            utilities.runner_for(UtilityType::EdtCli),
-            objects,
-        ),
-        (_, DumpMode::Partial, _, None, _) => Err(AppError::Runtime(
-            "partial dump objects were not validated before execution".to_owned(),
-        )),
-        (SourceFormat::Edt, _, _, _, None) => Err(AppError::Runtime(
-            "EDT binary must be resolved before executing format=EDT dump".to_owned(),
-        )),
+            ),
+            (_, DumpMode::Partial, _, None, _) => Err(AppError::Runtime(
+                "partial dump objects were not validated before execution".to_owned(),
+            )),
+            (SourceFormat::Edt, _, _, _, None) => Err(AppError::Runtime(
+                "EDT binary must be resolved before executing format=EDT dump".to_owned(),
+            )),
+            // Исполнитель без адаптера выгрузки: до сюда его не пускает поиск утилиты выше,
+            // но матрица может опередить код, и тогда это отказ, а не паника.
+            (_, _, other, _, _) => Err(crate::use_cases::unimplemented_provider(
+                Operation::Dump,
+                other,
+            )),
+        };
+        (result, false)
     };
     drop(lock_guard);
 
     match result {
         Ok((platform_result, cleanup_message)) => Ok(DumpResult {
-            provider_dispatched: true,
+            provider: None,
+            provider_dispatched: false,
+            up_to_date,
             ok: true,
             source_set: Some(resolved.source_set_name),
             extension: resolved.extension,
@@ -406,14 +469,17 @@ pub(super) fn run_dump_with_context(
             target_path: resolved.target_path,
             platform_log_path: platform_result.platform_log_path,
             duration_ms: started.elapsed().as_millis() as u64,
-            message: cleanup_message.or_else(|| Some("dump completed successfully".to_owned())),
+            message: cleanup_message
+                .or_else(|| Some(crate::domain::dump::DUMP_SUCCESS_MESSAGE.to_owned())),
         }),
         Err(error) => {
             let message = error.to_string();
             Err(DumpExecutionFailure::with_payload(
                 error,
                 DumpResult {
-                    provider_dispatched: true,
+                    provider: None,
+                    provider_dispatched: false,
+                    up_to_date: false,
                     ok: false,
                     source_set: Some(resolved.source_set_name),
                     extension: resolved.extension,

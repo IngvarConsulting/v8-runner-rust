@@ -1,0 +1,74 @@
+{
+  "$defs": {
+    "ToolDownloadDestination": {
+      "additionalProperties": false,
+      "properties": {
+        "config": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "tag": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool",
+        "tag",
+        "source",
+        "path",
+        "config"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/tools-download.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "config_path": {
+      "type": "string"
+    },
+    "destinations": {
+      "items": {
+        "$ref": "#/$defs/ToolDownloadDestination"
+      },
+      "type": "array"
+    },
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "local_config_path": {
+      "type": "string"
+    },
+    "mode": {
+      "type": "string"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "tool": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "ok",
+    "tool",
+    "mode",
+    "destinations",
+    "config_path",
+    "local_config_path",
+    "duration_ms"
+  ],
+  "title": "ToolsDownloadResult",
+  "type": "object"
+}

@@ -4,7 +4,7 @@ use clap::{Args, Parser, Subcommand};
 #[command(
     name = "v8-runner",
     version,
-    about = "Run 1C:Enterprise build, test, dump, convert, and launch workflows"
+    about = "Run 1C:Enterprise push, test, pull, convert, and launch workflows"
 )]
 pub struct Cli {
     /// Path to an existing YAML config file. Defaults to ./v8project.yaml
@@ -38,6 +38,20 @@ pub struct Cli {
     #[arg(long, global = true, help_heading = "Global options")]
     pub workdir: Option<String>,
 
+    /// Infobase to work with: a name declared in v8project.local.yaml or a connection string; defaults to `origin`
+    #[arg(
+        long,
+        global = true,
+        value_name = "NAME|CONNECTION",
+        help_heading = "Global options"
+    )]
+    pub infobase: Option<String>,
+
+    /// Show the plan and locate the tools without dispatching anything: a command without a
+    /// preview refuses the key instead of ignoring it
+    #[arg(long, global = true, help_heading = "Global options")]
+    pub dry_run: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -47,23 +61,35 @@ pub enum Command {
     /// Print application version
     Version,
     /// Create a v8-runner project from an existing infobase
+    #[command(name = "clone", alias = "bootstrap")]
     Bootstrap(BootstrapArgs),
-    /// Generate project configuration and autodetect source-sets
+    /// Prepare the project: generate configuration and autodetect source-sets
+    #[command(name = "init")]
+    ConfigInit(ConfigInitArgs),
+    /// Previous spelling of `init`; hidden for one release cycle
+    #[command(hide = true)]
     Config(ConfigArgs),
+    /// Creating the infobase; parsed as `infobase create` and normalised here.
+    #[command(skip)]
+    Init,
     /// Download YaXUnit, Vanessa Automation, and client MCP tool assets
     Tools(ToolsArgs),
-    /// Initialize the infobase and EDT workspace
-    Init(InitArgs),
-    /// Update configured extension properties inside the infobase
+    /// Update extension security properties or manage installed extensions
     Extensions(ExtensionsArgs),
-    /// Build configured source-sets into the infobase
+    /// Send configured source-sets to the infobase
+    #[command(name = "push", alias = "build")]
     Build(BuildArgs),
-    /// Apply built release artifacts to the infobase
+    /// Upload a built package (.cf/.cfe) into the infobase
+    #[command(name = "upload", alias = "load")]
     Load(LoadArgs),
     /// Run YaXUnit or Vanessa Automation tests, building first by default
     Test(TestArgs),
-    /// Dump infobase state back to project files
+    /// Pull infobase state back into project files
+    #[command(name = "pull", alias = "dump")]
     Dump(DumpArgs),
+    /// Take the configuration out of the infobase as a package
+    #[command(name = "download")]
+    Download(InfobaseConfigurationExportArgs),
     /// Export configuration packages or a full DT snapshot from the configured infobase
     Infobase(InfobaseArgs),
     /// Convert configured source-sets between EDT and Designer file formats
@@ -71,12 +97,23 @@ pub enum Command {
     /// Export release artifacts via Designer batch commands
     #[command(name = "make", visible_alias = "artifacts")]
     Artifacts(ArtifactsArgs),
-    /// Run Designer or EDT syntax validation
+    /// Check the configuration with Designer or EDT
+    #[command(name = "check", alias = "syntax")]
     Syntax(SyntaxArgs),
     /// Launch 1C application
     Launch(LaunchArgs),
+    /// Publish the infobase on a web server with webinst, or delete the publication
+    Publish(PublishArgs),
     /// Serve Model Context Protocol transports
     Mcp(McpArgs),
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Command options")]
+pub struct PublishArgs {
+    /// Delete the publication named in infobase.web instead of creating it
+    #[arg(long)]
+    pub delete: bool,
 }
 
 #[derive(Args, Debug)]
@@ -196,25 +233,18 @@ pub struct ConfigInitArgs {
     /// Source format to write
     #[arg(long, default_value = "auto", value_parser = ["auto", "designer", "edt"])]
     pub format: String,
-
-    /// Builder backend to write
-    #[arg(long, default_value = "DESIGNER", value_parser = ["DESIGNER", "IBCMD", "designer", "ibcmd"])]
-    pub builder: String,
 }
 
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Command options")]
 pub struct BuildArgs {
-    /// Clear change cache and rebuild everything
-    #[arg(long)]
+    /// Clear change cache and send everything anew
+    #[arg(long = "full", alias = "full-rebuild")]
     pub full_rebuild: bool,
 
     /// Limit build to one source-set from v8project.yaml
     #[arg(long)]
     pub source_set: Option<String>,
-    /// Plan every step and locate the platform without dispatching it
-    #[arg(long)]
-    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
@@ -224,11 +254,21 @@ pub struct LoadArgs {
     #[arg(long)]
     pub path: String,
 
-    /// Load mode
-    #[arg(long, default_value = "load", value_parser = ["load", "merge", "update"])]
+    /// Upload mode
+    #[arg(
+        long,
+        default_value = "load",
+        value_parser = clap::builder::PossibleValuesParser::new([
+            clap::builder::PossibleValue::new("load"),
+            clap::builder::PossibleValue::new("combine"),
+            clap::builder::PossibleValue::new("update"),
+            // Прежнее имя режима живёт один цикл выпуска и в справке не печатается.
+            clap::builder::PossibleValue::new("merge").hide(true),
+        ]),
+    )]
     pub mode: String,
 
-    /// Merge settings file used by --mode merge
+    /// Settings file used by --mode combine
     #[arg(long)]
     pub settings: Option<String>,
 
@@ -239,18 +279,6 @@ pub struct LoadArgs {
     /// Vendor configuration name, required to ask whether a configuration is on support
     #[arg(long)]
     pub vendor_name: Option<String>,
-
-    /// Resolve the plan and locate the platform without probing or applying anything
-    #[arg(long)]
-    pub dry_run: bool,
-}
-
-#[derive(Args, Debug)]
-#[command(next_help_heading = "Command options")]
-pub struct InitArgs {
-    /// Decide every step and locate the platform without creating anything
-    #[arg(long)]
-    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
@@ -258,20 +286,36 @@ pub struct InitArgs {
 pub struct ExtensionsArgs {
     /// Read or change the extension composition of the infobase.
     ///
-    /// Omitting it keeps the published behaviour: update the security properties of the
-    /// configured extension source-sets.
+    /// Without a subcommand, update security properties of the selected extensions.
+    /// Without selectors, update all configured extension source-sets.
     #[command(subcommand)]
     pub command: Option<ExtensionsCommand>,
 
     /// Extension source-set name to update. Repeat to target multiple extensions.
     #[arg(long = "name")]
     pub names: Vec<String>,
+
+    /// Installed extension's platform name; no matching source-set is required.
+    /// Repeat or combine with --name to update only the explicitly selected targets.
+    #[arg(long = "installed-name")]
+    pub installed_names: Vec<String>,
+}
+
+impl ExtensionsArgs {
+    /// Parent property options must not be silently ignored by a composition subcommand.
+    /// Validate after parsing so global options remain legal around subcommands.
+    pub fn validate_property_options(&self) -> Result<(), &'static str> {
+        if self.command.is_some() && (!self.names.is_empty() || !self.installed_names.is_empty()) {
+            return Err("extensions parent --name and --installed-name cannot be combined with a subcommand; place subcommand options after its name");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Subcommand, Debug)]
 pub enum ExtensionsCommand {
     /// Report the extensions installed in the infobase
-    List(ExtensionPreviewArgs),
+    List,
     /// Report one installed extension by its platform name
     Info(ExtensionNameArgs),
     /// Register a new extension in the infobase
@@ -288,27 +332,11 @@ pub struct ExtensionNameArgs {
     /// Extension name as the platform knows it
     #[arg(long)]
     pub name: String,
-
-    /// Name the target and the account without starting the platform
-    #[arg(long)]
-    pub dry_run: bool,
-}
-
-#[derive(Args, Debug)]
-#[command(next_help_heading = "Command options")]
-pub struct ExtensionPreviewArgs {
-    /// Name the target and the account without starting the platform
-    #[arg(long)]
-    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Command options")]
 pub struct ExtensionCreateArgs {
-    /// Name the target and the account without starting the platform
-    #[arg(long)]
-    pub dry_run: bool,
-
     /// Extension name as the platform will know it
     #[arg(long)]
     pub name: String,
@@ -329,10 +357,6 @@ pub struct ExtensionCreateArgs {
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Command options")]
 pub struct ExtensionActivateArgs {
-    /// Name the target and the account without starting the platform
-    #[arg(long)]
-    pub dry_run: bool,
-
     /// Extension name as the platform knows it
     #[arg(long)]
     pub name: String,
@@ -348,8 +372,8 @@ pub struct TestArgs {
     #[arg(long, global = true)]
     pub full: bool,
 
-    /// Run tests against the configured prepared infobase without building sources first
-    #[arg(long, global = true)]
+    /// Run tests against the configured prepared infobase without sending sources first
+    #[arg(long = "no-push", alias = "no-build", global = true)]
     pub no_build: bool,
 
     /// Client mode used for enterprise launch during test execution
@@ -447,9 +471,10 @@ pub struct DumpArgs {
     /// Objects for partial dump. Use canonical TYPE:NAME selectors; legacy TYPE.NAME selectors are accepted for compatibility.
     #[arg(long = "object")]
     pub objects: Vec<String>,
-    /// Resolve the target and locate the platform without dumping anything
-    #[arg(long)]
-    pub dry_run: bool,
+
+    /// Replace the target directory even when it holds work version control cannot give back
+    #[arg(long = "force", alias = "discard-uncommitted")]
+    pub discard_uncommitted: bool,
 }
 
 #[derive(Args, Debug)]
@@ -458,21 +483,12 @@ pub struct InfobaseArgs {
     pub command: InfobaseCommand,
 }
 
-impl InfobaseArgs {
-    pub fn dry_run(&self) -> bool {
-        match &self.command {
-            InfobaseCommand::Configuration(configuration) => match &configuration.command {
-                InfobaseConfigurationCommand::Export(args) => args.dry_run,
-            },
-            InfobaseCommand::Dump(args) => args.dry_run,
-            InfobaseCommand::Restore(args) => args.dry_run,
-        }
-    }
-}
-
 #[derive(Subcommand, Debug)]
 pub enum InfobaseCommand {
-    /// Export working/database configuration state to CF or CFE
+    /// Create the infobase and the EDT workspace declared by the project
+    Create,
+    /// Previous spelling of `download`; hidden for one release cycle
+    #[command(hide = true)]
     Configuration(InfobaseConfigurationArgs),
     /// Export the complete infobase to a DT transfer file (not a backup)
     Dump(InfobaseDumpArgs),
@@ -506,10 +522,6 @@ pub struct InfobaseConfigurationExportArgs {
     /// Final CF/CFE output path
     #[arg(long)]
     pub output: String,
-
-    /// Validate and select a provider without locks, files, or provider process dispatch
-    #[arg(long)]
-    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
@@ -518,10 +530,6 @@ pub struct InfobaseDumpArgs {
     /// Final DT output path; a DT transfer image is not a database backup
     #[arg(long)]
     pub output: String,
-
-    /// Validate and select a provider without locks, files, or provider process dispatch
-    #[arg(long)]
-    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
@@ -538,10 +546,6 @@ pub struct InfobaseRestoreArgs {
     /// Discard the data of the existing target infobase; refuses when it is absent
     #[arg(long, conflicts_with = "create")]
     pub replace: bool,
-
-    /// Validate and select a provider without locks, files, or provider process dispatch
-    #[arg(long)]
-    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
@@ -551,13 +555,13 @@ pub struct ConvertArgs {
     #[arg(long)]
     pub source_set: Option<String>,
 
-    /// Resolve the plan and locate the platform without converting anything
-    #[arg(long)]
-    pub dry_run: bool,
-
     /// Target root for converted source-set layout. Defaults to workPath/convert/out
     #[arg(long)]
     pub output: Option<String>,
+
+    /// Replace the target directory even when it holds work version control cannot give back
+    #[arg(long = "force", alias = "discard-uncommitted")]
+    pub discard_uncommitted: bool,
 }
 
 #[derive(Args, Debug)]
@@ -574,24 +578,43 @@ pub struct ArtifactsArgs {
     /// Extension name in the infobase for cfe export
     #[arg(long)]
     pub extension: Option<String>,
-    /// Resolve the target and locate the platform without building or publishing anything
-    #[arg(long)]
-    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]
+#[command(
+    after_help = "Ветку выбирает format проекта: DESIGNER — /CheckConfig, EDT — проверка проекта.\nБез единого ключа режима выполняется профиль по умолчанию: --thin-client --server\n--unreference-procedures --handlers-existence --empty-handlers --extended-modules-check."
+)]
 pub struct SyntaxArgs {
+    /// Режимы `/CheckConfig`. Без единого ключа выполняется профиль по умолчанию.
+    #[command(flatten)]
+    pub modes: DesignerConfigSyntaxArgs,
+    /// EDT project names
+    #[arg(long = "project", help_heading = "Command options")]
+    pub projects: Vec<String>,
+    /// Прежние имена: приняты один цикл, в справке их нет.
     #[command(subcommand)]
-    pub target: SyntaxTarget,
+    pub target: Option<SyntaxTarget>,
+}
+
+impl SyntaxArgs {
+    /// Ключи самой команды рядом с прежним именем не исполняются, поэтому отвергаются.
+    pub fn keys_next_to_a_previous_name(&self) -> Option<&'static str> {
+        (self.target.is_some()
+            && (self.modes != DesignerConfigSyntaxArgs::default() || !self.projects.is_empty()))
+        .then_some("check keys cannot be combined with a subcommand; place the keys after its name")
+    }
 }
 
 #[derive(Subcommand, Debug)]
 pub enum SyntaxTarget {
     /// Check configuration via Designer CheckConfig
+    #[command(hide = true)]
     DesignerConfig(DesignerConfigSyntaxArgs),
-    /// Check modules via Designer CheckModules
+    /// Check modules via Designer CheckConfig module modes
+    #[command(hide = true)]
     DesignerModules(DesignerModulesSyntaxArgs),
     /// Check via EDT validate
+    #[command(hide = true)]
     Edt {
         /// EDT project names
         #[arg(long = "project")]
@@ -602,8 +625,8 @@ pub enum SyntaxTarget {
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Command options")]
 pub struct LaunchArgs {
-    /// Launch mode
-    #[arg(value_name = "MODE", value_parser = ["designer", "thin", "thick", "ordinary", "mcp"])]
+    /// Launch mode; `web` opens infobase.web.url in the browser
+    #[arg(value_name = "MODE", value_parser = ["designer", "thin", "thick", "ordinary", "mcp", "web"])]
     pub target: String,
 
     /// Optional client-side MCP scenario to start with the MCP server
@@ -617,9 +640,10 @@ pub struct LaunchArgs {
     #[command(flatten)]
     pub launch: DirectLaunchOptionsArgs,
 
-    /// Validate and select a provider without launching the client process
-    #[arg(long)]
-    pub dry_run: bool,
+    /// Which address opens the base: `web` for infobase.web.url, `connection` for
+    /// infobase.connection. Thin client only; the default follows the target kind
+    #[arg(long = "via", value_parser = ["web", "connection"])]
+    pub via: Option<String>,
 
     /// JSON config path for onec-client-mcp-devkit `/C runMcp=<FILE>`
     #[arg(long = "mcp-config")]
@@ -696,7 +720,7 @@ pub enum McpServeTransport {
     Http,
 }
 
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default, PartialEq, Eq)]
 #[command(next_help_heading = "Command options")]
 pub struct DesignerConfigSyntaxArgs {
     #[arg(long)]
@@ -782,8 +806,8 @@ pub struct DesignerModulesSyntaxArgs {
 mod tests {
     use super::{
         ArtifactsArgs, Cli, Command, ConvertArgs, DirectLaunchOptionsArgs, ExtensionsArgs,
-        InitArgs, LaunchArgs, LoadArgs, McpCommand, McpServeTransport, SyntaxTarget,
-        TestLaunchOptionsArgs, TestRunner, TestScope,
+        InfobaseArgs, InfobaseCommand, LaunchArgs, LoadArgs, McpCommand, McpServeTransport,
+        SyntaxTarget, TestLaunchOptionsArgs, TestRunner, TestScope,
     };
     use clap::Parser;
 
@@ -813,13 +837,41 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Имя `init` перешло к подготовке проекта, а создание базы живёт под
+    /// `infobase create`: это единственное имя словаря без синонима.
     #[test]
-    fn parses_init_command() {
+    fn init_prepares_the_project_and_the_infobase_is_created_by_its_own_command() {
         let cli = Cli::try_parse_from(["v8-runner", "init"]).expect("parse");
+        assert!(matches!(cli.command, Command::ConfigInit(_)));
+
+        let cli = Cli::try_parse_from(["v8-runner", "infobase", "create"]).expect("parse");
         assert!(matches!(
             cli.command,
-            Command::Init(InitArgs { dry_run: false })
+            Command::Infobase(InfobaseArgs {
+                command: InfobaseCommand::Create,
+            })
         ));
+    }
+
+    /// Прежние имена принимаются и в справке не печатаются.
+    #[test]
+    fn a_previous_command_name_is_accepted_as_a_hidden_synonym() {
+        for (previous, expected) in [
+            ("build", "push"),
+            ("dump", "pull"),
+            ("load", "upload"),
+            ("syntax", "check"),
+            ("bootstrap", "clone"),
+        ] {
+            let cli = Cli::try_parse_from(["v8-runner", previous, "--help"]);
+            // `--help` прерывает разбор, но имя уже разрешено: ошибка печатает новое имя.
+            let rendered = cli.expect_err("help exits with an error kind").to_string();
+            assert!(rendered.contains(expected), "{previous}: {rendered}");
+            assert!(
+                !rendered.contains(&format!("v8-runner {previous}")),
+                "{rendered}"
+            );
+        }
     }
 
     #[test]
@@ -841,12 +893,87 @@ mod tests {
         .expect("parse");
 
         match cli.command {
-            Command::Extensions(ExtensionsArgs { names, command }) => {
+            Command::Extensions(ExtensionsArgs {
+                names,
+                command,
+                installed_names,
+            }) => {
                 assert!(command.is_none());
                 assert_eq!(names, vec!["client_mcp", "tests"]);
+                assert!(installed_names.is_empty());
             }
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn parses_explicit_extension_targets_and_preview() {
+        let cli = Cli::try_parse_from([
+            "v8-runner",
+            "extensions",
+            "--installed-name",
+            "YAXUNIT",
+            "--name",
+            "tests",
+            "--installed-name",
+            "Другое",
+            "--dry-run",
+        ])
+        .expect("parse");
+        let preview = cli.dry_run;
+        let Command::Extensions(args) = cli.command else {
+            panic!("unexpected command");
+        };
+        assert_eq!(args.names, ["tests"]);
+        assert_eq!(args.installed_names, ["YAXUNIT", "Другое"]);
+        assert!(preview);
+        assert!(args.command.is_none());
+    }
+
+    #[test]
+    fn extension_parent_options_cannot_be_ignored_by_subcommands() {
+        for arguments in [
+            vec!["--name", "tests", "list"],
+            vec!["--installed-name", "YAXUNIT", "list"],
+            vec!["--installed-name", "YAXUNIT", "delete", "--name", "Other"],
+        ] {
+            let cli = Cli::try_parse_from(["v8-runner", "extensions"].into_iter().chain(arguments))
+                .expect("parse before semantic validation");
+            let Command::Extensions(args) = cli.command else {
+                panic!("unexpected command");
+            };
+            assert!(args.validate_property_options().is_err());
+        }
+        // Ключ превью стал глобальным: перед подкомандой он значит то же, что после неё.
+        let cli = Cli::try_parse_from([
+            "v8-runner",
+            "extensions",
+            "--dry-run",
+            "delete",
+            "--name",
+            "Other",
+        ])
+        .expect("parse");
+        assert!(cli.dry_run);
+        let Command::Extensions(args) = cli.command else {
+            panic!("unexpected command");
+        };
+        assert!(args.validate_property_options().is_ok());
+        // Global transport/config options still work before and after a subcommand.
+        let cli = Cli::try_parse_from([
+            "v8-runner",
+            "extensions",
+            "--json-message",
+            "list",
+            "--config",
+            "v8project.yaml",
+            "--dry-run",
+        ])
+        .expect("global options with subcommand");
+        let Command::Extensions(args) = cli.command else {
+            panic!("unexpected command");
+        };
+        assert!(args.validate_property_options().is_ok());
     }
 
     #[test]
@@ -857,14 +984,12 @@ mod tests {
         match cli.command {
             Command::Load(LoadArgs {
                 path,
-                dry_run,
                 mode,
                 settings,
                 extension,
                 vendor_name,
             }) => {
                 assert_eq!(path, "dist/main.cf");
-                assert!(!dry_run);
                 assert_eq!(mode, "load");
                 assert!(settings.is_none());
                 assert!(extension.is_none());
@@ -893,14 +1018,12 @@ mod tests {
         match cli.command {
             Command::Load(LoadArgs {
                 path,
-                dry_run,
                 mode,
                 settings,
                 extension,
-                vendor_name,
+                vendor_name: _,
             }) => {
                 assert_eq!(path, "dist/ext.cfe");
-                assert!(!dry_run);
                 assert_eq!(mode, "merge");
                 assert_eq!(settings.as_deref(), Some("merge.xml"));
                 assert_eq!(extension.as_deref(), Some("SalesAddon"));
@@ -1031,7 +1154,7 @@ mod tests {
                 mcp_config,
                 mcp_port,
                 wait_ready,
-                dry_run,
+                via: _,
             }) => {
                 assert_eq!(target, "ordinary");
                 assert_eq!(launch.common.c.as_deref(), Some("DoWork"));
@@ -1044,7 +1167,6 @@ mod tests {
                 assert_eq!(mcp_config, None);
                 assert_eq!(mcp_port, None);
                 assert!(!wait_ready);
-                assert!(!dry_run);
             }
             _ => panic!("unexpected command"),
         }
@@ -1084,7 +1206,7 @@ mod tests {
                 mcp_config,
                 mcp_port,
                 wait_ready,
-                dry_run,
+                via: _,
             }) => {
                 assert_eq!(target, "designer");
                 assert_eq!(launch, DirectLaunchOptionsArgs::default());
@@ -1093,7 +1215,6 @@ mod tests {
                 assert_eq!(mcp_config, None);
                 assert_eq!(mcp_port, None);
                 assert!(!wait_ready);
-                assert!(!dry_run);
             }
             _ => panic!("unexpected command"),
         }
@@ -1104,10 +1225,11 @@ mod tests {
         let cli = Cli::try_parse_from(["v8-runner", "launch", "thin", "--dry-run"])
             .expect("parse launch preview");
 
+        let preview = cli.dry_run;
         match cli.command {
             Command::Launch(args) => {
                 assert_eq!(args.target, "thin");
-                assert!(args.dry_run);
+                assert!(preview);
             }
             _ => panic!("unexpected command"),
         }
@@ -1139,7 +1261,7 @@ mod tests {
                 mcp_config,
                 mcp_port,
                 wait_ready,
-                dry_run,
+                via: _,
             }) => {
                 assert_eq!(target, "mcp");
                 assert_eq!(launch, DirectLaunchOptionsArgs::default());
@@ -1148,7 +1270,6 @@ mod tests {
                 assert_eq!(mcp_config.as_deref(), Some("mcp-conf.json"));
                 assert_eq!(mcp_port, Some(9876));
                 assert!(wait_ready);
-                assert!(!dry_run);
             }
             _ => panic!("unexpected command"),
         }
@@ -1175,7 +1296,7 @@ mod tests {
             .expect("parse syntax config");
 
         match cli.command {
-            Command::Syntax(args) => match args.target {
+            Command::Syntax(args) => match args.target.expect("hidden synonym") {
                 SyntaxTarget::DesignerConfig(config) => {
                     assert!(!config.server);
                     assert!(!config.all_extensions);
@@ -1224,11 +1345,9 @@ mod tests {
         match cli.command {
             Command::Artifacts(ArtifactsArgs {
                 output,
-                dry_run,
                 source_set,
                 extension,
             }) => {
-                assert!(!dry_run);
                 assert_eq!(output, "dist/main.cf");
                 assert!(source_set.is_none());
                 assert!(extension.is_none());
@@ -1245,9 +1364,9 @@ mod tests {
             Command::Convert(ConvertArgs {
                 source_set,
                 output,
-                dry_run,
+                discard_uncommitted,
             }) => {
-                assert!(!dry_run);
+                assert!(!discard_uncommitted);
                 assert!(source_set.is_none());
                 assert!(output.is_none());
             }
@@ -1264,9 +1383,9 @@ mod tests {
             Command::Convert(ConvertArgs {
                 source_set,
                 output,
-                dry_run,
+                discard_uncommitted,
             }) => {
-                assert!(!dry_run);
+                assert!(!discard_uncommitted);
                 assert_eq!(source_set.as_deref(), Some("ext-sales"));
                 assert!(output.is_none());
             }
@@ -1283,9 +1402,9 @@ mod tests {
             Command::Convert(ConvertArgs {
                 source_set,
                 output,
-                dry_run,
+                discard_uncommitted,
             }) => {
-                assert!(!dry_run);
+                assert!(!discard_uncommitted);
                 assert!(source_set.is_none());
                 assert_eq!(output.as_deref(), Some("tests/fixtures/edt"));
             }
@@ -1310,11 +1429,9 @@ mod tests {
         match cli.command {
             Command::Artifacts(ArtifactsArgs {
                 output,
-                dry_run,
                 source_set,
                 extension,
             }) => {
-                assert!(!dry_run);
                 assert_eq!(output, "dist/ext.cfe");
                 assert_eq!(source_set.as_deref(), Some("ext-sales"));
                 assert_eq!(extension.as_deref(), Some("SalesAddon"));
@@ -1355,7 +1472,6 @@ mod tests {
                             assert_eq!(export.state, "database");
                             assert_eq!(export.extension.as_deref(), Some("SalesAddon"));
                             assert_eq!(export.output, "dist/sales.cfe");
-                            assert!(!export.dry_run);
                         }
                     }
                 }
@@ -1380,7 +1496,6 @@ mod tests {
             Command::Infobase(args) => match args.command {
                 super::InfobaseCommand::Dump(dump) => {
                     assert_eq!(dump.output, "dist/snapshot.dt");
-                    assert!(!dump.dry_run);
                 }
                 _ => panic!("unexpected infobase command"),
             },
@@ -1401,13 +1516,14 @@ mod tests {
         ])
         .expect("parse infobase restore");
 
+        let preview = cli.dry_run;
         match cli.command {
             Command::Infobase(args) => match args.command {
                 super::InfobaseCommand::Restore(restore) => {
                     assert_eq!(restore.input, "dist/snapshot.dt");
                     assert!(!restore.create);
                     assert!(restore.replace);
-                    assert!(restore.dry_run);
+                    assert!(preview);
                 }
                 _ => panic!("unexpected infobase command"),
             },

@@ -35,25 +35,23 @@ pub struct DesignerDsl<'a> {
 
 impl<'a> DesignerDsl<'a> {
     /// Create a new Designer DSL bound to one executable path and runner.
+    ///
+    /// The policy is required: it carries the command's interrupt and its work mark, and a
+    /// DSL on a policy of its own would lose both.
     pub fn new(
         binary: PathBuf,
         connection: V8Connection,
         runner: &'a dyn ProcessRunner,
         log_file: Option<PathBuf>,
+        execution_policy: ProcessExecutionPolicy,
     ) -> Self {
         Self {
             binary,
             connection,
             runner,
             log_file,
-            execution_policy: ProcessExecutionPolicy::default(),
+            execution_policy,
         }
-    }
-
-    /// Overrides the shared execution policy for process-level cancellation and deadlines.
-    pub fn with_execution_policy(mut self, execution_policy: ProcessExecutionPolicy) -> Self {
-        self.execution_policy = execution_policy;
-        self
     }
 
     /// `/LoadConfigFromFiles <dir> -updateConfigDumpInfo`
@@ -330,14 +328,6 @@ impl<'a> DesignerDsl<'a> {
         self.run(&args)
     }
 
-    /// `/CheckModules [-ThinClient] [-Server] ...`
-    pub fn check_modules(&self, flags: &[&str]) -> Result<PlatformCommandResult, DesignerError> {
-        let mut args = self.base_args();
-        args.push("/CheckModules".to_owned());
-        args.extend(flags.iter().map(|flag| (*flag).to_owned()));
-        self.run(&args)
-    }
-
     fn base_args(&self) -> Vec<String> {
         let mut args = vec![
             "DESIGNER".to_owned(),
@@ -383,7 +373,7 @@ impl<'a> DesignerDsl<'a> {
 
         let (platform_log_path, platform_log, platform_log_read_error) =
             if let Some(path) = &self.log_file {
-                match std::fs::read_to_string(path) {
+                match crate::support::fs::read_platform_log(path) {
                     Ok(contents) => (Some(path.clone()), Some(contents), None),
                     Err(error) => (
                         Some(path.clone()),
@@ -411,7 +401,7 @@ impl<'a> DesignerDsl<'a> {
 mod tests {
     use super::DesignerDsl;
     use crate::platform::connection::V8Connection;
-    use crate::platform::process::{ProcessExecutor, ProcessRunner};
+    use crate::platform::process::{ProcessExecutionPolicy, ProcessExecutor, ProcessRunner};
     use std::fs;
     use std::path::Path;
     use tempfile::tempdir;
@@ -451,6 +441,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             Some(log_path),
+            ProcessExecutionPolicy::default(),
         );
 
         let error = dsl
@@ -478,6 +469,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             None,
+            ProcessExecutionPolicy::default(),
         );
 
         let result = dsl.check_config(&[]).expect("check config");
@@ -503,9 +495,10 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             Some(log_path.clone()),
+            ProcessExecutionPolicy::default(),
         );
 
-        let result = dsl.check_modules(&["-Server"]).expect("check modules");
+        let result = dsl.check_config(&["-Server"]).expect("check config");
 
         assert_eq!(result.process.exit_code, 1);
         assert_eq!(result.platform_log_path, Some(log_path));
@@ -526,9 +519,10 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             Some(log_path.clone()),
+            ProcessExecutionPolicy::default(),
         );
 
-        let result = dsl.check_modules(&["-Server"]).expect("check modules");
+        let result = dsl.check_config(&["-Server"]).expect("check config");
 
         assert_eq!(result.process.exit_code, 101);
         assert_eq!(result.platform_log_path, Some(log_path));
@@ -556,6 +550,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             None,
+            ProcessExecutionPolicy::default(),
         );
 
         dsl.dump_config_to_files(dir.path().join("out").as_path(), None)
@@ -583,6 +578,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             None,
+            ProcessExecutionPolicy::default(),
         );
 
         dsl.dump_config_to_files_incremental(dir.path().join("out").as_path(), Some("ExtName"))
@@ -612,6 +608,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             None,
+            ProcessExecutionPolicy::default(),
         );
 
         dsl.dump_config_to_files_partial(
@@ -647,6 +644,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/my ib"),
             &runner as &dyn ProcessRunner,
             None,
+            ProcessExecutionPolicy::default(),
         );
 
         dsl.create_infobase().expect("create infobase");
@@ -677,6 +675,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             Some(log_path.clone()),
+            ProcessExecutionPolicy::default(),
         );
 
         let result = dsl.dump_cfg(&target, Some("SalesAddon")).expect("dump cfg");
@@ -706,6 +705,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             None,
+            ProcessExecutionPolicy::default(),
         );
 
         dsl.dump_db_cfg(&target, Some("SalesAddon"))
@@ -749,6 +749,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             None,
+            ProcessExecutionPolicy::default(),
         );
 
         dsl.dump_infobase(&target).expect("dump infobase");
@@ -788,6 +789,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             None,
+            ProcessExecutionPolicy::default(),
         );
 
         dsl.load_cfg(&dir.path().join("release.cf"), None)
@@ -826,6 +828,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             None,
+            ProcessExecutionPolicy::default(),
         );
 
         dsl.compare_cfg(
@@ -864,6 +867,7 @@ mod tests {
             V8Connection::from_connection_string("File=/tmp/ib"),
             &runner as &dyn ProcessRunner,
             None,
+            ProcessExecutionPolicy::default(),
         );
 
         dsl.dump_external_data_processor_or_report_to_files(

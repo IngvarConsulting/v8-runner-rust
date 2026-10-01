@@ -87,14 +87,13 @@ fn parse_object_issue(line: &str) -> Option<Issue> {
 
     let (object, message) = if contains_issue_marker(tail.trim()) {
         (first.to_owned(), tail.trim().to_owned())
-    } else if let Some(rest) = rest {
+    } else {
+        let rest = rest?;
         if contains_issue_marker(rest) {
             (format!("{first} {second}"), rest.to_owned())
         } else {
             return None;
         }
-    } else {
-        return None;
     };
     let severity = classify_severity(&message);
 

@@ -91,8 +91,8 @@ impl PlatformUtilities {
 mod tests {
     use super::PlatformUtilities;
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, InfobaseConfig, McpConfig, PlatformToolConfig,
-        SourceFormat, TestsConfig, ToolsConfig,
+        AppConfig, BuildConfig, InfobaseConfig, McpConfig, PlatformToolConfig, SourceFormat,
+        TestsConfig, ToolsConfig,
     };
     use crate::platform::locator::{
         EdtVersion, Locator, LocatorError, PlatformVersion, PlatformVersionRequirement, UtilityType,
@@ -124,10 +124,12 @@ mod tests {
         AppConfig {
             base_path: PathBuf::from("/tmp/project"),
             work_path: PathBuf::from("/tmp/project/.work"),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: Vec::new(),
             build: BuildConfig::default(),
             tools: ToolsConfig {
@@ -171,7 +173,13 @@ mod tests {
             .locate(UtilityType::EdtCli)
             .expect_err("expected not found");
 
-        assert!(matches!(error, LocatorError::NotFound(UtilityType::EdtCli)));
+        assert!(matches!(
+            error,
+            LocatorError::NotFound {
+                utility: UtilityType::EdtCli,
+                ..
+            }
+        ));
     }
 
     #[cfg(unix)]

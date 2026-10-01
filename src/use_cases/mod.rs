@@ -1,3 +1,5 @@
+/// Agent entry point shared by the scenarios that talk to the Designer agent.
+pub(crate) mod agent_session;
 /// Artifact export orchestration use case.
 pub mod artifacts;
 /// Bootstrap project from an existing infobase.
@@ -18,9 +20,12 @@ pub mod configure_extensions;
 pub mod context;
 /// Source-format conversion use case.
 pub mod convert_sources;
+/// Refuses a directory replacement that would destroy unrecoverable work.
+mod destruction_guard;
 /// Dump orchestration use case.
 pub mod dump_config;
 /// Shared extension identity helpers.
+pub(crate) mod extension_agent;
 pub mod extension_identity;
 pub mod extension_inventory;
 /// Shared discovery and preparation helpers for external artifacts.
@@ -40,6 +45,8 @@ mod launch_keys;
 pub mod load_artifact;
 /// Text-mode live progress events shared by CLI-facing use cases.
 mod progress;
+pub mod provider_selection;
+pub mod publish_infobase;
 /// Transport-neutral request DTOs consumed by use cases.
 pub mod request;
 /// Transport-neutral use-case error and failure contracts.
@@ -60,3 +67,16 @@ pub mod transport;
 pub(crate) mod vanessa;
 /// Shared locking for commands that mutate the same workspace.
 pub mod workspace_lock;
+
+/// Отказ операции, которой назначен исполнитель, не умеющий её делать.
+///
+/// Валидация конфига такого не пропускает, поэтому сюда попадает только строка
+/// матрицы, опередившая код: типизированный отказ вместо паники.
+pub(crate) fn unimplemented_provider(
+    operation: crate::domain::capability::Operation,
+    provider: crate::domain::capability::Provider,
+) -> crate::support::error::AppError {
+    crate::support::error::AppError::capability(format!(
+        "provider '{provider}' is not implemented for {operation} in this build of the runner"
+    ))
+}

@@ -1,4 +1,6 @@
-use clap::Parser;
+use std::io::IsTerminal;
+
+use clap::{CommandFactory, FromArgMatches};
 use serde::Serialize;
 use tracing::{debug, error};
 
@@ -7,26 +9,99 @@ use crate::cli::args::{
     ToolsCommand,
 };
 use crate::cli::execute;
+use crate::cli::global_flags;
 use crate::cli::output::{failure_envelope, print_command_error};
 use crate::command_envelope::Envelope;
 use crate::config::loader::{
     load_config, load_config_for_infobase_export, load_config_for_prepared_test,
-    load_config_for_tools_download, resolve_primary_config_path,
+    load_config_for_preview, load_config_for_tools_download, resolve_primary_config_path,
 };
 use crate::output::presenter::Presenter;
 use crate::output::text::{TimelineItem, TimelineStatus};
 use crate::support::error::AppError;
-use crate::use_cases::config_init::{ConfigBuilderRequest, ConfigFormatRequest, ConfigInitRequest};
+use crate::use_cases::config_init::{
+    ConfigFormatRequest, ConfigInitRequest, DeclaredOrigin, OriginKey,
+};
 use crate::use_cases::context::CommandName;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
-const BOOTSTRAP_COMMAND: &str = "bootstrap";
-const CONFIG_INIT_COMMAND: &str = "config init";
+/// Новые имена команд словаря, у которых внутри остался прежний путь разбора: `init` —
+/// это `config init`, `download` — `infobase configuration export`. Обе формы разбираются
+/// `clap` и здесь сводятся к одной, чтобы ниже по течению имя было одно.
+fn canonical_command(command: Command) -> Command {
+    use crate::cli::args::{
+        ConfigArgs, ConfigCommand, InfobaseArgs, InfobaseCommand, InfobaseConfigurationArgs,
+        InfobaseConfigurationCommand,
+    };
+    match command {
+        Command::ConfigInit(args) => Command::Config(ConfigArgs {
+            command: ConfigCommand::Init(args),
+        }),
+        Command::Download(args) => Command::Infobase(InfobaseArgs {
+            command: InfobaseCommand::Configuration(InfobaseConfigurationArgs {
+                command: InfobaseConfigurationCommand::Export(args),
+            }),
+        }),
+        // Создание базы — свой сценарий, а не выгрузка: путь `infobase create` сводится
+        // к внутреннему варианту, и ниже по течению команда остаётся прежней.
+        Command::Infobase(InfobaseArgs {
+            command: InfobaseCommand::Create,
+        }) => Command::Init,
+        command => command,
+    }
+}
+
+/// Отказ по глобальному ключу случается до того, как команда выбрала себе вывод. У
+/// `mcp serve` stdout занят протоколом, поэтому его отказы уходят голой строкой в stderr —
+/// как и остальные отказы запуска сервера; у прочих команд отказ рисует конверт.
+fn render_startup_refusal(
+    leaf: &str,
+    command: &Command,
+    no_color: bool,
+    output_format: &str,
+    error: UseCaseError,
+) -> i32 {
+    if leaf.starts_with("mcp ") {
+        eprintln!("{error}");
+        return error.exit_code();
+    }
+    let presenter = Presenter::new(output_format.to_owned(), color_mode(no_color));
+    let message = error.to_string();
+    // Конверт называет команду тем же именем, что и остальные её ответы; лист назван внутри
+    // сообщения, где он и нужен читателю.
+    print_command_error(&presenter, command_name(command), &error, &message);
+    error.exit_code()
+}
+
+const BOOTSTRAP_COMMAND: &str = "clone";
+const CONFIG_INIT_COMMAND: &str = "init";
 const VERSION_COMMAND: &str = "version";
 
 pub fn run() -> i32 {
-    let cli = Cli::parse();
+    let mut matches = Cli::command().get_matches();
+    // Путь листа читается до нормализации имён: `clap` уже свёл синонимы к каноническому
+    // имени, а `canonical_command` ниже схлопывает разные листья в один вариант.
+    let leaf = global_flags::leaf_command_path(&matches);
+    let mut cli = match Cli::from_arg_matches_mut(&mut matches) {
+        Ok(cli) => cli,
+        Err(error) => error.exit(),
+    };
+    cli.command = canonical_command(cli.command);
     let output_format = cli_output_format(cli.json_message);
+    if let Some(error) =
+        global_flags::refusal(&leaf, cli.dry_run, cli.infobase.as_deref()).or_else(|| {
+            // Очистка рабочего каталога и превью об одном каталоге спорят одинаково у всякой
+            // команды, поэтому спрашивается это один раз и до того, как каталог тронут.
+            (cli.dry_run && cli.clean_before_execution).then(|| {
+                UseCaseError::new(
+                    UseCaseErrorKind::Validation,
+                    "--clean-before-execution cannot be combined with --dry-run because preview must not modify workPath",
+                )
+            })
+        })
+    {
+        return render_startup_refusal(&leaf, &cli.command, cli.no_color, output_format, error);
+    }
 
     if let Command::Version = &cli.command {
         return run_version_command(output_format);
@@ -36,15 +111,11 @@ pub fn run() -> i32 {
         return run_mcp_command(&cli, args);
     }
 
-    let color_mode = if cli.no_color {
-        crate::output::presenter::ColorMode::Disabled
-    } else {
-        crate::output::presenter::ColorMode::Enabled
-    };
-    let presenter = Presenter::new(output_format.to_owned(), color_mode);
+    let color_mode = color_mode(cli.no_color);
+    let mut presenter = Presenter::new(output_format.to_owned(), color_mode);
 
     if let Command::Config(args) = &cli.command {
-        return run_config_command(args, &presenter);
+        return run_config_command(args, &cli, &presenter);
     }
 
     if let Command::Bootstrap(args) = &cli.command {
@@ -53,11 +124,14 @@ pub fn run() -> i32 {
 
     if let Command::Infobase(args) = &cli.command {
         if let Err(error) = execute::validate_infobase_request(args) {
-            let error = execute::render_invalid_infobase_request(args, &presenter, error);
+            let error =
+                execute::render_invalid_infobase_request(args, &presenter, error, cli.dry_run);
             return error.exit_code();
         }
-        if args.dry_run() && cli.clean_before_execution {
-            let message = "--clean-before-execution cannot be combined with infobase --dry-run because preview must not modify workPath";
+    }
+
+    if let Command::Extensions(args) = &cli.command {
+        if let Err(message) = args.validate_property_options() {
             let error = UseCaseError::new(UseCaseErrorKind::Validation, message);
             print_command_error(&presenter, command_name(&cli.command), &error, message);
             return error.exit_code();
@@ -65,7 +139,15 @@ pub fn run() -> i32 {
     }
 
     let config = match load_cli_config(&cli) {
-        Ok(c) => c,
+        Ok(loaded) => {
+            presenter.note_load_warnings(
+                cli.config
+                    .as_deref()
+                    .unwrap_or(crate::config::loader::DEFAULT_CONFIG_FILE_NAME),
+                &loaded.warnings,
+            );
+            loaded.config
+        }
         Err(e) => {
             let message = e.to_string();
             let error = UseCaseError::from(AppError::from(e));
@@ -75,7 +157,8 @@ pub fn run() -> i32 {
                     &presenter,
                     error,
                     "provider selection was not attempted because configuration loading failed",
-                    crate::domain::infobase_export::ExportPhase::ConfigurationLoad,
+                    crate::domain::infobase_export::InfobaseTransferPhase::ConfigurationLoad,
+                    cli.dry_run,
                 );
                 return error.exit_code();
             }
@@ -85,15 +168,15 @@ pub fn run() -> i32 {
     };
     let mut prepared_infobase = match &cli.command {
         Command::Infobase(args) => {
-            match execute::prepare_infobase_cli_command(&config, args, &presenter) {
+            match execute::prepare_infobase_cli_command(&config, args, &presenter, cli.dry_run) {
                 Ok(prepared) => Some(prepared),
                 Err(error) => return error.exit_code(),
             }
         }
         _ => None,
     };
-    if let Command::Infobase(args) = &cli.command {
-        if args.dry_run() {
+    if let Command::Infobase(_) = &cli.command {
+        if cli.dry_run {
             return match execute::preview_prepared_infobase_command(
                 &config,
                 prepared_infobase
@@ -122,15 +205,17 @@ pub fn run() -> i32 {
         crate::support::logging::init_action_logging_deferred(
             level,
             output_format,
-            !cli.no_color,
+            color_enabled(cli.no_color),
             &config.work_path,
+            cli.dry_run,
         )
     } else {
         crate::support::logging::init_action_logging(
             level,
             output_format,
-            !cli.no_color,
+            color_enabled(cli.no_color),
             &config.work_path,
+            cli.dry_run,
         )
     };
     let action_log_path = match logging_result {
@@ -158,7 +243,10 @@ pub fn run() -> i32 {
     let result = match &cli.command {
         Command::Version => unreachable!("version command is handled before config loading"),
         Command::Bootstrap(_) => unreachable!("bootstrap command is handled before config loading"),
-        Command::Init(_)
+        Command::ConfigInit(_) | Command::Download(_) => {
+            unreachable!("new command names are normalised in canonical_command")
+        }
+        Command::Init
         | Command::Config(_)
         | Command::Tools(_)
         | Command::Extensions(_)
@@ -169,12 +257,14 @@ pub fn run() -> i32 {
         | Command::Convert(_)
         | Command::Artifacts(_)
         | Command::Syntax(_)
-        | Command::Launch(_) => execute::execute_command(
+        | Command::Launch(_)
+        | Command::Publish(_) => execute::execute_command(
             &config,
             &cli.command,
             Some(primary_config_path),
             &presenter,
             cli.clean_before_execution,
+            cli.dry_run,
         ),
         Command::Infobase(_) => execute::execute_prepared_infobase_command(
             &config,
@@ -210,20 +300,27 @@ pub fn run() -> i32 {
 
 fn load_cli_config(
     cli: &Cli,
-) -> Result<crate::config::model::AppConfig, crate::config::loader::ConfigLoadError> {
+) -> Result<crate::config::loader::LoadedConfig, crate::config::loader::ConfigLoadError> {
+    let selector = crate::config::model::InfobaseSelector::from_flag(cli.infobase.as_deref());
+    let config_path = cli.config.as_deref();
+    let workdir = cli.workdir.as_deref();
     if matches!(
         &cli.command,
         Command::Tools(crate::cli::args::ToolsArgs {
             command: ToolsCommand::Download(_)
         })
     ) {
-        load_config_for_tools_download(cli.config.as_deref(), cli.workdir.as_deref())
+        load_config_for_tools_download(config_path, workdir, &selector)
     } else if execute::uses_infobase_export_config(&cli.command) {
-        load_config_for_infobase_export(cli.config.as_deref(), cli.workdir.as_deref())
+        load_config_for_infobase_export(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Test(args) if args.no_build) {
-        load_config_for_prepared_test(cli.config.as_deref(), cli.workdir.as_deref())
+        load_config_for_prepared_test(config_path, workdir, &selector)
+    } else if cli.dry_run {
+        // Превью не создаёт рабочего каталога: проверки те же, готовит `workPath` только
+        // применение. Прежде так загружалось одно лишь `extensions --dry-run`.
+        load_config_for_preview(config_path, workdir, &selector)
     } else {
-        load_config(cli.config.as_deref(), cli.workdir.as_deref())
+        load_config(config_path, workdir, &selector)
     }
 }
 
@@ -231,15 +328,18 @@ fn command_name(command: &Command) -> &'static str {
     match command {
         Command::Version => VERSION_COMMAND,
         Command::Bootstrap(_) => BOOTSTRAP_COMMAND,
-        Command::Config(_) => "config",
+        Command::Config(_) | Command::ConfigInit(_) => CONFIG_INIT_COMMAND,
+        // Сервер отвечает голой строкой в stderr, имени конверта ему не нужно; здесь оно
+        // есть, чтобы имя было у всякой команды.
+        Command::Mcp(_) => "mcp serve",
         _ => execute::command_name(command).as_str(),
     }
 }
 
-#[derive(Debug, Serialize)]
-struct VersionInfo {
-    name: &'static str,
-    version: &'static str,
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct VersionInfo {
+    pub name: &'static str,
+    pub version: &'static str,
 }
 
 fn run_version_command(output_format: &str) -> i32 {
@@ -248,29 +348,33 @@ fn run_version_command(output_format: &str) -> i32 {
         version: env!("CARGO_PKG_VERSION"),
     };
 
-    if output_format == "json" {
-        let presenter = Presenter::new(
-            output_format.to_owned(),
-            crate::output::presenter::ColorMode::Disabled,
-        );
+    let presenter = Presenter::new(
+        output_format.to_owned(),
+        crate::output::presenter::ColorMode::Disabled,
+    );
+    if presenter.is_json() {
         presenter.print_envelope(&Envelope::ok(VERSION_COMMAND, 0, info));
     } else {
-        println!("{} {}", info.name, info.version);
+        presenter.print_bare(&format!("{} {}", info.name, info.version));
     }
 
     0
 }
 
-fn run_config_command(args: &crate::cli::args::ConfigArgs, presenter: &Presenter) -> i32 {
+fn run_config_command(
+    args: &crate::cli::args::ConfigArgs,
+    cli: &Cli,
+    presenter: &Presenter,
+) -> i32 {
     match &args.command {
-        ConfigCommand::Init(init_args) => run_config_init(init_args, presenter),
+        ConfigCommand::Init(init_args) => run_config_init(init_args, cli, presenter),
     }
 }
 
 fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 {
     if config_flag_was_explicitly_set() {
         let message =
-            "global --config flag is not supported for `bootstrap`; use `bootstrap --project-dir <DIR>` to choose where the generated project is written";
+            "global --config flag is not supported for `clone`; use `clone --project-dir <DIR>` to choose where the generated project is written";
         let error = UseCaseError::new(UseCaseErrorKind::Validation, message);
         print_command_error(presenter, BOOTSTRAP_COMMAND, &error, message);
         return error.exit_code();
@@ -290,8 +394,9 @@ fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 
     if let Err(error) = crate::support::logging::init_action_logging(
         level,
         if presenter.is_json() { "json" } else { "text" },
-        !cli.no_color,
+        color_enabled(cli.no_color),
         &work_path,
+        cli.dry_run,
     ) {
         let message = error.to_string();
         let error = UseCaseError::new(UseCaseErrorKind::Runtime, message.clone());
@@ -308,9 +413,40 @@ fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 
         password: args.password.clone(),
         source_dir: args.source_dir.clone().into(),
         force: args.force,
+        dry_run: cli.dry_run,
     };
-    let context = crate::use_cases::context::ExecutionContext::cli(CommandName::Bootstrap);
-    match crate::use_cases::bootstrap_project::execute(&context, &request) {
+    // Ctrl+C и SIGTERM — отмена, как у остальных команд: по умолчанию сигнал убил бы
+    // раннер под замком, и файл владельца замка пережил бы его.
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let _signal_guard = crate::cli::signal::CliSignalGuard::install(cancellation.clone());
+    let context = crate::use_cases::context::ExecutionContext::cli(CommandName::Bootstrap)
+        .with_cancellation(cancellation);
+    let outcome = crate::use_cases::bootstrap_project::plan(request).and_then(|plan| {
+        // Замок берётся по настройкам плана до первого файла проекта: занятый каталог
+        // отказывает, пока проекта ещё нет. Внешняя ошибка — только отказ замка, итог
+        // клона внутри.
+        // `--clean-before-execution` клон не чистит: журналов платформы у нового проекта нет.
+        let clean_before_execution = false;
+        let preview = plan.is_preview();
+        execute::with_cli_workspace_lock(
+            plan.config(),
+            presenter,
+            CommandName::Bootstrap,
+            clean_before_execution,
+            preview,
+            || {
+                Ok(crate::use_cases::bootstrap_project::execute(
+                    &context, &plan,
+                ))
+            },
+        )
+        .unwrap_or_else(|error| {
+            Err(crate::use_cases::result::UseCaseFailure::without_payload(
+                error,
+            ))
+        })
+    });
+    match outcome {
         Ok(result) => {
             if presenter.is_json() {
                 presenter.print_envelope(&Envelope {
@@ -323,7 +459,12 @@ fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 
                     data: result,
                 });
             } else {
-                render_bootstrap_text(&result, presenter, true);
+                render_bootstrap_text(
+                    &result,
+                    presenter,
+                    true,
+                    execute::Requested::from_dry_run(cli.dry_run),
+                );
             }
             0
         }
@@ -341,13 +482,20 @@ fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 
                     presenter.print_envelope(&failure_envelope(
                         BOOTSTRAP_COMMAND,
                         0,
-                        serde_json::json!({ "message": error.message() }),
+                        crate::cli::output::RefusalData {
+                            message: error.message().to_owned(),
+                        },
                         &error,
                     ));
                 }
             } else {
                 if let Some(result) = failure.payload.as_ref() {
-                    render_bootstrap_text(result, presenter, false);
+                    render_bootstrap_text(
+                        result,
+                        presenter,
+                        false,
+                        execute::Requested::from_dry_run(cli.dry_run),
+                    );
                 }
                 presenter.print_error(&error.to_string());
             }
@@ -367,10 +515,10 @@ fn resolve_bootstrap_project_dir(
     }
 }
 
-fn run_config_init(args: &ConfigInitArgs, presenter: &Presenter) -> i32 {
+fn run_config_init(args: &ConfigInitArgs, cli: &Cli, presenter: &Presenter) -> i32 {
     if config_flag_was_explicitly_set() {
         let message =
-            "global --config flag is not supported for `config init`; use `config init --output <FILE>` to choose where the generated config is written";
+            "global --config flag is not supported for `init`; use `init --output <FILE>` to choose where the generated config is written";
         let error = UseCaseError::new(UseCaseErrorKind::Validation, message);
         print_command_error(presenter, CONFIG_INIT_COMMAND, &error, message);
         return error.exit_code();
@@ -387,13 +535,43 @@ fn run_config_init(args: &ConfigInitArgs, presenter: &Presenter) -> i32 {
     };
     let output_path = args.output.as_deref().unwrap_or("v8project.yaml");
 
+    // `init` объявляет базу, а не выбирает её: адрес приходит либо своим ключом команды,
+    // либо глобальным `--infobase` — сайт называет `init --infobase <строка>` рецептом
+    // объявления `origin`. Два ключа об одном адресе — отказ, а не тихий выбор одного.
+    let declared_by_flag =
+        match crate::config::model::InfobaseSelector::from_flag(cli.infobase.as_deref()) {
+            crate::config::model::InfobaseSelector::Connection(connection) => Some(connection),
+            _ => None,
+        };
+    let own_key = args
+        .connection
+        .clone()
+        .filter(|connection| !connection.trim().is_empty());
+    let connection = match (own_key, declared_by_flag) {
+        (Some(_), Some(_)) => {
+            let message =
+                "--connection and --infobase name the same address for `init`; pass one of them";
+            let error = UseCaseError::new(UseCaseErrorKind::Validation, message);
+            print_command_error(presenter, CONFIG_INIT_COMMAND, &error, message);
+            return error.exit_code();
+        }
+        (Some(connection), None) => Some(DeclaredOrigin {
+            key: OriginKey::Connection,
+            connection,
+        }),
+        (None, Some(connection)) => Some(DeclaredOrigin {
+            key: OriginKey::Infobase,
+            connection,
+        }),
+        (None, None) => None,
+    };
+
     let request = ConfigInitRequest {
         project_dir,
         output_path: output_path.into(),
         force: args.force,
-        connection: args.connection.clone(),
+        connection,
         format: map_config_format(&args.format),
-        builder: map_config_builder(&args.builder),
     };
 
     match crate::use_cases::config_init::execute(&request) {
@@ -431,7 +609,6 @@ fn render_config_init_text(
         format!("local path: {}", result.local_path),
         format!("gitignore: {}", result.gitignore_path),
         format!("format: {}", result.format),
-        format!("builder: {}", result.builder),
     ];
     if result.overwritten {
         details.push("overwritten: yes".to_owned());
@@ -465,6 +642,7 @@ fn render_bootstrap_text(
     result: &crate::domain::bootstrap::BootstrapResult,
     presenter: &Presenter,
     succeeded: bool,
+    requested: execute::Requested,
 ) {
     let mut details = vec![
         format!("path: {}", result.path.display()),
@@ -472,6 +650,14 @@ fn render_bootstrap_text(
         format!("gitignore: {}", result.gitignore_path.display()),
         format!("source dir: {}", result.source_dir.display()),
         format!("dumped: {}", if result.dumped { "yes" } else { "no" }),
+        format!(
+            "provider dispatched: {}",
+            if result.provider_dispatched {
+                "yes"
+            } else {
+                "no"
+            }
+        ),
     ];
     if let Some(message) = result.message.as_deref() {
         details.push(format!(
@@ -483,10 +669,14 @@ fn render_bootstrap_text(
         details.push(format!("[warning] {warning}"));
     }
 
-    let label = if succeeded {
-        "Project bootstrapped successfully"
-    } else {
-        "Project bootstrap failed"
+    // Превью проекта не заводит, и называть его заведённым нельзя: пути в ответе — те,
+    // что были бы написаны. Признак берётся у запроса, а не выводится из
+    // `provider_dispatched`: тот говорит, получил ли исполнитель работу, а не было ли
+    // превью, и успешный боевой прогон может вернуться без работы исполнителю.
+    let label = match (succeeded, requested) {
+        (true, execute::Requested::Apply) => "Project cloned successfully",
+        (true, execute::Requested::Preview) => "Project clone planned, nothing written",
+        (false, _) => "Project clone failed",
     };
     let timeline = vec![
         TimelineItem::new(
@@ -495,7 +685,7 @@ fn render_bootstrap_text(
             } else {
                 TimelineStatus::Failed
             },
-            "bootstrap:",
+            "clone:",
         )
         .with_detail(details.join("\n")),
         TimelineItem::new(
@@ -515,13 +705,6 @@ fn map_config_format(value: &str) -> ConfigFormatRequest {
         "designer" | "DESIGNER" => ConfigFormatRequest::Designer,
         "edt" | "EDT" => ConfigFormatRequest::Edt,
         _ => ConfigFormatRequest::Auto,
-    }
-}
-
-fn map_config_builder(value: &str) -> ConfigBuilderRequest {
-    match value {
-        "ibcmd" | "IBCMD" => ConfigBuilderRequest::Ibcmd,
-        _ => ConfigBuilderRequest::Designer,
     }
 }
 
@@ -572,13 +755,15 @@ fn prepare_mcp_runtime(
     cli: &Cli,
     transport: &'static str,
 ) -> Result<crate::config::model::AppConfig, i32> {
-    let config = match load_config(cli.config.as_deref(), cli.workdir.as_deref()) {
-        Ok(config) => config,
+    let selector = crate::config::model::InfobaseSelector::from_flag(cli.infobase.as_deref());
+    let loaded = match load_config(cli.config.as_deref(), cli.workdir.as_deref(), &selector) {
+        Ok(loaded) => loaded,
         Err(error) => {
             eprintln!("{error}");
             return Err(crate::output::exit_codes::VALIDATION_ERROR);
         }
     };
+    let config = loaded.config;
 
     if cli.clean_before_execution {
         eprintln!("--clean-before-execution is not supported for MCP transports");
@@ -587,10 +772,22 @@ fn prepare_mcp_runtime(
 
     let level = cli.log_level.as_deref().unwrap_or("info");
     if let Err(error) =
-        crate::support::logging::init_action_logging(level, "json", false, &config.work_path)
+        // Сервер превью не предлагает: ключа нет в опубликованной поверхности.
+        crate::support::logging::init_action_logging(
+            level,
+            "json",
+            false,
+            &config.work_path,
+            false,
+        )
     {
         eprintln!("{error}");
         return Err(crate::output::exit_codes::RUNTIME_ERROR);
+    }
+
+    // stdout сервера занят протоколом: предупреждения загрузки уходят в журнал действий.
+    for warning in &loaded.warnings {
+        tracing::warn!(transport, "{warning}");
     }
 
     debug!(
@@ -606,6 +803,31 @@ fn install_mcp_panic_hook() {
     std::panic::set_hook(Box::new(|panic_info| {
         eprintln!("{panic_info}");
     }));
+}
+
+/// Цвет — оформление, а не содержание, и включается он только там, где его увидят.
+///
+/// Перенаправленный вывод читает не терминал: escape-последовательности в файле журнала
+/// или в выводе CI мешают и человеку, и `grep`. Поэтому цвет выключает и флаг, и
+/// договорённость `NO_COLOR`, и сам факт, что на том конце не терминал.
+/// Цвет включается только там, где его увидят.
+///
+/// Порядок как у остальных инструментов: запрет сильнее разрешения, а разрешение
+/// сильнее догадки. `FORCE_COLOR` нужен тем, кто перенаправляет вывод в средство,
+/// которое ANSI отрисует, — в первую очередь CI.
+fn color_enabled(no_color_flag: bool) -> bool {
+    if no_color_flag || std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    std::env::var_os("FORCE_COLOR").is_some() || std::io::stdout().is_terminal()
+}
+
+fn color_mode(no_color_flag: bool) -> crate::output::presenter::ColorMode {
+    if color_enabled(no_color_flag) {
+        crate::output::presenter::ColorMode::Enabled
+    } else {
+        crate::output::presenter::ColorMode::Disabled
+    }
 }
 
 fn cli_output_format(json_message: bool) -> &'static str {

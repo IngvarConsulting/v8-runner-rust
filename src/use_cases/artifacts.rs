@@ -1,16 +1,19 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+mod agent;
 use tracing::debug;
 
-use crate::config::model::{
-    AppConfig, BuilderBackend, SourceFormat, SourceSetConfig, SourceSetPurpose,
-};
+use crate::config::model::{AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose};
 use crate::domain::artifact::{
     ArtifactKind, ArtifactRef, ArtifactSet, ARTIFACT_ROLE_PACKAGE_FILE, ARTIFACT_ROLE_PLATFORM_LOG,
     ARTIFACT_ROLE_STAGE_FILE,
 };
 use crate::domain::artifacts::{ArtifactBuildMetadata, ArtifactBuildMode, ArtifactsResult};
-use crate::domain::execution::{ExecutionError, ExecutionOutcome, ExecutionStatus};
+use crate::domain::capability::{Operation, Provider};
+use crate::domain::execution::{
+    ExecutionError, ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus,
+};
 use crate::domain::runner::RunnerKind;
 use crate::platform::designer::DesignerDsl;
 use crate::platform::locator::UtilityType;
@@ -31,21 +34,21 @@ use crate::use_cases::external_artifacts::{
     source_set_external_kind, ExternalArtifactDescriptor,
 };
 use crate::use_cases::interruption::{
-    command_interruption_details, command_interruption_status,
-    deferred_command_interruption_details, deferred_interruption_warning_for_command,
-    interruption_before_safe_point,
+    cancellation_record, deferred_command_interruption_details,
+    deferred_interruption_warning_for_command, interruption_before_safe_point,
 };
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::{ArtifactsModeRequest, ArtifactsRequest};
-use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 
 use super::staged_publication::{
     cleanup_owned_orphan_files, interruption_before_publish, StagedPublication,
+    StagedPublicationOutcome,
 };
 
 const SUPPORTED_ARTIFACTS_ERROR: &str =
-    "artifacts currently supports only builder=DESIGNER with designer backend profile";
+    "artifacts currently supports only the Designer provider with the designer backend profile";
 const ARTIFACTS_BACKUP_PREFIX: &str = ".artifacts-backup";
 
 pub fn execute(
@@ -61,7 +64,7 @@ pub fn execute(
         extension = args.extension.as_deref().unwrap_or("<none>"),
         "executing artifacts use case"
     );
-    run_artifacts(context, config, args)
+    stamp_dispatch(run_artifacts(context, config, args), context.work())
 }
 
 type ArtifactsExecutionFailure = UseCaseFailure<ArtifactsResult>;
@@ -137,25 +140,63 @@ fn run_artifacts(
     }
 
     let mut utilities = PlatformUtilities::from_config(config);
-    let location = match utilities.locate(UtilityType::V8) {
-        Ok(location) => location,
-        Err(error) => {
+    let selected = match crate::use_cases::provider_selection::select(
+        config,
+        &mut utilities,
+        crate::domain::capability::Operation::Make,
+    ) {
+        Ok(selected) => selected,
+        Err((error, receipt)) => {
             let message = error.to_string();
-            return Err(ArtifactsExecutionFailure::with_payload(
-                AppError::from(error),
-                empty_result(
-                    resolved.mode,
-                    started,
-                    Some(resolved.source_set_name.clone()),
-                    resolved.extension.clone(),
-                    resolved.output_path.clone(),
-                    Some(message),
-                ),
-            ));
+            let mut result = empty_result(
+                resolved.mode,
+                started,
+                Some(resolved.source_set_name.clone()),
+                resolved.extension.clone(),
+                resolved.output_path.clone(),
+                Some(message),
+            );
+            result.provider = Some(receipt);
+            return Err(ArtifactsExecutionFailure::with_payload(error, result));
         }
     };
+    let receipt = selected.receipt.clone();
+    let outcome = run_artifacts_selected(
+        context, config, args, started, resolved, utilities, selected,
+    );
+    crate::use_cases::provider_selection::attach(outcome, &receipt)
+}
+
+fn run_artifacts_selected(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &ArtifactsRequest,
+    started: Instant,
+    resolved: ResolvedArtifactsTarget,
+    utilities: PlatformUtilities,
+    selected: crate::use_cases::provider_selection::SelectedProvider,
+) -> UseCaseResult<ArtifactsResult> {
+    // Только агентский исполнитель может обходиться без утилиты: к чужому агенту
+    // подключаются по сети. Любому другому без утилиты делать нечего.
+    let executable = selected.location.map(|location| location.path);
+    if executable.is_none() && selected.provider != Provider::Agent {
+        return Err(UseCaseFailure::without_payload(
+            crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::Make,
+                selected.provider,
+            ),
+        ));
+    }
+    let executor_label = executable
+        .as_deref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "the designer agent".to_owned());
 
     if args.dry_run {
+        crate::use_cases::progress::log_live_stage(
+            "make: preview",
+            "[Artifacts] preview only, nothing built or published",
+        );
         // The artifacts lock below is this command's first filesystem write, and Designer is
         // already located, so an absent platform refuses in the preview.
         let metadata = ArtifactBuildMetadata {
@@ -169,6 +210,7 @@ fn run_artifacts(
             published: false,
         };
         return Ok(ArtifactsResult {
+            provider: None,
             provider_dispatched: false,
             mode: resolved.mode,
             source_set: Some(resolved.source_set_name.clone()),
@@ -180,7 +222,7 @@ fn run_artifacts(
                     "would build {:?} into '{}' via {}; nothing published",
                     resolved.mode,
                     resolved.output_path.display(),
-                    location.path.display()
+                    executor_label
                 )]),
         });
     }
@@ -221,13 +263,24 @@ fn run_artifacts(
         ));
     }
 
-    let execution_result = run_designer_export(
-        context,
-        config,
-        &resolved,
-        location.path.as_path(),
-        utilities.runner_for(UtilityType::V8),
-    );
+    let execution_result = match (selected.provider, executable.as_deref()) {
+        (Provider::Agent, v8) => agent::run_agent_export(context, config, &resolved, v8),
+        (_, Some(binary)) => run_designer_export(
+            context,
+            config,
+            &resolved,
+            binary,
+            utilities.runner_for(UtilityType::V8),
+        ),
+        (provider, None) => Err((
+            crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::Make,
+                provider,
+            ),
+            ArtifactSet::default(),
+            None,
+        )),
+    };
     drop(lock_guard);
 
     match execution_result {
@@ -245,26 +298,10 @@ fn run_artifacts(
                 file_names: published_file_names(&artifacts),
                 published: true,
             };
-            let diagnostics = message.message.clone().into_iter().collect::<Vec<_>>();
-            let mut execution = ExecutionOutcome::new(ExecutionStatus::Succeeded)
-                .with_diagnostics(diagnostics)
-                .with_artifacts(artifacts.clone())
-                .with_payload(metadata);
-            if let Some(interruption) = message.deferred_interruption {
-                execution =
-                    execution.with_interruptions(vec![deferred_command_interruption_details(
-                        interruption,
-                        "publish",
-                        publication_warning(context.command(), Some(interruption)).unwrap_or_else(
-                            || {
-                                "artifact publication completed after deferred interruption"
-                                    .to_owned()
-                            },
-                        ),
-                    )]);
-            }
+            let execution = published_execution(context, artifacts, metadata, message);
             Ok(ArtifactsResult {
-                provider_dispatched: true,
+                provider: None,
+                provider_dispatched: false,
                 mode: resolved.mode,
                 source_set: Some(resolved.source_set_name),
                 extension: resolved.extension,
@@ -272,63 +309,88 @@ fn run_artifacts(
                 execution,
             })
         }
-        Err((error, mut artifacts, platform_log_path)) => {
-            let message = error.to_string();
-            if artifacts.get_by_role(ARTIFACT_ROLE_PLATFORM_LOG).is_none() {
-                if let Some(path) = platform_log_path.as_ref() {
-                    artifacts.push(
-                        ArtifactRef::new(ArtifactKind::PlatformLog, path)
-                            .with_role(ARTIFACT_ROLE_PLATFORM_LOG),
-                    );
-                }
-            }
-            let metadata = ArtifactBuildMetadata {
-                artifact_type: resolved.mode,
-                output_path: resolved.output_path.clone(),
-                file_names: published_file_names(&artifacts),
-                published: false,
-            };
-            let artifact_for_error = artifacts
-                .get_by_role(ARTIFACT_ROLE_PLATFORM_LOG)
-                .or_else(|| artifacts.get_by_role(ARTIFACT_ROLE_STAGE_FILE))
-                .map(|path| ArtifactRef::new(ArtifactKind::Other("diagnostic".to_owned()), path));
-            let mut execution = ExecutionOutcome::new(
-                context
-                    .interruption()
-                    .map(command_interruption_status)
-                    .unwrap_or(ExecutionStatus::Failed),
-            )
-            .with_artifacts(artifacts.clone())
-            .with_payload(metadata);
-            if let Some(interruption) = context.interruption() {
-                execution = execution
-                    .with_diagnostics(vec![message.clone()])
-                    .with_interruptions(vec![command_interruption_details(
-                        interruption,
-                        "export_or_publish",
-                        message.clone(),
-                    )]);
-            } else {
-                execution = execution.with_errors(vec![ExecutionError {
-                    code: "designer_export_failed".to_owned(),
-                    message: message.clone(),
-                    details: Vec::new(),
-                    artifact: artifact_for_error,
-                    retryable: false,
-                }]);
-            }
-            let payload = ArtifactsResult {
-                provider_dispatched: true,
-                mode: resolved.mode,
-                source_set: Some(resolved.source_set_name),
-                extension: resolved.extension,
-                duration_ms: started.elapsed().as_millis() as u64,
-                execution,
-            };
-            Err(ArtifactsExecutionFailure::with_payload(error, payload))
-        }
+        Err((error, artifacts, platform_log_path)) => Err(export_refusal(
+            &resolved,
+            started,
+            error,
+            artifacts,
+            platform_log_path,
+        )),
     }
 }
+
+/// Отказ сборки артефакта формой команды. Отмену и её место называет ошибка: безопасная
+/// точка — `command_boundary`, снятый экспорт — `provider_command`. Отказ, пришедший, когда
+/// отмена уже ожидала, остаётся отказом со своим кодом: сигнал сюда не доходит вовсе.
+fn export_refusal(
+    resolved: &ResolvedArtifactsTarget,
+    started: Instant,
+    error: AppError,
+    mut artifacts: ArtifactSet,
+    platform_log_path: Option<PathBuf>,
+) -> ArtifactsExecutionFailure {
+    let message = error.to_string();
+    if artifacts.get_by_role(ARTIFACT_ROLE_PLATFORM_LOG).is_none() {
+        if let Some(path) = platform_log_path.as_ref() {
+            artifacts.push(
+                ArtifactRef::new(ArtifactKind::PlatformLog, path)
+                    .with_role(ARTIFACT_ROLE_PLATFORM_LOG),
+            );
+        }
+    }
+    let metadata = ArtifactBuildMetadata {
+        artifact_type: resolved.mode,
+        output_path: resolved.output_path.clone(),
+        file_names: published_file_names(&artifacts),
+        published: false,
+    };
+    let artifact_for_error = artifacts
+        .get_by_role(ARTIFACT_ROLE_PLATFORM_LOG)
+        .or_else(|| artifacts.get_by_role(ARTIFACT_ROLE_STAGE_FILE))
+        .map(|path| ArtifactRef::new(ArtifactKind::Other("diagnostic".to_owned()), path));
+    let interruption = cancellation_record(
+        &error,
+        ExecutionInterruptionPhase::ProviderCommand,
+        message.clone(),
+    );
+    let status = if interruption.is_some() {
+        ExecutionStatus::Cancelled
+    } else {
+        ExecutionStatus::Failed
+    };
+    let execution = ExecutionOutcome::new(status)
+        .with_artifacts(artifacts.clone())
+        .with_payload(metadata);
+    let execution = match interruption {
+        Some(interruption) => execution
+            .with_diagnostics(vec![message.clone()])
+            .with_interruptions(vec![interruption]),
+        None => execution.with_errors(vec![ExecutionError {
+            code: "designer_export_failed".to_owned(),
+            message: message.clone(),
+            details: Vec::new(),
+            artifact: artifact_for_error,
+            retryable: false,
+        }]),
+    };
+    let payload = ArtifactsResult {
+        provider: None,
+        provider_dispatched: false,
+        mode: resolved.mode,
+        source_set: Some(resolved.source_set_name.clone()),
+        extension: resolved.extension.clone(),
+        duration_ms: started.elapsed().as_millis() as u64,
+        execution,
+    };
+    ArtifactsExecutionFailure::with_payload(error, payload)
+}
+
+/// Исход публикации артефактов: и успех, и отказ несут уже разложенный набор, чтобы
+/// вызывающий мог убрать за собой и назвать, что успело лечь на диск.
+type PublicationAttempt = Result<
+    (PlatformCommandResult, ArtifactSet, PublicationOutcome),
+    (AppError, ArtifactSet, Option<PathBuf>),
+>;
 
 fn run_designer_export(
     context: &ExecutionContext,
@@ -336,10 +398,7 @@ fn run_designer_export(
     resolved: &ResolvedArtifactsTarget,
     binary: &Path,
     runner: &dyn ProcessRunner,
-) -> Result<
-    (PlatformCommandResult, ArtifactSet, PublicationOutcome),
-    (AppError, ArtifactSet, Option<PathBuf>),
-> {
+) -> PublicationAttempt {
     if matches!(
         resolved.mode,
         ArtifactBuildMode::ExternalDataProcessorEpf | ArtifactBuildMode::ExternalReportErf
@@ -434,8 +493,9 @@ fn run_designer_export(
         ));
     }
 
-    if let Some(error) = interruption_before_publish(
+    if let Some(error) = refusal_before_publication(
         context,
+        resolved,
         format!(
             "artifact publication for source-set '{}' and output '{}'",
             resolved.source_set_name,
@@ -464,11 +524,7 @@ fn run_designer_export(
     Ok((
         dump_result,
         published_artifacts,
-        publication_message(
-            context,
-            publish_phase.cleanup_warning,
-            publish_phase.deferred_interruption,
-        ),
+        publication_message(context, publish_phase),
     ))
 }
 
@@ -478,10 +534,7 @@ fn run_external_designer_export(
     resolved: &ResolvedArtifactsTarget,
     binary: &Path,
     runner: &dyn ProcessRunner,
-) -> Result<
-    (PlatformCommandResult, ArtifactSet, PublicationOutcome),
-    (AppError, ArtifactSet, Option<PathBuf>),
-> {
+) -> PublicationAttempt {
     if let Some(error) = interruption_before_safe_point(
         context,
         format!(
@@ -510,7 +563,7 @@ fn run_external_designer_export(
         resolved.mode,
     )
     .map_err(|error| (error, ArtifactSet::default(), None))?;
-    let descriptors = external_descriptors(context, config, resolved, runner, binary)
+    let descriptors = external_descriptors(context, config, resolved)
         .map_err(|error| (error, ArtifactSet::default(), None))?;
     let mut artifacts = ArtifactSet::default();
     let mut last_result = PlatformCommandResult {
@@ -610,8 +663,9 @@ fn run_external_designer_export(
         })?;
     }
 
-    if let Some(error) = interruption_before_publish(
+    if let Some(error) = refusal_before_publication(
         context,
+        resolved,
         format!(
             "external artifact publication for source-set '{}' and output '{}'",
             resolved.source_set_name,
@@ -626,6 +680,8 @@ fn run_external_designer_export(
             context,
             ARTIFACTS_BACKUP_PREFIX,
             "failed to publish staged external directory",
+            // Путь вывода — место для порождённого, а не для чьей-то работы.
+            crate::use_cases::destruction_guard::DestructionConsent::RunnerOwned,
         )
         .map_err(|error| {
             (
@@ -651,11 +707,7 @@ fn run_external_designer_export(
     Ok((
         last_result,
         artifacts,
-        publication_message(
-            context,
-            publish_phase.cleanup_warning,
-            publish_phase.deferred_interruption,
-        ),
+        publication_message(context, publish_phase),
     ))
 }
 
@@ -716,10 +768,7 @@ fn resolve_target(
                 let candidates = inventory
                     .source_sets_with_purpose(SourceSetPurpose::Extension)
                     .into_iter()
-                    .filter_map(|source_set| {
-                        let resolved_name = platform_extension_name(source_set);
-                        (resolved_name == requested_extension).then_some(source_set)
-                    })
+                    .filter(|source_set| platform_extension_name(source_set) == requested_extension)
                     .collect::<Vec<_>>();
                 if candidates.is_empty() {
                     let available = inventory
@@ -780,6 +829,15 @@ fn resolve_target(
         }
     };
 
+    let _runtime_context = inventory
+        .designer_context(&source_set.name)
+        .ok_or_else(|| {
+            AppError::Runtime(format!(
+                "missing runtime context for source-set '{}'",
+                source_set.name
+            ))
+        })?;
+
     let canonical_output_path = nearest_existing_canonical_path(&output_path).map_err(|error| {
         AppError::Runtime(format!("failed to canonicalize output path: {error}"))
     })?;
@@ -814,7 +872,11 @@ fn resolve_target(
 }
 
 fn validate_supported_matrix(config: &AppConfig, args: &ArtifactsRequest) -> Option<AppError> {
-    if config.builder != BuilderBackend::Designer {
+    // Агент — тот же профиль Конфигуратора (те же виды артефактов), только через shell.
+    if !matches!(
+        config.selected_provider(Operation::Make),
+        Provider::Designer | Provider::Agent
+    ) {
         return Some(AppError::Validation(SUPPORTED_ARTIFACTS_ERROR.to_owned()));
     }
     if args.execution.profile.backend_hint.as_deref() != Some("designer") {
@@ -890,6 +952,19 @@ fn resolve_single_configuration_source_set<'a>(
     Ok(configuration_source_sets[0])
 }
 
+/// Последний шаг перед публикацией: прерывание и цель. Цель сверена при разрешении, но за
+/// время работы исполнителя путь мог начать указывать в другое место — тогда публикация
+/// останавливается, а промежуточная копия остаётся, как и при прерывании.
+#[must_use = "a refusal must stop the publication"]
+fn refusal_before_publication(
+    context: &ExecutionContext,
+    resolved: &ResolvedArtifactsTarget,
+    safe_point: impl Into<String>,
+) -> Option<AppError> {
+    interruption_before_publish(context, safe_point)
+        .or_else(|| validate_publish_target(resolved).err())
+}
+
 fn validate_publish_target(resolved: &ResolvedArtifactsTarget) -> Result<(), AppError> {
     if resolved.canonical_output_path
         != nearest_existing_canonical_path(&resolved.output_path).map_err(|error| {
@@ -897,7 +972,7 @@ fn validate_publish_target(resolved: &ResolvedArtifactsTarget) -> Result<(), App
         })?
     {
         return Err(AppError::Validation(format!(
-            "output path changed during artifacts resolution: {}",
+            "output path changed since the target was resolved: {}",
             resolved.output_path.display()
         )));
     }
@@ -964,8 +1039,8 @@ fn build_designer_dsl<'a>(
         config.v8_connection(),
         runner,
         Some(log_file),
-    )
-    .with_execution_policy(context.process_policy(InterruptionSafetyClass::GracefulThenKill, None)))
+        context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+    ))
 }
 
 fn ensure_platform_success(
@@ -1027,7 +1102,11 @@ fn empty_result(
             .with_errors(vec![ExecutionError::new("artifacts_failed", message)]);
     }
     ArtifactsResult {
-        provider_dispatched: true,
+        provider: None,
+        // Ответ без исполнения: все шесть мест, которые его строят, — отказы раньше
+        // запуска платформы: матрица, цель, цель выкладки, выбор исполнителя, замок и
+        // чистка. Настоящий запуск строит ответ буквально и ставит признак сам.
+        provider_dispatched: false,
         mode,
         source_set,
         extension,
@@ -1048,7 +1127,7 @@ fn merge_optional_messages(left: Option<String>, right: Option<String>) -> Optio
 /// What the publish phase has to say, and whether an interruption was deferred through it.
 ///
 /// The flag used to be recovered by searching the message for the words "critical phase" — a
-/// verdict taken from prose the runner itself had formatted (ADR-0029). The phase knows the
+/// verdict taken from prose the runner itself had formatted (DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES). The phase knows the
 /// fact, so the fact travels.
 #[derive(Debug)]
 struct PublicationOutcome {
@@ -1056,31 +1135,65 @@ struct PublicationOutcome {
     deferred_interruption: Option<crate::use_cases::context::ExecutionInterruption>,
 }
 
+/// Итог публикации берётся целиком: предупреждение уборки не может потеряться у места
+/// вызова, и успех с неубранной копией не выглядит чистым. Разбор полный, без `..`:
+/// новое поле итога не пройдёт мимо, пока здесь не решат, что с ним делать.
 fn publication_message(
     context: &ExecutionContext,
-    cleanup_warning: Option<String>,
-    deferred_interruption: Option<crate::use_cases::context::ExecutionInterruption>,
+    published: StagedPublicationOutcome,
 ) -> PublicationOutcome {
+    let StagedPublicationOutcome {
+        cleanup_warning,
+        deferred_interruption,
+        previous_target_present: _,
+    } = published;
     PublicationOutcome {
         message: merge_optional_messages(
             cleanup_warning,
-            publication_warning(context.command(), deferred_interruption),
+            deferred_interruption
+                .map(|interruption| publication_warning(context.command(), interruption)),
         ),
         deferred_interruption,
     }
 }
 
+/// Итог успешного `make`: сообщение публикации уходит в диагностику ответа, отложенное
+/// прерывание — в прерывания. Здесь предупреждение уборки становится частью ответа.
+fn published_execution(
+    context: &ExecutionContext,
+    artifacts: ArtifactSet,
+    metadata: ArtifactBuildMetadata,
+    publication: PublicationOutcome,
+) -> ExecutionOutcome<ArtifactBuildMetadata> {
+    let PublicationOutcome {
+        message,
+        deferred_interruption,
+    } = publication;
+    let execution = ExecutionOutcome::new(ExecutionStatus::Succeeded)
+        .with_diagnostics(message.into_iter().collect())
+        .with_artifacts(artifacts)
+        .with_payload(metadata);
+    match deferred_interruption {
+        Some(interruption) => {
+            execution.with_interruptions(vec![deferred_command_interruption_details(
+                interruption,
+                ExecutionInterruptionPhase::Publication,
+                publication_warning(context.command(), interruption),
+            )])
+        }
+        None => execution,
+    }
+}
+
 fn publication_warning(
     command: crate::use_cases::context::CommandName,
-    deferred_interruption: Option<crate::use_cases::context::ExecutionInterruption>,
-) -> Option<String> {
-    deferred_interruption.map(|interruption| {
-        deferred_interruption_warning_for_command(
-            "artifact publication completed",
-            command,
-            interruption,
-        )
-    })
+    interruption: crate::use_cases::context::ExecutionInterruption,
+) -> String {
+    deferred_interruption_warning_for_command(
+        "artifact publication completed",
+        command,
+        interruption,
+    )
 }
 
 fn map_mode(mode: ArtifactsModeRequest) -> ArtifactBuildMode {
@@ -1098,8 +1211,6 @@ fn external_descriptors(
     context: &ExecutionContext,
     config: &AppConfig,
     resolved: &ResolvedArtifactsTarget,
-    _runner: &dyn ProcessRunner,
-    _binary: &Path,
 ) -> Result<Vec<ExternalArtifactDescriptor>, AppError> {
     let source_set = config
         .source_sets
@@ -1129,8 +1240,6 @@ fn external_descriptors(
                 location.path,
                 config.work_path.join("edt-workspace"),
                 utilities.runner_for(UtilityType::EdtCli),
-            )
-            .with_execution_policy(
                 context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
             );
             prepare_edt_external_artifacts(config, source_set, &edt)
@@ -1151,11 +1260,12 @@ fn published_file_names(artifacts: &ArtifactSet) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_orphan_files, publication_message, publication_warning, resolve_target,
-        run_artifacts, run_designer_export, validate_supported_matrix, ResolvedArtifactsTarget,
+        cleanup_orphan_files, export_refusal, publication_message, publication_warning,
+        published_execution, resolve_target, run_artifacts, run_designer_export,
+        validate_supported_matrix, ResolvedArtifactsTarget, StagedPublicationOutcome,
     };
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, PlatformToolConfig, SourceFormat, SourceSetConfig,
+        AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
         SourceSetPurpose, TestsConfig, ToolsConfig,
     };
     use crate::domain::artifact::{
@@ -1163,11 +1273,12 @@ mod tests {
         ARTIFACT_ROLE_STAGE_FILE,
     };
     use crate::domain::artifacts::{ArtifactBuildMetadata, ArtifactBuildMode, ArtifactsResult};
-    use crate::domain::execution::ExecutionStatus;
+    use crate::domain::execution::{ExecutionInterruptionPhase, ExecutionStatus};
     use crate::platform::process::{
         ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessResult, ProcessRunner,
         SpawnResult,
     };
+    use crate::support::error::AppError;
     use crate::support::fs::{
         metadata_sidecar_path, read_temp_dir_metadata, write_temp_dir_metadata, TempDirKind,
     };
@@ -1175,7 +1286,6 @@ mod tests {
     use crate::use_cases::request::{ArtifactsModeRequest, ArtifactsRequest};
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::time::Duration;
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
 
@@ -1216,10 +1326,34 @@ mod tests {
         result.execution.artifacts.as_ref().expect("artifacts")
     }
 
-    struct CancelAfterDumpRunner;
+    /// Подставной Конфигуратор: выгружает `.cf` и журнал, а затем делает то, что задал тест, —
+    /// отменяет команду или подменяет цель — и выходит с заданным кодом.
+    #[cfg(unix)]
+    struct DumpThen<F> {
+        then: F,
+        exit_code: i32,
+    }
 
-    impl CancelAfterDumpRunner {
-        fn write_success(request: &ProcessRequest) -> Result<ProcessResult, ProcessError> {
+    #[cfg(unix)]
+    impl<F> DumpThen<F> {
+        fn new(then: F) -> Self {
+            Self { then, exit_code: 0 }
+        }
+
+        fn exiting(self, exit_code: i32) -> Self {
+            Self { exit_code, ..self }
+        }
+    }
+
+    #[cfg(unix)]
+    impl<F: Fn(&ProcessExecutionPolicy)> ProcessRunner for DumpThen<F> {
+        fn run_with_policy(
+            &self,
+            request: &ProcessRequest,
+            policy: &ProcessExecutionPolicy,
+        ) -> Result<ProcessResult, ProcessError> {
+            // Как настоящий исполнитель, двойник отмечает работу, едва «запустил» процесс.
+            policy.mark_started_for_test();
             let mut previous = "";
             for arg in &request.args {
                 if previous == "/DumpCfg" {
@@ -1236,42 +1370,21 @@ mod tests {
                 }
                 previous = arg;
             }
+            (self.then)(policy);
             Ok(ProcessResult {
-                exit_code: 0,
+                exit_code: self.exit_code,
                 stdout: String::new(),
                 stderr: String::new(),
                 interruption: None,
             })
         }
-    }
 
-    impl ProcessRunner for CancelAfterDumpRunner {
-        fn run(&self, request: &ProcessRequest) -> Result<ProcessResult, ProcessError> {
-            Self::write_success(request)
-        }
-
-        fn run_with_timeout(
+        fn spawn(
             &self,
-            request: &ProcessRequest,
-            _timeout: Duration,
-        ) -> Result<ProcessResult, ProcessError> {
-            Self::write_success(request)
-        }
-
-        fn run_with_policy(
-            &self,
-            request: &ProcessRequest,
-            policy: &ProcessExecutionPolicy,
-        ) -> Result<ProcessResult, ProcessError> {
-            let result = Self::write_success(request)?;
-            policy.cancellation.cancel();
-            Ok(result)
-        }
-
-        fn spawn(&self, _request: &ProcessRequest) -> Result<SpawnResult, ProcessError> {
-            Err(ProcessError::Cancelled {
-                cmd: "unused".to_owned(),
-            })
+            _request: &ProcessRequest,
+            _work: &crate::platform::process::WorkGiven,
+        ) -> Result<SpawnResult, ProcessError> {
+            unreachable!("the export runs to its end and never spawns")
         }
     }
 
@@ -1284,10 +1397,12 @@ mod tests {
         AppConfig {
             base_path: base.to_path_buf(),
             work_path: work.to_path_buf(),
-            execution_timeout: 300_000,
             format,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![
                 SourceSetConfig {
                     name: "configuration".to_owned(),
@@ -1362,7 +1477,7 @@ mod tests {
 
         let error = validate_supported_matrix(&config, &request).expect("error");
 
-        assert!(error.to_string().contains("builder=DESIGNER"));
+        assert!(error.to_string().contains("the Designer provider"));
     }
 
     #[test]
@@ -1474,11 +1589,28 @@ mod tests {
 
         let failure = run_artifacts(&context, &config, &request).expect_err("failure");
         let error_text = failure.error.to_string();
+        let kind = failure.error.kind();
         let payload = failure.payload.expect("payload");
 
         assert!(error_text.contains("before entering artifact export"));
+        assert_eq!(
+            kind,
+            crate::use_cases::result::UseCaseErrorKind::Cancelled(
+                crate::support::error::CancelledAt::Boundary
+            )
+        );
         assert_eq!(payload.execution.status, ExecutionStatus::Cancelled);
-        assert_eq!(payload.execution.interruptions.len(), 1);
+        let [interruption] = payload.execution.interruptions.as_slice() else {
+            panic!(
+                "one interruption expected: {:?}",
+                payload.execution.interruptions
+            );
+        };
+        // До экспорта ничего не выгружено: это безопасная точка команды.
+        assert_eq!(
+            interruption.phase,
+            Some(ExecutionInterruptionPhase::CommandBoundary)
+        );
     }
 
     #[cfg(unix)]
@@ -1544,7 +1676,7 @@ mod tests {
             &config,
             &resolved,
             Path::new("/tmp/fake-1cv8"),
-            &CancelAfterDumpRunner,
+            &DumpThen::new(|policy: &ProcessExecutionPolicy| policy.cancellation.cancel()),
         )
         .expect_err("interrupted before publish");
         let (error, artifacts, _platform_log_path) = failure;
@@ -1559,33 +1691,227 @@ mod tests {
         assert!(!resolved.output_path.exists());
     }
 
+    /// Цель перепроверяется перед публикацией: путь, который за время работы исполнителя
+    /// стал указывать в другое место, публикацию останавливает, цель не трогается, а
+    /// промежуточная копия остаётся, как при прерывании.
+    #[cfg(unix)]
     #[test]
-    fn publication_warning_reports_timed_out_context() {
+    fn designer_export_rechecks_the_target_before_publishing() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        fs::create_dir_all(base.join("configuration")).expect("base config");
+        fs::create_dir_all(&work).expect("work");
+        let elsewhere = dir.path().join("elsewhere.cf");
+        fs::write(&elsewhere, "someone else's package").expect("elsewhere");
+        let config = sample_config(
+            &base,
+            &work,
+            Path::new("/tmp/fake-1cv8"),
+            SourceFormat::Designer,
+        );
+        let target = dir.path().join("dist/release.cf");
+        let request = cf_request(&target.display().to_string());
+        let resolved = resolve_target(&config, &request).expect("resolved");
+        let context = ExecutionContext::cli(CommandName::Artifacts);
+        // Пока исполнитель работает, на месте цели появляется ссылка в чужое место.
+        let runner = DumpThen::new(|_: &ProcessExecutionPolicy| {
+            std::os::unix::fs::symlink(&elsewhere, &target).expect("plant a link");
+        });
+
+        let (error, artifacts, _platform_log_path) = run_designer_export(
+            &context,
+            &config,
+            &resolved,
+            Path::new("/tmp/fake-1cv8"),
+            &runner,
+        )
+        .expect_err("a moved target must stop the publication");
+
+        assert!(matches!(error, AppError::Validation(_)), "{error}");
+        assert!(error.to_string().contains("output path changed"), "{error}");
+        assert!(
+            fs::symlink_metadata(&target)
+                .expect("target")
+                .file_type()
+                .is_symlink(),
+            "the planted link must stay in place"
+        );
+        assert_eq!(
+            fs::read_to_string(&elsewhere).expect("elsewhere"),
+            "someone else's package"
+        );
+        let stage_path = artifacts
+            .get_by_role(ARTIFACT_ROLE_STAGE_FILE)
+            .expect("stage artifact");
+        assert!(stage_path.is_file());
+    }
+
+    /// Отказ, пришедший, когда отмена уже ожидает, остаётся отказом со своим кодом: сигнал
+    /// без ошибки отмены прерыванием его не делает (#308).
+    #[cfg(unix)]
+    #[test]
+    fn an_unrelated_failure_while_an_interruption_is_pending_stays_a_failure() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        fs::create_dir_all(base.join("configuration")).expect("base config");
+        fs::create_dir_all(&work).expect("work");
+        let config = sample_config(
+            &base,
+            &work,
+            Path::new("/tmp/fake-1cv8"),
+            SourceFormat::Designer,
+        );
+        let request = cf_request(&dir.path().join("dist/release.cf").display().to_string());
+        let resolved = resolve_target(&config, &request).expect("resolved");
+        let context = ExecutionContext::cli(CommandName::Artifacts);
+        // Конфигуратор выходит с отказом, а оператор тем временем просит остановиться.
+        let runner = DumpThen::new(|policy: &ProcessExecutionPolicy| policy.cancellation.cancel())
+            .exiting(12);
+
+        let (error, artifacts, platform_log_path) = run_designer_export(
+            &context,
+            &config,
+            &resolved,
+            Path::new("/tmp/fake-1cv8"),
+            &runner,
+        )
+        .expect_err("the export failed");
+        assert!(
+            context.interruption().is_some(),
+            "the interruption is pending"
+        );
+        let failure = export_refusal(
+            &resolved,
+            std::time::Instant::now(),
+            error,
+            artifacts,
+            platform_log_path,
+        );
+
+        assert_eq!(
+            failure.error.kind(),
+            crate::use_cases::result::UseCaseErrorKind::Platform
+        );
+        let payload = failure.payload.expect("payload");
+        assert_eq!(payload.execution.status, ExecutionStatus::Failed);
+        assert!(
+            payload.execution.interruptions.is_empty(),
+            "{:?}",
+            payload.execution.interruptions
+        );
+        assert_eq!(payload.execution.errors[0].code, "designer_export_failed");
+    }
+
+    /// Конфигуратор, снятый отменой посреди выгрузки, — оборванная работа команды: фаза
+    /// `provider_command`, род отказа — отмена (#308).
+    #[cfg(unix)]
+    #[test]
+    fn a_designer_export_cancelled_after_its_start_is_a_cut_provider_command() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("configuration")).expect("config dir");
+        let script = dir.path().join("1cv8");
+        let started = dir.path().join("started");
+        write_script(
+            &script,
+            &format!(
+                ": > '{}'\nwaited=0\nwhile [ \"$waited\" -lt 300 ]; do sleep 0.1; waited=$((waited + 1)); done\nexit 0",
+                started.display()
+            ),
+        );
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        fs::create_dir_all(base.join("configuration")).expect("base config");
+        fs::create_dir_all(&work).expect("work");
+        let config = sample_config(&base, &work, &script, SourceFormat::Designer);
+        let request = cf_request(&dir.path().join("dist/release.cf").display().to_string());
+        let cancellation = CancellationToken::new();
+        let operator =
+            crate::platform::process::cancel_when_started(&started, cancellation.clone());
+
+        let failure = super::execute(
+            &ExecutionContext::cli(CommandName::Artifacts).with_cancellation(cancellation),
+            &config,
+            &request,
+        )
+        .expect_err("the export was cancelled");
+        assert!(
+            operator.join().expect("operator"),
+            "the command never marked its start"
+        );
+
+        assert_eq!(
+            failure.error.kind(),
+            crate::use_cases::result::UseCaseErrorKind::Cancelled(
+                crate::support::error::CancelledAt::Work
+            )
+        );
+        let payload = failure.payload.expect("payload");
+        assert!(payload.provider_dispatched, "the export had started");
+        assert_eq!(payload.execution.status, ExecutionStatus::Cancelled);
+        let [interruption] = payload.execution.interruptions.as_slice() else {
+            panic!(
+                "one interruption expected: {:?}",
+                payload.execution.interruptions
+            );
+        };
+        assert_eq!(
+            interruption.phase,
+            Some(ExecutionInterruptionPhase::ProviderCommand)
+        );
+    }
+
+    #[test]
+    fn publication_warning_reports_an_interrupted_context() {
         let warning = publication_warning(
             CommandName::Artifacts,
-            Some(crate::use_cases::context::ExecutionInterruption::TimedOut),
-        )
-        .expect("warning");
+            crate::use_cases::context::ExecutionInterruption::Cancelled,
+        );
 
-        assert!(warning.contains("timeout"));
+        assert!(warning.contains("cancel"));
         assert!(warning.contains("critical phase"));
     }
 
     #[test]
     fn publication_message_keeps_cleanup_warning_in_result_contract() {
         let context = ExecutionContext::cli(CommandName::Artifacts);
-
-        let outcome = publication_message(
+        let publication = publication_message(
             &context,
-            Some("cleanup warning".to_owned()),
-            Some(crate::use_cases::context::ExecutionInterruption::Cancelled),
+            StagedPublicationOutcome {
+                cleanup_warning: Some("cleanup warning".to_owned()),
+                deferred_interruption: Some(
+                    crate::use_cases::context::ExecutionInterruption::Cancelled,
+                ),
+                previous_target_present: true,
+            },
         );
-        let message = outcome.message.expect("message");
+        let metadata = ArtifactBuildMetadata {
+            artifact_type: ArtifactBuildMode::ConfigurationCf,
+            output_path: PathBuf::from("dist/main.cf"),
+            file_names: vec!["main.cf".to_owned()],
+            published: true,
+        };
 
-        assert!(message.contains("cleanup warning"));
-        assert!(message.contains("cancellation request"));
+        let execution =
+            published_execution(&context, ArtifactSet::default(), metadata, publication);
+
+        // Предупреждение уборки доходит до ответа, и успех чистым не выглядит.
+        assert_eq!(execution.status, ExecutionStatus::Succeeded);
+        let [message] = execution.diagnostics.as_slice() else {
+            panic!("one diagnostic expected: {:?}", execution.diagnostics);
+        };
+        assert!(message.contains("cleanup warning"), "{message}");
+        assert!(message.contains("cancellation request"), "{message}");
         // The fact travels beside the text, so nobody has to read the text to recover it.
-        assert!(outcome.deferred_interruption.is_some());
+        let [interruption] = execution.interruptions.as_slice() else {
+            panic!("one interruption expected: {:?}", execution.interruptions);
+        };
+        assert!(interruption.deferred);
+        assert_eq!(
+            interruption.phase,
+            Some(ExecutionInterruptionPhase::Publication)
+        );
     }
 
     #[cfg(unix)]
@@ -1770,6 +2096,43 @@ mod tests {
         assert!(!payload.execution.errors[0].message.is_empty());
     }
 
+    /// Каталог внешних обработок `output` в `dir` — цель, которую уборка сверяет со следами.
+    fn external_output_target(dir: &Path, output: &Path) -> ResolvedArtifactsTarget {
+        ResolvedArtifactsTarget {
+            mode: ArtifactBuildMode::ExternalDataProcessorEpf,
+            source_set_name: "external".to_owned(),
+            extension: None,
+            output_path: output.to_path_buf(),
+            source_path: dir.join("external"),
+            is_directory_output: true,
+            canonical_output_path: output.to_path_buf(),
+            canonical_base_path: dir.to_path_buf(),
+            canonical_work_path: dir.to_path_buf(),
+            target_identity: "identity".to_owned(),
+            lock_path: dir.join("lock"),
+        }
+    }
+
+    #[test]
+    fn cleanup_orphan_files_ignores_malformed_metadata() {
+        let dir = tempdir().expect("tempdir");
+        let output = dir.path().join("dist/external");
+        fs::create_dir_all(&output).expect("output");
+        let backup_dir = output
+            .parent()
+            .expect("parent")
+            .join(".artifacts-backup-run-1");
+        fs::create_dir_all(&backup_dir).expect("backup");
+        let meta_path = metadata_sidecar_path(&backup_dir);
+        fs::write(&meta_path, b"not json").expect("metadata");
+        let resolved = external_output_target(dir.path(), &output);
+
+        cleanup_orphan_files(&resolved).expect("cleanup");
+
+        assert!(backup_dir.exists());
+        assert!(meta_path.exists());
+    }
+
     #[test]
     fn cleanup_orphan_files_scans_directory_output_root() {
         let dir = tempdir().expect("tempdir");
@@ -1792,19 +2155,7 @@ mod tests {
             serde_json::to_vec_pretty(&metadata).expect("json"),
         )
         .expect("rewrite metadata");
-        let resolved = ResolvedArtifactsTarget {
-            mode: ArtifactBuildMode::ExternalDataProcessorEpf,
-            source_set_name: "external".to_owned(),
-            extension: None,
-            output_path: output.clone(),
-            source_path: dir.path().join("external"),
-            is_directory_output: true,
-            canonical_output_path: output.clone(),
-            canonical_base_path: dir.path().to_path_buf(),
-            canonical_work_path: dir.path().to_path_buf(),
-            target_identity: "identity".to_owned(),
-            lock_path: dir.path().join("lock"),
-        };
+        let resolved = external_output_target(dir.path(), &output);
 
         cleanup_orphan_files(&resolved).expect("cleanup");
 
@@ -1831,19 +2182,7 @@ mod tests {
             serde_json::to_vec_pretty(&metadata).expect("json"),
         )
         .expect("rewrite metadata");
-        let resolved = ResolvedArtifactsTarget {
-            mode: ArtifactBuildMode::ExternalDataProcessorEpf,
-            source_set_name: "external".to_owned(),
-            extension: None,
-            output_path: output.clone(),
-            source_path: dir.path().join("external"),
-            is_directory_output: true,
-            canonical_output_path: output.clone(),
-            canonical_base_path: dir.path().to_path_buf(),
-            canonical_work_path: dir.path().to_path_buf(),
-            target_identity: "identity".to_owned(),
-            lock_path: dir.path().join("lock"),
-        };
+        let resolved = external_output_target(dir.path(), &output);
 
         cleanup_orphan_files(&resolved).expect("cleanup");
 
@@ -1876,19 +2215,7 @@ mod tests {
             serde_json::to_vec_pretty(&metadata).expect("json"),
         )
         .expect("rewrite metadata");
-        let resolved = ResolvedArtifactsTarget {
-            mode: ArtifactBuildMode::ExternalDataProcessorEpf,
-            source_set_name: "external".to_owned(),
-            extension: None,
-            output_path: output.clone(),
-            source_path: dir.path().join("external"),
-            is_directory_output: true,
-            canonical_output_path: output.clone(),
-            canonical_base_path: dir.path().to_path_buf(),
-            canonical_work_path: dir.path().to_path_buf(),
-            target_identity: "identity".to_owned(),
-            lock_path: dir.path().join("lock"),
-        };
+        let resolved = external_output_target(dir.path(), &output);
 
         cleanup_orphan_files(&resolved).expect("cleanup");
 
@@ -1922,19 +2249,7 @@ mod tests {
             serde_json::to_vec_pretty(&metadata).expect("json"),
         )
         .expect("rewrite metadata");
-        let resolved = ResolvedArtifactsTarget {
-            mode: ArtifactBuildMode::ExternalDataProcessorEpf,
-            source_set_name: "external".to_owned(),
-            extension: None,
-            output_path: output.clone(),
-            source_path: dir.path().join("external"),
-            is_directory_output: true,
-            canonical_output_path: output.clone(),
-            canonical_base_path: dir.path().to_path_buf(),
-            canonical_work_path: dir.path().to_path_buf(),
-            target_identity: "identity".to_owned(),
-            lock_path: dir.path().join("lock"),
-        };
+        let resolved = external_output_target(dir.path(), &output);
 
         cleanup_orphan_files(&resolved).expect("cleanup");
 
@@ -1954,19 +2269,7 @@ mod tests {
         fs::create_dir_all(&recent).expect("stage");
         write_temp_dir_metadata(&recent, TempDirKind::Stage, "run-1", &output, "identity")
             .expect("metadata");
-        let resolved = ResolvedArtifactsTarget {
-            mode: ArtifactBuildMode::ExternalDataProcessorEpf,
-            source_set_name: "external".to_owned(),
-            extension: None,
-            output_path: output.clone(),
-            source_path: dir.path().join("external"),
-            is_directory_output: true,
-            canonical_output_path: output.clone(),
-            canonical_base_path: dir.path().to_path_buf(),
-            canonical_work_path: dir.path().to_path_buf(),
-            target_identity: "identity".to_owned(),
-            lock_path: dir.path().join("lock"),
-        };
+        let resolved = external_output_target(dir.path(), &output);
 
         cleanup_orphan_files(&resolved).expect("cleanup");
 
@@ -1995,19 +2298,7 @@ mod tests {
             serde_json::to_vec_pretty(&metadata).expect("json"),
         )
         .expect("rewrite metadata");
-        let resolved = ResolvedArtifactsTarget {
-            mode: ArtifactBuildMode::ExternalDataProcessorEpf,
-            source_set_name: "external".to_owned(),
-            extension: None,
-            output_path: output.clone(),
-            source_path: dir.path().join("external"),
-            is_directory_output: true,
-            canonical_output_path: output.clone(),
-            canonical_base_path: dir.path().to_path_buf(),
-            canonical_work_path: dir.path().to_path_buf(),
-            target_identity: "identity".to_owned(),
-            lock_path: dir.path().join("lock"),
-        };
+        let resolved = external_output_target(dir.path(), &output);
 
         cleanup_orphan_files(&resolved).expect("cleanup");
 

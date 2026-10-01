@@ -2,14 +2,15 @@ use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, Cursor};
 use std::path::{Component, Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use tracing::debug;
 use zip::ZipArchive;
 
 use crate::config::loader::LOCAL_CONFIG_FILE_NAME;
-use crate::config::model::{AppConfig, BuilderBackend};
+use crate::config::model::AppConfig;
+use crate::domain::capability::{Operation, Provider};
 use crate::domain::tools_download::{
     ToolDownloadDestination, ToolDownloadTarget, ToolExtensionInstallMode, ToolsDownloadResult,
 };
@@ -37,7 +38,7 @@ pub fn execute(
     config: &AppConfig,
     request: &ToolsDownloadRequest,
 ) -> UseCaseResult<ToolsDownloadResult> {
-    tools_download(context, config, request).map_err(|error| UseCaseFailure::without_payload(error))
+    tools_download(context, config, request).map_err(UseCaseFailure::without_payload)
 }
 
 fn tools_download(
@@ -175,9 +176,11 @@ fn download_client_mcp(
     mode: ToolExtensionInstallMode,
     force: bool,
 ) -> Result<Vec<ToolDownloadDestination>, AppError> {
-    if mode == ToolExtensionInstallMode::Artifacts && config.builder != BuilderBackend::Designer {
+    if mode == ToolExtensionInstallMode::Artifacts
+        && config.selected_provider(Operation::Build) != Provider::Designer
+    {
         return Err(AppError::Validation(
-            "`tools download client-mcp` requires builder=DESIGNER because client_mcp.cfe is registered as a tool extension artifact; use `tools download client-mcp --sources` for builder=IBCMD"
+            "`tools download client-mcp` needs the Designer as the push provider because client_mcp.cfe is registered as a tool extension artifact; use `tools download client-mcp --sources` when providers.push names another executor"
                 .to_owned(),
         ));
     }
@@ -219,15 +222,25 @@ fn download_client_mcp(
     }
 }
 
+/// A transfer carries no overall budget: what bounds it is silence on the socket.
+///
+/// Bytes on a network stream are a real liveness signal, unlike a 1C platform process that
+/// legitimately says nothing for minutes, so the download client ends a stalled transfer on
+/// its own read-idle timeout. A wall-clock budget here would only cut healthy transfers of
+/// large archives short. See DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE.
+const TRANSFER_IS_BOUNDED_BY_SILENCE: Option<Duration> = None;
+
 fn fetch_latest_release(context: &ExecutionContext, repo: &str) -> Result<GitHubRelease, AppError> {
     let base = release_base_url();
     let url = format!("{base}/repos/{repo}/releases/latest");
     debug!(repo, url = %url, "fetching latest tool release");
     let cancellation = context.cancellation();
-    let text =
-        download::get_text(&url, context.remaining_budget(), &cancellation).map_err(|error| {
-            AppError::Runtime(format!("failed to fetch latest release {repo}: {error}"))
-        })?;
+    // Отказ загрузки — отказ выполнения, её отмена — отмена: различает их `From`.
+    let text = download::get_text(&url, TRANSFER_IS_BOUNDED_BY_SILENCE, &cancellation).map_err(
+        |error| {
+            AppError::from(error).with_context(format!("failed to fetch latest release {repo}"))
+        },
+    )?;
     serde_json::from_str::<GitHubRelease>(&text).map_err(|error| {
         AppError::Runtime(format!("failed to parse latest release {repo}: {error}"))
     })
@@ -258,15 +271,20 @@ fn download_asset_file(
     let cancellation = context.cancellation();
     let bytes = download::get_bytes(
         &asset.browser_download_url,
-        context.remaining_budget(),
+        TRANSFER_IS_BOUNDED_BY_SILENCE,
         &cancellation,
     )
     .map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to download asset '{}': {error}",
-            asset.name
-        ))
+        AppError::from(error).with_context(format!("failed to download asset '{}'", asset.name))
     })?;
+    if verify_asset_digest(&asset.name, asset.digest.as_deref(), &bytes)?
+        == DigestVerdict::NotPublished
+    {
+        tracing::warn!(
+            asset = %asset.name,
+            "release publishes no checksum for this asset; integrity is unverified"
+        );
+    }
     publish_file_bytes_with_marker(context, &bytes, target_path)
 }
 
@@ -290,15 +308,20 @@ fn download_single_file_from_zip(
     let cancellation = context.cancellation();
     let bytes = download::get_bytes(
         &asset.browser_download_url,
-        context.remaining_budget(),
+        TRANSFER_IS_BOUNDED_BY_SILENCE,
         &cancellation,
     )
     .map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to download asset '{}': {error}",
-            asset.name
-        ))
+        AppError::from(error).with_context(format!("failed to download asset '{}'", asset.name))
     })?;
+    if verify_asset_digest(&asset.name, asset.digest.as_deref(), &bytes)?
+        == DigestVerdict::NotPublished
+    {
+        tracing::warn!(
+            asset = %asset.name,
+            "release publishes no checksum for this asset; integrity is unverified"
+        );
+    }
     let file = find_file_in_zip(&bytes, file_name)?;
     publish_file_bytes_with_marker(context, &file, target_path)
 }
@@ -323,12 +346,10 @@ fn download_source_subdir(
         "downloading tool source archive"
     );
     let cancellation = context.cancellation();
-    let bytes = download::get_bytes(&archive_url, context.remaining_budget(), &cancellation)
+    let bytes = download::get_bytes(&archive_url, TRANSFER_IS_BOUNDED_BY_SILENCE, &cancellation)
         .map_err(|error| {
-            AppError::Runtime(format!(
-                "failed to download source archive '{}': {error}",
-                archive_url
-            ))
+            AppError::from(error)
+                .with_context(format!("failed to download source archive '{archive_url}'"))
         })?;
     let staged = target_path.with_extension(format!(
         "download-{}",
@@ -555,7 +576,7 @@ fn write_source_download_marker(target_path: &Path, marker_path: &Path) -> Resul
     })?;
     ensure_dir(parent).map_err(io_error("failed to create download marker parent"))?;
     fs::write(
-        &marker_path,
+        marker_path,
         format!(
             "{{\n  \"tool\": \"v8-runner\",\n  \"target\": \"{}\"\n}}\n",
             target_path.display()
@@ -1007,10 +1028,134 @@ impl GitHubRelease {
 struct GitHubAsset {
     name: String,
     browser_download_url: String,
+    /// Контрольная сумма ассета, как её публикует GitHub: `sha256:<hex>`. Поля может не
+    /// быть у старого выпуска — тогда сверять нечего, и об этом говорят прямо, а не
+    /// выдают отсутствие проверки за успешную.
+    #[serde(default)]
+    digest: Option<String>,
+}
+
+/// Итог сверки скачанного с опубликованной суммой.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DigestVerdict {
+    /// Сумма опубликована и совпала.
+    Matched,
+    /// Суммы у выпуска нет: неизвестность названа отдельно, а не сведена к совпадению.
+    NotPublished,
+}
+
+/// Сверяет скачанное с суммой, опубликованной рядом с ассетом.
+///
+/// Расширение `.cfe` после загрузки попадает в информационную базу как исполняемый код
+/// 1С, поэтому подмена содержимого по пути — не абстракция. Формат суммы задаёт GitHub:
+/// `sha256:<hex>`; незнакомый алгоритм — отказ, а не пропуск.
+fn verify_asset_digest(
+    name: &str,
+    digest: Option<&str>,
+    bytes: &[u8],
+) -> Result<DigestVerdict, AppError> {
+    let Some(digest) = digest else {
+        return Ok(DigestVerdict::NotPublished);
+    };
+    let algorithm_len = "sha256:".len();
+    let expected = digest
+        .get(..algorithm_len)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("sha256:"))
+        .map(|_| &digest[algorithm_len..]);
+    let Some(expected) = expected else {
+        return Err(AppError::Runtime(format!(
+            "asset '{name}' carries a digest in an unsupported form: {digest}"
+        )));
+    };
+    let actual = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        format!("{:x}", hasher.finalize())
+    };
+    if actual.eq_ignore_ascii_case(expected.trim()) {
+        Ok(DigestVerdict::Matched)
+    } else {
+        Err(AppError::Runtime(format!(
+            "asset '{name}' does not match its published sha256: expected {expected}, got {actual}"
+        )))
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{verify_asset_digest, DigestVerdict};
+
+    /// Отмена загрузки — отмена, а не отказ выполнения: род `cancelled`, и оборванной работы
+    /// она не оставляет — файлы ложатся на место только после загрузки (#308).
+    #[test]
+    fn a_cancelled_download_is_a_cancellation() {
+        use crate::support::error::CancelledAt;
+        use crate::use_cases::context::{CommandName, ExecutionContext};
+        use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
+
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
+        let context =
+            ExecutionContext::cli(CommandName::ToolsDownload).with_cancellation(cancellation);
+
+        let error = super::fetch_latest_release(&context, "IngvarConsulting/v8-runner-rust")
+            .expect_err("the download was cancelled");
+
+        assert_eq!(error.cancellation(), Some(CancelledAt::Boundary), "{error}");
+        assert_eq!(
+            UseCaseError::from(error).kind(),
+            UseCaseErrorKind::Cancelled(CancelledAt::Boundary)
+        );
+    }
+
+    /// Расширение после загрузки попадает в информационную базу как исполняемый код 1С,
+    /// поэтому сумма, опубликованная рядом с ассетом, сверяется. Её отсутствие названо
+    /// отдельным значением, а не сведено к совпадению.
+    #[test]
+    fn a_published_checksum_is_verified_and_its_absence_is_named() {
+        // sha256("v8-runner") — посчитан этим же кодом и закреплён здесь.
+        let payload = b"v8-runner";
+        let matched =
+            verify_asset_digest("x.cfe", None, payload).expect("no digest is not a failure");
+        assert_eq!(matched, DigestVerdict::NotPublished);
+
+        let actual = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(payload);
+            format!("{:x}", hasher.finalize())
+        };
+        assert_eq!(
+            verify_asset_digest("x.cfe", Some(&format!("sha256:{actual}")), payload)
+                .expect("matching digest"),
+            DigestVerdict::Matched
+        );
+        assert_eq!(
+            verify_asset_digest(
+                "x.cfe",
+                Some(&format!("SHA256:{}", actual.to_uppercase())),
+                payload
+            )
+            .expect("case does not matter"),
+            DigestVerdict::Matched
+        );
+
+        let mismatch = verify_asset_digest("x.cfe", Some("sha256:00"), payload)
+            .expect_err("a mismatched asset must be refused");
+        assert!(
+            mismatch.to_string().contains("does not match"),
+            "{mismatch}"
+        );
+
+        let unknown = verify_asset_digest("x.cfe", Some("md5:00"), payload)
+            .expect_err("an unknown algorithm is a refusal, not a skip");
+        assert!(
+            unknown.to_string().contains("unsupported form"),
+            "{unknown}"
+        );
+    }
+
     use super::*;
 
     #[test]

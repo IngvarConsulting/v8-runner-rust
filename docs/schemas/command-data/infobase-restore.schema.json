@@ -1,0 +1,575 @@
+{
+  "$defs": {
+    "ArtifactKind": {
+      "description": "Stable artifact classification for runner/package outputs.",
+      "oneOf": [
+        {
+          "enum": [
+            "run_directory",
+            "config",
+            "package",
+            "report",
+            "runner_log",
+            "platform_log",
+            "sentinel"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "other": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "other"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "description": "Reference to a single retained artifact.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ArtifactKind"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "path"
+      ],
+      "type": "object"
+    },
+    "ArtifactSet": {
+      "additionalProperties": false,
+      "description": "A retained artifact collection for a single execution.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ArtifactRef"
+          },
+          "type": "array"
+        },
+        "root_dir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ExecutionError": {
+      "additionalProperties": false,
+      "description": "Structured execution error that can point to related artifacts.",
+      "properties": {
+        "artifact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "code": {
+          "type": "string"
+        },
+        "details": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ExecutionInterruptionDetails": {
+      "additionalProperties": false,
+      "description": "Structured metadata of an actual or deferred interruption.",
+      "properties": {
+        "deferred": {
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/$defs/ExecutionInterruptionKind"
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionInterruptionPhase"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "deferred"
+      ],
+      "type": "object"
+    },
+    "ExecutionInterruptionKind": {
+      "description": "Command-level interruption kind preserved in serialized execution results.",
+      "enum": [
+        "cancelled",
+        "timed_out"
+      ],
+      "type": "string"
+    },
+    "ExecutionInterruptionPhase": {
+      "description": "What was interrupted: one closed vocabulary shared by every form that carries an execution\noutcome. Each command uses the values that name its own work.",
+      "oneOf": [
+        {
+          "const": "command_boundary",
+          "description": "A safe point of the command: its own check between steps, or a refusal before a process\nstarted or a request command was sent. No work of the command was cut short.",
+          "type": "string"
+        },
+        {
+          "const": "provider_command",
+          "description": "A platform command the command ran — a process of its own or a command of an agent\nsession. The interruption reached it after it started: it cut the command short or, in\na critical phase, waited for its end.",
+          "type": "string"
+        },
+        {
+          "const": "run",
+          "description": "The test run in the 1C client (`test`).",
+          "type": "string"
+        },
+        {
+          "const": "apply",
+          "description": "Loading or merging the package into the infobase (`upload`).",
+          "type": "string"
+        },
+        {
+          "const": "update_db_cfg",
+          "description": "Updating the database configuration (`upload`).",
+          "type": "string"
+        },
+        {
+          "const": "publication",
+          "description": "Publishing the result through a staged copy (`make`, `download`, `infobase dump`).",
+          "type": "string"
+        }
+      ]
+    },
+    "ExecutionMetrics": {
+      "additionalProperties": false,
+      "description": "Shared counters emitted by parsers and execution adapters.",
+      "properties": {
+        "errors": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "extra": {
+          "additionalProperties": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "object"
+        },
+        "failed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "passed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skipped": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total",
+        "passed",
+        "failed",
+        "skipped",
+        "errors"
+      ],
+      "type": "object"
+    },
+    "ExecutionOutcome": {
+      "additionalProperties": false,
+      "description": "Shared execution envelope for runner-like flows.",
+      "properties": {
+        "artifacts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactSet"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diagnostics": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/ExecutionError"
+          },
+          "type": "array"
+        },
+        "interruptions": {
+          "items": {
+            "$ref": "#/$defs/ExecutionInterruptionDetails"
+          },
+          "type": "array"
+        },
+        "metrics": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionMetrics"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "payload": {
+          "type": "null"
+        },
+        "status": {
+          "$ref": "#/$defs/ExecutionStatus"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    "ExecutionStatus": {
+      "description": "Shared execution status used by runner and package-like flows.",
+      "enum": [
+        "succeeded",
+        "failed",
+        "cancelled",
+        "timed_out",
+        "invalid_output"
+      ],
+      "type": "string"
+    },
+    "ExportTargetState": {
+      "description": "Observable state of the final output path after an export attempt.",
+      "enum": [
+        "unchanged",
+        "created",
+        "replaced",
+        "restored",
+        "uncertain"
+      ],
+      "type": "string"
+    },
+    "InfobaseExportArtifactKind": {
+      "description": "Closed file format vocabulary for information-base exports.\n\nThis type is deliberately namespaced: [`crate::domain::artifact::ArtifactKind`]\nclassifies retained execution artifacts and does not distinguish CF, CFE,\nand DT package formats.",
+      "enum": [
+        "cf",
+        "cfe",
+        "dt"
+      ],
+      "type": "string"
+    },
+    "InfobaseExportMode": {
+      "description": "Whether the command only proves its execution plan or applies it.",
+      "enum": [
+        "preview",
+        "apply"
+      ],
+      "type": "string"
+    },
+    "InfobaseRestorePlan": {
+      "additionalProperties": false,
+      "description": "Compact machine-facing plan produced by a non-executing restore preflight.",
+      "properties": {
+        "artifact_kind": {
+          "$ref": "#/$defs/InfobaseExportArtifactKind"
+        },
+        "input": {
+          "type": "string"
+        },
+        "provider": {
+          "$ref": "#/$defs/Provider"
+        },
+        "target_mode": {
+          "$ref": "#/$defs/RestoreTargetMode"
+        }
+      },
+      "required": [
+        "provider",
+        "artifact_kind",
+        "input",
+        "target_mode"
+      ],
+      "type": "object"
+    },
+    "InfobaseSnapshotSubject": {
+      "description": "Subject marker for a complete DT export.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "infobase",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Provider": {
+      "description": "Исполнитель. Имя называет того, кто делает работу, а не способ его запуска.",
+      "oneOf": [
+        {
+          "const": "designer",
+          "description": "Конфигуратор пакетным процессом на операцию.",
+          "type": "string"
+        },
+        {
+          "const": "agent",
+          "description": "Агентский shell: Конфигуратор в агентском режиме или шлюз автономного сервера.",
+          "type": "string"
+        },
+        {
+          "const": "ibcmd",
+          "description": "Утилита `ibcmd`.",
+          "type": "string"
+        },
+        {
+          "const": "ibcmd-rs",
+          "description": "Конвертер XML ↔ CF без платформы.",
+          "type": "string"
+        },
+        {
+          "const": "webinst",
+          "description": "Публикация базы на веб-сервере.",
+          "type": "string"
+        }
+      ]
+    },
+    "ProviderOrigin": {
+      "description": "Откуда взялся выбранный исполнитель.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Первый готовый из цепочки умолчаний.",
+          "properties": {
+            "kind": {
+              "const": "default",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Назначен ключом `providers.<операция>` в названном файле.",
+          "properties": {
+            "file": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "override",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "file"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ProviderReceipt": {
+      "additionalProperties": false,
+      "description": "Квитанция о выборе исполнителя — одна форма у всех операций.\n\nОбъясняет принятое решение и не предлагает другого: неиспользованные альтернативы\nне перечисляются, потому что выбор вызывающему не принадлежит. `selected: null`\nзначит, что выбор состоялся и никто не подошёл: каждый пропущенный назван с причиной.",
+      "properties": {
+        "origin": {
+          "$ref": "#/$defs/ProviderOrigin"
+        },
+        "selected": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provider"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "skipped": {
+          "items": {
+            "$ref": "#/$defs/SkippedProvider"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "origin"
+      ],
+      "type": "object"
+    },
+    "RestoreTargetMode": {
+      "description": "Which irreversible change to the target infobase the caller permits.\n\nNeither provider asks: Designer creates an absent infobase and overwrites a\npresent one, and IBCMD overwrites a present one. The mode is therefore a\nrunner-side gate, and a mode that does not match the observed target is a\nrefusal rather than a silent fallback to the other case.",
+      "oneOf": [
+        {
+          "const": "create",
+          "description": "The target infobase must be absent; restoring creates it.",
+          "type": "string"
+        },
+        {
+          "const": "replace",
+          "description": "The target infobase must exist; restoring discards its current data.",
+          "type": "string"
+        }
+      ]
+    },
+    "SkippedProvider": {
+      "additionalProperties": false,
+      "description": "Исполнитель, пропущенный до выбранного, и почему.",
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/Provider"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "reason"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/infobase-restore.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Typed presentation data for an information-base restore.",
+  "properties": {
+    "artifact_kind": {
+      "$ref": "#/$defs/InfobaseExportArtifactKind"
+    },
+    "execution": {
+      "$ref": "#/$defs/ExecutionOutcome"
+    },
+    "input": {
+      "type": "string"
+    },
+    "mode": {
+      "$ref": "#/$defs/InfobaseExportMode"
+    },
+    "plan": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/InfobaseRestorePlan"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "provider": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProviderReceipt"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Квитанция о выборе исполнителя; `None`, пока выбор не начинался."
+    },
+    "provider_dispatched": {
+      "description": "Present only in a preview, and then `false`: no executor got work. An apply answer\nomits it.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "restored": {
+      "description": "`true` only after the provider reported a completed load.",
+      "type": "boolean"
+    },
+    "subject": {
+      "$ref": "#/$defs/InfobaseSnapshotSubject"
+    },
+    "target_mode": {
+      "$ref": "#/$defs/RestoreTargetMode"
+    },
+    "target_state": {
+      "$ref": "#/$defs/ExportTargetState"
+    }
+  },
+  "required": [
+    "mode",
+    "subject",
+    "artifact_kind",
+    "input",
+    "target_mode",
+    "restored",
+    "target_state",
+    "execution"
+  ],
+  "title": "RestoreInfobaseSnapshotResult",
+  "type": "object"
+}

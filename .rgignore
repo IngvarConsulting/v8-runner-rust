@@ -1,2 +1,2 @@
-spec/archive/
-references/1c/
+references/1c/*
+!references/1c/confirmed-runtime-measurements.md

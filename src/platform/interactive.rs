@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -9,15 +9,19 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::platform::process::{
-    ProcessExecutionPolicy, ProcessInterruption, ProcessInterruptionAction,
-    ProcessInterruptionReason, ProcessInterruptionSafety,
+    ProcessExecutionPolicy, ProcessInterruption, ProcessInterruptionReason,
+    ProcessInterruptionSafety,
 };
+use crate::platform::secrets::render_masked_command;
 
 const DEFAULT_PROMPT: &[u8] = b"1C:EDT>";
 const EXECUTABLE_BUSY_MAX_RETRIES: usize = 5;
 const EXECUTABLE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(10);
 const IO_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const PROMPT_DRAIN_GRACE: Duration = Duration::from_millis(20);
+/// Сколько ждать статуса ведущего, который уже выходит, но ещё не подобран ядром.
+#[cfg(unix)]
+const EXITING_LEADER_GRACE: Duration = Duration::from_secs(1);
 const STREAM_BUFFER_SIZE: usize = 1024;
 
 /// Request describing how to start an interactive child process.
@@ -132,6 +136,9 @@ pub enum InteractiveProcessError {
         command: String,
         stdout: String,
         stderr: String,
+        /// Доставлена ли команда как работа команды. Отказ до отправки и служебная команда
+        /// сессии работы не несут.
+        delivered: bool,
     },
 
     #[error("interactive process exited before the next prompt (exit {exit_code})")]
@@ -175,6 +182,9 @@ pub enum InteractiveProcessError {
 /// Low-level prompt-delimited interactive process executor.
 #[derive(Debug)]
 pub struct InteractiveProcessExecutor {
+    /// Только неподобранный ведущий: подбирают его `try_wait_child` и `kill_internal`, и оба
+    /// тут же его убирают. Номер подобранного процесса свободен, и сигнал группе по нему мог
+    /// бы попасть в чужую группу, занявшую этот номер.
     child: Option<Child>,
     stdin: Option<ChildStdin>,
     events: Receiver<ReaderEvent>,
@@ -191,7 +201,7 @@ impl InteractiveProcessExecutor {
         request: InteractiveProcessRequest,
         startup_timeout: Duration,
     ) -> Result<Self, InteractiveProcessError> {
-        let rendered_command = render_command(&request);
+        let rendered_command = render_masked_command(&request.program, &request.args);
         let mut child = spawn_command(&request, &rendered_command)?;
         let stdin = child
             .stdin
@@ -208,7 +218,7 @@ impl InteractiveProcessExecutor {
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| InteractiveProcessError::MissingStderr {
+            .ok_or(InteractiveProcessError::MissingStderr {
                 cmd: rendered_command,
             })?;
 
@@ -244,19 +254,9 @@ impl InteractiveProcessExecutor {
         self.child.as_ref().map(Child::id)
     }
 
-    /// Runs one interactive command and waits for the next prompt.
-    pub fn execute(
-        &mut self,
-        command: &str,
-        timeout: Duration,
-    ) -> Result<InteractiveCommandOutput, InteractiveProcessError> {
-        if self.poisoned {
-            return Err(InteractiveProcessError::Poisoned);
-        }
-        if self.terminated || self.child.is_none() {
-            return Err(InteractiveProcessError::Terminated);
-        }
-
+    /// Пишет команду в процесс и выталкивает её. Ошибка здесь значит, что команда в процесс не
+    /// попала.
+    fn send_command(&mut self, command: &str) -> Result<(), InteractiveProcessError> {
         let stdin = self
             .stdin
             .as_mut()
@@ -279,6 +279,39 @@ impl InteractiveProcessExecutor {
                 command: command.to_owned(),
                 source,
             })?;
+        Ok(())
+    }
+
+    /// Runs one interactive command and waits for the next prompt. Only tests send commands
+    /// without saying whether they are the command's work; production goes through
+    /// `execute_delivering`.
+    #[cfg(test)]
+    pub fn execute(
+        &mut self,
+        command: &str,
+        timeout: Duration,
+    ) -> Result<InteractiveCommandOutput, InteractiveProcessError> {
+        self.execute_delivering(command, timeout, || {})
+    }
+
+    /// Как `execute`, но `delivered` вызывается, как только команда доставлена в процесс:
+    /// записана и вытолкнута, ещё до ответа. Команда запроса отмечает в нём работу;
+    /// служебная передаёт пустой вызов — и объявить так команду может только платформа.
+    pub(in crate::platform) fn execute_delivering(
+        &mut self,
+        command: &str,
+        timeout: Duration,
+        delivered: impl FnOnce(),
+    ) -> Result<InteractiveCommandOutput, InteractiveProcessError> {
+        if self.poisoned {
+            return Err(InteractiveProcessError::Poisoned);
+        }
+        if self.terminated || self.child.is_none() {
+            return Err(InteractiveProcessError::Terminated);
+        }
+
+        self.send_command(command)?;
+        delivered();
 
         self.wait_for_prompt(
             WaitMode::Command {
@@ -288,6 +321,8 @@ impl InteractiveProcessExecutor {
         )
     }
 
+    /// Как `execute_delivering`, но под политикой команды: доставленная команда отмечает
+    /// работу в `policy.work`, если та есть, — у служебной команды её нет.
     pub(crate) fn execute_with_policy(
         &mut self,
         command: &str,
@@ -305,6 +340,7 @@ impl InteractiveProcessExecutor {
                 command: command.to_owned(),
                 stdout: String::new(),
                 stderr: String::new(),
+                delivered: false,
             });
         }
         if timeout.is_zero() {
@@ -316,28 +352,10 @@ impl InteractiveProcessExecutor {
             });
         }
 
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or(InteractiveProcessError::Terminated)?;
-        stdin.write_all(command.as_bytes()).map_err(|source| {
-            InteractiveProcessError::StdinWriteFailed {
-                command: command.to_owned(),
-                source,
-            }
-        })?;
-        stdin
-            .write_all(b"\n")
-            .map_err(|source| InteractiveProcessError::StdinWriteFailed {
-                command: command.to_owned(),
-                source,
-            })?;
-        stdin
-            .flush()
-            .map_err(|source| InteractiveProcessError::StdinFlushFailed {
-                command: command.to_owned(),
-                source,
-            })?;
+        self.send_command(command)?;
+        if let Some(work) = &policy.work {
+            work.mark_work_given();
+        }
 
         self.wait_for_prompt_with_policy(
             WaitMode::Command {
@@ -360,28 +378,18 @@ impl InteractiveProcessExecutor {
         let _ = self.stdin.take();
         let deadline = Instant::now() + timeout;
         loop {
-            let child = self
-                .child
-                .as_mut()
-                .ok_or(InteractiveProcessError::Terminated)?;
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    self.child = None;
-                    self.terminated = true;
-                    self.poisoned = false;
-                    return Ok(ShutdownOutcome::Graceful {
-                        exit_code: status.code().unwrap_or(-1),
-                    });
-                }
-                Ok(None) => {
-                    if Instant::now() >= deadline {
-                        self.kill_internal()?;
-                        return Ok(ShutdownOutcome::ForcedKill);
-                    }
-                    thread::sleep(IO_POLL_INTERVAL);
-                }
-                Err(source) => return Err(InteractiveProcessError::WaitFailed { source }),
+            if let Some(status) = self.try_wait_child()? {
+                self.terminated = true;
+                self.poisoned = false;
+                return Ok(ShutdownOutcome::Graceful {
+                    exit_code: status.code().unwrap_or(-1),
+                });
             }
+            if Instant::now() >= deadline {
+                self.kill_internal()?;
+                return Ok(ShutdownOutcome::ForcedKill);
+            }
+            thread::sleep(IO_POLL_INTERVAL);
         }
     }
 
@@ -390,7 +398,7 @@ impl InteractiveProcessExecutor {
         if self.terminated || self.child.is_none() {
             return Ok(());
         }
-        self.kill_internal()
+        self.kill_internal().map(|_| ())
     }
 
     fn wait_for_prompt(
@@ -435,8 +443,8 @@ impl InteractiveProcessExecutor {
                         stderr: String::from_utf8_lossy(&stderr).into_owned(),
                     },
                 };
-                self.kill_internal()?;
                 self.poisoned = true;
+                self.kill_internal()?;
                 return Err(error);
             }
 
@@ -456,7 +464,6 @@ impl InteractiveProcessExecutor {
                             .is_some()
                     };
                 if prompt_seen {
-                    self.child = None;
                     self.stdin = None;
                     self.terminated = true;
                     self.poisoned = true;
@@ -471,7 +478,6 @@ impl InteractiveProcessExecutor {
 
                 flush_pending(&mut self.stdout_pending, &mut stdout);
                 flush_pending(&mut self.stderr_pending, &mut stderr);
-                self.child = None;
                 self.stdin = None;
                 self.terminated = true;
                 self.poisoned = true;
@@ -494,15 +500,7 @@ impl InteractiveProcessExecutor {
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
-                    flush_pending(&mut self.stdout_pending, &mut stdout);
-                    flush_pending(&mut self.stderr_pending, &mut stderr);
-                    self.poisoned = true;
-                    let _ = self.kill_internal();
-                    return Err(InteractiveProcessError::ProcessExited {
-                        exit_code: -1,
-                        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-                        stderr: String::from_utf8_lossy(&stderr).into_owned(),
-                    });
+                    return Err(self.on_streams_closed(&mut stdout, &mut stderr));
                 }
             }
         }
@@ -533,10 +531,7 @@ impl InteractiveProcessExecutor {
                 let output = self.finish_prompt_wait(&mut stdout, &mut stderr)?;
                 return Ok(InteractiveCommandExecution {
                     output,
-                    interruption: observed_interruption.map(|reason| ProcessInterruption {
-                        reason,
-                        action: ProcessInterruptionAction::Deferred,
-                    }),
+                    interruption: observed_interruption.map(ProcessInterruption::deferred),
                 });
             }
 
@@ -559,7 +554,6 @@ impl InteractiveProcessExecutor {
                             .is_some()
                     };
                 if prompt_seen {
-                    self.child = None;
                     self.stdin = None;
                     self.terminated = true;
                     self.poisoned = true;
@@ -574,7 +568,6 @@ impl InteractiveProcessExecutor {
 
                 flush_pending(&mut self.stdout_pending, &mut stdout);
                 flush_pending(&mut self.stderr_pending, &mut stderr);
-                self.child = None;
                 self.stdin = None;
                 self.terminated = true;
                 self.poisoned = true;
@@ -630,15 +623,7 @@ impl InteractiveProcessExecutor {
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
-                    flush_pending(&mut self.stdout_pending, &mut stdout);
-                    flush_pending(&mut self.stderr_pending, &mut stderr);
-                    self.poisoned = true;
-                    let _ = self.kill_internal();
-                    return Err(InteractiveProcessError::ProcessExited {
-                        exit_code: -1,
-                        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-                        stderr: String::from_utf8_lossy(&stderr).into_owned(),
-                    });
+                    return Err(self.on_streams_closed(&mut stdout, &mut stderr));
                 }
             }
         }
@@ -681,29 +666,91 @@ impl InteractiveProcessExecutor {
         Ok(())
     }
 
-    fn try_wait_child(
+    /// Оба потока закрыты. Процесс либо уже выходит — трубы доходят до конца файла раньше,
+    /// чем `waitpid` сообщит выход, — либо живёт без них. Его снимают и подбирают; ответ
+    /// несёт код выхода, если процесс вышел сам.
+    fn on_streams_closed(
         &mut self,
-    ) -> Result<Option<std::process::ExitStatus>, InteractiveProcessError> {
-        match self.child.as_mut() {
-            Some(child) => child
-                .try_wait()
-                .map_err(|source| InteractiveProcessError::WaitFailed { source }),
-            None => Ok(Some(exit_status_unavailable())),
+        stdout: &mut Vec<u8>,
+        stderr: &mut Vec<u8>,
+    ) -> InteractiveProcessError {
+        flush_pending(&mut self.stdout_pending, stdout);
+        flush_pending(&mut self.stderr_pending, stderr);
+        self.poisoned = true;
+        InteractiveProcessError::ProcessExited {
+            exit_code: self.reap_after_streams_closed(),
+            stdout: String::from_utf8_lossy(stdout).into_owned(),
+            stderr: String::from_utf8_lossy(stderr).into_owned(),
         }
     }
 
-    fn kill_internal(&mut self) -> Result<(), InteractiveProcessError> {
-        if let Some(child) = self.child.as_mut() {
-            kill_process_group(child)
-                .map_err(|source| InteractiveProcessError::KillFailed { source })?;
-            child
-                .wait()
-                .map_err(|source| InteractiveProcessError::WaitFailed { source })?;
+    /// На Unix снимают сразу: процесс, уже вошедший в выход, сигнал не трогает, и его код
+    /// берут из подобранного статуса. Процесс, который сам закрыл потоки и лишь потом
+    /// собрался выйти, снимается сигналом и отвечает `-1`.
+    #[cfg(unix)]
+    fn reap_after_streams_closed(&mut self) -> i32 {
+        match self.kill_internal() {
+            Ok(status) => status.and_then(|status| status.code()).unwrap_or(-1),
+            Err(error) => {
+                warn!(error = %error, "interactive process with closed streams was not taken down");
+                -1
+            }
         }
-        self.child = None;
+    }
+
+    /// На Windows снятие само ставит код выхода, поэтому сначала смотрят, не вышел ли
+    /// процесс сам; снятый отвечает `-1`.
+    #[cfg(not(unix))]
+    fn reap_after_streams_closed(&mut self) -> i32 {
+        if let Ok(Some(status)) = self.try_wait_child() {
+            self.stdin = None;
+            self.terminated = true;
+            return status.code().unwrap_or(-1);
+        }
+        if let Err(error) = self.kill_internal() {
+            warn!(error = %error, "interactive process with closed streams was not taken down");
+        }
+        -1
+    }
+
+    /// Сообщает о выходе процесса и подобранный процесс из исполнителя убирает. Номер
+    /// подобранного процесса свободен, и сигнал группе по нему мог бы попасть в чужую
+    /// группу, занявшую тот же номер; поэтому в `self.child` живёт только неподобранный.
+    fn try_wait_child(&mut self) -> Result<Option<ExitStatus>, InteractiveProcessError> {
+        let Some(child) = self.child.as_mut() else {
+            return Ok(Some(exit_status_unavailable()));
+        };
+        let status = child.try_wait();
+        // Подобранный процесс уходит из исполнителя, и подобранный кем-то другим (`ECHILD`)
+        // тоже: сигналить по его номеру больше нельзя. При прочих ошибках ручка остаётся,
+        // чтобы снятие и `Drop` ещё могли процесс подобрать.
+        if matches!(status, Ok(Some(_))) || status.as_ref().is_err_and(reaped_elsewhere) {
+            self.child = None;
+        }
+        status.map_err(|source| InteractiveProcessError::WaitFailed { source })
+    }
+
+    /// Снимает группу неподобранного процесса и подбирает его. Возвращает подобранный
+    /// статус или `None`, когда процесса в исполнителе уже нет. Пока процесс не подобран,
+    /// его номер держит даже зомби, так что сигнал достаётся только его группе.
+    fn kill_internal(&mut self) -> Result<Option<ExitStatus>, InteractiveProcessError> {
+        let status = match self.child.as_mut() {
+            Some(child) => {
+                kill_process_group(child)
+                    .map_err(|source| InteractiveProcessError::KillFailed { source })?;
+                let waited = child.wait();
+                // Как и в `try_wait_child`: подобранный — здесь или кем-то другим — уходит,
+                // при прочих ошибках ручка остаётся для следующей попытки.
+                if waited.as_ref().map_or_else(reaped_elsewhere, |_| true) {
+                    self.child = None;
+                }
+                Some(waited.map_err(|source| InteractiveProcessError::WaitFailed { source })?)
+            }
+            None => None,
+        };
         self.stdin = None;
         self.terminated = true;
-        Ok(())
+        Ok(status)
     }
 
     fn finish_prompt_wait(
@@ -729,7 +776,6 @@ impl InteractiveProcessExecutor {
         flush_pending(&mut self.stderr_pending, stderr);
 
         if let Some(status) = self.try_wait_child()? {
-            self.child = None;
             self.stdin = None;
             self.terminated = true;
             self.poisoned = true;
@@ -774,10 +820,15 @@ impl InteractiveProcessExecutor {
             ProcessInterruptionSafety::Interruptible => {
                 flush_pending(&mut self.stdout_pending, stdout);
                 flush_pending(&mut self.stderr_pending, stderr);
-                self.kill_internal()?;
                 self.poisoned = true;
+                self.kill_internal()?;
                 Ok(Some(interactive_error_from_reason(
-                    command, timeout, reason, stdout, stderr,
+                    command,
+                    timeout,
+                    reason,
+                    policy.work.is_some(),
+                    stdout,
+                    stderr,
                 )))
             }
             ProcessInterruptionSafety::GracefulThenKill => {
@@ -789,7 +840,12 @@ impl InteractiveProcessExecutor {
                 }
                 self.poisoned = true;
                 Ok(Some(interactive_error_from_reason(
-                    command, timeout, reason, stdout, stderr,
+                    command,
+                    timeout,
+                    reason,
+                    policy.work.is_some(),
+                    stdout,
+                    stderr,
                 )))
             }
         }
@@ -808,10 +864,12 @@ enum WaitMode {
     Command { command: String },
 }
 
+/// Команда уже отправлена: отмена обрывает работу команды, если команда ею была.
 fn interactive_error_from_reason(
     command: &str,
     timeout: Duration,
     reason: ProcessInterruptionReason,
+    delivered: bool,
     stdout: &[u8],
     stderr: &[u8],
 ) -> InteractiveProcessError {
@@ -820,6 +878,7 @@ fn interactive_error_from_reason(
             command: command.to_owned(),
             stdout: String::from_utf8_lossy(stdout).into_owned(),
             stderr: String::from_utf8_lossy(stderr).into_owned(),
+            delivered,
         },
         ProcessInterruptionReason::TimedOut => InteractiveProcessError::CommandTimeout {
             command: command.to_owned(),
@@ -911,13 +970,6 @@ fn find_prompt(buffer: &[u8], prompt: &[u8]) -> Option<(usize, usize)> {
     None
 }
 
-fn render_command(request: &InteractiveProcessRequest) -> String {
-    let mut parts = Vec::with_capacity(request.args.len() + 1);
-    parts.push(request.program.display().to_string());
-    parts.extend(request.args.iter().cloned());
-    parts.join(" ")
-}
-
 fn spawn_command(
     request: &InteractiveProcessRequest,
     rendered_command: &str,
@@ -1004,18 +1056,47 @@ fn configure_process_group(command: &mut Command) {
 #[cfg(not(unix))]
 fn configure_process_group(_command: &mut Command) {}
 
+/// `ECHILD`: процесс подобрал кто-то другой, и его номер уже не наш.
+fn reaped_elsewhere(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(libc::ECHILD)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+/// Снимает группу неподобранного процесса. `ESRCH` значит, что группы уже нет. `EPERM`
+/// macOS отвечает, когда сигнал в группе принять некому: ведущий уже выходит или стал
+/// зомби. Тогда ждут, пока его выход станет виден, но недолго: живой ведущий, которому
+/// сигнал не положен, остаётся ошибкой, иначе следующее ожидание длилось бы вечно.
 #[cfg(unix)]
 fn kill_process_group(child: &mut Child) -> std::io::Result<()> {
-    unsafe {
-        let pgid = -(child.id() as i32);
-        if libc::kill(pgid, libc::SIGKILL) != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                return Err(error);
+    let pgid = -(child.id() as i32);
+    // SAFETY: `kill` только посылает сигнал; группу держит неподобранный ведущий.
+    if unsafe { libc::kill(pgid, libc::SIGKILL) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(()),
+        Some(libc::EPERM) => {
+            let deadline = Instant::now() + EXITING_LEADER_GRACE;
+            loop {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    return Ok(());
+                }
+                if Instant::now() >= deadline {
+                    return Err(error);
+                }
+                thread::sleep(Duration::from_millis(1));
             }
         }
+        _ => Err(error),
     }
-    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -1256,14 +1337,16 @@ mod tests {
         assert!(matches!(err, InteractiveProcessError::SpawnFailed { .. }));
     }
 
+    /// Жив ли процесс — по нулевому сигналу: он отвечает и за зомби, так что «не жив» значит
+    /// «подобран». Отказ в правах — тоже живой процесс.
     #[cfg(unix)]
     fn is_process_alive(pid: u32) -> bool {
-        Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
+        let pid = libc::pid_t::try_from(pid).expect("pid fits pid_t");
+        // SAFETY: нулевой сигнал ничего не посылает, `kill` лишь проверяет процесс.
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
 
     #[cfg(unix)]
@@ -1351,6 +1434,164 @@ mod tests {
                 InteractiveProcessError::ProcessExited { exit_code: 1, .. }
             ),
             "unexpected startup failure: {err:?}"
+        );
+    }
+
+    /// Ждёт выхода процесса, не подбирая его: `WNOWAIT` оставляет зомби на месте, и номер
+    /// процесса остаётся занятым.
+    #[cfg(unix)]
+    fn wait_until_exited_unreaped(pid: u32) -> bool {
+        let id = libc::id_t::try_from(pid).expect("pid fits id_t");
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while std::time::Instant::now() < deadline {
+            // SAFETY: для `siginfo_t` нули — допустимое значение. Обнуление на каждом обороте
+            // и делает осмысленной проверку `si_signo`, когда `WNOHANG` ничего не нашёл.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            // SAFETY: `info` — живая локальная переменная, заимствованная только здесь;
+            // `WNOWAIT` оставляет процесс неподобранным.
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    id,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            if result == 0 && info.si_signo == libc::SIGCHLD {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    /// Исполнитель с процессом, который после подсказки ждёт конца stdin и выходит с
+    /// кодом 5. Возвращает исполнителя и номер уже вышедшего, но не подобранного процесса.
+    #[cfg(unix)]
+    fn executor_with_an_exited_leader(dir: &Path) -> InteractiveProcessExecutor {
+        let script = dir.join("exit-on-eof.sh");
+        write_script(&script, "printf '1C:EDT>'\nread -r _ || exit 5\nexit 6");
+        let mut executor = spawn_executor(&script, TEST_STARTUP_TIMEOUT);
+        let pid = executor.pid().expect("pid");
+        executor.stdin = None;
+        assert!(
+            wait_until_exited_unreaped(pid),
+            "the process {pid} did not exit"
+        );
+        executor
+    }
+
+    /// Потоки закрылись, а выход процесса `waitpid` ещё не показал: так бывает, когда трубы
+    /// доходят до конца файла во время выхода. Ответ всё равно несёт настоящий код, а не
+    /// выдуманный `-1`. На macOS снятие группы из одних зомби отвечает `EPERM`, и процесс
+    /// всё равно должен быть подобран.
+    #[cfg(unix)]
+    #[test]
+    fn closed_streams_answer_with_the_reaped_exit_code() {
+        let dir = tempdir().expect("tempdir");
+        let mut executor = executor_with_an_exited_leader(dir.path());
+
+        let err = executor.on_streams_closed(&mut Vec::new(), &mut Vec::new());
+        assert!(
+            matches!(
+                err,
+                InteractiveProcessError::ProcessExited { exit_code: 5, .. }
+            ),
+            "{err:?}"
+        );
+        assert_eq!(executor.pid(), None, "the leader is reaped");
+    }
+
+    /// Подобранный процесс исполнитель больше не держит: его номер свободен, и сигнал группе
+    /// по нему мог бы попасть в чужую группу, которая этот номер заняла.
+    #[cfg(unix)]
+    #[test]
+    fn a_reaped_leader_leaves_the_executor_and_is_never_signalled() {
+        let dir = tempdir().expect("tempdir");
+        let mut executor = executor_with_an_exited_leader(dir.path());
+
+        let status = executor
+            .try_wait_child()
+            .expect("wait")
+            .expect("the exit is reported");
+        assert_eq!(status.code(), Some(5));
+        assert_eq!(
+            executor.pid(),
+            None,
+            "a reaped leader must leave the executor"
+        );
+        assert!(
+            executor.kill_internal().expect("kill").is_none(),
+            "nothing is left to signal"
+        );
+    }
+
+    /// Процесс, которого подобрал кто-то другой, тоже уходит из исполнителя: его номер
+    /// свободен. Прочие ошибки ожидания ручку оставляют.
+    #[cfg(unix)]
+    #[test]
+    fn a_leader_reaped_elsewhere_leaves_the_executor() {
+        let dir = tempdir().expect("tempdir");
+        let mut executor = executor_with_an_exited_leader(dir.path());
+        let pid = libc::pid_t::try_from(executor.pid().expect("pid")).expect("pid fits pid_t");
+        let mut raw_status = 0;
+        // SAFETY: `raw_status` — живая локальная переменная; процесс подбирается мимо
+        // исполнителя, как это сделал бы чужой обработчик `SIGCHLD`.
+        assert_eq!(unsafe { libc::waitpid(pid, &mut raw_status, 0) }, pid);
+
+        let error = executor
+            .try_wait_child()
+            .expect_err("the process is already reaped elsewhere");
+        assert!(
+            matches!(&error, InteractiveProcessError::WaitFailed { source } if source.raw_os_error() == Some(libc::ECHILD)),
+            "{error:?}"
+        );
+        assert_eq!(
+            executor.pid(),
+            None,
+            "a leader reaped elsewhere must leave the executor"
+        );
+    }
+
+    /// Трубы доходят до конца файла ещё во время выхода процесса, раньше, чем `waitpid`
+    /// может его сообщить. Одновременные запуски расширяют это окно; код выхода должен быть
+    /// настоящим. Тест вероятностный: гонку наверняка ловит `closed_streams_…`, а этот держит
+    /// исходный симптом под нагрузкой.
+    #[cfg(unix)]
+    #[test]
+    fn startup_reports_the_real_exit_code_under_parallel_load() {
+        let false_binary = Path::new("/usr/bin/false");
+        assert!(false_binary.exists(), "/usr/bin/false must exist on Unix");
+        let workers = (0..4)
+            .map(|_| {
+                thread::spawn(move || {
+                    (0..8)
+                        .map(|_| {
+                            InteractiveProcessExecutor::spawn(
+                                InteractiveProcessRequest::new(false_binary.to_path_buf()),
+                                TEST_STARTUP_TIMEOUT,
+                            )
+                            .expect_err("startup must fail")
+                        })
+                        .filter(|err| {
+                            !matches!(
+                                err,
+                                InteractiveProcessError::ProcessExited { exit_code: 1, .. }
+                            )
+                        })
+                        .map(|err| format!("{err:?}"))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let wrong = workers
+            .into_iter()
+            .flat_map(|worker| worker.join().expect("worker"))
+            .collect::<Vec<_>>();
+        assert!(
+            wrong.is_empty(),
+            "startup failures without the real exit code: {wrong:?}"
         );
     }
 
@@ -1460,6 +1701,7 @@ mod tests {
         let script = dir.path().join("repl.sh");
         repl_script(&script, &dir.path().join("child.pid"));
         let mut executor = spawn_executor(&script, TEST_STARTUP_TIMEOUT);
+        let pid = executor.pid().expect("pid");
 
         let err = executor
             .execute("hang", Duration::from_millis(50))
@@ -1469,6 +1711,11 @@ mod tests {
             err,
             InteractiveProcessError::CommandTimeout { .. }
         ));
+        // Таймаут приходит, когда процесс уже подобран: зомби на нулевой сигнал ещё отвечал бы.
+        assert!(
+            !is_process_alive(pid),
+            "the timed-out process {pid} is still there"
+        );
         assert!(matches!(
             executor.execute("pid", Duration::from_millis(50)),
             Err(InteractiveProcessError::Poisoned | InteractiveProcessError::Terminated)

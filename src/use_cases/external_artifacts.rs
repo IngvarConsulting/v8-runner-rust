@@ -306,8 +306,8 @@ mod tests {
         source_set_external_kind, ExternalArtifactKind,
     };
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, SourceFormat, SourceSetConfig, SourceSetPurpose,
-        TestsConfig, ToolsConfig,
+        AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
+        ToolsConfig,
     };
     use crate::platform::edt::EdtDsl;
     use crate::platform::process::ProcessExecutor;
@@ -319,10 +319,12 @@ mod tests {
         AppConfig {
             base_path: base.to_path_buf(),
             work_path: work.to_path_buf(),
-            execution_timeout: 300_000,
             format,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![
                 SourceSetConfig {
                     name: "external".to_owned(),
@@ -485,7 +487,12 @@ mod tests {
             fs::set_permissions(&binary, perms).expect("chmod");
         }
         let config = config(&base, &work, &binary, SourceFormat::Edt);
-        let dsl = EdtDsl::new(binary.clone(), work.join("edt-workspace"), &ProcessExecutor);
+        let dsl = EdtDsl::new(
+            binary.clone(),
+            work.join("edt-workspace"),
+            &ProcessExecutor,
+            crate::platform::process::ProcessExecutionPolicy::default(),
+        );
 
         let artifacts =
             prepare_edt_external_artifacts(&config, &config.source_sets[1], &dsl).expect("prepare");

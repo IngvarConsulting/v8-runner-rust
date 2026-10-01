@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v8-runner · Компоненты</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="styles.css?v=16">
+<style>
+  .ref { font-size: 0.9em; color: var(--muted, #7a7f87); }
+  td.k { white-space: nowrap; }
+  .pill.measured { background: #f6e8c8; color: #241c0c; border: 1px solid #a4813a; }
+</style>
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">v8-runner</a>
+  <nav>
+    <a href="index.html">Начало</a>
+    <a href="platform.html">Платформа</a>
+    <a href="problems.html">Трудности</a>
+    <a href="architecture.html" aria-current="page">Компоненты</a>
+    <a href="sources.html">Исходники</a>
+    <a href="cli.html">CLI</a>
+    <a href="scenarios.html">Подбор</a>
+    <a href="usecases.html">Сценарии</a>
+    <a href="deployments.html">Расстановки</a>
+    <a class="gh" href="https://github.com/IngvarConsulting/v8-runner-rust" aria-label="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span class="gh-stars" hidden></span></a>
+  </nav>
+</div></div>
+
+<main class="page">
+<h1>Компоненты</h1>
+<p class="lede">Раннер ничего не делает с базой сам: он оркестрирует чужие процессы — утилиты платформы и EDT. Здесь перечислено, из чего состоит система, кто с кем разговаривает и по какому каналу, и как раннер выбирает исполнителя на каждую операцию.</p>
+
+<ul class="toc">
+  <li><a href="#parts">Из чего состоит система</a></li>
+  <li><a href="#d-map">Кто с кем говорит</a></li>
+  <li><a href="#targets">Цели: два адреса</a></li>
+  <li><a href="#providers">Исполнители</a></li>
+  <li><a href="#provider-choice">Выбор исполнителя</a></li>
+  <li><a href="#d-ops">Что доступно по виду цели</a></li>
+  <li><a href="#layers">Внутри раннера</a></li>
+  <li><a href="#life">Сколько живёт</a></li>
+</ul>
+
+<h2 id="parts">Из чего состоит система</h2>
+<p>Платформа называет пять компонентов: информационная база, клиентское приложение, сервер (кластер), СУБД и веб-сервер <span class="ref">(<a href="platform.html#t51">51</a>)</span>. К ним раннер добавляет утилиты, которыми с этими компонентами разговаривают, и свои собственные части.</p>
+
+<div class="tablewrap"><table>
+<thead><tr><th>чьё</th><th>компонент</th><th>зачем раннеру</th></tr></thead>
+<tbody>
+<tr><td class="k">платформа</td><td>информационная база: файловая, в кластере или за автономным сервером</td><td>цель всех команд обмена <span class="ref">(<a href="platform.html#t52">52</a>, <a href="platform.html#t60">60</a>)</span></td></tr>
+<tr><td class="k">платформа</td><td>кластер серверов: ragent, rmngr, rphost, СУБД за ним</td><td>держит базу; раннер обращается к нему адресом, процессами не управляет <span class="ref">(<a href="platform.html#t53">53</a>)</span></td></tr>
+<tr><td class="k">платформа</td><td>автономный сервер ibsrv с прямым и SSH-шлюзами</td><td>держит базу; по прямому шлюзу принимает Конфигуратор и тонкий клиент, как кластер <span class="ref">(<a href="platform.html#t65">65</a>)</span>, по SSH сам исполняет агентский набор <span class="ref">(<a href="platform.html#t61">61</a>)</span></td></tr>
+<tr><td class="k">платформа</td><td>веб-сервер Apache или IIS с модулем расширения</td><td>публикация и адрес для веб-клиента <span class="ref">(<a href="platform.html#t69">69</a>)</span></td></tr>
+<tr><td class="k">платформа</td><td>клиентские приложения: тонкий, толстый, веб</td><td>тесты и запуск <span class="ref">(<a href="platform.html#t66">66</a>)</span></td></tr>
+<tr><td class="k">утилита</td><td>Конфигуратор в пакетном режиме</td><td>исполнитель для всех трёх видов цели <span class="ref">(<a href="platform.html#t76">76</a>)</span>; к автономному серверу подключается по прямому шлюзу <span class="ref">(<a href="platform.html#t65">65</a>)</span></td></tr>
+<tr><td class="k">утилита</td><td>Конфигуратор в режиме агента</td><td>долгоживущая сессия с машинным ответом; раннер поднимает его сам <span class="ref">(<a href="platform.html#t85">85</a>, <a href="platform.html#agent">разбор</a>)</span></td></tr>
+<tr><td class="k">утилита</td><td>ibcmd</td><td>создание файловой базы, состав расширений, сборка пакета без базы, статус расхождения <span class="ref">(<a href="platform.html#t72">72</a>, <a href="platform.html#t103">103</a>, <a href="platform.html#t29">29</a>, <a href="platform.html#t30">30</a>)</span>; к базе под кластером не применяется <span class="ref">(<a href="platform.html#t60">60</a>)</span></td></tr>
+<tr><td class="k">утилита</td><td>webinst</td><td>публикация на веб-сервере <span class="ref">(<a href="platform.html#t69">69</a>)</span></td></tr>
+<tr><td class="k">утилита</td><td>1cedtcli</td><td>перевод между проектом EDT и XML, проверка проекта <span class="ref">(<a href="platform.html#t107">107</a>)</span></td></tr>
+<tr><td class="k">утилита</td><td>rac и сервер администрирования ras</td><td>сеансы своей базы в кластере: список, завершение, блокировка начала <span class="ref">(<a href="platform.html#t56">56</a>)</span>. Серверы, лицензии, профили — вне раннера. Если <code>cluster.ras</code> не объявлен, <code>ras</code> раннер поднимает сам <span class="ref">(<a href="platform.html#t55">55</a>)</span></td></tr>
+<tr><td class="k">раннер</td><td>командная строка и MCP-сервер</td><td>два адаптера над одними сценариями</td></tr>
+<tr><td class="k">раннер</td><td><code>v8project.yaml</code> и местный слой <code>v8project.local.yaml</code></td><td>что это за проект и к какой базе подключён этот каталог</td></tr>
+<tr><td class="k">раннер</td><td><code>workPath</code></td><td>журналы, временные файлы и три памяти о прошлом разе, по одной на каждую базу</td></tr>
+<tr><td class="k">вне раннера</td><td>система контроля версий</td><td>история, слияние, разметка конфликтов. Раннер в неё не пишет</td></tr>
+</tbody>
+</table></div>
+
+<p>Как раннер устроен по осям: формат и тип исходников → операция → вид цели → исполнитель по матрице умолчаний. Первые три называет вызывающий, четвёртое решает раннер.</p>
+<h3 id="d-map">Кто с кем говорит</h3>
+<p>Раннер запускает утилиты у себя и достаёт цель тремя способами: файлом, сетевым протоколом платформы и SSH. Автономный сервер достижим двумя из них: Конфигуратор идёт в его прямой шлюз тем же протоколом, что в кластер <span class="ref">(<a href="platform.html#t65">65</a>)</span>, а SSH ведёт в агентский шлюз <span class="ref">(<a href="platform.html#t61">61</a>)</span>. Прямого подключения к СУБД у него нет: базу в кластере создаёт Конфигуратор, а реквизиты СУБД уходят кластеру в строке создания <span class="ref">(<a href="platform.html#t73">73</a>)</span>. К базе, которой кластер управляет, инструменты автономного сервера применять нельзя <span class="ref">(<a href="platform.html#t60">60</a>)</span>. Консоль кластера остаётся вне раннера; к серверу администрирования он ходит только за сеансами своей базы. Здесь показан только канал администрирования; чем и откуда базу открывает человек, видно в каждом варианте отдельно.</p>
+<!-- diagram:map -->
+<div class="diagram" role="img" aria-label="Кто с кем говорит: раннер запускает утилиты у себя и достаёт цель файлом, протоколом платформы и SSH">
+<svg viewBox="2.0 -92.0 1392.0 744.0" xmlns="http://www.w3.org/2000/svg" style="max-width:1392px">
+<defs><marker id="arr-map" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-host"><rect x="12.0" y="-6.0" width="536.0" height="556.0" rx="12"/><text x="26.0" y="12.0">машина раннера</text></g>
+<path marker-end="url(#arr-map)" class="e" d="M170.0,273.9 C269.9,273.9 292.1,60.0 392.0,60.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M170.0,283.8 C251.0,283.8 269.0,151.4 350.0,151.4"/>
+<path marker-end="url(#arr-map)" class="e" d="M170.0,300.0 C251.0,300.0 269.0,190.3 350.0,190.3"/>
+<path marker-end="url(#arr-map)" class="e" d="M170.0,310.4 C269.9,310.4 292.1,290.0 392.0,290.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M170.0,320.3 C269.9,320.3 292.1,400.0 392.0,400.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M170.0,327.3 C269.9,327.3 292.1,510.0 392.0,510.0"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M150,271 L150,-40 Q150,-70 180,-70 L1010,-70 Q1040,-70 1040,-40 L1040,31"/>
+<path marker-end="url(#arr-map)" class="e" d="M100,329 L100,600 Q100,630 130,630 L1350,630 Q1380,630 1380,600 L1380,238 Q1380,208 1350,208 L1304,208"/>
+<path marker-end="url(#arr-map)" class="e" d="M488.0,60.0 C569.5,60.0 587.5,54.2 669.0,54.2"/>
+<path marker-end="url(#arr-map)" class="e" d="M530.0,146.8 C592.5,146.8 606.5,74.5 669.0,74.5"/>
+<path marker-end="url(#arr-map)" class="e" d="M530.0,175.8 C579.5,175.8 590.5,208.0 640.0,208.0"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M530,167 C640,140 800,140 940,196"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M530,158 C620,108 760,108 830,108 C880,108 885,60 900,60"/>
+<path marker-end="url(#arr-map)" class="e" d="M488.0,281.2 C556.4,281.2 571.6,228.3 640.0,228.3"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M488.0,298.8 C716.1,298.8 766.9,330.0 995.0,330.0"/>
+<path marker-end="url(#arr-map)" class="e dash" d="M488,400 C800,400 1250,430 1250,230"/>
+<path marker-end="url(#arr-map)" class="e" d="M1196.0,208.0 C1156.0,208.0 1180.0,208.0 1140.0,208.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M1040.0,237.0 C1040.0,277.0 1040.0,263.0 1040.0,303.0"/>
+<path marker-end="url(#arr-map)" class="e" d="M488.0,510.0 C570.1,510.0 588.4,510.0 670.5,510.0"/>
+<g class="n n-run"><rect x="30.0" y="271.0" width="140.0" height="58.0" rx="8"/><text><tspan x="100.0" y="291.0">v8-runner</tspan><tspan x="100.0" y="309.0">CLI · MCP</tspan></text></g>
+<g class="n n-sw"><rect x="392.0" y="38.0" width="96.0" height="44.0" rx="8"/><text><tspan x="440.0" y="60.0">1cedtcli</tspan></text></g>
+<g class="n n-sw"><rect x="350.0" y="141.0" width="180.0" height="58.0" rx="8"/><text><tspan x="440.0" y="161.0">1cv8 DESIGNER</tspan><tspan x="440.0" y="179.0">1cv8 /AgentMode 1543</tspan></text></g>
+<g class="n n-sw"><rect x="392.0" y="268.0" width="96.0" height="44.0" rx="8"/><text><tspan x="440.0" y="290.0">ibcmd</tspan></text></g>
+<g class="n n-sw"><rect x="392.0" y="378.0" width="96.0" height="44.0" rx="8"/><text><tspan x="440.0" y="400.0">rac</tspan></text></g>
+<g class="n n-sw"><rect x="392.0" y="488.0" width="96.0" height="44.0" rx="8"/><text><tspan x="440.0" y="510.0">webinst</tspan></text></g>
+<g class="n n-doc"><path d="M669.0,31.0 h142.0 v50.0 q-35.5,12.0 -71.0,0 q-35.5,-12.0 -71.0,0 z"/><text><tspan x="740.0" y="51.0">исходники</tspan><tspan x="740.0" y="69.0">XML, проект EDT</tspan></text></g>
+<g class="n n-doc"><path d="M640.0,179.0 h200.0 v50.0 q-50.0,12.0 -100.0,0 q-50.0,-12.0 -100.0,0 z"/><text><tspan x="740.0" y="199.0">файловая база</tspan><tspan x="740.0" y="217.0">каталог с 1Cv8.1CD</tspan></text></g>
+<g class="n n-svc"><rect x="900.0" y="31.0" width="280.0" height="58.0" rx="29.0"/><text><tspan x="1040.0" y="51.0">автономный сервер ibsrv</tspan><tspan x="1040.0" y="69.0">прямой шлюз · SSH-шлюз 1543</tspan></text></g>
+<g class="n n-sw"><rect x="940.0" y="179.0" width="200.0" height="58.0" rx="8"/><text><tspan x="1040.0" y="199.0">кластер 1С</tspan><tspan x="1040.0" y="217.0">ragent · rmngr · rphost</tspan></text></g>
+<g class="n n-cyl"><path d="M995.0,310.0 v40.0 a45.0,7.0 0 0 0 90.0,0 v-40.0"/><ellipse cx="1040.0" cy="310.0" rx="45.0" ry="7.0"/><text><tspan x="1040.0" y="330.0">СУБД</tspan></text></g>
+<g class="n n-svc"><rect x="1196.0" y="186.0" width="108.0" height="44.0" rx="22.0"/><text><tspan x="1250.0" y="208.0">RAS 1545</tspan></text></g>
+<g class="n n-svc"><rect x="670.5" y="488.0" width="139.0" height="44.0" rx="22.0"/><text><tspan x="740.0" y="510.0">Apache · IIS</tspan></text></g>
+<g class="lbl"><rect x="217.5" y="155.0" width="127" height="24" rx="4"/><text><tspan x="281.0" y="167.0">одна живая сессия</tspan></text></g>
+<g class="lbl"><rect x="189.5" y="205.6" width="141" height="24" rx="4"/><text><tspan x="260.0" y="217.6">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="186.0" y="233.2" width="148" height="24" rx="4"/><text><tspan x="260.0" y="245.2">поднимает, потом SSH</tspan></text></g>
+<g class="lbl"><rect x="210.5" y="288.2" width="141" height="24" rx="4"/><text><tspan x="281.0" y="300.2">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="210.5" y="348.1" width="141" height="24" rx="4"/><text><tspan x="281.0" y="360.1">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="210.5" y="406.6" width="141" height="24" rx="4"/><text><tspan x="281.0" y="418.6">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="519.5" y="-82.0" width="81" height="24" rx="4"/><text><tspan x="560.0" y="-70.0">SSH · SFTP</tspan></text></g>
+<g class="lbl"><rect x="962.5" y="618.0" width="275" height="24" rx="4"/><text><tspan x="1100.0" y="630.0">поднимает, если cluster.ras не объявлен</tspan></text></g>
+<g class="lbl"><rect x="565.0" y="179.9" width="40" height="24" rx="4"/><text><tspan x="585.0" y="191.9">файл</tspan></text></g>
+<g class="lbl"><rect x="701.5" y="139.0" width="67" height="24" rx="4"/><text><tspan x="735.0" y="151.0">TCP 1541</tspan></text></g>
+<g class="lbl"><rect x="679.5" y="97.9" width="121" height="24" rx="4"/><text><tspan x="740.0" y="109.9">TCP: прямой шлюз</tspan></text></g>
+<g class="lbl"><rect x="557.0" y="225.8" width="74" height="24" rx="4"/><text><tspan x="594.0" y="237.8">--db-path</tspan></text></g>
+<g class="lbl"><rect x="626.0" y="297.9" width="148" height="24" rx="4"/><text><tspan x="700.0" y="309.9">--dbms: прямо в СУБД</tspan></text></g>
+<g class="lbl"><rect x="603.0" y="389.6" width="194" height="24" rx="4"/><text><tspan x="700.0" y="401.6">TCP 1545: сеансы своей базы</tspan></text></g>
+<g class="lbl"><rect x="568.5" y="498.0" width="81" height="24" rx="4"/><text><tspan x="609.0" y="510.0">публикация</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:map -->
+<p class="hint">Утилиты EDT к базе не подключаются: <code>1cedtcli</code> работает только с исходниками, поэтому во всех четырнадцати расстановках он одинаков.</p>
+
+<p class="hint">Четырнадцать способов расставить это по машинам — на странице <a href="deployments.html">Расстановки</a>.</p>
+<h2 id="targets">Цели: два адреса</h2>
+<p>У базы два адреса. По <strong>строке подключения</strong> раннер её администрирует, и по ней же базу открывают Конфигуратор, толстый и тонкий клиент. По <strong>веб-адресу</strong> её открывают веб-клиент и тот же тонкий клиент: у тонкого клиента два пути, у веб-клиента один, у толстого клиента и Конфигуратора только строка <span class="ref">(<a href="platform.html#t67">67</a>)</span>. Адрес вида <code>ws=…</code> — веб-адрес, и он не говорит, чем администрировать: за публикацией может стоять файловая база, кластер или автономный сервер.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Цель</th><th>Строка подключения: раннер, Конфигуратор, толстый и тонкий клиент</th><th>Веб-адрес: веб-клиент и тонкий клиент</th></tr></thead>
+<tbody>
+<tr><td class="k">файловая</td><td><code>connection: File=…</code></td><td>после <code>publish</code> или объявленный вручную</td></tr>
+<tr><td class="k">кластер 1С</td><td><code>connection: Srvr=…;Ref=…</code></td><td>после <code>publish</code> или объявленный вручную</td></tr>
+<tr><td class="k">автономный сервер</td><td><code>connection: Srvr=…;Ref=…</code> — прямой шлюз, имя базы равно <code>--name</code> сервера; толстого клиента он не пускает <span class="ref">(<a href="platform.html#t65">65</a>)</span>. Рядом <code>standalone.gate</code> — SSH-шлюз для агентского набора <span class="ref">(<a href="platform.html#t61">61</a>)</span></td><td>HTTP-адрес самого сервера, известен сразу</td></tr>
+</tbody></table></div>
+<p>Кластер и автономный сервер могут стоять на другой машине, и их файловая система раннеру недоступна. Поэтому <code>workPath</code> всегда локален, пути в командах, адресованных цели, разрешаются на её стороне, а результат с удалённой цели, которую исполнял SSH-шлюз, забирается объявленным каналом обмена, а не чтением чужого пути. Конфигуратор по сети — в кластер или в прямой шлюз — читает и пишет файлы у раннера. Режим, где раннер сам поднимает процесс, работает только с локальной точкой входа.</p>
+<p class="hint">Следствие для диагностики: журнал платформы на стороне цели и технологический журнал сервера раннеру не видны — квитанция их не обещает.</p>
+
+<p class="hint">Ключи базы здесь и ниже записаны от её секции: <code>web.url</code> значит <code>infobases.&lt;имя&gt;.web.url</code>. Веб-адрес живёт в <code>web.url</code>: у автономного сервера он известен сразу, у остальных появляется после публикации.</p>
+
+<h2 id="providers">Исполнители</h2>
+<div class="tablewrap"><table>
+<thead><tr><th>Исполнитель</th><th>Что это</th><th>Решение по</th></tr></thead>
+<tbody>
+<tr><td class="k"><span class="pill batch">Designer</span></td><td>процесс Конфигуратора на команду; к файловой базе — файлом, к кластеру и к прямому шлюзу автономного сервера — по сети <span class="ref">(<a href="platform.html#t65">65</a>)</span></td><td>коду выхода и появлению артефакта</td></tr>
+<tr><td class="k"><span class="pill agent">agent</span></td><td>агентский shell по SSH: Конфигуратор в режиме агента или шлюз ibsrv; у шлюза набор команд урезан <span class="ref">(<a href="platform.html#t61">61</a>)</span>. У файловой базы и кластера такой точки входа нет: Конфигуратор в агентском режиме поднимает сам раннер, поэтому платформа нужна на его машине</td><td>JSON: <code>type</code> и закрытый <code>error-type</code></td></tr>
+<tr><td class="k"><span class="pill ibcmd">ibcmd</span></td><td>утилита платформы; у автономного сервера ведёт только сеансы</td><td>коду выхода и машинному выводу</td></tr>
+<tr><td class="k"><span class="pill rs">ibcmd-rs</span></td><td>конвертер XML ↔ CF без платформы</td><td>коду выхода</td></tr>
+<tr><td class="k"><span class="pill neutral">webinst</span></td><td>публикация базы на Apache или IIS</td><td>коду выхода и появлению публикации</td></tr>
+</tbody></table></div>
+<p class="hint">Проза инструмента никогда не решает — только переносится как улика.</p>
+
+<h2 id="provider-choice">Выбор исполнителя</h2>
+<ol>
+  <li>Умолчания заданы нами и живут в коде — матрица <code>(операция, цель) → цепочка</code>.</li>
+  <li>Раннер берёт первого готового в этом окружении.</li>
+  <li><code>providers.&lt;операция&gt;</code> в конфиге переопределяет жёстко: неготовый — отказ, без отката.</li>
+  <li>На проводе и во флагах исполнителя нет: вызывающий его не выбирает.</li>
+  <li>Квитанция объясняет выбор: <code>selected</code>, <code>origin</code>, <code>skipped</code>.</li>
+</ol>
+
+<h2 id="experiments">Назначить исполнителя жёстко</h2>
+<p>Ключ <code>providers.&lt;операция&gt;</code> в <code>v8project.yaml</code> или в местном слое назначает исполнителя на одну операцию и отменяет цепочку умолчаний: если названный исполнитель не готов, команда отказывает и следующего не берёт. Другого выключателя нет: ни флага, ни переменной окружения, ни состояния на диске.</p>
+<pre><code>providers:
+  push: agent
+  pull: agent</code></pre>
+<p>Квитанция показывает, кто исполнил и почему: <code>provider.selected</code> называет исполнителя, <code>provider.origin.kind: override</code> — что его назначил ключ. Валидация отвергает ключ там, где выбирать не из чего: например, у автономного сервера, объявленного одним SSH-шлюзом, исполнитель один. Там, где названный исполнитель операцию не реализует, отказ называет, кто её реализует.</p>
+
+<h2 id="agent-modes">Агент: два режима</h2>
+<div class="tablewrap"><table>
+<thead><tr><th></th><th>managed</th><th>attached</th></tr></thead>
+<tbody>
+<tr><td class="k">кто поднял</td><td>раннер</td><td>вы</td></tr>
+<tr><td class="k">где бывает</td><td>файловая база и кластер</td><td>автономный сервер — всегда, он держит свой шлюз сам; файловая база и кластер — только если агент Конфигуратора подняли вы</td></tr>
+<tr><td class="k">признак в конфиге</td><td>ключей <code>tools.designer_agent.attach</code> нет — раннер поднимает сам</td><td><code>standalone.gate</code> / <code>tools.designer_agent.attach</code></td></tr>
+<tr><td class="k">флаги запуска</td><td>раннер плюс ваши</td><td>только ваши</td></tr>
+<tr><td class="k">если недоступен</td><td>ошибка запуска</td><td><code>endpoint_unreachable</code>, свой рядом не поднимает</td></tr>
+</tbody></table></div>
+<p class="hint">Тот же принцип у сервера администрирования: объявленный <code>cluster.ras</code> раннер только использует, а без него поднимает <code>ras</code> сам, на своей машине, против агента кластера из строки подключения, и гасит вместе с командой <span class="ref">(<a href="platform.html#t55">55</a>)</span>.</p>
+
+<h2 id="rules">Правила</h2>
+<div class="tablewrap"><table>
+<tbody>
+<tr><td class="k">замок</td><td>команда владеет <code>workPath</code> целиком; сессия агента живёт не дольше</td></tr>
+<tr><td class="k">замок базы</td><td>команда, которая открывает файловую базу, владеет и ею: другая рабочая копия на этой машине получает отказ сразу. Базу, с которой ведут разработку, держит одна копия, делят её только по согласию каждой (<a href="sources.html#copies">Несколько рабочих копий</a>)</td></tr>
+<tr><td class="k">срок</td><td>у команды его нет — она идёт до терминального исхода; предел бывает у шага, если шаг его объявил</td></tr>
+<tr><td class="k">выкладка</td><td>полная замена каталога идёт через staging и backup</td></tr>
+<tr><td class="k">превью</td><td><code>--dry-run</code> не берёт замок и ничего не создаёт</td></tr>
+<tr><td class="k">секреты</td><td>маскируются во всех выводах</td></tr>
+</tbody></table></div>
+
+<p class="hint">Unica вызывает командную строку с <code>--json-message</code>. MCP — для хостов, подключающих раннер напрямую.</p>
+
+
+<h2 id="d-ops">Что доступно по виду цели</h2>
+<p>Ни местоположение цели, ни владелец её процесса — служба, консоль, контейнер — на этот список не влияют: он зависит только от вида. Первый исполнитель в клетке — умолчание; если он не готов в этом окружении, раннер берёт следующего. Ключ <code>providers.&lt;операция&gt;</code> назначает исполнителя жёстко. В столбце кластера ibcmd нет: регистрировать базу в кластере он не умеет <span class="ref">(<a href="platform.html#t74">74</a>)</span>, а к базе, которой кластер управляет, инструменты автономного сервера применять нельзя <span class="ref">(<a href="platform.html#t60">60</a>)</span>. У автономного сервера первым стоит Конфигуратор по прямому шлюзу: полный набор команд, файлы у раннера <span class="ref">(<a href="platform.html#t65">65</a>)</span>; SSH-шлюз берётся, когда строка подключения не объявлена или его назначил ключ, и набор у него урезан <span class="ref">(<a href="platform.html#t61">61</a>)</span>.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Операция</th><th>Файловая база</th><th>Кластер 1С</th><th>Автономный сервер</th></tr></thead>
+<tbody>
+<tr><td class="k">infobase create</td><td><span class="pill ibcmd">ibcmd</span> <span class="pill batch">designer</span></td><td><span class="pill batch">designer</span> <span class="pill neutral">rac</span> регистрация в кластере и база данных одной командой <span class="ref">(<a href="platform.html#t73">73</a>)</span></td><td><span class="pill no">нет</span> создаётся ibcmd в автономном режиме до запуска сервера <span class="ref">(<a href="platform.html#t75">75</a>)</span></td></tr>
+<tr><td class="k">push</td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span></td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span></td><td><span class="pill batch">designer</span> <span class="pill agent">agent</span> по SSH — файлы через канал обмена</td></tr>
+<tr><td class="k">apply</td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span></td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span></td><td><span class="pill batch">designer</span> <span class="pill agent">agent</span></td></tr>
+<tr><td class="k">reset</td><td><span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span></td><td><span class="pill batch">designer</span></td><td><span class="pill batch">designer</span> по SSH нет: в наборе шлюза нет отката <span class="ref">(<a href="platform.html#t60">60</a>)</span></td></tr>
+<tr><td class="k">upload</td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span></td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span></td><td><span class="pill batch">designer</span> по SSH нет: в наборе шлюза нет сравнения <span class="ref">(<a href="platform.html#t61">61</a>)</span></td></tr>
+<tr><td class="k">pull</td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span></td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span></td><td><span class="pill batch">designer</span> <span class="pill agent">agent</span> по SSH — результат через канал обмена</td></tr>
+<tr><td class="k">download</td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span> <span class="pill ibcmd">ibcmd</span></td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span></td><td><span class="pill batch">designer</span> <span class="pill agent">agent</span> только основная конфигурация</td></tr>
+<tr><td class="k">diff</td><td><span class="pill ibcmd">ibcmd</span> <span class="pill batch">designer</span></td><td><span class="pill batch">designer</span></td><td><span class="pill batch">designer</span> <span class="pill agent">agent</span> только по файлу версий</td></tr>
+<tr><td class="k">make</td><td colspan="3"><span class="pill ibcmd">ibcmd</span> <span class="pill rs">ibcmd-rs</span> <span class="pill batch">designer</span> — база не нужна, пакет собирается из исходников</td></tr>
+<tr><td class="k">convert</td><td colspan="3"><span class="pill neutral">edt-cli</span> <span class="pill ibcmd">ibcmd</span> <span class="pill rs">ibcmd-rs</span> — база не нужна: EDT ↔ XML делает <code>1cedtcli</code>, пакет ↔ XML — <code>ibcmd</code> или <code>ibcmd-rs</code></td></tr>
+<tr><td class="k">extensions</td><td><span class="pill ibcmd">ibcmd</span> <span class="pill agent">agent</span></td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span> имена</td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span> имена</td></tr>
+<tr><td class="k">infobase dump · restore</td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span></td><td><span class="pill agent">agent</span> <span class="pill batch">designer</span></td><td><span class="pill batch">designer</span> по SSH нет: <code>dump-ib</code> роняет <code>ibsrv</code> 8.3.27 <span class="pill measured">замер</span></td></tr>
+<tr><td class="k">check</td><td><span class="pill batch">designer</span></td><td><span class="pill batch">designer</span></td><td><span class="pill batch">designer</span></td></tr>
+<tr><td class="k">sessions</td><td><span class="pill no">нет</span> сервера, ведущего сеансы, нет</td><td><span class="pill neutral">rac</span></td><td><span class="pill ibcmd">ibcmd</span> session</td></tr>
+<tr><td class="k">test</td><td>клиент по строке подключения</td><td>клиент по строке подключения</td><td>тонкий клиент по строке подключения или по веб-адресу; толстого клиента прямой шлюз не пускает <span class="ref">(<a href="platform.html#t65">65</a>)</span></td></tr>
+<tr><td class="k">launch</td><td>designer · thin · thick · ordinary · mcp; web — когда объявлен <code>web.url</code></td><td>designer · thin · thick · ordinary · mcp; web — когда объявлен <code>web.url</code></td><td>designer · thin · mcp по строке подключения; thick и ordinary — нет: прямой шлюз толстого клиента не пускает, обычное приложение сервер не поддерживает <span class="ref">(<a href="platform.html#t65">65</a>)</span>; web — браузером по HTTP сервера</td></tr>
+<tr><td class="k">publish</td><td><span class="pill neutral">webinst</span></td><td><span class="pill neutral">webinst</span></td><td>не нужна: сервер отдаёт HTTP сам</td></tr>
+</tbody></table></div>
+<p class="hint">У тонкого клиента два пути, и раннер умеет оба: по строке подключения — прямо в файловую базу, в кластер или в прямой шлюз автономного сервера, по веб-адресу — через Apache, IIS или HTTP автономного сервера. Без ключа <code>launch thin</code> берёт строку подключения; веб-адрес — когда строка не объявлена. Ключ <code>--via web|connection</code> умолчание переопределяет и принимается только там, где клиент тонкий: через веб-сервер ходят тонкий, веб- и мобильный клиенты, толстый и Конфигуратор — только по строке подключения <span class="ref">(<a href="platform.html#t67">67</a>)</span>; <code>launch web</code> открывает тот же веб-адрес браузером. <code>ibcmd</code> серверную цель открывает прямо в СУБД, мимо кластера, по секции <code>dbms</code>; у файловой базы ему хватает пути к каталогу, а у автономного сервера секция не принимается вовсе. Какие строки помечены экспериментальными и как их включить — в разделе <a href="#experiments">Эксперименты</a>.</p>
+
+<h2 id="d-protocols">Каналы и протоколы</h2>
+<div class="tablewrap"><table>
+<thead><tr><th>Канал</th><th>Между кем</th><th>Чем</th><th>Что ходит</th></tr></thead>
+<tbody>
+<tr><td class="k">запуск утилиты</td><td>раннер → <code>1cv8</code>, <code>1cv8c</code>, <code>ibcmd</code>, <code>webinst</code>, <code>1cedtcli</code></td><td>процесс ОС: аргументы, код выхода, журнал</td><td>команда и её артефакты на диске</td></tr>
+<tr><td class="k">файловая база</td><td>Конфигуратор, <code>ibcmd</code>, клиент → каталог с <code>1Cv8.1CD</code></td><td>файловый доступ; у применения и снимка — монопольный</td><td>данные базы</td></tr>
+<tr><td class="k">кластер</td><td>Конфигуратор, клиент, агент → <code>ragent</code> 1540, <code>rmngr</code> 1541, <code>rphost</code> 1560–1591 <span class="ref">(<a href="platform.html#t63">63</a>)</span></td><td>протокол платформы поверх TCP</td><td>сеанс работы с ИБ</td></tr>
+<tr><td class="k">СУБД</td><td>кластер → сервер СУБД</td><td>реквизиты из секции <code>dbms</code> базы уходят в строку создания базы <span class="ref">(<a href="platform.html#t73">73</a>)</span></td><td>раннер к СУБД не подключается; ibcmd с базой под кластером не используется <span class="ref">(<a href="platform.html#t60">60</a>)</span></td></tr>
+<tr><td class="k">агент Конфигуратора</td><td>раннер → <code>1cv8 /AgentMode</code> на 127.0.0.1:1543 <span class="ref">(<a href="platform.html#t86">86</a>)</span></td><td>SSH встроенным клиентом: команда строкой, ответ JSON <span class="ref">(<a href="platform.html#t85">85</a>)</span>; без псевдотерминала <span class="ref">(<a href="platform.html#t101">101</a>)</span></td><td>команды сессии; файлы — через <code>AgentBaseDir</code> в <code>workPath</code></td></tr>
+<tr><td class="k">SSH-шлюз автономного сервера</td><td>раннер → <code>ibsrv</code> на <code>host:1543</code> <span class="ref">(<a href="platform.html#t64">64</a>)</span></td><td>SSH встроенным клиентом: команда строкой, ответ JSON <span class="ref">(<a href="platform.html#t61">61</a>)</span></td><td>команды сессии</td></tr>
+<tr><td class="k">прямой шлюз автономного сервера</td><td>Конфигуратор, тонкий клиент → <code>ibsrv</code> <span class="ref">(<a href="platform.html#t65">65</a>)</span></td><td>протокол платформы поверх TCP, как у кластера; строка <code>Srvr=…;Ref=…</code></td><td>сеанс работы с ИБ; файлы остаются у раннера</td></tr>
+<tr><td class="k">обмен файлами с целью</td><td>раннер ↔ каталог пользователя SSH-шлюза</td><td><code>exchange: sftp</code> — подсистема SFTP того же соединения; <code>exchange: { dir }</code> — видимый каталог</td><td>исходники, списки, <code>.cf</code>, <code>.cfe</code>, результаты выгрузки</td></tr>
+<tr><td class="k">публикация</td><td><code>webinst</code> → Apache или IIS на машине раннера <span class="ref">(<a href="platform.html#t69">69</a>)</span></td><td>запуск процесса, запись каталога публикации и правка конфига веб-сервера</td><td><code>default.vrd</code> целиком</td></tr>
+<tr><td class="k">веб-клиент</td><td>браузер, тонкий клиент → веб-сервер 80 · 443</td><td>HTTP, HTTPS; адрес вида <code>ws=…</code></td><td>сеанс пользователя</td></tr>
+<tr><td class="k">автономный сервер, клиент</td><td>браузер, тонкий клиент → <code>ibsrv</code> 8314 <span class="ref">(<a href="platform.html#t64">64</a>)</span></td><td>HTTP, HTTPS</td><td>сеанс пользователя</td></tr>
+<tr><td class="k">клиентский MCP</td><td>раннер → клиент 1С, поднятый командой <code>launch mcp</code> с инструментом onec-client-mcp-devkit</td><td>HTTP на 127.0.0.1</td><td>проверка готовности и инструменты внутри клиента</td></tr>
+<tr><td class="k">MCP-сервер раннера</td><td>ИИ-хост → раннер</td><td>stdio или HTTP на 127.0.0.1</td><td>вызовы инструментов</td></tr>
+<tr><td class="k">сервер администрирования</td><td>раннер → <code>rac</code> → RAS 1545 <span class="ref">(<a href="platform.html#t54">54</a>)</span></td><td>процесс ОС; адрес из <code>cluster.ras</code>, а без него — <code>ras</code>, поднятый раннером на своей машине против агента кластера <span class="ref">(<a href="platform.html#t55">55</a>)</span></td><td>сеансы своей базы: список, завершение, блокировка начала <span class="ref">(<a href="platform.html#t57">57</a>)</span>. Консоль кластера, лицензии и серверы — вне раннера</td></tr>
+</tbody></table></div>
+<h2 id="layers">Внутри раннера</h2>
+<p>Слои раннера и процессы, которые он запускает.</p>
+<h3>Слои</h3>
+<!-- diagram:layers -->
+<div class="diagram" role="img" aria-label="Слои раннера: адаптеры транспорта, оркестрация, общие слои и платформа">
+<svg viewBox="14.0 -23.0 915.0 393.0" xmlns="http://www.w3.org/2000/svg" style="max-width:915px">
+<defs><marker id="arr-layers" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<g class="fr fr-host"><rect x="24.0" y="254.0" width="612.0" height="106.0" rx="12"/><text x="38.0" y="272.0">Общее</text></g>
+<g class="fr fr-host"><rect x="31.0" y="-13.0" width="537.0" height="120.0" rx="12"/><text x="45.0" y="5.0">Адаптеры транспорта</text></g>
+<path marker-end="url(#arr-layers)" class="e" d="M150.0,89.0 C150.0,133.8 249.6,116.2 249.6,161.0"/>
+<path marker-end="url(#arr-layers)" class="e" d="M430.0,89.0 C430.0,133.8 330.4,116.2 330.4,161.0"/>
+<path marker-end="url(#arr-layers)" class="e" d="M219.3,219.0 C219.3,277.2 90.0,239.8 90.0,298.0"/>
+<path marker-end="url(#arr-layers)" class="e" d="M269.8,219.0 C269.8,259.0 230.0,258.0 230.0,298.0"/>
+<path marker-end="url(#arr-layers)" class="e" d="M320.3,219.0 C320.3,259.0 400.0,258.0 400.0,298.0"/>
+<path marker-end="url(#arr-layers)" class="e" d="M370.8,219.0 C370.8,308.6 570.0,208.4 570.0,298.0"/>
+<path marker-end="url(#arr-layers)" class="e" d="M391.0,190.0 C520.6,190.0 549.4,190.0 679.0,190.0"/>
+<path marker-end="url(#arr-layers)" class="e" d="M780.0,212.0 C780.0,252.0 780.0,258.0 780.0,298.0"/>
+<g class="n n-sw"><rect x="49.0" y="31.0" width="202.0" height="58.0" rx="8"/><text><tspan x="150.0" y="51.0">cli</tspan><tspan x="150.0" y="69.0">аргументы, текст и JSON</tspan></text></g>
+<g class="n n-sw"><rect x="310.0" y="31.0" width="240.0" height="58.0" rx="8"/><text><tspan x="430.0" y="51.0">mcp</tspan><tspan x="430.0" y="69.0">8 инструментов, stdio и HTTP</tspan></text></g>
+<g class="n n-run"><rect x="189.0" y="161.0" width="202.0" height="58.0" rx="8"/><text><tspan x="290.0" y="181.0">use_cases — оркестрация</tspan><tspan x="290.0" y="199.0">замок, пайплайн</tspan></text></g>
+<g class="n n-sw"><rect x="42.0" y="298.0" width="96.0" height="44.0" rx="8"/><text><tspan x="90.0" y="320.0">config</tspan></text></g>
+<g class="n n-sw"><rect x="182.0" y="298.0" width="96.0" height="44.0" rx="8"/><text><tspan x="230.0" y="320.0">domain</tspan></text></g>
+<g class="n n-sw"><rect x="325.5" y="298.0" width="149.0" height="44.0" rx="8"/><text><tspan x="400.0" y="320.0">change_detection</tspan></text></g>
+<g class="n n-sw"><rect x="522.0" y="298.0" width="96.0" height="44.0" rx="8"/><text><tspan x="570.0" y="320.0">parsers</tspan></text></g>
+<g class="n n-sw"><rect x="679.0" y="168.0" width="202.0" height="44.0" rx="8"/><text><tspan x="780.0" y="190.0">platform — вызов утилит</tspan></text></g>
+<g class="n n-sw"><rect x="641.0" y="298.0" width="278.0" height="44.0" rx="8"/><text><tspan x="780.0" y="320.0">support — файлы, staging, журналы</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:layers -->
+
+<div class="tablewrap"><table>
+<thead><tr><th>Слой</th><th>Отвечает за</th><th>Не знает про</th></tr></thead>
+<tbody>
+<tr><td class="k">cli</td><td>разбор аргументов, вывод текстом и JSON, взятие замка</td><td>как устроены утилиты платформы</td></tr>
+<tr><td class="k">mcp</td><td>инструменты, сессии HTTP, лимит одновременных вызовов</td><td>то же</td></tr>
+<tr><td class="k">use_cases</td><td>порядок шагов, замок, выбор исполнителя</td><td>ни clap, ни MCP-типы</td></tr>
+<tr><td class="k">config</td><td>чтение и проверка <code>v8project.yaml</code> и overlay</td><td>исполнение</td></tr>
+<tr><td class="k">domain</td><td>типы результата, матрица исполнителей</td><td>процессы</td></tr>
+<tr><td class="k">change_detection</td><td>что изменилось с прошлого раза</td><td>чем загружать</td></tr>
+<tr><td class="k">parsers</td><td>журналы и отчёты → типы</td><td>решения</td></tr>
+<tr><td class="k">platform</td><td>аргументы, запуск, коды выхода утилит</td><td>бизнес-смысл команды</td></tr>
+</tbody></table></div>
+
+<h3>Процессы</h3>
+<!-- diagram:processes -->
+<div class="diagram" role="img" aria-label="Процессы, которые запускает раннер">
+<svg viewBox="52.0 18.0 855.5 504.0" xmlns="http://www.w3.org/2000/svg" style="max-width:855px">
+<defs><marker id="arr-processes" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<path marker-end="url(#arr-processes)" class="e" d="M450.0,241.0 C450.0,164.9 450.0,148.1 450.0,72.0"/>
+<path marker-end="url(#arr-processes)" class="e" d="M389.2,241.0 C389.2,199.6 306.0,190.4 306.0,149.0"/>
+<path marker-end="url(#arr-processes)" class="e" d="M510.8,241.0 C510.8,196.4 591.2,186.6 591.2,142.0"/>
+<path marker-end="url(#arr-processes)" class="e" d="M370.0,270.0 C274.6,270.0 253.4,270.0 158.0,270.0"/>
+<path marker-end="url(#arr-processes)" class="e" d="M530.0,270.0 C598.6,270.0 613.9,270.0 682.5,270.0"/>
+<path marker-end="url(#arr-processes)" class="e" d="M389.2,299.0 C389.2,343.6 293.6,353.4 293.6,398.0"/>
+<path marker-end="url(#arr-processes)" class="e" d="M510.8,299.0 C510.8,343.6 606.4,353.4 606.4,398.0"/>
+<path marker-end="url(#arr-processes)" class="e" d="M450.0,299.0 C450.0,375.1 450.0,391.9 450.0,468.0"/>
+<g class="n n-run"><rect x="370.0" y="241.0" width="160.0" height="58.0" rx="8"/><text><tspan x="450.0" y="261.0">раннер</tspan><tspan x="450.0" y="279.0">CLI или MCP-сервер</tspan></text></g>
+<g class="n n-sw"><rect x="387.0" y="28.0" width="126.0" height="44.0" rx="8"/><text><tspan x="450.0" y="50.0">1cv8 DESIGNER</tspan></text></g>
+<g class="n n-svc"><rect x="85.0" y="91.0" width="260.0" height="58.0" rx="29.0"/><text><tspan x="215.0" y="111.0">ras cluster</tspan><tspan x="215.0" y="129.0">если cluster.ras не объявлен</tspan></text></g>
+<g class="n n-sw"><rect x="572.0" y="98.0" width="96.0" height="44.0" rx="8"/><text><tspan x="620.0" y="120.0">ibcmd</tspan></text></g>
+<g class="n n-sw"><rect x="62.0" y="248.0" width="96.0" height="44.0" rx="8"/><text><tspan x="110.0" y="270.0">rac</tspan></text></g>
+<g class="n n-svc"><rect x="682.5" y="241.0" width="215.0" height="58.0" rx="29.0"/><text><tspan x="790.0" y="261.0">агент: 1cv8 /AgentMode</tspan><tspan x="790.0" y="279.0">или шлюз ibsrv</tspan></text></g>
+<g class="n n-sw"><rect x="212.0" y="398.0" width="96.0" height="44.0" rx="8"/><text><tspan x="260.0" y="420.0">webinst</tspan></text></g>
+<g class="n n-sw"><rect x="592.0" y="398.0" width="96.0" height="44.0" rx="8"/><text><tspan x="640.0" y="420.0">1cedtcli</tspan></text></g>
+<g class="n n-sw"><rect x="402.0" y="468.0" width="96.0" height="44.0" rx="8"/><text><tspan x="450.0" y="490.0">клиент 1С</tspan></text></g>
+<g class="lbl"><rect x="379.5" y="144.5" width="141" height="24" rx="4"/><text><tspan x="450.0" y="156.5">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="253.6" y="183.0" width="188" height="24" rx="4"/><text><tspan x="347.6" y="195.0">поднимает на время команды</tspan></text></g>
+<g class="lbl"><rect x="480.5" y="179.5" width="141" height="24" rx="4"/><text><tspan x="551.0" y="191.5">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="193.5" y="258.0" width="141" height="24" rx="4"/><text><tspan x="264.0" y="270.0">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="565.8" y="258.0" width="81" height="24" rx="4"/><text><tspan x="606.2" y="270.0">сессия SSH</tspan></text></g>
+<g class="lbl"><rect x="270.9" y="336.5" width="141" height="24" rx="4"/><text><tspan x="341.4" y="348.5">процесс на операцию</tspan></text></g>
+<g class="lbl"><rect x="495.1" y="336.5" width="127" height="24" rx="4"/><text><tspan x="558.6" y="348.5">одна живая сессия</tspan></text></g>
+<g class="lbl"><rect x="386.5" y="371.5" width="127" height="24" rx="4"/><text><tspan x="450.0" y="383.5">процесс на запуск</tspan></text></g>
+</svg>
+</div>
+<!-- /diagram:processes -->
+
+<h2 id="life">Сколько живёт</h2>
+<div class="tablewrap"><table>
+<thead><tr><th>Компонент</th><th>Где</th><th>Сколько живёт</th><th>Сколько штук</th></tr></thead>
+<tbody>
+<tr><td class="k">CLI-процесс</td><td>ОС</td><td>одна команда</td><td>1</td></tr>
+<tr><td class="k">MCP-сервер</td><td>ОС</td><td>до остановки хоста</td><td>1</td></tr>
+<tr><td class="k">замок <code>workPath</code></td><td>файл в <code>workPath</code></td><td>время команды</td><td>1 на каталог</td></tr>
+<tr><td class="k">замок базы</td><td>файл рядом с каталогом файловой базы</td><td>время команды; берётся после замка <code>workPath</code> и не ждёт</td><td>1 на базу</td></tr>
+<tr><td class="k">метка базы</td><td>файл рядом с каталогом файловой базы</td><td>пока рабочая копия держит базу</td><td>1 на базу</td></tr>
+<tr><td class="k">поиск утилит</td><td>память процесса</td><td>время процесса, с кешем</td><td>1</td></tr>
+<tr><td class="k">состояние изменений</td><td><code>workPath/hash-storages</code></td><td>открыто на время команды, хранится между запусками</td><td>по набору исходников</td></tr>
+<tr><td class="k">сессия EDT</td><td>процесс <code>1cedtcli</code></td><td>в CLI — до конца команды; в MCP-сервере — до остановки, греется заранее</td><td>1 на хост</td></tr>
+<tr><td class="k">сессия агента</td><td>процесс агента или ibsrv</td><td>не дольше, чем раннер владеет <code>workPath</code>, и только когда агенту есть что поручить</td><td>1 на цель</td></tr>
+<tr><td class="k">ras, поднятый раннером</td><td>процесс на машине раннера</td><td>ровно столько, сколько раннер владеет <code>workPath</code>; объявленный <code>cluster.ras</code> он не поднимает</td><td>1 на команду</td></tr>
+<tr><td class="k">Designer, ibcmd, webinst</td><td>отдельный процесс</td><td>одна операция</td><td>1 одновременно</td></tr>
+<tr><td class="k">автономный сервер</td><td>ваш процесс</td><td>не наш; раннер его не поднимает и не перезапускает</td><td>—</td></tr>
+<tr><td class="k">клиент 1С</td><td>процесс</td><td>время теста или запуска</td><td>1</td></tr>
+<tr><td class="k">HTTP-сессии MCP</td><td>память сервера</td><td>до закрытия или простоя (<code>idle_ttl_secs</code>)</td><td>до <code>max_sessions</code></td></tr>
+</tbody></table></div>
+
+<h2>Что из этого следует</h2>
+<ul>
+  <li>Долгоживущее есть только у MCP-сервера: сессия EDT и HTTP-сессии. У CLI всё умирает вместе с командой.</li>
+  <li>Сессия агента привязана к замку: она не живёт дольше, чем команда владеет <code>workPath</code>, и вложенные шаги идут в ней же.</li>
+  <li>Состояние изменений переживает процессы — оно лежит на диске под <code>workPath</code>.</li>
+  <li>Параллельные команды на одном <code>workPath</code> не выполняются: вторая сразу получает отказ <code>workspace_busy</code>.</li>
+  <li>Две рабочие копии одной файловой базы на одной машине не работают с ней одновременно: вторая команда сразу получает отказ и называет, какая копия занята базой.</li>
+</ul>
+
+</main>
+
+<script src="site.js?v=7" defer></script>
+</body>
+</html>

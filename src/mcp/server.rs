@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -30,6 +31,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use url::Url;
+
 use crate::config::model::AppConfig;
 use crate::mcp::context::McpCallContext;
 use crate::mcp::edt_syntax;
@@ -45,6 +48,11 @@ use crate::mcp::service::{map_syntax_use_case_result, normalize_check_syntax_edt
 use crate::mcp::telemetry::{
     McpEdtSessionObserver, McpTelemetry, SemaphoreWaitErrorKind, SemaphoreWaitOutcome,
 };
+use crate::support::authority::{host_of_authority, host_of_url, Host};
+use crate::use_cases::context::CommandName;
+use crate::use_cases::result::UseCaseFailure;
+use crate::use_cases::transport::dispatch_with_workspace_lock_async;
+
 use crate::platform::edt_session::{
     EdtSessionHostOptions, EdtSessionManager, EdtSessionShutdownError,
 };
@@ -77,19 +85,6 @@ enum ErrorReason {
     JoinFailure,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ExecutionPolicy {
-    timeout: Option<Duration>,
-}
-
-impl ExecutionPolicy {
-    const fn bounded(timeout: Duration) -> Self {
-        Self {
-            timeout: Some(timeout),
-        }
-    }
-}
-
 impl McpTool {
     const fn as_str(self) -> &'static str {
         match self {
@@ -104,9 +99,13 @@ impl McpTool {
         }
     }
 
-    fn execution_policy(self, config: &AppConfig) -> ExecutionPolicy {
+    /// How long this tool may wait for a free execution slot.
+    ///
+    /// Admission only. Once a call holds a slot it runs to its terminal outcome, with no
+    /// deadline over it: see DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE.
+    fn admission_timeout(self, config: &AppConfig) -> Duration {
         let _ = self;
-        ExecutionPolicy::bounded(config.execution_timeout_duration())
+        config.mcp_admission_timeout_duration()
     }
 }
 
@@ -181,16 +180,29 @@ pub fn serve_http(config: AppConfig) -> Result<(), McpServerError> {
                 address: config.mcp.http.bind_address.clone(),
                 source,
             })?;
-        let router = axum::Router::new().route(
-            config.mcp.http.path.as_str(),
-            axum::routing::any({
-                let service = service.clone();
-                move |request| {
+        warn_about_a_listener_nobody_guards(config.as_ref());
+        let router = axum::Router::new()
+            .route(
+                config.mcp.http.path.as_str(),
+                axum::routing::any({
                     let service = service.clone();
-                    async move { service.handle(request).await }
-                }
-            }),
-        );
+                    move |request| {
+                        let service = service.clone();
+                        async move { service.handle(request).await }
+                    }
+                }),
+            )
+            // Слой, а не проверка внутри обработчика: так под проверку попадают и
+            // запросы, не совпавшие ни с одним маршрутом. Отрабатывает он раньше,
+            // чем тело запроса начнут читать, а сессию — занимать.
+            //
+            // Вызов обязан быть последним в цепочке: axum накрывает слоем только
+            // те маршруты, что добавлены до него, — маршрут, приписанный следом,
+            // пройдёт мимо проверки молча.
+            .layer(axum::middleware::from_fn_with_state(
+                KnownHosts::of(config.as_ref()),
+                refuse_a_request_that_names_another_host,
+            ));
         let serve = axum::serve(listener, router).with_graceful_shutdown({
             let shutdown = shutdown.clone();
             async move {
@@ -294,164 +306,94 @@ impl McpToolServer {
         TRequest: Send + 'static,
         TResponse: serde::Serialize + Send + 'static,
     {
-        let policy = tool.execution_policy(self.config.as_ref());
-        let timeout = policy.timeout;
-        let deadline = timeout.map(|value| Instant::now() + value);
+        let admission_timeout = tool.admission_timeout(self.config.as_ref());
         let permit = self
-            .acquire_execution_slot(tool, cancellation.clone(), deadline, timeout)
+            .acquire_execution_slot(tool, cancellation.clone(), admission_timeout)
             .await?;
-        let remaining_timeout = remaining_timeout(deadline);
         if cancellation.is_cancelled() {
             return Err(execution_error(
                 ErrorReason::Cancelled,
                 ExecutionStage::Queued,
-                timeout,
+                Some(admission_timeout),
             ));
         }
-        if timeout.is_some() && remaining_timeout.is_some_and(|value| value.is_zero()) {
-            return Err(execution_error(
-                ErrorReason::Timeout,
-                ExecutionStage::Queued,
-                timeout,
-            ));
-        }
+        let edt_timeout = Duration::from_millis(self.config.tools.edt_cli.command_timeout_ms);
 
         let config = self.config.clone();
         let port = self.port.clone();
         let call_context = self
             .call_context
             .clone()
-            .with_deadline(deadline.map(Instant::into_std))
             .with_cancellation(cancellation.clone())
-            .with_edt_timeout(remaining_timeout);
+            .with_edt_timeout(Some(edt_timeout));
         let mut handle =
             tokio::task::spawn_blocking(move || method(config, port, call_context, request));
         let _permit = permit;
-        let mut interrupted = None;
+        // Защёлка обязательна: без неё `cancelled()` разрешался бы на каждом витке и
+        // цикл крутился бы вхолостую. Отменённый вызов не обрывается — мы дожидаемся
+        // терминального исхода работы, которая уже идёт.
+        let mut interrupt_seen = false;
         loop {
             tokio::select! {
                 biased;
                 result = &mut handle => {
                     let result = result
-                        .map_err(|_| execution_error(ErrorReason::JoinFailure, ExecutionStage::Running, timeout))?;
+                        .map_err(|_| execution_error(ErrorReason::JoinFailure, ExecutionStage::Running, None))?;
                     return map_tool_result(result);
                 }
-                _ = cancellation.cancelled(), if interrupted.is_none() => {
-                    interrupted = Some(ErrorReason::Cancelled);
-                }
-                _ = wait_for_deadline(deadline), if deadline.is_some() && interrupted.is_none() => {
-                    cancellation.cancel();
-                    interrupted = Some(ErrorReason::Timeout);
+                _ = cancellation.cancelled(), if !interrupt_seen => {
+                    interrupt_seen = true;
                 }
             }
         }
     }
 
+    /// Ждёт свободный слот исполнения не дольше допускного срока.
+    ///
+    /// Это единственный срок, оставшийся у MCP: у клиента протокола нет Ctrl+C, и занятый
+    /// слот иначе держал бы очередь молча. Получивший слот вызов идёт до терминального
+    /// исхода — см. DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE.
     async fn acquire_execution_slot(
         &self,
         tool: McpTool,
         cancellation: CancellationToken,
-        deadline: Option<Instant>,
-        timeout: Option<Duration>,
+        timeout: Duration,
     ) -> Result<OwnedSemaphorePermit, ErrorData> {
         let wait_started = Instant::now();
-        let bounded = timeout.is_some();
         let acquire = self.concurrency_limit.clone().acquire_owned();
         tokio::pin!(acquire);
 
-        match deadline {
-            Some(deadline) => {
-                tokio::select! {
-                    biased;
-                    _ = cancellation.cancelled() => {
-                        self.telemetry.execution().record_semaphore_wait(
-                            self.call_context.transport(),
-                            tool.as_str(),
-                            SemaphoreWaitOutcome::Cancelled,
-                            bounded,
-                            timeout,
-                            wait_started.elapsed(),
-                            None,
-                        );
-                        Err(execution_error(ErrorReason::Cancelled, ExecutionStage::Queued, timeout))
-                    }
-                    _ = tokio::time::sleep_until(deadline) => {
-                        self.telemetry.execution().record_semaphore_wait(
-                            self.call_context.transport(),
-                            tool.as_str(),
-                            SemaphoreWaitOutcome::Timeout,
-                            bounded,
-                            timeout,
-                            wait_started.elapsed(),
-                            None,
-                        );
-                        Err(execution_error(ErrorReason::Timeout, ExecutionStage::Queued, timeout))
-                    }
-                    permit = &mut acquire => permit.map_err(|error| {
-                        self.telemetry.execution().record_semaphore_wait(
-                            self.call_context.transport(),
-                            tool.as_str(),
-                            SemaphoreWaitOutcome::InternalError,
-                            bounded,
-                            timeout,
-                            wait_started.elapsed(),
-                            Some(SemaphoreWaitErrorKind::SemaphoreClosed),
-                        );
-                        ErrorData::internal_error(error.to_string(), None)
-                    }).map(|permit| {
-                        self.telemetry.execution().record_semaphore_wait(
-                            self.call_context.transport(),
-                            tool.as_str(),
-                            SemaphoreWaitOutcome::Acquired,
-                            bounded,
-                            timeout,
-                            wait_started.elapsed(),
-                            None,
-                        );
-                        permit
-                    }),
-                }
+        let record = |outcome, error_kind| {
+            self.telemetry.execution().record_semaphore_wait(
+                self.call_context.transport(),
+                tool.as_str(),
+                outcome,
+                true,
+                Some(timeout),
+                wait_started.elapsed(),
+                error_kind,
+            );
+        };
+
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                record(SemaphoreWaitOutcome::Cancelled, None);
+                Err(execution_error(ErrorReason::Cancelled, ExecutionStage::Queued, Some(timeout)))
             }
-            None => {
-                tokio::select! {
-                    biased;
-                    _ = cancellation.cancelled() => {
-                        self.telemetry.execution().record_semaphore_wait(
-                            self.call_context.transport(),
-                            tool.as_str(),
-                            SemaphoreWaitOutcome::Cancelled,
-                            bounded,
-                            timeout,
-                            wait_started.elapsed(),
-                            None,
-                        );
-                        Err(execution_error(ErrorReason::Cancelled, ExecutionStage::Queued, timeout))
-                    }
-                    permit = &mut acquire => permit.map_err(|error| {
-                        self.telemetry.execution().record_semaphore_wait(
-                            self.call_context.transport(),
-                            tool.as_str(),
-                            SemaphoreWaitOutcome::InternalError,
-                            bounded,
-                            timeout,
-                            wait_started.elapsed(),
-                            Some(SemaphoreWaitErrorKind::SemaphoreClosed),
-                        );
-                        ErrorData::internal_error(error.to_string(), None)
-                    }).map(|permit| {
-                        self.telemetry.execution().record_semaphore_wait(
-                            self.call_context.transport(),
-                            tool.as_str(),
-                            SemaphoreWaitOutcome::Acquired,
-                            bounded,
-                            timeout,
-                            wait_started.elapsed(),
-                            None,
-                        );
-                        permit
-                    }),
-                }
+            _ = tokio::time::sleep_until(Instant::now() + timeout) => {
+                record(SemaphoreWaitOutcome::Timeout, None);
+                Err(execution_error(ErrorReason::Timeout, ExecutionStage::Queued, Some(timeout)))
             }
+            permit = &mut acquire => permit
+                .map_err(|error| {
+                    record(
+                        SemaphoreWaitOutcome::InternalError,
+                        Some(SemaphoreWaitErrorKind::SemaphoreClosed),
+                    );
+                    ErrorData::internal_error(error.to_string(), None)
+                })
+                .inspect(|_permit| record(SemaphoreWaitOutcome::Acquired, None)),
         }
     }
 
@@ -474,16 +416,12 @@ impl McpToolServer {
                 .await;
         }
 
-        let timeout = McpTool::CheckSyntaxEdt
-            .execution_policy(self.config.as_ref())
-            .timeout;
-        let deadline = timeout.map(|value| Instant::now() + value);
+        let admission_timeout = McpTool::CheckSyntaxEdt.admission_timeout(self.config.as_ref());
         let mut permit = Some(
             self.acquire_execution_slot(
                 McpTool::CheckSyntaxEdt,
                 cancellation.clone(),
-                deadline,
-                timeout,
+                admission_timeout,
             )
             .await?,
         );
@@ -491,35 +429,41 @@ impl McpToolServer {
             return Err(execution_error(
                 ErrorReason::Cancelled,
                 ExecutionStage::Queued,
-                timeout,
+                Some(admission_timeout),
             ));
         }
 
-        let remaining_timeout = remaining_timeout(deadline);
-        if remaining_timeout.is_some_and(|value| value.is_zero()) {
-            return Err(execution_error(
-                ErrorReason::Timeout,
-                ExecutionStage::Queued,
-                timeout,
-            ));
-        }
-
-        let edt_timeout = remaining_timeout
-            .map(|value| {
-                value.min(Duration::from_millis(
-                    self.config.tools.edt_cli.command_timeout_ms,
-                ))
-            })
-            .unwrap_or_else(|| Duration::from_millis(1));
+        // Шаг ограничен только собственным пределом: ожидание в очереди его не укорачивает.
+        // Допускной срок кончается вместе с допуском, иначе это тот же срок команды под
+        // другим именем — см. DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE.
+        let edt_timeout = Duration::from_millis(self.config.tools.edt_cli.command_timeout_ms);
         let use_case_request = normalize_check_syntax_edt_request(&request);
-        let result = edt_syntax::execute(
-            self.edt_session.as_ref(),
+        // Замок `workPath` берётся после допуска, как у порта: ожидая слота, вызов его не
+        // держит. Снимается он с конечным состоянием проверки — раньше слота, иначе
+        // следующий допущенный вызов застал бы каталог занятым.
+        let result = match dispatch_with_workspace_lock_async(
             self.config.as_ref(),
-            &use_case_request,
-            edt_timeout,
-            cancellation,
+            CommandName::Syntax,
+            || {
+                edt_syntax::execute(
+                    self.edt_session.as_ref(),
+                    self.config.as_ref(),
+                    &use_case_request,
+                    edt_timeout,
+                    cancellation,
+                )
+            },
         )
-        .await;
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                permit.take();
+                return map_tool_result(map_syntax_use_case_result(Err(
+                    UseCaseFailure::without_payload(error),
+                )));
+            }
+        };
 
         match result {
             Ok(use_case_result) => {
@@ -531,7 +475,7 @@ impl McpToolServer {
                 Err(execution_error(
                     ErrorReason::Cancelled,
                     ExecutionStage::Queued,
-                    timeout,
+                    Some(edt_timeout),
                 ))
             }
             Err(edt_syntax::EdtSyntaxTransportError::QueuedTimeout) => {
@@ -539,7 +483,7 @@ impl McpToolServer {
                 Err(execution_error(
                     ErrorReason::Timeout,
                     ExecutionStage::Queued,
-                    timeout,
+                    Some(edt_timeout),
                 ))
             }
         }
@@ -918,7 +862,12 @@ fn execution_error(
         (ErrorReason::Timeout, ExecutionStage::Queued) => {
             "MCP call timed out while waiting for execution slot"
         }
-        (ErrorReason::Timeout, ExecutionStage::Running) => "MCP call timed out during execution",
+        // Недостижимо и обязано таким остаться: допущенный вызов идёт до терминального
+        // исхода (DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE). Плечо нужно `match`, а текст
+        // назовёт это дефектом, а не сделает вид, что у выполнения есть срок.
+        (ErrorReason::Timeout, ExecutionStage::Running) => {
+            "MCP call reported a timeout while running, which no bound can produce"
+        }
         (ErrorReason::JoinFailure, ExecutionStage::Queued) => "MCP queue task failed unexpectedly",
         (ErrorReason::JoinFailure, ExecutionStage::Running) => {
             "MCP execution task failed unexpectedly"
@@ -937,10 +886,6 @@ fn execution_error(
         "timeoutMs": timeout.map(duration_to_millis),
     });
     ErrorData::internal_error(message, Some(data))
-}
-
-fn remaining_timeout(deadline: Option<Instant>) -> Option<Duration> {
-    deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()))
 }
 
 fn duration_to_millis(duration: Duration) -> u64 {
@@ -1007,6 +952,188 @@ fn session_id_from_headers(headers: &axum::http::HeaderMap) -> Option<SessionId>
         .map(Into::into)
 }
 
+/// Отказывает запросу, назвавшему чужой хост.
+async fn refuse_a_request_that_names_another_host(
+    axum::extract::State(known): axum::extract::State<KnownHosts>,
+    request: Request<Body>,
+    next: axum::middleware::Next,
+) -> Response<Body> {
+    match admission_verdict(&request, &known) {
+        Ok(()) => next.run(request).await,
+        Err(refused) => refusal_response(refused),
+    }
+}
+
+/// Предупреждает, когда слушатель открыт наружу и закрыт только периметром.
+///
+/// Сочетание видно до первого запроса, а отказ виден только по коду `403`, который
+/// клиент MCP покажет без тела. Поэтому о нём говорят на старте, а не молчат до
+/// первой неудачи в контейнере, за которым никто не смотрит.
+fn warn_about_a_listener_nobody_guards(config: &AppConfig) {
+    if !config.mcp.http.allowed_hosts.is_empty() {
+        return;
+    }
+    let reachable_from_outside = config
+        .mcp
+        .http
+        .bind_address
+        .parse::<SocketAddr>()
+        .is_ok_and(|address| !address.ip().to_canonical().is_loopback());
+    if reachable_from_outside {
+        tracing::warn!(
+            bind_address = %config.mcp.http.bind_address,
+            "MCP HTTP listens beyond the loopback while mcp.http.allowed_hosts is empty: \
+             every request naming another host is refused with 403, and the listener \
+             itself has no authentication"
+        );
+    }
+}
+
+/// Хосты, на чьё имя слушатель отвечает.
+///
+/// Защита здесь ровно от одного: браузер на той же машине переразрешает своё имя
+/// в `127.0.0.1` и стучится к слушателю как к своему. Подделать `Host` он не может,
+/// поэтому сверка имени такую страницу и отсекает.
+///
+/// Чего защита НЕ делает: она не закрывает слушатель от не-браузерных клиентов.
+/// `curl -H 'Host: 127.0.0.1:3000' http://10.0.0.5:3000/mcp` заголовок подставит
+/// любой, поэтому не-петлевой bind остаётся открытым всем, кто до него дотянется.
+/// Единственная защита там — периметр, и назвать чужое имя в `allowed_hosts`
+/// значит взять его на себя.
+#[derive(Clone)]
+struct KnownHosts {
+    named: Arc<Vec<Host>>,
+}
+
+impl KnownHosts {
+    fn of(config: &AppConfig) -> Self {
+        Self {
+            named: Arc::new(
+                config
+                    .mcp
+                    .http
+                    .allowed_hosts
+                    .iter()
+                    .filter_map(|allowed| host_of_authority(allowed))
+                    .collect(),
+            ),
+        }
+    }
+
+    fn admits(&self, host: &Host) -> bool {
+        host.is_loopback() || self.named.contains(host)
+    }
+}
+
+/// Заголовок, из-за которого запрос отклонён.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefusedHeader {
+    Host,
+    Origin,
+}
+
+impl RefusedHeader {
+    const fn name(self) -> &'static str {
+        match self {
+            RefusedHeader::Host => "Host",
+            RefusedHeader::Origin => "Origin",
+        }
+    }
+}
+
+/// Пускать ли запрос по его заголовкам.
+///
+/// `Host` обязателен и должен быть ровно один: сборка собрана только с `http1`
+/// (`Cargo.toml`, крейта `h2` в `Cargo.lock` нет), поэтому `:authority` сюда не
+/// приходит и отсутствие заголовка — не протокол версии 2, а причина отказать.
+///
+/// `Origin` проверяется, если он есть. Отсутствие — не повод отказывать: клиенты
+/// вне браузера его не шлют. А `Origin: null` — это не отсутствие: так
+/// представляются песочница, `file:` и `data:`, и адресом это не разбирается.
+fn admission_verdict(request: &Request<Body>, known: &KnownHosts) -> Result<(), RefusedHeader> {
+    // У http/1.1 два канала для имени хоста. Цель запроса в absolute-form
+    // (`GET http://имя/mcp HTTP/1.1`) несёт своё, и по RFC 9112 §3.2.2 верить
+    // положено ему, а не заголовку; hyper его в `Host` не переносит. Клиенты MCP
+    // так не пишут, поэтому здесь требуется, чтобы оба канала назвали известное
+    // имя, — строже, чем велит RFC, и закрыто в обе стороны.
+    if let Some(authority) = request.uri().authority() {
+        let named = host_of_authority(authority.as_str()).ok_or(RefusedHeader::Host)?;
+        if !known.admits(&named) {
+            return Err(RefusedHeader::Host);
+        }
+    }
+
+    let headers = request.headers();
+    let host = exactly_one(headers, &axum::http::header::HOST)
+        .and_then(host_of_authority)
+        .ok_or(RefusedHeader::Host)?;
+    if !known.admits(&host) {
+        return Err(RefusedHeader::Host);
+    }
+
+    let Some(origin) = exactly_one(headers, &axum::http::header::ORIGIN) else {
+        return if headers.contains_key(axum::http::header::ORIGIN) {
+            Err(RefusedHeader::Origin)
+        } else {
+            Ok(())
+        };
+    };
+    let origin = Url::parse(origin).map_err(|_| RefusedHeader::Origin)?;
+    // Браузер сериализует источник как `схема://хост[:порт]` и больше ничем. Всё
+    // остальное — userinfo, путь, запрос — оттуда прийти не может, и принимать
+    // такое значит рассуждать про одни записи, а пускать другие.
+    let shaped_like_an_origin = origin.username().is_empty()
+        && origin.password().is_none()
+        && origin.path() == "/"
+        && origin.query().is_none()
+        && origin.fragment().is_none();
+    let scheme_is_web = origin.scheme() == "http" || origin.scheme() == "https";
+    let admitted = scheme_is_web
+        && shaped_like_an_origin
+        && host_of_url(&origin).is_some_and(|host| known.admits(&host));
+    if admitted {
+        Ok(())
+    } else {
+        Err(RefusedHeader::Origin)
+    }
+}
+
+/// Значение заголовка, если он один.
+///
+/// Повтор `Host` запрещён RFC 9112 §3.2, но hyper его не отбрасывает, а
+/// `HeaderMap::get` молча берёт первый. Считать здесь дешевле, чем гадать, какой
+/// из двух прочитает следующий в цепочке.
+fn exactly_one<'a>(
+    headers: &'a axum::http::HeaderMap,
+    name: &axum::http::HeaderName,
+) -> Option<&'a str> {
+    let mut values = headers.get_all(name).iter();
+    let only = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    // Значение вне печатного ASCII читается как отсутствие: имя хоста таким не бывает.
+    only.to_str().ok()
+}
+
+/// Ответ на запрос, пришедший не на то имя.
+///
+/// Значение заголовка в тело не попадает: его пишет тот, кому отказали.
+fn refusal_response(refused: RefusedHeader) -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .header(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        )
+        .body(Body::from(format!(
+            "Forbidden: the {} header does not name a host this listener answers; \
+             list it in mcp.http.allowed_hosts to allow it",
+            refused.name()
+        )))
+        .expect("valid refusal response")
+}
+
 fn valid_streamable_post_headers(headers: &axum::http::HeaderMap) -> bool {
     let accepts_both = headers
         .get(axum::http::header::ACCEPT)
@@ -1020,12 +1147,6 @@ fn valid_streamable_post_headers(headers: &axum::http::HeaderMap) -> bool {
         .is_some_and(|value| value.starts_with("application/json"));
 
     accepts_both && content_type_is_json
-}
-
-async fn wait_for_deadline(deadline: Option<Instant>) {
-    if let Some(deadline) = deadline {
-        tokio::time::sleep_until(deadline).await;
-    }
 }
 
 async fn wait_for_shutdown_signal() {
@@ -1063,13 +1184,16 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        execution_error, max_concurrent_calls, shutdown_grace_period, ErrorReason, ExecutionStage,
-        HttpSessionAdmission, McpTool, McpToolServer,
+        admission_verdict, execution_error, max_concurrent_calls, shutdown_grace_period,
+        ErrorReason, ExecutionStage, HttpSessionAdmission, KnownHosts, McpTool, McpToolServer,
+        RefusedHeader,
     };
+    use axum::body::Body;
+    use axum::http::Request;
+
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, McpConfig, McpExecutionConfig, McpHttpConfig,
-        PlatformToolConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
-        ToolsConfig,
+        AppConfig, BuildConfig, McpConfig, McpExecutionConfig, McpHttpConfig, PlatformToolConfig,
+        SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig, ToolsConfig,
     };
     use crate::mcp::context::McpCallContext;
     use crate::mcp::port::DefaultMcpUseCasePort;
@@ -1171,12 +1295,15 @@ mod tests {
                 Some(Duration::from_millis(300_000))
             )
         );
+        let wire = serde_json::to_value(&error).expect("serialize MCP error data");
+        assert_eq!(wire["data"]["reason"], "cancelled");
+        assert_eq!(wire["data"]["stage"], "queued");
         assert_eq!(started.load(Ordering::SeqCst), 0);
         assert_eq!(execution_telemetry.snapshot().cancelled_total, 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn queued_timeout_returns_transport_error() {
+    async fn an_admission_timeout_returns_a_transport_error() {
         let server = McpToolServer::with_port(
             Arc::new(test_config_with_edt_timeout(1, 9, 20)),
             Arc::new(DefaultMcpUseCasePort),
@@ -1222,7 +1349,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn bounded_queued_cancellation_wins_before_deadline() {
+    async fn bounded_queued_cancellation_wins_before_the_admission_timeout() {
         let server = McpToolServer::with_port(
             Arc::new(test_config_with_edt_timeout(1, 9, 80)),
             Arc::new(DefaultMcpUseCasePort),
@@ -1498,6 +1625,169 @@ mod tests {
             .map(|_| ())
     }
 
+    fn known_hosts(allowed: &[&str]) -> KnownHosts {
+        let mut config = test_config(1, 30);
+        config.mcp.http.allowed_hosts = allowed.iter().map(|name| (*name).to_owned()).collect();
+        KnownHosts::of(&config)
+    }
+
+    fn asking(target: &str, pairs: &[(&str, &str)]) -> Request<Body> {
+        let mut builder = Request::builder().uri(target);
+        for (name, value) in pairs {
+            builder = builder.header(*name, *value);
+        }
+        builder.body(Body::empty()).expect("a request")
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> Request<Body> {
+        asking("/mcp", pairs)
+    }
+
+    #[test]
+    fn the_loopback_is_answered_without_being_listed() {
+        let known = known_hosts(&[]);
+        for host in ["127.0.0.1:3000", "localhost:3000", "[::1]:3000"] {
+            assert_eq!(
+                admission_verdict(&headers(&[("host", host)]), &known),
+                Ok(()),
+                "{host} is answered"
+            );
+        }
+    }
+
+    #[test]
+    fn a_page_that_rebound_its_own_name_is_refused() {
+        // Та самая атака: браузер разрешает `evil.com` в `127.0.0.1` и стучится
+        // к слушателю как к своему. Подделать `Host` он не может — на этом и ловим.
+        let known = known_hosts(&[]);
+        for host in [
+            "evil.com:3000",
+            "127.evil.com:3000",
+            "127.0.0.1.nip.io:3000",
+        ] {
+            assert_eq!(
+                admission_verdict(&headers(&[("host", host)]), &known),
+                Err(RefusedHeader::Host),
+                "{host} is refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_name_in_an_absolute_request_target_is_checked_too() {
+        // У http/1.1 имя хоста приезжает двумя каналами, и `Host` — не единственный:
+        // absolute-form несёт своё, а hyper его в заголовок не переносит.
+        let known = known_hosts(&[]);
+
+        assert_eq!(
+            admission_verdict(
+                &asking("http://evil.com/mcp", &[("host", "127.0.0.1:3000")]),
+                &known
+            ),
+            Err(RefusedHeader::Host)
+        );
+        assert_eq!(
+            admission_verdict(
+                &asking("http://127.0.0.1:3000/mcp", &[("host", "127.0.0.1:3000")]),
+                &known
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn an_origin_shaped_unlike_a_browser_origin_is_refused() {
+        // Браузер сериализует источник как `схема://хост[:порт]`. Ни userinfo, ни
+        // путь оттуда прийти не могут, и петлевой хост за `@` — не тот источник.
+        let known = known_hosts(&[]);
+        let local = ("host", "127.0.0.1:3000");
+        for origin in [
+            "http://evil.com@127.0.0.1",
+            "http://127.0.0.1/some/path",
+            "http://127.0.0.1/?x=1",
+        ] {
+            assert_eq!(
+                admission_verdict(&headers(&[local, ("origin", origin)]), &known),
+                Err(RefusedHeader::Origin),
+                "{origin} is refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_that_is_missing_or_doubled_is_refused() {
+        let known = known_hosts(&[]);
+        assert_eq!(
+            admission_verdict(&headers(&[]), &known),
+            Err(RefusedHeader::Host)
+        );
+        // Повтор запрещён RFC 9112 §3.2, а `HeaderMap::get` молча берёт первый.
+        assert_eq!(
+            admission_verdict(
+                &headers(&[("host", "127.0.0.1:3000"), ("host", "evil.com:3000")]),
+                &known
+            ),
+            Err(RefusedHeader::Host)
+        );
+    }
+
+    #[test]
+    fn an_origin_is_checked_when_it_is_there_and_not_demanded_when_it_is_not() {
+        let known = known_hosts(&[]);
+        let local = ("host", "127.0.0.1:3000");
+
+        assert_eq!(admission_verdict(&headers(&[local]), &known), Ok(()));
+        // Любой петлевой порт: страница на другом порту петли — не та атака,
+        // а межпортовый запрос браузер и так гасит на CORS.
+        assert_eq!(
+            admission_verdict(
+                &headers(&[local, ("origin", "http://127.0.0.1:6274")]),
+                &known
+            ),
+            Ok(())
+        );
+        for origin in ["http://evil.com", "null", "file://", "not an origin"] {
+            assert_eq!(
+                admission_verdict(&headers(&[local, ("origin", origin)]), &known),
+                Err(RefusedHeader::Origin),
+                "{origin} is refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_listed_host_is_answered_however_its_root_dot_is_written() {
+        let known = known_hosts(&["runner", "10.0.0.5"]);
+        for host in [
+            "runner:3000",
+            "runner.:3000",
+            "RUNNER:3000",
+            "10.0.0.5:3000",
+        ] {
+            assert_eq!(
+                admission_verdict(&headers(&[("host", host)]), &known),
+                Ok(()),
+                "{host} is answered"
+            );
+        }
+        assert_eq!(
+            admission_verdict(&headers(&[("host", "runner.evil.com:3000")]), &known),
+            Err(RefusedHeader::Host)
+        );
+    }
+
+    #[test]
+    fn a_listed_host_also_names_an_origin() {
+        let known = known_hosts(&["runner"]);
+        assert_eq!(
+            admission_verdict(
+                &headers(&[("host", "runner:3000"), ("origin", "http://runner:3000")]),
+                &known
+            ),
+            Ok(())
+        );
+    }
+
     fn test_config(max_concurrent_calls: usize, shutdown_grace_period_secs: u64) -> AppConfig {
         test_config_with_edt_timeout(max_concurrent_calls, shutdown_grace_period_secs, 300_000)
     }
@@ -1510,10 +1800,12 @@ mod tests {
         AppConfig {
             base_path: PathBuf::from("/tmp/project"),
             work_path: PathBuf::from("/tmp/work"),
-            execution_timeout: edt_timeout_ms,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: String::from("main"),
                 purpose: SourceSetPurpose::Configuration,
@@ -1534,6 +1826,7 @@ mod tests {
                 execution: McpExecutionConfig {
                     max_concurrent_calls,
                     shutdown_grace_period_secs,
+                    admission_timeout_ms: edt_timeout_ms,
                 },
             },
             tests: TestsConfig::default(),

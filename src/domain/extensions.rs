@@ -1,15 +1,23 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExtensionsResult {
+    /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<crate::domain::capability::ProviderReceipt>,
+
     pub ok: bool,
-    /// `false` when the run stopped at a preview instead of dispatching the platform.
+    /// Whether an executor got this command's work: a process was started to do it, or the
+    /// request's command was handed to a running session. Starting or opening a session and
+    /// its own service commands are not work. `false` whenever the executor got none — a
+    /// preview, a refusal or interruption before any work, a run with nothing to do, or a
+    /// process that could not be started.
     pub provider_dispatched: bool,
     pub steps: Vec<ExtensionsStep>,
     pub duration_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExtensionsStep {
     pub target: String,
     pub action: String,
@@ -20,15 +28,18 @@ pub struct ExtensionsStep {
 
 /// One extension installed in the target infobase, as reported by the platform.
 ///
-/// Field set mirrors `ibcmd config extension list` on 8.3.27 exactly. The name
-/// prefix is deliberately absent: the platform does not report it on read, it lives
-/// only in the extension's own `Configuration.xml`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// `ibcmd` reads the applied name prefix from a saved DB configuration.
+/// The agent provider cannot attest that property and reports `None`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct InstalledExtension {
     pub name: String,
     /// `None` when the platform reported the field empty.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// `None` means the selected provider cannot attest the applied prefix;
+    /// `Some("")` is a known empty prefix.
+    #[schemars(required, extend("type" = ["string", "null"]))]
+    pub name_prefix: Option<String>,
     pub active: bool,
     pub purpose: String,
     pub safe_mode: bool,
@@ -40,16 +51,42 @@ pub struct InstalledExtension {
     pub hash_sum: String,
 }
 
+/// What the read was asked for, named as data.
+///
+/// A change preview names its `target` and `action` as fields; the read names its
+/// subject the same way, so a caller pairs the answer with its request without
+/// parsing the wording of `plan`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum RequestedInventory {
+    /// Every extension installed in the infobase.
+    All,
+    /// One extension by its platform name.
+    Named { name: String },
+}
+
 /// Result of reading the extension composition of an infobase.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExtensionInventoryResult {
+    /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<crate::domain::capability::ProviderReceipt>,
+
+    /// `false` when the read failed after the executor got the work: the composition is then
+    /// unknown, not empty.
     pub ok: bool,
-    /// `false` when the run stopped at a preview instead of dispatching the platform.
+    /// Whether an executor got this command's work: a process was started to do it, or the
+    /// request's command was handed to a running session. Starting or opening a session and
+    /// its own service commands are not work. `false` in a preview. A refusal before any work
+    /// answers the shared refusal form, without this field; a failure after the executor got
+    /// the work answers this form with `ok: false`, an empty `extensions` and `true`.
     ///
     /// Reading the composition is an action, not a look: the platform starts, a session
     /// opens, the account authenticates and a journal trace is left. So the read has a
     /// preview too, and in it `extensions` is empty because nothing was asked.
     pub provider_dispatched: bool,
+    /// The subject of the read, present in the preview and in the answer alike.
+    pub requested: RequestedInventory,
     /// What the apply would do, named without any secret from the connection string.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,

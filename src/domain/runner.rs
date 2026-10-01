@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::execution::ExecutionTimeouts;
 
 /// Shared launch options reused by direct launch and runner-like scenarios.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, schemars::JsonSchema)]
 pub struct LaunchOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub c: Option<String>,
@@ -22,7 +22,7 @@ pub struct LaunchOptions {
 }
 
 /// Opt-in bounded observation settings for a direct external EPF launch.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExternalEpfWaitOptions {
     pub timeout_ms: u64,
     pub stderr_output: String,
@@ -59,7 +59,7 @@ pub(crate) fn launch_key_alias_matches(raw: &str, key: &str) -> bool {
 }
 
 /// Shared client/utility mode for runner-like execution requests.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LaunchClientModeRequest {
     Designer,
@@ -69,7 +69,7 @@ pub enum LaunchClientModeRequest {
 }
 
 /// Extensible runner identity for test/package scenarios.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RunnerKind {
     YaXUnit,
@@ -83,7 +83,7 @@ pub enum RunnerKind {
 }
 
 /// Declares primary output formats produced by a runner.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RunnerOutputFormat {
     JunitXml,
@@ -95,7 +95,7 @@ pub enum RunnerOutputFormat {
 }
 
 /// Runner profile shared by transport-neutral execution requests.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct RunnerProfile {
     pub id: String,
     pub kind: RunnerKind,
@@ -106,14 +106,14 @@ pub struct RunnerProfile {
 }
 
 /// Execution retention policy shared by runner-like requests.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, schemars::JsonSchema)]
 pub struct ExecutionPolicy {
     pub retain_artifacts_on_failure: bool,
     pub retain_artifacts_on_success: bool,
 }
 
 /// Shared execution request block for runner-like flows.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ScenarioExecutionRequest {
     pub profile: RunnerProfile,
     /// Requested client/utility mode for the enterprise platform launcher.

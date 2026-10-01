@@ -3,19 +3,35 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// Structured result of a `launch` command.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LaunchResult {
-    /// `true` when the process was spawned successfully.
+    /// `true` when the process was spawned and, when the command waits on it, the wait
+    /// succeeded: under `--wait-for-exit` the client exited on its own, under `--wait-ready`
+    /// its MCP endpoint became ready. A timeout, an interrupted wait or a failed readiness
+    /// check answers `false` although the client was started. A preview answers `true`
+    /// without starting anything: `provider_dispatched` tells the two apart.
     pub ok: bool,
     /// Requested launch mode.
     pub mode: LaunchMode,
     /// OS process identifier if the launcher exposed one.
     pub pid: Option<u32>,
-    /// Selected binary path used to spawn the process.
+    /// Selected binary path used to spawn the process; for `web` — the system URL opener.
     pub binary: PathBuf,
-    /// Canonical platform installation metadata for the selected binary.
-    pub platform_resolution: PlatformResolution,
-    /// `false` when the run stopped at a preview instead of dispatching the client process.
+    /// Canonical platform installation metadata for the selected binary. Absent for
+    /// `web`: a browser is not a platform utility.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform_resolution: Option<PlatformResolution>,
+    /// Which address the base was opened by. Present for every mode, not only for the
+    /// ones that have a choice: no caller has to read an absent field as "by connection".
+    pub via: LaunchVia,
+    /// Client address opened by `launch web` or by a thin client going through the web.
+    /// Any userinfo password in it is masked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Whether the program in `binary` was started: the client, or the system URL opener
+    /// for `launch web`. `false` in a preview. A refusal before the start, or a start that
+    /// failed, answers the shared refusal form, without this field; a failure after the
+    /// start answers this form with `true`.
     pub provider_dispatched: bool,
     /// Compact machine-facing plan produced by a non-executing preview.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -30,11 +46,36 @@ pub struct LaunchResult {
     pub external_epf_wait: Option<ExternalEpfWaitResult>,
 }
 
+/// Which of the target's two addresses opens the base.
+///
+/// A target has an administrative address and a client one, and a client can be opened by
+/// either. The target kind sets the default; `--via` overrides it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum LaunchVia {
+    /// The administrative address — `infobase.connection`.
+    Connection,
+    /// The client address — `infobase.web.url`, as a ws connection.
+    Web,
+}
+
+impl LaunchVia {
+    /// Парсит объявленный адрес. Словарь один на обе поверхности: разойдись CLI и MCP
+    /// в значениях, они разошлись бы и в поведении.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "web" => Some(Self::Web),
+            "connection" => Some(Self::Connection),
+            _ => None,
+        }
+    }
+}
+
 /// Compact machine-facing plan produced by a non-executing launch preview.
 ///
 /// The plan names what the runner selected, because only the runner discovers a
 /// platform installation: a caller cannot compose these arguments itself.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LaunchPlan {
     /// Program the runner would have spawned.
     pub program: PathBuf,
@@ -43,18 +84,26 @@ pub struct LaunchPlan {
 }
 
 /// Observed outcome of an opt-in bounded external EPF client launch.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExternalEpfWaitResult {
+    /// Process identifier of the waited client.
     pub pid: u32,
+    /// The external data processor the client was asked to execute.
     pub execute_path: String,
+    /// The client's exit code; `null` when the wait ended without one: the client was
+    /// terminated at the timeout (`timed_out: true`), or the wait was interrupted before the
+    /// client exited (`timed_out: false`).
     pub exit_code: Option<i32>,
+    /// `true` when the client was terminated at the declared timeout.
     pub timed_out: bool,
+    /// Where the external data processor was asked to write its output.
     pub output_path: String,
+    /// Where the client's stderr was captured.
     pub stderr_path: String,
 }
 
 /// Canonical platform installation metadata exposed by `launch` JSON results.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PlatformResolution {
     /// Absolute canonical path to the selected executable.
     pub path: PathBuf,
@@ -67,7 +116,7 @@ pub struct PlatformResolution {
 }
 
 /// Typed discovery sources exposed by `launch` resolution metadata.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum PlatformResolutionSource {
     /// The configured utility or installation hint.
@@ -79,7 +128,7 @@ pub enum PlatformResolutionSource {
 }
 
 /// Result of probing a client-side MCP endpoint after launch.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpReadinessResult {
     /// `true` when initialize and tools/list succeeded and required tools were present.
     pub ok: bool,
@@ -94,7 +143,7 @@ pub struct McpReadinessResult {
 }
 
 /// Supported application launch modes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LaunchMode {
     Designer,
@@ -102,4 +151,5 @@ pub enum LaunchMode {
     Thick,
     Ordinary,
     Mcp,
+    Web,
 }

@@ -7,10 +7,16 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+use crate::platform::secrets::render_masked_command;
+
 const EXECUTABLE_BUSY_MAX_RETRIES: usize = 5;
 const EXECUTABLE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(10);
 #[cfg(any(windows, test))]
 const WINDOWS_ERROR_INVALID_HANDLE: i32 = 6;
+/// Строка журнала, с которой раннер откладывает прерывание критического процесса или
+/// критической команды агента.
+pub(crate) const CRITICAL_INTERRUPTION_DEFERRED: &str =
+    "interruption requested during critical process phase; waiting for terminal outcome";
 
 /// Request for launching an external utility.
 #[derive(Debug, Clone)]
@@ -56,6 +62,9 @@ pub struct ManagedSpawnResult {
     result: SpawnResult,
     child: Option<SpawnedChild>,
     rendered_command: String,
+    /// Стал ли этот процесс работой команды: его запуск отметил работу. Процесс самой
+    /// платформы — агент — работой не становится.
+    delivered: bool,
 }
 
 /// Managed spawn lifecycle behaviour used by current callers.
@@ -89,6 +98,18 @@ impl ManagedSpawnResult {
             terminate_child_group_gracefully(&mut spawned, Duration::from_millis(250));
             let _ = spawned.child.wait();
         }
+    }
+
+    /// Снимает процесс по отмене команды и называет это отменой: ошибка несёт, был ли
+    /// процесс работой команды.
+    #[must_use]
+    pub fn cancel(self) -> ProcessError {
+        let error = ProcessError::Cancelled {
+            cmd: self.rendered_command.clone(),
+            delivered: self.delivered,
+        };
+        self.terminate();
+        error
     }
 
     /// Waits for a managed client and guarantees process-group cleanup at timeout.
@@ -127,6 +148,7 @@ impl ManagedSpawnResult {
                 let _ = spawned.child.wait();
                 return Err(ProcessError::Cancelled {
                     cmd: self.rendered_command.clone(),
+                    delivered: self.delivered,
                 });
             }
             if policy
@@ -189,6 +211,48 @@ pub struct ProcessInterruption {
     pub action: ProcessInterruptionAction,
 }
 
+impl ProcessInterruption {
+    /// Прерывание, которое критическая фаза отложила до своего исхода.
+    pub fn deferred(reason: ProcessInterruptionReason) -> Self {
+        Self {
+            reason,
+            action: ProcessInterruptionAction::Deferred,
+        }
+    }
+}
+
+/// Получил ли исполнитель работу этой команды. Отмечает её платформа в тот миг, когда работа
+/// передаётся: запущен процесс, который выполняет запрос, или работающей сессии отдана
+/// команда запроса. Подъём сессии и её служебные команды отметки не ставят. Читает её
+/// сценарий, когда собирает ответ; клоны делят одну отметку.
+///
+/// Шаг самой платформы — служебная команда сессии, ожидание выхода агента — отметки не
+/// несёт вовсе: носитель держит `Option<WorkGiven>`, и `None` у него значит «не работа
+/// команды». `Default` нет нарочно: отметка, созданная мимо команды, молча теряла бы работу.
+#[derive(Debug, Clone)]
+pub struct WorkGiven(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl WorkGiven {
+    /// Отметка одной команды: её заводит контекст команды.
+    pub(crate) fn for_command() -> Self {
+        Self(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )))
+    }
+
+    /// Работа передана исполнителю.
+    pub(crate) fn mark_work_given(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn given(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// Сколько снимаемый процесс ждёт мягкого завершения, прежде чем его убьют.
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
+
 /// Shared execution policy passed from transport-neutral command context into the runner.
 #[derive(Debug, Clone)]
 pub struct ProcessExecutionPolicy {
@@ -196,21 +260,46 @@ pub struct ProcessExecutionPolicy {
     pub cancellation: CancellationToken,
     pub safety: ProcessInterruptionSafety,
     pub graceful_shutdown_timeout: Duration,
+    /// Куда отметить, что процесс запущен: запуск разового процесса — работа команды.
+    /// `None` — у шага самой платформы, который работой команды не является; объявить так
+    /// шаг может только платформа: поле за её пределами не видно.
+    pub(in crate::platform) work: Option<WorkGiven>,
 }
 
+/// Только для тестов: в работе политику строит контекст команды, и отметка работы у неё
+/// своя, а не пустая.
+#[cfg(test)]
 impl Default for ProcessExecutionPolicy {
     fn default() -> Self {
-        Self {
-            timeout: None,
-            cancellation: CancellationToken::new(),
-            safety: ProcessInterruptionSafety::Interruptible,
-            graceful_shutdown_timeout: Duration::from_millis(250),
-        }
+        Self::new(
+            None,
+            CancellationToken::new(),
+            ProcessInterruptionSafety::Interruptible,
+            WorkGiven::for_command(),
+        )
     }
 }
 
 impl ProcessExecutionPolicy {
+    /// Политика шага команды: запуск процесса под ней — работа команды.
     pub fn new(
+        timeout: Option<Duration>,
+        cancellation: CancellationToken,
+        safety: ProcessInterruptionSafety,
+        work: WorkGiven,
+    ) -> Self {
+        Self {
+            timeout,
+            cancellation,
+            safety,
+            graceful_shutdown_timeout: GRACEFUL_SHUTDOWN_TIMEOUT,
+            work: Some(work),
+        }
+    }
+
+    /// Политика шага самой платформы — ожидания выхода агента: работы команды он не
+    /// отмечает.
+    pub(in crate::platform) fn platform_step(
         timeout: Option<Duration>,
         cancellation: CancellationToken,
         safety: ProcessInterruptionSafety,
@@ -219,7 +308,44 @@ impl ProcessExecutionPolicy {
             timeout,
             cancellation,
             safety,
-            ..Self::default()
+            graceful_shutdown_timeout: GRACEFUL_SHUTDOWN_TIMEOUT,
+            work: None,
+        }
+    }
+
+    /// Та же политика для служебной команды платформы — перехода интерактивной сессии в
+    /// рабочее пространство: работы команды она не отмечает.
+    pub(in crate::platform) fn without_work(&self) -> Self {
+        Self {
+            work: None,
+            ..self.clone()
+        }
+    }
+
+    /// Та же политика для команды, которая базу только читает: критическая фаза — запись, а
+    /// чтение отмена снимает (INV.USE-CASES.A-DATABASE-WRITE-IS-A-CRITICAL-PHASE). Под
+    /// критической политикой чтение снимается мягко — SIGTERM, затем kill; защищённее своего
+    /// класса оно не становится. Отмена, предел и отметка работы у него те же.
+    pub(in crate::platform) fn for_reading(&self) -> Self {
+        let safety = match self.safety {
+            ProcessInterruptionSafety::Interruptible => ProcessInterruptionSafety::Interruptible,
+            ProcessInterruptionSafety::GracefulThenKill
+            | ProcessInterruptionSafety::CriticalNonAbortable => {
+                ProcessInterruptionSafety::GracefulThenKill
+            }
+        };
+        Self {
+            safety,
+            ..self.clone()
+        }
+    }
+
+    /// Двойник исполнителя в тестах сценариев отмечает работу, как настоящий, едва
+    /// «запустил» процесс.
+    #[cfg(test)]
+    pub(crate) fn mark_started_for_test(&self) {
+        if let Some(work) = &self.work {
+            work.mark_work_given();
         }
     }
 }
@@ -249,7 +375,12 @@ pub enum ProcessError {
     },
 
     #[error("process cancelled '{cmd}' before reaching a safe completion point")]
-    Cancelled { cmd: String },
+    Cancelled {
+        cmd: String,
+        /// Успел ли запуск стать работой команды: процесс запущен под её отметкой работы.
+        /// Отказ до запуска и шаг самой платформы работы не несут — они на границе.
+        delivered: bool,
+    },
 
     #[error("process timed out '{cmd}' after {timeout_ms}ms")]
     TimedOut { cmd: String, timeout_ms: u64 },
@@ -260,38 +391,42 @@ pub enum ProcessError {
 
 /// Boundary for synchronous and detached process execution.
 pub trait ProcessRunner {
-    /// Execute a process and wait for completion, capturing stdout/stderr.
-    fn run(&self, request: &ProcessRequest) -> Result<ProcessResult, ProcessError>;
-
-    /// Execute a process with a hard timeout, terminating the process group if needed.
-    fn run_with_timeout(
-        &self,
-        request: &ProcessRequest,
-        timeout: Duration,
-    ) -> Result<ProcessResult, ProcessError>;
-
-    /// Execute a process using the shared command-boundary execution policy.
+    /// Execute a process under the caller's execution policy.
+    ///
+    /// Right after the process has started, the implementation marks `policy.work` when
+    /// there is one: a started request process is the command's work, whatever happens to
+    /// it later. A run refused before the start marks nothing.
+    ///
+    /// No default: an implementation must answer for the whole policy, not just its
+    /// timeout. Since a command carries no deadline
+    /// (DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE), `policy.timeout` is `None` at most call
+    /// sites, and a default that fell through to `run` would silently drop the operator's
+    /// interrupt and the interruption safety class — the one thing that still ends a run.
     fn run_with_policy(
         &self,
         request: &ProcessRequest,
         policy: &ProcessExecutionPolicy,
-    ) -> Result<ProcessResult, ProcessError> {
-        match policy.timeout {
-            Some(timeout) => self.run_with_timeout(request, timeout),
-            None => self.run(request),
-        }
-    }
+    ) -> Result<ProcessResult, ProcessError>;
 
-    /// Start a process in fire-and-forget mode without waiting for completion.
-    fn spawn(&self, request: &ProcessRequest) -> Result<SpawnResult, ProcessError>;
+    /// Start a process in fire-and-forget mode without waiting for completion. A process
+    /// that passed its startup probe is the command's work: the implementation marks `work`.
+    fn spawn(
+        &self,
+        request: &ProcessRequest,
+        work: &WorkGiven,
+    ) -> Result<SpawnResult, ProcessError>;
 
-    /// Start a process and keep a handle until the caller detaches or terminates it.
+    /// Start a process and keep a handle until the caller detaches or terminates it. The
+    /// implementation marks `work`, when there is one, once the process has passed its
+    /// startup probe: a client that exits inside the probe is a start that failed. A
+    /// session's own process comes without it.
     fn spawn_managed(
         &self,
         request: &ProcessRequest,
         mode: ManagedSpawnMode,
+        work: Option<&WorkGiven>,
     ) -> Result<ManagedSpawnResult, ProcessError> {
-        let _ = mode;
+        let _ = (mode, work);
         Err(ProcessError::ManagedSpawnUnsupported {
             cmd: render_command(request),
         })
@@ -302,25 +437,6 @@ pub trait ProcessRunner {
 pub struct ProcessExecutor;
 
 impl ProcessRunner for ProcessExecutor {
-    fn run(&self, request: &ProcessRequest) -> Result<ProcessResult, ProcessError> {
-        self.run_internal(request, &ProcessExecutionPolicy::default())
-    }
-
-    fn run_with_timeout(
-        &self,
-        request: &ProcessRequest,
-        timeout: Duration,
-    ) -> Result<ProcessResult, ProcessError> {
-        self.run_internal(
-            request,
-            &ProcessExecutionPolicy::new(
-                Some(timeout),
-                CancellationToken::new(),
-                ProcessInterruptionSafety::Interruptible,
-            ),
-        )
-    }
-
     fn run_with_policy(
         &self,
         request: &ProcessRequest,
@@ -329,10 +445,15 @@ impl ProcessRunner for ProcessExecutor {
         self.run_internal(request, policy)
     }
 
-    fn spawn(&self, request: &ProcessRequest) -> Result<SpawnResult, ProcessError> {
+    fn spawn(
+        &self,
+        request: &ProcessRequest,
+        work: &WorkGiven,
+    ) -> Result<SpawnResult, ProcessError> {
         let rendered_command = render_command(request);
         debug!(command = rendered_command.as_str(), "spawning process");
         let spawned = spawn_checked_child(request, ProcessIoMode::Detached, &rendered_command)?;
+        work.mark_work_given();
         let pid = spawned.child.id();
 
         debug!(command = rendered_command.as_str(), pid, "process started");
@@ -346,6 +467,7 @@ impl ProcessRunner for ProcessExecutor {
         &self,
         request: &ProcessRequest,
         mode: ManagedSpawnMode,
+        work: Option<&WorkGiven>,
     ) -> Result<ManagedSpawnResult, ProcessError> {
         let rendered_command = render_command(request);
         debug!(
@@ -357,6 +479,9 @@ impl ProcessRunner for ProcessExecutor {
             ManagedSpawnMode::Wait => ProcessIoMode::ManagedWait,
         };
         let spawned = spawn_checked_child(request, io_mode, &rendered_command)?;
+        if let Some(work) = work {
+            work.mark_work_given();
+        }
         let pid = spawned.child.id();
 
         debug!(
@@ -370,6 +495,7 @@ impl ProcessRunner for ProcessExecutor {
             },
             child: Some(spawned),
             rendered_command,
+            delivered: work.is_some(),
         })
     }
 }
@@ -390,6 +516,7 @@ impl ProcessExecutor {
         if policy.cancellation.is_cancelled() {
             return Err(ProcessError::Cancelled {
                 cmd: rendered_command,
+                delivered: false,
             });
         }
         if policy.timeout.is_some_and(|timeout| timeout.is_zero()) {
@@ -399,6 +526,9 @@ impl ProcessExecutor {
             });
         }
         let spawned = spawn_command(request, ProcessIoMode::Captured, &rendered_command)?;
+        if let Some(work) = &policy.work {
+            work.mark_work_given();
+        }
         let output = wait_for_output(spawned, &rendered_command, policy)?;
         debug!(
             command = rendered_command.as_str(),
@@ -583,6 +713,20 @@ fn spawn_command(
     unreachable!("spawn loop must return on success or final error");
 }
 
+/// Снимает наследование с собственных стандартных дескрипторов перед запуском
+/// отсоединённого ребёнка.
+///
+/// `Stdio::null()` подменяет потоки ребёнка, но не мешает наследоваться второй,
+/// наследуемой копии дескриптора самого раннера: отсоединённый клиент 1С держал бы
+/// конвейер stdout обёртки открытым после выхода раннера.
+///
+/// Отвергнутые замены. `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` — правильный список
+/// разрешённого в Win32, но `spawn_with_attributes` и `inherit_handles` в Rust
+/// нестабильны, а свой `CreateProcessW` повторил бы кавычки командной строки,
+/// окружение, рабочий каталог, поиск исполняемого файла, владение дескрипторами ребёнка
+/// и работу с Job Object. Снять наследование на время и вернуть обратно — гонка с
+/// одновременным созданием процессов, а сбой возврата после старта ребёнка уже нечем
+/// обработать. Поэтому снятие постоянное: повторный вызов ничего не меняет.
 #[cfg(windows)]
 fn isolate_inherited_standard_handles() -> std::io::Result<()> {
     use windows_sys::Win32::Foundation::{
@@ -774,6 +918,11 @@ fn wait_for_output(
                     source,
                 })?
         {
+            // Известный предел: потоки чтения присоединяются после выхода процесса. Внук,
+            // переживший родителя и держащий трубу, задержит присоединение, и прерывание в
+            // это время не наблюдается: цикл уже вышел. Группу снимают только пути
+            // прерывания выше — `Interruptible` и `GracefulThenKill`, — а обычный выход её
+            // не трогает.
             let stdout = stdout_reader.join().unwrap_or_default();
             let stderr = stderr_reader.join().unwrap_or_default();
             return match observed_interruption {
@@ -782,6 +931,7 @@ fn wait_for_output(
                 {
                     Err(ProcessError::Cancelled {
                         cmd: rendered_command.to_owned(),
+                        delivered: policy.work.is_some(),
                     })
                 }
                 Some(ProcessInterruptionReason::TimedOut)
@@ -796,10 +946,7 @@ fn wait_for_output(
                     status,
                     stdout,
                     stderr,
-                    interruption: Some(ProcessInterruption {
-                        reason,
-                        action: ProcessInterruptionAction::Deferred,
-                    }),
+                    interruption: Some(ProcessInterruption::deferred(reason)),
                 }),
                 None => Ok(ObservedOutput {
                     status,
@@ -862,7 +1009,8 @@ fn interrupt_child(
             warn!(
                 command = rendered_command,
                 reason = ?reason,
-                "interruption requested during critical process phase; waiting for terminal outcome"
+                "{}",
+                CRITICAL_INTERRUPTION_DEFERRED
             );
             Ok(None)
         }
@@ -871,7 +1019,7 @@ fn interrupt_child(
             let _ = spawned.child.wait();
             Ok(Some(process_error_from_reason(
                 rendered_command,
-                policy.timeout,
+                policy,
                 reason,
             )))
         }
@@ -880,25 +1028,27 @@ fn interrupt_child(
             let _ = spawned.child.wait();
             Ok(Some(process_error_from_reason(
                 rendered_command,
-                policy.timeout,
+                policy,
                 reason,
             )))
         }
     }
 }
 
+/// Процесс уже запущен: отмена обрывает работу команды, если он был ею.
 fn process_error_from_reason(
     rendered_command: &str,
-    timeout: Option<Duration>,
+    policy: &ProcessExecutionPolicy,
     reason: ProcessInterruptionReason,
 ) -> ProcessError {
     match reason {
         ProcessInterruptionReason::Cancelled => ProcessError::Cancelled {
             cmd: rendered_command.to_owned(),
+            delivered: policy.work.is_some(),
         },
         ProcessInterruptionReason::TimedOut => ProcessError::TimedOut {
             cmd: rendered_command.to_owned(),
-            timeout_ms: timeout.unwrap_or_default().as_millis() as u64,
+            timeout_ms: policy.timeout.unwrap_or_default().as_millis() as u64,
         },
     }
 }
@@ -983,71 +1133,167 @@ fn terminate_windows_process_tree(pid: u32) {
     let _ = pid;
 }
 
+/// Показ команды для отказа и журнала. Секреты маскирует
+/// [`crate::platform::secrets`] — единственный владелец правила.
 fn render_command(request: &ProcessRequest) -> String {
-    let mut parts = Vec::with_capacity(request.args.len() + 1);
-    parts.push(request.program.display().to_string());
-    let mut skip_next = false;
-    for arg in &request.args {
-        if skip_next {
-            parts.push("***".to_owned());
-            skip_next = false;
-        } else if is_sensitive_flag(arg) {
-            parts.push(arg.clone());
-            skip_next = true;
-        } else if let Some((key, _)) = split_sensitive_assignment(arg) {
-            parts.push(format!("{key}=***"));
-        } else {
-            parts.push(arg.clone());
+    render_masked_command(&request.program, &request.args)
+}
+
+/// Тестовая отметка: раннер отложил прерывание критического процесса. Тест ждёт её, а не
+/// отсчёта времени, прежде чем отпустить подставной процесс. Снаружи модуля её не видно:
+/// рукопожатие с ней ведёт [`HeldCommand::interrupt_during`].
+#[cfg(all(test, unix))]
+#[derive(Clone, Default)]
+struct DeferralWatch(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+#[cfg(all(test, unix))]
+impl DeferralWatch {
+    fn observed(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Выполняет `operation` на этом потоке и отмечает строку журнала об отложенном
+    /// прерывании. Процесс ждёт раннер на вызывающем потоке, поэтому подписчика хватает.
+    fn during<T>(&self, operation: impl FnOnce() -> T) -> T {
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(self.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, operation)
+    }
+}
+
+#[cfg(all(test, unix))]
+impl std::io::Write for DeferralWatch {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if String::from_utf8_lossy(buf).contains(CRITICAL_INTERRUPTION_DEFERRED) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
         }
+        Ok(buf.len())
     }
-    parts.join(" ")
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
-fn is_sensitive_flag(arg: &str) -> bool {
-    const FLAGS: &[&str] = &[
-        "/N",
-        "-N",
-        "/P",
-        "-P",
-        "--user",
-        "--database-user",
-        "--db-user",
-        "--target-database-user",
-        "--target-db-user",
-        "--password",
-        "--database-password",
-        "--db-pwd",
-        "--target-database-password",
-        "--target-db-pwd",
-    ];
+#[cfg(all(test, unix))]
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for DeferralWatch {
+    type Writer = Self;
 
-    FLAGS.iter().any(|flag| arg.eq_ignore_ascii_case(flag))
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
 }
 
-fn split_sensitive_assignment(arg: &str) -> Option<(&str, &str)> {
-    const FLAGS: &[&str] = &[
-        "/N",
-        "-N",
-        "/P",
-        "-P",
-        "--user",
-        "--database-user",
-        "--db-user",
-        "--target-database-user",
-        "--target-db-user",
-        "--password",
-        "--database-password",
-        "--db-pwd",
-        "--target-database-password",
-        "--target-db-pwd",
-    ];
+/// Команда подставной программы, которую тест держит: начавшись, она отмечается файлом и
+/// ждёт, пока её не отпустят. Порядок «отмена пришла во время записи, запись кончилась,
+/// когда раннер уже отложил отмену» задают рукопожатия, а не отсчёт времени.
+#[cfg(all(test, unix))]
+pub(crate) struct HeldCommand {
+    started: PathBuf,
+    release: PathBuf,
+}
 
-    let (key, value) = arg.split_once('=')?;
-    if FLAGS.iter().any(|flag| key.eq_ignore_ascii_case(flag)) {
-        Some((key, value))
-    } else {
-        None
+#[cfg(all(test, unix))]
+impl HeldCommand {
+    pub(crate) fn in_dir(dir: &std::path::Path) -> Self {
+        Self::with_markers(dir.join("held-started"), dir.join("held-release"))
     }
+
+    /// Команда скрипта, который тест пишет целиком: начавшись, она создаёт `started` и ждёт,
+    /// пока не появится `release`.
+    pub(crate) fn with_markers(started: PathBuf, release: PathBuf) -> Self {
+        Self { started, release }
+    }
+
+    /// Ветка sh-скрипта с аргументами в `$args`: команда, в которой есть `pattern`,
+    /// отмечается, ждёт отпуска и выходит с `exit_code`.
+    pub(crate) fn script_branch(&self, pattern: &str, exit_code: i32) -> String {
+        format!(
+            "if printf '%s' \"$args\" | grep -F -q -- '{pattern}'; then\n\
+               : > '{started}'\n\
+               waited=0\n\
+               while [ ! -e '{release}' ] && [ \"$waited\" -lt 300 ]; do\n\
+                 sleep 0.1\n\
+                 waited=$((waited + 1))\n\
+               done\n\
+               exit {exit_code}\n\
+             fi\n",
+            started = self.started.display(),
+            release = self.release.display(),
+        )
+    }
+
+    /// Выполняет `run` на этом потоке, пока оператор отменяет команду: дождаться её начала,
+    /// отменить `cancellation`, дождаться, пока раннер отложит отмену, и отпустить команду.
+    /// Отсрочку раннер должен записать на этом же потоке — отметку слушает подписчик потока.
+    /// Тест падает, если команда не началась или раннер отсрочки так и не записал.
+    #[track_caller]
+    pub(crate) fn interrupt_during<T>(
+        &self,
+        cancellation: CancellationToken,
+        run: impl FnOnce() -> T,
+    ) -> T {
+        let watch = DeferralWatch::default();
+        let operator = {
+            let started = self.started.clone();
+            let release = self.release.clone();
+            let watch = watch.clone();
+            std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                let began = wait_until(deadline, || started.exists());
+                cancellation.cancel();
+                let deferred = wait_until(deadline, || watch.observed());
+                std::fs::write(&release, "").expect("release the held command");
+                (began, deferred)
+            })
+        };
+        let outcome = watch.during(run);
+        let (began, deferred) = operator
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        assert!(began, "the held command never started");
+        assert!(
+            deferred,
+            "the runner never logged that it deferred the cancellation"
+        );
+        outcome
+    }
+
+    /// Оператор для некритической команды — [`cancel_when_started`] по отметке её начала.
+    pub(crate) fn cancel_when_started(
+        &self,
+        cancellation: CancellationToken,
+    ) -> std::thread::JoinHandle<bool> {
+        cancel_when_started(&self.started, cancellation)
+    }
+}
+
+/// Оператор теста: дождаться, пока команда отметится файлом `started`, и отменить. Команду он
+/// не отпускает — отмена снимает её сама. Поток отвечает, дождался ли он отметки.
+#[cfg(all(test, unix))]
+pub(crate) fn cancel_when_started(
+    started: &std::path::Path,
+    cancellation: CancellationToken,
+) -> std::thread::JoinHandle<bool> {
+    let started = started.to_path_buf();
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let appeared = wait_until(deadline, || started.exists());
+        cancellation.cancel();
+        appeared
+    })
+}
+
+/// Ждёт, пока `condition` не станет верным или не выйдет `deadline`; отвечает, дождался ли.
+#[cfg(all(test, unix))]
+fn wait_until(deadline: std::time::Instant, condition: impl Fn() -> bool) -> bool {
+    while !condition() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    condition()
 }
 
 #[cfg(test)]
@@ -1056,7 +1302,7 @@ mod tests {
         is_invalid_standard_handle_error, render_command, ManagedSpawnMode, ProcessError,
         ProcessExecutionPolicy, ProcessExecutor, ProcessInterruptionAction,
         ProcessInterruptionReason, ProcessInterruptionSafety, ProcessIoMode, ProcessRequest,
-        ProcessRunner, WINDOWS_ERROR_INVALID_HANDLE,
+        ProcessRunner, WorkGiven, WINDOWS_ERROR_INVALID_HANDLE,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1090,6 +1336,234 @@ mod tests {
         fs::set_permissions(path, perms).expect("chmod");
     }
 
+    fn gave_work(policy: &ProcessExecutionPolicy) -> bool {
+        policy.work.as_ref().is_some_and(WorkGiven::given)
+    }
+
+    #[cfg(unix)]
+    fn plain_request(program: PathBuf) -> ProcessRequest {
+        ProcessRequest {
+            program,
+            args: vec![],
+            workdir: None,
+            stdout_log_path: None,
+            stderr_log_path: None,
+            startup_probe: None,
+        }
+    }
+
+    /// Запущенный процесс — работа команды, чем бы он ни кончился. Отказ до запуска — отмена,
+    /// нулевой срок, программа, которую не удалось запустить, — работы не даёт.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_started_process_marks_the_work() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("fails.sh");
+        write_script(&script, "exit 3");
+        let runner = ProcessExecutor;
+
+        let started = ProcessExecutionPolicy::default();
+        let result = runner
+            .run_with_policy(&plain_request(script.clone()), &started)
+            .expect("the process ran");
+        assert_eq!(result.exit_code, 3);
+        assert!(gave_work(&started), "a started process got the work");
+
+        let cancelled = ProcessExecutionPolicy::default();
+        cancelled.cancellation.cancel();
+        let outcome = runner.run_with_policy(&plain_request(script.clone()), &cancelled);
+        assert!(
+            matches!(
+                outcome,
+                Err(ProcessError::Cancelled {
+                    delivered: false,
+                    ..
+                })
+            ),
+            "a refusal before the start delivers nothing: {outcome:?}"
+        );
+        assert!(
+            !gave_work(&cancelled),
+            "a cancel before the start gives no work"
+        );
+
+        let zero = ProcessExecutionPolicy {
+            timeout: Some(Duration::ZERO),
+            ..ProcessExecutionPolicy::default()
+        };
+        let outcome = runner.run_with_policy(&plain_request(script), &zero);
+        assert!(
+            matches!(outcome, Err(ProcessError::TimedOut { .. })),
+            "{outcome:?}"
+        );
+        assert!(!gave_work(&zero), "a zero timeout refuses before the start");
+
+        let missing = ProcessExecutionPolicy::default();
+        let outcome = runner.run_with_policy(&plain_request(dir.path().join("absent")), &missing);
+        assert!(
+            matches!(outcome, Err(ProcessError::SpawnFailed { .. })),
+            "{outcome:?}"
+        );
+        assert!(
+            !gave_work(&missing),
+            "a process that could not start got no work"
+        );
+    }
+
+    /// Процесс, снятый уже после запуска, работу получил. Порядок задан рукопожатием: отмена
+    /// приходит, когда скрипт отметился, что запущен.
+    #[cfg(unix)]
+    #[test]
+    fn a_process_cancelled_after_its_start_still_got_the_work() {
+        let dir = tempdir().expect("tempdir");
+        let started_marker = dir.path().join("started");
+        let script = dir.path().join("waits.sh");
+        write_script(
+            &script,
+            &format!(": > '{}'\nsleep 30", started_marker.display()),
+        );
+        let policy = ProcessExecutionPolicy::default();
+        let operator = super::cancel_when_started(&started_marker, policy.cancellation.clone());
+
+        let outcome = ProcessExecutor.run_with_policy(&plain_request(script), &policy);
+        assert!(
+            operator.join().expect("operator"),
+            "the process never started"
+        );
+
+        assert!(
+            matches!(
+                outcome,
+                Err(ProcessError::Cancelled {
+                    delivered: true,
+                    ..
+                })
+            ),
+            "the cancel cut the command's work short: {outcome:?}"
+        );
+        assert!(
+            gave_work(&policy),
+            "the process had started before the cancel"
+        );
+    }
+
+    /// Шаг самой платформы работой команды не является: отмена, снявшая его процесс, работы
+    /// не обрывает — ни у разового процесса, ни у управляемого.
+    #[cfg(unix)]
+    #[test]
+    fn a_cancelled_platform_step_delivered_no_work() {
+        let dir = tempdir().expect("tempdir");
+        let started_marker = dir.path().join("started");
+        let script = dir.path().join("waits.sh");
+        write_script(
+            &script,
+            &format!(": > '{}'\nsleep 30", started_marker.display()),
+        );
+        let policy = ProcessExecutionPolicy::platform_step(
+            None,
+            CancellationToken::new(),
+            ProcessInterruptionSafety::Interruptible,
+        );
+        let operator = super::cancel_when_started(&started_marker, policy.cancellation.clone());
+
+        let outcome = ProcessExecutor.run_with_policy(&plain_request(script), &policy);
+        assert!(
+            operator.join().expect("operator"),
+            "the process never started"
+        );
+
+        assert!(
+            matches!(
+                outcome,
+                Err(ProcessError::Cancelled {
+                    delivered: false,
+                    ..
+                })
+            ),
+            "{outcome:?}"
+        );
+    }
+
+    /// Управляемый процесс помнит, стал ли он работой команды: отмена ожидания его выхода
+    /// называет это так же, как отмена разового процесса.
+    #[cfg(unix)]
+    #[test]
+    fn a_cancelled_managed_wait_names_whether_the_process_was_the_work() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("waits.sh");
+        write_script(&script, "sleep 30");
+        for with_work in [true, false] {
+            let work = WorkGiven::for_command();
+            let request = ProcessRequest {
+                stdout_log_path: Some(dir.path().join("stdout.log")),
+                stderr_log_path: Some(dir.path().join("stderr.log")),
+                ..plain_request(script.clone())
+            };
+            let managed = ProcessExecutor
+                .spawn_managed(&request, ManagedSpawnMode::Wait, with_work.then_some(&work))
+                .expect("spawn managed");
+            let policy = ProcessExecutionPolicy::default();
+            policy.cancellation.cancel();
+
+            let outcome = managed.wait_for_exit(&policy);
+
+            assert!(
+                matches!(
+                    outcome,
+                    Err(ProcessError::Cancelled { delivered, .. }) if delivered == with_work
+                ),
+                "with work {with_work}: {outcome:?}"
+            );
+            assert_eq!(work.given(), with_work);
+        }
+    }
+
+    /// Чтение после записи критической фазой не бывает и защищённее своего класса не
+    /// становится; отмена, предел и отметка работы у него те же, что у записи.
+    #[test]
+    fn a_read_is_never_a_critical_phase() {
+        for (safety, read) in [
+            (
+                ProcessInterruptionSafety::Interruptible,
+                ProcessInterruptionSafety::Interruptible,
+            ),
+            (
+                ProcessInterruptionSafety::GracefulThenKill,
+                ProcessInterruptionSafety::GracefulThenKill,
+            ),
+            (
+                ProcessInterruptionSafety::CriticalNonAbortable,
+                ProcessInterruptionSafety::GracefulThenKill,
+            ),
+        ] {
+            let write = ProcessExecutionPolicy::new(
+                Some(Duration::from_secs(7)),
+                CancellationToken::new(),
+                safety,
+                WorkGiven::for_command(),
+            );
+
+            let reading = write.for_reading();
+
+            assert_eq!(reading.safety, read, "{safety:?}");
+            assert_eq!(reading.timeout, write.timeout, "{safety:?}");
+            assert_eq!(
+                reading.graceful_shutdown_timeout, write.graceful_shutdown_timeout,
+                "{safety:?}"
+            );
+            write.cancellation.cancel();
+            assert!(
+                reading.cancellation.is_cancelled(),
+                "{safety:?}: the read answers to the command's cancel"
+            );
+            reading.mark_started_for_test();
+            assert!(
+                gave_work(&write),
+                "{safety:?}: the read marks the command's work"
+            );
+        }
+    }
+
     #[cfg(unix)]
     fn write_script(path: &Path, body: &str) {
         if let Some(parent) = path.parent() {
@@ -1112,14 +1586,17 @@ mod tests {
 
         let runner = ProcessExecutor;
         let result = runner
-            .run(&ProcessRequest {
-                program: script,
-                args: vec![],
-                workdir: None,
-                stdout_log_path: Some(stdout_log.clone()),
-                stderr_log_path: Some(stderr_log.clone()),
-                startup_probe: None,
-            })
+            .run_with_policy(
+                &ProcessRequest {
+                    program: script,
+                    args: vec![],
+                    workdir: None,
+                    stdout_log_path: Some(stdout_log.clone()),
+                    stderr_log_path: Some(stderr_log.clone()),
+                    startup_probe: None,
+                },
+                &ProcessExecutionPolicy::default(),
+            )
             .expect("run");
 
         assert_eq!(result.exit_code, 3);
@@ -1174,9 +1651,12 @@ mod tests {
         assert!(!rendered.contains("target-secret"));
     }
 
+    /// Пароль внутри строки соединения приезжает одним аргументом, и до 16.09.2026
+    /// показ команды печатал его целиком — а этот показ уходит в текст отказа и в
+    /// журнал. Читаемым остаётся всё, что не секрет: адрес сервера и имя базы.
     #[test]
-    fn render_command_keeps_infobase_connection_string_visible() {
-        let request = ProcessRequest {
+    fn render_command_masks_the_password_inside_a_connection_string() {
+        let rendered = render_command(&ProcessRequest {
             program: PathBuf::from("1cv8c"),
             args: vec![
                 "/IBConnectionString".to_owned(),
@@ -1186,63 +1666,63 @@ mod tests {
             stdout_log_path: None,
             stderr_log_path: None,
             startup_probe: None,
-        };
+        });
 
-        let rendered = render_command(&request);
-
-        assert!(rendered.contains("/IBConnectionString Srvr=host;Ref=base;Usr=alice;Pwd=secret"));
+        assert_eq!(
+            rendered,
+            "1cv8c /IBConnectionString Srvr=host;Ref=base;Usr=***;Pwd=***"
+        );
     }
 
+    /// Строка соединения приезжает и склеенной с ключом, и с закавыченным паролем,
+    /// внутри которого есть `;`. Ни одна из этих форм не должна показать пароль.
     #[test]
-    fn render_command_keeps_infobase_connection_string_assignment_visible() {
-        let request = ProcessRequest {
-            program: PathBuf::from("1cv8c"),
-            args: vec!["/IBConnectionString=File=/tmp/ib;usr=alice;PWD=secret".to_owned()],
-            workdir: None,
-            stdout_log_path: None,
-            stderr_log_path: None,
-            startup_probe: None,
-        };
+    fn render_command_masks_the_password_in_every_connection_string_form() {
+        for (arg, password) in [
+            (
+                "/IBConnectionString=File=/tmp/ib;usr=alice;PWD=secret",
+                "secret",
+            ),
+            (
+                "/IBConnectionStringSrvr=host;Ref=base;Usr=alice;Pwd=secret",
+                "secret",
+            ),
+            ("File=/tmp/ib;Usr=alice;Pwd=\"sec;ret\";Ref=base", "sec;ret"),
+            ("\"Srvr=host;Ref=base;Usr=alice;Pwd=secret\"", "secret"),
+        ] {
+            let rendered = render_command(&ProcessRequest {
+                program: PathBuf::from("1cv8c"),
+                args: vec![arg.to_owned()],
+                workdir: None,
+                stdout_log_path: None,
+                stderr_log_path: None,
+                startup_probe: None,
+            });
 
-        let rendered = render_command(&request);
-
-        assert!(rendered.contains("/IBConnectionString=File=/tmp/ib;usr=alice;PWD=secret"));
+            assert!(!rendered.contains(password), "{arg} -> {rendered}");
+            assert!(!rendered.contains("alice"), "{arg} -> {rendered}");
+        }
     }
 
+    /// `/WSP` — пароль пользователя веб-сервера, и до 16.09.2026 его не знал ни один
+    /// из двух маскировщиков. В argv он попадает через `--raw-key`.
     #[test]
-    fn render_command_keeps_combined_infobase_connection_token_visible() {
-        let request = ProcessRequest {
-            program: PathBuf::from("1cv8c"),
-            args: vec!["/IBConnectionStringSrvr=host;Ref=base;Usr=alice;Pwd=secret".to_owned()],
-            workdir: None,
-            stdout_log_path: None,
-            stderr_log_path: None,
-            startup_probe: None,
-        };
-
-        let rendered = render_command(&request);
-
-        assert!(rendered.contains("/IBConnectionStringSrvr=host;Ref=base;Usr=alice;Pwd=secret"));
-    }
-
-    #[test]
-    fn render_command_keeps_quoted_infobase_connection_values_visible() {
-        let request = ProcessRequest {
+    fn render_command_masks_the_web_server_password() {
+        let rendered = render_command(&ProcessRequest {
             program: PathBuf::from("1cv8c"),
             args: vec![
-                "/IBConnectionString".to_owned(),
-                "File=/tmp/ib;Usr=alice;Pwd=\"sec;ret\";Ref=base".to_owned(),
+                "/WSN".to_owned(),
+                "alice".to_owned(),
+                "/WSP".to_owned(),
+                "secret".to_owned(),
             ],
             workdir: None,
             stdout_log_path: None,
             stderr_log_path: None,
             startup_probe: None,
-        };
+        });
 
-        let rendered = render_command(&request);
-
-        assert!(rendered
-            .contains("/IBConnectionString File=/tmp/ib;Usr=alice;Pwd=\"sec;ret\";Ref=base"));
+        assert_eq!(rendered, "1cv8c /WSN *** /WSP ***");
     }
 
     #[cfg(unix)]
@@ -1253,19 +1733,14 @@ mod tests {
         write_script(&script, "sleep 0.1");
 
         let runner = ProcessExecutor;
+        let work = WorkGiven::for_command();
         let result = runner
-            .spawn(&ProcessRequest {
-                program: script.clone(),
-                args: vec![],
-                workdir: None,
-                stdout_log_path: None,
-                stderr_log_path: None,
-                startup_probe: None,
-            })
+            .spawn(&plain_request(script.clone()), &work)
             .expect("spawn");
 
         assert!(result.pid > 0);
         assert_eq!(result.binary, script);
+        assert!(work.given(), "a started process is the command's work");
     }
 
     #[cfg(unix)]
@@ -1275,21 +1750,52 @@ mod tests {
         assert!(false_binary.exists(), "/usr/bin/false must exist on Unix");
 
         let runner = ProcessExecutor;
+        let work = WorkGiven::for_command();
         let err = runner
-            .spawn(&ProcessRequest {
-                program: false_binary,
-                args: vec![],
-                workdir: None,
-                stdout_log_path: None,
-                stderr_log_path: None,
-                startup_probe: Some(Duration::from_millis(250)),
-            })
+            .spawn(
+                &ProcessRequest {
+                    program: false_binary,
+                    args: vec![],
+                    workdir: None,
+                    stdout_log_path: None,
+                    stderr_log_path: None,
+                    startup_probe: Some(Duration::from_millis(250)),
+                },
+                &work,
+            )
             .expect_err("expected early exit");
 
-        assert!(matches!(
-            err,
-            ProcessError::ExitedEarly { exit_code: 1, .. }
-        ));
+        assert!(
+            matches!(err, ProcessError::ExitedEarly { exit_code: 1, .. }),
+            "{err:?}"
+        );
+        assert!(
+            !work.given(),
+            "a process that failed its startup probe did not start"
+        );
+    }
+
+    /// Клиент, запущенный с ручкой, — тоже работа команды: отметку ставит платформа, как
+    /// только процесс прошёл пробу старта.
+    #[cfg(unix)]
+    #[test]
+    fn a_managed_process_marks_the_work_once_started() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("client.sh");
+        write_script(&script, "sleep 30");
+        let work = WorkGiven::for_command();
+
+        let managed = ProcessExecutor
+            .spawn_managed(
+                &plain_request(script),
+                ManagedSpawnMode::Detached,
+                Some(&work),
+            )
+            .expect("spawn managed");
+        let started = work.given();
+        managed.terminate();
+
+        assert!(started, "a started client is the command's work");
     }
 
     #[cfg(unix)]
@@ -1303,6 +1809,7 @@ mod tests {
         );
 
         let runner = ProcessExecutor;
+        let work = WorkGiven::for_command();
         let err = match runner.spawn_managed(
             &ProcessRequest {
                 program: PathBuf::from("/bin/sh"),
@@ -1313,6 +1820,7 @@ mod tests {
                 startup_probe: Some(Duration::from_secs(2)),
             },
             ManagedSpawnMode::Detached,
+            Some(&work),
         ) {
             Ok(managed) => {
                 managed.terminate();
@@ -1321,7 +1829,8 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(matches!(err, ProcessError::ExitedEarly { .. }));
+        assert!(matches!(err, ProcessError::ExitedEarly { .. }), "{err:?}");
+        assert!(!work.given(), "an early exit is a start that failed");
         let child_pid = read_pid(&child_pid_path);
         if !wait_for_process_exit(child_pid, Duration::from_secs(5)) {
             unsafe {
@@ -1385,13 +1894,13 @@ mod tests {
             let pid = match spawn_mode {
                 RedirectedStdoutSpawnMode::Detached => {
                     ProcessExecutor
-                        .spawn(&request)
+                        .spawn(&request, &WorkGiven::for_command())
                         .expect("spawn detached helper child")
                         .pid
                 }
                 RedirectedStdoutSpawnMode::ManagedDetached => {
                     ProcessExecutor
-                        .spawn_managed(&request, ManagedSpawnMode::Detached)
+                        .spawn_managed(&request, ManagedSpawnMode::Detached, None)
                         .expect("spawn managed-detached helper child")
                         .detach()
                         .pid
@@ -1489,6 +1998,7 @@ mod tests {
                     startup_probe: None,
                 },
                 ManagedSpawnMode::Detached,
+                None,
             )
             .expect("spawn managed");
 
@@ -1534,6 +2044,7 @@ mod tests {
                 startup_probe: Some(Duration::from_millis(200)),
             },
             ManagedSpawnMode::Detached,
+            None,
         ) {
             Ok(managed) => {
                 managed.terminate();
@@ -1561,14 +2072,17 @@ mod tests {
 
         let runner = ProcessExecutor;
         let err = runner
-            .run(&ProcessRequest {
-                program: script,
-                args: vec![],
-                workdir: None,
-                stdout_log_path: Some(dir.path().join("missing").join("stdout.log")),
-                stderr_log_path: None,
-                startup_probe: None,
-            })
+            .run_with_policy(
+                &ProcessRequest {
+                    program: script,
+                    args: vec![],
+                    workdir: None,
+                    stdout_log_path: Some(dir.path().join("missing").join("stdout.log")),
+                    stderr_log_path: None,
+                    startup_probe: None,
+                },
+                &ProcessExecutionPolicy::default(),
+            )
             .expect_err("expected log write failure");
 
         assert!(matches!(err, ProcessError::StdoutLogIo { .. }));
@@ -1583,7 +2097,7 @@ mod tests {
 
         let runner = ProcessExecutor;
         let err = runner
-            .run_with_timeout(
+            .run_with_policy(
                 &ProcessRequest {
                     program: script,
                     args: vec![],
@@ -1592,11 +2106,92 @@ mod tests {
                     stderr_log_path: None,
                     startup_probe: None,
                 },
-                Duration::from_millis(100),
+                &ProcessExecutionPolicy::new(
+                    Some(Duration::from_millis(100)),
+                    CancellationToken::new(),
+                    ProcessInterruptionSafety::Interruptible,
+                    crate::platform::process::WorkGiven::for_command(),
+                ),
             )
             .expect_err("expected timeout");
 
         assert!(matches!(err, ProcessError::TimedOut { .. }));
+    }
+
+    /// Статус прерывания приходит, когда процесс уже подобран: ответ «отменено» или «предел
+    /// истёк» при живом процессе врал бы, что работа прекращена. Подобранный процесс не
+    /// отвечает на нулевой сигнал, а зомби ещё отвечал бы.
+    #[cfg(unix)]
+    #[test]
+    fn an_interrupted_process_is_reaped_before_the_answer() {
+        for safety in [
+            ProcessInterruptionSafety::Interruptible,
+            ProcessInterruptionSafety::GracefulThenKill,
+        ] {
+            for by_timeout in [true, false] {
+                let dir = tempdir().expect("tempdir");
+                let pid_file = dir.path().join("pid");
+                let script = dir.path().join("sleep.sh");
+                write_script(
+                    &script,
+                    &format!("echo $$ > '{}'\nexec sleep 10", pid_file.display()),
+                );
+                let cancellation = CancellationToken::new();
+                let timeout = by_timeout.then_some(Duration::from_secs(3));
+                let canceller = (!by_timeout).then(|| {
+                    let cancellation = cancellation.clone();
+                    let pid_file = pid_file.clone();
+                    // Отмена приходит, когда процесс записал номер, и в любом случае: иначе
+                    // тест ждал бы конца `sleep` и падал бы не там.
+                    thread::spawn(move || {
+                        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                        while std::time::Instant::now() < deadline
+                            && fs::read_to_string(&pid_file)
+                                .ok()
+                                .and_then(|text| text.trim().parse::<i32>().ok())
+                                .is_none()
+                        {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        cancellation.cancel();
+                    })
+                });
+
+                let err = ProcessExecutor
+                    .run_with_policy(
+                        &ProcessRequest {
+                            program: script,
+                            args: vec![],
+                            workdir: None,
+                            stdout_log_path: None,
+                            stderr_log_path: None,
+                            startup_probe: None,
+                        },
+                        &ProcessExecutionPolicy::new(
+                            timeout,
+                            cancellation,
+                            safety,
+                            crate::platform::process::WorkGiven::for_command(),
+                        ),
+                    )
+                    .expect_err("the process must be interrupted");
+                if let Some(canceller) = canceller {
+                    canceller.join().expect("canceller");
+                }
+
+                let expected = if by_timeout {
+                    matches!(err, ProcessError::TimedOut { .. })
+                } else {
+                    matches!(err, ProcessError::Cancelled { .. })
+                };
+                assert!(expected, "{safety:?}, by timeout {by_timeout}: {err:?}");
+                let pid = read_pid(&pid_file);
+                assert!(
+                    !process_exists(pid),
+                    "{safety:?}, by timeout {by_timeout}: the interrupted process {pid} is still there"
+                );
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -1627,6 +2222,7 @@ mod tests {
                     None,
                     cancellation,
                     ProcessInterruptionSafety::Interruptible,
+                    crate::platform::process::WorkGiven::for_command(),
                 ),
             )
             .expect_err("expected cancellation");
@@ -1656,6 +2252,7 @@ mod tests {
                     Some(Duration::from_millis(10)),
                     CancellationToken::new(),
                     ProcessInterruptionSafety::CriticalNonAbortable,
+                    crate::platform::process::WorkGiven::for_command(),
                 ),
             )
             .expect("critical process must reach terminal success");
@@ -1682,14 +2279,17 @@ mod tests {
 
         let runner = ProcessExecutor;
         let result = runner
-            .run(&ProcessRequest {
-                program: script,
-                args: vec![],
-                workdir: None,
-                stdout_log_path: None,
-                stderr_log_path: None,
-                startup_probe: None,
-            })
+            .run_with_policy(
+                &ProcessRequest {
+                    program: script,
+                    args: vec![],
+                    workdir: None,
+                    stdout_log_path: None,
+                    stderr_log_path: None,
+                    startup_probe: None,
+                },
+                &ProcessExecutionPolicy::default(),
+            )
             .expect("run");
 
         assert_eq!(result.exit_code, 0);
@@ -1700,8 +2300,12 @@ mod tests {
     fn read_pid(path: &Path) -> i32 {
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         while std::time::Instant::now() < deadline {
-            if let Ok(pid) = fs::read_to_string(path) {
-                return pid.trim().parse().expect("child pid");
+            // Оболочка создаёт файл раньше, чем пишет в него номер: пустой ещё не записан.
+            if let Some(pid) = fs::read_to_string(path)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                return pid;
             }
             thread::sleep(Duration::from_millis(10));
         }

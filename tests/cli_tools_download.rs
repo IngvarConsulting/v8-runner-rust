@@ -1,5 +1,3 @@
-#![cfg(unix)]
-
 mod support;
 
 use serde_json::Value;
@@ -12,9 +10,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use support::command_data::assert_data_matches_its_command_form;
 use support::{temp_workspace, v8_runner_command};
 
-const SLEEPING_RESPONSE_DELAY: Duration = Duration::from_secs(5);
+/// Прежний глобальный `builder` в тестовых конфигах: `DESIGNER` — умолчания матрицы,
+/// `IBCMD` — `ibcmd` всюду, где у операции есть развилка.
+fn providers_yaml(builder: &str) -> &'static str {
+    if builder == "IBCMD" {
+        "providers:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\n"
+    } else {
+        ""
+    }
+}
 
 fn write_minimal_config(root: &Path) -> PathBuf {
     write_minimal_config_with_builder(root, "DESIGNER")
@@ -30,8 +37,9 @@ fn write_minimal_config_with_builder(root: &Path, builder: &str) -> PathBuf {
     fs::write(
         &config_path,
         format!(
-            "# yaml-language-server: $schema=./docs/schemas/v8project.schema.json\nworkPath: '{}'\nformat: DESIGNER\nbuilder: {builder}\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  edt_cli:\n    path: /tmp/edt\n",
+            "# yaml-language-server: $schema=./docs/schemas/v8project.schema.json\nworkPath: '{}'\nformat: DESIGNER\n{}infobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  edt_cli:\n    path: /tmp/edt\n",
             work_path.display(),
+            providers_yaml(builder),
         ),
     )
     .expect("config");
@@ -48,14 +56,6 @@ fn write_config_with_pending_va(root: &Path) -> PathBuf {
     config_path
 }
 
-fn write_config_with_execution_timeout(root: &Path, timeout_ms: u64) -> PathBuf {
-    let config_path = write_minimal_config(root);
-    let mut config = fs::read_to_string(&config_path).expect("config");
-    config.push_str(&format!("execution_timeout: {timeout_ms}\n"));
-    fs::write(&config_path, config).expect("timeout config");
-    config_path
-}
-
 struct FixtureServer {
     address: std::net::SocketAddr,
     shutdown: Arc<AtomicBool>,
@@ -65,10 +65,6 @@ struct FixtureServer {
 impl FixtureServer {
     fn start(root: &Path) -> (Self, u16) {
         Self::start_with_mode(Some(root.to_path_buf()), Duration::ZERO)
-    }
-
-    fn start_sleeping() -> (Self, u16) {
-        Self::start_with_mode(None, SLEEPING_RESPONSE_DELAY)
     }
 
     fn start_with_mode(root: Option<PathBuf>, response_delay: Duration) -> (Self, u16) {
@@ -581,6 +577,44 @@ fn tools_download_follows_latest_release_and_asset_redirects() {
     assert!(local.contains("client_mcp.cfe"));
 }
 
+/// Живая сверка формы `tools download`: загрузка идёт с поддельного сервера в этом же
+/// процессе, поэтому сеть для неё не нужна.
+#[test]
+fn tools_download_answers_in_the_form_declared_for_it() {
+    let dir = temp_workspace();
+    let config_path = write_minimal_config(dir.path());
+    let server_root = dir.path().join("server");
+    let (_server, port) = FixtureServer::start(&server_root);
+    write_http_fixture(&server_root, port);
+
+    let output = v8_runner_command()
+        .env(
+            "V8TR_GITHUB_API_BASE_URL",
+            format!("http://127.0.0.1:{port}"),
+        )
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "tools",
+            "download",
+            "client-mcp",
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json envelope");
+    assert_eq!(payload["command"], "tools download", "{payload}");
+    assert_data_matches_its_command_form(&payload, "`tools download client-mcp`");
+}
+
 #[test]
 fn tools_download_follows_302_redirects() {
     let dir = temp_workspace();
@@ -653,7 +687,7 @@ fn tools_download_artifacts_keeps_yaxunit_out_of_source_sets() {
 #[test]
 fn tools_download_artifacts_handles_large_assets_without_pipe_deadlock() {
     let dir = temp_workspace();
-    let config_path = write_config_with_execution_timeout(dir.path(), 15_000);
+    let config_path = write_minimal_config(dir.path());
     let server_root = dir.path().join("server");
     let (_server, port) = FixtureServer::start(&server_root);
     write_http_fixture(&server_root, port);
@@ -761,7 +795,7 @@ fn tools_download_artifacts_requires_designer_builder() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(combined.contains("requires builder=DESIGNER"));
+    assert!(combined.contains("needs the Designer as the push provider"));
 }
 
 #[test]
@@ -804,11 +838,19 @@ fn tools_download_force_refuses_to_replace_unmanaged_tool_file() {
     );
 }
 
+/// DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE, at the command boundary.
+///
+/// Раньше `execution_timeout: 200` обрывал эту загрузку на 200-й миллисекунде. Теперь
+/// медленное зеркало дожидаются: обрывает загрузку только тишина в сокете, а отвечающий
+/// с задержкой сервер тишиной не является. Провал приходит по содержимому ответа, а не
+/// по часам.
 #[test]
-fn tools_download_respects_execution_timeout_during_http_download() {
+fn a_slow_mirror_is_waited_for_instead_of_being_cut_off_by_a_command_budget() {
+    const RESPONSE_DELAY: Duration = Duration::from_secs(2);
+
     let dir = temp_workspace();
-    let config_path = write_config_with_execution_timeout(dir.path(), 200);
-    let (_server, port) = FixtureServer::start_sleeping();
+    let config_path = write_minimal_config(dir.path());
+    let (_server, port) = FixtureServer::start_with_mode(None, RESPONSE_DELAY);
 
     let started = std::time::Instant::now();
     let output = v8_runner_command()
@@ -826,19 +868,21 @@ fn tools_download_respects_execution_timeout_during_http_download() {
         .output()
         .expect("run command");
     let elapsed = started.elapsed();
-    assert!(
-        !output.status.success(),
-        "stdout={}\nstderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(elapsed < SLEEPING_RESPONSE_DELAY, "elapsed={elapsed:?}");
+
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(combined.contains("timed out"));
+    assert!(
+        elapsed >= RESPONSE_DELAY,
+        "the slow response must be waited for, not cut short; elapsed={elapsed:?}"
+    );
+    assert!(!output.status.success(), "{combined}");
+    assert!(
+        !combined.contains("timed out"),
+        "the failure must come from the response, not from a clock: {combined}"
+    );
 }
 
 #[test]

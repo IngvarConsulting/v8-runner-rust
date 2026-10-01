@@ -8,6 +8,8 @@ use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::config::model::INFOBASE_NAME_PATTERN;
+
 pub const MAIN_CONFIG_SCHEMA_PATH: &str = "docs/schemas/v8project.schema.json";
 pub const LOCAL_CONFIG_SCHEMA_PATH: &str = "docs/schemas/v8project.local.schema.json";
 
@@ -206,7 +208,13 @@ fn allow_null_property(schema: &mut Value, def_path: &[&str], property: &str) {
 }
 
 fn add_numeric_runtime_bounds(schema: &mut Value) {
-    set_numeric_bounds(schema, &[], "execution_timeout", Some(1), Some(86_400_000));
+    set_numeric_bounds(
+        schema,
+        &["McpExecutionSchema"],
+        "admission_timeout_ms",
+        Some(1),
+        Some(86_400_000),
+    );
     set_numeric_bounds(
         schema,
         &["BuildSchema"],
@@ -227,6 +235,20 @@ fn add_numeric_runtime_bounds(schema: &mut Value) {
         "command_timeout_ms",
         Some(1),
         None,
+    );
+    set_numeric_bounds(
+        schema,
+        &["DesignerAgentSchema"],
+        "startup_timeout_ms",
+        Some(1),
+        None,
+    );
+    set_numeric_bounds(
+        schema,
+        &["DesignerAgentSchema"],
+        "port",
+        Some(1),
+        Some(65_535),
     );
     for def in ["ClientMcpToolSchema", "PartialClientMcpToolSchema"] {
         set_numeric_bounds(schema, &[def], "port", Some(1), None);
@@ -313,15 +335,6 @@ where
 struct MainConfigSchema {
     /// Working directory for generated state, logs, temporary files, and hash storages.
     work_path: PathBuf,
-    /// Global execution budget for public CLI and MCP commands in milliseconds.
-    #[serde(
-        rename = "execution_timeout",
-        default,
-        deserialize_with = "deserialize_non_null_optional",
-        skip_serializing_if = "Option::is_none"
-    )]
-    #[schemars(with = "u64")]
-    execution_timeout: Option<u64>,
     /// Source format used by project source sets when a nested source does not override it.
     #[serde(
         default,
@@ -330,20 +343,43 @@ struct MainConfigSchema {
     )]
     #[schemars(with = "SourceFormatSchema")]
     format: Option<SourceFormatSchema>,
-    /// Backend used for build/load operations.
+    /// Per-operation executor overrides. A missing key means the default chain from the
+    /// capability matrix; a present key means exactly that provider and no fallback.
     #[serde(
         default,
         deserialize_with = "deserialize_non_null_optional",
         skip_serializing_if = "Option::is_none"
     )]
-    #[schemars(with = "BuilderBackendSchema")]
-    builder: Option<BuilderBackendSchema>,
-    /// Target infobase connection, credentials, and optional DBMS settings.
-    infobase: InfobaseSchema,
+    #[schemars(with = "ProvidersSchema")]
+    providers: Option<ProvidersSchema>,
+    /// One-cycle synonym for `infobases.origin` of v8project.local.yaml: which infobase a
+    /// checkout is attached to is known to the machine, not to the project.
+    #[deprecated = "declare the infobase as infobases.origin in v8project.local.yaml"]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "InfobaseSchema")]
+    infobase: Option<InfobaseSchema>,
+    /// Карта баз слитого документа. В проектном файле её нет — отказ до границы, — и в
+    /// опубликованную схему она не входит; поле есть только ради проверки слитого корня.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    infobases: Option<BTreeMap<String, InfobaseSchema>>,
     /// Project source sets to build, test, dump, or materialize.
     #[serde(rename = "source-set", default)]
     source_sets: Vec<SourceSetSchema>,
-    /// Build pipeline settings.
+    /// Settings of `push`: how sources reach the infobase.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "BuildSchema")]
+    push: Option<BuildSchema>,
+    /// Previous spelling of `push`; accepted for one release cycle.
+    #[deprecated = "name the section by its command: push"]
     #[serde(
         default,
         deserialize_with = "deserialize_non_null_optional",
@@ -389,14 +425,28 @@ struct LocalOverlayConfigSchema {
     )]
     #[schemars(with = "PathBuf")]
     work_path: Option<PathBuf>,
-    /// Machine-local infobase credentials and connection overrides.
+    /// Infobases of this checkout by name, like remotes of a repository; commands work
+    /// with `origin` unless `--infobase` names another one. A name is a plain identifier:
+    /// it becomes a directory under workPath.
     #[serde(
         default,
         deserialize_with = "deserialize_non_null_optional",
         skip_serializing_if = "Option::is_none"
     )]
-    #[schemars(with = "PartialInfobaseSchema")]
-    infobase: Option<PartialInfobaseSchema>,
+    #[schemars(
+        with = "BTreeMap<String, InfobaseSchema>",
+        extend("propertyNames" = json!({ "pattern": INFOBASE_NAME_PATTERN }))
+    )]
+    infobases: Option<BTreeMap<String, InfobaseSchema>>,
+    /// One-cycle synonym for `infobases.origin`.
+    #[deprecated = "declare the infobase as infobases.origin"]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "InfobaseSchema")]
+    infobase: Option<InfobaseSchema>,
     /// Machine-local tool discovery and launch overrides.
     #[serde(
         default,
@@ -413,6 +463,14 @@ struct LocalOverlayConfigSchema {
     )]
     #[schemars(with = "PartialTestsSchema")]
     tests: Option<PartialTestsSchema>,
+    /// Machine-local executor overrides for an experiment or a workaround.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "ProvidersSchema")]
+    providers: Option<ProvidersSchema>,
     /// Machine-local MCP runtime overrides.
     #[serde(
         default,
@@ -430,17 +488,99 @@ enum SourceFormatSchema {
     Edt,
 }
 
+/// Executors the runner can dispatch to. Names say who does the work, not how it is started.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-enum BuilderBackendSchema {
+#[serde(rename_all = "kebab-case")]
+enum ProviderSchema {
     Designer,
+    Agent,
     Ibcmd,
+    IbcmdRs,
+    Webinst,
+}
+
+/// One optional override per operation that has a choice of executor.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(deny_unknown_fields)]
+struct ProvidersSchema {
+    /// Executor for `infobase create`.
+    #[serde(
+        rename = "infobase.create",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    infobase_create: Option<ProviderSchema>,
+    /// Previous spelling of `infobase.create`; accepted for one release cycle.
+    #[deprecated = "name the executor by its command: providers.infobase.create"]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    init: Option<ProviderSchema>,
+    /// Executor for `push`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    push: Option<ProviderSchema>,
+    /// Previous spelling of `push`; accepted for one release cycle.
+    #[deprecated = "name the executor by its command: providers.push"]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    build: Option<ProviderSchema>,
+    /// Executor for `upload`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    upload: Option<ProviderSchema>,
+    /// Previous spelling of `upload`; accepted for one release cycle.
+    #[deprecated = "name the executor by its command: providers.upload"]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    load: Option<ProviderSchema>,
+    /// Executor for `pull`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pull: Option<ProviderSchema>,
+    /// Previous spelling of `pull`; accepted for one release cycle.
+    #[deprecated = "name the executor by its command: providers.pull"]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dump: Option<ProviderSchema>,
+    /// Executor for `extensions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    extensions: Option<ProviderSchema>,
+    /// Executor for `download`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    download: Option<ProviderSchema>,
+    /// Previous spelling of `download`; accepted for one release cycle.
+    #[deprecated = "name the executor by its command: providers.download"]
+    #[serde(
+        rename = "infobase.configuration.export",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    infobase_configuration_export: Option<ProviderSchema>,
+    /// Executor for `infobase dump`.
+    #[serde(
+        rename = "infobase.dump",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    infobase_dump: Option<ProviderSchema>,
+    /// Executor for `infobase restore`.
+    #[serde(
+        rename = "infobase.restore",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    infobase_restore: Option<ProviderSchema>,
+    /// Executor for `syntax`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    syntax: Option<ProviderSchema>,
+    /// Executor for `make`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    make: Option<ProviderSchema>,
+    /// Executor for `publish`. Accepted by the schema so validation can say the operation has no choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    publish: Option<ProviderSchema>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct InfobaseSchema {
-    /// 1C infobase connection string without embedded user or password.
+    /// 1C infobase connection string without embedded user or password: `File=…` for a file
+    /// infobase, `Srvr=…;Ref=…` for a cluster; next to `standalone` it is the server's direct
+    /// gate address or empty.
+    #[serde(default)]
     connection: String,
     /// Optional infobase user name passed to platform utilities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -451,28 +591,130 @@ struct InfobaseSchema {
     /// Optional DBMS settings for server-based infobases.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dbms: Option<InfobaseDbmsSchema>,
+    /// Client address and web-server publication settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    web: Option<InfobaseWebSchema>,
+    /// Standalone server reached through its SSH gate; declares the target kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    standalone: Option<InfobaseStandaloneSchema>,
+    /// The cluster around a server infobase: the administration server (`ras`) address and
+    /// the two administrator levels above the infobase user — cluster and central server.
+    /// Each operation asks only for the level it needs; a file infobase and a standalone
+    /// server have no cluster and refuse the section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cluster: Option<InfobaseClusterSchema>,
 }
 
+/// A standalone server (`ibsrv`) as the target.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct PartialInfobaseSchema {
-    /// Optional local override for the 1C infobase connection string.
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct InfobaseStandaloneSchema {
+    /// `host:port` or `[v6]:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`); the
+    /// port is required — `ibsrv` listens on 1543 unless told otherwise.
+    gate: String,
+    /// SHA256 fingerprint the gate must present, as `SHA256:<base64>`.
     #[serde(
         default,
         deserialize_with = "deserialize_non_null_optional",
         skip_serializing_if = "Option::is_none"
     )]
     #[schemars(with = "String")]
-    connection: Option<String>,
-    /// Optional local infobase user name.
+    host_fingerprint: Option<String>,
+    /// How files travel between the runner and the gate user's directory: `sftp` through
+    /// the gate, or `{ dir: … }` — that directory as the runner sees it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    exchange: Option<InfobaseStandaloneExchangeSchema>,
+}
+
+/// The declared file channel to a standalone server.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(untagged)]
+enum InfobaseStandaloneExchangeSchema {
+    /// A named channel: `sftp` — the SFTP subsystem of the gate's SSH connection.
+    Named(InfobaseStandaloneExchangeChannelSchema),
+    /// The gate user's directory (`<users-data>/<user>` of `ibsrv`) as the runner sees it.
+    Dir {
+        /// The gate user's directory as the runner sees it.
+        dir: PathBuf,
+    },
+}
+
+/// Named exchange channels.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum InfobaseStandaloneExchangeChannelSchema {
+    Sftp,
+}
+
+/// Web server a publication is written to.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum WebServerKindSchema {
+    Iis,
+    Apache2,
+    Apache22,
+    Apache24,
+}
+
+/// Publication and client-address settings for the target infobase.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct InfobaseWebSchema {
+    /// Web server to publish on with `v8-runner publish`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    server: Option<WebServerKindSchema>,
+    /// Virtual directory name (`webinst -wsdir`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wsdir: Option<String>,
+    /// Physical directory the publication is written to (`webinst -dir`); must exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dir: Option<PathBuf>,
+    /// Web server configuration file (`webinst -confpath`); required for apache2 and apache22.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    conf: Option<PathBuf>,
+    /// Use OS authentication (`webinst -osauth`); IIS only.
+    #[serde(default, rename = "os-auth", skip_serializing_if = "Option::is_none")]
+    os_auth: Option<bool>,
+    /// Address a client or a browser opens the infobase at; `launch web` uses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+}
+
+/// The cluster section of a server infobase: three credential levels lie side by side in
+/// the local layer, the infobase user in the infobase section itself.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct InfobaseClusterSchema {
+    /// Administration server (`ras`) address as `host[:port]` — an IPv6 address in
+    /// brackets. It goes to `rac` as is, so the port default (1545) stays with the platform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ras: Option<String>,
+    /// Cluster administrator name; `sessions` (#212) and `infobase create` in a cluster (#204)
+    /// will ask for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     user: Option<String>,
-    /// Optional local infobase password.
+    /// Cluster administrator password.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     password: Option<String>,
-    /// Optional local DBMS settings override.
+    /// The central server agent (`ragent`) and its administrator.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    dbms: Option<PartialInfobaseDbmsSchema>,
+    agent: Option<InfobaseClusterAgentSchema>,
+}
+
+/// The central server agent of the cluster and its administrator.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct InfobaseClusterAgentSchema {
+    /// Agent address as `host[:port]` when it differs from the host of `Srvr=` with the
+    /// platform default port (1540); the runner's own `ras` connects to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    address: Option<String>,
+    /// Central server administrator name; no runner operation asks for it by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user: Option<String>,
+    /// Central server administrator password.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    password: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -494,8 +736,6 @@ struct InfobaseDbmsSchema {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     password: Option<String>,
 }
-
-type PartialInfobaseDbmsSchema = InfobaseDbmsSchema;
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -559,6 +799,15 @@ struct ToolsSchema {
     )]
     #[schemars(with = "EdtCliSchema")]
     edt_cli: Option<EdtCliSchema>,
+    /// Designer agent endpoint: the agent the runner launches, or one to attach to.
+    #[serde(
+        rename = "designer_agent",
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "DesignerAgentSchema")]
+    designer_agent: Option<DesignerAgentSchema>,
     /// onec-client-mcp tool settings.
     #[serde(
         default,
@@ -605,6 +854,15 @@ struct PartialToolsSchema {
     )]
     #[schemars(with = "EdtCliSchema")]
     edt_cli: Option<EdtCliSchema>,
+    /// Designer agent endpoint: the agent the runner launches, or one to attach to.
+    #[serde(
+        rename = "designer_agent",
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "DesignerAgentSchema")]
+    designer_agent: Option<DesignerAgentSchema>,
     /// Machine-local onec-client-mcp tool settings.
     #[serde(
         default,
@@ -696,6 +954,46 @@ struct EdtCliSchema {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct DesignerAgentSchema {
+    /// `host:port` or `[v6]:port` of a Designer agent started outside the runner (attached
+    /// mode); the port is required. Excludes `port` and `host-key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attach: Option<String>,
+    /// `AgentBaseDir` of the attached agent: where its commands read and write files. Needs `attach`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    base_dir: Option<PathBuf>,
+    /// Port the runner-launched agent listens on (managed mode). Default 1543.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "u16")]
+    port: Option<u16>,
+    /// Private host key file for the runner-launched agent. Absent: the platform generates one (`/AgentSSHHostKeyAuto`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host_key: Option<PathBuf>,
+    /// SHA256 fingerprint the attached agent must present, as `SHA256:<base64>`. Attached mode only.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "String")]
+    host_fingerprint: Option<String>,
+    /// Time limit for the runner-launched agent to accept the first authenticated session, in milliseconds.
+    #[serde(
+        rename = "startup_timeout_ms",
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "u64")]
+    startup_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 struct ClientMcpToolSchema {
     /// Default port passed to onec-client-mcp-devkit.
@@ -704,7 +1002,7 @@ struct ClientMcpToolSchema {
     /// Optional wait-ready timeout in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     wait_ready_timeout_ms: Option<u64>,
-    /// Optional tool extension prepared by `build` for client MCP launches.
+    /// Optional tool extension prepared by `push` for client MCP launches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     extension: Option<ToolExtensionSchema>,
 }
@@ -885,6 +1183,14 @@ struct McpHttpSchema {
     )]
     #[schemars(with = "u64")]
     idle_ttl_secs: Option<u64>,
+    /// Host header values the HTTP listener answers besides the loopback.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "Vec<String>")]
+    allowed_hosts: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -906,6 +1212,16 @@ struct McpExecutionSchema {
     )]
     #[schemars(with = "u64")]
     shutdown_grace_period_secs: Option<u64>,
+    /// How long an MCP call may wait for a free execution slot, in milliseconds.
+    ///
+    /// Bounds admission only: a call that already holds a slot runs to its terminal outcome.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "u64")]
+    admission_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -1044,6 +1360,7 @@ struct ExecutionTimeoutsSchema {
 #[cfg(test)]
 mod tests {
     use crate::config::loader::load_config;
+    use crate::config::model::InfobaseSelector;
 
     use super::{
         local_config_schema_json, main_config_schema_json, schema_json_pretty,
@@ -1079,6 +1396,50 @@ mod tests {
         }
     }
 
+    /// Синоним помечен в обеих схемах, а карта принимает только имена-идентификаторы
+    /// (`INV.CONFIG.A-KEY-SYNONYM-IS-MARKED-DEPRECATED-IN-THE-SCHEMA`,
+    /// `INV.CONFIG.AN-INFOBASE-NAME-IS-A-PLAIN-IDENTIFIER`).
+    #[test]
+    fn the_infobase_synonym_is_deprecated_and_the_map_keys_are_identifiers() {
+        let main_schema = main_config_schema_json();
+        assert_eq!(
+            main_schema["properties"]["infobase"]["deprecated"],
+            serde_json::Value::Bool(true)
+        );
+        assert!(
+            !main_schema["required"]
+                .as_array()
+                .expect("required")
+                .iter()
+                .any(|key| key == "infobase"),
+            "the project file no longer requires a base section"
+        );
+        assert!(
+            main_schema["properties"].get("infobases").is_none(),
+            "the map lives in the local layer only"
+        );
+
+        let local_schema = local_config_schema_json();
+        assert_eq!(
+            local_schema["properties"]["infobase"]["deprecated"],
+            serde_json::Value::Bool(true)
+        );
+        let map = &local_schema["properties"]["infobases"];
+        assert_eq!(
+            map["propertyNames"]["pattern"],
+            serde_json::Value::String(super::INFOBASE_NAME_PATTERN.to_owned())
+        );
+        assert_eq!(
+            map["additionalProperties"]["$ref"],
+            "#/$defs/InfobaseSchema"
+        );
+        let section = &local_schema["$defs"]["InfobaseSchema"]["properties"];
+        assert!(
+            section.get("standalone").is_some(),
+            "the local layer declares whole sections, a standalone server included"
+        );
+    }
+
     #[test]
     fn generated_schemas_include_user_facing_field_descriptions() {
         let main_schema = main_config_schema_json();
@@ -1094,6 +1455,12 @@ mod tests {
             &["InfobaseSchema"],
             "connection",
             "infobase connection string",
+        );
+        assert_property_description_contains(
+            &local_config_schema_json(),
+            &[],
+            "infobases",
+            "Infobases of this checkout by name",
         );
         assert_property_description_contains(
             &main_schema,
@@ -1124,6 +1491,42 @@ mod tests {
             &["McpHttpSchema"],
             "bind_address",
             "Socket address",
+        );
+        assert_property_description_contains(
+            &main_schema,
+            &["McpHttpSchema"],
+            "allowed_hosts",
+            "Host header values",
+        );
+        assert_property_description_contains(
+            &main_schema,
+            &["DesignerAgentSchema"],
+            "host-fingerprint",
+            "SHA256 fingerprint",
+        );
+        assert_property_description_contains(
+            &main_schema,
+            &["InfobaseStandaloneSchema"],
+            "host-fingerprint",
+            "SHA256 fingerprint",
+        );
+        assert_property_description_contains(
+            &main_schema,
+            &["InfobaseSchema"],
+            "cluster",
+            "two administrator levels",
+        );
+        assert_property_description_contains(
+            &main_schema,
+            &["InfobaseClusterSchema"],
+            "ras",
+            "Administration server",
+        );
+        assert_property_description_contains(
+            &main_schema,
+            &["InfobaseClusterAgentSchema"],
+            "address",
+            "Agent address",
         );
         assert_property_description_contains(
             &main_schema,
@@ -1189,7 +1592,9 @@ mod tests {
             &minimal_project_config_without_base_path(),
         );
 
-        let config = load_config(config_path.to_str(), None).expect("load config");
+        let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect("load config");
         assert_eq!(
             config.base_path,
             std::fs::canonicalize(dir.path()).expect("canonical config dir")
@@ -1207,9 +1612,30 @@ mod tests {
 
         assert_schema_valid(&local_config_schema_json(), overlay);
 
-        let config = load_config(config_path.to_str(), None).expect("load config");
+        let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect("load config");
         assert_eq!(config.infobase.user.as_deref(), Some("Admin"));
         assert_eq!(config.infobase.password.as_deref(), Some("secret"));
+    }
+
+    /// Секция `cluster` — часть секции базы в обеих схемах: местный слой объявляет её
+    /// картой, проектный файл на этот цикл — синонимом `infobase:`; неизвестный ключ
+    /// внутри неё отказывают и схема, и загрузчик.
+    #[test]
+    fn both_schemas_accept_the_cluster_section_and_refuse_a_stranger_inside_it() {
+        let overlay = "infobases:\n  origin:\n    connection: 'Srvr=srv:1541;Ref=demo'\n    cluster:\n      ras: srv:1545\n      user: cluster-admin\n      password: cluster-secret\n      agent:\n        address: srv:1540\n        user: agent-admin\n        password: agent-secret\n";
+        assert_schema_valid(&local_config_schema_json(), overlay);
+        assert_overlay_loader_ok(overlay);
+        let project = "workPath: work\nformat: DESIGNER\ninfobase:\n  connection: 'Srvr=srv:1541;Ref=demo'\n  cluster:\n    ras: srv:1545\n    user: cluster-admin\n    password: cluster-secret\n    agent:\n      address: srv:1540\n      user: agent-admin\n      password: agent-secret\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n";
+        assert_schema_valid(&main_config_schema_json(), project);
+
+        let stranger = "infobases:\n  origin:\n    connection: 'Srvr=srv:1541;Ref=demo'\n    cluster:\n      ras: srv:1545\n      port: 1545\n";
+        assert_schema_invalid(&local_config_schema_json(), stranger);
+        assert_overlay_loader_error(stranger);
+        let agent_stranger = "infobases:\n  origin:\n    connection: 'Srvr=srv:1541;Ref=demo'\n    cluster:\n      agent:\n        host: srv\n";
+        assert_schema_invalid(&local_config_schema_json(), agent_stranger);
+        assert_overlay_loader_error(agent_stranger);
     }
 
     #[test]
@@ -1217,7 +1643,7 @@ mod tests {
         for overlay in [
             "source-set: []\n",
             "format: DESIGNER\n",
-            "builder: DESIGNER\n",
+            "",
             "unknown: value\n",
             "infobase:\n  name: unexpected\n",
             "tools:\n  client_mcp:\n    extension:\n      source:\n        extra: unexpected\n",
@@ -1249,7 +1675,7 @@ mod tests {
     #[test]
     fn main_schema_and_loader_accept_canonical_mixed_config_keys() {
         let config = format!(
-            "{}execution_timeout: 300000\ntools:\n  enterprise:\n    additional-launch-keys:\n      - /TESTMANAGER\n  edt_cli:\n    startup_timeout_ms: 300000\n    command_timeout_ms: 300000\n",
+            "{}tools:\n  enterprise:\n    additional-launch-keys:\n      - /TESTMANAGER\n  edt_cli:\n    startup_timeout_ms: 300000\n    command_timeout_ms: 300000\n",
             minimal_project_config_without_base_path()
         );
 
@@ -1295,7 +1721,9 @@ mod tests {
 
         assert_schema_valid(&local_config_schema_json(), overlay);
 
-        let config = load_config(config_path.to_str(), None).expect("load merged config");
+        let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect("load merged config");
         assert!(config.tools.platform.strict);
         assert_eq!(
             config.tools.platform.path.as_deref(),
@@ -1324,7 +1752,9 @@ mod tests {
         assert_schema_valid(&main_config_schema_json(), &primary);
         assert_schema_valid(&local_config_schema_json(), overlay);
 
-        let config = load_config(config_path.to_str(), None).expect("load merged config");
+        let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect("load merged config");
         assert!(config.tools.platform.strict);
         assert_eq!(
             config.tools.platform.path.as_deref(),
@@ -1364,7 +1794,9 @@ mod tests {
 
         assert_schema_valid(&local_config_schema_json(), overlay);
 
-        let config = load_config(config_path.to_str(), None).expect("load config");
+        let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect("load config");
         assert!(config.tools.client_mcp.extension.is_none());
     }
 
@@ -1387,7 +1819,9 @@ mod tests {
 
         assert_schema_valid(&local_config_schema_json(), overlay);
 
-        let config = load_config(config_path.to_str(), None).expect("load config");
+        let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect("load config");
         let mut extension = config.tools.client_mcp.extension.expect("extension");
         assert!(extension.source().is_none());
         assert!(extension.artifact_mut().is_some());
@@ -1445,11 +1879,11 @@ mod tests {
     fn schemas_and_loader_reject_invalid_runtime_numeric_boundaries() {
         for config in [
             format!(
-                "{}execution_timeout: 0\n",
+                "{}mcp:\n  execution:\n    admission_timeout_ms: 0\n",
                 minimal_project_config_without_base_path()
             ),
             format!(
-                "{}execution_timeout: 86400001\n",
+                "{}mcp:\n  execution:\n    admission_timeout_ms: 86400001\n",
                 minimal_project_config_without_base_path()
             ),
             format!(
@@ -1529,13 +1963,13 @@ mod tests {
     #[test]
     fn schemas_and_loader_accept_supported_runtime_sections() {
         let config = format!(
-            "{}execution_timeout: 300000\nbuild:\n  partialLoadThreshold: 20\ntools:\n  client_mcp:\n    port: 9874\n    wait_ready_timeout_ms: 300000\n  edt_cli:\n    startup_timeout_ms: 300000\n    command_timeout_ms: 300000\nmcp:\n  http:\n    bind_address: '127.0.0.1:3000'\n    path: /mcp\n    stateful_sessions: true\n    max_sessions: 64\n    idle_ttl_secs: 900\n  execution:\n    max_concurrent_calls: 1\n    shutdown_grace_period_secs: 30\ntests:\n  execution_timeout_seconds: 300\n  yaxunit:\n    timeouts:\n      startup_ms: 300000\n      run_ms: 300000\n      total_ms: 300000\n  va:\n    fail_fast: false\n    timeouts:\n      startup_ms: 300000\n      run_ms: 300000\n      total_ms: 300000\n",
+            "{}build:\n  partialLoadThreshold: 20\ntools:\n  client_mcp:\n    port: 9874\n    wait_ready_timeout_ms: 300000\n  edt_cli:\n    startup_timeout_ms: 300000\n    command_timeout_ms: 300000\nmcp:\n  http:\n    bind_address: '127.0.0.1:3000'\n    path: /mcp\n    stateful_sessions: true\n    max_sessions: 64\n    idle_ttl_secs: 900\n    allowed_hosts:\n      - runner\n  execution:\n    max_concurrent_calls: 1\n    shutdown_grace_period_secs: 30\ntests:\n  execution_timeout_seconds: 300\n  yaxunit:\n    timeouts:\n      startup_ms: 300000\n      run_ms: 300000\n      total_ms: 300000\n  va:\n    fail_fast: false\n    timeouts:\n      startup_ms: 300000\n      run_ms: 300000\n      total_ms: 300000\n",
             minimal_project_config_without_base_path()
         );
         assert_schema_valid(&main_config_schema_json(), &config);
         assert_config_loader_ok(&config);
 
-        let overlay = "workPath: local-work\ninfobase:\n  user: Admin\n  password: secret\ntools:\n  client_mcp:\n    port: 9874\n    wait_ready_timeout_ms: 300000\nmcp:\n  http:\n    max_sessions: 64\n  execution:\n    max_concurrent_calls: 1\ntests:\n  execution_timeout_seconds: 300\n";
+        let overlay = "workPath: local-work\ninfobase:\n  user: Admin\n  password: secret\ntools:\n  client_mcp:\n    port: 9874\n    wait_ready_timeout_ms: 300000\nmcp:\n  http:\n    max_sessions: 64\n    allowed_hosts:\n      - runner.local\n  execution:\n    max_concurrent_calls: 1\ntests:\n  execution_timeout_seconds: 300\n";
         assert_schema_valid(&local_config_schema_json(), overlay);
         assert_overlay_loader_ok(overlay);
     }
@@ -1603,11 +2037,11 @@ mod tests {
     }
 
     fn minimal_project_config_without_base_path() -> String {
-        "workPath: build\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=build/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n".to_owned()
+        "workPath: build\nformat: DESIGNER\ninfobase:\n  connection: 'File=build/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n".to_owned()
     }
 
     fn minimal_project_config_with_format_null() -> String {
-        "workPath: build\nformat: null\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=build/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n".to_owned()
+        "workPath: build\nformat: null\ninfobase:\n  connection: 'File=build/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n".to_owned()
     }
 
     fn assert_schema_valid(schema: &serde_json::Value, yaml: &str) {
@@ -1639,7 +2073,9 @@ mod tests {
         std::fs::write(&config_path, minimal_project_config_without_base_path()).expect("config");
         std::fs::write(dir.path().join("v8project.local.yaml"), overlay).expect("overlay");
 
-        load_config(config_path.to_str(), None).expect_err("overlay must be rejected");
+        load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect_err("overlay must be rejected");
     }
 
     fn assert_overlay_loader_ok(overlay: &str) {
@@ -1649,7 +2085,9 @@ mod tests {
         std::fs::write(&config_path, minimal_project_config_without_base_path()).expect("config");
         std::fs::write(dir.path().join("v8project.local.yaml"), overlay).expect("overlay");
 
-        load_config(config_path.to_str(), None).expect("overlay must be accepted");
+        load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect("overlay must be accepted");
     }
 
     fn assert_config_loader_ok(config: &str) {
@@ -1658,7 +2096,9 @@ mod tests {
         let config_path = dir.path().join("v8project.yaml");
         std::fs::write(&config_path, config).expect("config");
 
-        load_config(config_path.to_str(), None).expect("config must be accepted");
+        load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect("config must be accepted");
     }
 
     fn assert_config_loader_error_any(config: &str) {
@@ -1667,7 +2107,9 @@ mod tests {
         let config_path = dir.path().join("v8project.yaml");
         std::fs::write(&config_path, config).expect("config");
 
-        load_config(config_path.to_str(), None).expect_err("config must be rejected");
+        load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect_err("config must be rejected");
     }
 
     fn assert_config_loader_error(config: &str, expected: &str) {
@@ -1676,7 +2118,9 @@ mod tests {
         let config_path = dir.path().join("v8project.yaml");
         std::fs::write(&config_path, config).expect("config");
 
-        let error = load_config(config_path.to_str(), None).expect_err("config must be rejected");
+        let error = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect_err("config must be rejected");
         assert!(
             error.to_string().contains(expected),
             "expected error to contain {expected:?}, got {error}"

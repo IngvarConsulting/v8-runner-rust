@@ -1,0 +1,62 @@
+{
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/clone.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "dump_target_path": {
+      "type": "string"
+    },
+    "dumped": {
+      "type": "boolean"
+    },
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "gitignore_path": {
+      "type": "string"
+    },
+    "local_path": {
+      "type": "string"
+    },
+    "message": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "path": {
+      "type": "string"
+    },
+    "provider_dispatched": {
+      "description": "Получил ли исполнитель работу этой команды: запущен процесс, который её выполняет,\nлибо работающей сессии отдана команда запроса. Подъём и открытие сессии, в том числе\nзапуск её процесса, и её служебные команды работой не считаются. `false`, если работы\nне было: превью, отказ или прерывание до передачи работы, процесс, который не удалось\nзапустить. Поле есть всегда, поэтому отсутствие работы не выводится из отсутствия\nзначения.",
+      "type": "boolean"
+    },
+    "source_dir": {
+      "type": "string"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "ok",
+    "path",
+    "local_path",
+    "gitignore_path",
+    "source_dir",
+    "dump_target_path",
+    "dumped",
+    "provider_dispatched",
+    "duration_ms"
+  ],
+  "title": "BootstrapResult",
+  "type": "object"
+}

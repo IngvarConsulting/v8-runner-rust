@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::config::model::InfobaseConfig;
-use crate::platform::connection::V8Connection;
+use crate::platform::connection::{file_infobase, name_the_account, V8Connection};
 use crate::platform::process::{
     ProcessError, ProcessExecutionPolicy, ProcessRequest, ProcessRunner,
 };
@@ -74,7 +74,7 @@ impl IbcmdConnection {
                 database_path,
                 user,
                 ..
-            } => (format!("file infobase '{}'", database_path.display()), user),
+            } => (file_infobase(database_path.display()), user),
             Self::Server {
                 dbms_kind,
                 database_server,
@@ -86,10 +86,7 @@ impl IbcmdConnection {
                 user,
             ),
         };
-        match user.as_deref().filter(|user| !user.is_empty()) {
-            Some(user) => format!("{target} as '{user}'"),
-            None => format!("{target} with no configured infobase user"),
-        }
+        name_the_account(&target, user.as_deref())
     }
 
     #[cfg(test)]
@@ -178,15 +175,21 @@ impl DynamicUpdateMode {
     }
 }
 
-/// Result status returned by `ibcmd infobase create`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Result status returned by `ibcmd infobase create`. `Failed` and `Unconfirmed` are failures
+/// carried inside `Ok`, so the create result — and the interruption it deferred — stays with
+/// them.
+#[derive(Debug)]
 pub enum IbcmdInfobaseCreateStatus {
     Created,
     AlreadyExists,
     Failed,
+    /// Создание не удалось, а вопрос, есть ли база уже, остался без ответа: его не пустила
+    /// или оборвала отмена, оборвал предел шага либо его процесс не запустился.
+    Unconfirmed(ProcessError),
 }
 
 /// Normalized outcome for infobase creation with the raw platform payload preserved.
+#[must_use]
 #[derive(Debug)]
 pub struct IbcmdInfobaseCreateOutcome {
     pub status: IbcmdInfobaseCreateStatus,
@@ -204,16 +207,19 @@ pub struct IbcmdDsl<'a> {
 
 impl<'a> IbcmdDsl<'a> {
     /// Creates a new DSL bound to a resolved `ibcmd` binary and target infobase.
+    ///
+    /// The policy is required: it carries the command's interrupt and its work mark.
     pub fn new(
         binary: PathBuf,
         connection: IbcmdConnection,
         runner: &'a dyn ProcessRunner,
+        execution_policy: ProcessExecutionPolicy,
     ) -> Self {
         Self {
             binary,
             connection,
             runner,
-            execution_policy: ProcessExecutionPolicy::default(),
+            execution_policy,
             data_path: None,
         }
     }
@@ -221,12 +227,6 @@ impl<'a> IbcmdDsl<'a> {
     /// Uses an isolated standalone-server data directory for every IBCMD call.
     pub fn with_data_path(mut self, data_path: PathBuf) -> Self {
         self.data_path = Some(data_path);
-        self
-    }
-
-    /// Overrides the shared execution policy for process-level cancellation and deadlines.
-    pub fn with_execution_policy(mut self, execution_policy: ProcessExecutionPolicy) -> Self {
-        self.execution_policy = execution_policy;
         self
     }
 
@@ -249,11 +249,17 @@ impl<'a> IbcmdDsl<'a> {
     /// `ibcmd infobase create` answers 255 both when the infobase is already registered and
     /// when the path cannot be written (measured on 8.3.27.2074), so its exit code alone does
     /// not separate the benign case. The separation comes from a second structural question
-    /// rather than from the complaint's wording (ADR-0029): `config generation-id` answers
+    /// rather than from the complaint's wording (DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES): `config generation-id` answers
     /// zero only when the infobase exists **and** these credentials can read it — a missing
     /// infobase and a wrong user both answer 255. So a create that failed over an infobase we
     /// can still read is "already there", and anything else stays a failure, including the case
     /// where the infobase exists but is not ours to touch.
+    ///
+    /// The question only reads the infobase, and only a write is a critical phase
+    /// (INV.USE-CASES.A-DATABASE-WRITE-IS-A-CRITICAL-PHASE), so a cancel stops it gracefully:
+    /// SIGTERM, then kill. A question that goes unanswered — refused because the cancel came
+    /// first, cut, or failed to start — leaves the status `Unconfirmed` and keeps the create
+    /// result, with the interruption the create deferred.
     pub fn ensure_infobase_create(&self) -> Result<IbcmdInfobaseCreateOutcome, IbcmdError> {
         let args = self.create_infobase_args();
         let result = self.run(&args)?;
@@ -263,11 +269,11 @@ impl<'a> IbcmdDsl<'a> {
                 result,
             });
         }
-        let probe = self.run(&self.authenticated_infobase_args(&["config", "generation-id"]))?;
-        let status = if probe.process.exit_code == 0 {
-            IbcmdInfobaseCreateStatus::AlreadyExists
-        } else {
-            IbcmdInfobaseCreateStatus::Failed
+        let question = self.authenticated_infobase_args(&["config", "generation-id"]);
+        let status = match self.run_with(&question, &self.execution_policy.for_reading()) {
+            Ok(probe) if probe.process.exit_code == 0 => IbcmdInfobaseCreateStatus::AlreadyExists,
+            Ok(_) => IbcmdInfobaseCreateStatus::Failed,
+            Err(error) => IbcmdInfobaseCreateStatus::Unconfirmed(error),
         };
 
         Ok(IbcmdInfobaseCreateOutcome { status, result })
@@ -422,6 +428,26 @@ impl<'a> IbcmdDsl<'a> {
         self.run(&args)
     }
 
+    /// Exports a saved CF/CFE file using the `config` mode's target context.
+    ///
+    /// This is deliberately distinct from `config_export_full`, which reads the
+    /// working configuration rather than the saved applied DB snapshot. Platform
+    /// 8.3.27 still requires database connection arguments even with `--file`.
+    pub fn config_export_file(
+        &self,
+        source_file: &Path,
+        target_dir: &Path,
+    ) -> Result<PlatformCommandResult, IbcmdError> {
+        let mut args = vec!["config".to_owned()];
+        args.extend(self.base_args());
+        args.push("export".to_owned());
+        args.extend(self.connection.auth_args());
+        args.extend(self.connection.dbms_auth_args());
+        args.push(format!("--file={}", source_file.display()));
+        args.push(target_dir.display().to_string());
+        self.run(&args)
+    }
+
     /// Exports changes in sync mode relative to an existing target directory.
     pub fn config_export_incremental(
         &self,
@@ -466,25 +492,31 @@ impl<'a> IbcmdDsl<'a> {
     }
 
     fn run(&self, args: &[String]) -> Result<PlatformCommandResult, IbcmdError> {
+        self.run_with(args, &self.execution_policy)
+            .map_err(IbcmdError::Spawn)
+    }
+
+    fn run_with(
+        &self,
+        args: &[String],
+        policy: &ProcessExecutionPolicy,
+    ) -> Result<PlatformCommandResult, ProcessError> {
         let mut args_with_data = args.to_vec();
         if let Some(data_path) = &self.data_path {
             args_with_data.insert(1, data_path.display().to_string());
             args_with_data.insert(1, "--data".to_owned());
         }
-        let process = self
-            .runner
-            .run_with_policy(
-                &ProcessRequest {
-                    program: self.binary.clone(),
-                    args: args_with_data,
-                    workdir: None,
-                    stdout_log_path: None,
-                    stderr_log_path: None,
-                    startup_probe: None,
-                },
-                &self.execution_policy,
-            )
-            .map_err(IbcmdError::Spawn)?;
+        let process = self.runner.run_with_policy(
+            &ProcessRequest {
+                program: self.binary.clone(),
+                args: args_with_data,
+                workdir: None,
+                stdout_log_path: None,
+                stderr_log_path: None,
+                startup_probe: None,
+            },
+            policy,
+        )?;
 
         Ok(PlatformCommandResult {
             process,
@@ -511,7 +543,9 @@ fn required_dbms_field(field: &'static str, value: Option<&str>) -> Result<Strin
 mod tests {
     use super::{DynamicUpdateMode, IbcmdConnection, IbcmdDsl, IbcmdInfobaseCreateStatus};
     use crate::config::model::{InfobaseConfig, InfobaseDbmsConfig};
-    use crate::platform::process::{ProcessExecutor, ProcessRunner};
+    #[cfg(unix)]
+    use crate::platform::process::ProcessInterruptionSafety;
+    use crate::platform::process::{ProcessExecutionPolicy, ProcessExecutor, ProcessRunner};
     use std::fs;
     use std::io::Write;
     use std::path::{Path, PathBuf};
@@ -611,7 +645,12 @@ mod tests {
         );
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
 
         dsl.config_import_full(dir.path(), Some("Ext"))
             .expect("import");
@@ -635,7 +674,12 @@ mod tests {
         );
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
         let files = vec![PathBuf::from("Catalogs/Items.xml")];
 
         dsl.config_import_partial(dir.path(), &files, None)
@@ -661,7 +705,12 @@ mod tests {
         );
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
 
         dsl.config_apply(None, DynamicUpdateMode::Auto)
             .expect("apply");
@@ -684,13 +733,56 @@ mod tests {
         );
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
 
         dsl.config_export_full(dir.path(), None).expect("export");
 
         let args = fs::read_to_string(args_log).expect("args");
         assert!(args.contains("export"));
         assert!(args.contains("--force"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_export_file_uses_config_mode_and_the_target_context() {
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("ibcmd");
+        let args_log = dir.path().join("args.log");
+        let source = dir.path().join("database.cfe");
+        let target = dir.path().join("xml");
+        write_script(
+            &script,
+            &format!("printf '%s\\n' \"$@\" > \"{}\"\nexit 0", args_log.display()),
+        );
+        let runner = ProcessExecutor;
+        let dsl = IbcmdDsl::new(
+            script,
+            file_connection("File=/ib"),
+            &runner,
+            ProcessExecutionPolicy::default(),
+        );
+
+        dsl.config_export_file(&source, &target)
+            .expect("offline export");
+
+        let args = fs::read_to_string(args_log).expect("args");
+        let args = args.lines().collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "config",
+                "--db-path",
+                "/ib",
+                "export",
+                format!("--file={}", source.display()).as_str(),
+                target.to_str().expect("utf8 target"),
+            ]
+        );
     }
 
     #[cfg(unix)]
@@ -706,7 +798,12 @@ mod tests {
         );
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
 
         dsl.config_save(&target, true, Some("SalesAddon"))
             .expect("save database extension");
@@ -750,8 +847,13 @@ mod tests {
                 .with_credentials(Some("admin".to_owned()), Some("secret".to_owned())),
         )
         .expect("connection");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner)
-            .with_data_path(data_path.clone());
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        )
+        .with_data_path(data_path.clone());
 
         dsl.config_save(&target, false, None)
             .expect("save working configuration");
@@ -793,8 +895,13 @@ mod tests {
         );
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner)
-            .with_data_path(data_path.clone());
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        )
+        .with_data_path(data_path.clone());
 
         dsl.config_export_full(dir.path(), None).expect("export");
 
@@ -829,7 +936,12 @@ mod tests {
             );
             let runner = ProcessExecutor;
             let conn = file_connection("File=/ib");
-            let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+            let dsl = IbcmdDsl::new(
+                script,
+                conn,
+                &runner as &dyn ProcessRunner,
+                ProcessExecutionPolicy::default(),
+            );
 
             dsl.config_export_full(dir.path(), None).expect("export");
 
@@ -851,7 +963,12 @@ mod tests {
         );
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
 
         dsl.config_export_incremental(dir.path(), None)
             .expect("export");
@@ -869,7 +986,12 @@ mod tests {
         write_script(&script, "echo out; echo err 1>&2; exit 7");
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
 
         let result = dsl
             .config_apply(None, DynamicUpdateMode::Auto)
@@ -895,12 +1017,20 @@ mod tests {
         );
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
 
         let outcome = dsl.ensure_infobase_create().expect("create");
 
         let args = fs::read_to_string(args_log).expect("args");
-        assert_eq!(outcome.status, IbcmdInfobaseCreateStatus::Created);
+        assert!(
+            matches!(outcome.status, IbcmdInfobaseCreateStatus::Created),
+            "{outcome:?}"
+        );
         assert!(args.contains("infobase"));
         assert!(args.contains("create"));
         assert!(args.contains("infobase\n--db-path\n/ib\ncreate"));
@@ -928,11 +1058,19 @@ mod tests {
                 .with_credentials(Some("postgres".to_owned()), Some("secret".to_owned())),
         ))
         .expect("connection");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
 
         let outcome = dsl.ensure_infobase_create().expect("ensure");
 
-        assert_eq!(outcome.status, IbcmdInfobaseCreateStatus::AlreadyExists);
+        assert!(
+            matches!(outcome.status, IbcmdInfobaseCreateStatus::AlreadyExists),
+            "{outcome:?}"
+        );
         let args = fs::read_to_string(args_log).expect("args");
         assert!(args.contains("--create-database"));
         assert!(args.contains("--dbms\nPostgreSQL"));
@@ -944,7 +1082,7 @@ mod tests {
 
     /// Two tests used to stand here, proving that the phrase «уже существует» was benign in
     /// upper case and that «ошибка авторизации» next to it was not. Both read the platform's
-    /// wording, which ADR-0029 forbids, and the fact they protected is now asked of the
+    /// wording, which DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES forbids, and the fact they protected is now asked of the
     /// infobase instead.
     #[cfg(unix)]
     #[test]
@@ -962,11 +1100,19 @@ mod tests {
         );
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
 
         let outcome = dsl.ensure_infobase_create().expect("create outcome");
 
-        assert_eq!(outcome.status, IbcmdInfobaseCreateStatus::AlreadyExists);
+        assert!(
+            matches!(outcome.status, IbcmdInfobaseCreateStatus::AlreadyExists),
+            "{outcome:?}"
+        );
         let args = fs::read_to_string(&args_log).expect("args");
         assert!(
             args.contains("generation-id"),
@@ -984,11 +1130,139 @@ mod tests {
         write_script(&script, "exit 255");
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
 
         let outcome = dsl.ensure_infobase_create().expect("create outcome");
 
-        assert_eq!(outcome.status, IbcmdInfobaseCreateStatus::Failed);
+        assert!(
+            matches!(outcome.status, IbcmdInfobaseCreateStatus::Failed),
+            "{outcome:?}"
+        );
+    }
+
+    /// Политика создания базы в работе: критическая, с отменой теста.
+    #[cfg(unix)]
+    fn critical_policy(
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> ProcessExecutionPolicy {
+        ProcessExecutionPolicy {
+            cancellation: cancellation.clone(),
+            safety: ProcessInterruptionSafety::CriticalNonAbortable,
+            ..ProcessExecutionPolicy::default()
+        }
+    }
+
+    /// Создание, отложившее отмену и отказавшее, не теряет своего результата: вопрос, есть
+    /// ли база, после отмены уже не запускается, и ответ несёт код создания и его отсрочку.
+    #[cfg(unix)]
+    #[test]
+    fn a_create_that_deferred_a_cancel_keeps_its_result_when_the_question_is_refused() {
+        use crate::platform::process::{
+            HeldCommand, ProcessError, ProcessInterruption, ProcessInterruptionReason,
+        };
+
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("ibcmd");
+        let args_log = dir.path().join("args.log");
+        let held = HeldCommand::in_dir(dir.path());
+        write_script(
+            &script,
+            &format!(
+                "args=\"$*\"\nprintf '%s\\n' \"$args\" >> \"{}\"\n{}exit 0",
+                args_log.display(),
+                held.script_branch("create", 255)
+            ),
+        );
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let runner = ProcessExecutor;
+        let dsl = IbcmdDsl::new(
+            script,
+            file_connection("File=/ib"),
+            &runner as &dyn ProcessRunner,
+            critical_policy(&cancellation),
+        );
+        let outcome = held
+            .interrupt_during(cancellation, || dsl.ensure_infobase_create())
+            .expect("the create ran");
+
+        assert!(
+            matches!(
+                outcome.status,
+                IbcmdInfobaseCreateStatus::Unconfirmed(ProcessError::Cancelled {
+                    delivered: false,
+                    ..
+                })
+            ),
+            "{outcome:?}"
+        );
+        assert_eq!(outcome.result.process.exit_code, 255);
+        assert_eq!(
+            outcome.result.process.interruption,
+            Some(ProcessInterruption::deferred(
+                ProcessInterruptionReason::Cancelled
+            ))
+        );
+        let args = fs::read_to_string(&args_log).expect("args");
+        assert!(!args.contains("generation-id"), "{args}");
+    }
+
+    /// Вопрос после неудачного создания только читает базу: отмена обрывает его, не
+    /// дожидаясь конца, и ответ остаётся без подтверждения.
+    #[cfg(unix)]
+    #[test]
+    fn a_cancel_cuts_the_question_after_a_failed_create() {
+        use crate::platform::process::{HeldCommand, ProcessError};
+
+        let dir = tempdir().expect("tempdir");
+        let script = dir.path().join("ibcmd");
+        let held = HeldCommand::in_dir(dir.path());
+        write_script(
+            &script,
+            &format!(
+                "args=\"$*\"\nif printf '%s' \"$args\" | grep -F -q -- 'create'; then exit 255; fi\n{}exit 0",
+                held.script_branch("generation-id", 0)
+            ),
+        );
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let runner = ProcessExecutor;
+        let dsl = IbcmdDsl::new(
+            script,
+            file_connection("File=/ib"),
+            &runner as &dyn ProcessRunner,
+            critical_policy(&cancellation),
+        );
+        let operator = held.cancel_when_started(cancellation);
+        let started = std::time::Instant::now();
+
+        let outcome = dsl.ensure_infobase_create().expect("the create ran");
+        assert!(
+            operator.join().expect("operator thread"),
+            "the question never started"
+        );
+
+        assert!(
+            matches!(
+                outcome.status,
+                IbcmdInfobaseCreateStatus::Unconfirmed(ProcessError::Cancelled {
+                    delivered: true,
+                    ..
+                })
+            ),
+            "{outcome:?}"
+        );
+        assert_eq!(outcome.result.process.exit_code, 255);
+        assert!(outcome.result.process.interruption.is_none());
+        // Критический вопрос дождался бы отпуска — полминуты; снятый кончается сразу.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the question was waited for: {:?}",
+            started.elapsed()
+        );
     }
 
     #[cfg(unix)]
@@ -1003,7 +1277,12 @@ mod tests {
         );
         let runner = ProcessExecutor;
         let conn = file_connection("File=/ib");
-        let dsl = IbcmdDsl::new(script, conn, &runner as &dyn ProcessRunner);
+        let dsl = IbcmdDsl::new(
+            script,
+            conn,
+            &runner as &dyn ProcessRunner,
+            ProcessExecutionPolicy::default(),
+        );
 
         dsl.infobase_extension_update_properties("client_mcp", false, false)
             .expect("update");

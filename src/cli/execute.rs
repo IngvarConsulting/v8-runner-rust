@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -10,37 +9,37 @@ use crate::cli::args::{
     ArtifactsArgs, BuildArgs, Command, ConvertArgs, DesignerConfigSyntaxArgs,
     DesignerModulesSyntaxArgs, DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs,
     ExtensionsCommand, InfobaseArgs, InfobaseCommand, InfobaseConfigurationCommand,
-    InfobaseConfigurationExportArgs, InfobaseRestoreArgs, InitArgs, LaunchArgs, LaunchOptionsArgs,
-    LoadArgs, SyntaxArgs, SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope,
-    TestVaArgs, TestYaxunitArgs, ToolsArgs, ToolsCommand, ToolsDownloadArgs, ToolsDownloadCommand,
+    InfobaseConfigurationExportArgs, InfobaseRestoreArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs,
+    SyntaxArgs, SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope, TestVaArgs,
+    TestYaxunitArgs, ToolsArgs, ToolsCommand, ToolsDownloadArgs, ToolsDownloadCommand,
 };
 use crate::cli::output::{
-    cli_error_contract, failure_envelope, pre_dispatch_error_envelope,
-    print_command_use_case_error, with_cli_error,
+    failure_envelope, pre_dispatch_error_envelope, print_command_use_case_error, with_cli_error,
 };
 use crate::cli::signal::CliSignalGuard;
 use crate::command_envelope::{test_envelope, Envelope};
-use crate::config::model::{AppConfig, SourceSetPurpose};
+use crate::config::model::{AppConfig, SourceFormat, SourceSetPurpose};
 use crate::domain::artifact::{
     ArtifactRef, ArtifactSet, ARTIFACT_ROLE_PACKAGE_FILE, ARTIFACT_ROLE_PLATFORM_LOG,
 };
 use crate::domain::artifacts::{ArtifactBuildMetadata, ArtifactBuildMode, ArtifactsResult};
 use crate::domain::build::{BuildMode, BuildResult};
+use crate::domain::capability::ProviderReceipt;
 use crate::domain::convert::{ConvertDirection, ConvertResult, ConvertScope};
 use crate::domain::dump::{DumpMode, DumpResult};
 use crate::domain::execution::{
-    ExecutionError, ExecutionInterruptionDetails, ExecutionOutcome, ExecutionStatus,
-    ExecutionStepStatus, StepResult,
+    ExecutionError, ExecutionInterruptionDetails, ExecutionInterruptionKind,
+    ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus, ExecutionStepStatus, StepResult,
 };
 use crate::domain::infobase_export::{
     ConfigurationState, ConfigurationSubject, ExportConfigurationPackageRequest,
     ExportConfigurationPackageResult, ExportInfobaseSnapshotRequest, ExportInfobaseSnapshotResult,
-    ExportPhase, ExportProviderDecision, RestoreInfobaseSnapshotRequest,
-    RestoreInfobaseSnapshotResult, RestoreTargetMode,
+    InfobaseTransferPhase, RestoreInfobaseSnapshotRequest, RestoreInfobaseSnapshotResult,
+    RestoreTargetMode,
 };
 use crate::domain::init::{InitResult, InitStep, InitStepStatus};
 use crate::domain::issue::{Issue, IssueSeverity};
-use crate::domain::launch::{LaunchMode, LaunchResult};
+use crate::domain::launch::{LaunchMode, LaunchResult, LaunchVia};
 use crate::domain::load::{
     CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
 };
@@ -79,17 +78,15 @@ use crate::use_cases::request::{
     effective_test_timeouts, ArtifactsModeRequest, ArtifactsRequest, BuildRequest,
     ClientMcpAddonRequest, ClientMcpMode, ClientMcpOptionsRequest, ConfigureExtensionsRequest,
     ConvertRequest, ConvertScopeRequest, DesignerClientScope, DesignerClientScopes,
-    DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest,
-    DesignerModulesSyntaxRequest, DumpRequest, ExtensionInventoryRequest, ExtensionInventoryScope,
-    InitRequest, LaunchRequest, LoadRequest, SyntaxExtensionScope, SyntaxRequest,
-    SyntaxTargetRequest, TestRequest, TestScopeRequest, ToolsDownloadRequest,
+    DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest, DumpRequest,
+    ExtensionInventoryRequest, ExtensionInventoryScope, InitRequest, LaunchRequest, LoadRequest,
+    SyntaxExtensionScope, SyntaxRequest, SyntaxTargetRequest, TestRequest, TestScopeRequest,
+    ToolsDownloadRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
 use crate::use_cases::tools_download;
 use crate::use_cases::transport::{dispatch_with_workspace_lock_policy, WorkspaceBusyPolicy};
-
-const EXTERNAL_EPF_WAIT_CLEANUP_MARGIN: Duration = Duration::from_millis(500);
 
 /// Executes a parsed CLI command by mapping it into transport-neutral requests and
 /// rendering the resulting command output.
@@ -99,24 +96,21 @@ pub fn execute_command(
     primary_config_path: Option<PathBuf>,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
 ) -> Result<(), UseCaseError> {
     let cancellation = CancellationToken::new();
     let _signal_guard = CliSignalGuard::install(cancellation.clone());
     match command {
         Command::Version => unreachable!("version command is handled outside cli::execute"),
         Command::Bootstrap(_) => unreachable!("bootstrap command is handled outside cli::execute"),
-        Command::Config(_) => unreachable!("config commands are handled outside cli::execute"),
+        Command::Config(_) | Command::ConfigInit(_) => {
+            unreachable!("config commands are handled outside cli::execute")
+        }
+        Command::Download(_) => unreachable!("download is normalised into infobase in app::run"),
         Command::Tools(args) => execute_tools(
             config,
             args,
             required_primary_config_path(primary_config_path)?,
-            presenter,
-            clean_before_execution,
-            cancellation,
-        ),
-        Command::Init(args) => execute_init(
-            config,
-            args,
             presenter,
             clean_before_execution,
             cancellation,
@@ -126,6 +120,7 @@ pub fn execute_command(
             args,
             presenter,
             clean_before_execution,
+            dry_run,
             cancellation,
         ),
         Command::Build(args) => execute_build(
@@ -133,6 +128,7 @@ pub fn execute_command(
             args,
             presenter,
             clean_before_execution,
+            dry_run,
             cancellation,
         ),
         Command::Load(args) => execute_load(
@@ -140,6 +136,7 @@ pub fn execute_command(
             args,
             presenter,
             clean_before_execution,
+            dry_run,
             cancellation,
         ),
         Command::Test(args) => execute_test(
@@ -154,6 +151,14 @@ pub fn execute_command(
             args,
             presenter,
             clean_before_execution,
+            dry_run,
+            cancellation,
+        ),
+        Command::Init => execute_init(
+            config,
+            presenter,
+            clean_before_execution,
+            dry_run,
             cancellation,
         ),
         Command::Infobase(args) => execute_infobase(
@@ -161,6 +166,7 @@ pub fn execute_command(
             args,
             presenter,
             clean_before_execution,
+            dry_run,
             cancellation,
         ),
         Command::Convert(args) => execute_convert(
@@ -168,6 +174,7 @@ pub fn execute_command(
             args,
             presenter,
             clean_before_execution,
+            dry_run,
             cancellation,
         ),
         Command::Artifacts(args) => execute_artifacts(
@@ -175,6 +182,7 @@ pub fn execute_command(
             args,
             presenter,
             clean_before_execution,
+            dry_run,
             cancellation,
         ),
         Command::Syntax(args) => execute_syntax(
@@ -182,6 +190,7 @@ pub fn execute_command(
             args,
             presenter,
             clean_before_execution,
+            dry_run,
             cancellation,
         ),
         Command::Launch(args) => execute_launch(
@@ -189,9 +198,173 @@ pub fn execute_command(
             args,
             presenter,
             clean_before_execution,
+            dry_run,
+            cancellation,
+        ),
+        Command::Publish(args) => execute_publish(
+            config,
+            args,
+            presenter,
+            clean_before_execution,
+            dry_run,
             cancellation,
         ),
         Command::Mcp(_) => unreachable!("mcp commands are handled outside cli::execute"),
+    }
+}
+
+fn execute_publish(
+    config: &AppConfig,
+    args: &crate::cli::args::PublishArgs,
+    presenter: &Presenter,
+    clean_before_execution: bool,
+    dry_run: bool,
+    cancellation: CancellationToken,
+) -> Result<(), UseCaseError> {
+    use crate::domain::publish::PublishAction;
+    use crate::use_cases::publish_infobase::{self, PublishRequest};
+
+    let request = PublishRequest {
+        action: if args.delete {
+            PublishAction::Delete
+        } else {
+            PublishAction::Publish
+        },
+        dry_run,
+    };
+    let context = cli_context(config, CommandName::Publish, cancellation);
+    with_cli_workspace_lock(
+        config,
+        presenter,
+        CommandName::Publish,
+        clean_before_execution,
+        dry_run,
+        || match publish_infobase::execute(&context, config, &request) {
+            Ok(result) => {
+                if presenter.is_json() {
+                    presenter.print_envelope(&Envelope::ok(
+                        CommandName::Publish.as_str(),
+                        result.duration_ms,
+                        result,
+                    ));
+                } else {
+                    render_publish_text(&result, presenter, true, Requested::from_dry_run(dry_run));
+                }
+                Ok(())
+            }
+            Err(failure) => {
+                let error = failure.error;
+                if presenter.is_json() {
+                    print_failure(
+                        presenter,
+                        CommandName::Publish,
+                        failure.payload,
+                        |result| result.duration_ms,
+                        &error,
+                    );
+                } else {
+                    if let Some(result) = failure.payload.as_ref() {
+                        render_publish_text(
+                            result,
+                            presenter,
+                            false,
+                            Requested::from_dry_run(dry_run),
+                        );
+                    }
+                    presenter.print_error(&error.to_string());
+                }
+                Err(error)
+            }
+        },
+    )
+}
+
+/// Отказ команды в JSON: с формой команды — её конвертом, без формы — общей формой отказа.
+/// Форму отказ несёт, когда исполнитель уже получил работу или команда отвечает предметом.
+fn print_failure<T: Serialize>(
+    presenter: &Presenter,
+    command: CommandName,
+    payload: Option<T>,
+    duration_ms: impl FnOnce(&T) -> u64,
+    error: &UseCaseError,
+) {
+    match payload {
+        Some(result) => presenter.print_envelope(&failure_envelope(
+            command.as_str(),
+            duration_ms(&result),
+            result,
+            error,
+        )),
+        None => presenter.print_envelope(&pre_dispatch_error_envelope(command.as_str(), error)),
+    }
+}
+
+/// Что просил вызывающий: превью (`--dry-run`) или боевой прогон. Слова превью в ответе
+/// берутся отсюда, а не из `provider_dispatched`: признак говорит, получил ли исполнитель
+/// работу, а не было ли превью.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Requested {
+    Preview,
+    Apply,
+}
+
+impl Requested {
+    pub(crate) fn from_dry_run(dry_run: bool) -> Self {
+        if dry_run {
+            Self::Preview
+        } else {
+            Self::Apply
+        }
+    }
+}
+
+fn render_publish_text(
+    result: &crate::domain::publish::PublishResult,
+    presenter: &Presenter,
+    succeeded: bool,
+    requested: Requested,
+) {
+    let verb = match result.action {
+        crate::domain::publish::PublishAction::Publish => "Publication",
+        crate::domain::publish::PublishAction::Delete => "Publication removal",
+    };
+    // «Запланировано» — не стандартный исход, у него своя подпись. Превью называет запрос:
+    // `provider_dispatched` говорит о работе исполнителя, а не о превью.
+    let planned_label =
+        (succeeded && requested == Requested::Preview).then(|| format!("{verb} planned"));
+    let mut details = vec![
+        format!("server: {}", result.server),
+        format!("wsdir: {}", result.wsdir),
+        format!("dir: {}", result.dir.display()),
+    ];
+    if let Some(url) = result.url.as_deref() {
+        details.push(format!("url: {url}"));
+    }
+    if !result.provider_dispatched {
+        details.push("provider dispatched: false".to_owned());
+    }
+    if let Some(plan) = &result.plan {
+        details.push(format!("planned program: {}", plan.program.display()));
+        details.push(format!("planned args: {}", plan.args.join(" ")));
+    }
+    append_if_present(
+        &mut details,
+        result
+            .message
+            .as_deref()
+            .map(|message| bracketed_detail(if succeeded { "status" } else { "error" }, message)),
+    );
+    append_if_present(
+        &mut details,
+        result
+            .platform_log_path
+            .as_deref()
+            .map(|path| format!("[diagnostic] platform log -> {}", path.display())),
+    );
+    details.extend(provider_receipt_details(result.provider.as_ref()));
+    match planned_label {
+        Some(label) => single_timeline(presenter, timeline_status(succeeded), label, details),
+        None => single_timeline_outcome(presenter, timeline_status(succeeded), verb, details),
     }
 }
 
@@ -200,11 +373,13 @@ pub fn command_name(command: &Command) -> CommandName {
     match command {
         Command::Version => unreachable!("version command does not map to execution use cases"),
         Command::Bootstrap(_) => CommandName::Bootstrap,
-        Command::Config(_) => unreachable!("config commands do not map to execution use cases"),
+        Command::Config(_) | Command::ConfigInit(_) => {
+            unreachable!("config commands do not map to execution use cases")
+        }
+        Command::Download(_) => unreachable!("download is normalised into infobase in app::run"),
         Command::Tools(ToolsArgs {
             command: ToolsCommand::Download(_),
         }) => CommandName::ToolsDownload,
-        Command::Init(_) => CommandName::Init,
         Command::Extensions(_) => CommandName::Extensions,
         Command::Build(_) => CommandName::Build,
         Command::Load(_) => CommandName::Load,
@@ -216,6 +391,10 @@ pub fn command_name(command: &Command) -> CommandName {
                     command: InfobaseConfigurationCommand::Export(_),
                 }),
         }) => CommandName::InfobaseConfigurationExport,
+        Command::Init => CommandName::Init,
+        Command::Infobase(InfobaseArgs {
+            command: InfobaseCommand::Create,
+        }) => unreachable!("infobase create is normalised into its own command in app::run"),
         Command::Infobase(InfobaseArgs {
             command: InfobaseCommand::Dump(_),
         }) => CommandName::InfobaseDump,
@@ -226,6 +405,7 @@ pub fn command_name(command: &Command) -> CommandName {
         Command::Artifacts(_) => CommandName::Artifacts,
         Command::Syntax(_) => CommandName::Syntax,
         Command::Launch(_) => CommandName::Launch,
+        Command::Publish(_) => CommandName::Publish,
         Command::Mcp(_) => unreachable!("mcp commands do not map to CLI command names"),
     }
 }
@@ -300,18 +480,13 @@ fn execute_tools_download(
             Err(failure) => {
                 let error = failure.error;
                 if presenter.is_json() {
-                    match failure.payload {
-                        Some(result) => presenter.print_envelope(&failure_envelope(
-                            CommandName::ToolsDownload.as_str(),
-                            result.duration_ms,
-                            result,
-                            &error,
-                        )),
-                        None => presenter.print_envelope(&pre_dispatch_error_envelope(
-                            CommandName::ToolsDownload.as_str(),
-                            &error,
-                        )),
-                    }
+                    print_failure(
+                        presenter,
+                        CommandName::ToolsDownload,
+                        failure.payload,
+                        |result| result.duration_ms,
+                        &error,
+                    );
                 } else {
                     presenter.print_error(&error.to_string());
                 }
@@ -337,26 +512,36 @@ fn execute_extensions(
     args: &ExtensionsArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
+    args.validate_property_options().map_err(|message| {
+        render_pre_dispatch_error(
+            presenter,
+            CommandName::Extensions,
+            AppError::Validation(message.to_owned()),
+        )
+    })?;
     if let Some(command) = &args.command {
         return execute_extension_command(
             config,
             command,
             presenter,
             clean_before_execution,
+            dry_run,
             cancellation,
         );
     }
-    let request = map_extensions_request(args);
+    let request = map_extensions_request(args, dry_run);
+    configure_extensions::resolve_targets(config, &request)
+        .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Extensions, error))?;
     let context = cli_context(config, CommandName::Extensions, cancellation);
     with_cli_workspace_lock(
         config,
         presenter,
         CommandName::Extensions,
         clean_before_execution,
-        // у голого `extensions` превью нет: подкоманды его имеют.
-        false,
+        dry_run,
         || match configure_extensions::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -365,24 +550,21 @@ fn execute_extensions(
                         result.duration_ms,
                         result,
                     ));
+                } else if dry_run {
+                    render_extensions_text(&result, presenter, Requested::Preview);
                 }
                 Ok(())
             }
             Err(failure) => {
                 let error = failure.error;
                 if presenter.is_json() {
-                    match failure.payload {
-                        Some(result) => presenter.print_envelope(&failure_envelope(
-                            CommandName::Extensions.as_str(),
-                            result.duration_ms,
-                            result,
-                            &error,
-                        )),
-                        None => presenter.print_envelope(&pre_dispatch_error_envelope(
-                            CommandName::Extensions.as_str(),
-                            &error,
-                        )),
-                    }
+                    print_failure(
+                        presenter,
+                        CommandName::Extensions,
+                        failure.payload,
+                        |result| result.duration_ms,
+                        &error,
+                    );
                 } else {
                     presenter.print_error(&error.to_string());
                 }
@@ -401,29 +583,24 @@ fn execute_extension_command(
     command: &ExtensionsCommand,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
     let context = cli_context(config, CommandName::Extensions, cancellation);
-    // Превью любой подкоманды платформу не поднимает, значит и `workPath` ему не нужен.
-    let preview = match command {
-        ExtensionsCommand::List(args) => args.dry_run,
-        ExtensionsCommand::Info(args) | ExtensionsCommand::Delete(args) => args.dry_run,
-        ExtensionsCommand::Create(args) => args.dry_run,
-        ExtensionsCommand::Activate(args) => args.dry_run,
-    };
     with_cli_workspace_lock(
         config,
         presenter,
         CommandName::Extensions,
         clean_before_execution,
-        preview,
+        // Превью любой подкоманды платформу не поднимает, значит и `workPath` ему не нужен.
+        dry_run,
         || match command {
-            ExtensionsCommand::List(args) => run_extension_inventory(
+            ExtensionsCommand::List => run_extension_inventory(
                 config,
                 &context,
                 presenter,
                 ExtensionInventoryScope::All,
-                args.dry_run,
+                dry_run,
             ),
             ExtensionsCommand::Info(args) => run_extension_inventory(
                 config,
@@ -432,7 +609,7 @@ fn execute_extension_command(
                 ExtensionInventoryScope::Named {
                     name: args.name.clone(),
                 },
-                args.dry_run,
+                dry_run,
             ),
             ExtensionsCommand::Create(args) => run_extension_change(
                 config,
@@ -444,7 +621,7 @@ fn execute_extension_command(
                     synonym: args.synonym.clone(),
                     purpose: args.purpose.clone(),
                 },
-                args.dry_run,
+                dry_run,
             ),
             ExtensionsCommand::Delete(args) => run_extension_change(
                 config,
@@ -453,7 +630,7 @@ fn execute_extension_command(
                 ExtensionChangeRequest::Delete {
                     name: args.name.clone(),
                 },
-                args.dry_run,
+                dry_run,
             ),
             ExtensionsCommand::Activate(args) => run_extension_change(
                 config,
@@ -463,7 +640,7 @@ fn execute_extension_command(
                     name: args.name.clone(),
                     active: args.active == "yes",
                 },
-                args.dry_run,
+                dry_run,
             ),
         },
     )
@@ -493,10 +670,15 @@ fn run_extension_inventory(
         Err(failure) => {
             let error = failure.error;
             if presenter.is_json() {
-                presenter.print_envelope(&pre_dispatch_error_envelope(
-                    CommandName::Extensions.as_str(),
+                // Отказ после работы исполнителя несёт форму чтения, до неё — общую форму
+                // отказа.
+                print_failure(
+                    presenter,
+                    CommandName::Extensions,
+                    failure.payload,
+                    |result| result.duration_ms,
                     &error,
-                ));
+                );
             } else {
                 presenter.print_error(&error.to_string());
             }
@@ -521,25 +703,20 @@ fn run_extension_change(
                     result,
                 ));
             } else {
-                render_extensions_text(&result, presenter);
+                render_extensions_text(&result, presenter, Requested::from_dry_run(dry_run));
             }
             Ok(())
         }
         Err(failure) => {
             let error = failure.error;
             if presenter.is_json() {
-                match failure.payload {
-                    Some(result) => presenter.print_envelope(&failure_envelope(
-                        CommandName::Extensions.as_str(),
-                        result.duration_ms,
-                        result,
-                        &error,
-                    )),
-                    None => presenter.print_envelope(&pre_dispatch_error_envelope(
-                        CommandName::Extensions.as_str(),
-                        &error,
-                    )),
-                }
+                print_failure(
+                    presenter,
+                    CommandName::Extensions,
+                    failure.payload,
+                    |result| result.duration_ms,
+                    &error,
+                );
             } else {
                 presenter.print_error(&error.to_string());
             }
@@ -553,11 +730,19 @@ fn render_extension_inventory_text(
     presenter: &Presenter,
 ) {
     if let Some(plan) = result.plan.as_deref() {
+        let requested = match &result.requested {
+            crate::domain::extensions::RequestedInventory::All => {
+                "requested: every installed extension".to_owned()
+            }
+            crate::domain::extensions::RequestedInventory::Named { name } => {
+                format!("requested: extension '{name}'")
+            }
+        };
         presenter.print_timeline(&[TimelineItem::new(
             TimelineStatus::Succeeded,
             "Infobase extensions preview",
         )
-        .with_detail(plan.to_owned())]);
+        .with_detail(format!("{requested}\n{plan}"))]);
         return;
     }
     if result.extensions.is_empty() {
@@ -573,7 +758,7 @@ fn render_extension_inventory_text(
         .iter()
         .map(|extension| {
             format!(
-                "{}: purpose={}, active={}, safe mode={}, unsafe action protection={}, scope={}, version={}, hash={}",
+                "{}: purpose={}, active={}, safe mode={}, unsafe action protection={}, scope={}, version={}, prefix={}, hash={}",
                 extension.name,
                 extension.purpose,
                 extension.active,
@@ -581,10 +766,13 @@ fn render_extension_inventory_text(
                 extension.unsafe_action_protection,
                 extension.scope,
                 extension.version.as_deref().unwrap_or("none"),
+                extension.name_prefix.as_deref().unwrap_or("unavailable"),
                 extension.hash_sum,
             )
         })
         .collect::<Vec<_>>();
+    let mut details = details;
+    details.extend(provider_receipt_details(result.provider.as_ref()));
     presenter.print_timeline(&[TimelineItem::new(
         TimelineStatus::Succeeded,
         "Infobase extensions",
@@ -595,6 +783,7 @@ fn render_extension_inventory_text(
 fn render_extensions_text(
     result: &crate::domain::extensions::ExtensionsResult,
     presenter: &Presenter,
+    requested: Requested,
 ) {
     let details = result
         .steps
@@ -605,10 +794,10 @@ fn render_extensions_text(
                 step.target,
                 step.action,
                 // A preview performed nothing, so the step must not read as done.
-                match (result.provider_dispatched, step.ok) {
-                    (false, _) => "planned",
-                    (true, true) => "ok",
-                    (true, false) => "failed",
+                match (requested, step.ok) {
+                    (Requested::Preview, _) => "planned",
+                    (Requested::Apply, true) => "ok",
+                    (Requested::Apply, false) => "failed",
                 },
                 step.message
                     .as_deref()
@@ -622,31 +811,31 @@ fn render_extensions_text(
     } else {
         TimelineStatus::Failed
     };
-    let label = if result.provider_dispatched {
-        "Infobase extension change"
-    } else {
+    let label = if requested == Requested::Preview {
         "Infobase extension change preview"
+    } else {
+        "Infobase extension change"
     };
+    let mut details = details;
+    details.extend(provider_receipt_details(result.provider.as_ref()));
     presenter.print_timeline(&[TimelineItem::new(status, label).with_detail(details.join("\n"))]);
 }
 
 fn execute_init(
     config: &AppConfig,
-    args: &InitArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    let request = InitRequest {
-        dry_run: args.dry_run,
-    };
+    let request = InitRequest { dry_run };
     let context = cli_context(config, CommandName::Init, cancellation);
     with_cli_workspace_lock(
         config,
         presenter,
         CommandName::Init,
         clean_before_execution,
-        args.dry_run,
+        dry_run,
         || match init_project::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -688,16 +877,17 @@ fn execute_build(
     args: &BuildArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    let request = map_build_request(args);
+    let request = map_build_request(args, dry_run);
     let context = cli_context(config, CommandName::Build, cancellation);
     with_cli_workspace_lock(
         config,
         presenter,
         CommandName::Build,
         clean_before_execution,
-        args.dry_run,
+        dry_run,
         || match build_project::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -787,9 +977,10 @@ fn execute_load(
     args: &LoadArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    let request = map_load_request(args)
+    let request = map_load_request(args, dry_run)
         .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Load, error))?;
     let context = cli_context(config, CommandName::Load, cancellation);
     with_cli_workspace_lock(
@@ -797,14 +988,14 @@ fn execute_load(
         presenter,
         CommandName::Load,
         clean_before_execution,
-        args.dry_run,
+        dry_run,
         || match load_artifact::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
-                    let envelope = build_load_envelope(&result);
+                    let envelope = build_load_envelope(&result, Requested::from_dry_run(dry_run));
                     presenter.print_envelope(&envelope);
                 } else {
-                    render_load_text(&result, presenter, true);
+                    render_load_text(&result, presenter, true, Requested::from_dry_run(dry_run));
                 }
                 Ok(())
             }
@@ -812,12 +1003,20 @@ fn execute_load(
                 let error = failure.error;
                 if presenter.is_json() {
                     if let Some(result) = failure.payload {
-                        let envelope = with_cli_error(build_load_envelope(&result), &error);
+                        let envelope = with_cli_error(
+                            build_load_envelope(&result, Requested::from_dry_run(dry_run)),
+                            &error,
+                        );
                         presenter.print_envelope(&envelope);
                     }
                 } else {
                     if let Some(result) = failure.payload.as_ref() {
-                        render_load_text(result, presenter, false);
+                        render_load_text(
+                            result,
+                            presenter,
+                            false,
+                            Requested::from_dry_run(dry_run),
+                        );
                     }
                     presenter.print_error(&error.to_string());
                 }
@@ -832,9 +1031,10 @@ fn execute_dump(
     args: &DumpArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    let request = map_dump_request(args)
+    let request = map_dump_request(args, dry_run)
         .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Dump, error))?;
     let context = cli_context(config, CommandName::Dump, cancellation);
     with_cli_workspace_lock(
@@ -842,7 +1042,7 @@ fn execute_dump(
         presenter,
         CommandName::Dump,
         clean_before_execution,
-        args.dry_run,
+        dry_run,
         || match dump_config::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -882,15 +1082,15 @@ fn execute_dump(
 pub enum PreparedInfobaseCommand {
     Configuration {
         request: ExportConfigurationPackageRequest,
-        provider: infobase_export::PreparedExportProvider,
+        provider: infobase_export::PreparedTransferProvider,
     },
     Snapshot {
         request: ExportInfobaseSnapshotRequest,
-        provider: infobase_export::PreparedExportProvider,
+        provider: infobase_export::PreparedTransferProvider,
     },
     Restore {
         request: RestoreInfobaseSnapshotRequest,
-        provider: infobase_export::PreparedExportProvider,
+        provider: infobase_export::PreparedTransferProvider,
     },
 }
 
@@ -902,6 +1102,9 @@ pub struct PreparedInfobaseCliCommand {
 
 pub fn validate_infobase_request(args: &InfobaseArgs) -> Result<(), AppError> {
     match &args.command {
+        InfobaseCommand::Create => {
+            unreachable!("infobase create is normalised into its own command in app::run")
+        }
         InfobaseCommand::Configuration(configuration) => match &configuration.command {
             InfobaseConfigurationCommand::Export(args) => {
                 let request = map_infobase_configuration_export_request(args);
@@ -943,6 +1146,7 @@ pub fn render_invalid_infobase_request(
     args: &InfobaseArgs,
     presenter: &Presenter,
     error: AppError,
+    dry_run: bool,
 ) -> UseCaseError {
     let error = UseCaseError::from(error);
     render_infobase_pre_dispatch_failure(
@@ -950,7 +1154,8 @@ pub fn render_invalid_infobase_request(
         presenter,
         error,
         "provider selection was not attempted because the request is invalid",
-        ExportPhase::Validation,
+        InfobaseTransferPhase::Validation,
+        dry_run,
     )
 }
 
@@ -958,17 +1163,22 @@ pub fn render_infobase_pre_dispatch_failure(
     args: &InfobaseArgs,
     presenter: &Presenter,
     error: UseCaseError,
-    selection_reason: &str,
-    phase: ExportPhase,
+    _selection_reason: &str,
+    phase: InfobaseTransferPhase,
+    dry_run: bool,
 ) -> UseCaseError {
-    let selection = ExportProviderDecision::unavailable(selection_reason, Vec::new());
+    // Выбор исполнителя не начинался: квитанции нет, причина — в ошибке конверта.
+    let selection: Option<ProviderReceipt> = None;
     match &args.command {
+        InfobaseCommand::Create => {
+            unreachable!("infobase create has no export request to render")
+        }
         InfobaseCommand::Configuration(configuration) => match &configuration.command {
             InfobaseConfigurationCommand::Export(args) => {
                 let request = map_infobase_configuration_export_request(args);
                 let mut result =
-                    configuration_pre_dispatch_failure(&request, selection, &error, phase);
-                if args.dry_run {
+                    configuration_pre_dispatch_failure(&request, selection.clone(), &error, phase);
+                if dry_run {
                     result.mark_preview_failure();
                 }
                 render_configuration_failure(
@@ -983,8 +1193,9 @@ pub fn render_infobase_pre_dispatch_failure(
             let request = ExportInfobaseSnapshotRequest {
                 output: PathBuf::from(&args.output),
             };
-            let mut result = snapshot_pre_dispatch_failure(&request, selection, &error, phase);
-            if args.dry_run {
+            let mut result =
+                snapshot_pre_dispatch_failure(&request, selection.clone(), &error, phase);
+            if dry_run {
                 result.mark_preview_failure();
             }
             render_snapshot_failure(CommandName::InfobaseDump, result, &error, presenter);
@@ -999,7 +1210,7 @@ pub fn render_infobase_pre_dispatch_failure(
                 }
             });
             let mut result = restore_pre_dispatch_failure(&request, selection, &error, phase);
-            if args.dry_run {
+            if dry_run {
                 result.mark_preview_failure();
             }
             render_restore_failure(CommandName::InfobaseRestore, result, &error, presenter);
@@ -1013,8 +1224,12 @@ pub fn prepare_infobase_command(
     args: &InfobaseArgs,
     presenter: &Presenter,
     context: &ExecutionContext,
+    dry_run: bool,
 ) -> Result<PreparedInfobaseCommand, UseCaseError> {
     match &args.command {
+        InfobaseCommand::Create => {
+            unreachable!("infobase create is dispatched before the export machinery")
+        }
         InfobaseCommand::Configuration(configuration) => match &configuration.command {
             InfobaseConfigurationCommand::Export(args) => {
                 let request = map_infobase_configuration_export_request(args);
@@ -1028,7 +1243,7 @@ pub fn prepare_infobase_command(
                     Err(failure) => {
                         let error = failure.error;
                         if let Some(mut result) = failure.payload {
-                            if args.dry_run {
+                            if dry_run {
                                 result.mark_preview_failure();
                             }
                             render_configuration_failure(command, result, &error, presenter);
@@ -1050,7 +1265,7 @@ pub fn prepare_infobase_command(
                 Err(failure) => {
                     let error = failure.error;
                     if let Some(mut result) = failure.payload {
-                        if args.dry_run {
+                        if dry_run {
                             result.mark_preview_failure();
                         }
                         render_snapshot_failure(command, result, &error, presenter);
@@ -1070,7 +1285,7 @@ pub fn prepare_infobase_command(
                 Err(failure) => {
                     let error = failure.error;
                     if let Some(mut result) = failure.payload {
-                        if args.dry_run {
+                        if dry_run {
                             result.mark_preview_failure();
                         }
                         render_restore_failure(command, result, &error, presenter);
@@ -1086,11 +1301,12 @@ pub fn prepare_infobase_cli_command(
     config: &AppConfig,
     args: &InfobaseArgs,
     presenter: &Presenter,
+    dry_run: bool,
 ) -> Result<PreparedInfobaseCliCommand, UseCaseError> {
     let cancellation = CancellationToken::new();
     let signal_guard = CliSignalGuard::install(cancellation.clone());
     let context = cli_context(config, infobase_command_name(args), cancellation);
-    let command = prepare_infobase_command(config, args, presenter, &context)?;
+    let command = prepare_infobase_command(config, args, presenter, &context, dry_run)?;
     Ok(PreparedInfobaseCliCommand {
         command,
         context,
@@ -1100,6 +1316,9 @@ pub fn prepare_infobase_cli_command(
 
 fn infobase_command_name(args: &InfobaseArgs) -> CommandName {
     match &args.command {
+        InfobaseCommand::Create => {
+            unreachable!("infobase create is normalised into its own command in app::run")
+        }
         InfobaseCommand::Configuration(_) => CommandName::InfobaseConfigurationExport,
         InfobaseCommand::Dump(_) => CommandName::InfobaseDump,
         InfobaseCommand::Restore(_) => CommandName::InfobaseRestore,
@@ -1131,10 +1350,11 @@ fn execute_infobase(
     args: &InfobaseArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
     let context = cli_context(config, infobase_command_name(args), cancellation);
-    let prepared = prepare_infobase_command(config, args, presenter, &context)?;
+    let prepared = prepare_infobase_command(config, args, presenter, &context, dry_run)?;
     execute_prepared_infobase(
         config,
         prepared,
@@ -1298,7 +1518,7 @@ pub fn preview_prepared_infobase_command(
 fn execute_infobase_restore(
     config: &AppConfig,
     request: RestoreInfobaseSnapshotRequest,
-    prepared: infobase_export::PreparedExportProvider,
+    prepared: infobase_export::PreparedTransferProvider,
     context: &ExecutionContext,
     presenter: &Presenter,
     clean_before_execution: bool,
@@ -1368,7 +1588,7 @@ fn execute_infobase_restore(
         if let Err(error) = &outcome {
             let result = restore_pre_dispatch_failure(
                 &request,
-                prepared.selection().clone(),
+                Some(prepared.receipt().clone()),
                 error,
                 infobase_pre_dispatch_execution_phase(workspace_lock_acquired),
             );
@@ -1381,7 +1601,7 @@ fn execute_infobase_restore(
 fn execute_infobase_configuration_export(
     config: &AppConfig,
     request: ExportConfigurationPackageRequest,
-    prepared: infobase_export::PreparedExportProvider,
+    prepared: infobase_export::PreparedTransferProvider,
     context: &ExecutionContext,
     presenter: &Presenter,
     clean_before_execution: bool,
@@ -1453,7 +1673,7 @@ fn execute_infobase_configuration_export(
         if let Err(error) = &outcome {
             let result = configuration_pre_dispatch_failure(
                 &request,
-                prepared.selection().clone(),
+                Some(prepared.receipt().clone()),
                 error,
                 infobase_pre_dispatch_execution_phase(workspace_lock_acquired),
             );
@@ -1466,7 +1686,7 @@ fn execute_infobase_configuration_export(
 fn execute_infobase_dump(
     config: &AppConfig,
     request: ExportInfobaseSnapshotRequest,
-    prepared: infobase_export::PreparedExportProvider,
+    prepared: infobase_export::PreparedTransferProvider,
     context: &ExecutionContext,
     presenter: &Presenter,
     clean_before_execution: bool,
@@ -1536,7 +1756,7 @@ fn execute_infobase_dump(
         if let Err(error) = &outcome {
             let result = snapshot_pre_dispatch_failure(
                 &request,
-                prepared.selection().clone(),
+                Some(prepared.receipt().clone()),
                 error,
                 infobase_pre_dispatch_execution_phase(workspace_lock_acquired),
             );
@@ -1546,32 +1766,51 @@ fn execute_infobase_dump(
     outcome
 }
 
-fn infobase_pre_dispatch_execution_phase(workspace_lock_acquired: bool) -> ExportPhase {
+fn infobase_pre_dispatch_execution_phase(workspace_lock_acquired: bool) -> InfobaseTransferPhase {
     if workspace_lock_acquired {
-        ExportPhase::WorkspacePreparation
+        InfobaseTransferPhase::WorkspacePreparation
     } else {
-        ExportPhase::WorkspaceLock
+        InfobaseTransferPhase::WorkspaceLock
     }
 }
 
 fn annotate_pre_dispatch_failure(execution: &mut ExecutionOutcome<()>, error: &UseCaseError) {
-    let (code, _) = cli_error_contract(error.kind());
     execution.status = match error.kind() {
         UseCaseErrorKind::InvalidOutput => ExecutionStatus::InvalidOutput,
-        UseCaseErrorKind::Cancelled => ExecutionStatus::Cancelled,
+        UseCaseErrorKind::Cancelled(_) => ExecutionStatus::Cancelled,
         UseCaseErrorKind::TimedOut => ExecutionStatus::TimedOut,
         _ => ExecutionStatus::Failed,
     };
-    execution
-        .errors
-        .push(ExecutionError::new(code, error.message()));
+    execution.errors.push(ExecutionError::new(
+        execution_step_code(error.kind()),
+        error.message(),
+    ));
+}
+
+/// Код шага исполнителя: свой словарь, едущий внутри `data.execution.errors[]`.
+///
+/// Имена совпадают с кодами конверта, но поля разные, и различать их должен код, а не
+/// читатель: конверт стал точнее — у рода `capability` там четыре кода, — а шаг остаётся
+/// при прежнем словаре, потому что его читает другой потребитель.
+const fn execution_step_code(kind: UseCaseErrorKind) -> &'static str {
+    match kind {
+        UseCaseErrorKind::Capability(_) => "capability_unavailable",
+        UseCaseErrorKind::Environment => "environment_unavailable",
+        UseCaseErrorKind::WorkspaceBusy => "workspace_busy",
+        UseCaseErrorKind::InvalidOutput => "invalid_output",
+        UseCaseErrorKind::Cancelled(_) => "cancelled",
+        UseCaseErrorKind::TimedOut => "timed_out",
+        UseCaseErrorKind::Validation => "invalid_argument",
+        UseCaseErrorKind::Runtime => "runtime_failure",
+        UseCaseErrorKind::Platform => "platform_failure",
+    }
 }
 
 fn configuration_pre_dispatch_failure(
     request: &ExportConfigurationPackageRequest,
-    selection: ExportProviderDecision,
+    selection: Option<ProviderReceipt>,
     error: &UseCaseError,
-    phase: ExportPhase,
+    phase: InfobaseTransferPhase,
 ) -> ExportConfigurationPackageResult {
     let mut result = ExportConfigurationPackageResult::new(request.clone(), selection);
     annotate_pre_dispatch_failure(&mut result.execution, error);
@@ -1584,9 +1823,9 @@ fn configuration_pre_dispatch_failure(
 
 fn snapshot_pre_dispatch_failure(
     request: &ExportInfobaseSnapshotRequest,
-    selection: ExportProviderDecision,
+    selection: Option<ProviderReceipt>,
     error: &UseCaseError,
-    phase: ExportPhase,
+    phase: InfobaseTransferPhase,
 ) -> ExportInfobaseSnapshotResult {
     let mut result = ExportInfobaseSnapshotResult::new(request.clone(), selection);
     annotate_pre_dispatch_failure(&mut result.execution, error);
@@ -1599,9 +1838,9 @@ fn snapshot_pre_dispatch_failure(
 
 fn restore_pre_dispatch_failure(
     request: &RestoreInfobaseSnapshotRequest,
-    selection: ExportProviderDecision,
+    selection: Option<ProviderReceipt>,
     error: &UseCaseError,
-    phase: ExportPhase,
+    phase: InfobaseTransferPhase,
 ) -> RestoreInfobaseSnapshotResult {
     let mut result = RestoreInfobaseSnapshotResult::new(request.clone(), selection);
     annotate_pre_dispatch_failure(&mut result.execution, error);
@@ -1674,21 +1913,16 @@ struct InfobaseExportText<'a> {
     label: &'a str,
     state: Option<&'a str>,
     subject: String,
-    implementation: &'a str,
-    readiness: &'a str,
-    evidence: &'a str,
     artifact_kind: &'a str,
     execution_status: &'a str,
     /// Field name for `path`: an export names its output, a restore names its input.
     path_label: &'a str,
     path: &'a Path,
-    provider: Option<crate::domain::infobase_export::ExportProvider>,
-    provider_reason: &'a str,
+    provider: Option<&'a ProviderReceipt>,
     /// Field name for `applied`: an export publishes, a restore loads.
     applied_label: &'a str,
     applied: bool,
     target_state: &'a str,
-    candidates: &'a [crate::domain::infobase_export::ProviderCandidate],
     warnings: &'a [String],
     mode: crate::domain::infobase_export::InfobaseExportMode,
     provider_dispatched: Option<bool>,
@@ -1705,25 +1939,14 @@ fn render_configuration_export_text(
             label: "Configuration package export",
             state: Some(result.state.as_str()),
             subject: render_configuration_subject(&result.subject),
-            implementation: selected_candidate(&result.selection)
-                .map(|candidate| candidate.implementation.as_str())
-                .unwrap_or("none"),
-            readiness: selected_candidate(&result.selection)
-                .map(|candidate| candidate.readiness.as_str())
-                .unwrap_or("unavailable"),
-            evidence: selected_candidate(&result.selection)
-                .map(|candidate| candidate.evidence.as_str())
-                .unwrap_or("none"),
             artifact_kind: result.artifact_kind.as_str(),
             execution_status: execution_status_label(result.execution.status),
             path_label: "output",
             path: &result.output,
-            provider: result.selection.provider(),
-            provider_reason: result.selection.reason(),
+            provider: result.provider.as_ref(),
             applied_label: "published",
             applied: result.published,
             target_state: export_target_state_label(result.target_state),
-            candidates: result.selection.candidates(),
             warnings: &result.warnings,
             mode: result.mode,
             provider_dispatched: result.provider_dispatched,
@@ -1743,25 +1966,14 @@ fn render_snapshot_export_text(
             label: "Infobase DT export",
             state: None,
             subject: "infobase".to_owned(),
-            implementation: selected_candidate(&result.selection)
-                .map(|candidate| candidate.implementation.as_str())
-                .unwrap_or("none"),
-            readiness: selected_candidate(&result.selection)
-                .map(|candidate| candidate.readiness.as_str())
-                .unwrap_or("unavailable"),
-            evidence: selected_candidate(&result.selection)
-                .map(|candidate| candidate.evidence.as_str())
-                .unwrap_or("none"),
             artifact_kind: result.artifact_kind.as_str(),
             execution_status: execution_status_label(result.execution.status),
             path_label: "output",
             path: &result.output,
-            provider: result.selection.provider(),
-            provider_reason: result.selection.reason(),
+            provider: result.provider.as_ref(),
             applied_label: "published",
             applied: result.published,
             target_state: export_target_state_label(result.target_state),
-            candidates: result.selection.candidates(),
             warnings: &result.warnings,
             mode: result.mode,
             provider_dispatched: result.provider_dispatched,
@@ -1781,25 +1993,14 @@ fn render_restore_text(
             label: "Infobase DT restore",
             state: None,
             subject: format!("infobase:{}", result.target_mode.as_str()),
-            implementation: selected_candidate(&result.selection)
-                .map(|candidate| candidate.implementation.as_str())
-                .unwrap_or("none"),
-            readiness: selected_candidate(&result.selection)
-                .map(|candidate| candidate.readiness.as_str())
-                .unwrap_or("unavailable"),
-            evidence: selected_candidate(&result.selection)
-                .map(|candidate| candidate.evidence.as_str())
-                .unwrap_or("none"),
             artifact_kind: result.artifact_kind.as_str(),
             execution_status: execution_status_label(result.execution.status),
             path_label: "input",
             path: &result.input,
-            provider: result.selection.provider(),
-            provider_reason: result.selection.reason(),
+            provider: result.provider.as_ref(),
             applied_label: "restored",
             applied: result.restored,
             target_state: export_target_state_label(result.target_state),
-            candidates: result.selection.candidates(),
             warnings: &result.warnings,
             mode: result.mode,
             provider_dispatched: result.provider_dispatched,
@@ -1814,19 +2015,14 @@ fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Present
         label,
         state,
         subject,
-        implementation,
-        readiness,
-        evidence,
         artifact_kind,
         execution_status,
         path_label,
         path,
         provider,
-        provider_reason,
         applied_label,
         applied,
         target_state,
-        candidates,
         warnings,
         mode,
         provider_dispatched,
@@ -1839,9 +2035,16 @@ fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Present
     } else {
         TimelineStatus::Failed
     };
-    let provider = provider
-        .map(|value| value.as_str().to_owned())
-        .unwrap_or_else(|| "none".to_owned());
+    let provider_line = match provider {
+        Some(receipt) => match receipt.selected {
+            Some(selected) => format!(
+                "provider: {selected} ({})",
+                provider_origin_label(&receipt.origin)
+            ),
+            None => "provider: none is ready".to_owned(),
+        },
+        None => "provider: not selected".to_owned(),
+    };
     let mut details = vec![
         format!("command: {command}"),
         format!(
@@ -1852,12 +2055,8 @@ fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Present
             }
         ),
         format!("subject: {subject}"),
-        format!("implementation: {implementation}"),
-        format!("readiness: {readiness}"),
-        format!("evidence: {evidence}"),
         format!("artifact kind: {artifact_kind}"),
-        format!("provider: {provider}"),
-        format!("provider reason: {provider_reason}"),
+        provider_line,
         format!("execution status: {execution_status}"),
         format!("{applied_label}: {applied}"),
         format!("target state: {target_state}"),
@@ -1866,14 +2065,14 @@ fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Present
     if let Some(provider_dispatched) = provider_dispatched {
         details.insert(2, format!("provider dispatched: {provider_dispatched}"));
     }
-    for candidate in candidates {
+    for skipped in provider
+        .map(|receipt| receipt.skipped.as_slice())
+        .unwrap_or_default()
+    {
         details.push(format!(
-            "candidate {}: implementation={}, readiness={}, evidence={}; {}",
-            candidate.provider.as_str(),
-            candidate.implementation.as_str(),
-            candidate.readiness.as_str(),
-            candidate.evidence.as_str(),
-            candidate.reason
+            "[skipped:{}] {}",
+            skipped.provider.as_str(),
+            skipped.reason
         ));
     }
     if let Some(state) = state {
@@ -1883,14 +2082,35 @@ fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Present
     presenter.print_timeline(&[TimelineItem::new(status, label).with_detail(details.join("\n"))]);
 }
 
-fn selected_candidate(
-    selection: &crate::domain::infobase_export::ExportProviderDecision,
-) -> Option<&crate::domain::infobase_export::ProviderCandidate> {
-    let provider = selection.provider()?;
-    selection
-        .candidates()
-        .iter()
-        .find(|candidate| candidate.provider == provider)
+/// Строки квитанции о выборе исполнителя — одни и те же у всех команд.
+fn provider_receipt_details(receipt: Option<&ProviderReceipt>) -> Vec<String> {
+    let Some(receipt) = receipt else {
+        return Vec::new();
+    };
+    let mut details = vec![match receipt.selected {
+        Some(selected) => format!(
+            "provider: {selected} ({})",
+            provider_origin_label(&receipt.origin)
+        ),
+        None => "provider: none is ready".to_owned(),
+    }];
+    for skipped in &receipt.skipped {
+        details.push(format!(
+            "[skipped:{}] {}",
+            skipped.provider.as_str(),
+            skipped.reason
+        ));
+    }
+    details
+}
+
+fn provider_origin_label(origin: &crate::domain::capability::ProviderOrigin) -> String {
+    match origin {
+        crate::domain::capability::ProviderOrigin::Default => "default".to_owned(),
+        crate::domain::capability::ProviderOrigin::Override { file } => {
+            format!("providers.* in {file}")
+        }
+    }
 }
 
 fn export_target_state_label(
@@ -1932,9 +2152,10 @@ fn execute_convert(
     args: &ConvertArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    let request = map_convert_request(args);
+    let request = map_convert_request(args, dry_run);
     if let Err(error) = convert_sources::preflight_validate(config, &request) {
         return Err(render_pre_dispatch_error(
             presenter,
@@ -1948,7 +2169,7 @@ fn execute_convert(
         presenter,
         CommandName::Convert,
         clean_before_execution,
-        args.dry_run,
+        dry_run,
         || match convert_sources::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -1990,9 +2211,10 @@ fn execute_artifacts(
     args: &ArtifactsArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    let request = map_artifacts_request_with_config(config, args)
+    let request = map_artifacts_request_with_config(config, args, dry_run)
         .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Artifacts, error))?;
     let context = cli_context(config, CommandName::Artifacts, cancellation);
     with_cli_workspace_lock(
@@ -2000,7 +2222,7 @@ fn execute_artifacts(
         presenter,
         CommandName::Artifacts,
         clean_before_execution,
-        args.dry_run,
+        dry_run,
         || match artifacts::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -2035,18 +2257,18 @@ fn execute_syntax(
     args: &SyntaxArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
     let context = cli_context(config, CommandName::Syntax, cancellation);
-    let request = map_syntax_request(args)
+    let request = map_syntax_request(config, args, dry_run)
         .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Syntax, error))?;
     with_cli_workspace_lock(
         config,
         presenter,
         CommandName::Syntax,
         clean_before_execution,
-        // превью у синтаксического контроля нет.
-        false,
+        dry_run,
         || match check_syntax::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -2056,7 +2278,7 @@ fn execute_syntax(
                         result,
                     ));
                 } else {
-                    render_syntax_text(&result, presenter);
+                    render_syntax_text(&result, presenter, Requested::from_dry_run(dry_run));
                 }
                 Ok(())
             }
@@ -2073,7 +2295,7 @@ fn execute_syntax(
                     }
                 } else {
                     if let Some(result) = failure.payload.as_ref() {
-                        render_syntax_text(result, presenter);
+                        render_syntax_text(result, presenter, Requested::from_dry_run(dry_run));
                     }
                     presenter.print_error(&error.to_string());
                 }
@@ -2088,18 +2310,19 @@ fn execute_launch(
     args: &LaunchArgs,
     presenter: &Presenter,
     clean_before_execution: bool,
+    dry_run: bool,
     cancellation: CancellationToken,
 ) -> Result<(), UseCaseError> {
-    let request = map_launch_request(args)
+    let request = map_launch_request(args, dry_run)
         .map_err(|error| render_pre_dispatch_error(presenter, CommandName::Launch, error))?;
-    let context = launch_cli_context(config, &request, cancellation);
+    let context = cli_context(config, CommandName::Launch, cancellation);
     let started = Instant::now();
     with_cli_workspace_lock(
         config,
         presenter,
         CommandName::Launch,
         clean_before_execution,
-        args.dry_run,
+        dry_run,
         || match launch_app::execute(&context, config, &request) {
             Ok(result) => {
                 if presenter.is_json() {
@@ -2109,7 +2332,7 @@ fn execute_launch(
                         result,
                     ));
                 } else {
-                    render_launch_text(&result, presenter);
+                    render_launch_text(&result, presenter, Requested::from_dry_run(dry_run));
                 }
                 Ok(())
             }
@@ -2126,7 +2349,9 @@ fn execute_launch(
                         None => presenter.print_envelope(&failure_envelope(
                             CommandName::Launch.as_str(),
                             started.elapsed().as_millis() as u64,
-                            json!({ "message": error.message() }),
+                            crate::cli::output::RefusalData {
+                                message: error.message().to_owned(),
+                            },
                             &error,
                         )),
                     }
@@ -2136,7 +2361,7 @@ fn execute_launch(
                             result,
                             presenter,
                             TimelineStatus::Failed,
-                            "Launch failed",
+                            "Launch",
                         );
                     }
                     presenter.print_error(&error.to_string());
@@ -2152,12 +2377,13 @@ fn execute_launch(
 /// `preview` говорит, что запуск ничего в `workPath` не изменит. Тогда блокировка не
 /// берётся: держать её не за что, а вред настоящий — «покажи план» упиралось бы в
 /// занятое пространство и отказывало `workspace_busy`, а два одновременных превью
-/// выстраивались бы в очередь. Прецедент — `infobase ... --dry-run` по ADR-0024,
+/// выстраивались бы в очередь. Прецедент — `infobase ... --dry-run` по DEC.2026-09-11.PREVIEW-STOPS-BEFORE-THE-PROVIDER-IS-DISPATCHED,
 /// который возвращается до блокировок вообще.
 ///
 /// Решение живёт здесь, а не в отдельном помощнике рядом: у границы один владелец,
-/// иначе её легко обойти новым вызовом.
-fn with_cli_workspace_lock<T>(
+/// иначе её легко обойти новым вызовом. Спор превью с очисткой — вопрос не границы, а
+/// двух глобальных ключей, и отвечает на него `app::run` до загрузки конфига.
+pub(crate) fn with_cli_workspace_lock<T>(
     config: &AppConfig,
     presenter: &Presenter,
     command: CommandName,
@@ -2166,16 +2392,13 @@ fn with_cli_workspace_lock<T>(
     run: impl FnOnce() -> Result<T, UseCaseError>,
 ) -> Result<T, UseCaseError> {
     if preview {
-        // Чистка меняет `workPath`, поэтому с превью она отклоняется, а не
-        // пропускается молча: иначе флаг обещает одно, а делает другое.
-        if clean_before_execution {
-            let message = format!(
-                "--clean-before-execution cannot be combined with {} --dry-run because preview must not modify workPath",
-                command.as_str()
-            );
-            presenter.print_error(&message);
-            return Err(UseCaseError::new(UseCaseErrorKind::Validation, message));
-        }
+        // Чистка меняет `workPath` и с превью не сочетается; спор двух глобальных ключей
+        // разрешается один раз на запуске (`app::run`) — до того, как каталог тронут, — и
+        // здесь уже не повторяется.
+        debug_assert!(
+            !clean_before_execution,
+            "очистка с превью отклонена на запуске"
+        );
         return run();
     }
     with_cli_workspace_lock_observed(
@@ -2198,7 +2421,9 @@ fn with_cli_workspace_lock_observed<T>(
 ) -> Result<T, UseCaseError> {
     let busy_policy = if matches!(
         command,
-        CommandName::InfobaseConfigurationExport | CommandName::InfobaseDump
+        CommandName::InfobaseConfigurationExport
+            | CommandName::InfobaseDump
+            | CommandName::Bootstrap
     ) {
         WorkspaceBusyPolicy::Typed
     } else {
@@ -2247,17 +2472,19 @@ fn render_pre_dispatch_error(
     error
 }
 
-fn map_build_request(args: &BuildArgs) -> BuildRequest {
+fn map_build_request(args: &BuildArgs, dry_run: bool) -> BuildRequest {
     BuildRequest {
-        dry_run: args.dry_run,
+        dry_run,
         full_rebuild: args.full_rebuild,
         source_set: args.source_set.clone(),
     }
 }
 
-fn map_extensions_request(args: &ExtensionsArgs) -> ConfigureExtensionsRequest {
+fn map_extensions_request(args: &ExtensionsArgs, dry_run: bool) -> ConfigureExtensionsRequest {
     ConfigureExtensionsRequest {
         names: args.names.clone(),
+        installed_names: args.installed_names.clone(),
+        dry_run,
     }
 }
 
@@ -2506,43 +2733,34 @@ fn validate_test_launch_options(args: &TestLaunchOptionsArgs) -> Result<(), UseC
     Ok(())
 }
 
+/// Builds the execution context for a CLI command.
+///
+/// A public command carries no deadline: see DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE.
+/// What bounds a step is the step's own cap, and what ends a run early is the operator's
+/// interrupt, which reaches the context as cancellation.
+///
+/// The EDT step cap is one such declared cap, and it is read here so that both transports
+/// bound an EDT subprocess by the same configured key. Before this it reached use cases
+/// from MCP only, and a one-shot `1cedtcli` started from the CLI was bounded by nothing but
+/// the command deadline that no longer exists.
 fn cli_context(
     config: &AppConfig,
     command: CommandName,
     cancellation: CancellationToken,
 ) -> ExecutionContext {
     ExecutionContext::cli(command)
-        .with_deadline(Some(Instant::now() + config.execution_timeout_duration()))
+        .with_edt_timeout(Some(Duration::from_millis(
+            config.tools.edt_cli.command_timeout_ms,
+        )))
         .with_cancellation(cancellation)
 }
 
-fn launch_cli_context(
-    config: &AppConfig,
-    request: &LaunchRequest,
-    cancellation: CancellationToken,
-) -> ExecutionContext {
-    let timeout = request
-        .launch
-        .external_epf_wait
-        .as_ref()
-        .map(|wait| {
-            config.execution_timeout_duration().max(
-                Duration::from_millis(wait.timeout_ms)
-                    .saturating_add(EXTERNAL_EPF_WAIT_CLEANUP_MARGIN),
-            )
-        })
-        .unwrap_or_else(|| config.execution_timeout_duration());
-    ExecutionContext::cli(CommandName::Launch)
-        .with_deadline(Some(Instant::now() + timeout))
-        .with_cancellation(cancellation)
-}
-
-fn map_load_request(args: &LoadArgs) -> Result<LoadRequest, UseCaseError> {
+fn map_load_request(args: &LoadArgs, dry_run: bool) -> Result<LoadRequest, UseCaseError> {
     Ok(LoadRequest {
-        dry_run: args.dry_run,
+        dry_run,
         mode: match args.mode.as_str() {
             "load" => LoadMode::Load,
-            "merge" => LoadMode::Merge,
+            "combine" | "merge" => LoadMode::Merge,
             "update" => LoadMode::Update,
             other => {
                 return Err(UseCaseError::new(
@@ -2558,17 +2776,18 @@ fn map_load_request(args: &LoadArgs) -> Result<LoadRequest, UseCaseError> {
     })
 }
 
-fn map_dump_request(args: &DumpArgs) -> Result<DumpRequest, UseCaseError> {
+fn map_dump_request(args: &DumpArgs, dry_run: bool) -> Result<DumpRequest, UseCaseError> {
     Ok(DumpRequest {
-        dry_run: args.dry_run,
+        dry_run,
         mode: parse_required_dump_mode(&args.mode)?,
         source_set: args.source_set.clone(),
         extension: args.extension.clone(),
         objects: args.objects.clone(),
+        discard_uncommitted: args.discard_uncommitted,
     })
 }
 
-fn map_convert_request(args: &ConvertArgs) -> ConvertRequest {
+fn map_convert_request(args: &ConvertArgs, dry_run: bool) -> ConvertRequest {
     ConvertRequest {
         scope: match args.source_set.as_deref() {
             Some(name) => ConvertScopeRequest::SourceSet {
@@ -2577,13 +2796,15 @@ fn map_convert_request(args: &ConvertArgs) -> ConvertRequest {
             None => ConvertScopeRequest::All,
         },
         output_root: args.output.clone(),
-        dry_run: args.dry_run,
+        dry_run,
+        discard_uncommitted: args.discard_uncommitted,
     }
 }
 
 fn map_artifacts_request_with_config(
     config: &AppConfig,
     args: &ArtifactsArgs,
+    dry_run: bool,
 ) -> Result<ArtifactsRequest, UseCaseError> {
     let mode = match (args.source_set.as_deref(), args.extension.is_some()) {
         (_, true) => ArtifactsModeRequest::ExtensionCfe,
@@ -2611,7 +2832,7 @@ fn map_artifacts_request_with_config(
     };
 
     Ok(ArtifactsRequest {
-        dry_run: args.dry_run,
+        dry_run,
         execution: ArtifactsRequest::default_execution(mode),
         mode,
         output_path: args.output.clone(),
@@ -2620,20 +2841,60 @@ fn map_artifacts_request_with_config(
     })
 }
 
-fn map_syntax_request(args: &SyntaxArgs) -> Result<SyntaxRequest, UseCaseError> {
-    Ok(SyntaxRequest {
-        target: match &args.target {
-            SyntaxTarget::DesignerConfig(config) => {
-                SyntaxTargetRequest::DesignerConfig(map_designer_config_request(config)?)
-            }
-            SyntaxTarget::DesignerModules(modules) => {
-                SyntaxTargetRequest::DesignerModules(map_designer_modules_request(modules)?)
-            }
-            SyntaxTarget::Edt { projects } => SyntaxTargetRequest::Edt {
-                projects: projects.clone(),
-            },
+/// Ветку выбирает формат проекта, а не подкоманда: проверка одна, а чем её выполнить —
+/// свойство проекта. Прежние имена приняты один цикл и держат своё утверждение о ветке:
+/// `check edt` в проекте формата платформы отказывает, как отказывал, — синоним не меняет
+/// инструмент молча.
+fn map_syntax_request(
+    config: &AppConfig,
+    args: &SyntaxArgs,
+    dry_run: bool,
+) -> Result<SyntaxRequest, UseCaseError> {
+    if let Some(message) = args.keys_next_to_a_previous_name() {
+        return Err(UseCaseError::new(UseCaseErrorKind::Validation, message));
+    }
+    let target = match &args.target {
+        Some(SyntaxTarget::DesignerConfig(modes)) => {
+            SyntaxTargetRequest::DesignerConfig(map_designer_config_request(modes)?)
+        }
+        Some(SyntaxTarget::DesignerModules(modules)) => {
+            SyntaxTargetRequest::DesignerConfig(map_designer_modules_request(modules)?)
+        }
+        Some(SyntaxTarget::Edt { projects }) => SyntaxTargetRequest::Edt {
+            projects: projects.clone(),
         },
-    })
+        None if config.format == SourceFormat::Edt => {
+            // Ключ, которого ветка не исполняет, отвергается, а не игнорируется.
+            if args.modes != DesignerConfigSyntaxArgs::default() {
+                return Err(UseCaseError::new(
+                    UseCaseErrorKind::Validation,
+                    "the project format is EDT, and the check runs EDT validation: modes of /CheckConfig are not executed there. Name the project with --project or drop the keys",
+                ));
+            }
+            SyntaxTargetRequest::Edt {
+                projects: args.projects.clone(),
+            }
+        }
+        None => {
+            if !args.projects.is_empty() {
+                return Err(UseCaseError::new(
+                    UseCaseErrorKind::Validation,
+                    "--project names an EDT project, and the project format is DESIGNER: the check runs /CheckConfig there. Drop the key",
+                ));
+            }
+            let named = map_designer_config_request(&args.modes)?;
+            // Ключей не назвали — выполняется профиль по умолчанию: пустая `/CheckConfig`
+            // не проверяет ничего и отвечает «чисто», а команда обещает проверку. Прежние
+            // имена сюда не попадают: у них свой состав и своя проверка режимов.
+            let request = if named.names_no_mode() {
+                DesignerConfigSyntaxRequest::default_profile(named.extension_scope().clone())
+            } else {
+                named
+            };
+            SyntaxTargetRequest::DesignerConfig(request)
+        }
+    };
+    Ok(SyntaxRequest { target, dry_run })
 }
 
 fn map_designer_config_request(
@@ -2698,10 +2959,15 @@ fn map_designer_config_request(
     ))
 }
 
+/// Прежнее имя `designer-modules` исполняется той же `/CheckConfig`: её режимы покрывают
+/// режимы проверки модулей целиком. Проверки конфигурации остаются пустыми, а требование
+/// «хотя бы один режим» сохраняется: синоним держится один цикл ровно тем, чем был, и
+/// профиль по умолчанию сюда не подмешивается.
 fn map_designer_modules_request(
     args: &DesignerModulesSyntaxArgs,
-) -> Result<DesignerModulesSyntaxRequest, UseCaseError> {
-    DesignerModulesSyntaxRequest::new(
+) -> Result<DesignerConfigSyntaxRequest, UseCaseError> {
+    let request = DesignerConfigSyntaxRequest::new(
+        DesignerConfigChecks::new([]),
         DesignerClientScopes::new(
             [
                 args.thin_client.then_some(DesignerClientScope::ThinClient),
@@ -2723,10 +2989,17 @@ fn map_designer_modules_request(
         ),
         crate::use_cases::request::ExtendedModulesPolicy::basic(args.extended_modules_check),
         SyntaxExtensionScope::new(args.extension.clone(), args.all_extensions),
-    )
+    );
+    if request.names_no_mode() {
+        return Err(UseCaseError::new(
+            UseCaseErrorKind::Validation,
+            crate::use_cases::request::MODULES_WITHOUT_MODES_ERROR,
+        ));
+    }
+    Ok(request)
 }
 
-fn map_launch_request(args: &LaunchArgs) -> Result<LaunchRequest, UseCaseError> {
+fn map_launch_request(args: &LaunchArgs, dry_run: bool) -> Result<LaunchRequest, UseCaseError> {
     let mut target = parse_launch_target(&args.target, "mode", LaunchModeAliases::Cli)?;
     let client_mcp = if matches!(
         target,
@@ -2755,7 +3028,8 @@ fn map_launch_request(args: &LaunchArgs) -> Result<LaunchRequest, UseCaseError> 
         target,
         launch: map_direct_launch_options(target, &args.launch, client_mcp.is_some())?,
         client_mcp,
-        dry_run: args.dry_run,
+        via: map_launch_via(args.via.as_deref())?,
+        dry_run,
     })
 }
 
@@ -2887,6 +3161,20 @@ fn map_mcp_options(args: &LaunchArgs) -> Result<ClientMcpOptionsRequest, UseCase
     })
 }
 
+/// `--via` уже ограничен clap до двух значений; отказ остаётся на случай,
+/// когда адаптер вызывают не из clap.
+fn map_launch_via(value: Option<&str>) -> Result<Option<LaunchVia>, UseCaseError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    LaunchVia::parse(value).map(Some).ok_or_else(|| {
+        UseCaseError::new(
+            UseCaseErrorKind::Validation,
+            "--via accepts only `web` or `connection`",
+        )
+    })
+}
+
 fn map_mcp_client_mode(mode: Option<&str>) -> Result<ClientMcpMode, UseCaseError> {
     Ok(match mode.unwrap_or("thin") {
         "thin" => ClientMcpMode::Thin,
@@ -2907,10 +3195,18 @@ fn is_reserved_raw_launch_key(raw: &str) -> bool {
         .any(|key| launch_key_alias_matches(raw, key))
 }
 
-#[derive(Debug, Serialize)]
-struct LoadJsonData<'a> {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct LoadJsonData<'a> {
+    /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderReceipt>,
+
     pub ok: bool,
-    /// `false` when the run stopped at a preview instead of dispatching the platform.
+    /// Whether an executor got this command's work: a process was started to do it, or the
+    /// request's command was handed to a running session. Starting or opening a session and
+    /// its own service commands are not work. `false` whenever the executor got none — a
+    /// preview, a refusal or interruption before any work, a run with nothing to do, or a
+    /// process that could not be started.
     pub provider_dispatched: bool,
     pub mode: LoadMode,
     pub artifact_path: &'a Path,
@@ -2928,9 +3224,10 @@ struct LoadJsonData<'a> {
 }
 
 impl<'a> LoadJsonData<'a> {
-    fn from_result(result: &'a LoadResult) -> Self {
+    fn from_result(result: &'a LoadResult, requested: Requested) -> Self {
         let metadata = load_metadata(result);
         Self {
+            provider: result.provider.clone(),
             ok: result.execution.is_ok(),
             provider_dispatched: result.provider_dispatched,
             mode: result.mode,
@@ -2945,7 +3242,7 @@ impl<'a> LoadJsonData<'a> {
             extension: result.extension.as_deref(),
             platform_log_path: platform_log_path_from_artifacts(&result.execution.artifacts),
             duration_ms: result.duration_ms,
-            message: load_message(result),
+            message: load_message(result, requested),
             execution: &result.execution,
         }
     }
@@ -2955,7 +3252,7 @@ fn load_metadata(result: &LoadResult) -> Option<&LoadExecutionMetadata> {
     result.execution.payload.as_ref()
 }
 
-fn load_message(result: &LoadResult) -> Option<String> {
+fn load_message(result: &LoadResult, requested: Requested) -> Option<String> {
     if !result.execution.is_ok() {
         return execution_message(&result.execution);
     }
@@ -2963,21 +3260,22 @@ fn load_message(result: &LoadResult) -> Option<String> {
     let metadata = load_metadata(result)?;
     let mode = match result.mode {
         LoadMode::Load => "load",
-        LoadMode::Merge => "merge",
+        LoadMode::Merge => "combine",
         LoadMode::Update => "update",
     };
     // A preview applied nothing, so it must not claim a successful apply; its own
-    // diagnostics below say what it would have done.
-    let mut message = if result.provider_dispatched {
+    // diagnostics below say what it would have done. The request says it was a preview:
+    // `provider_dispatched` tells whether an executor got work, not whether it previewed.
+    let mut message = if requested == Requested::Preview {
+        format!(
+            "{mode} {} previewed; nothing applied",
+            result.artifact_path.display()
+        )
+    } else {
         format!(
             "{mode} {} applied successfully after {:?} compatibility probe",
             result.artifact_path.display(),
             metadata.compatibility_state
-        )
-    } else {
-        format!(
-            "{mode} {} previewed; nothing applied",
-            result.artifact_path.display()
         )
     };
     if !result.execution.diagnostics.is_empty() {
@@ -2987,7 +3285,7 @@ fn load_message(result: &LoadResult) -> Option<String> {
     Some(message)
 }
 
-fn build_load_envelope(result: &LoadResult) -> Envelope<LoadJsonData<'_>> {
+fn build_load_envelope(result: &LoadResult, requested: Requested) -> Envelope<LoadJsonData<'_>> {
     Envelope {
         ok: result.execution.is_ok(),
         command: CommandName::Load.as_str().to_owned(),
@@ -2995,14 +3293,22 @@ fn build_load_envelope(result: &LoadResult) -> Envelope<LoadJsonData<'_>> {
         warnings: Vec::new(),
         steps: Vec::new(),
         error: None,
-        data: LoadJsonData::from_result(result),
+        data: LoadJsonData::from_result(result, requested),
     }
 }
 
-#[derive(Debug, Serialize)]
-struct ArtifactsJsonData<'a> {
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub(crate) struct ArtifactsJsonData<'a> {
+    /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderReceipt>,
+
     pub ok: bool,
-    /// `false` when the run stopped at a preview instead of dispatching the platform.
+    /// Whether an executor got this command's work: a process was started to do it, or the
+    /// request's command was handed to a running session. Starting or opening a session and
+    /// its own service commands are not work. `false` whenever the executor got none — a
+    /// preview, a refusal or interruption before any work, a run with nothing to do, or a
+    /// process that could not be started.
     pub provider_dispatched: bool,
     pub mode: ArtifactBuildMode,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3023,6 +3329,7 @@ struct ArtifactsJsonData<'a> {
 impl<'a> ArtifactsJsonData<'a> {
     fn from_result(result: &'a ArtifactsResult) -> Self {
         Self {
+            provider: result.provider.clone(),
             ok: result.execution.is_ok(),
             provider_dispatched: result.provider_dispatched,
             mode: result.mode,
@@ -3043,7 +3350,7 @@ impl<'a> ArtifactsJsonData<'a> {
     }
 }
 
-fn build_artifacts_envelope<'a>(result: &ArtifactsResult) -> Envelope<ArtifactsJsonData<'_>> {
+fn build_artifacts_envelope(result: &ArtifactsResult) -> Envelope<ArtifactsJsonData<'_>> {
     Envelope {
         ok: result.execution.is_ok(),
         command: CommandName::Artifacts.as_str().to_owned(),
@@ -3088,16 +3395,22 @@ fn test_report(result: &TestRunResult) -> Option<&TestReport> {
 }
 
 fn render_build_text(result: &BuildResult, presenter: &Presenter, succeeded: bool) {
-    let summary = if !succeeded {
-        TimelineItem::new(TimelineStatus::Failed, "Build failed")
-    } else if result
-        .steps
-        .iter()
-        .all(|step| matches!(step.mode, BuildMode::Skipped) && step.ok)
+    // «Без изменений» — не стандартный исход, у него своя подпись.
+    let summary = if succeeded
+        && result
+            .steps
+            .iter()
+            .all(|step| matches!(step.mode, BuildMode::Skipped) && step.ok)
     {
         TimelineItem::new(TimelineStatus::Succeeded, "Build completed: no changes")
     } else {
-        TimelineItem::new(TimelineStatus::Succeeded, "Build completed successfully")
+        TimelineItem::outcome(timeline_status(succeeded), "Build")
+    };
+    let receipt = provider_receipt_details(result.provider.as_ref());
+    let summary = if receipt.is_empty() {
+        summary
+    } else {
+        summary.with_detail(receipt.join("\n"))
     };
     presenter.print_timeline(&[summary]);
 }
@@ -3161,6 +3474,19 @@ fn bracketed_detail(kind: &str, message: impl AsRef<str>) -> String {
     format!("[{kind}] {}", message.as_ref())
 }
 
+fn timeline_outcome_with_details(
+    status: TimelineStatus,
+    subject: impl Into<String>,
+    details: Vec<String>,
+) -> TimelineItem {
+    let item = TimelineItem::outcome(status, subject);
+    if details.is_empty() {
+        item
+    } else {
+        item.with_detail(details.join("\n"))
+    }
+}
+
 fn single_timeline(
     presenter: &Presenter,
     status: TimelineStatus,
@@ -3168,6 +3494,23 @@ fn single_timeline(
     details: Vec<String>,
 ) {
     presenter.print_timeline(&[timeline_item_with_details(status, label, details)]);
+}
+
+/// Узел со стандартным исходом: рендерер называет предмет, слово выбирает presenter
+/// тем же правилом, что и знак.
+fn single_timeline_outcome(
+    presenter: &Presenter,
+    status: TimelineStatus,
+    subject: impl Into<String>,
+    details: Vec<String>,
+) {
+    let item = TimelineItem::outcome(status, subject);
+    let item = if details.is_empty() {
+        item
+    } else {
+        item.with_detail(details.join("\n"))
+    };
+    presenter.print_timeline(&[item]);
 }
 
 fn append_if_present(details: &mut Vec<String>, line: Option<String>) {
@@ -3212,10 +3555,12 @@ fn append_interruptions(details: &mut Vec<String>, interruptions: &[ExecutionInt
         }
 
         let kind = match interruption.kind {
-            crate::domain::execution::ExecutionInterruptionKind::Cancelled => "cancelled",
-            crate::domain::execution::ExecutionInterruptionKind::TimedOut => "timed_out",
+            ExecutionInterruptionKind::Cancelled => "cancelled",
+            ExecutionInterruptionKind::TimedOut => "timed_out",
         };
-        let phase = interruption.phase.as_deref().unwrap_or("unknown_phase");
+        let phase = interruption
+            .phase
+            .map_or("unknown_phase", ExecutionInterruptionPhase::as_str);
         let detail = if interruption.deferred {
             format!("deferred {kind} interruption during {phase}")
         } else {
@@ -3362,10 +3707,11 @@ fn test_has_actionable_success_signal(result: &TestRunResult) -> bool {
 }
 
 fn dump_has_warning(result: &DumpResult) -> bool {
-    result
-        .message
-        .as_deref()
-        .is_some_and(|message| message != "dump completed successfully")
+    !result.up_to_date
+        && result
+            .message
+            .as_deref()
+            .is_some_and(|message| message != crate::domain::dump::DUMP_SUCCESS_MESSAGE)
 }
 
 fn execution_has_warning(
@@ -3385,10 +3731,15 @@ fn render_artifact_mode(mode: ArtifactBuildMode) -> &'static str {
     }
 }
 
-fn render_load_text(result: &LoadResult, presenter: &Presenter, succeeded: bool) {
+fn render_load_text(
+    result: &LoadResult,
+    presenter: &Presenter,
+    succeeded: bool,
+    requested: Requested,
+) {
     let mode = match result.mode {
         LoadMode::Load => "load",
-        LoadMode::Merge => "merge",
+        LoadMode::Merge => "combine",
         LoadMode::Update => "update",
     };
     let metadata = load_metadata(result);
@@ -3403,18 +3754,12 @@ fn render_load_text(result: &LoadResult, presenter: &Presenter, succeeded: bool)
         ),
         crate::domain::load::LoadTargetKind::Unknown => "unknown".to_owned(),
     };
-    let warning = succeeded
-        && execution_has_warning(
+    // Рендерер решает, какие подробности показать; слово исхода выбирает presenter.
+    let show_signals = !succeeded
+        || execution_has_warning(
             &result.execution.diagnostics,
             &result.execution.interruptions,
         );
-    let label = if !succeeded {
-        "Artifact load failed"
-    } else if warning {
-        "Artifact load completed with warnings"
-    } else {
-        "Artifact load completed successfully"
-    };
     let mut details = vec![
         format!("target: {target}"),
         format!(
@@ -3423,11 +3768,11 @@ fn render_load_text(result: &LoadResult, presenter: &Presenter, succeeded: bool)
         ),
         format!("artifact: {}", result.artifact_path.display()),
     ];
-    if !succeeded || warning {
+    if show_signals {
         let prefix = if succeeded { "warning" } else { "error" };
         append_if_present(
             &mut details,
-            load_message(result).map(|message| bracketed_detail(prefix, message)),
+            load_message(result, requested).map(|message| bracketed_detail(prefix, message)),
         );
         append_error_details(&mut details, &result.execution.errors);
         append_diagnostics(&mut details, &result.execution.diagnostics);
@@ -3439,7 +3784,13 @@ fn render_load_text(result: &LoadResult, presenter: &Presenter, succeeded: bool)
                 .map(|path| format!("[diagnostic] platform log -> {}", path.display())),
         );
     }
-    single_timeline(presenter, timeline_status(succeeded), label, details);
+    details.extend(provider_receipt_details(result.provider.as_ref()));
+    single_timeline_outcome(
+        presenter,
+        timeline_status(succeeded),
+        "Artifact load",
+        details,
+    );
 }
 
 fn render_init_text(result: &InitResult, presenter: &Presenter) {
@@ -3461,17 +3812,25 @@ fn render_init_text(result: &InitResult, presenter: &Presenter) {
     let succeeded = result
         .steps
         .iter()
-        .all(|step| matches!(step.status, InitStepStatus::Ok | InitStepStatus::Skipped));
+        // Превью ничего не делает и потому ничего не проваливает: шаг со статусом
+        // `Planned` — это план, а не отказ. Раньше он приводил к подписи «Init failed»
+        // при `ok: true` и коде выхода 0, то есть текст говорил обратное всему остальному.
+        .all(|step| {
+            matches!(
+                step.status,
+                InitStepStatus::Ok | InitStepStatus::Skipped | InitStepStatus::Planned
+            )
+        });
     let mut timeline = vec![timeline_item_with_details(
         timeline_status(succeeded),
         "init:",
         details,
     )];
-    timeline.push(if succeeded {
-        TimelineItem::new(TimelineStatus::Succeeded, "Init completed successfully")
-    } else {
-        TimelineItem::new(TimelineStatus::Failed, "Init failed")
-    });
+    timeline.push(timeline_outcome_with_details(
+        timeline_status(succeeded),
+        "Init",
+        provider_receipt_details(result.provider.as_ref()),
+    ));
     presenter.print_timeline(&timeline);
 }
 
@@ -3492,14 +3851,9 @@ fn render_dump_text(result: &DumpResult, presenter: &Presenter, succeeded: bool)
         DumpMode::Partial => "partial",
     };
     let source_set = result.source_set.as_deref().unwrap_or("<unresolved>");
-    let warning = succeeded && dump_has_warning(result);
-    let label = if !succeeded {
-        "Dump failed"
-    } else if warning {
-        "Dump completed with warnings"
-    } else {
-        "Dump completed successfully"
-    };
+    let show_signals = !succeeded || dump_has_warning(result);
+    let skipped_label =
+        (succeeded && result.up_to_date).then_some("Dump skipped: configuration unchanged");
     let mut details = vec![
         format!("source-set: {source_set}"),
         format!("mode: {mode}"),
@@ -3508,7 +3862,16 @@ fn render_dump_text(result: &DumpResult, presenter: &Presenter, succeeded: bool)
     if let Some(extension) = result.extension.as_deref() {
         details.push(format!("extension: {extension}"));
     }
-    if !succeeded || warning {
+    if succeeded && result.up_to_date {
+        append_if_present(
+            &mut details,
+            result
+                .message
+                .as_deref()
+                .map(|message| bracketed_detail("note", message)),
+        );
+    }
+    if show_signals {
         let prefix = if succeeded { "warning" } else { "error" };
         append_if_present(
             &mut details,
@@ -3525,19 +3888,16 @@ fn render_dump_text(result: &DumpResult, presenter: &Presenter, succeeded: bool)
                 .map(|path| format!("[diagnostic] platform log -> {}", path.display())),
         );
     }
-    single_timeline(presenter, timeline_status(succeeded), label, details);
+    details.extend(provider_receipt_details(result.provider.as_ref()));
+    // «Пропущено» — не стандартный исход, у него своя подпись; в остальных случаях
+    // слово выбирает presenter.
+    match skipped_label {
+        Some(label) => single_timeline(presenter, timeline_status(succeeded), label, details),
+        None => single_timeline_outcome(presenter, timeline_status(succeeded), "Dump", details),
+    }
 }
 
 fn render_convert_text(result: &ConvertResult, presenter: &Presenter, succeeded: bool) {
-    let label = if succeeded {
-        if result.message.is_some() {
-            "Convert completed with warnings"
-        } else {
-            "Convert completed successfully"
-        }
-    } else {
-        "Convert failed"
-    };
     let mut details = vec![
         format!("direction: {}", render_convert_direction(result.direction)),
         format!(
@@ -3564,25 +3924,19 @@ fn render_convert_text(result: &ConvertResult, presenter: &Presenter, succeeded:
                 .map(|message| bracketed_detail(prefix, message)),
         );
     }
-    single_timeline(presenter, timeline_status(succeeded), label, details);
+    single_timeline_outcome(presenter, timeline_status(succeeded), "Convert", details);
 }
 
 fn render_artifacts_text(result: &ArtifactsResult, presenter: &Presenter, succeeded: bool) {
     let source_set = result.source_set.as_deref().unwrap_or("<unresolved>");
     let message = execution_message(&result.execution);
-    let warning = succeeded
-        && (message.is_some()
-            || execution_has_warning(
-                &result.execution.diagnostics,
-                &result.execution.interruptions,
-            ));
-    let label = if !succeeded {
-        "Artifacts export failed"
-    } else if warning {
-        "Artifacts export completed with warnings"
-    } else {
-        "Artifacts export completed successfully"
-    };
+    // Рендерер решает, какие подробности показать; слово исхода выбирает presenter.
+    let show_signals = !succeeded
+        || message.is_some()
+        || execution_has_warning(
+            &result.execution.diagnostics,
+            &result.execution.interruptions,
+        );
     let mut details = vec![
         format!("source-set: {source_set}"),
         format!("mode: {}", render_artifact_mode(result.mode)),
@@ -3616,7 +3970,7 @@ fn render_artifacts_text(result: &ArtifactsResult, presenter: &Presenter, succee
             details.push(render_artifact_ref("artifact", artifact));
         }
     }
-    if !succeeded || warning {
+    if show_signals {
         let prefix = if succeeded { "warning" } else { "error" };
         append_if_present(
             &mut details,
@@ -3642,7 +3996,13 @@ fn render_artifacts_text(result: &ArtifactsResult, presenter: &Presenter, succee
             details.push(render_artifact_ref("diagnostic", artifact));
         }
     }
-    single_timeline(presenter, timeline_status(succeeded), label, details);
+    details.extend(provider_receipt_details(result.provider.as_ref()));
+    single_timeline_outcome(
+        presenter,
+        timeline_status(succeeded),
+        "Artifacts export",
+        details,
+    );
 }
 
 fn render_convert_direction(direction: ConvertDirection) -> &'static str {
@@ -3660,17 +4020,23 @@ fn render_convert_scope(scope: ConvertScope, source_set: Option<&str>) -> String
     }
 }
 
-fn render_syntax_text(result: &SyntaxCheckResult, presenter: &Presenter) {
-    let succeeded = matches!(result.status, SyntaxCheckStatus::Clean);
-    let label = match result.status {
-        SyntaxCheckStatus::Clean => {
-            format!("Syntax check {} completed successfully", result.check_name)
-        }
-        SyntaxCheckStatus::IssuesFound => {
-            format!("Syntax check {} found issues", result.check_name)
-        }
-        SyntaxCheckStatus::ToolFailed => format!("Syntax check {} failed", result.check_name),
+fn render_syntax_text(result: &SyntaxCheckResult, presenter: &Presenter, requested: Requested) {
+    // Превью — исход успешный: проверка не выполнялась, значит и приговора нет.
+    let succeeded = matches!(
+        result.status,
+        SyntaxCheckStatus::Clean | SyntaxCheckStatus::Planned
+    );
+    // «Найдены замечания» — не стандартный исход, у него своя подпись. У остальных
+    // слово выбирает presenter. Непрочитанный журнал больше не остаётся одним
+    // предупреждением среди подробностей: он делает вердикт неизвестным, то есть
+    // `tool_failed`, и подпись следует за знаком сама.
+    let subject = if requested == Requested::Preview {
+        format!("Syntax check {} preview", result.check_name)
+    } else {
+        format!("Syntax check {}", result.check_name)
     };
+    let issues_label = matches!(result.status, SyntaxCheckStatus::IssuesFound)
+        .then(|| format!("{subject} found issues"));
     let mut details = vec![format!(
         "status: {} (exit {}, errors {}, warnings {}, info {}, duration {} ms)",
         render_syntax_status(result.status),
@@ -3680,6 +4046,17 @@ fn render_syntax_text(result: &SyntaxCheckResult, presenter: &Presenter) {
         result.summary.info,
         result.duration_ms
     )];
+
+    append_if_present(
+        &mut details,
+        result
+            .message
+            .as_deref()
+            .map(|message| bracketed_detail("status", message)),
+    );
+    if !result.provider_dispatched {
+        details.push("provider dispatched: false".to_owned());
+    }
 
     if !succeeded {
         for issue in &result.issues {
@@ -3715,7 +4092,11 @@ fn render_syntax_text(result: &SyntaxCheckResult, presenter: &Presenter) {
         );
     }
 
-    single_timeline(presenter, timeline_status(succeeded), label, details);
+    details.extend(provider_receipt_details(result.provider.as_ref()));
+    match issues_label {
+        Some(label) => single_timeline(presenter, timeline_status(succeeded), label, details),
+        None => single_timeline_outcome(presenter, timeline_status(succeeded), subject, details),
+    }
 }
 
 fn render_syntax_status(status: SyntaxCheckStatus) -> &'static str {
@@ -3723,28 +4104,32 @@ fn render_syntax_status(status: SyntaxCheckStatus) -> &'static str {
         SyntaxCheckStatus::Clean => "clean",
         SyntaxCheckStatus::IssuesFound => "issues_found",
         SyntaxCheckStatus::ToolFailed => "tool_failed",
+        SyntaxCheckStatus::Planned => "planned",
     }
 }
 
-fn render_launch_text(result: &LaunchResult, presenter: &Presenter) {
-    let label = if result.provider_dispatched {
-        "Launch completed successfully"
+fn render_launch_text(result: &LaunchResult, presenter: &Presenter, requested: Requested) {
+    let subject = if requested == Requested::Preview {
+        "Launch preview"
     } else {
-        "Launch preview completed successfully"
+        "Launch"
     };
-    render_launch_text_with_status(result, presenter, TimelineStatus::Succeeded, label);
+    render_launch_text_with_status(result, presenter, TimelineStatus::Succeeded, subject);
 }
 
 fn render_launch_text_with_status(
     result: &LaunchResult,
     presenter: &Presenter,
     status: TimelineStatus,
-    label: &'static str,
+    subject: &'static str,
 ) {
     let mut details = vec![
         format!("mode: {}", render_launch_mode(&result.mode)),
         format!("binary: {}", result.binary.display()),
     ];
+    if let Some(url) = result.url.as_deref() {
+        details.push(format!("url: {url}"));
+    }
     append_if_present(
         &mut details,
         result
@@ -3778,7 +4163,7 @@ fn render_launch_text_with_status(
             ));
         }
     }
-    single_timeline(presenter, status, label, details);
+    single_timeline_outcome(presenter, status, subject, details);
 }
 
 fn render_launch_mode(mode: &LaunchMode) -> &'static str {
@@ -3788,29 +4173,22 @@ fn render_launch_mode(mode: &LaunchMode) -> &'static str {
         LaunchMode::Thick => "толстый клиент",
         LaunchMode::Ordinary => "обычное приложение",
         LaunchMode::Mcp => "клиентский MCP-сервер",
+        LaunchMode::Web => "веб-клиент",
     }
 }
 
 fn render_test_text(result: &TestRunResult, presenter: &Presenter) {
     let diagnostics = visible_test_diagnostics(result);
     let succeeded = result.execution.is_ok();
-    let has_warning = succeeded
-        && (!result.warnings.is_empty()
-            || test_has_actionable_success_signal(result)
-            || !result.execution.interruptions.is_empty()
-            || result
-                .steps
-                .iter()
-                .any(|step| !matches!(step.status, ExecutionStepStatus::Succeeded)));
-    let label = if succeeded {
-        if has_warning {
-            "Tests completed with warnings"
-        } else {
-            "Tests completed successfully"
-        }
-    } else {
-        "Tests failed"
-    };
+    // Рендерер решает, показывать ли сигналы шагов; слово исхода выбирает presenter.
+    let show_signals = !succeeded
+        || !result.warnings.is_empty()
+        || test_has_actionable_success_signal(result)
+        || !result.execution.interruptions.is_empty()
+        || result
+            .steps
+            .iter()
+            .any(|step| !matches!(step.status, ExecutionStepStatus::Succeeded));
     let mut details = vec![format!("target: {}", render_test_target(&result.target))];
     if let Some(report) = test_report(result) {
         details.push(format!(
@@ -3823,7 +4201,7 @@ fn render_test_text(result: &TestRunResult, presenter: &Presenter) {
         ));
     }
 
-    if !succeeded || has_warning {
+    if show_signals {
         append_step_signals(&mut details, &result.steps);
         append_report_failures(&mut details, result);
         append_error_details(&mut details, &result.execution.errors);
@@ -3835,7 +4213,7 @@ fn render_test_text(result: &TestRunResult, presenter: &Presenter) {
         append_retained_test_artifacts(&mut details, result);
     }
 
-    single_timeline(presenter, timeline_status(succeeded), label, details);
+    single_timeline_outcome(presenter, timeline_status(succeeded), "Tests", details);
 }
 
 fn render_test_target(target: &TestTarget) -> String {
@@ -3914,27 +4292,29 @@ fn status_label(status: &TestStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_load_envelope, command_name, execute_command, infobase_pre_dispatch_execution_phase,
-        map_artifacts_request_with_config, map_build_request, map_designer_config_request,
-        map_dump_request, map_extensions_request, map_launch_request, map_load_request,
-        map_syntax_request, map_test_request,
+        append_interruptions, build_load_envelope, command_name, execute_command,
+        infobase_pre_dispatch_execution_phase, map_artifacts_request_with_config,
+        map_build_request, map_designer_config_request, map_dump_request, map_extensions_request,
+        map_launch_request, map_load_request, map_syntax_request, map_test_request,
     };
     use crate::cli::args::{
         ArtifactsArgs, BuildArgs, Command, DesignerConfigSyntaxArgs, DesignerModulesSyntaxArgs,
         DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs, InfobaseArgs, InfobaseCommand,
         InfobaseConfigurationArgs, InfobaseConfigurationCommand, InfobaseConfigurationExportArgs,
-        InfobaseDumpArgs, InitArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs, SyntaxArgs,
-        SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope, TestVaArgs,
-        TestYaxunitArgs,
+        InfobaseDumpArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs, SyntaxArgs, SyntaxTarget,
+        TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope, TestVaArgs, TestYaxunitArgs,
     };
     use crate::cli::output::pre_dispatch_error_envelope;
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, SourceFormat, SourceSetConfig, SourceSetPurpose,
-        TestsConfig, ToolsConfig,
+        AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
+        ToolsConfig,
     };
     use crate::domain::artifacts::ArtifactBuildMode;
-    use crate::domain::execution::{ExecutionOutcome, ExecutionStatus};
-    use crate::domain::infobase_export::ExportPhase;
+    use crate::domain::execution::{
+        ExecutionInterruptionDetails, ExecutionInterruptionKind, ExecutionInterruptionPhase,
+        ExecutionOutcome, ExecutionStatus,
+    };
+    use crate::domain::infobase_export::InfobaseTransferPhase;
     use crate::domain::load::{
         CompatibilityState, LoadExecutionMetadata, LoadMode, LoadResult, LoadTargetKind,
     };
@@ -3953,6 +4333,27 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
+
+    #[test]
+    fn interruption_without_message_is_rendered_from_its_phase() {
+        let mut details = Vec::new();
+        append_interruptions(
+            &mut details,
+            &[
+                ExecutionInterruptionDetails::new(ExecutionInterruptionKind::Cancelled, true)
+                    .with_phase(ExecutionInterruptionPhase::ProviderCommand),
+                ExecutionInterruptionDetails::new(ExecutionInterruptionKind::TimedOut, false),
+            ],
+        );
+
+        assert_eq!(
+            details,
+            vec![
+                "[warning] deferred cancelled interruption during provider_command".to_owned(),
+                "[warning] timed_out interruption during unknown_phase".to_owned(),
+            ]
+        );
+    }
 
     #[test]
     fn maps_test_module_request() {
@@ -4090,99 +4491,151 @@ mod tests {
         assert_eq!(no_build_request.build_policy, TestBuildPolicy::Skip);
     }
 
+    /// Формат проекта выбирает ветку и без подкоманды: у EDT это проверка проекта, и
+    /// `--project` доезжает до неё.
     #[test]
-    fn maps_syntax_request() {
-        let request = map_syntax_request(&SyntaxArgs {
-            target: SyntaxTarget::DesignerModules(DesignerModulesSyntaxArgs {
-                thin_client: true,
-                web_client: false,
-                server: true,
-                external_connection: false,
-                thick_client_ordinary_application: false,
-                mobile_app_client: false,
-                mobile_app_server: false,
-                mobile_client: false,
-                extended_modules_check: true,
-                extension: Some("Ext".to_owned()),
-                all_extensions: false,
-            }),
-        })
+    fn maps_a_bare_check_to_the_edt_branch_by_format() {
+        let work = tempfile::tempdir().expect("tempdir");
+        let mut config = sample_config(work.path());
+        config.format = SourceFormat::Edt;
+
+        let request = map_syntax_request(
+            &config,
+            &SyntaxArgs {
+                modes: DesignerConfigSyntaxArgs::default(),
+                projects: vec!["main".to_owned()],
+                target: None,
+            },
+            false,
+        )
         .expect("request");
 
         assert!(matches!(
             request.target,
-            SyntaxTargetRequest::DesignerModules(ref modules)
-                if modules.has_client_scope(DesignerClientScope::ThinClient)
-                    && modules.has_client_scope(DesignerClientScope::Server)
-                    && modules.extension_scope().extension() == Some("Ext")
+            SyntaxTargetRequest::Edt { ref projects } if projects == &["main".to_owned()]
+        ));
+    }
+
+    /// Прежнее имя `designer-modules` исполняется `/CheckConfig`: режимы доезжают, а
+    /// проверок конфигурации в запросе нет.
+    #[test]
+    fn maps_syntax_request() {
+        let work = tempfile::tempdir().expect("tempdir");
+        let config = sample_config(work.path());
+        let request = map_syntax_request(
+            &config,
+            &SyntaxArgs {
+                modes: DesignerConfigSyntaxArgs::default(),
+                projects: Vec::new(),
+                target: Some(SyntaxTarget::DesignerModules(DesignerModulesSyntaxArgs {
+                    thin_client: true,
+                    web_client: false,
+                    server: true,
+                    external_connection: false,
+                    thick_client_ordinary_application: false,
+                    mobile_app_client: false,
+                    mobile_app_server: false,
+                    mobile_client: false,
+                    extended_modules_check: true,
+                    extension: Some("Ext".to_owned()),
+                    all_extensions: false,
+                })),
+            },
+            false,
+        )
+        .expect("request");
+
+        assert!(matches!(
+            request.target,
+            SyntaxTargetRequest::DesignerConfig(ref modes)
+                if modes.has_client_scope(DesignerClientScope::ThinClient)
+                    && modes.has_client_scope(DesignerClientScope::Server)
+                    && modes.extension_scope().extension() == Some("Ext")
+                    && !modes.has_check(crate::use_cases::request::DesignerConfigCheck::UnreferenceProcedures)
         ));
     }
 
     #[test]
     fn maps_build_dump_launch_and_load_requests() {
         assert!(
-            map_build_request(&BuildArgs {
-                dry_run: false,
-                full_rebuild: true,
-                source_set: None,
-            })
+            map_build_request(
+                &BuildArgs {
+                    full_rebuild: true,
+                    source_set: None,
+                },
+                false,
+            )
             .full_rebuild
         );
         assert_eq!(
-            map_extensions_request(&ExtensionsArgs {
-                command: None,
-                names: vec!["client_mcp".to_owned()],
-            })
+            map_extensions_request(
+                &ExtensionsArgs {
+                    command: None,
+                    names: vec!["client_mcp".to_owned()],
+                    installed_names: vec![],
+                },
+                false,
+            )
             .names,
             vec!["client_mcp"]
         );
         assert_eq!(
-            map_dump_request(&DumpArgs {
-                dry_run: false,
-                mode: "incremental".to_owned(),
-                source_set: Some("main".to_owned()),
-                extension: Some("Ext".to_owned()),
-                objects: vec!["Catalog.Item".to_owned()],
-            })
+            map_dump_request(
+                &DumpArgs {
+                    discard_uncommitted: false,
+                    mode: "incremental".to_owned(),
+                    source_set: Some("main".to_owned()),
+                    extension: Some("Ext".to_owned()),
+                    objects: vec!["Catalog.Item".to_owned()],
+                },
+                false,
+            )
             .expect("request")
             .mode,
             DumpModeRequest::Incremental
         );
         assert_eq!(
-            map_dump_request(&DumpArgs {
-                dry_run: false,
-                mode: "incremental".to_owned(),
-                source_set: Some("main".to_owned()),
-                extension: Some("Ext".to_owned()),
-                objects: vec!["Catalog.Item".to_owned()],
-            })
+            map_dump_request(
+                &DumpArgs {
+                    discard_uncommitted: false,
+                    mode: "incremental".to_owned(),
+                    source_set: Some("main".to_owned()),
+                    extension: Some("Ext".to_owned()),
+                    objects: vec!["Catalog.Item".to_owned()],
+                },
+                false,
+            )
             .expect("request")
             .source_set
             .as_deref(),
             Some("main")
         );
         assert_eq!(
-            map_launch_request(&LaunchArgs {
-                target: "thin".to_owned(),
-                mcp_scenario: None,
-                mcp_mode: None,
-                launch: DirectLaunchOptionsArgs {
-                    common: LaunchOptionsArgs {
-                        c: Some("Command".to_owned()),
-                        execute: Some("tool.epf".to_owned()),
-                        use_privileged_mode: true,
-                        output: Some("launch.log".to_owned()),
-                        raw_keys: vec!["/WA-".to_owned(), "/DisplayAllFunctions".to_owned()],
+            map_launch_request(
+                &LaunchArgs {
+                    via: None,
+                    target: "thin".to_owned(),
+                    mcp_scenario: None,
+                    mcp_mode: None,
+                    launch: DirectLaunchOptionsArgs {
+                        common: LaunchOptionsArgs {
+                            c: Some("Command".to_owned()),
+                            execute: Some("tool.epf".to_owned()),
+                            use_privileged_mode: true,
+                            output: Some("launch.log".to_owned()),
+                            raw_keys: vec!["/WA-".to_owned(), "/DisplayAllFunctions".to_owned()],
+                        },
+                        ..DirectLaunchOptionsArgs::default()
                     },
-                    ..DirectLaunchOptionsArgs::default()
+                    mcp_config: None,
+                    mcp_port: None,
+                    wait_ready: false,
                 },
-                mcp_config: None,
-                mcp_port: None,
-                wait_ready: false,
-                dry_run: false,
-            })
+                false,
+            )
             .expect("request"),
             LaunchRequest {
+                via: None,
                 target: LaunchTargetRequest::thin_client(),
                 launch: LaunchOptions {
                     c: Some("Command".to_owned()),
@@ -4198,48 +4651,58 @@ mod tests {
             }
         );
         assert_eq!(
-            map_launch_request(&LaunchArgs {
-                target: "ordinary".to_owned(),
-                mcp_scenario: None,
-                mcp_mode: None,
-                launch: DirectLaunchOptionsArgs::default(),
-                mcp_config: None,
-                mcp_port: None,
-                wait_ready: false,
-                dry_run: false,
-            })
+            map_launch_request(
+                &LaunchArgs {
+                    via: None,
+                    target: "ordinary".to_owned(),
+                    mcp_scenario: None,
+                    mcp_mode: None,
+                    launch: DirectLaunchOptionsArgs::default(),
+                    mcp_config: None,
+                    mcp_port: None,
+                    wait_ready: false,
+                },
+                false,
+            )
             .expect("request")
             .target,
             LaunchTargetRequest::ordinary_application()
         );
         assert_eq!(
-            map_launch_request(&LaunchArgs {
-                target: "thin".to_owned(),
-                mcp_scenario: None,
-                mcp_mode: None,
-                launch: DirectLaunchOptionsArgs::default(),
-                mcp_config: None,
-                mcp_port: None,
-                wait_ready: false,
-                dry_run: false,
-            })
+            map_launch_request(
+                &LaunchArgs {
+                    via: None,
+                    target: "thin".to_owned(),
+                    mcp_scenario: None,
+                    mcp_mode: None,
+                    launch: DirectLaunchOptionsArgs::default(),
+                    mcp_config: None,
+                    mcp_port: None,
+                    wait_ready: false,
+                },
+                false,
+            )
             .expect("request")
             .target,
             LaunchTargetRequest::thin_client()
         );
         assert_eq!(
-            map_launch_request(&LaunchArgs {
-                target: "mcp".to_owned(),
-                mcp_scenario: Some("va".to_owned()),
-                mcp_mode: Some("ordinary".to_owned()),
-                launch: DirectLaunchOptionsArgs::default(),
-                mcp_config: Some("C:\\tmp\\mcp-conf.json".to_owned()),
-                mcp_port: Some(123),
-                wait_ready: true,
-                dry_run: false,
-            })
+            map_launch_request(
+                &LaunchArgs {
+                    via: None,
+                    target: "mcp".to_owned(),
+                    mcp_scenario: Some("va".to_owned()),
+                    mcp_mode: Some("ordinary".to_owned()),
+                    launch: DirectLaunchOptionsArgs::default(),
+                    mcp_config: Some("C:\\tmp\\mcp-conf.json".to_owned()),
+                    mcp_port: Some(123),
+                    wait_ready: true,
+                },
+                false,
+            )
             .expect("request"),
             LaunchRequest {
+                via: None,
                 target: LaunchTargetRequest::client_mcp_with_mode(ClientMcpMode::Ordinary),
                 launch: LaunchOptions {
                     c: None,
@@ -4259,14 +4722,16 @@ mod tests {
                 dry_run: false,
             }
         );
-        let load = map_load_request(&LoadArgs {
-            dry_run: false,
-            path: "dist/main.cf".to_owned(),
-            mode: "merge".to_owned(),
-            settings: Some("merge.xml".to_owned()),
-            vendor_name: None,
-            extension: Some("Ext".to_owned()),
-        })
+        let load = map_load_request(
+            &LoadArgs {
+                path: "dist/main.cf".to_owned(),
+                mode: "merge".to_owned(),
+                settings: Some("merge.xml".to_owned()),
+                vendor_name: None,
+                extension: Some("Ext".to_owned()),
+            },
+            false,
+        )
         .expect("load request");
         assert_eq!(load.mode, LoadMode::Merge);
         assert_eq!(load.artifact_path, "dist/main.cf");
@@ -4275,11 +4740,11 @@ mod tests {
         let artifacts = map_artifacts_request_with_config(
             &sample_config(Path::new("/tmp/work")),
             &ArtifactsArgs {
-                dry_run: false,
                 output: "dist/ext.cfe".to_owned(),
                 source_set: Some("ext-sales".to_owned()),
                 extension: Some("SalesAddon".to_owned()),
             },
+            false,
         )
         .expect("request");
         assert_eq!(artifacts.mode, ArtifactsModeRequest::ExtensionCfe);
@@ -4292,11 +4757,11 @@ mod tests {
         let artifacts = map_artifacts_request_with_config(
             &sample_config(Path::new("/tmp/work")),
             &ArtifactsArgs {
-                dry_run: false,
                 output: "dist/main.cf".to_owned(),
                 source_set: Some("main".to_owned()),
                 extension: Some("   ".to_owned()),
             },
+            false,
         )
         .expect("request");
 
@@ -4307,24 +4772,30 @@ mod tests {
 
     #[test]
     fn rejects_invalid_mode_mapping() {
-        let dump_error = map_dump_request(&DumpArgs {
-            dry_run: false,
-            mode: "garbage".to_owned(),
-            source_set: None,
-            extension: None,
-            objects: vec![],
-        })
+        let dump_error = map_dump_request(
+            &DumpArgs {
+                discard_uncommitted: false,
+                mode: "garbage".to_owned(),
+                source_set: None,
+                extension: None,
+                objects: vec![],
+            },
+            false,
+        )
         .expect_err("dump mode should be rejected");
-        let launch_error = map_launch_request(&LaunchArgs {
-            target: "garbage".to_owned(),
-            mcp_scenario: None,
-            mcp_mode: None,
-            launch: DirectLaunchOptionsArgs::default(),
-            mcp_config: None,
-            mcp_port: None,
-            wait_ready: false,
-            dry_run: false,
-        })
+        let launch_error = map_launch_request(
+            &LaunchArgs {
+                via: None,
+                target: "garbage".to_owned(),
+                mcp_scenario: None,
+                mcp_mode: None,
+                launch: DirectLaunchOptionsArgs::default(),
+                mcp_config: None,
+                mcp_port: None,
+                wait_ready: false,
+            },
+            false,
+        )
         .expect_err("launch mode should be rejected");
 
         assert_eq!(dump_error.kind(), UseCaseErrorKind::Validation);
@@ -4333,14 +4804,16 @@ mod tests {
 
     #[test]
     fn rejects_invalid_load_mode_mapping() {
-        let error = map_load_request(&LoadArgs {
-            dry_run: false,
-            path: "dist/main.cf".to_owned(),
-            mode: "garbage".to_owned(),
-            settings: None,
-            vendor_name: None,
-            extension: None,
-        })
+        let error = map_load_request(
+            &LoadArgs {
+                path: "dist/main.cf".to_owned(),
+                mode: "garbage".to_owned(),
+                settings: None,
+                vendor_name: None,
+                extension: None,
+            },
+            false,
+        )
         .expect_err("load mode should be rejected");
 
         assert_eq!(error.kind(), UseCaseErrorKind::Validation);
@@ -4425,20 +4898,17 @@ mod tests {
 
     #[test]
     fn resolves_command_name() {
-        assert_eq!(
-            command_name(&Command::Init(InitArgs { dry_run: false })),
-            CommandName::Init
-        );
+        assert_eq!(command_name(&Command::Init), CommandName::Init);
         assert_eq!(
             command_name(&Command::Extensions(ExtensionsArgs {
                 command: None,
                 names: vec![],
+                installed_names: vec![],
             })),
             CommandName::Extensions
         );
         assert_eq!(
             command_name(&Command::Build(BuildArgs {
-                dry_run: false,
                 full_rebuild: false,
                 source_set: None,
             })),
@@ -4446,7 +4916,6 @@ mod tests {
         );
         assert_eq!(
             command_name(&Command::Load(LoadArgs {
-                dry_run: false,
                 path: "dist/main.cf".to_owned(),
                 mode: "load".to_owned(),
                 settings: None,
@@ -4457,7 +4926,6 @@ mod tests {
         );
         assert_eq!(
             command_name(&Command::Artifacts(ArtifactsArgs {
-                dry_run: false,
                 output: "dist/main.cf".to_owned(),
                 source_set: None,
                 extension: None,
@@ -4470,10 +4938,12 @@ mod tests {
         AppConfig {
             base_path: work_path.join("base"),
             work_path: work_path.to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![
                 SourceSetConfig {
                     name: "main".to_owned(),
@@ -4512,12 +4982,12 @@ mod tests {
         let error = execute_command(
             &config,
             &Command::Build(BuildArgs {
-                dry_run: false,
                 full_rebuild: true,
                 source_set: None,
             }),
             None,
             &presenter,
+            false,
             false,
         )
         .expect_err("busy workspace");
@@ -4551,6 +5021,7 @@ mod tests {
             }),
             None,
             &presenter,
+            false,
             false,
         )
         .expect_err("busy workspace");
@@ -4597,7 +5068,6 @@ mod tests {
                             state: "working".to_owned(),
                             extension: None,
                             output: dir.path().join("main.cf").display().to_string(),
-                            dry_run: false,
                         },
                     ),
                 }),
@@ -4605,13 +5075,12 @@ mod tests {
             Command::Infobase(InfobaseArgs {
                 command: InfobaseCommand::Dump(InfobaseDumpArgs {
                     output: dir.path().join("base.dt").display().to_string(),
-                    dry_run: false,
                 }),
             }),
         ];
 
         for command in commands {
-            let error = execute_command(&config, &command, None, &presenter, false)
+            let error = execute_command(&config, &command, None, &presenter, false, false)
                 .expect_err("busy workspace");
             assert_eq!(error.kind(), UseCaseErrorKind::WorkspaceBusy);
             assert!(error.to_string().contains("workspace"));
@@ -4633,6 +5102,7 @@ mod tests {
         let error = execute_command(
             &config,
             &Command::Launch(LaunchArgs {
+                via: None,
                 target: "garbage".to_owned(),
                 mcp_scenario: None,
                 mcp_mode: None,
@@ -4640,10 +5110,10 @@ mod tests {
                 mcp_config: None,
                 mcp_port: None,
                 wait_ready: false,
-                dry_run: false,
             }),
             None,
             &presenter,
+            false,
             false,
         )
         .expect_err("invalid mode");
@@ -4679,6 +5149,7 @@ mod tests {
             None,
             &presenter,
             false,
+            false,
         )
         .expect_err("invalid module");
 
@@ -4704,13 +5175,13 @@ mod tests {
         let _ = execute_command(
             &config,
             &Command::Build(BuildArgs {
-                dry_run: false,
                 full_rebuild: true,
                 source_set: None,
             }),
             None,
             &presenter,
             true,
+            false,
         )
         .expect_err("busy workspace");
 
@@ -4721,9 +5192,9 @@ mod tests {
     fn pre_dispatch_json_error_keeps_command_identity() {
         let error = UseCaseError::new(UseCaseErrorKind::Runtime, "workspace is busy");
         for (command, expected) in [
-            (CommandName::Build, "build"),
-            (CommandName::Load, "load"),
-            (CommandName::Dump, "dump"),
+            (CommandName::Build, "push"),
+            (CommandName::Load, "upload"),
+            (CommandName::Dump, "pull"),
             (CommandName::Test, "test"),
             (CommandName::Artifacts, "make"),
             (CommandName::Launch, "launch"),
@@ -4741,21 +5212,21 @@ mod tests {
     fn infobase_pre_dispatch_phase_distinguishes_lock_from_workspace_preparation() {
         assert_eq!(
             infobase_pre_dispatch_execution_phase(false),
-            ExportPhase::WorkspaceLock
+            InfobaseTransferPhase::WorkspaceLock
         );
         assert_eq!(
             infobase_pre_dispatch_execution_phase(true),
-            ExportPhase::WorkspacePreparation
+            InfobaseTransferPhase::WorkspacePreparation
         );
     }
 
     #[test]
     fn pre_dispatch_json_error_supports_config_init_identity() {
         let error = UseCaseError::new(UseCaseErrorKind::Validation, "bad config init request");
-        let envelope = pre_dispatch_error_envelope("config init", &error);
+        let envelope = pre_dispatch_error_envelope("init", &error);
         let json = serde_json::to_value(envelope).expect("json");
 
-        assert_eq!(json["command"], "config init");
+        assert_eq!(json["command"], "init");
         assert_eq!(json["data"]["message"], "bad config init request");
         assert_eq!(json["error"]["code"], "invalid_argument");
     }
@@ -4763,6 +5234,7 @@ mod tests {
     #[test]
     fn load_json_message_preserves_success_text_and_all_diagnostics() {
         let result = LoadResult {
+            provider: None,
             provider_dispatched: true,
             mode: LoadMode::Load,
             artifact_path: PathBuf::from("main.cf"),
@@ -4782,7 +5254,8 @@ mod tests {
                 }),
         };
 
-        let json = serde_json::to_value(build_load_envelope(&result)).expect("json");
+        let json = serde_json::to_value(build_load_envelope(&result, super::Requested::Apply))
+            .expect("json");
         let message = json["data"]["message"].as_str().expect("message");
 
         assert_eq!(json["ok"], true);

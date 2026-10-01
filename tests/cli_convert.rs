@@ -269,7 +269,7 @@ fn write_config(
     platform_version: Option<&str>,
 ) {
     let mut config = format!(
-        "workPath: '{}'\nformat: {format}\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n",
+        "workPath: '{}'\nformat: {format}\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n",
         work_path.display(),
     );
     for source_set in source_sets {
@@ -713,7 +713,7 @@ fn convert_single_extension_source_set_infers_base_project_name_from_configurati
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("● convert: base project import"));
+    assert!(stdout.contains("◌ convert: base project import"));
     assert!(!stdout.contains("started_at: "));
     assert!(stdout.contains("[EDT] importing Designer files for base project name"));
     assert!(

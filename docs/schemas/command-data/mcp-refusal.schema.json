@@ -1,0 +1,41 @@
+{
+  "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/mcp-refusal.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`data` отказа адаптера MCP.\n\nОтказ случается до сценария: вход клиента не разобран, команда не начиналась. Форма\nназывает инструмент, по которому пришёл вызов, и — когда адаптер это знает — поле\nвхода, из-за которого вызов отклонён.",
+  "properties": {
+    "errors": {
+      "items": {
+        "type": "string"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "field": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "message": {
+      "type": "string"
+    },
+    "mode": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tool": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "message",
+    "tool"
+  ],
+  "title": "McpRefusalData",
+  "type": "object"
+}

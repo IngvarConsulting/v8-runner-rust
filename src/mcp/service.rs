@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use crate::command_envelope::{test_envelope, Envelope, EnvelopeError};
 use crate::config::model::AppConfig;
+use crate::domain::launch::LaunchVia;
 use crate::domain::runner::{
     ExecutionPolicy, LaunchClientModeRequest, LaunchOptions, RunnerKind, RunnerOutputFormat,
     RunnerProfile, ScenarioExecutionRequest,
@@ -23,15 +24,15 @@ use crate::mcp::request::{
 use crate::support::adapter_input::{
     normalize_edt_projects, normalize_extension_scope, normalize_optional_string,
     normalize_required_string, parse_launch_target, parse_optional_dump_mode, LaunchModeAliases,
+    RawValueError, RawValueProblem,
 };
 use crate::support::path::is_safe_path_segment;
 use crate::use_cases::context::{CommandName, ExecutionContext, ExecutionTransport};
 use crate::use_cases::request::{
     effective_test_timeouts, BuildRequest, ClientMcpAddonRequest, ClientMcpMode,
     ClientMcpOptionsRequest, DesignerClientScope, DesignerClientScopes, DesignerConfigCheck,
-    DesignerConfigChecks, DesignerConfigSyntaxRequest, DesignerModulesSyntaxRequest,
-    DumpModeRequest, DumpRequest, LaunchRequest, SyntaxRequest, SyntaxTargetRequest,
-    TestBuildPolicy, TestRequest, TestScopeRequest,
+    DesignerConfigChecks, DesignerConfigSyntaxRequest, DumpModeRequest, DumpRequest, LaunchRequest,
+    SyntaxRequest, SyntaxTargetRequest, TestBuildPolicy, TestRequest, TestScopeRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult};
 
@@ -118,15 +119,13 @@ where
         let module_name =
             normalize_required_string(&request.module_name, "module_name").map_err(|error| {
                 let message = error.message().to_owned();
-                let business_error = McpBusinessError::from_use_case(&error);
+                let business_error = McpBusinessError::from_use_case(&UseCaseError::from(error));
                 McpServiceError::Business(McpBusinessFailure::new(
                     business_error.clone(),
                     adapter_error_envelope(
                         CommandName::Test,
-                        "run_module_tests",
-                        &message,
+                        McpRefusalData::new("run_module_tests", &message).with_field("module_name"),
                         business_error,
-                        json!({ "field": "module_name" }),
                     ),
                 ))
             })?;
@@ -166,7 +165,7 @@ where
             mode: parse_optional_dump_mode(request.mode.as_deref(), DumpModeRequest::Incremental)
                 .map_err(|error| {
                 let message = error.message().to_owned();
-                let business_error = raw_value_business_error(&error, "dump mode");
+                let business_error = raw_value_business_error(&error);
                 let mode = request
                     .mode
                     .as_deref()
@@ -182,16 +181,20 @@ where
                     business_error.clone(),
                     adapter_error_envelope(
                         CommandName::Dump,
-                        "dump_config",
-                        &data_message,
+                        McpRefusalData::new("dump_config", &data_message)
+                            .with_field("mode")
+                            .with_mode(mode)
+                            .with_errors(vec![message]),
                         business_error,
-                        json!({ "field": "mode", "mode": mode, "errors": [message] }),
                     ),
                 ))
             })?,
             source_set: None,
             extension: normalize_optional_string(request.extension.as_deref()),
             objects: request.objects.clone(),
+            // У MCP согласия взять неоткуда: инструмент работает без человека
+            // у экрана, а уничтожение незафиксированной работы требует его решения.
+            discard_uncommitted: false,
         };
 
         match self
@@ -278,6 +281,8 @@ where
                     invalid_syntax_request(error, "check_syntax_designer_config")
                 })?,
             ),
+            // Превью сервер не предлагает: ключа нет в опубликованной поверхности.
+            dry_run: false,
         };
 
         match self
@@ -309,11 +314,12 @@ where
         let context = execution_context(call_context, CommandName::Syntax)
             .map_err(McpServiceError::Internal)?;
         let use_case_request = SyntaxRequest {
-            target: SyntaxTargetRequest::DesignerModules(
+            target: SyntaxTargetRequest::DesignerConfig(
                 map_designer_modules_request(request).map_err(|error| {
                     invalid_syntax_request(error, "check_syntax_designer_modules")
                 })?,
             ),
+            dry_run: false,
         };
 
         match self
@@ -572,6 +578,8 @@ fn map_launch_app_request(
                 addon: map_mcp_launch_addon(request.mcp_scenario.as_deref())?,
                 wait_ready: request.wait_ready.unwrap_or(false),
             }),
+            via: map_launch_via_input(request.via.as_deref())
+                .map_err(|error| launch_adapter_business_error(error, "via"))?,
             // Preview is a CLI capability; the MCP surface exposes no preview input,
             // exactly as it does not for `infobase --dry-run`.
             dry_run: false,
@@ -584,8 +592,7 @@ fn map_launch_app_request(
         || normalize_optional_string(request.mcp_scenario.as_deref()).is_some()
         || request.wait_ready.unwrap_or(false)
     {
-        let error = UseCaseError::new(
-            UseCaseErrorKind::Validation,
+        let error = RawValueError::unsupported(
             "mcpConfig, mcpPort, mode, mcpScenario, and waitReady are supported only when utilityType is mcp",
         );
         return Err(launch_adapter_business_error(error, "utilityType"));
@@ -597,6 +604,8 @@ fn map_launch_app_request(
         target,
         launch: LaunchOptions::default(),
         client_mcp: None,
+        via: map_launch_via_input(request.via.as_deref())
+            .map_err(|error| launch_adapter_business_error(error, "via"))?,
         dry_run: false,
     })
 }
@@ -610,10 +619,7 @@ fn map_mcp_config_path(
         .is_some_and(|path| path.contains(';'))
     {
         return Err(launch_adapter_business_error(
-            UseCaseError::new(
-                UseCaseErrorKind::Validation,
-                "mcpConfig must not contain ';' because the /C runMcp payload is semicolon-delimited",
-            ),
+            RawValueError::unsupported("mcpConfig must not contain ';' because the /C runMcp payload is semicolon-delimited"),
             "mcpConfig",
         ));
     }
@@ -623,14 +629,20 @@ fn map_mcp_config_path(
 fn map_mcp_port(port: Option<u16>) -> Result<Option<u16>, McpServiceError<McpCommandEnvelope>> {
     if port == Some(0) {
         return Err(launch_adapter_business_error(
-            UseCaseError::new(
-                UseCaseErrorKind::Validation,
-                "mcpPort must be greater than or equal to 1",
-            ),
+            RawValueError::unsupported("mcpPort must be greater than or equal to 1"),
             "mcpPort",
         ));
     }
     Ok(port)
+}
+
+fn map_launch_via_input(value: Option<&str>) -> Result<Option<LaunchVia>, RawValueError> {
+    let Some(value) = normalize_optional_string(value) else {
+        return Ok(None);
+    };
+    LaunchVia::parse(&value)
+        .map(Some)
+        .ok_or_else(|| RawValueError::unsupported("via accepts only `web` or `connection`"))
 }
 
 fn map_mcp_launch_mode(
@@ -644,10 +656,7 @@ fn map_mcp_launch_mode(
         "thick" => Ok(ClientMcpMode::Thick),
         "ordinary" => Ok(ClientMcpMode::Ordinary),
         other => Err(launch_adapter_business_error(
-            UseCaseError::new(
-                UseCaseErrorKind::Validation,
-                format!("unsupported launch mode: {other}"),
-            ),
+            RawValueError::unsupported(format!("unsupported launch mode: {other}")),
             "mode",
         )),
     }
@@ -660,10 +669,7 @@ fn map_mcp_launch_addon(
     match addon.as_deref() {
         Some("va") => Ok(Some(ClientMcpAddonRequest::VanessaAutomation)),
         Some(other) => Err(launch_adapter_business_error(
-            UseCaseError::new(
-                UseCaseErrorKind::Validation,
-                format!("unsupported launch mcpScenario: {other}"),
-            ),
+            RawValueError::unsupported(format!("unsupported launch mcpScenario: {other}")),
             "mcpScenario",
         )),
         None => Ok(None),
@@ -671,19 +677,17 @@ fn map_mcp_launch_addon(
 }
 
 fn launch_adapter_business_error(
-    error: UseCaseError,
+    error: RawValueError,
     field: &'static str,
 ) -> McpServiceError<McpCommandEnvelope> {
     let message = error.message().to_owned();
-    let business_error = raw_value_business_error(&error, field);
+    let business_error = raw_value_business_error(&error);
     McpServiceError::Business(McpBusinessFailure::new(
         business_error.clone(),
         adapter_error_envelope(
             CommandName::Launch,
-            "launch_app",
-            &message,
+            McpRefusalData::new("launch_app", &message).with_field(field),
             business_error,
-            json!({ "field": field }),
         ),
     ))
 }
@@ -699,10 +703,8 @@ fn test_adapter_business_error(
         business_error.clone(),
         adapter_error_envelope(
             CommandName::Test,
-            tool,
-            &message,
+            McpRefusalData::new(tool, &message).with_field(field),
             business_error,
-            json!({ "field": field }),
         ),
     ))
 }
@@ -715,7 +717,6 @@ fn execution_context(
         transport @ (ExecutionTransport::McpStdio | ExecutionTransport::McpHttp) => {
             Ok(ExecutionContext::new(command, transport)
                 .with_edt_timeout(call_context.edt_timeout())
-                .with_deadline(call_context.deadline())
                 .with_cancellation(call_context.cancellation()))
         }
         ExecutionTransport::Cli => Err(McpInternalError::new(format!(
@@ -799,36 +800,66 @@ fn fallback_error_envelope(
     mcp_value_envelope(Envelope::err(
         command.as_str(),
         0,
-        json!({
-            "message": error.message(),
-            "tool": tool,
-        }),
+        McpRefusalData::new(tool, error.message()),
     ))
+}
+
+/// `data` отказа адаптера MCP.
+///
+/// Отказ случается до сценария: вход клиента не разобран, команда не начиналась. Форма
+/// называет инструмент, по которому пришёл вызов, и — когда адаптер это знает — поле
+/// входа, из-за которого вызов отклонён.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct McpRefusalData {
+    pub message: String,
+    pub tool: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub errors: Option<Vec<String>>,
+}
+
+impl McpRefusalData {
+    fn new(tool: &str, message: &str) -> Self {
+        Self {
+            message: message.to_owned(),
+            tool: tool.to_owned(),
+            field: None,
+            mode: None,
+            errors: None,
+        }
+    }
+
+    fn with_field(mut self, field: &str) -> Self {
+        self.field = Some(field.to_owned());
+        self
+    }
+
+    fn with_mode(mut self, mode: String) -> Self {
+        self.mode = Some(mode);
+        self
+    }
+
+    fn with_errors(mut self, errors: Vec<String>) -> Self {
+        self.errors = Some(errors);
+        self
+    }
 }
 
 fn adapter_error_envelope(
     command: CommandName,
-    tool: &'static str,
-    message: &str,
+    data: McpRefusalData,
     business_error: McpBusinessError,
-    mut extra: Value,
 ) -> McpCommandEnvelope {
-    let mut data = json!({
-        "message": message,
-        "tool": tool,
-    });
-    if let (Some(data_object), Some(extra_object)) = (data.as_object_mut(), extra.as_object_mut()) {
-        data_object.extend(extra_object.clone());
-    }
+    let data = serde_json::to_value(data).expect("refusal data serializes");
     Envelope::err(command.as_str(), 0, data).with_error(envelope_error(&business_error))
 }
 
 fn envelope_error(error: &McpBusinessError) -> EnvelopeError {
-    EnvelopeError::new(
-        error.code.as_str(),
-        error.kind.as_str(),
-        error.message.clone(),
-    )
+    EnvelopeError::new(error.code.into(), error.kind.into(), error.message.clone())
+        .with_next(error.next.clone())
 }
 
 fn invalid_syntax_request(
@@ -841,26 +872,25 @@ fn invalid_syntax_request(
         business_error.clone(),
         adapter_error_envelope(
             CommandName::Syntax,
-            tool,
-            &message,
+            McpRefusalData::new(tool, &message).with_errors(vec![message.clone()]),
             business_error,
-            json!({ "errors": [message] }),
         ),
     ))
 }
 
-fn raw_value_business_error(error: &UseCaseError, field_name: &'static str) -> McpBusinessError {
-    let blank_message = format!("{field_name} must not be blank");
-    let code = if error.message() == blank_message {
-        crate::mcp::error::McpErrorCode::InvalidArgument
-    } else {
-        crate::mcp::error::McpErrorCode::UnsupportedValue
+/// Код отказа берётся из типизированной причины, а не из сравнения текста сообщения:
+/// решать прозой нельзя (`DEC.2026-09-12.TOOL-PROSE-NEVER-DECIDES`).
+fn raw_value_business_error(error: &RawValueError) -> McpBusinessError {
+    let code = match error.problem() {
+        RawValueProblem::Blank => crate::mcp::error::McpErrorCode::InvalidArgument,
+        RawValueProblem::Unsupported => crate::mcp::error::McpErrorCode::UnsupportedValue,
     };
 
     McpBusinessError {
         code,
         kind: McpBusinessErrorKind::Validation,
         message: error.message().to_owned(),
+        next: None,
     }
 }
 
@@ -926,11 +956,17 @@ fn map_designer_config_request(
     ))
 }
 
+/// Инструмент проверки модулей исполняется той же `/CheckConfig`: её режимы покрывают
+/// режимы проверки модулей целиком. Проверки конфигурации остаются пустыми — профиль
+/// соседнего инструмента сюда не подмешивается, иначе два умолчания слились бы в одно, —
+/// а требование «хотя бы один режим» сохраняется: явно выключив все режимы, вызывающий
+/// получает отказ, а не подставленный профиль.
 fn map_designer_modules_request(
     request: &McpCheckSyntaxDesignerModulesRequest,
-) -> Result<DesignerModulesSyntaxRequest, UseCaseError> {
+) -> Result<DesignerConfigSyntaxRequest, UseCaseError> {
     let scope = normalize_extension_scope(request.extension.as_deref(), request.all_extensions);
-    DesignerModulesSyntaxRequest::new(
+    let request = DesignerConfigSyntaxRequest::new(
+        DesignerConfigChecks::new([]),
         DesignerClientScopes::new(
             [
                 (request.thin_client != Some(false)).then_some(DesignerClientScope::ThinClient),
@@ -953,7 +989,14 @@ fn map_designer_modules_request(
             request.extended_modules_check != Some(false),
         ),
         scope,
-    )
+    );
+    if request.names_no_mode() {
+        return Err(UseCaseError::new(
+            UseCaseErrorKind::Validation,
+            crate::use_cases::request::MODULES_WITHOUT_MODES_ERROR,
+        ));
+    }
+    Ok(request)
 }
 
 pub(crate) fn normalize_check_syntax_edt_request(
@@ -963,6 +1006,7 @@ pub(crate) fn normalize_check_syntax_edt_request(
         target: SyntaxTargetRequest::Edt {
             projects: normalize_edt_projects(request.project_name.as_deref()),
         },
+        dry_run: false,
     }
 }
 
@@ -989,6 +1033,74 @@ fn render_dump_mode(mode: DumpModeRequest) -> &'static str {
 }
 
 #[cfg(test)]
+mod profile_tests {
+    use super::*;
+    use crate::mcp::request::McpCheckSyntaxDesignerConfigRequest;
+    use crate::use_cases::request::DesignerConfigSyntaxRequest;
+
+    /// Умолчания инструмента и профиль команды — один и тот же набор режимов. Держать их
+    /// порознь нельзя: разойдутся молча.
+    #[test]
+    fn the_designer_config_tool_defaults_to_the_same_profile_as_the_command() {
+        let request = McpCheckSyntaxDesignerConfigRequest::default();
+
+        let mapped = map_designer_config_request(&request).expect("request");
+
+        // Область расширений приходит от вызывающего, режимы — от общего профиля.
+        assert_eq!(
+            mapped,
+            DesignerConfigSyntaxRequest::default_profile(mapped.extension_scope().clone())
+        );
+    }
+
+    /// Явно выключив все режимы, вызывающий получает отказ синонима, а не профиль.
+    #[test]
+    fn the_modules_tool_refuses_when_every_mode_is_switched_off() {
+        let request = McpCheckSyntaxDesignerModulesRequest {
+            thin_client: Some(false),
+            server: Some(false),
+            extended_modules_check: Some(false),
+            ..Default::default()
+        };
+
+        let error = map_designer_modules_request(&request).expect_err("refusal");
+
+        assert!(
+            error.message().contains("requires at least one mode flag"),
+            "{}",
+            error.message()
+        );
+    }
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::*;
+    use crate::domain::next_step::NextStep;
+    use crate::support::error::CapabilityReason;
+    use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
+
+    /// Шаг из отказа доезжает и до MCP: род и код у него свои и уже, а выход из отказа —
+    /// тот же самый, он про предмет, а не про транспорт.
+    #[test]
+    fn the_mcp_envelope_carries_the_next_step_of_a_refusal() {
+        let error = UseCaseError::new(
+            UseCaseErrorKind::Capability(CapabilityReason::Target),
+            "a standalone server is opened by its web address",
+        )
+        .with_next(NextStep::command("launch web"));
+
+        let business = McpBusinessError::from_use_case(&error);
+        let envelope = envelope_error(&business);
+
+        let rendered = serde_json::to_value(&envelope).expect("envelope error serializes");
+        assert_eq!(rendered["next"]["command"], "launch web", "{rendered}");
+        // Словарь MCP уже: кода возможности у него нет, и это граница, а не потеря.
+        assert_eq!(rendered["kind"], "runtime", "{rendered}");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};
@@ -997,7 +1109,7 @@ mod tests {
 
     use super::McpService;
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, PlatformToolConfig, SourceFormat, SourceSetConfig,
+        AppConfig, BuildConfig, PlatformToolConfig, SourceFormat, SourceSetConfig,
         SourceSetPurpose, TestsConfig, ToolsConfig,
     };
     use crate::domain::build::{BuildMode, BuildResult, BuildStep};
@@ -1005,7 +1117,7 @@ mod tests {
     use crate::domain::execution::{ExecutionStepKind, StepResult};
     use crate::domain::issue::{Issue, IssueSeverity, ModuleIssue};
     use crate::domain::launch::{
-        LaunchMode, LaunchResult, PlatformResolution, PlatformResolutionSource,
+        LaunchMode, LaunchResult, LaunchVia, PlatformResolution, PlatformResolutionSource,
     };
     use crate::domain::runner::RunnerKind;
     use crate::domain::syntax::{SyntaxCheckResult, SyntaxCheckStatus, SyntaxIssueSummary};
@@ -1163,6 +1275,7 @@ mod tests {
     #[test]
     fn build_project_maps_success_request_and_response() {
         let port = StubPort::with_build_result(Ok(BuildResult {
+            provider: None,
             provider_dispatched: true,
             ok: true,
             steps: vec![BuildStep {
@@ -1188,7 +1301,7 @@ mod tests {
             .expect("success");
 
         assert!(response.ok);
-        assert_eq!(response.command, "build");
+        assert_eq!(response.command, "push");
         assert_eq!(response.duration_ms, 42);
         assert_eq!(response.data["ok"], true);
         assert_eq!(response.data["steps"][0]["mode"], "full");
@@ -1196,7 +1309,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].0.command(), CommandName::Build);
         assert_eq!(requests[0].0.transport(), ExecutionTransport::McpStdio);
-        assert_eq!(requests[0].1.full_rebuild, true);
+        assert!(requests[0].1.full_rebuild);
         assert_eq!(requests[0].1.source_set.as_deref(), Some("main"));
     }
 
@@ -1205,6 +1318,7 @@ mod tests {
         let port = StubPort::with_build_result(Err(UseCaseFailure::with_payload(
             UseCaseError::new(UseCaseErrorKind::Runtime, "builder failed"),
             BuildResult {
+                provider: None,
                 provider_dispatched: true,
                 ok: false,
                 steps: vec![BuildStep {
@@ -1228,7 +1342,7 @@ mod tests {
             McpServiceError::Business(failure) => {
                 assert_eq!(failure.error.code, McpErrorCode::RuntimeFailure);
                 assert!(!failure.response.ok);
-                assert_eq!(failure.response.command, "build");
+                assert_eq!(failure.response.command, "push");
                 assert_eq!(failure.response.duration_ms, 19);
                 assert_eq!(failure.response.data["steps"][0]["ok"], false);
                 assert_eq!(
@@ -1272,7 +1386,7 @@ mod tests {
         assert_eq!(response.data["report"]["summary"]["failed"], 1);
         assert!(response.error.is_none());
         let requests = service.port.test_requests.borrow();
-        assert_eq!(requests[0].1.full, true);
+        assert!(requests[0].1.full);
         assert_eq!(requests[0].1.scope, TestScopeRequest::All);
         assert_eq!(requests[0].1.execution.profile.kind, RunnerKind::YaXUnit);
     }
@@ -1307,7 +1421,7 @@ mod tests {
 
         assert!(response.ok);
         let requests = service.port.test_requests.borrow();
-        assert_eq!(requests[0].1.full, true);
+        assert!(requests[0].1.full);
         assert_eq!(requests[0].1.scope, TestScopeRequest::All);
         assert_eq!(requests[0].1.execution.profile.kind, RunnerKind::Vanessa);
         assert_eq!(requests[0].1.execution.profile.id, "acceptance");
@@ -1493,7 +1607,9 @@ mod tests {
     #[test]
     fn dump_config_maps_success_and_incremental_default_mode() {
         let port = StubPort::with_dump_result(Ok(DumpResult {
+            provider: None,
             provider_dispatched: true,
+            up_to_date: false,
             ok: true,
             source_set: Some("main".to_owned()),
             extension: None,
@@ -1519,7 +1635,7 @@ mod tests {
             .expect("success");
 
         assert!(response.ok);
-        assert_eq!(response.command, "dump");
+        assert_eq!(response.command, "pull");
         assert_eq!(response.data["mode"], "INCREMENTAL");
         let requests = service.port.dump_requests.borrow();
         assert_eq!(requests[0].1.mode, DumpModeRequest::Incremental);
@@ -1535,7 +1651,9 @@ mod tests {
             StubPort::with_dump_result(Err(UseCaseFailure::with_payload(
                 UseCaseError::new(UseCaseErrorKind::Runtime, "dump failed"),
                 DumpResult {
+                    provider: None,
                     provider_dispatched: true,
+                    up_to_date: false,
                     ok: false,
                     source_set: Some("main".to_owned()),
                     extension: None,
@@ -1564,7 +1682,7 @@ mod tests {
         assert_eq!(requests[0].1.mode, DumpModeRequest::Incremental);
         match error {
             McpServiceError::Business(failure) => {
-                assert_eq!(failure.response.command, "dump");
+                assert_eq!(failure.response.command, "pull");
                 assert_eq!(failure.response.data["mode"], "INCREMENTAL");
                 assert_eq!(failure.response.data["message"], "dump failed");
             }
@@ -1598,7 +1716,7 @@ mod tests {
         assert_eq!(requests[0].1.mode, DumpModeRequest::Incremental);
         match error {
             McpServiceError::Business(failure) => {
-                assert_eq!(failure.response.command, "dump");
+                assert_eq!(failure.response.command, "pull");
                 assert_eq!(failure.response.data["mode"], "INCREMENTAL");
                 assert_eq!(failure.response.data["message"], "dump failed");
                 assert_eq!(failure.response.data["tool"], "dump_config");
@@ -1613,7 +1731,9 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_dump_result(Ok(DumpResult {
+                provider: None,
                 provider_dispatched: true,
+                up_to_date: false,
                 ok: true,
                 source_set: None,
                 extension: None,
@@ -1640,7 +1760,7 @@ mod tests {
         match error {
             McpServiceError::Business(failure) => {
                 assert_eq!(failure.error.code, McpErrorCode::UnsupportedValue);
-                assert_eq!(failure.response.command, "dump");
+                assert_eq!(failure.response.command, "pull");
                 assert_eq!(failure.response.data["mode"], "garbage");
                 assert_eq!(
                     failure.response.data["errors"][0],
@@ -1662,7 +1782,9 @@ mod tests {
     #[test]
     fn dump_config_partial_success_preserves_partial_mode_and_warning_message() {
         let port = StubPort::with_dump_result(Ok(DumpResult {
+            provider: None,
             provider_dispatched: true,
+            up_to_date: false,
             ok: true,
             source_set: Some("main".to_owned()),
             extension: None,
@@ -1712,7 +1834,9 @@ mod tests {
                     "IBCMD does not support object-scoped partial dump; export failed",
                 ),
                 DumpResult {
+                    provider: None,
                     provider_dispatched: true,
+                    up_to_date: false,
                     ok: false,
                     source_set: Some("main".to_owned()),
                     extension: None,
@@ -1841,11 +1965,13 @@ mod tests {
 
         for (alias, result_mode, request_mode) in cases {
             let port = StubPort::with_launch_result(Ok(LaunchResult {
+                via: LaunchVia::Connection,
                 ok: true,
                 mode: result_mode,
                 pid: Some(42),
                 binary: PathBuf::from("/opt/1cv8"),
-                platform_resolution: sample_platform_resolution("/opt/1cv8"),
+                url: None,
+                platform_resolution: Some(sample_platform_resolution("/opt/1cv8")),
                 provider_dispatched: true,
                 plan: None,
                 message: None,
@@ -1875,11 +2001,13 @@ mod tests {
     #[test]
     fn launch_app_maps_client_mcp_vanessa_options() {
         let port = StubPort::with_launch_result(Ok(LaunchResult {
+            via: LaunchVia::Connection,
             ok: true,
             mode: LaunchMode::Mcp,
             pid: Some(42),
             binary: PathBuf::from("/opt/1cv8"),
-            platform_resolution: sample_platform_resolution("/opt/1cv8"),
+            url: None,
+            platform_resolution: Some(sample_platform_resolution("/opt/1cv8")),
             provider_dispatched: true,
             plan: None,
             message: None,
@@ -1893,6 +2021,7 @@ mod tests {
             .launch_app(
                 McpCallContext::http(),
                 &McpLaunchAppRequest {
+                    via: None,
                     utility_type: "mcp".to_owned(),
                     mcp_scenario: Some("va".to_owned()),
                     mode: Some("ordinary".to_owned()),
@@ -1926,11 +2055,13 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_launch_result(Ok(LaunchResult {
+                via: LaunchVia::Connection,
                 ok: true,
                 mode: LaunchMode::Thin,
                 pid: Some(42),
                 binary: PathBuf::from("/opt/1cv8c"),
-                platform_resolution: sample_platform_resolution("/opt/1cv8c"),
+                url: None,
+                platform_resolution: Some(sample_platform_resolution("/opt/1cv8c")),
                 provider_dispatched: true,
                 plan: None,
                 message: None,
@@ -1970,11 +2101,13 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_launch_result(Ok(LaunchResult {
+                via: LaunchVia::Connection,
                 ok: true,
                 mode: LaunchMode::Thin,
                 pid: Some(42),
                 binary: PathBuf::from("/opt/1cv8c"),
-                platform_resolution: sample_platform_resolution("/opt/1cv8c"),
+                url: None,
+                platform_resolution: Some(sample_platform_resolution("/opt/1cv8c")),
                 provider_dispatched: true,
                 plan: None,
                 message: None,
@@ -2008,11 +2141,13 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_launch_result(Ok(LaunchResult {
+                via: LaunchVia::Connection,
                 ok: true,
                 mode: LaunchMode::Mcp,
                 pid: Some(42),
                 binary: PathBuf::from("/opt/1cv8"),
-                platform_resolution: sample_platform_resolution("/opt/1cv8"),
+                url: None,
+                platform_resolution: Some(sample_platform_resolution("/opt/1cv8")),
                 provider_dispatched: true,
                 plan: None,
                 message: None,
@@ -2051,11 +2186,13 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_launch_result(Ok(LaunchResult {
+                via: LaunchVia::Connection,
                 ok: true,
                 mode: LaunchMode::Mcp,
                 pid: Some(42),
                 binary: PathBuf::from("/opt/1cv8"),
-                platform_resolution: sample_platform_resolution("/opt/1cv8"),
+                url: None,
+                platform_resolution: Some(sample_platform_resolution("/opt/1cv8")),
                 provider_dispatched: true,
                 plan: None,
                 message: None,
@@ -2094,11 +2231,13 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_launch_result(Ok(LaunchResult {
+                via: LaunchVia::Connection,
                 ok: true,
                 mode: LaunchMode::Designer,
                 pid: None,
                 binary: PathBuf::from("/opt/1cv8"),
-                platform_resolution: sample_platform_resolution("/opt/1cv8"),
+                url: None,
+                platform_resolution: Some(sample_platform_resolution("/opt/1cv8")),
                 provider_dispatched: true,
                 plan: None,
                 message: None,
@@ -2138,11 +2277,13 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_launch_result(Ok(LaunchResult {
+                via: LaunchVia::Connection,
                 ok: true,
                 mode: LaunchMode::Designer,
                 pid: None,
                 binary: PathBuf::from("/opt/1cv8"),
-                platform_resolution: sample_platform_resolution("/opt/1cv8"),
+                url: None,
+                platform_resolution: Some(sample_platform_resolution("/opt/1cv8")),
                 provider_dispatched: true,
                 plan: None,
                 message: None,
@@ -2190,7 +2331,7 @@ mod tests {
             .expect("success");
 
         assert!(response.ok);
-        assert_eq!(response.command, "syntax");
+        assert_eq!(response.command, "check");
         let requests = service.port.syntax_requests.borrow();
         assert_eq!(
             requests[0].1.target,
@@ -2278,7 +2419,7 @@ mod tests {
             .expect("success");
 
         assert!(response.ok);
-        assert_eq!(response.command, "syntax");
+        assert_eq!(response.command, "check");
         let requests = service.port.syntax_requests.borrow();
         match &requests[0].1.target {
             SyntaxTargetRequest::DesignerConfig(request) => {
@@ -2435,7 +2576,7 @@ mod tests {
         assert_eq!(response.data["status"], "issues_found");
         let requests = service.port.syntax_requests.borrow();
         match &requests[0].1.target {
-            SyntaxTargetRequest::DesignerModules(request) => {
+            SyntaxTargetRequest::DesignerConfig(request) => {
                 assert!(request.has_client_scope(DesignerClientScope::ThinClient));
                 assert!(request.has_client_scope(DesignerClientScope::Server));
                 assert_eq!(request.extension_scope().extension(), Some("Ext"));
@@ -2464,7 +2605,7 @@ mod tests {
 
         let requests = service.port.syntax_requests.borrow();
         match &requests[0].1.target {
-            SyntaxTargetRequest::DesignerModules(request) => {
+            SyntaxTargetRequest::DesignerConfig(request) => {
                 assert_eq!(request.extension_scope().extension(), None);
                 assert!(request.extension_scope().includes_all_extensions());
             }
@@ -2506,6 +2647,7 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_build_result(Ok(BuildResult {
+                provider: None,
                 provider_dispatched: true,
                 ok: true,
                 steps: vec![],
@@ -2535,6 +2677,7 @@ mod tests {
         let service = McpService::with_port(
             &config,
             StubPort::with_build_result(Ok(BuildResult {
+                provider: None,
                 provider_dispatched: true,
                 ok: true,
                 steps: vec![],
@@ -2557,10 +2700,12 @@ mod tests {
         AppConfig {
             base_path: PathBuf::from("/tmp/project"),
             work_path: PathBuf::from("/tmp/work"),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -2670,13 +2815,16 @@ mod tests {
 
     fn sample_syntax_result(status: SyntaxCheckStatus) -> SyntaxCheckResult {
         SyntaxCheckResult {
+            provider: None,
+            provider_dispatched: true,
+            message: None,
             status,
             exit_code: if matches!(status, SyntaxCheckStatus::Clean) {
                 0
             } else {
                 1
             },
-            check_name: "CheckConfig".to_owned(),
+            check_name: crate::domain::syntax::CheckName::DesignerConfig,
             issues: if matches!(status, SyntaxCheckStatus::IssuesFound) {
                 vec![Issue::Module(ModuleIssue {
                     path: "src/CommonModule.bsl".to_owned(),

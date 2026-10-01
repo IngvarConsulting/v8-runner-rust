@@ -1,9 +1,106 @@
 use super::*;
+use crate::domain::capability::{Operation, Provider};
+
+/// Кто грузит набор исходников в базу: пакетный Конфигуратор или его агент.
+///
+/// Утилита ищется до превью (превью отказывает без платформы), а процесс или сессия
+/// поднимаются только перед первой настоящей загрузкой: сборка без изменений
+/// платформу не запускает.
+pub(super) trait SourceSetLoader {
+    fn locate(&mut self) -> Result<(), AppError>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn load(
+        &mut self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        source_set: &SourceSetConfig,
+        source_context: &SourceSetContext,
+        step_index: usize,
+        partial_paths: Option<&[PathBuf]>,
+        commit: &StepCommit,
+    ) -> Result<Vec<String>, AppError>;
+
+    /// Вызывается после последнего набора, и при отказе тоже.
+    fn finish(&mut self) {}
+}
+
+/// Пакетный Конфигуратор: процесс на каждую команду, утилита — `1cv8`.
+pub(super) struct DesignerLoader {
+    utilities: PlatformUtilities,
+    binary: Option<PathBuf>,
+}
+
+impl DesignerLoader {
+    pub(super) fn new(config: &AppConfig) -> Self {
+        Self {
+            utilities: PlatformUtilities::from_config(config),
+            binary: None,
+        }
+    }
+}
+
+impl SourceSetLoader for DesignerLoader {
+    fn locate(&mut self) -> Result<(), AppError> {
+        if self.binary.is_none() {
+            let location = self.utilities.locate(UtilityType::V8)?;
+            self.binary = Some(location.path);
+        }
+        Ok(())
+    }
+
+    fn load(
+        &mut self,
+        context: &ExecutionContext,
+        config: &AppConfig,
+        source_set: &SourceSetConfig,
+        source_context: &SourceSetContext,
+        step_index: usize,
+        partial_paths: Option<&[PathBuf]>,
+        commit: &StepCommit,
+    ) -> Result<Vec<String>, AppError> {
+        let binary = self.binary.clone().ok_or_else(|| {
+            AppError::Runtime("Designer was not located before the load".to_owned())
+        })?;
+        execute_source_set_step(
+            context,
+            config,
+            &binary,
+            self.utilities.runner_for(UtilityType::V8),
+            source_set,
+            source_context,
+            source_context,
+            step_index,
+            partial_paths,
+            commit,
+        )
+    }
+}
 
 pub(super) fn run_build_designer(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &BuildArgs,
+) -> Result<BuildResult, BuildExecutionFailure> {
+    run_build_with(context, config, args, &mut DesignerLoader::new(config))
+}
+
+pub(super) fn run_build_agent(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &BuildArgs,
+) -> Result<BuildResult, BuildExecutionFailure> {
+    let mut loader = super::agent::AgentLoader::new(config);
+    let outcome = run_build_with(context, config, args, &mut loader);
+    loader.finish();
+    outcome
+}
+
+fn run_build_with(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    args: &BuildArgs,
+    loader: &mut dyn SourceSetLoader,
 ) -> Result<BuildResult, BuildExecutionFailure> {
     debug!(
         full_rebuild = args.full_rebuild,
@@ -20,7 +117,8 @@ pub(super) fn run_build_designer(
                 return Err(BuildExecutionFailure::with_payload(
                     error,
                     BuildResult {
-                        provider_dispatched: true,
+                        provider: None,
+                        provider_dispatched: false,
                         ok: false,
                         steps: vec![],
                         duration_ms: started.elapsed().as_millis() as u64,
@@ -29,17 +127,7 @@ pub(super) fn run_build_designer(
             }
         };
     let selected_designer_contexts =
-        designer_contexts_for_source_sets(&inventory, &ordered_source_sets).map_err(|error| {
-            BuildExecutionFailure::with_payload(
-                error,
-                BuildResult {
-                    provider_dispatched: true,
-                    ok: false,
-                    steps: vec![],
-                    duration_ms: started.elapsed().as_millis() as u64,
-                },
-            )
-        })?;
+        designer_contexts_for_source_sets(&inventory, &ordered_source_sets);
 
     let analysis_by_name = if args.full_rebuild {
         None
@@ -50,16 +138,10 @@ pub(super) fn run_build_designer(
         ))
     };
 
-    let mut utilities = PlatformUtilities::from_config(config);
-    let mut designer_binary: Option<PathBuf> = None;
     let mut steps = Vec::new();
 
     for (index, source_set) in ordered_source_sets.iter().enumerate() {
-        let Some(source_context) = selected_designer_contexts
-            .iter()
-            .find(|source| source.name() == source_set.name)
-            .cloned()
-        else {
+        let Some(source_context) = inventory.designer_context(&source_set.name).cloned() else {
             continue;
         };
 
@@ -151,31 +233,18 @@ pub(super) fn run_build_designer(
                     message = message.as_str(),
                     "executing build step"
                 );
-                let binary = match designer_binary.clone() {
-                    Some(path) => path,
-                    None => {
-                        let location = match utilities.locate(UtilityType::V8) {
-                            Ok(location) => location,
-                            Err(error) => {
-                                let result = fail_from_source_set_index(
-                                    started,
-                                    steps,
-                                    &ordered_source_sets,
-                                    index,
-                                    source_set,
-                                    mode.clone(),
-                                    error.to_string(),
-                                );
-                                return Err(BuildExecutionFailure::with_payload(
-                                    AppError::from(error),
-                                    result,
-                                ));
-                            }
-                        };
-                        designer_binary = Some(location.path.clone());
-                        location.path
-                    }
-                };
+                if let Err(error) = loader.locate() {
+                    let result = fail_from_source_set_index(
+                        started,
+                        steps,
+                        &ordered_source_sets,
+                        index,
+                        source_set,
+                        mode.clone(),
+                        error.to_string(),
+                    );
+                    return Err(BuildExecutionFailure::with_payload(error, result));
+                }
 
                 if args.dry_run {
                     push_build_step(
@@ -190,13 +259,10 @@ pub(super) fn run_build_designer(
                 }
 
                 let step_started = Instant::now();
-                match execute_source_set_step(
+                match loader.load(
                     context,
                     config,
-                    &binary,
-                    utilities.runner_for(UtilityType::V8),
                     source_set,
-                    &source_context,
                     &source_context,
                     index,
                     partial_paths.as_deref(),
@@ -207,7 +273,7 @@ pub(super) fn run_build_designer(
                         &source_set.name,
                         mode,
                         true,
-                        merge_step_message(message, &warnings),
+                        append_warnings(message, &warnings),
                         step_started.elapsed().as_millis() as u64,
                     ),
                     Err(error) => {
@@ -228,7 +294,8 @@ pub(super) fn run_build_designer(
     }
 
     Ok(BuildResult {
-        provider_dispatched: true,
+        provider: None,
+        provider_dispatched: false,
         ok: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,
@@ -255,7 +322,8 @@ pub(super) fn run_build_ibcmd(
                 return Err(BuildExecutionFailure::with_payload(
                     error,
                     BuildResult {
-                        provider_dispatched: true,
+                        provider: None,
+                        provider_dispatched: false,
                         ok: false,
                         steps: vec![],
                         duration_ms: started.elapsed().as_millis() as u64,
@@ -264,17 +332,7 @@ pub(super) fn run_build_ibcmd(
             }
         };
     let selected_designer_contexts =
-        designer_contexts_for_source_sets(&inventory, &ordered_source_sets).map_err(|error| {
-            BuildExecutionFailure::with_payload(
-                error,
-                BuildResult {
-                    provider_dispatched: true,
-                    ok: false,
-                    steps: vec![],
-                    duration_ms: started.elapsed().as_millis() as u64,
-                },
-            )
-        })?;
+        designer_contexts_for_source_sets(&inventory, &ordered_source_sets);
 
     let analysis_by_name = if args.full_rebuild {
         None
@@ -290,11 +348,7 @@ pub(super) fn run_build_ibcmd(
     let mut steps = Vec::new();
 
     for (index, source_set) in ordered_source_sets.iter().enumerate() {
-        let Some(source_context) = selected_designer_contexts
-            .iter()
-            .find(|source| source.name() == source_set.name)
-            .cloned()
-        else {
+        let Some(source_context) = inventory.designer_context(&source_set.name).cloned() else {
             continue;
         };
 
@@ -406,7 +460,7 @@ pub(super) fn run_build_ibcmd(
                         &source_set.name,
                         mode,
                         true,
-                        merge_step_message(message, &warnings),
+                        append_warnings(message, &warnings),
                         step_started.elapsed().as_millis() as u64,
                     ),
                     Err(error) => {
@@ -427,17 +481,56 @@ pub(super) fn run_build_ibcmd(
     }
 
     Ok(BuildResult {
-        provider_dispatched: true,
+        provider: None,
+        provider_dispatched: false,
         ok: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,
     })
 }
 
+/// Утилита, которая загрузит файлы конфигуратора в базу. Кэш тот же, что у боевого
+/// прогона, поэтому превью и запуск ищут одно и то же и в одном порядке.
+fn locate_designer_loader(
+    provider: Provider,
+    utilities: &mut PlatformUtilities,
+    designer_binary: &mut Option<PathBuf>,
+    ibcmd_binary: &mut Option<PathBuf>,
+) -> Result<PathBuf, AppError> {
+    match provider {
+        other @ (Provider::Agent | Provider::IbcmdRs | Provider::Webinst) => Err(
+            crate::use_cases::unimplemented_provider(Operation::Build, other),
+        ),
+        Provider::Designer => {
+            if let Some(path) = designer_binary.clone() {
+                return Ok(path);
+            }
+            let path = utilities
+                .locate(UtilityType::V8)
+                .map_err(AppError::from)?
+                .path;
+            *designer_binary = Some(path.clone());
+            Ok(path)
+        }
+        Provider::Ibcmd => {
+            if let Some(path) = ibcmd_binary.clone() {
+                return Ok(path);
+            }
+            let path = utilities
+                .locate(UtilityType::Ibcmd)
+                .map_err(AppError::from)?
+                .path;
+            *ibcmd_binary = Some(path.clone());
+            Ok(path)
+        }
+    }
+}
+
 pub(super) fn run_build_edt(
     context: &ExecutionContext,
     config: &AppConfig,
     args: &BuildArgs,
+    provider: Provider,
 ) -> Result<BuildResult, BuildExecutionFailure> {
     debug!(
         full_rebuild = args.full_rebuild,
@@ -448,7 +541,8 @@ pub(super) fn run_build_edt(
         return Err(BuildExecutionFailure::with_payload(
             error,
             BuildResult {
-                provider_dispatched: true,
+                provider: None,
+                provider_dispatched: false,
                 ok: false,
                 steps: vec![],
                 duration_ms: 0,
@@ -465,7 +559,8 @@ pub(super) fn run_build_edt(
                 return Err(BuildExecutionFailure::with_payload(
                     error,
                     BuildResult {
-                        provider_dispatched: true,
+                        provider: None,
+                        provider_dispatched: false,
                         ok: false,
                         steps: vec![],
                         duration_ms: started.elapsed().as_millis() as u64,
@@ -473,30 +568,7 @@ pub(super) fn run_build_edt(
                 ));
             }
         };
-    let selected_edt_contexts = edt_contexts_for_source_sets(&inventory, &ordered_source_sets)
-        .map_err(|error| {
-            BuildExecutionFailure::with_payload(
-                error,
-                BuildResult {
-                    provider_dispatched: true,
-                    ok: false,
-                    steps: vec![],
-                    duration_ms: started.elapsed().as_millis() as u64,
-                },
-            )
-        })?;
-    let selected_designer_contexts =
-        designer_contexts_for_source_sets(&inventory, &ordered_source_sets).map_err(|error| {
-            BuildExecutionFailure::with_payload(
-                error,
-                BuildResult {
-                    provider_dispatched: true,
-                    ok: false,
-                    steps: vec![],
-                    duration_ms: started.elapsed().as_millis() as u64,
-                },
-            )
-        })?;
+    let selected_edt_contexts = edt_contexts_for_source_sets(&inventory, &ordered_source_sets);
 
     let edt_analysis_by_name = if args.full_rebuild {
         None
@@ -512,18 +584,10 @@ pub(super) fn run_build_edt(
     let mut steps = Vec::new();
 
     for (index, source_set) in ordered_source_sets.iter().enumerate() {
-        let Some(edt_context) = selected_edt_contexts
-            .iter()
-            .find(|source| source.name() == source_set.name)
-            .cloned()
-        else {
+        let Some(edt_context) = inventory.edt_context(&source_set.name).cloned() else {
             continue;
         };
-        let Some(designer_context) = selected_designer_contexts
-            .iter()
-            .find(|source| source.name() == source_set.name)
-            .cloned()
-        else {
+        let Some(designer_context) = inventory.designer_context(&source_set.name).cloned() else {
             continue;
         };
 
@@ -576,6 +640,27 @@ pub(super) fn run_build_edt(
                     location.path
                 }
             };
+
+            if args.dry_run {
+                // Экспорт внешних артефактов пересоздаёт каталог в `workPath`, запускает
+                // EDT CLI и фиксирует состояние обнаружения изменений; превью
+                // останавливается до всех трёх. Остановка стоит там же, где у соседней
+                // ветки набора исходников: после поиска утилиты.
+                push_build_step(
+                    &mut steps,
+                    &source_set.name,
+                    BuildMode::EdtExport,
+                    true,
+                    format!(
+                        "would export the external artifacts of '{}' to Designer files via {}; planned, nothing dispatched",
+                        source_set.name,
+                        edt.display()
+                    ),
+                    0,
+                );
+                continue;
+            }
+
             let export_started = Instant::now();
             if let Some(error) = interruption_before_safe_point(
                 context,
@@ -614,11 +699,12 @@ pub(super) fn run_build_edt(
                                 Arc::new(manager),
                                 Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
                                 Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
-                            ) {
-                                Ok(dsl) => dsl.with_execution_policy(context.process_policy(
+                                context.process_policy(
                                     InterruptionSafetyClass::GracefulThenKill,
                                     None,
-                                )),
+                                ),
+                            ) {
+                                Ok(dsl) => dsl,
                                 Err(error) => {
                                     let app_error = AppError::from(error);
                                     let result = fail_from_source_set_index(
@@ -661,8 +747,6 @@ pub(super) fn run_build_edt(
                     edt.clone(),
                     config.work_path.join("edt-workspace"),
                     utilities.runner_for(UtilityType::EdtCli),
-                )
-                .with_execution_policy(
                     context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
                 );
                 prepare_edt_external_artifacts(config, source_set, &one_shot_edt)
@@ -696,7 +780,7 @@ pub(super) fn run_build_edt(
                         &source_set.name,
                         BuildMode::EdtExport,
                         true,
-                        merge_step_message(
+                        append_warnings(
                             format!(
                                 "exported {} external artifact(s) to designer runtime",
                                 descriptors.len()
@@ -768,17 +852,41 @@ pub(super) fn run_build_edt(
                 };
 
                 if args.dry_run {
-                    // The EDT export writes a Designer snapshot and the load step below then
-                    // touches the infobase; a preview stops before both.
+                    // Экспорт пишет снимок файлов конфигуратора, а следующий за ним шаг
+                    // трогает базу; превью останавливается до обоих. Но сначала ищет и
+                    // вторую утилиту: шаг обещает загрузку, и одобрить его, не зная, чем
+                    // грузить, значит одобрить невыполнимое
+                    // (`INV.CLI.PREVIEW-RETURNS-AFTER-TOOL-LOOKUP`).
+                    let loader = match locate_designer_loader(
+                        provider,
+                        &mut utilities,
+                        &mut designer_binary,
+                        &mut ibcmd_binary,
+                    ) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            let result = fail_from_source_set_index(
+                                started,
+                                steps,
+                                &ordered_source_sets,
+                                index,
+                                source_set,
+                                BuildMode::EdtExport,
+                                error.to_string(),
+                            );
+                            return Err(BuildExecutionFailure::with_payload(error, result));
+                        }
+                    };
                     push_build_step(
                         &mut steps,
                         &source_set.name,
                         BuildMode::EdtExport,
                         true,
                         format!(
-                            "would export '{}' to Designer files via {} and then load it; planned, nothing dispatched",
+                            "would export '{}' to Designer files via {} and then load it via {}; planned, nothing dispatched",
                             source_set.name,
-                            edt.display()
+                            edt.display(),
+                            loader.display()
                         ),
                         0,
                     );
@@ -805,11 +913,12 @@ pub(super) fn run_build_edt(
                                     Arc::new(manager),
                                     Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
                                     Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
-                                ) {
-                                    Ok(dsl) => dsl.with_execution_policy(context.process_policy(
+                                    context.process_policy(
                                         InterruptionSafetyClass::GracefulThenKill,
                                         None,
-                                    )),
+                                    ),
+                                ) {
+                                    Ok(dsl) => dsl,
                                     Err(error) => {
                                         let app_error = AppError::from(error);
                                         let result = fail_from_source_set_index(
@@ -858,8 +967,6 @@ pub(super) fn run_build_edt(
                         edt.clone(),
                         config.work_path.join("edt-workspace"),
                         utilities.runner_for(UtilityType::EdtCli),
-                    )
-                    .with_execution_policy(
                         context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
                     );
                     execute_edt_export_step(
@@ -907,7 +1014,7 @@ pub(super) fn run_build_edt(
                     &source_set.name,
                     BuildMode::EdtExport,
                     true,
-                    merge_step_message("EDT export completed".to_owned(), &export_warnings),
+                    append_warnings("EDT export completed".to_owned(), &export_warnings),
                     export_started.elapsed().as_millis() as u64,
                 );
             }
@@ -957,37 +1064,53 @@ pub(super) fn run_build_edt(
                 commit,
             } => {
                 let load_started = Instant::now();
-                let load_result = match config.builder {
-                    BuilderBackend::Designer => {
-                        let designer = match designer_binary.clone() {
-                            Some(path) => path,
-                            None => {
-                                let location = match utilities.locate(UtilityType::V8) {
-                                    Ok(location) => location,
-                                    Err(error) => {
-                                        let result = fail_from_source_set_index(
-                                            started,
-                                            steps,
-                                            &ordered_source_sets,
-                                            index,
-                                            source_set,
-                                            mode.clone(),
-                                            error.to_string(),
-                                        );
-                                        return Err(BuildExecutionFailure::with_payload(
-                                            AppError::from(error),
-                                            result,
-                                        ));
-                                    }
-                                };
-                                designer_binary = Some(location.path.clone());
-                                location.path
-                            }
-                        };
+                // Исполнитель загрузки ищется тем же помощником, что и в превью: иначе
+                // два поиска разошлись бы, и превью одобряло бы то, чего запуск не может.
+                let loader = match locate_designer_loader(
+                    provider,
+                    &mut utilities,
+                    &mut designer_binary,
+                    &mut ibcmd_binary,
+                ) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        let result = fail_from_source_set_index(
+                            started,
+                            steps,
+                            &ordered_source_sets,
+                            index,
+                            source_set,
+                            mode.clone(),
+                            error.to_string(),
+                        );
+                        return Err(BuildExecutionFailure::with_payload(error, result));
+                    }
+                };
+                let load_result = match provider {
+                    other @ (Provider::Agent | Provider::IbcmdRs | Provider::Webinst) => Err(
+                        crate::use_cases::unimplemented_provider(Operation::Build, other),
+                    ),
+                    Provider::Designer => {
+                        let designer = &loader;
+                        // Загрузка сюда доходит и тогда, когда этап EDT пропущен: каталог
+                        // файлов конфигуратора уже есть, а состояние Конфигуратора
+                        // устарело. Превью останавливается здесь — дальше идёт запуск
+                        // против базы и запись состояния.
+                        if args.dry_run {
+                            push_build_step(
+                                &mut steps,
+                                &source_set.name,
+                                mode,
+                                true,
+                                format!("{message}; planned, Designer not dispatched"),
+                                0,
+                            );
+                            continue;
+                        }
                         execute_source_set_step(
                             context,
                             config,
-                            &designer,
+                            designer,
                             utilities.runner_for(UtilityType::V8),
                             source_set,
                             &designer_context,
@@ -997,36 +1120,23 @@ pub(super) fn run_build_edt(
                             &commit,
                         )
                     }
-                    BuilderBackend::Ibcmd => {
-                        let ibcmd = match ibcmd_binary.clone() {
-                            Some(path) => path,
-                            None => {
-                                let location = match utilities.locate(UtilityType::Ibcmd) {
-                                    Ok(location) => location,
-                                    Err(error) => {
-                                        let result = fail_from_source_set_index(
-                                            started,
-                                            steps,
-                                            &ordered_source_sets,
-                                            index,
-                                            source_set,
-                                            mode.clone(),
-                                            error.to_string(),
-                                        );
-                                        return Err(BuildExecutionFailure::with_payload(
-                                            AppError::from(error),
-                                            result,
-                                        ));
-                                    }
-                                };
-                                ibcmd_binary = Some(location.path.clone());
-                                location.path
-                            }
-                        };
+                    Provider::Ibcmd => {
+                        let ibcmd = &loader;
+                        if args.dry_run {
+                            push_build_step(
+                                &mut steps,
+                                &source_set.name,
+                                mode,
+                                true,
+                                format!("{message}; planned, ibcmd not dispatched"),
+                                0,
+                            );
+                            continue;
+                        }
                         execute_source_set_step_ibcmd(
                             context,
                             config,
-                            &ibcmd,
+                            ibcmd,
                             utilities.runner_for(UtilityType::Ibcmd),
                             source_set,
                             &designer_context,
@@ -1042,7 +1152,7 @@ pub(super) fn run_build_edt(
                         &source_set.name,
                         mode,
                         true,
-                        merge_step_message(message, &warnings),
+                        append_warnings(message, &warnings),
                         load_started.elapsed().as_millis() as u64,
                     ),
                     Err(error) => {
@@ -1063,7 +1173,8 @@ pub(super) fn run_build_edt(
     }
 
     Ok(BuildResult {
-        provider_dispatched: true,
+        provider: None,
+        provider_dispatched: false,
         ok: true,
         steps,
         duration_ms: started.elapsed().as_millis() as u64,

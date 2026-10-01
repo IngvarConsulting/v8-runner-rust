@@ -12,7 +12,7 @@ pub const ARTIFACT_ROLE_PACKAGE_FILE: &str = "package_file";
 pub const ARTIFACT_ROLE_STAGE_FILE: &str = "stage_file";
 
 /// Stable artifact classification for runner/package outputs.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
     RunDirectory,
@@ -26,7 +26,7 @@ pub enum ArtifactKind {
 }
 
 /// Reference to a single retained artifact.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ArtifactRef {
     pub kind: ArtifactKind,
     pub path: PathBuf,
@@ -53,7 +53,7 @@ impl ArtifactRef {
 }
 
 /// A retained artifact collection for a single execution.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, schemars::JsonSchema)]
 pub struct ArtifactSet {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub root_dir: Option<PathBuf>,

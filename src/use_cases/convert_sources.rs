@@ -21,13 +21,14 @@ use crate::support::path::{
     is_filesystem_root, nearest_existing_canonical_path, stable_path_identity,
 };
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
+use crate::use_cases::destruction_guard::{guard_replacement, DestructionConsent};
 use crate::use_cases::external_artifacts::{
     discover_designer_external_artifacts, parse_external_descriptor, ExternalArtifactKind,
 };
 use crate::use_cases::interruption;
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::{ConvertRequest, ConvertScopeRequest};
-use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
+use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 
 const CONVERT_BACKUP_PREFIX: &str = ".convert-backup";
 
@@ -68,6 +69,8 @@ struct ResolvedConvertRequest {
     source_set: Option<String>,
     workspace_path: PathBuf,
     items: Vec<ResolvedConvertItem>,
+    /// Разрешено ли уничтожить незафиксированную работу в каталоге цели.
+    consent: DestructionConsent,
 }
 
 pub fn execute(
@@ -75,7 +78,10 @@ pub fn execute(
     config: &AppConfig,
     request: &ConvertRequest,
 ) -> UseCaseResult<ConvertResult> {
-    run_convert_with_context(context, config, request)
+    stamp_dispatch(
+        run_convert_with_context(context, config, request),
+        context.work(),
+    )
 }
 
 pub fn preflight_validate(config: &AppConfig, request: &ConvertRequest) -> Result<(), AppError> {
@@ -92,11 +98,10 @@ fn run_convert_with_context(
     let scope = scope_from_request(request);
     let workspace_path = convert_workspace_path(config);
 
-    if let Some(interruption) = context.interruption() {
-        let error = AppError::Runtime(interruption::command_interruption_message(
-            context,
-            interruption,
-        ));
+    if let Some(cancel) =
+        interruption::SafePointCancel::noticed(context, interruption::SafePoint::Command)
+    {
+        let error = cancel.into_error();
         let message = error.to_string();
         return Err(ConvertExecutionFailure::with_payload(
             error,
@@ -169,7 +174,7 @@ fn run_convert_with_context(
                 target_path: item.target_path.clone(),
             })
             .collect();
-        let mut preview = result_snapshot(
+        let preview = result_snapshot(
             true,
             resolved.direction,
             resolved.scope,
@@ -182,7 +187,6 @@ fn run_convert_with_context(
                 location.path.display()
             )),
         );
-        preview.provider_dispatched = false;
         return Ok(preview);
     }
 
@@ -215,6 +219,7 @@ fn run_convert_with_context(
             Arc::new(manager),
             Duration::from_millis(config.tools.edt_cli.startup_timeout_ms),
             Duration::from_millis(config.tools.edt_cli.command_timeout_ms),
+            policy,
         )
         .map_err(|error| {
             let app_error = AppError::from(error);
@@ -233,17 +238,16 @@ fn run_convert_with_context(
                 ),
             )
         })?
-        .with_timeout(context.edt_timeout())
-        .with_execution_policy(policy);
+        .with_timeout(context.edt_timeout());
         execute_with_dsl(context, &dsl, &resolved, started)
     } else {
         let dsl = EdtDsl::new(
             location.path.clone(),
             resolved.workspace_path.clone(),
             utilities.runner_for(UtilityType::EdtCli),
+            policy,
         )
-        .with_timeout(context.edt_timeout())
-        .with_execution_policy(policy);
+        .with_timeout(context.edt_timeout());
         execute_with_dsl(context, &dsl, &resolved, started)
     }
 }
@@ -450,13 +454,10 @@ fn execute_with_dsl(
             )
         })?;
 
-        if let Some(interruption) = context.interruption() {
+        if let Some(error) =
+            interruption::interruption_before_safe_point(context, "convert publication")
+        {
             let _ = remove_path_if_exists(&staging_root);
-            let error = AppError::Runtime(interruption::interruption_before_safe_point_message(
-                context,
-                interruption,
-                "convert publication",
-            ));
             let message = error.to_string();
             return Err(ConvertExecutionFailure::with_payload(
                 error,
@@ -473,6 +474,23 @@ fn execute_with_dsl(
             ));
         }
 
+        // Преобразование заменяет каталог исходников так же, как выгрузка.
+        guard_replacement(&item.target_path, resolved.consent).map_err(|error| {
+            let message = error.to_string();
+            ConvertExecutionFailure::with_payload(
+                error,
+                result_snapshot(
+                    false,
+                    resolved.direction,
+                    resolved.scope,
+                    resolved.source_set.clone(),
+                    resolved.workspace_path.clone(),
+                    outputs.clone(),
+                    started,
+                    Some(message),
+                ),
+            )
+        })?;
         let publish_phase = context
             .run_no_process_critical_phase(|| {
                 replace_dir_atomically(
@@ -615,6 +633,11 @@ fn resolve_request(
         source_set,
         workspace_path: convert_workspace_path(config),
         items,
+        consent: if request.discard_uncommitted {
+            DestructionConsent::Granted
+        } else {
+            DestructionConsent::AskFirst
+        },
     })
 }
 
@@ -1367,7 +1390,7 @@ fn result_snapshot(
 ) -> ConvertResult {
     ConvertResult {
         ok,
-        provider_dispatched: true,
+        provider_dispatched: false,
         direction,
         scope,
         source_set,
@@ -1581,26 +1604,50 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::config::model::{
-        AppConfig, BuilderBackend, InfobaseConfig, McpConfig, SourceFormat, TestsConfig,
-        ToolsConfig,
+        AppConfig, InfobaseConfig, McpConfig, SourceFormat, TestsConfig, ToolsConfig,
     };
 
-    use super::{convert_session_host_options, convert_workspace_path};
+    use super::{convert_session_host_options, convert_workspace_path, execute};
+    use crate::use_cases::context::{CommandName, ExecutionContext};
+    use crate::use_cases::request::{ConvertRequest, ConvertScopeRequest};
 
     fn sample_config() -> AppConfig {
         AppConfig {
             base_path: PathBuf::from("/tmp/project"),
             work_path: PathBuf::from("/tmp/work"),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![],
             build: Default::default(),
             tools: ToolsConfig::default(),
             mcp: McpConfig::default(),
             tests: TestsConfig::default(),
         }
+    }
+
+    /// Превью работы EDT CLI не даёт ни на одной ветке, и отказ превью тоже: признак ставит
+    /// одно место, `execute`. Прерывание здесь — ветка, до которой доходит любой запрос,
+    /// раньше поиска EDT CLI, так что проверка не зависит от машины.
+    #[test]
+    fn an_interrupted_preview_reports_no_work_for_the_edt_cli() {
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
+        let context = ExecutionContext::cli(CommandName::Convert).with_cancellation(cancellation);
+        let request = ConvertRequest {
+            scope: ConvertScopeRequest::All,
+            output_root: None,
+            dry_run: true,
+            discard_uncommitted: false,
+        };
+
+        let failure = execute(&context, &sample_config(), &request)
+            .expect_err("an interrupted preview refuses");
+        let payload = failure.payload.expect("the refusal carries the form");
+        assert!(!payload.provider_dispatched, "{payload:?}");
     }
 
     #[test]

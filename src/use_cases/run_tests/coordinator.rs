@@ -1,4 +1,6 @@
+use super::helpers::build_prerequisite_failure;
 use super::*;
+use crate::support::error::CapabilityReason;
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::TestBuildPolicy;
 
@@ -89,24 +91,15 @@ pub(super) fn run_tests(
                         .as_ref()
                         .map(build_summary)
                         .unwrap_or_else(|| failure.error.to_string());
-                    steps.push(
-                        failed_step(
-                            "build",
-                            ExecutionStepKind::PlatformCommand,
-                            build_started.elapsed().as_millis() as u64,
-                            summary.clone(),
-                        )
-                        .with_errors(vec![test_execution_error(
-                            TestErrorKind::BuildFailed,
-                            summary.clone(),
-                        )]),
+                    let step = failed_step(
+                        "build",
+                        ExecutionStepKind::PlatformCommand,
+                        build_started.elapsed().as_millis() as u64,
+                        summary.clone(),
                     );
-                    let outcome = ExecutionOutcome::new(ExecutionStatus::Failed)
-                        .with_diagnostics(vec![summary.clone()])
-                        .with_errors(vec![test_execution_error(
-                            TestErrorKind::BuildFailed,
-                            summary.clone(),
-                        )]);
+                    let (step, outcome) =
+                        build_prerequisite_failure(&failure.error, step, &summary);
+                    steps.push(step);
                     let result = make_test_result(
                         target,
                         mode,
@@ -167,7 +160,7 @@ pub(super) fn run_tests(
 
     debug!("preparing test run artifacts");
     let prepare_artifacts_started = Instant::now();
-    let mut artifacts = match create_run_artifacts(config, &runner_id) {
+    let mut artifacts = match create_run_artifacts(config, runner_id) {
         Ok(artifacts) => artifacts,
         Err(error) => {
             let app_error =
@@ -281,7 +274,7 @@ pub(super) fn run_tests(
         args.execution
             .client_mode
             .unwrap_or(LaunchClientModeRequest::Thin),
-        capped_timeout_ms(args.execution.timeouts.total_ms, context),
+        args.execution.timeouts.total_ms,
     ) {
         Ok(dsl) => dsl,
         Err(error) => {
@@ -532,7 +525,24 @@ pub(super) fn run_tests(
     ))
 }
 
+/// Что можно доказать о готовой базе, не запуская платформу.
+///
+/// Автономная цель отказывается сразу: тесты поднимают клиент предприятия по строке
+/// подключения, а прямой шлюз автономного сервера раннер пока не использует.
+///
+/// Дальше проверка строгая только у файловой базы: каталог обязан нести `1Cv8.1CD`.
+/// У серверной такой проверки нет, и это принятая уступка по переносимости — публичный
+/// контракт подключения не несёт учётных данных администрирования кластера, поэтому
+/// доказать существование именованной серверной базы заранее нечем, кроме
+/// ложноположительной проверки TCP или новой внешней зависимости. Её доступность
+/// устанавливает само подключение движка тестов и его типизированные ошибки процесса.
 fn validate_prepared_infobase(config: &AppConfig) -> Result<(), AppError> {
+    if config.target_kind() == crate::domain::capability::TargetKind::Standalone {
+        return Err(AppError::capability_for(
+            CapabilityReason::Soon,
+            "tests start an enterprise client by the connection string; the direct gate of a standalone server is not used by the runner yet (#205) — run tests against a File= or Srvr= target",
+        ));
+    }
     let connection = config.v8_connection();
     let Some(file_path) = connection.file_path() else {
         return Ok(());

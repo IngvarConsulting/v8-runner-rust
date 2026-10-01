@@ -1,15 +1,19 @@
 use std::io::ErrorKind;
+mod agent;
+
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::config::model::{AppConfig, BuilderBackend};
-use crate::domain::execution::{ExecutionError, ExecutionOutcome, ExecutionStatus, StepResult};
+use crate::config::model::AppConfig;
+use crate::domain::capability::{Implementation, Provider, ProviderReceipt};
+use crate::domain::execution::{
+    ExecutionError, ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus, StepResult,
+};
 use crate::domain::infobase_export::{
     ConfigurationState, ConfigurationSubject, ExportConfigurationPackageRequest,
     ExportConfigurationPackageResult, ExportInfobaseSnapshotRequest, ExportInfobaseSnapshotResult,
-    ExportPhase, ExportProvider, ExportProviderDecision, ExportTargetState, ProviderCandidate,
-    ProviderEvidence, ProviderImplementation, ProviderReadiness, RestoreInfobaseSnapshotRequest,
+    ExportTargetState, InfobaseTransferPhase, RestoreInfobaseSnapshotRequest,
     RestoreInfobaseSnapshotResult, RestoreTargetMode,
 };
 use crate::platform::designer::DesignerDsl;
@@ -30,9 +34,8 @@ use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
 
 use super::interruption::{
-    command_interruption_details, deferred_command_interruption_details,
-    deferred_process_interruption_details, deferred_process_interruption_warning,
-    process_interruption_details,
+    cancellation_record, deferred_command_interruption_details, pending_interruption_error,
+    process_interruption_details, record_deferral, CommandFailure,
 };
 use super::staged_publication::{
     cleanup_owned_orphan_files, interruption_before_publish, PublicationFailureState,
@@ -43,15 +46,16 @@ const CONFIGURATION_COMMAND: &str = "infobase.configuration.export";
 const SNAPSHOT_COMMAND: &str = "infobase.dump";
 
 #[derive(Debug, Clone)]
-pub struct PreparedExportProvider {
-    selection: ExportProviderDecision,
-    provider: ExportProvider,
-    executable: PathBuf,
+pub struct PreparedTransferProvider {
+    receipt: ProviderReceipt,
+    provider: Provider,
+    /// `None` у исполнителя без утилиты на этой машине — чужого агента.
+    executable: Option<PathBuf>,
 }
 
-impl PreparedExportProvider {
-    pub fn selection(&self) -> &ExportProviderDecision {
-        &self.selection
+impl PreparedTransferProvider {
+    pub fn receipt(&self) -> &ProviderReceipt {
+        &self.receipt
     }
 }
 
@@ -60,33 +64,58 @@ pub fn execute_configuration_export(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &ExportConfigurationPackageRequest,
-    prepared: &PreparedExportProvider,
+    prepared: &PreparedTransferProvider,
 ) -> UseCaseResult<ExportConfigurationPackageResult> {
     let mut result =
-        ExportConfigurationPackageResult::new(request.clone(), prepared.selection.clone());
+        ExportConfigurationPackageResult::new(request.clone(), Some(prepared.receipt.clone()));
     if let Err(error) = validate_configuration_request(request) {
         return Err(configuration_failure(
             context,
             error,
             result,
-            ExportPhase::Validation,
+            InfobaseTransferPhase::Validation,
         ));
     }
     let provider = prepared.provider;
 
     let output = resolve_output(config, &request.output).map_err(|error| {
-        configuration_failure(context, error, result.clone(), ExportPhase::ResolveTarget)
+        configuration_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::ResolveTarget,
+        )
     })?;
     result.output = output.target.clone();
-    let _target_lock = acquire_target_lock(context, &output.lock_path, CONFIGURATION_COMMAND)
-        .map_err(|error| {
-            configuration_failure(context, error, result.clone(), ExportPhase::TargetLock)
-        })?;
+    let _target_lock = acquire_target_lock(
+        context,
+        &output.lock_path,
+        CONFIGURATION_COMMAND,
+        TARGET_LOCK_WAIT,
+    )
+    .map_err(|error| {
+        configuration_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::TargetLock,
+        )
+    })?;
     let output_observation = observe_locked_output(&output).map_err(|error| {
-        configuration_failure(context, error, result.clone(), ExportPhase::ResolveTarget)
+        configuration_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::ResolveTarget,
+        )
     })?;
     cleanup_export_orphans(&output, &[".infobase-config-stage-"]).map_err(|error| {
-        configuration_failure(context, error, result.clone(), ExportPhase::OrphanCleanup)
+        configuration_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::OrphanCleanup,
+        )
     })?;
     let publication = StagedPublication::prepare_file(
         &output.target,
@@ -95,7 +124,12 @@ pub fn execute_configuration_export(
         request.subject.artifact_kind().file_extension(),
     )
     .map_err(|error| {
-        configuration_failure(context, error, result.clone(), ExportPhase::PrepareStaging)
+        configuration_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::PrepareStaging,
+        )
     })?;
 
     let provider_started = Instant::now();
@@ -103,7 +137,7 @@ pub fn execute_configuration_export(
         context,
         config,
         provider,
-        &prepared.executable,
+        prepared.executable.as_deref(),
         request.state,
         &request.subject,
         publication.staging_path(),
@@ -114,7 +148,7 @@ pub fn execute_configuration_export(
                 context,
                 publication.cleanup_failure(error),
                 result,
-                ExportPhase::ProviderCommand,
+                InfobaseTransferPhase::ProviderCommand,
             ))
         }
     };
@@ -123,13 +157,13 @@ pub fn execute_configuration_export(
             context,
             publication.cleanup_failure(error),
             result,
-            ExportPhase::ProviderCommand,
+            InfobaseTransferPhase::ProviderCommand,
         ));
     }
     result.steps.push(
         StepResult::succeeded(
-            ExportPhase::ProviderCommand.as_str(),
-            ExportPhase::ProviderCommand.kind(),
+            InfobaseTransferPhase::ProviderCommand.as_str(),
+            InfobaseTransferPhase::ProviderCommand.kind(),
             provider_started.elapsed().as_millis() as u64,
         )
         .with_target(publication.staging_path().display().to_string()),
@@ -139,13 +173,13 @@ pub fn execute_configuration_export(
             context,
             publication.cleanup_failure(error),
             result,
-            ExportPhase::ValidateProviderOutput,
+            InfobaseTransferPhase::ValidateProviderOutput,
         ));
     }
-    record_deferred_process_interruption(
-        &platform_result,
-        "provider command",
+    record_deferral(
+        ExecutionInterruptionPhase::ProviderCommand,
         "configuration export",
+        platform_result.process.interruption,
         &mut result.execution,
         &mut result.warnings,
     );
@@ -154,7 +188,7 @@ pub fn execute_configuration_export(
             context,
             publication.cleanup_failure(error),
             result,
-            ExportPhase::BeforePublication,
+            InfobaseTransferPhase::BeforePublication,
         ));
     }
     revalidate_before_publish(&output, &output_observation, &publication).map_err(|error| {
@@ -162,7 +196,7 @@ pub fn execute_configuration_export(
             context,
             error,
             result.clone(),
-            ExportPhase::PublishTargetRevalidation,
+            InfobaseTransferPhase::PublishTargetRevalidation,
         )
     })?;
     let publication_started = Instant::now();
@@ -176,13 +210,13 @@ pub fn execute_configuration_export(
                 context,
                 failure.error,
                 result.clone(),
-                ExportPhase::Publication,
+                InfobaseTransferPhase::Publication,
             )
         })?;
     result.steps.push(
         StepResult::succeeded(
-            ExportPhase::Publication.as_str(),
-            ExportPhase::Publication.kind(),
+            InfobaseTransferPhase::Publication.as_str(),
+            InfobaseTransferPhase::Publication.kind(),
             publication_started.elapsed().as_millis() as u64,
         )
         .with_target(result.output.display().to_string()),
@@ -205,7 +239,7 @@ pub fn execute_configuration_export(
             .interruptions
             .push(deferred_command_interruption_details(
                 interruption,
-                "publication",
+                ExecutionInterruptionPhase::Publication,
                 message,
             ));
     }
@@ -217,32 +251,58 @@ pub fn execute_infobase_snapshot(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &ExportInfobaseSnapshotRequest,
-    prepared: &PreparedExportProvider,
+    prepared: &PreparedTransferProvider,
 ) -> UseCaseResult<ExportInfobaseSnapshotResult> {
-    let mut result = ExportInfobaseSnapshotResult::new(request.clone(), prepared.selection.clone());
+    let mut result =
+        ExportInfobaseSnapshotResult::new(request.clone(), Some(prepared.receipt.clone()));
     if let Err(error) = validate_snapshot_output(&request.output) {
         return Err(snapshot_failure(
             context,
             error,
             result,
-            ExportPhase::Validation,
+            InfobaseTransferPhase::Validation,
         ));
     }
     let provider = prepared.provider;
 
     let output = resolve_output(config, &request.output).map_err(|error| {
-        snapshot_failure(context, error, result.clone(), ExportPhase::ResolveTarget)
+        snapshot_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::ResolveTarget,
+        )
     })?;
     result.output = output.target.clone();
-    let _target_lock =
-        acquire_target_lock(context, &output.lock_path, SNAPSHOT_COMMAND).map_err(|error| {
-            snapshot_failure(context, error, result.clone(), ExportPhase::TargetLock)
-        })?;
+    let _target_lock = acquire_target_lock(
+        context,
+        &output.lock_path,
+        SNAPSHOT_COMMAND,
+        TARGET_LOCK_WAIT,
+    )
+    .map_err(|error| {
+        snapshot_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::TargetLock,
+        )
+    })?;
     let output_observation = observe_locked_output(&output).map_err(|error| {
-        snapshot_failure(context, error, result.clone(), ExportPhase::ResolveTarget)
+        snapshot_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::ResolveTarget,
+        )
     })?;
     cleanup_export_orphans(&output, &[".infobase-dt-stage-"]).map_err(|error| {
-        snapshot_failure(context, error, result.clone(), ExportPhase::OrphanCleanup)
+        snapshot_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::OrphanCleanup,
+        )
     })?;
     let publication = StagedPublication::prepare_file(
         &output.target,
@@ -251,7 +311,12 @@ pub fn execute_infobase_snapshot(
         "dt",
     )
     .map_err(|error| {
-        snapshot_failure(context, error, result.clone(), ExportPhase::PrepareStaging)
+        snapshot_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::PrepareStaging,
+        )
     })?;
 
     let provider_started = Instant::now();
@@ -259,7 +324,7 @@ pub fn execute_infobase_snapshot(
         context,
         config,
         provider,
-        &prepared.executable,
+        prepared.executable.as_deref(),
         publication.staging_path(),
     ) {
         Ok(platform_result) => platform_result,
@@ -268,7 +333,7 @@ pub fn execute_infobase_snapshot(
                 context,
                 publication.cleanup_failure(error),
                 result,
-                ExportPhase::ProviderCommand,
+                InfobaseTransferPhase::ProviderCommand,
             ))
         }
     };
@@ -277,13 +342,13 @@ pub fn execute_infobase_snapshot(
             context,
             publication.cleanup_failure(error),
             result,
-            ExportPhase::ProviderCommand,
+            InfobaseTransferPhase::ProviderCommand,
         ));
     }
     result.steps.push(
         StepResult::succeeded(
-            ExportPhase::ProviderCommand.as_str(),
-            ExportPhase::ProviderCommand.kind(),
+            InfobaseTransferPhase::ProviderCommand.as_str(),
+            InfobaseTransferPhase::ProviderCommand.kind(),
             provider_started.elapsed().as_millis() as u64,
         )
         .with_target(publication.staging_path().display().to_string()),
@@ -293,13 +358,13 @@ pub fn execute_infobase_snapshot(
             context,
             publication.cleanup_failure(error),
             result,
-            ExportPhase::ValidateProviderOutput,
+            InfobaseTransferPhase::ValidateProviderOutput,
         ));
     }
-    record_deferred_process_interruption(
-        &platform_result,
-        "provider command",
+    record_deferral(
+        ExecutionInterruptionPhase::ProviderCommand,
         "infobase DT export",
+        platform_result.process.interruption,
         &mut result.execution,
         &mut result.warnings,
     );
@@ -308,7 +373,7 @@ pub fn execute_infobase_snapshot(
             context,
             publication.cleanup_failure(error),
             result,
-            ExportPhase::BeforePublication,
+            InfobaseTransferPhase::BeforePublication,
         ));
     }
     revalidate_before_publish(&output, &output_observation, &publication).map_err(|error| {
@@ -316,7 +381,7 @@ pub fn execute_infobase_snapshot(
             context,
             error,
             result.clone(),
-            ExportPhase::PublishTargetRevalidation,
+            InfobaseTransferPhase::PublishTargetRevalidation,
         )
     })?;
     let publication_started = Instant::now();
@@ -330,13 +395,13 @@ pub fn execute_infobase_snapshot(
                 context,
                 failure.error,
                 result.clone(),
-                ExportPhase::Publication,
+                InfobaseTransferPhase::Publication,
             )
         })?;
     result.steps.push(
         StepResult::succeeded(
-            ExportPhase::Publication.as_str(),
-            ExportPhase::Publication.kind(),
+            InfobaseTransferPhase::Publication.as_str(),
+            InfobaseTransferPhase::Publication.kind(),
             publication_started.elapsed().as_millis() as u64,
         )
         .with_target(result.output.display().to_string()),
@@ -359,7 +424,7 @@ pub fn execute_infobase_snapshot(
             .interruptions
             .push(deferred_command_interruption_details(
                 interruption,
-                "publication",
+                ExecutionInterruptionPhase::Publication,
                 message,
             ));
     }
@@ -415,47 +480,39 @@ pub fn prepare_infobase_restore(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &RestoreInfobaseSnapshotRequest,
-) -> Result<PreparedExportProvider, UseCaseFailure<RestoreInfobaseSnapshotResult>> {
+) -> Result<PreparedTransferProvider, UseCaseFailure<RestoreInfobaseSnapshotResult>> {
     if let Err(error) = validate_restore_request(request) {
-        let decision = ExportProviderDecision::unavailable(
-            "provider selection was not attempted because the request is invalid",
-            Vec::new(),
-        );
-        let result = RestoreInfobaseSnapshotResult::new(request.clone(), decision);
+        let result = RestoreInfobaseSnapshotResult::new(request.clone(), None);
         return Err(restore_failure(
             context,
             error,
             result,
-            ExportPhase::Validation,
+            InfobaseTransferPhase::Validation,
         ));
     }
 
     if let Err(error) = validate_restore_target(config, request.target_mode) {
-        let decision = ExportProviderDecision::unavailable(
-            "provider selection was not attempted because the target mode does not match the infobase",
-            Vec::new(),
-        );
-        let result = RestoreInfobaseSnapshotResult::new(request.clone(), decision);
+        let result = RestoreInfobaseSnapshotResult::new(request.clone(), None);
         return Err(restore_failure(
             context,
             error,
             result,
-            ExportPhase::Validation,
+            InfobaseTransferPhase::Validation,
         ));
     }
 
-    let intent = ExportIntent::SnapshotRestore {
+    let intent = InfobaseTransferIntent::SnapshotRestore {
         expects_absent_target: request.target_mode == RestoreTargetMode::Create,
     };
     match select_provider(context, config, intent) {
         Ok(prepared) => Ok(prepared),
-        Err((error, decision)) => {
-            let result = RestoreInfobaseSnapshotResult::new(request.clone(), decision);
+        Err((error, receipt)) => {
+            let result = RestoreInfobaseSnapshotResult::new(request.clone(), Some(receipt));
             Err(restore_failure(
                 context,
                 error,
                 result,
-                ExportPhase::ProviderSelection,
+                InfobaseTransferPhase::ProviderSelection,
             ))
         }
     }
@@ -465,10 +522,10 @@ pub fn preview_infobase_restore(
     _context: &ExecutionContext,
     _config: &AppConfig,
     request: &RestoreInfobaseSnapshotRequest,
-    prepared: &PreparedExportProvider,
+    prepared: &PreparedTransferProvider,
 ) -> UseCaseResult<RestoreInfobaseSnapshotResult> {
     let mut result =
-        RestoreInfobaseSnapshotResult::new(request.clone(), prepared.selection().clone());
+        RestoreInfobaseSnapshotResult::new(request.clone(), Some(prepared.receipt().clone()));
     result.mark_preview();
     Ok(result)
 }
@@ -482,16 +539,16 @@ pub fn execute_infobase_restore(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &RestoreInfobaseSnapshotRequest,
-    prepared: &PreparedExportProvider,
+    prepared: &PreparedTransferProvider,
 ) -> UseCaseResult<RestoreInfobaseSnapshotResult> {
     let mut result =
-        RestoreInfobaseSnapshotResult::new(request.clone(), prepared.selection.clone());
+        RestoreInfobaseSnapshotResult::new(request.clone(), Some(prepared.receipt.clone()));
     if let Err(error) = validate_restore_request(request) {
         return Err(restore_failure(
             context,
             error,
             result,
-            ExportPhase::Validation,
+            InfobaseTransferPhase::Validation,
         ));
     }
     let target_present = match validate_restore_target(config, request.target_mode) {
@@ -501,7 +558,7 @@ pub fn execute_infobase_restore(
                 context,
                 error,
                 result,
-                ExportPhase::ResolveTarget,
+                InfobaseTransferPhase::ResolveTarget,
             ))
         }
     };
@@ -510,7 +567,7 @@ pub fn execute_infobase_restore(
             context,
             error,
             result,
-            ExportPhase::BeforePublication,
+            InfobaseTransferPhase::BeforePublication,
         ));
     }
 
@@ -519,18 +576,30 @@ pub fn execute_infobase_restore(
         context,
         config,
         prepared.provider,
-        &prepared.executable,
+        prepared.executable.as_deref(),
         &request.input,
     ) {
         Ok(platform_result) => platform_result,
-        Err(error) => {
-            result.target_state = ExportTargetState::Uncertain;
-            record_uncertain_target_warning(&mut result.warnings, result.target_state);
+        Err(failure) => {
+            // Базу мог тронуть только исполнитель, получивший работу. Отказ до неё — отмена
+            // до запуска, исполнитель, которого не собрать, — оставляет цель как была.
+            if context.work().given() {
+                result.target_state = ExportTargetState::Uncertain;
+                record_uncertain_target_warning(&mut result.warnings, result.target_state);
+            }
+            // Отмена, отложенная до конца критической фазы, названа и у неудачи — как на
+            // пути Конфигуратора ниже, в том же порядке предупреждений.
+            let error = failure.record_into(
+                ExecutionInterruptionPhase::ProviderCommand,
+                "infobase DT restore",
+                &mut result.execution,
+                &mut result.warnings,
+            );
             return Err(restore_failure(
                 context,
                 error,
                 result,
-                ExportPhase::ProviderCommand,
+                InfobaseTransferPhase::ProviderCommand,
             ));
         }
     };
@@ -539,25 +608,34 @@ pub fn execute_infobase_restore(
         // here can tell how much, so the target state is reported as uncertain.
         result.target_state = ExportTargetState::Uncertain;
         record_uncertain_target_warning(&mut result.warnings, result.target_state);
+        // Отмена, отложенная до конца критической фазы, названа и у неудачной загрузки:
+        // оператор просил остановить, и ответ говорит, почему его не послушали.
+        record_deferral(
+            ExecutionInterruptionPhase::ProviderCommand,
+            "infobase DT restore",
+            platform_result.process.interruption,
+            &mut result.execution,
+            &mut result.warnings,
+        );
         return Err(restore_failure(
             context,
             error,
             result,
-            ExportPhase::ProviderCommand,
+            InfobaseTransferPhase::ProviderCommand,
         ));
     }
     result.steps.push(
         StepResult::succeeded(
-            ExportPhase::ProviderCommand.as_str(),
-            ExportPhase::ProviderCommand.kind(),
+            InfobaseTransferPhase::ProviderCommand.as_str(),
+            InfobaseTransferPhase::ProviderCommand.kind(),
             provider_started.elapsed().as_millis() as u64,
         )
         .with_target(request.input.display().to_string()),
     );
-    record_deferred_process_interruption(
-        &platform_result,
-        "provider command",
+    record_deferral(
+        ExecutionInterruptionPhase::ProviderCommand,
         "infobase DT restore",
+        platform_result.process.interruption,
         &mut result.execution,
         &mut result.warnings,
     );
@@ -586,29 +664,42 @@ fn observe_target_infobase(config: &AppConfig) -> Result<bool, AppError> {
 fn run_restore_provider(
     context: &ExecutionContext,
     config: &AppConfig,
-    provider: ExportProvider,
-    executable: &Path,
+    provider: Provider,
+    executable: Option<&Path>,
     source_file: &Path,
-) -> Result<PlatformCommandResult, AppError> {
+) -> Result<PlatformCommandResult, CommandFailure> {
     match provider {
-        ExportProvider::DesignerBatch => {
+        // Исполнитель без адаптера: отказ, а не паника — строка матрицы опередила код.
+        other @ (Provider::IbcmdRs | Provider::Webinst) => Err(CommandFailure::without_deferral(
+            crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::InfobaseRestore,
+                other,
+            ),
+        )),
+        Provider::Agent => agent::restore_snapshot(context, config, executable, source_file),
+        Provider::Designer => {
+            let executable = executable_of(executable).map_err(CommandFailure::without_deferral)?;
             let runner = crate::platform::process::ProcessExecutor;
-            let log = provider_log_path(config, "infobase-restore")?;
+            let log = provider_log_path(config, "infobase-restore")
+                .map_err(CommandFailure::without_deferral)?;
+            // Загрузка снимка подменяет базу целиком: фаза критическая, как у `restore-ib`
+            // агента. Снятый посреди записи Конфигуратор оставил бы базу в состоянии,
+            // которое не назовёт никто.
             DesignerDsl::new(
                 executable.to_path_buf(),
                 config.v8_connection(),
                 &runner,
                 Some(log),
-            )
-            .with_execution_policy(
-                context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+                context.process_policy(InterruptionSafetyClass::CriticalNonAbortable, None),
             )
             .restore_infobase(source_file)
-            .map_err(AppError::from)
+            // Отказ раннера фактом отсрочки не владеет: процесс, отложивший отмену,
+            // отвечает результатом, а не ошибкой.
+            .map_err(|error| CommandFailure::without_deferral(AppError::from(error)))
         }
-        ExportProvider::IbcmdProcess => Err(AppError::CapabilityUnavailable(
+        Provider::Ibcmd => Err(CommandFailure::without_deferral(AppError::capability(
             "IBCMD DT restore is experimental and cannot be dispatched".to_owned(),
-        )),
+        ))),
     }
 }
 
@@ -616,7 +707,7 @@ fn restore_failure(
     context: &ExecutionContext,
     error: AppError,
     mut result: RestoreInfobaseSnapshotResult,
-    phase: ExportPhase,
+    phase: InfobaseTransferPhase,
 ) -> UseCaseFailure<RestoreInfobaseSnapshotResult> {
     record_execution_failure(context, &error, phase, &mut result.execution);
     result.steps.push(failed_step(phase, &error));
@@ -686,30 +777,26 @@ pub fn prepare_configuration_export(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &ExportConfigurationPackageRequest,
-) -> Result<PreparedExportProvider, UseCaseFailure<ExportConfigurationPackageResult>> {
+) -> Result<PreparedTransferProvider, UseCaseFailure<ExportConfigurationPackageResult>> {
     if let Err(error) = validate_configuration_request(request) {
-        let decision = ExportProviderDecision::unavailable(
-            "provider selection was not attempted because the request is invalid",
-            Vec::new(),
-        );
-        let result = ExportConfigurationPackageResult::new(request.clone(), decision);
+        let result = ExportConfigurationPackageResult::new(request.clone(), None);
         return Err(configuration_failure(
             context,
             error,
             result,
-            ExportPhase::Validation,
+            InfobaseTransferPhase::Validation,
         ));
     }
 
-    match select_provider(context, config, ExportIntent::Configuration) {
+    match select_provider(context, config, InfobaseTransferIntent::Configuration) {
         Ok(prepared) => Ok(prepared),
-        Err((error, decision)) => {
-            let result = ExportConfigurationPackageResult::new(request.clone(), decision);
+        Err((error, receipt)) => {
+            let result = ExportConfigurationPackageResult::new(request.clone(), Some(receipt));
             Err(configuration_failure(
                 context,
                 error,
                 result,
-                ExportPhase::ProviderSelection,
+                InfobaseTransferPhase::ProviderSelection,
             ))
         }
     }
@@ -719,30 +806,26 @@ pub fn prepare_infobase_snapshot(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &ExportInfobaseSnapshotRequest,
-) -> Result<PreparedExportProvider, UseCaseFailure<ExportInfobaseSnapshotResult>> {
+) -> Result<PreparedTransferProvider, UseCaseFailure<ExportInfobaseSnapshotResult>> {
     if let Err(error) = validate_snapshot_output(&request.output) {
-        let decision = ExportProviderDecision::unavailable(
-            "provider selection was not attempted because the request is invalid",
-            Vec::new(),
-        );
-        let result = ExportInfobaseSnapshotResult::new(request.clone(), decision);
+        let result = ExportInfobaseSnapshotResult::new(request.clone(), None);
         return Err(snapshot_failure(
             context,
             error,
             result,
-            ExportPhase::Validation,
+            InfobaseTransferPhase::Validation,
         ));
     }
 
-    match select_provider(context, config, ExportIntent::Snapshot) {
+    match select_provider(context, config, InfobaseTransferIntent::Snapshot) {
         Ok(prepared) => Ok(prepared),
-        Err((error, decision)) => {
-            let result = ExportInfobaseSnapshotResult::new(request.clone(), decision);
+        Err((error, receipt)) => {
+            let result = ExportInfobaseSnapshotResult::new(request.clone(), Some(receipt));
             Err(snapshot_failure(
                 context,
                 error,
                 result,
-                ExportPhase::ProviderSelection,
+                InfobaseTransferPhase::ProviderSelection,
             ))
         }
     }
@@ -752,13 +835,18 @@ pub fn preview_configuration_export(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &ExportConfigurationPackageRequest,
-    prepared: &PreparedExportProvider,
+    prepared: &PreparedTransferProvider,
 ) -> UseCaseResult<ExportConfigurationPackageResult> {
     let mut result =
-        ExportConfigurationPackageResult::new(request.clone(), prepared.selection().clone());
+        ExportConfigurationPackageResult::new(request.clone(), Some(prepared.receipt().clone()));
     result.mark_preview_failure();
     let output = resolve_output(config, &request.output).map_err(|error| {
-        configuration_failure(context, error, result.clone(), ExportPhase::ResolveTarget)
+        configuration_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::ResolveTarget,
+        )
     })?;
     result.output = output.target;
     result.mark_preview();
@@ -769,13 +857,18 @@ pub fn preview_infobase_snapshot(
     context: &ExecutionContext,
     config: &AppConfig,
     request: &ExportInfobaseSnapshotRequest,
-    prepared: &PreparedExportProvider,
+    prepared: &PreparedTransferProvider,
 ) -> UseCaseResult<ExportInfobaseSnapshotResult> {
     let mut result =
-        ExportInfobaseSnapshotResult::new(request.clone(), prepared.selection().clone());
+        ExportInfobaseSnapshotResult::new(request.clone(), Some(prepared.receipt().clone()));
     result.mark_preview_failure();
     let output = resolve_output(config, &request.output).map_err(|error| {
-        snapshot_failure(context, error, result.clone(), ExportPhase::ResolveTarget)
+        snapshot_failure(
+            context,
+            error,
+            result.clone(),
+            InfobaseTransferPhase::ResolveTarget,
+        )
     })?;
     result.output = output.target;
     result.mark_preview();
@@ -783,176 +876,217 @@ pub fn preview_infobase_snapshot(
 }
 
 #[derive(Debug, Clone, Copy)]
-enum ExportIntent {
+enum InfobaseTransferIntent {
     Configuration,
     Snapshot,
     SnapshotRestore { expects_absent_target: bool },
 }
 
+impl InfobaseTransferIntent {
+    const fn operation(self) -> crate::domain::capability::Operation {
+        use crate::domain::capability::Operation;
+        match self {
+            Self::Configuration => Operation::ConfigurationExport,
+            Self::Snapshot => Operation::InfobaseDump,
+            Self::SnapshotRestore { .. } => Operation::InfobaseRestore,
+        }
+    }
+}
+
 fn select_provider(
     context: &ExecutionContext,
     config: &AppConfig,
-    intent: ExportIntent,
-) -> Result<PreparedExportProvider, (AppError, ExportProviderDecision)> {
-    let providers = match config.builder {
-        BuilderBackend::Designer => [ExportProvider::DesignerBatch, ExportProvider::IbcmdProcess],
-        BuilderBackend::Ibcmd => [ExportProvider::IbcmdProcess, ExportProvider::DesignerBatch],
-    };
-    let mut utilities = PlatformUtilities::from_config(config);
-    let mut candidates = Vec::new();
-    let mut selected = None;
+    intent: InfobaseTransferIntent,
+) -> Result<PreparedTransferProvider, (AppError, ProviderReceipt)> {
+    use crate::domain::capability::SkippedProvider;
 
-    for provider in providers {
-        if let Some(interruption) = context.interruption() {
-            let reason = format!(
-                "{} during provider selection",
-                interruption.message(context.command())
-            );
-            let decision = ExportProviderDecision::unavailable(reason.clone(), candidates);
-            let error = match interruption {
-                crate::use_cases::context::ExecutionInterruption::Cancelled => {
-                    AppError::Cancelled(reason)
-                }
-                crate::use_cases::context::ExecutionInterruption::TimedOut => {
-                    AppError::TimedOut(reason)
-                }
-            };
-            return Err((error, decision));
+    // Кандидаты приходят из матрицы: переопределение — один исполнитель без отката,
+    // умолчание — цепочка, из которой берётся первый готовый.
+    let plan = config.provider_plan(intent.operation());
+    if plan.candidates().is_empty() {
+        return Err((
+            AppError::capability(format!(
+                "no executor implements {} on a {} target",
+                intent.operation(),
+                config.target_kind().as_str()
+            )),
+            plan.receipt_for_nobody(Vec::new()),
+        ));
+    }
+    let mut utilities = PlatformUtilities::from_config(config);
+    let mut skipped: Vec<SkippedProvider> = Vec::new();
+    let mut has_implemented = false;
+
+    for provider in plan.candidates() {
+        if let Some(error) = pending_interruption_error(context, "during provider selection") {
+            let receipt = plan.receipt_for_nobody(skipped);
+            return Err((error, receipt));
         }
-        let (implementation, evidence, implementation_reason) = capability(intent, provider);
-        if selected.is_some() || implementation != ProviderImplementation::Implemented {
-            candidates.push(ProviderCandidate::new(
+        let (implementation, implementation_reason) = capability(intent, provider);
+        // Экспериментальный адаптер доступен только переопределением: в цепочку умолчаний
+        // он не входит, а названный явно — пробуется, потому что за этим и назвали.
+        let named_explicitly = matches!(
+            plan,
+            crate::domain::capability::ProviderPlan::Override { .. }
+        );
+        // У автономного сервера шлюз — единственный исполнитель: он не эксперимент, а
+        // строка матрицы (`GATE_ONLY`), и в цепочку входит сам.
+        let gate_only = provider == Provider::Agent && config.infobase.standalone.is_some();
+        // Развилка недостижима и оставлена поясом: цепочка умолчаний отфильтрована по
+        // `Implemented`, а названный ключом исполнитель проходит по `named_explicitly`.
+        // Настоящий отказ по неверному ключу даёт проверка настроек — у экспортного
+        // семейства её нет, и это разбирается в #272.
+        if implementation == Implementation::Experimental && !named_explicitly && !gate_only {
+            skipped.push(SkippedProvider {
                 provider,
-                implementation,
-                ProviderReadiness::NotChecked,
-                evidence,
-                implementation_reason,
-            ));
+                reason: implementation_reason.to_owned(),
+            });
             continue;
         }
+        has_implemented = true;
 
-        let utility = provider_utility(provider);
+        let utility = provider_utility(config, provider);
         match readiness(config, &mut utilities, intent, provider, utility) {
             Ok(executable) => {
-                candidates.push(ProviderCandidate::new(
+                let receipt = plan.receipt_for(provider, skipped);
+                return Ok(PreparedTransferProvider {
+                    receipt,
                     provider,
-                    implementation,
-                    ProviderReadiness::Ready,
-                    evidence,
-                    format!(
-                        "{}; '{}' resolved without starting a provider process",
-                        implementation_reason,
-                        executable.display()
-                    ),
-                ));
-                selected = Some((provider, executable));
+                    executable,
+                });
             }
-            Err(reason) => candidates.push(ProviderCandidate::new(
+            Err(reason) => skipped.push(SkippedProvider {
                 provider,
-                implementation,
-                ProviderReadiness::Unavailable,
-                evidence,
-                format!("{implementation_reason}; {reason}"),
-            )),
+                reason: format!("{implementation_reason}; {reason}"),
+            }),
         }
     }
 
-    if let Some((provider, executable)) = selected {
-        let reason = format!(
-            "selected {} before dispatch from the operation-specific candidate order",
-            provider.as_str()
-        );
-        let selection = ExportProviderDecision::selected(provider, reason, candidates);
-        return Ok(PreparedExportProvider {
-            selection,
-            provider,
-            executable,
-        });
-    }
-
-    let has_implemented = candidates
+    let reason = skipped
         .iter()
-        .any(|candidate| candidate.implementation == ProviderImplementation::Implemented);
-    let reason = candidates
-        .iter()
-        .map(|candidate| format!("{}: {}", candidate.provider.as_str(), candidate.reason))
+        .map(|entry| format!("{}: {}", entry.provider.as_str(), entry.reason))
         .collect::<Vec<_>>()
         .join("; ");
-    let decision = ExportProviderDecision::unavailable(reason.clone(), candidates);
+    let receipt = plan.receipt_for_nobody(skipped);
     let error = if has_implemented {
         AppError::EnvironmentUnavailable(reason)
     } else {
-        AppError::CapabilityUnavailable(reason)
+        AppError::capability(reason)
     };
-    Err((error, decision))
+    Err((error, receipt))
 }
 
+/// Есть ли у переноса адаптер под этого исполнителя, и словами — почему.
+///
+/// Улику эта таблица не называет: её держит `domain::capability`, и второго мнения о ней
+/// здесь быть не должно. Прежде называла — и расходилась с доменом в пяти строках из
+/// девяти, а читателя у значения не было ни одного. Сама таблица уходит в #272 вместе с
+/// проверкой настроек, которой у экспортного семейства нет.
 fn capability(
-    intent: ExportIntent,
-    provider: ExportProvider,
-) -> (ProviderImplementation, ProviderEvidence, &'static str) {
+    intent: InfobaseTransferIntent,
+    provider: Provider,
+) -> (Implementation, &'static str) {
     match (intent, provider) {
-        (ExportIntent::Configuration, ExportProvider::DesignerBatch) => (
-            ProviderImplementation::Implemented,
-            ProviderEvidence::ArgvTested,
+        (InfobaseTransferIntent::Configuration, Provider::Designer) => (
+            Implementation::Implemented,
             "Designer CF/CFE adapter is implemented from the documented batch contract",
         ),
-        (ExportIntent::Configuration, ExportProvider::IbcmdProcess) => (
-            ProviderImplementation::Implemented,
-            ProviderEvidence::ArgvTested,
+        (InfobaseTransferIntent::Configuration, Provider::Ibcmd) => (
+            Implementation::Implemented,
             "IBCMD CF/CFE adapter is implemented from the documented config-save contract",
         ),
-        (ExportIntent::Snapshot, ExportProvider::DesignerBatch) => (
-            ProviderImplementation::Implemented,
-            ProviderEvidence::ArgvTested,
+        (InfobaseTransferIntent::Snapshot, Provider::Designer) => (
+            Implementation::Implemented,
             "Designer DT adapter is implemented from the documented batch contract",
         ),
-        (ExportIntent::Snapshot, ExportProvider::IbcmdProcess) => (
-            ProviderImplementation::Experimental,
-            ProviderEvidence::Documented,
+        (InfobaseTransferIntent::Snapshot, Provider::Ibcmd) => (
+            Implementation::Experimental,
             "IBCMD DT export is disabled until an exclusive-access preflight is implemented",
         ),
-        (ExportIntent::SnapshotRestore { .. }, ExportProvider::DesignerBatch) => (
-            ProviderImplementation::Implemented,
-            ProviderEvidence::LiveVerified,
+        (InfobaseTransferIntent::SnapshotRestore { .. }, Provider::Designer) => (
+            Implementation::Implemented,
             "Designer DT restore is implemented and was verified against a live 8.3.27 file infobase",
         ),
-        (ExportIntent::SnapshotRestore { .. }, ExportProvider::IbcmdProcess) => (
-            ProviderImplementation::Experimental,
-            ProviderEvidence::LiveVerified,
+        (InfobaseTransferIntent::SnapshotRestore { .. }, Provider::Ibcmd) => (
+            Implementation::Experimental,
             "IBCMD DT restore runs but stays experimental until an exclusive-access preflight is implemented",
+        ),
+        (InfobaseTransferIntent::Configuration, Provider::Agent) => (
+            Implementation::Experimental,
+            "agent CF/CFE export runs `config dump-cfg` in the agent session; named by providers.* only",
+        ),
+        (InfobaseTransferIntent::Snapshot, Provider::Agent) => (
+            Implementation::Experimental,
+            "agent DT export runs `infobase-tools dump-ib`; named by providers.* only",
+        ),
+        (InfobaseTransferIntent::SnapshotRestore { .. }, Provider::Agent) => (
+            Implementation::Experimental,
+            "agent DT restore runs `infobase-tools restore-ib`; the agent drops the session afterwards",
+        ),
+        // Строка матрицы, опередившая код: исполнитель назван, адаптера у него нет.
+        (_, _) => (
+            Implementation::Experimental,
+            "no export adapter is implemented for this provider in this build of the runner",
         ),
     }
 }
 
-fn provider_utility(provider: ExportProvider) -> UtilityType {
+/// Утилита исполнителя; `None` — исполнителю на этой машине утилита не нужна.
+fn provider_utility(config: &AppConfig, provider: Provider) -> Option<UtilityType> {
     match provider {
-        ExportProvider::DesignerBatch => UtilityType::V8,
-        ExportProvider::IbcmdProcess => UtilityType::Ibcmd,
+        Provider::Designer => Some(UtilityType::V8),
+        // Управляемому агенту нужна платформа, чужому и шлюзу автономного сервера — ничего.
+        Provider::Agent if config.infobase.standalone.is_some() => None,
+        Provider::Agent => match config.tools.designer_agent.mode() {
+            Ok(crate::config::model::DesignerAgentMode::Attached { .. }) => None,
+            _ => Some(UtilityType::V8),
+        },
+        // Только Designer, Agent и ibcmd имеют адаптер. Остальных сюда не пускает
+        // проверка настроек, отвергающая ключ без строки в матрице.
+        _ => Some(UtilityType::Ibcmd),
     }
 }
 
 fn readiness(
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
-    intent: ExportIntent,
-    provider: ExportProvider,
-    utility: UtilityType,
-) -> Result<PathBuf, String> {
-    match intent {
-        ExportIntent::SnapshotRestore {
-            expects_absent_target: true,
-        } => validate_restore_target_connection(config)?,
-        _ => validate_file_infobase_readiness(config)?,
+    intent: InfobaseTransferIntent,
+    provider: Provider,
+    utility: Option<UtilityType>,
+) -> Result<Option<PathBuf>, String> {
+    // Автономный сервер обслуживает существующую базу: файловых проверок нет, а
+    // `--create` ему не адресовать.
+    if config.infobase.standalone.is_some() {
+        if matches!(
+            intent,
+            InfobaseTransferIntent::SnapshotRestore {
+                expects_absent_target: true
+            }
+        ) {
+            return Err(
+                "a standalone server serves an existing infobase: restore it with --replace, not --create"
+                    .to_owned(),
+            );
+        }
+    } else {
+        match intent {
+            InfobaseTransferIntent::SnapshotRestore {
+                expects_absent_target: true,
+            } => validate_restore_target_connection(config)?,
+            _ => validate_file_infobase_readiness(config)?,
+        }
     }
-    if provider == ExportProvider::IbcmdProcess {
+    if provider == Provider::Ibcmd {
         IbcmdConnection::from_infobase(&config.infobase)
             .map_err(|error| format!("connection is not ready for IBCMD: {error}"))?;
     }
-    utilities
-        .locate(utility)
-        .map(|location| location.path)
-        .map_err(|error| format!("environment is not ready: {error}"))
+    match utility {
+        Some(utility) => utilities
+            .locate(utility)
+            .map(|location| Some(location.path))
+            .map_err(|error| format!("environment is not ready: {error}")),
+        None => Ok(None),
+    }
 }
 
 fn validate_file_infobase_readiness(config: &AppConfig) -> Result<(), String> {
@@ -1014,7 +1148,7 @@ fn configuration_failure(
     context: &ExecutionContext,
     error: AppError,
     mut result: ExportConfigurationPackageResult,
-    phase: ExportPhase,
+    phase: InfobaseTransferPhase,
 ) -> UseCaseFailure<ExportConfigurationPackageResult> {
     record_execution_failure(context, &error, phase, &mut result.execution);
     result.steps.push(failed_step(phase, &error));
@@ -1025,69 +1159,65 @@ fn snapshot_failure(
     context: &ExecutionContext,
     error: AppError,
     mut result: ExportInfobaseSnapshotResult,
-    phase: ExportPhase,
+    phase: InfobaseTransferPhase,
 ) -> UseCaseFailure<ExportInfobaseSnapshotResult> {
     record_execution_failure(context, &error, phase, &mut result.execution);
     result.steps.push(failed_step(phase, &error));
     UseCaseFailure::with_payload(infobase_use_case_error(error), result)
 }
 
+/// Истёкший срок процесса перенос называет сроком, а не отказом платформы. Отмену называет
+/// `From` — одинаково для всех команд.
 fn infobase_use_case_error(error: AppError) -> UseCaseError {
-    let kind = match process_error(&error) {
-        Some(ProcessError::Cancelled { .. }) => Some(UseCaseErrorKind::Cancelled),
-        Some(ProcessError::TimedOut { .. }) => Some(UseCaseErrorKind::TimedOut),
-        _ => None,
-    };
-    match kind {
-        Some(kind) => UseCaseError::new(kind, error.to_string()),
-        None => error.into(),
+    match process_error(&error) {
+        Some(ProcessError::TimedOut { .. }) => {
+            UseCaseError::new(UseCaseErrorKind::TimedOut, error.to_string())
+        }
+        _ => error.into(),
     }
 }
 
-fn failed_step(phase: ExportPhase, error: &AppError) -> StepResult {
+fn failed_step(phase: InfobaseTransferPhase, error: &AppError) -> StepResult {
     StepResult::failed(phase.as_str(), phase.kind(), 0).with_message(error.to_string())
 }
 
 fn record_execution_failure(
     _context: &ExecutionContext,
     error: &AppError,
-    phase: ExportPhase,
+    phase: InfobaseTransferPhase,
     execution: &mut ExecutionOutcome<()>,
 ) {
     let message = error.to_string();
+    // Отмену и её место называет ошибка: безопасная точка — `command_boundary`, где бы её
+    // ни проверили, оборванная работа исполнителя — фаза шага.
+    if let Some(details) = cancellation_record(error, phase.interruption_phase(), &message) {
+        execution.status = ExecutionStatus::Cancelled;
+        execution
+            .errors
+            .push(ExecutionError::new("cancelled", message));
+        execution.interruptions.push(details);
+        return;
+    }
     let mut interruption_details = None;
     let (status, code) = match process_error(error) {
-        Some(ProcessError::Cancelled { .. }) => {
-            interruption_details = Some(process_interruption_details(
-                ProcessInterruptionReason::Cancelled,
-                phase.as_str(),
-                false,
-                &message,
-            ));
-            (ExecutionStatus::Cancelled, "cancelled")
-        }
         Some(ProcessError::TimedOut { .. }) => {
             interruption_details = Some(process_interruption_details(
                 ProcessInterruptionReason::TimedOut,
-                phase.as_str(),
+                phase.interruption_phase(),
                 false,
                 &message,
             ));
             (ExecutionStatus::TimedOut, "timed_out")
         }
         _ => match error {
-            AppError::Cancelled(_) => {
-                interruption_details = Some(command_interruption_details(
-                    crate::use_cases::context::ExecutionInterruption::Cancelled,
-                    phase.as_str(),
-                    &message,
-                ));
-                (ExecutionStatus::Cancelled, "cancelled")
-            }
+            // Сюда `timed_out` приходит только от шага — например от завершения
+            // агентской сессии, у которого предел свой. Срок команды его дать не может,
+            // поэтому улика записывается как процессная, а не командная.
             AppError::TimedOut(_) => {
-                interruption_details = Some(command_interruption_details(
-                    crate::use_cases::context::ExecutionInterruption::TimedOut,
-                    phase.as_str(),
+                interruption_details = Some(process_interruption_details(
+                    ProcessInterruptionReason::TimedOut,
+                    phase.interruption_phase(),
+                    false,
                     &message,
                 ));
                 (ExecutionStatus::TimedOut, "timed_out")
@@ -1128,29 +1258,10 @@ fn execution_error_code(error: &AppError) -> &'static str {
         AppError::CapabilityUnavailable(_) => "capability_unavailable",
         AppError::EnvironmentUnavailable(_) => "environment_unavailable",
         AppError::WorkspaceBusy(_) => "workspace_busy",
-        AppError::Cancelled(_) => "cancelled",
         AppError::TimedOut(_) => "timed_out",
         AppError::InvalidOutput(_) => "invalid_output",
         AppError::Runtime(_) => "runtime_failure",
         _ => "platform_failure",
-    }
-}
-
-fn record_deferred_process_interruption(
-    platform_result: &PlatformCommandResult,
-    phase: &str,
-    completed_action: &str,
-    execution: &mut ExecutionOutcome<()>,
-    warnings: &mut Vec<String>,
-) {
-    if let Some(details) =
-        deferred_process_interruption_details(phase, completed_action, platform_result)
-    {
-        execution.interruptions.push(details);
-    }
-    if let Some(warning) = deferred_process_interruption_warning(completed_action, platform_result)
-    {
-        warnings.push(warning);
     }
 }
 
@@ -1307,38 +1418,44 @@ fn cleanup_export_orphans(
     )
 }
 
+/// How long an export waits for another run to release the same output target.
+///
+/// This is a step bound, not a command deadline: the lock guards a file we own, and a
+/// conflict that has not cleared in this window is a second run writing the same target,
+/// not a slow platform operation. Waiting is a courtesy for back-to-back commands that
+/// briefly overlap; past it the honest answer is that the target is busy.
+const TARGET_LOCK_WAIT: Duration = Duration::from_secs(300);
+
+const TARGET_LOCK_POLL: Duration = Duration::from_millis(25);
+
 fn acquire_target_lock(
     context: &ExecutionContext,
     lock_path: &Path,
     command: &str,
+    wait: Duration,
 ) -> Result<crate::support::fs::AdvisoryLockGuard, AppError> {
+    let waiting_since = Instant::now();
     loop {
         match try_acquire_advisory_lock(lock_path) {
             Ok(guard) => return Ok(guard),
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                if let Some(interruption) = context.interruption() {
-                    let message = format!(
-                        "{} while waiting for {command} output lock '{}'",
-                        interruption.message(context.command()),
+                if let Some(error) = pending_interruption_error(
+                    context,
+                    format!(
+                        "while waiting for {command} output lock '{}'",
                         lock_path.display()
-                    );
-                    return Err(match interruption {
-                        crate::use_cases::context::ExecutionInterruption::Cancelled => {
-                            AppError::Cancelled(message)
-                        }
-                        crate::use_cases::context::ExecutionInterruption::TimedOut => {
-                            AppError::TimedOut(message)
-                        }
-                    });
+                    ),
+                ) {
+                    return Err(error);
                 }
-                let delay = context
-                    .remaining_budget()
-                    .map(|remaining| remaining.min(Duration::from_millis(25)))
-                    .unwrap_or(Duration::from_millis(25));
-                if delay.is_zero() {
-                    continue;
+                if waiting_since.elapsed() >= wait {
+                    return Err(AppError::WorkspaceBusy(format!(
+                        "another run still holds the {command} output lock '{}' after {}ms; finish or stop it, or send this run to a different output",
+                        lock_path.display(),
+                        wait.as_millis()
+                    )));
                 }
-                thread::sleep(delay);
+                thread::sleep(TARGET_LOCK_POLL);
             }
             Err(error) => {
                 return Err(AppError::Runtime(format!(
@@ -1353,8 +1470,8 @@ fn acquire_target_lock(
 fn run_configuration_provider(
     context: &ExecutionContext,
     config: &AppConfig,
-    provider: ExportProvider,
-    executable: &Path,
+    provider: Provider,
+    executable: Option<&Path>,
     state: ConfigurationState,
     subject: &ConfigurationSubject,
     staging_path: &Path,
@@ -1365,15 +1482,33 @@ fn run_configuration_provider(
     };
     let runner = crate::platform::process::ProcessExecutor;
     let result = match provider {
-        ExportProvider::DesignerBatch => {
+        // Исполнитель без адаптера: отказ, а не паника — строка матрицы опередила код.
+        other @ (Provider::IbcmdRs | Provider::Webinst) => {
+            return Err(crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::ConfigurationExport,
+                other,
+            ));
+        }
+        Provider::Agent => {
+            return agent::export_configuration(
+                context,
+                config,
+                executable,
+                state,
+                extension,
+                staging_path,
+            )
+            // Выгрузка критических команд не ведёт, отложенной отмены у её сессии не бывает.
+            .map_err(|failure| failure.into_error("configuration export"));
+        }
+        Provider::Designer => {
+            let executable = executable_of(executable)?;
             let log = provider_log_path(config, "configuration-export")?;
             let dsl = DesignerDsl::new(
                 executable.to_path_buf(),
                 config.v8_connection(),
                 &runner,
                 Some(log),
-            )
-            .with_execution_policy(
                 context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
             );
             match state {
@@ -1382,7 +1517,8 @@ fn run_configuration_provider(
             }
             .map_err(AppError::from)?
         }
-        ExportProvider::IbcmdProcess => {
+        Provider::Ibcmd => {
+            let executable = executable_of(executable)?;
             let connection =
                 IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
             let data_path = config.work_path.join("ibcmd-data");
@@ -1392,17 +1528,19 @@ fn run_configuration_provider(
                     data_path.display()
                 ))
             })?;
-            IbcmdDsl::new(executable.to_path_buf(), connection, &runner)
-                .with_data_path(data_path)
-                .with_execution_policy(
-                    context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
-                )
-                .config_save(
-                    staging_path,
-                    state == ConfigurationState::Database,
-                    extension,
-                )
-                .map_err(AppError::from)?
+            IbcmdDsl::new(
+                executable.to_path_buf(),
+                connection,
+                &runner,
+                context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
+            )
+            .with_data_path(data_path)
+            .config_save(
+                staging_path,
+                state == ConfigurationState::Database,
+                extension,
+            )
+            .map_err(AppError::from)?
         }
     };
     Ok(result)
@@ -1411,12 +1549,23 @@ fn run_configuration_provider(
 fn run_snapshot_provider(
     context: &ExecutionContext,
     config: &AppConfig,
-    provider: ExportProvider,
-    executable: &Path,
+    provider: Provider,
+    executable: Option<&Path>,
     staging_path: &Path,
 ) -> Result<PlatformCommandResult, AppError> {
     match provider {
-        ExportProvider::DesignerBatch => {
+        // Исполнитель без адаптера: отказ, а не паника — строка матрицы опередила код.
+        other @ (Provider::IbcmdRs | Provider::Webinst) => {
+            Err(crate::use_cases::unimplemented_provider(
+                crate::domain::capability::Operation::InfobaseDump,
+                other,
+            ))
+        }
+        // Выгрузка критических команд не ведёт, отложенной отмены у её сессии не бывает.
+        Provider::Agent => agent::export_snapshot(context, config, executable, staging_path)
+            .map_err(|failure| failure.into_error("infobase DT export")),
+        Provider::Designer => {
+            let executable = executable_of(executable)?;
             let runner = crate::platform::process::ProcessExecutor;
             let log = provider_log_path(config, "infobase-dump")?;
             DesignerDsl::new(
@@ -1424,17 +1573,22 @@ fn run_snapshot_provider(
                 config.v8_connection(),
                 &runner,
                 Some(log),
-            )
-            .with_execution_policy(
                 context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
             )
             .dump_infobase(staging_path)
             .map_err(AppError::from)
         }
-        ExportProvider::IbcmdProcess => Err(AppError::CapabilityUnavailable(
+        Provider::Ibcmd => Err(AppError::capability(
             "IBCMD DT export is experimental and cannot be dispatched".to_owned(),
         )),
     }
+}
+
+/// Утилита, без которой пакетному исполнителю не работать; её отсутствие после
+/// выбора — ошибка раннера, а не среды.
+fn executable_of(executable: Option<&Path>) -> Result<&Path, AppError> {
+    executable
+        .ok_or_else(|| AppError::Runtime("executor was selected without its utility".to_owned()))
 }
 
 fn provider_log_path(config: &AppConfig, stem: &str) -> Result<PathBuf, AppError> {
@@ -1495,13 +1649,13 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, InfobaseConfig, McpConfig, SourceFormat,
-        TestsConfig, ToolsConfig,
+        AppConfig, BuildConfig, InfobaseConfig, McpConfig, SourceFormat, TestsConfig, ToolsConfig,
     };
-    use crate::domain::execution::{ExecutionOutcome, ExecutionStatus};
-    use crate::domain::infobase_export::{
-        ConfigurationSubject, ExportProvider, ProviderImplementation,
+    use crate::domain::capability::{Implementation, Provider};
+    use crate::domain::execution::{
+        ExecutionInterruptionKind, ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus,
     };
+    use crate::domain::infobase_export::ConfigurationSubject;
     use crate::platform::process::ProcessError;
     use crate::support::error::AppError;
     use crate::use_cases::context::ExecutionContext;
@@ -1511,17 +1665,19 @@ mod tests {
         acquire_target_lock, capability, cleanup_export_orphans, observe_locked_output,
         record_execution_failure, resolve_output, revalidate_before_publish,
         revalidate_output_observation, validate_configuration_output, validate_snapshot_output,
-        ExportIntent, ExportPhase, SNAPSHOT_COMMAND,
+        InfobaseTransferIntent, InfobaseTransferPhase, SNAPSHOT_COMMAND, TARGET_LOCK_WAIT,
     };
 
     fn config(base: &Path, work: &Path) -> AppConfig {
         AppConfig {
             base_path: base.to_path_buf(),
             work_path: work.to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: Vec::new(),
             build: BuildConfig::default(),
             tools: ToolsConfig::default(),
@@ -1556,10 +1712,10 @@ mod tests {
         assert!(validate_snapshot_output(Path::new("dist/base.dt")).is_ok());
         assert!(validate_snapshot_output(Path::new("dist/base.backup")).is_err());
 
-        let (designer, _, _) = capability(ExportIntent::Snapshot, ExportProvider::DesignerBatch);
-        assert_eq!(designer, ProviderImplementation::Implemented);
-        let (ibcmd, _, _) = capability(ExportIntent::Snapshot, ExportProvider::IbcmdProcess);
-        assert_eq!(ibcmd, ProviderImplementation::Experimental);
+        let (designer, _) = capability(InfobaseTransferIntent::Snapshot, Provider::Designer);
+        assert_eq!(designer, Implementation::Implemented);
+        let (ibcmd, _) = capability(InfobaseTransferIntent::Snapshot, Provider::Ibcmd);
+        assert_eq!(ibcmd, Implementation::Experimental);
     }
 
     #[test]
@@ -1636,20 +1792,36 @@ mod tests {
         }
     }
 
+    /// Ожидание чужой блокировки — шаг со своим пределом, а не остаток срока команды.
+    ///
+    /// Срока у команды нет (DEC.2026-09-20.A-COMMAND-HAS-NO-DEADLINE), и без этого предела
+    /// цикл крутился бы до Ctrl+C. Отказ обязан называться занятостью, а не таймаутом:
+    /// держит цель другой прогон, и ждать дальше бессмысленно.
     #[test]
-    fn target_lock_wait_observes_the_command_deadline() {
+    fn target_lock_wait_gives_up_and_names_the_run_that_holds_the_target() {
         let dir = tempfile::tempdir().expect("tempdir");
         let lock_path = dir.path().join("target.lock");
         let _guard = crate::support::fs::acquire_advisory_lock(&lock_path).expect("held lock");
-        let context = ExecutionContext::cli(crate::use_cases::context::CommandName::InfobaseDump)
-            .with_deadline(Some(Instant::now() + Duration::from_millis(30)));
+        let context = ExecutionContext::cli(crate::use_cases::context::CommandName::InfobaseDump);
         let started = Instant::now();
 
-        let error = acquire_target_lock(&context, &lock_path, SNAPSHOT_COMMAND)
-            .expect_err("deadline must stop lock wait");
+        let error = acquire_target_lock(
+            &context,
+            &lock_path,
+            SNAPSHOT_COMMAND,
+            Duration::from_millis(40),
+        )
+        .expect_err("the wait window must end the lock wait");
 
-        assert!(matches!(error, AppError::TimedOut(_)));
-        assert!(started.elapsed() < Duration::from_millis(250));
+        assert!(
+            matches!(error, AppError::WorkspaceBusy(_)),
+            "a held target is busy, not timed out: {error:?}"
+        );
+        assert!(
+            error.to_string().contains(&lock_path.display().to_string()),
+            "the refusal must name the lock it waited on: {error}"
+        );
+        assert!(started.elapsed() < Duration::from_millis(400));
     }
 
     #[test]
@@ -1662,14 +1834,18 @@ mod tests {
         let context = ExecutionContext::cli(crate::use_cases::context::CommandName::InfobaseDump)
             .with_cancellation(cancellation);
 
-        let error = acquire_target_lock(&context, &lock_path, SNAPSHOT_COMMAND)
+        // Окно ожидания нарочно полное: пройти этот тест можно только через прерывание.
+        let error = acquire_target_lock(&context, &lock_path, SNAPSHOT_COMMAND, TARGET_LOCK_WAIT)
             .expect_err("cancellation must stop lock wait");
 
-        assert!(matches!(error, AppError::Cancelled(_)));
+        assert_eq!(
+            error.cancellation(),
+            Some(crate::support::error::CancelledAt::Boundary)
+        );
     }
 
     #[test]
-    fn provider_selection_observes_the_shared_command_deadline() {
+    fn provider_selection_observes_the_operators_interrupt() {
         let dir = tempfile::tempdir().expect("tempdir");
         let base = dir.path().join("base");
         let work = dir.path().join("work");
@@ -1678,16 +1854,37 @@ mod tests {
         let request = crate::domain::infobase_export::ExportInfobaseSnapshotRequest {
             output: base.join("base.dt"),
         };
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
         let context = ExecutionContext::cli(crate::use_cases::context::CommandName::InfobaseDump)
-            .with_deadline(Some(Instant::now() - Duration::from_millis(1)));
+            .with_cancellation(cancellation);
 
         let failure = super::prepare_infobase_snapshot(&context, &config, &request)
-            .expect_err("expired deadline");
+            .expect_err("an interrupted run must not pick a provider");
 
-        assert_eq!(failure.error.kind(), UseCaseErrorKind::TimedOut);
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Cancelled(crate::support::error::CancelledAt::Boundary)
+        );
         let result = failure.payload.expect("typed payload");
-        assert_eq!(result.execution.status, ExecutionStatus::TimedOut);
-        assert_eq!(result.execution.errors[0].code, "timed_out");
+        assert_eq!(result.execution.status, ExecutionStatus::Cancelled);
+        assert_eq!(result.execution.errors[0].code, "cancelled");
+        // Прерывание замечено на безопасной точке команды; шаг выбора называет `steps[]`.
+        let [interruption] = result.execution.interruptions.as_slice() else {
+            panic!(
+                "one interruption expected: {:?}",
+                result.execution.interruptions
+            );
+        };
+        assert_eq!(
+            interruption.phase,
+            Some(ExecutionInterruptionPhase::CommandBoundary)
+        );
+        let failed = result.steps.last().expect("the failed step");
+        assert_eq!(
+            failed.name,
+            InfobaseTransferPhase::ProviderSelection.as_str()
+        );
     }
 
     #[test]
@@ -1729,39 +1926,61 @@ mod tests {
         assert!(!metadata_path.exists());
     }
 
+    /// Снятый процесс исполнителя — отмена его работы, а отказ запустить процесс по отмене —
+    /// безопасная точка: фазу записи называет сама ошибка, а не место вызова.
     #[test]
     fn cancelled_process_is_not_collapsed_into_generic_failure() {
+        for (delivered, phase) in [
+            (true, ExecutionInterruptionPhase::ProviderCommand),
+            (false, ExecutionInterruptionPhase::CommandBoundary),
+        ] {
+            let context = ExecutionContext::cli(
+                crate::use_cases::context::CommandName::InfobaseConfigurationExport,
+            );
+            if delivered {
+                context.work().mark_work_given();
+            }
+            let mut execution = ExecutionOutcome::new(ExecutionStatus::Failed);
+            let error = AppError::PlatformProcess(ProcessError::Cancelled {
+                cmd: "1cv8 DESIGNER".to_owned(),
+                delivered,
+            });
+
+            record_execution_failure(
+                &context,
+                &error,
+                InfobaseTransferPhase::ProviderCommand,
+                &mut execution,
+            );
+
+            assert_eq!(execution.status, ExecutionStatus::Cancelled);
+            assert_eq!(execution.errors[0].code, "cancelled");
+            assert!(!execution.errors[0].retryable);
+            let [interruption] = execution.interruptions.as_slice() else {
+                panic!("one interruption expected: {:?}", execution.interruptions);
+            };
+            assert!(!interruption.deferred);
+            assert_eq!(interruption.phase, Some(phase), "delivered: {delivered}");
+        }
+    }
+
+    #[test]
+    fn unrelated_failure_is_not_reclassified_by_an_interrupted_context() {
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
         let context = ExecutionContext::cli(
             crate::use_cases::context::CommandName::InfobaseConfigurationExport,
-        );
+        )
+        .with_cancellation(cancellation);
         let mut execution = ExecutionOutcome::new(ExecutionStatus::Failed);
-        let error = AppError::PlatformProcess(ProcessError::Cancelled {
-            cmd: "1cv8 DESIGNER".to_owned(),
-        });
+        let error = AppError::Runtime("publication failed".to_owned());
 
         record_execution_failure(
             &context,
             &error,
-            ExportPhase::ProviderCommand,
+            InfobaseTransferPhase::Publication,
             &mut execution,
         );
-
-        assert_eq!(execution.status, ExecutionStatus::Cancelled);
-        assert_eq!(execution.errors[0].code, "cancelled");
-        assert!(!execution.errors[0].retryable);
-        assert_eq!(execution.interruptions.len(), 1);
-    }
-
-    #[test]
-    fn unrelated_failure_is_not_reclassified_by_an_expired_deadline() {
-        let context = ExecutionContext::cli(
-            crate::use_cases::context::CommandName::InfobaseConfigurationExport,
-        )
-        .with_deadline(Some(Instant::now() - Duration::from_millis(1)));
-        let mut execution = ExecutionOutcome::new(ExecutionStatus::Failed);
-        let error = AppError::Runtime("publication failed".to_owned());
-
-        record_execution_failure(&context, &error, ExportPhase::Publication, &mut execution);
 
         assert_eq!(execution.status, ExecutionStatus::Failed);
         assert_eq!(execution.errors[0].code, "runtime_failure");
@@ -1850,5 +2069,257 @@ mod tests {
         let error =
             revalidate_output_observation(&output, &observation).expect_err("parent replacement");
         assert!(error.to_string().contains("output parent changed"));
+    }
+
+    /// Двойник `1cv8` для `/RestoreIB`, который пишет базу, пока его не отпустят.
+    ///
+    /// Он кладёт `started`, ждёт файла `release` (не дольше 30 с) и кладёт `finished`;
+    /// сигнал снятия он записывает в `terminated`. Оператор отменяет команду, когда запись
+    /// уже идёт, и отпускает двойника, когда раннер уже отложил отмену: мягкое снятие дошло
+    /// бы до процесса раньше, а критическая фаза его не посылает.
+    #[cfg(unix)]
+    #[track_caller]
+    fn restore_cancelled_while_the_platform_writes(
+        exit_code: i32,
+    ) -> (
+        tempfile::TempDir,
+        crate::use_cases::result::UseCaseResult<
+            crate::domain::infobase_export::RestoreInfobaseSnapshotResult,
+        >,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+
+        use crate::domain::capability::{ProviderOrigin, ProviderReceipt};
+        use crate::domain::infobase_export::{RestoreInfobaseSnapshotRequest, RestoreTargetMode};
+        use crate::use_cases::context::CommandName;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let base = root.join("base");
+        let infobase = root.join("ib");
+        std::fs::create_dir_all(&base).expect("base");
+        std::fs::create_dir_all(&infobase).expect("infobase");
+        std::fs::write(infobase.join("1Cv8.1CD"), "data").expect("existing infobase");
+        let input = root.join("snapshot.dt");
+        std::fs::write(&input, "snapshot").expect("snapshot");
+        let designer = root.join("1cv8");
+        std::fs::write(
+            &designer,
+            format!(
+                "#!/bin/sh\n\
+                 trap \"printf terminated > '{root}/terminated'; exit 143\" TERM INT\n\
+                 printf started > '{root}/started'\n\
+                 waited=0\n\
+                 while [ ! -e '{root}/release' ] && [ \"$waited\" -lt 300 ]; do\n\
+                   sleep 0.1\n\
+                   waited=$((waited + 1))\n\
+                 done\n\
+                 printf finished > '{root}/finished'\n\
+                 exit {exit_code}\n",
+                root = root.display(),
+            ),
+        )
+        .expect("fake designer");
+        std::fs::set_permissions(&designer, std::fs::Permissions::from_mode(0o755))
+            .expect("executable");
+
+        let mut config = config(&base, &root.join("work"));
+        config.infobase = InfobaseConfig::file(format!("File={}", infobase.display()));
+        let request = RestoreInfobaseSnapshotRequest {
+            input,
+            target_mode: RestoreTargetMode::Replace,
+        };
+        let prepared = super::PreparedTransferProvider {
+            receipt: ProviderReceipt::new(Provider::Designer, ProviderOrigin::Default),
+            provider: Provider::Designer,
+            executable: Some(designer),
+        };
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let context = ExecutionContext::cli(CommandName::InfobaseRestore)
+            .with_cancellation(cancellation.clone());
+        // Конфигуратор отпускают, когда раннер уже отложил отмену, а не через отсчёт времени.
+        let held = crate::platform::process::HeldCommand::with_markers(
+            root.join("started"),
+            root.join("release"),
+        );
+        let outcome = held.interrupt_during(cancellation, || {
+            super::execute_infobase_restore(&context, &config, &request, &prepared)
+        });
+        (dir, outcome)
+    }
+
+    /// Запись в базу — критическая фаза: отмена посреди `/RestoreIB` не снимает
+    /// Конфигуратор, раннер дожидается конца загрузки и называет отмену отложенной.
+    #[cfg(unix)]
+    #[test]
+    fn a_cancelled_designer_restore_runs_to_its_end_and_names_the_deferral() {
+        let (dir, outcome) = restore_cancelled_while_the_platform_writes(0);
+
+        let result = outcome.expect("the restore finishes despite the cancellation");
+        assert!(
+            !dir.path().join("terminated").exists(),
+            "the platform must not be signalled during a critical phase"
+        );
+        assert!(dir.path().join("finished").exists());
+        assert!(result.restored);
+        assert_eq!(result.execution.status, ExecutionStatus::Succeeded);
+        assert_eq!(result.execution.interruptions.len(), 1, "{result:?}");
+        let interruption = &result.execution.interruptions[0];
+        assert_eq!(interruption.kind, ExecutionInterruptionKind::Cancelled);
+        assert!(interruption.deferred);
+        assert_eq!(
+            interruption.phase,
+            Some(ExecutionInterruptionPhase::ProviderCommand)
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("unsafe interruption was not performed")),
+            "{:?}",
+            result.warnings
+        );
+    }
+
+    /// Загрузка, неудачная уже после отложенной отмены, называет и отмену: оператор
+    /// просил остановить, и отказ говорит, почему его не послушали.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_restore_after_a_deferred_cancellation_still_names_it() {
+        let (dir, outcome) = restore_cancelled_while_the_platform_writes(1);
+
+        let failure = outcome.expect_err("the platform reported a failure");
+        assert!(!dir.path().join("terminated").exists());
+        assert!(dir.path().join("finished").exists());
+        let result = failure.payload.expect("typed payload");
+        assert!(!result.restored);
+        assert_eq!(
+            result.execution.interruptions.len(),
+            1,
+            "{:?}",
+            result.execution.interruptions
+        );
+        let interruption = &result.execution.interruptions[0];
+        assert_eq!(interruption.kind, ExecutionInterruptionKind::Cancelled);
+        assert!(interruption.deferred);
+        assert_eq!(
+            interruption.phase,
+            Some(ExecutionInterruptionPhase::ProviderCommand)
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("unsafe interruption was not performed")),
+            "{:?}",
+            result.warnings
+        );
+    }
+
+    /// Подъём снимка для двух случаев без работы исполнителя: отмена до запуска и
+    /// исполнитель, которого не собрать. Цель оба раза не тронута.
+    #[cfg(unix)]
+    fn restore_without_work(
+        provider: Provider,
+        cancelled: bool,
+    ) -> (
+        tempfile::TempDir,
+        crate::use_cases::result::UseCaseResult<
+            crate::domain::infobase_export::RestoreInfobaseSnapshotResult,
+        >,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+
+        use crate::domain::capability::{ProviderOrigin, ProviderReceipt};
+        use crate::domain::infobase_export::{RestoreInfobaseSnapshotRequest, RestoreTargetMode};
+        use crate::use_cases::context::CommandName;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let base = root.join("base");
+        let infobase = root.join("ib");
+        std::fs::create_dir_all(&base).expect("base");
+        std::fs::create_dir_all(&infobase).expect("infobase");
+        std::fs::write(infobase.join("1Cv8.1CD"), "data").expect("existing infobase");
+        let input = root.join("snapshot.dt");
+        std::fs::write(&input, "snapshot").expect("snapshot");
+        let designer = root.join("1cv8");
+        std::fs::write(
+            &designer,
+            format!("#!/bin/sh\nprintf ran > '{}/ran'\nexit 0\n", root.display()),
+        )
+        .expect("fake designer");
+        std::fs::set_permissions(&designer, std::fs::Permissions::from_mode(0o755))
+            .expect("executable");
+        let mut config = config(&base, &root.join("work"));
+        config.infobase = InfobaseConfig::file(format!("File={}", infobase.display()));
+        let request = RestoreInfobaseSnapshotRequest {
+            input,
+            target_mode: RestoreTargetMode::Replace,
+        };
+        let prepared = super::PreparedTransferProvider {
+            receipt: ProviderReceipt::new(provider, ProviderOrigin::Default),
+            provider,
+            executable: Some(designer),
+        };
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        if cancelled {
+            cancellation.cancel();
+        }
+        let context =
+            ExecutionContext::cli(CommandName::InfobaseRestore).with_cancellation(cancellation);
+        let outcome = super::execute_infobase_restore(&context, &config, &request, &prepared);
+        (dir, outcome)
+    }
+
+    /// Отмена перед подъёмом снимка — безопасная точка: род отказа — отмена, запись —
+    /// `command_boundary`, цель не тронута, и ответ не пугает неудавшимся откатом (#308).
+    #[cfg(unix)]
+    #[test]
+    fn a_restore_cancelled_before_the_provider_stops_at_the_boundary() {
+        let (dir, outcome) = restore_without_work(Provider::Designer, true);
+
+        let failure = outcome.expect_err("the restore was cancelled");
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Cancelled(crate::support::error::CancelledAt::Boundary)
+        );
+        assert!(!dir.path().join("ran").exists(), "the platform never ran");
+        let result = failure.payload.expect("typed payload");
+        assert_eq!(result.execution.status, ExecutionStatus::Cancelled);
+        let [interruption] = result.execution.interruptions.as_slice() else {
+            panic!(
+                "one interruption expected: {:?}",
+                result.execution.interruptions
+            );
+        };
+        assert!(!interruption.deferred);
+        assert_eq!(
+            interruption.phase,
+            Some(ExecutionInterruptionPhase::CommandBoundary)
+        );
+        assert_eq!(
+            result.target_state,
+            crate::domain::infobase_export::ExportTargetState::Unchanged
+        );
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    }
+
+    /// Исполнитель, которого не собрать, базу не трогал: цель остаётся `unchanged`, и
+    /// предупреждения о неудавшемся откате нет — его давала бы только работа исполнителя.
+    #[cfg(unix)]
+    #[test]
+    fn a_restore_refused_before_any_work_leaves_the_target_unchanged() {
+        let (dir, outcome) = restore_without_work(Provider::Webinst, false);
+
+        let failure = outcome.expect_err("the provider has no adapter");
+        assert!(!dir.path().join("ran").exists(), "the platform never ran");
+        let result = failure.payload.expect("typed payload");
+        assert!(!result.restored);
+        assert_eq!(
+            result.target_state,
+            crate::domain::infobase_export::ExportTargetState::Unchanged
+        );
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     }
 }

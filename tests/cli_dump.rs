@@ -6,7 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use support::{temp_workspace, v8_runner_command, write_shell_script as write_script};
+use support::{
+    hold_workspace_lock, temp_workspace, v8_runner_command, write_shell_script as write_script,
+};
 
 const V8_CONFIGURATION_NATURE: &str = "com._1c.g5.v8.dt.core.V8ConfigurationNature";
 const EDT_RUNTIME_VERSION: &str = "8.3.27";
@@ -128,7 +130,7 @@ fn write_config_with_infobase(
     infobase_yaml: &str,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nbuilder: IBCMD\ninfobase:\n{}source-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\nproviders:\n  init: ibcmd\n  build: ibcmd\n  dump: ibcmd\n  infobase.configuration.export: ibcmd\ninfobase:\n{}source-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         infobase_yaml,
         platform_path.display(),
@@ -179,7 +181,7 @@ fn assert_ibcmd_data_path(calls: &str, work_path: &Path) {
 
 fn write_designer_config(path: &Path, work_path: &Path, platform_path: &Path) {
     let config = format!(
-        "workPath: '{}'\nformat: DESIGNER\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
+        "workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n",
         work_path.display(),
         platform_path.display(),
     );
@@ -195,7 +197,7 @@ fn write_edt_dump_config(
     edt_path: &Path,
 ) {
     let config = format!(
-        "workPath: '{}'\nformat: EDT\nbuilder: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n    interactive-mode: false\n",
+        "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/main\ntools:\n  platform:\n    path: '{}'\n  edt_cli:\n    path: '{}'\n    interactive-mode: false\n",
         work_path.display(),
         platform_path.display(),
         edt_path.display(),
@@ -260,15 +262,7 @@ fn setup_edt_project() -> (
 #[test]
 fn dry_run_neither_takes_nor_waits_for_the_workspace_lock() {
     let (_dir, config_path, _binary_path, work_path, _base_path, _calls_log) = setup_project();
-    fs::create_dir_all(&work_path).expect("work");
-    fs::write(
-        work_path.join(".v8-runner.workspace.lock"),
-        format!(
-            "{{\"tool\":\"v8-runner\",\"pid\":{},\"owner_id\":\"another-owner\",\"created_at\":\"2026-09-12T00:00:00Z\"}}",
-            std::process::id()
-        ),
-    )
-    .expect("foreign workspace lock");
+    hold_workspace_lock(&work_path);
 
     let preview = v8_runner_command()
         .args([
@@ -312,7 +306,7 @@ fn dry_run_neither_takes_nor_waits_for_the_workspace_lock() {
     );
     let envelope: Value = serde_json::from_slice(&apply.stdout).expect("json");
     let message = envelope["error"]["message"].as_str().expect("message");
-    assert!(message.contains("cannot start dump"), "{message}");
+    assert!(message.contains("cannot start pull"), "{message}");
     assert!(message.contains("workspace"), "{message}");
 }
 
@@ -454,7 +448,7 @@ fn dump_edt_full_json_success_updates_designer_mirror_and_edt_target() {
     );
     let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(payload["ok"], true);
-    assert_eq!(payload["command"], "dump");
+    assert_eq!(payload["command"], "pull");
     assert_eq!(
         payload["data"]["target_path"],
         fs::canonicalize(base_path.join("main"))
@@ -502,7 +496,7 @@ fn dump_text_success_is_compact_and_keeps_output_visible() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("● dump: full"));
+    assert!(stdout.contains("◌ dump: full"));
     assert!(!stdout.contains("started_at: "));
     assert!(stdout.contains("[ibcmd] exporting configuration files"));
     assert!(
@@ -604,7 +598,7 @@ fn dump_text_warning_shows_degraded_fallback_reason() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("● Dump completed with warnings"));
+    assert!(stdout.contains("▲ Dump completed with warnings"));
     assert!(stdout.contains("[warning] IBCMD does not support object-scoped partial dump"));
 }
 
@@ -707,7 +701,7 @@ fn dump_text_failure_shows_error_message() {
 
     assert!(!output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("● Dump failed"));
+    assert!(stdout.contains("✖ Dump failed"));
     assert!(stdout.contains("[error]"));
     assert!(stdout.contains("exit code 17"));
 }
@@ -743,4 +737,181 @@ fn dump_ibcmd_full_server_connection_passes_dbms_and_infobase_credentials() {
     assert!(calls.contains("--user Admin --password secret"));
     assert!(calls.contains("--database-user postgres --database-password pg-secret"));
     assert_ibcmd_data_path(&calls, &work_path);
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run git");
+    assert!(status.success(), "git {args:?} failed");
+}
+
+/// Готовит проект, чей каталог исходников лежит в репозитории с одним
+/// зафиксированным файлом.
+fn setup_project_in_a_repository() -> (
+    tempfile::TempDir,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+) {
+    let parts = setup_project();
+    let base_path = parts.4.clone();
+    git(&base_path, &["init", "-q", "-b", "main", "."]);
+    git(&base_path, &["config", "user.email", "test@example.com"]);
+    git(&base_path, &["config", "user.name", "Test"]);
+    git(&base_path, &["add", "-A"]);
+    git(&base_path, &["commit", "-qm", "committed sources"]);
+    parts
+}
+
+/// Полная выгрузка заменяет каталог исходников целиком, а прежнее содержимое
+/// раннер до сих пор удалял последним шагом. Файл вне учёта не вернуть ничем,
+/// поэтому команда обязана остановиться и назвать его.
+#[test]
+fn a_dump_refuses_to_destroy_work_version_control_cannot_give_back() {
+    let (_dir, config_path, _binary, _work, base_path, _calls) = setup_project_in_a_repository();
+    fs::write(
+        base_path.join("main").join("hand-written.xml"),
+        "written by hand\n",
+    )
+    .expect("hand-written");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "dump",
+            "--mode",
+            "full",
+            "--source-set",
+            "main",
+        ])
+        .output()
+        .expect("run dump");
+
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a refusal is a validation error, not a runtime one: {rendered}"
+    );
+    assert!(
+        rendered.contains("hand-written.xml"),
+        "the refusal must name what would be lost: {rendered}"
+    );
+    assert!(
+        rendered.contains("--discard-uncommitted"),
+        "the refusal must say how to proceed anyway: {rendered}"
+    );
+    assert!(
+        base_path.join("main").join("hand-written.xml").is_file(),
+        "the refusal must happen before anything is replaced"
+    );
+}
+
+/// Попросили явно — уничтожаем, как и обещает имя ключа. Резервная копия, о
+/// которой не просили и про которую молчат, была бы мусором в чужом каталоге.
+#[test]
+fn an_explicit_request_replaces_the_directory_and_keeps_nothing() {
+    let (_dir, config_path, _binary, _work, base_path, _calls) = setup_project_in_a_repository();
+    fs::write(
+        base_path.join("main").join("hand-written.xml"),
+        "written by hand\n",
+    )
+    .expect("hand-written");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "dump",
+            "--mode",
+            "full",
+            "--source-set",
+            "main",
+            "--discard-uncommitted",
+        ])
+        .output()
+        .expect("run dump");
+
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "dump must proceed: {rendered}");
+    assert!(
+        !base_path.join("main").join("hand-written.xml").exists(),
+        "the directory was replaced, so the hand-written file is gone"
+    );
+    assert!(
+        kept_backups(&base_path).is_empty(),
+        "nothing was asked to be kept: {:?}",
+        kept_backups(&base_path)
+    );
+}
+
+fn kept_backups(base_path: &Path) -> Vec<PathBuf> {
+    fs::read_dir(base_path)
+        .expect("read base")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_dir()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(".dump-backup"))
+        })
+        .collect()
+}
+
+/// Каталог вне системы контроля версий: ответа нет. Сторож не отказывает и не
+/// притворяется, что защитил, — работа идёт ровно как до него.
+#[test]
+fn without_version_control_the_dump_proceeds_untouched() {
+    let (_dir, config_path, _binary, _work, base_path, _calls) = setup_project();
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "dump",
+            "--mode",
+            "full",
+            "--source-set",
+            "main",
+        ])
+        .output()
+        .expect("run dump");
+
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success(),
+        "a missing answer must not stop the work: {rendered}"
+    );
+    assert!(
+        rendered.contains("Dump completed successfully"),
+        "and must not turn an ordinary dump into a warning: {rendered}"
+    );
+    assert!(
+        kept_backups(&base_path).is_empty(),
+        "nothing is kept behind: {:?}",
+        kept_backups(&base_path)
+    );
 }

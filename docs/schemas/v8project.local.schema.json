@@ -1,5 +1,49 @@
 {
   "$defs": {
+    "DesignerAgentSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "attach": {
+          "description": "`host:port` or `[v6]:port` of a Designer agent started outside the runner (attached\nmode); the port is required. Excludes `port` and `host-key`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base-dir": {
+          "description": "`AgentBaseDir` of the attached agent: where its commands read and write files. Needs `attach`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "host-fingerprint": {
+          "description": "SHA256 fingerprint the attached agent must present, as `SHA256:<base64>`. Attached mode only.",
+          "type": "string"
+        },
+        "host-key": {
+          "description": "Private host key file for the runner-launched agent. Absent: the platform generates one (`/AgentSSHHostKeyAuto`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "port": {
+          "description": "Port the runner-launched agent listens on (managed mode). Default 1543.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "startup_timeout_ms": {
+          "description": "Time limit for the runner-launched agent to accept the first authenticated session, in milliseconds.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "EdtCliSchema": {
       "additionalProperties": false,
       "properties": {
@@ -86,6 +130,73 @@
       },
       "type": "object"
     },
+    "InfobaseClusterAgentSchema": {
+      "additionalProperties": false,
+      "description": "The central server agent of the cluster and its administrator.",
+      "properties": {
+        "address": {
+          "description": "Agent address as `host[:port]` when it differs from the host of `Srvr=` with the\nplatform default port (1540); the runner's own `ras` connects to it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "password": {
+          "description": "Central server administrator password.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user": {
+          "description": "Central server administrator name; no runner operation asks for it by itself.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "InfobaseClusterSchema": {
+      "additionalProperties": false,
+      "description": "The cluster section of a server infobase: three credential levels lie side by side in\nthe local layer, the infobase user in the infobase section itself.",
+      "properties": {
+        "agent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InfobaseClusterAgentSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The central server agent (`ragent`) and its administrator."
+        },
+        "password": {
+          "description": "Cluster administrator password.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ras": {
+          "description": "Administration server (`ras`) address as `host[:port]` — an IPv6 address in\nbrackets. It goes to `rac` as is, so the port default (1545) stays with the platform.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user": {
+          "description": "Cluster administrator name; `sessions` (#212) and `infobase create` in a cluster (#204)\nwill ask for it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "InfobaseDbmsSchema": {
       "additionalProperties": false,
       "properties": {
@@ -127,9 +238,196 @@
       },
       "type": "object"
     },
+    "InfobaseSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "cluster": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InfobaseClusterSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The cluster around a server infobase: the administration server (`ras`) address and\nthe two administrator levels above the infobase user — cluster and central server.\nEach operation asks only for the level it needs; a file infobase and a standalone\nserver have no cluster and refuse the section."
+        },
+        "connection": {
+          "default": "",
+          "description": "1C infobase connection string without embedded user or password: `File=…` for a file\ninfobase, `Srvr=…;Ref=…` for a cluster; next to `standalone` it is the server's direct\ngate address or empty.",
+          "type": "string"
+        },
+        "dbms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InfobaseDbmsSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional DBMS settings for server-based infobases."
+        },
+        "password": {
+          "description": "Optional infobase password passed to platform utilities.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "standalone": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InfobaseStandaloneSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Standalone server reached through its SSH gate; declares the target kind."
+        },
+        "user": {
+          "description": "Optional infobase user name passed to platform utilities.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "web": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InfobaseWebSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Client address and web-server publication settings."
+        }
+      },
+      "type": "object"
+    },
+    "InfobaseStandaloneExchangeChannelSchema": {
+      "description": "Named exchange channels.",
+      "enum": [
+        "sftp"
+      ],
+      "type": "string"
+    },
+    "InfobaseStandaloneExchangeSchema": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/InfobaseStandaloneExchangeChannelSchema",
+          "description": "A named channel: `sftp` — the SFTP subsystem of the gate's SSH connection."
+        },
+        {
+          "description": "The gate user's directory (`<users-data>/<user>` of `ibsrv`) as the runner sees it.",
+          "properties": {
+            "dir": {
+              "description": "The gate user's directory as the runner sees it.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "dir"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "The declared file channel to a standalone server."
+    },
+    "InfobaseStandaloneSchema": {
+      "additionalProperties": false,
+      "description": "A standalone server (`ibsrv`) as the target.",
+      "properties": {
+        "exchange": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InfobaseStandaloneExchangeSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How files travel between the runner and the gate user's directory: `sftp` through\nthe gate, or `{ dir: … }` — that directory as the runner sees it."
+        },
+        "gate": {
+          "description": "`host:port` or `[v6]:port` of the server's SSH gate (`ibsrv --enable-ssh-gate`); the\nport is required — `ibsrv` listens on 1543 unless told otherwise.",
+          "type": "string"
+        },
+        "host-fingerprint": {
+          "description": "SHA256 fingerprint the gate must present, as `SHA256:<base64>`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "gate"
+      ],
+      "type": "object"
+    },
+    "InfobaseWebSchema": {
+      "additionalProperties": false,
+      "description": "Publication and client-address settings for the target infobase.",
+      "properties": {
+        "conf": {
+          "description": "Web server configuration file (`webinst -confpath`); required for apache2 and apache22.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dir": {
+          "description": "Physical directory the publication is written to (`webinst -dir`); must exist.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "os-auth": {
+          "description": "Use OS authentication (`webinst -osauth`); IIS only.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "server": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WebServerKindSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Web server to publish on with `v8-runner publish`."
+        },
+        "url": {
+          "description": "Address a client or a browser opens the infobase at; `launch web` uses it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wsdir": {
+          "description": "Virtual directory name (`webinst -wsdir`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "McpExecutionSchema": {
       "additionalProperties": false,
       "properties": {
+        "admission_timeout_ms": {
+          "description": "How long an MCP call may wait for a free execution slot, in milliseconds.\n\nBounds admission only: a call that already holds a slot runs to its terminal outcome.",
+          "format": "uint64",
+          "maximum": 86400000,
+          "minimum": 1,
+          "type": "integer"
+        },
         "max_concurrent_calls": {
           "description": "Maximum number of MCP calls allowed to execute concurrently.",
           "format": "uint",
@@ -148,6 +446,13 @@
     "McpHttpSchema": {
       "additionalProperties": false,
       "properties": {
+        "allowed_hosts": {
+          "description": "Host header values the HTTP listener answers besides the loopback.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "bind_address": {
           "description": "Socket address for the MCP HTTP listener.",
           "type": "string"
@@ -221,41 +526,6 @@
           "minimum": 1,
           "type": [
             "integer",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
-    "PartialInfobaseSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "connection": {
-          "description": "Optional local override for the 1C infobase connection string.",
-          "type": "string"
-        },
-        "dbms": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/InfobaseDbmsSchema"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Optional local DBMS settings override."
-        },
-        "password": {
-          "description": "Optional local infobase password.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "user": {
-          "description": "Optional local infobase user name.",
-          "type": [
-            "string",
             "null"
           ]
         }
@@ -382,6 +652,10 @@
           "$ref": "#/$defs/PartialClientMcpToolSchema",
           "description": "Machine-local onec-client-mcp tool settings."
         },
+        "designer_agent": {
+          "$ref": "#/$defs/DesignerAgentSchema",
+          "description": "Designer agent endpoint: the agent the runner launches, or one to attach to."
+        },
         "edt_cli": {
           "$ref": "#/$defs/EdtCliSchema",
           "description": "Machine-local EDT CLI discovery and execution settings."
@@ -422,6 +696,205 @@
             "string",
             "null"
           ]
+        }
+      },
+      "type": "object"
+    },
+    "ProviderSchema": {
+      "description": "Executors the runner can dispatch to. Names say who does the work, not how it is started.",
+      "enum": [
+        "designer",
+        "agent",
+        "ibcmd",
+        "ibcmd-rs",
+        "webinst"
+      ],
+      "type": "string"
+    },
+    "ProvidersSchema": {
+      "additionalProperties": false,
+      "description": "One optional override per operation that has a choice of executor.",
+      "properties": {
+        "build": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "deprecated": true,
+          "description": "Previous spelling of `push`; accepted for one release cycle."
+        },
+        "download": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `download`."
+        },
+        "dump": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "deprecated": true,
+          "description": "Previous spelling of `pull`; accepted for one release cycle."
+        },
+        "extensions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `extensions`."
+        },
+        "infobase.configuration.export": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "deprecated": true,
+          "description": "Previous spelling of `download`; accepted for one release cycle."
+        },
+        "infobase.create": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `infobase create`."
+        },
+        "infobase.dump": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `infobase dump`."
+        },
+        "infobase.restore": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `infobase restore`."
+        },
+        "init": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "deprecated": true,
+          "description": "Previous spelling of `infobase.create`; accepted for one release cycle."
+        },
+        "load": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "deprecated": true,
+          "description": "Previous spelling of `upload`; accepted for one release cycle."
+        },
+        "make": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `make`."
+        },
+        "publish": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `publish`. Accepted by the schema so validation can say the operation has no choice."
+        },
+        "pull": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `pull`."
+        },
+        "push": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `push`."
+        },
+        "syntax": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `syntax`."
+        },
+        "upload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executor for `upload`."
         }
       },
       "type": "object"
@@ -556,6 +1029,16 @@
       },
       "type": "object"
     },
+    "WebServerKindSchema": {
+      "description": "Web server a publication is written to.",
+      "enum": [
+        "iis",
+        "apache2",
+        "apache22",
+        "apache24"
+      ],
+      "type": "string"
+    },
     "YaxunitTestSchema": {
       "additionalProperties": false,
       "properties": {
@@ -572,12 +1055,27 @@
   "additionalProperties": false,
   "properties": {
     "infobase": {
-      "$ref": "#/$defs/PartialInfobaseSchema",
-      "description": "Machine-local infobase credentials and connection overrides."
+      "$ref": "#/$defs/InfobaseSchema",
+      "deprecated": true,
+      "description": "One-cycle synonym for `infobases.origin`."
+    },
+    "infobases": {
+      "additionalProperties": {
+        "$ref": "#/$defs/InfobaseSchema"
+      },
+      "description": "Infobases of this checkout by name, like remotes of a repository; commands work\nwith `origin` unless `--infobase` names another one. A name is a plain identifier:\nit becomes a directory under workPath.",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+      },
+      "type": "object"
     },
     "mcp": {
       "$ref": "#/$defs/McpSchema",
       "description": "Machine-local MCP runtime overrides."
+    },
+    "providers": {
+      "$ref": "#/$defs/ProvidersSchema",
+      "description": "Machine-local executor overrides for an experiment or a workaround."
     },
     "tests": {
       "$ref": "#/$defs/TestsSchema",

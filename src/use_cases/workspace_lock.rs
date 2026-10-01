@@ -192,8 +192,8 @@ mod tests {
         WORKSPACE_LOCK_SIDECAR_FILE_NAME,
     };
     use crate::config::model::{
-        AppConfig, BuildConfig, BuilderBackend, SourceFormat, SourceSetConfig, SourceSetPurpose,
-        TestsConfig, ToolsConfig,
+        AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
+        ToolsConfig,
     };
     use crate::support::fs::acquire_advisory_lock;
     use std::fs;
@@ -204,10 +204,12 @@ mod tests {
         AppConfig {
             base_path: work_path.join("base"),
             work_path: work_path.to_path_buf(),
-            execution_timeout: 300_000,
             format: SourceFormat::Designer,
-            builder: BuilderBackend::Designer,
+            providers: Default::default(),
+            provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+            infobases: Default::default(),
+            infobase_name: None,
             source_sets: vec![SourceSetConfig {
                 name: "main".to_owned(),
                 purpose: SourceSetPurpose::Configuration,
@@ -263,7 +265,7 @@ mod tests {
         let sidecar_path = canonical_work.join(WORKSPACE_LOCK_SIDECAR_FILE_NAME);
         fs::write(
             &sidecar_path,
-            r#"{"pid":999999,"command":"build","started_at":"2026-01-01T00:00:00Z","canonical_work_path":"/tmp/stale"}"#,
+            r#"{"pid":999999,"command":"push","started_at":"2026-01-01T00:00:00Z","canonical_work_path":"/tmp/stale"}"#,
         )
         .expect("sidecar");
 
@@ -289,6 +291,29 @@ mod tests {
         let _guard = hold_lock(&config, "build");
 
         assert!(!stale_temp.exists());
+    }
+
+    /// Замок — файл ОС; sidecar — диагностика. Невозможность записать sidecar не
+    /// отменяет владение каталогом: второй запуск всё равно получает «занято».
+    #[test]
+    fn an_unwritable_sidecar_does_not_release_the_lock() {
+        let work = tempdir().expect("work");
+        let config = sample_config(work.path());
+        let canonical =
+            crate::support::path::nearest_existing_canonical_path(work.path()).expect("canonical");
+        // Каталог на месте sidecar: переименовать поверх него файл нельзя.
+        std::fs::create_dir_all(super::workspace_lock_sidecar_path(&canonical)).expect("blocker");
+
+        let guard = acquire_workspace_lock(&config, "build")
+            .expect("the OS lock is taken even when the sidecar cannot be written");
+        let busy = acquire_workspace_lock(&config, "dump").expect_err("second owner is refused");
+        assert!(
+            matches!(busy, crate::support::error::AppError::WorkspaceBusy(_)),
+            "{busy}"
+        );
+        drop(guard);
+
+        acquire_workspace_lock(&config, "dump").expect("released after the first owner is gone");
     }
 
     #[test]
