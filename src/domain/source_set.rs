@@ -67,6 +67,7 @@ impl SourceSetContext {
         self
     }
 
+    /// Same answer as `storage_path(..).is_some()`, for callers without a `workPath`.
     pub fn persists_snapshot(&self) -> bool {
         !matches!(self.memory, SnapshotMemory::Disabled)
     }
