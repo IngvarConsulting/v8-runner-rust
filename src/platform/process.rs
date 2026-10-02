@@ -645,20 +645,18 @@ fn spawn_checked_child(
 
     if let Some(startup_probe) = request.startup_probe {
         std::thread::sleep(startup_probe);
-        if let Some(status) =
-            spawned
-                .child
-                .try_wait()
-                .map_err(|source| ProcessError::StartupCheckFailed {
-                    cmd: rendered_command.to_owned(),
-                    source,
-                })?
-        {
+        if let Some(status) = startup_probe_status(&mut spawned).map_err(|source| {
+            ProcessError::StartupCheckFailed {
+                cmd: rendered_command.to_owned(),
+                source,
+            }
+        })? {
             warn!(
                 command = rendered_command,
                 exit_code = status.code().unwrap_or(-1),
                 "process exited during startup probe"
             );
+            #[cfg(not(unix))]
             if matches!(
                 io_mode,
                 ProcessIoMode::ManagedDetached | ProcessIoMode::ManagedWait
@@ -674,6 +672,57 @@ fn spawn_checked_child(
     }
 
     Ok(spawned)
+}
+
+#[cfg(unix)]
+fn startup_probe_status(
+    spawned: &mut SpawnedChild,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    let pid = spawned.child.id();
+    loop {
+        // Observe without reaping: the retained leader reserves its process-group
+        // identity until the final cleanup signal. An observation error gives no
+        // authority to signal a numeric PGID, so return it without cleanup.
+        // SAFETY: zero is a valid initial value for the waitid output buffer.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: info is writable and pid identifies the child owned by spawned.
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        // SAFETY: waitid initialized the siginfo output on success.
+        if unsafe { info.si_pid() } == 0 {
+            return Ok(None);
+        }
+        // SAFETY: the unreaped leader still reserves this exact process group.
+        if unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                // Darwin can report EPERM for a zombie-only group. Preserve the
+                // observed early exit, but do not claim descendant cleanup.
+                warn!(pid, %error, "startup failed; process-group cleanup could not be confirmed");
+            }
+        }
+        return spawned.child.wait().map(Some);
+    }
+}
+
+#[cfg(not(unix))]
+fn startup_probe_status(
+    spawned: &mut SpawnedChild,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    spawned.child.try_wait()
 }
 
 fn spawn_command(
@@ -801,6 +850,7 @@ fn build_command(
         ProcessIoMode::Detached => {
             cmd.stdout(Stdio::null());
             cmd.stderr(Stdio::null());
+            set_child_process_group(&mut cmd);
         }
         ProcessIoMode::ManagedDetached => {
             cmd.stdout(Stdio::null());
@@ -1723,6 +1773,268 @@ mod tests {
         });
 
         assert_eq!(rendered, "1cv8c /WSN *** /WSP ***");
+    }
+
+    #[cfg(unix)]
+    struct DetachedFixturePeer(std::os::unix::net::UnixStream);
+
+    #[cfg(unix)]
+    impl Drop for DetachedFixturePeer {
+        fn drop(&mut self) {
+            use std::io::Write;
+            let _ = self.0.write_all(b"stop");
+            let _ = self.0.shutdown(std::net::Shutdown::Both);
+        }
+    }
+
+    #[cfg(unix)]
+    struct RetainedTestWrapper(Option<std::process::Child>);
+
+    #[cfg(unix)]
+    impl Drop for RetainedTestWrapper {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                // This guard never reaps before signalling: Child still reserves the PID.
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
+                let _ = child.wait();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn accept_detached_fixture(listener: &std::os::unix::net::UnixListener) -> DetachedFixturePeer {
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    return DetachedFixturePeer(stream);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "fixture did not connect"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("accept fixture: {error}"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess fixture invoked explicitly by detached lifecycle tests"]
+    fn detached_lifecycle_client_fixture() {
+        use std::io::{Read, Write};
+        let root = PathBuf::from(std::env::var_os("V8_RUNNER_DETACHED_FIXTURE_ROOT").unwrap());
+        let mut stream = std::os::unix::net::UnixStream::connect(root.join("s")).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        fs::write(root.join("ready"), b"ready").unwrap();
+        let mut message = [0; 4];
+        while stream.read_exact(&mut message).is_ok() {
+            if &message == b"ping" {
+                if stream.write_all(b"pong").is_err() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detached_spawn_survives_wrapper_exit_and_group_cleanup() {
+        use std::io::{Read, Write};
+        use std::os::unix::process::CommandExt;
+        const TEST: &str =
+            "platform::process::tests::detached_spawn_survives_wrapper_exit_and_group_cleanup";
+        if std::env::var_os("V8_RUNNER_DETACHED_WRAPPER").is_some() {
+            let work = WorkGiven::for_command();
+            let mut request = plain_request(std::env::current_exe().unwrap());
+            request.args = vec![
+                "--exact".into(),
+                "platform::process::tests::detached_lifecycle_client_fixture".into(),
+                "--ignored".into(),
+            ];
+            request.startup_probe = Some(Duration::from_millis(250));
+            ProcessExecutor
+                .spawn(&request, &work)
+                .expect("successful detached startup");
+            assert!(work.given());
+            return;
+        }
+        // Keep the socket path below the macOS sockaddr_un length limit.
+        let dir = tempfile::Builder::new()
+            .prefix("v8d")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(dir.path().join("s")).unwrap();
+        let helper = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST])
+            .env("V8_RUNNER_DETACHED_WRAPPER", "1")
+            .env("V8_RUNNER_DETACHED_FIXTURE_ROOT", dir.path())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut wrapper = RetainedTestWrapper(Some(helper));
+        let mut peer = accept_detached_fixture(&listener);
+        let pid = wrapper.0.as_ref().unwrap().id();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            // Observe exit without relinquishing PID/PGID authority.
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            if result == -1
+                && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+            {
+                continue;
+            }
+            assert_eq!(result, 0, "waitid: {}", std::io::Error::last_os_error());
+            // SAFETY: successful waitid initialized info; WNOHANG leaves si_pid zero while running.
+            if unsafe { info.si_pid() } == pid as i32 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "wrapper failed to exit"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        // Unica cleans the runner group after normal exit, before reaping its leader.
+        // SAFETY: WNOWAIT retained our exact wrapper leader, reserving this PGID.
+        let signalled = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+        if signalled == -1 {
+            let error = std::io::Error::last_os_error();
+            // Darwin reports EPERM when only the retained zombie remains in the group.
+            assert!(
+                cfg!(target_vendor = "apple") && error.raw_os_error() == Some(libc::EPERM),
+                "wrapper group cleanup failed: {error}"
+            );
+        }
+        assert!(wrapper.0.take().unwrap().wait().unwrap().success());
+        peer.0
+            .write_all(b"ping")
+            .expect("detached child must survive wrapper cleanup");
+        let mut reply = [0; 4];
+        peer.0
+            .read_exact(&mut reply)
+            .expect("detached child must answer AFTER wrapper cleanup");
+        assert_eq!(&reply, b"pong");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detached_spawn_cleans_descendant_when_startup_probe_fails() {
+        assert_failed_detached_start_cleans_descendant(false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_spawn_cleans_live_descendant_when_startup_probe_fails() {
+        assert_failed_detached_start_cleans_descendant(true);
+    }
+
+    #[cfg(unix)]
+    fn assert_failed_detached_start_cleans_descendant(managed: bool) {
+        use std::io::Read;
+        let dir = tempfile::Builder::new()
+            .prefix("v8f")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(dir.path().join("s")).unwrap();
+        let request = failed_detached_fixture_request(dir.path());
+        let work = WorkGiven::for_command();
+        let result = if managed {
+            ProcessExecutor
+                .spawn_managed(&request, ManagedSpawnMode::Detached, Some(&work))
+                .map(|child| {
+                    child.terminate();
+                })
+        } else {
+            ProcessExecutor.spawn(&request, &work).map(|_| ())
+        };
+        // Always acquire cleanup before assertions, including unexpected successful startup.
+        let mut peer = accept_detached_fixture(&listener);
+        assert!(
+            matches!(result, Err(ProcessError::ExitedEarly { exit_code: 7, .. })),
+            "{result:?}"
+        );
+        assert!(!work.given(), "failed startup must not transfer ownership");
+        let mut byte = [0];
+        assert_eq!(
+            peer.0
+                .read(&mut byte)
+                .expect("failed startup must close descendant connection"),
+            0,
+            "failed startup must terminate the descendant, not only its exited parent"
+        );
+    }
+
+    #[cfg(unix)]
+    fn failed_detached_fixture_request(root: &Path) -> ProcessRequest {
+        // Positional arguments avoid interpolating executable or temporary paths into shell code.
+        ProcessRequest {
+            program: PathBuf::from("/bin/sh"),
+            args: vec!["-c".into(),
+                "export V8_RUNNER_DETACHED_FIXTURE_ROOT=\"$2\"; \"$1\" --exact platform::process::tests::detached_lifecycle_client_fixture --ignored & attempt=0; while [ ! -f \"$2/ready\" ]; do attempt=$((attempt + 1)); [ \"$attempt\" -lt 500 ] || exit 8; sleep 0.01; done; exit 7".into(),
+                "fixture".into(), std::env::current_exe().unwrap().display().to_string(), root.display().to_string()],
+            workdir: None, stdout_log_path: None, stderr_log_path: None,
+            startup_probe: Some(Duration::from_secs(2)),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_observation_error_preserves_descendant_after_leader_was_reaped() {
+        use std::io::{Read, Write};
+        let dir = tempfile::Builder::new()
+            .prefix("v8e")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(dir.path().join("s")).unwrap();
+        let request = failed_detached_fixture_request(dir.path());
+        let mut spawned = super::spawn_command(&request, ProcessIoMode::Detached, "fixture")
+            .expect("spawn process whose ownership will be lost");
+        let mut peer = accept_detached_fixture(&listener);
+        assert_eq!(spawned.child.wait().unwrap().code(), Some(7));
+        // Deliberately reap first: this is real lost wait authority, without an injection seam.
+        let error =
+            super::startup_probe_status(&mut spawned).expect_err("leader was already reaped");
+        assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
+        peer.0.write_all(b"ping").unwrap();
+        let mut reply = [0; 4];
+        peer.0
+            .read_exact(&mut reply)
+            .expect("observer error must not signal a stale process group");
+        assert_eq!(&reply, b"pong");
     }
 
     #[cfg(unix)]
