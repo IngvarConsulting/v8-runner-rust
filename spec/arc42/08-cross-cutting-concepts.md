@@ -91,6 +91,20 @@
 
 Решение о частичной загрузке — [`partial_load.rs`](../../src/change_detection/partial_load.rs), [6.3](06-runtime-view.md).
 
+Защита от возврата общей памяти: прежний Designer-ключ позволял другой базе взять
+снимок первой. Путь и привязку определяет
+[`SourceSetContext`](../../src/domain/source_set.rs), все чтения и записи используют его.
+Проверки `base_snapshots_remain_separate_and_reject_a_retargeted_base` и
+`ad_hoc_analysis_never_reads_or_writes_memory_and_empty_sources_skip` в
+[`source_sets.rs`](../../src/change_detection/source_sets.rs), а также
+[`cli_pull_memory.rs`](../../tests/cli_pull_memory.rs) чередуют базы и повторяют ad hoc
+вызовы: переименование общего хранилища не скрывает возврат ошибки. При ревью изменений
+памяти сверяют этот путь чтения и записи и сохраняют по одному владельцу утверждений:
+[состав привязки](../rules/use-cases/hash-memory-is-scoped-to-its-base-and-source.md),
+[раскладка памяти](../rules/use-cases/memory-lives-under-the-base-it-describes.md),
+[чужая память](../rules/use-cases/foreign-memory-is-not-used.md),
+[подключение строкой](../rules/use-cases/a-base-named-by-a-connection-string-leaves-no-memory.md).
+
 ### 8.6 Ответ
 
 Сценарий возвращает результат или `UseCaseFailure<T>` —
