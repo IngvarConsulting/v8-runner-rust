@@ -436,6 +436,8 @@ impl ProcessExecutor {
 #[derive(Debug, Clone, Copy)]
 enum ProcessIoMode {
     Detached,
+    #[cfg(any(unix, windows))]
+    UnicaOwnedDetached,
     ManagedDetached,
     ManagedWait,
     Captured,
@@ -443,12 +445,75 @@ enum ProcessIoMode {
 
 impl ProcessIoMode {
     const fn requires_standard_handle_isolation(self) -> bool {
-        matches!(self, Self::Detached | Self::ManagedDetached)
+        match self {
+            Self::Detached | Self::ManagedDetached => true,
+            #[cfg(any(unix, windows))]
+            Self::UnicaOwnedDetached => true,
+            Self::ManagedWait | Self::Captured => false,
+        }
+    }
+
+    fn with_client_owner(self) -> std::io::Result<Self> {
+        if !matches!(self, Self::Detached) {
+            return Ok(self);
+        }
+        let Some(owner) = std::env::var_os("V8_RUNNER_CLIENT_OWNER") else {
+            return Ok(self);
+        };
+        // This private opt-in trusts the caller to retain and release the tree.
+        // Group/Job membership is a prerequisite, not caller identity attestation.
+        if owner != "unica" {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "unsupported V8_RUNNER_CLIENT_OWNER value",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            // The host owns this isolated group until it accepts the launch
+            // result. Keeping the client in it also covers abrupt runner death.
+            // SAFETY: these process identity queries have no pointer arguments.
+            if unsafe { libc::getpgrp() != libc::getpid() } {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Unica client ownership requires an isolated runner process group",
+                ));
+            }
+            Ok(Self::UnicaOwnedDetached)
+        }
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+            use windows_sys::Win32::System::Threading::GetCurrentProcess;
+            let mut in_job = 0;
+            // SAFETY: the pseudo-handle refers to this process, null asks about
+            // any containing job, and in_job is a writable BOOL output.
+            if unsafe { IsProcessInJob(GetCurrentProcess(), std::ptr::null_mut(), &mut in_job) }
+                == 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            if in_job == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Unica client ownership requires the runner to belong to a Job Object",
+                ));
+            }
+            Ok(Self::UnicaOwnedDetached)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Unica client ownership is unsupported on this platform",
+            ))
+        }
     }
 }
 
 struct SpawnedChild {
     child: ChildHandle,
+    io_mode: ProcessIoMode,
 }
 
 enum ChildHandle {
@@ -517,22 +582,20 @@ fn spawn_checked_child(
 
     if let Some(startup_probe) = request.startup_probe {
         std::thread::sleep(startup_probe);
-        if let Some(status) =
-            spawned
-                .child
-                .try_wait()
-                .map_err(|source| ProcessError::StartupCheckFailed {
-                    cmd: rendered_command.to_owned(),
-                    source,
-                })?
-        {
+        if let Some(status) = startup_probe_status(&mut spawned).map_err(|source| {
+            ProcessError::StartupCheckFailed {
+                cmd: rendered_command.to_owned(),
+                source,
+            }
+        })? {
             warn!(
                 command = rendered_command,
                 exit_code = status.code().unwrap_or(-1),
                 "process exited during startup probe"
             );
+            #[cfg(not(unix))]
             if matches!(
-                io_mode,
+                spawned.io_mode,
                 ProcessIoMode::ManagedDetached | ProcessIoMode::ManagedWait
             ) {
                 terminate_child_group_gracefully(&mut spawned, Duration::from_millis(250));
@@ -548,11 +611,74 @@ fn spawn_checked_child(
     Ok(spawned)
 }
 
+#[cfg(unix)]
+fn startup_probe_status(
+    spawned: &mut SpawnedChild,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    if matches!(spawned.io_mode, ProcessIoMode::UnicaOwnedDetached) {
+        // This child shares the host-owned runner group. Unica retains and
+        // cleans that group on failure; the child PID is not a process-group ID.
+        return spawned.child.try_wait();
+    }
+    let pid = spawned.child.id();
+    loop {
+        // This module is the sole wait owner until startup returns. WNOWAIT
+        // keeps its leader unreaped until the final group signal; it is not a
+        // lock against an unrelated process-wide child reaper. An observation
+        // error gives no authority to signal a numeric PGID.
+        // SAFETY: zero is a valid initial value for the waitid output buffer.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: info is writable and pid identifies the child owned by spawned.
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        // SAFETY: waitid initialized the siginfo output on success.
+        if unsafe { info.si_pid() } == 0 {
+            return Ok(None);
+        }
+        // SAFETY: the unreaped leader still reserves this exact process group.
+        if unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                // Darwin can report EPERM for a zombie-only group. Preserve the
+                // observed early exit, but do not claim descendant cleanup.
+                warn!(pid, %error, "startup failed; process-group cleanup could not be confirmed");
+            }
+        }
+        return spawned.child.wait().map(Some);
+    }
+}
+
+#[cfg(not(unix))]
+fn startup_probe_status(
+    spawned: &mut SpawnedChild,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    spawned.child.try_wait()
+}
+
 fn spawn_command(
     request: &ProcessRequest,
     io_mode: ProcessIoMode,
     rendered_command: &str,
 ) -> Result<SpawnedChild, ProcessError> {
+    let io_mode = io_mode
+        .with_client_owner()
+        .map_err(|source| ProcessError::SpawnFailed {
+            cmd: rendered_command.to_owned(),
+            source,
+        })?;
     for attempt in 0..=EXECUTABLE_BUSY_MAX_RETRIES {
         if io_mode.requires_standard_handle_isolation() {
             isolate_inherited_standard_handles().map_err(|source| ProcessError::SpawnFailed {
@@ -562,7 +688,7 @@ fn spawn_command(
         }
         let cmd = build_command(request, io_mode, rendered_command)?;
         match spawn_child(cmd, io_mode) {
-            Ok(child) => return Ok(SpawnedChild { child }),
+            Ok(child) => return Ok(SpawnedChild { child, io_mode }),
             Err(source) if is_executable_busy(&source) && attempt < EXECUTABLE_BUSY_MAX_RETRIES => {
                 warn!(
                     command = rendered_command,
@@ -655,8 +781,15 @@ fn build_command(
         cmd.current_dir(workdir);
     }
     cmd.stdin(Stdio::null());
+    cmd.env_remove("V8_RUNNER_CLIENT_OWNER");
     match io_mode {
         ProcessIoMode::Detached => {
+            cmd.stdout(Stdio::null());
+            cmd.stderr(Stdio::null());
+            set_child_process_group(&mut cmd);
+        }
+        #[cfg(any(unix, windows))]
+        ProcessIoMode::UnicaOwnedDetached => {
             cmd.stdout(Stdio::null());
             cmd.stderr(Stdio::null());
         }
@@ -1272,6 +1405,795 @@ mod tests {
                 let _ = libc::kill(child_pid, libc::SIGKILL);
             }
             panic!("managed startup failure should terminate process group child {child_pid}");
+        }
+    }
+
+    #[cfg(unix)]
+    fn plain_request(program: PathBuf) -> ProcessRequest {
+        ProcessRequest {
+            program,
+            args: vec![],
+            workdir: None,
+            stdout_log_path: None,
+            stderr_log_path: None,
+            startup_probe: None,
+        }
+    }
+
+    #[cfg(unix)]
+    struct DetachedFixturePeer(std::os::unix::net::UnixStream);
+
+    #[cfg(unix)]
+    impl std::io::Read for DetachedFixturePeer {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            use std::os::fd::AsRawFd;
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(std::io::ErrorKind::TimedOut.into());
+                }
+                let mut descriptor = libc::pollfd {
+                    fd: self.0.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: descriptor describes a live, owned socket and is writable.
+                let result =
+                    unsafe { libc::poll(&mut descriptor, 1, remaining.as_millis().max(1) as i32) };
+                if result == -1 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(error);
+                }
+                if result == 0 {
+                    return Err(std::io::ErrorKind::TimedOut.into());
+                }
+                return self.0.read(buffer);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for DetachedFixturePeer {
+        fn drop(&mut self) {
+            use std::io::Write;
+            let _ = self.0.write_all(b"stop");
+            let _ = self.0.shutdown(std::net::Shutdown::Both);
+        }
+    }
+
+    #[cfg(unix)]
+    struct RetainedTestWrapper(Option<std::process::Child>);
+
+    #[cfg(unix)]
+    impl Drop for RetainedTestWrapper {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                // This guard never reaps before signalling: Child still reserves the PID.
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
+                let _ = child.wait();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn accept_detached_fixture(listener: &std::os::unix::net::UnixListener) -> DetachedFixturePeer {
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    // Darwin may refuse timeout options once the peer has
+                    // closed. poll bounds reads without mutating socket options.
+                    stream.set_nonblocking(true).unwrap();
+                    return DetachedFixturePeer(stream);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "fixture did not connect"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("accept fixture: {error}"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess fixture invoked explicitly by detached lifecycle tests"]
+    fn detached_lifecycle_client_fixture() {
+        use std::io::{Read, Write};
+        let root = PathBuf::from(std::env::var_os("V8_RUNNER_DETACHED_FIXTURE_ROOT").unwrap());
+        let mut stream = std::os::unix::net::UnixStream::connect(root.join("s")).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        assert!(std::env::var_os("V8_RUNNER_CLIENT_OWNER").is_none());
+        fs::write(root.join("ready"), b"ready").unwrap();
+        let mut message = [0; 4];
+        while stream.read_exact(&mut message).is_ok() {
+            if &message == b"ping" {
+                if stream.write_all(b"pong").is_err() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detached_spawn_survives_wrapper_exit_and_group_cleanup() {
+        use std::io::{Read, Write};
+        use std::os::unix::process::CommandExt;
+        const TEST: &str =
+            "platform::process::tests::detached_spawn_survives_wrapper_exit_and_group_cleanup";
+        if std::env::var_os("V8_RUNNER_DETACHED_WRAPPER").is_some() {
+            let mut request = plain_request(std::env::current_exe().unwrap());
+            request.args = vec![
+                "--exact".into(),
+                "platform::process::tests::detached_lifecycle_client_fixture".into(),
+                "--ignored".into(),
+            ];
+            request.startup_probe = Some(Duration::from_millis(250));
+            ProcessExecutor
+                .spawn(&request)
+                .expect("successful detached startup");
+
+            return;
+        }
+        // Keep the socket path below the macOS sockaddr_un length limit.
+        let dir = tempfile::Builder::new()
+            .prefix("v8d")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(dir.path().join("s")).unwrap();
+        let helper = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST])
+            .env("V8_RUNNER_DETACHED_WRAPPER", "1")
+            .env_remove("V8_RUNNER_CLIENT_OWNER")
+            .env("V8_RUNNER_DETACHED_FIXTURE_ROOT", dir.path())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut wrapper = RetainedTestWrapper(Some(helper));
+        let mut peer = accept_detached_fixture(&listener);
+        let pid = wrapper.0.as_ref().unwrap().id();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            // Observe exit without relinquishing PID/PGID authority.
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            if result == -1
+                && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+            {
+                continue;
+            }
+            assert_eq!(result, 0, "waitid: {}", std::io::Error::last_os_error());
+            // SAFETY: successful waitid initialized info; WNOHANG leaves si_pid zero while running.
+            if unsafe { info.si_pid() } == pid as i32 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "wrapper failed to exit"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        // Unica cleans the runner group after normal exit, before reaping its leader.
+        // SAFETY: WNOWAIT retained our exact wrapper leader, reserving this PGID.
+        let signalled = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+        if signalled == -1 {
+            let error = std::io::Error::last_os_error();
+            // Darwin reports EPERM when only the retained zombie remains in the group.
+            assert!(
+                cfg!(target_vendor = "apple") && error.raw_os_error() == Some(libc::EPERM),
+                "wrapper group cleanup failed: {error}"
+            );
+        }
+        assert!(wrapper.0.take().unwrap().wait().unwrap().success());
+        peer.0
+            .write_all(b"ping")
+            .expect("detached child must survive wrapper cleanup");
+        let mut reply = [0; 4];
+        peer.read_exact(&mut reply)
+            .expect("detached child must answer AFTER wrapper cleanup");
+        assert_eq!(&reply, b"pong");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detached_client_dies_with_wrapper_before_startup_handoff() {
+        use std::io::{Read, Write};
+        use std::os::unix::process::CommandExt;
+        const TEST: &str =
+            "platform::process::tests::detached_client_dies_with_wrapper_before_startup_handoff";
+        if std::env::var_os("V8_RUNNER_PREHANDOFF_WRAPPER").is_some() {
+            let root = PathBuf::from(std::env::var_os("V8_RUNNER_DETACHED_FIXTURE_ROOT").unwrap());
+
+            let mut request = plain_request(std::env::current_exe().unwrap());
+            request.args = vec![
+                "--exact".into(),
+                "platform::process::tests::detached_lifecycle_client_fixture".into(),
+                "--ignored".into(),
+            ];
+            request.startup_probe = Some(Duration::from_secs(30));
+            ProcessExecutor
+                .spawn(&request)
+                .expect("startup probe must finish before handoff");
+            fs::write(root.join("handed-off"), b"receipt returned").unwrap();
+            return;
+        }
+
+        let dir = tempfile::Builder::new()
+            .prefix("v8p")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(dir.path().join("s")).unwrap();
+        let helper = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST])
+            .env("V8_RUNNER_PREHANDOFF_WRAPPER", "1")
+            .env("V8_RUNNER_CLIENT_OWNER", "unica")
+            .env("V8_RUNNER_DETACHED_FIXTURE_ROOT", dir.path())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut wrapper = RetainedTestWrapper(Some(helper));
+        // The socket handshake proves that spawn happened. The 30-second probe
+        // has not returned a receipt, so ownership has not been handed off.
+        let mut peer = accept_detached_fixture(&listener);
+        assert!(!dir.path().join("handed-off").exists());
+        let pid = wrapper.0.as_ref().unwrap().id();
+        // SAFETY: this test is the sole wait owner and has not reaped the wrapper.
+        // The signal targets only the wrapper's dedicated process group.
+        assert_eq!(
+            unsafe { libc::kill(-(pid as i32), libc::SIGKILL) },
+            0,
+            "wrapper group cleanup failed: {}",
+            std::io::Error::last_os_error()
+        );
+        let status = wrapper.0.take().unwrap().wait().unwrap();
+        assert!(
+            !status.success(),
+            "wrapper unexpectedly completed the probe"
+        );
+        assert!(!dir.path().join("handed-off").exists());
+
+        // Linux can report ECONNRESET when the killed peer closes with this
+        // ping unread. Both EOF and reset prove closure; data and timeout do not.
+        let _ = peer.0.write_all(b"ping");
+        let mut reply = [0; 4];
+        let received = peer.read(&mut reply);
+        assert!(
+            matches!(&received, Ok(0))
+                || matches!(&received, Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset),
+            "client must close its socket before startup handoff: {received:?}; reply: {reply:?}"
+        );
+        // Peer Drop sends stop even when the assertion fails, so the detached
+        // counterexample is cleaned up without signalling a numeric client PID.
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unica_owned_client_survives_handoff_and_failed_start_waits_for_host_cleanup() {
+        use std::io::{Read, Write};
+        use std::os::unix::process::CommandExt;
+        const TEST: &str = "platform::process::tests::unica_owned_client_survives_handoff_and_failed_start_waits_for_host_cleanup";
+        if let Some(case) = std::env::var_os("V8_RUNNER_OWNER_FIXTURE") {
+            let root = PathBuf::from(std::env::var_os("V8_RUNNER_DETACHED_FIXTURE_ROOT").unwrap());
+
+            if case == "failure" {
+                let error = ProcessExecutor
+                    .spawn(&failed_detached_fixture_request(&root))
+                    .unwrap_err();
+                assert!(matches!(
+                    error,
+                    ProcessError::ExitedEarly { exit_code: 7, .. }
+                ));
+            } else {
+                let mut request = plain_request(std::env::current_exe().unwrap());
+                request.args = vec![
+                    "--exact".into(),
+                    "platform::process::tests::detached_lifecycle_client_fixture".into(),
+                    "--ignored".into(),
+                ];
+                request.startup_probe = Some(Duration::from_millis(250));
+                ProcessExecutor.spawn(&request).unwrap();
+            }
+            fs::write(root.join("receipt"), case.to_string_lossy().as_bytes()).unwrap();
+            return;
+        }
+
+        for case in ["success", "failure"] {
+            let dir = tempfile::Builder::new()
+                .prefix("v8o")
+                .tempdir_in("/tmp")
+                .unwrap();
+            let listener = std::os::unix::net::UnixListener::bind(dir.path().join("s")).unwrap();
+            let helper = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST])
+                .env("V8_RUNNER_OWNER_FIXTURE", case)
+                .env("V8_RUNNER_CLIENT_OWNER", "unica")
+                .env("V8_RUNNER_DETACHED_FIXTURE_ROOT", dir.path())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::inherit())
+                .process_group(0)
+                .spawn()
+                .unwrap();
+            let mut wrapper = RetainedTestWrapper(Some(helper));
+            let mut peer = accept_detached_fixture(&listener);
+            let pid = wrapper.0.as_ref().unwrap().id();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+                // SAFETY: the output is writable; this test alone owns the wrapper wait.
+                let result = unsafe {
+                    libc::waitid(
+                        libc::P_PID,
+                        pid,
+                        &mut info,
+                        libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                    )
+                };
+                assert_eq!(
+                    result,
+                    0,
+                    "waitid failed: {}",
+                    std::io::Error::last_os_error()
+                );
+                if unsafe { info.si_pid() } != 0 {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "wrapper did not finish"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(
+                fs::read_to_string(dir.path().join("receipt")).unwrap(),
+                case
+            );
+            assert_eq!(fs::read(dir.path().join("ready")).unwrap(), b"ready");
+            peer.0.write_all(b"ping").unwrap();
+            let mut reply = [0; 4];
+            peer.read_exact(&mut reply).unwrap();
+            assert_eq!(
+                &reply, b"pong",
+                "runner must not clean the host-owned group"
+            );
+            if case == "failure" {
+                // SAFETY: the wrapper has not been reaped and the test is its sole wait owner.
+                assert_eq!(unsafe { libc::kill(-(pid as i32), libc::SIGKILL) }, 0);
+                assert!(wrapper.0.take().unwrap().wait().unwrap().success());
+                assert_eq!(
+                    peer.read(&mut reply).unwrap(),
+                    0,
+                    "host cleans failed launch"
+                );
+            } else {
+                // The host accepts the receipt and disarms cleanup before reaping.
+                assert!(wrapper.0.take().unwrap().wait().unwrap().success());
+                drop(wrapper);
+                peer.0.write_all(b"ping").unwrap();
+                peer.read_exact(&mut reply).unwrap();
+                assert_eq!(&reply, b"pong", "handed-off client must survive owner drop");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn client_owner_rejects_unknown_value_and_unisolated_runner_before_spawn() {
+        use std::os::unix::process::CommandExt;
+        const TEST: &str = "platform::process::tests::client_owner_rejects_unknown_value_and_unisolated_runner_before_spawn";
+        if std::env::var_os("V8_RUNNER_OWNER_REFUSAL_FIXTURE").is_some() {
+            let mut request = plain_request(std::env::current_exe().unwrap());
+            request.args = vec!["--list".into()];
+            let error = ProcessExecutor.spawn(&request).unwrap_err();
+            let ProcessError::SpawnFailed { source, .. } = error else {
+                panic!("unexpected refusal: {error}");
+            };
+            assert_eq!(source.kind(), std::io::ErrorKind::InvalidInput);
+
+            return;
+        }
+        for owner in ["unica", "unsupported", ""] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", TEST])
+                .env("V8_RUNNER_OWNER_REFUSAL_FIXTURE", "1")
+                .env("V8_RUNNER_CLIENT_OWNER", owner);
+            if owner != "unica" {
+                command.process_group(0);
+            }
+            assert!(command.status().unwrap().success(), "owner={owner:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detached_spawn_cleans_descendant_when_startup_probe_fails() {
+        assert_failed_detached_start_cleans_descendant(false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_spawn_cleans_live_descendant_when_startup_probe_fails() {
+        assert_failed_detached_start_cleans_descendant(true);
+    }
+
+    #[cfg(unix)]
+    fn assert_failed_detached_start_cleans_descendant(managed: bool) {
+        use std::io::Read;
+        let dir = tempfile::Builder::new()
+            .prefix("v8f")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(dir.path().join("s")).unwrap();
+        let request = failed_detached_fixture_request(dir.path());
+
+        let result = if managed {
+            ProcessExecutor
+                .spawn_managed(&request, ManagedSpawnMode::Detached)
+                .map(|child| {
+                    child.terminate();
+                })
+        } else {
+            ProcessExecutor.spawn(&request).map(|_| ())
+        };
+        // Always acquire cleanup before assertions, including unexpected successful startup.
+        let mut peer = accept_detached_fixture(&listener);
+        assert!(
+            matches!(result, Err(ProcessError::ExitedEarly { exit_code: 7, .. })),
+            "{result:?}"
+        );
+
+        let mut byte = [0];
+        assert_eq!(
+            peer.read(&mut byte)
+                .expect("failed startup must close descendant connection"),
+            0,
+            "failed startup must terminate the descendant, not only its exited parent"
+        );
+    }
+
+    #[cfg(unix)]
+    fn failed_detached_fixture_request(root: &Path) -> ProcessRequest {
+        // Positional arguments avoid interpolating executable or temporary paths into shell code.
+        ProcessRequest {
+            program: PathBuf::from("/bin/sh"),
+            args: vec!["-c".into(),
+                "export V8_RUNNER_DETACHED_FIXTURE_ROOT=\"$2\"; \"$1\" --exact platform::process::tests::detached_lifecycle_client_fixture --ignored & attempt=0; while [ ! -f \"$2/ready\" ]; do attempt=$((attempt + 1)); [ \"$attempt\" -lt 500 ] || exit 8; sleep 0.01; done; exit 7".into(),
+                "fixture".into(), std::env::current_exe().unwrap().display().to_string(), root.display().to_string()],
+            workdir: None, stdout_log_path: None, stderr_log_path: None,
+            startup_probe: Some(Duration::from_secs(2)),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_observation_error_preserves_descendant_after_leader_was_reaped() {
+        use std::io::{Read, Write};
+        let dir = tempfile::Builder::new()
+            .prefix("v8e")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(dir.path().join("s")).unwrap();
+        let request = failed_detached_fixture_request(dir.path());
+        let mut spawned = super::spawn_command(&request, ProcessIoMode::Detached, "fixture")
+            .expect("spawn process whose ownership will be lost");
+        let mut peer = accept_detached_fixture(&listener);
+        assert_eq!(spawned.child.wait().unwrap().code(), Some(7));
+        // Deliberately reap first: this is real lost wait authority, without an injection seam.
+        let error =
+            super::startup_probe_status(&mut spawned).expect_err("leader was already reaped");
+        assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
+        peer.0.write_all(b"ping").unwrap();
+        let mut reply = [0; 4];
+        peer.read_exact(&mut reply)
+            .expect("observer error must not signal a stale process group");
+        assert_eq!(&reply, b"pong");
+    }
+
+    #[cfg(windows)]
+    mod windows_client_owner {
+        use super::*;
+        use std::io::{self, Read, Write};
+        use std::net::{Shutdown, TcpListener, TcpStream};
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, TerminateJobObject,
+        };
+        use windows_sys::Win32::System::Threading::{
+            CreateEventW, GetCurrentProcess, OpenEventW, OpenProcess, SetEvent,
+            WaitForSingleObject, EVENT_MODIFY_STATE, PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_SYNCHRONIZE,
+        };
+
+        const CASE: &str = "V8_RUNNER_WINDOWS_OWNER_CASE";
+        const ADDRESS: &str = "V8_RUNNER_WINDOWS_OWNER_ADDRESS";
+        const READY_EVENT: &str = "V8_RUNNER_WINDOWS_OWNER_READY_EVENT";
+        const RECEIPT: &str = "V8_RUNNER_WINDOWS_OWNER_RECEIPT";
+        const CLIENT_TEST: &str = "platform::process::tests::windows_client_owner::client_fixture";
+
+        struct HostJob(Option<OwnedHandle>);
+
+        impl Drop for HostJob {
+            fn drop(&mut self) {
+                if let Some(job) = &self.0 {
+                    // This exact retained Job owns the fixture tree; never kill by a sampled PID.
+                    unsafe { TerminateJobObject(job.as_raw_handle(), 1) };
+                }
+            }
+        }
+
+        struct Wrapper(std::process::Child);
+
+        impl Drop for Wrapper {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        struct Peer(TcpStream);
+
+        impl Drop for Peer {
+            fn drop(&mut self) {
+                let _ = self.0.write_all(b"stop");
+                let _ = self.0.shutdown(Shutdown::Both);
+            }
+        }
+
+        fn owned_handle(handle: std::os::windows::io::RawHandle) -> OwnedHandle {
+            assert!(
+                !handle.is_null(),
+                "Windows fixture API: {}",
+                io::Error::last_os_error()
+            );
+            // The successful creation/open call transfers this handle to this guard exactly once.
+            unsafe { OwnedHandle::from_raw_handle(handle) }
+        }
+
+        fn wide(value: &str) -> Vec<u16> {
+            value.encode_utf16().chain(std::iter::once(0)).collect()
+        }
+
+        fn wait(handle: &impl AsRawHandle) {
+            assert_eq!(
+                unsafe { WaitForSingleObject(handle.as_raw_handle(), 10_000) },
+                WAIT_OBJECT_0
+            );
+        }
+
+        fn ping(peer: &mut Peer) {
+            peer.0.write_all(b"ping").expect("ping client");
+            let mut reply = [0; 4];
+            peer.0
+                .read_exact(&mut reply)
+                .expect("client replies after host release");
+            assert_eq!(&reply, b"pong");
+        }
+
+        #[test]
+        #[ignore = "subprocess fixture"]
+        fn client_fixture() {
+            assert!(std::env::var_os("V8_RUNNER_CLIENT_OWNER").is_none());
+            let mut in_job = 0;
+            assert_ne!(
+                unsafe { IsProcessInJob(GetCurrentProcess(), std::ptr::null_mut(), &mut in_job) },
+                0
+            );
+            assert_ne!(in_job, 0, "client inherits the host Job");
+            let mut socket = TcpStream::connect(std::env::var(ADDRESS).expect("fixture address"))
+                .expect("connect host");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(15)))
+                .expect("bound fixture lifetime");
+            socket
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .expect("bound fixture writes");
+            socket
+                .write_all(&std::process::id().to_le_bytes())
+                .expect("send client identity");
+            let event_name = wide(&std::env::var(READY_EVENT).expect("fixture ready event"));
+            let event =
+                owned_handle(unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, event_name.as_ptr()) });
+            assert_ne!(unsafe { SetEvent(event.as_raw_handle()) }, 0);
+            loop {
+                let mut message = [0; 4];
+                if socket.read_exact(&mut message).is_err() || &message == b"stop" {
+                    return;
+                }
+                assert_eq!(&message, b"ping");
+                if socket.write_all(b"pong").is_err() {
+                    return;
+                }
+            }
+        }
+
+        #[test]
+        fn host_job_terminates_client_before_startup_handoff() {
+            exercise("startup", "platform::process::tests::windows_client_owner::host_job_terminates_client_before_startup_handoff");
+        }
+
+        #[test]
+        fn released_host_job_preserves_client_after_runner_exit() {
+            exercise("handoff", "platform::process::tests::windows_client_owner::released_host_job_preserves_client_after_runner_exit");
+        }
+
+        fn exercise(case: &str, test_name: &str) {
+            if std::env::var(CASE).as_deref() == Ok(case) {
+                // Host must assign this runner to its Job before real owner-mode admission.
+                let mut start = [0; 2];
+                io::stdin()
+                    .read_exact(&mut start)
+                    .expect("host admission barrier");
+                assert_eq!(&start, b"go");
+
+                let spawned = ProcessExecutor
+                    .spawn(&ProcessRequest {
+                        program: std::env::current_exe().expect("test executable"),
+                        args: vec![
+                            "--exact".into(),
+                            CLIENT_TEST.into(),
+                            "--ignored".into(),
+                            "--nocapture".into(),
+                        ],
+                        workdir: None,
+                        stdout_log_path: None,
+                        stderr_log_path: None,
+                        startup_probe: Some(Duration::from_secs(if case == "startup" {
+                            30
+                        } else {
+                            1
+                        })),
+                    })
+                    .expect("real owner-mode spawn");
+
+                fs::write(
+                    std::env::var_os(RECEIPT).expect("receipt path"),
+                    spawned.pid.to_string(),
+                )
+                .expect("publish successful handoff receipt");
+                return;
+            }
+
+            let dir = tempdir().expect("fixture directory");
+            let receipt = dir.path().join("receipt");
+            let listener = TcpListener::bind("127.0.0.1:0").expect("fixture listener");
+            listener
+                .set_nonblocking(true)
+                .expect("accept only after ready event");
+            let event_name = format!("Local\\v8-runner-owner-{}", uuid::Uuid::new_v4());
+            let encoded_event_name = wide(&event_name);
+            let event = owned_handle(unsafe {
+                CreateEventW(std::ptr::null(), 1, 0, encoded_event_name.as_ptr())
+            });
+            // Deliberately no KILL_ON_JOB_CLOSE: successful release must preserve the client.
+            let mut job = HostJob(Some(owned_handle(unsafe {
+                CreateJobObjectW(std::ptr::null(), std::ptr::null())
+            })));
+            let mut wrapper = Wrapper(
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args(["--exact", test_name, "--nocapture"])
+                    .env(CASE, case)
+                    .env("V8_RUNNER_CLIENT_OWNER", "unica")
+                    .env(
+                        ADDRESS,
+                        listener.local_addr().expect("listener address").to_string(),
+                    )
+                    .env(READY_EVENT, event_name)
+                    .env(RECEIPT, &receipt)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::inherit())
+                    .spawn()
+                    .expect("runner wrapper"),
+            );
+            let job_handle = job.0.as_ref().expect("owned host job").as_raw_handle();
+            assert_ne!(
+                unsafe { AssignProcessToJobObject(job_handle, wrapper.0.as_raw_handle()) },
+                0,
+                "assign runner to host Job: {}",
+                io::Error::last_os_error()
+            );
+            wrapper
+                .0
+                .stdin
+                .take()
+                .expect("start barrier")
+                .write_all(b"go")
+                .expect("admit runner");
+            wait(&event);
+            let mut peer = Peer(
+                listener
+                    .accept()
+                    .expect("client connected before ready event")
+                    .0,
+            );
+            // Winsock inherits the listener's nonblocking mode. Timeout options
+            // only bound blocking reads; reset the accepted socket explicitly.
+            peer.0
+                .set_nonblocking(false)
+                .expect("blocking fixture protocol after ready event");
+            peer.0
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("bound host reads");
+            peer.0
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .expect("bound host writes");
+            let mut pid = [0; 4];
+            peer.0.read_exact(&mut pid).expect("client PID");
+            let pid = u32::from_le_bytes(pid);
+            let client = owned_handle(unsafe {
+                OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                    0,
+                    pid,
+                )
+            });
+            let mut in_host_job = 0;
+            assert_ne!(
+                unsafe { IsProcessInJob(client.as_raw_handle(), job_handle, &mut in_host_job) },
+                0
+            );
+            assert_ne!(
+                in_host_job, 0,
+                "real runner client must remain in the exact host Job"
+            );
+            if case == "startup" {
+                assert!(
+                    !receipt.exists(),
+                    "client ready while spawn has not returned a receipt"
+                );
+                assert_ne!(unsafe { TerminateJobObject(job_handle, 1) }, 0);
+                wait(&client);
+                wait(&wrapper.0);
+                assert!(!receipt.exists(), "host teardown precedes handoff");
+                // A signaled retained process handle proves termination even if TCP reports reset.
+            } else {
+                wait(&wrapper.0);
+                assert!(wrapper.0.wait().expect("runner exit").success());
+                assert_eq!(
+                    fs::read_to_string(&receipt).expect("handoff receipt"),
+                    pid.to_string()
+                );
+                drop(wrapper);
+                drop(job.0.take()); // Explicit successful host release; no termination on drop.
+                ping(&mut peer);
+                drop(peer);
+                wait(&client);
+            }
         }
     }
 
