@@ -10,7 +10,7 @@ realized:
   - src/platform/process.rs::client_owner_rejects_unknown_value_and_unisolated_runner_before_spawn
   - src/platform/process.rs::host_job_terminates_client_before_startup_handoff
   - src/platform/process.rs::released_host_job_preserves_client_after_runner_exit
-establishes: [INV.PLATFORM.DETACHED-CLIENT-OWNERSHIP]
+establishes: [INV.PLATFORM.DETACHED-CLIENT-OWNERSHIP, INV.PLATFORM.HOST-OWNED-CLIENT]
 ---
 
 # Владение отделяемым клиентом передаётся явно
