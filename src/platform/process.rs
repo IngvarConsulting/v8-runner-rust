@@ -2487,7 +2487,7 @@ mod tests {
     #[cfg(windows)]
     mod windows_client_owner {
         use super::*;
-        use std::io::{Read, Write};
+        use std::io::{self, Read, Write};
         use std::net::{Shutdown, TcpListener, TcpStream};
         use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
         use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
