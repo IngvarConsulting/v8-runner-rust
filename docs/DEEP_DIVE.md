@@ -35,7 +35,12 @@ MCP DTO в одном слое.
 - Для `format=EDT` используются два context-а:
   - `edt-<sourceSetName>` для решения, нужен ли export;
   - `designer-<sourceSetName>` для решения, что именно загружать в ИБ.
-- Persisted state живёт в `workPath/hash-storages/`.
+- Хеши конфигураций и расширений лежат в `workPath/infobases/<имя>/hashes/<набор>.redb`.
+  Адрес базы, исходный каталог и назначение набора проверяются вместе со снимком.
+  Чужая память останавливает обычный `push` с диагностикой; полный `pull` создаёт новую.
+- Кеш экспорта EDT и внешних артефактов остаётся общим в `workPath/hash-storages/`.
+  У базы по строке соединения хеш-памяти нет; журнал поколений и файл версий ещё требуют
+  отдельного переноса в рамках [#214](https://github.com/IngvarConsulting/v8-runner-rust/issues/214).
 - Generated Designer output для EDT flow живёт под `workPath/designer/<sourceSetName>`.
 
 Change detection выполняется on-demand во время build/export/load decision и не требует
@@ -83,6 +88,12 @@ runtime snapshot commit только указанным source-set.
 
 - Для `DESIGNER` может быть full, incremental или partial.
 - Для `IBCMD` object-scoped partial деградирует в incremental.
+- Полный `pull` в формате `DESIGNER` сначала считает хеши staging, затем публикует
+  дерево и записывает эти хеши. Это общий путь Конфигуратора, `ibcmd` и агента.
+  Отказ до публикации оставляет память прежней; после публикации ошибки хеширования
+  или записи памяти становятся предупреждением с предложением повторить полный `pull`.
+  Правка опубликованного дерева остаётся изменением. Протокола намерения нет.
+- Цель полной выгрузки не может содержать `workPath`: замена удалила бы состояние команды.
 - Для `format=EDT` использует internal Designer snapshot, затем EDT import.
 
 ### `convert`

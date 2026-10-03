@@ -972,7 +972,7 @@ mod tests {
             provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
-            infobase_name: None,
+            infobase_name: Some("origin".to_owned()),
             source_sets: vec![
                 SourceSetConfig {
                     name: "main".to_owned(),
@@ -1015,7 +1015,7 @@ mod tests {
             provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
-            infobase_name: None,
+            infobase_name: Some("origin".to_owned()),
             source_sets: vec![
                 SourceSetConfig {
                     name: "main".to_owned(),

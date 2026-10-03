@@ -456,7 +456,8 @@ pub(super) fn commit_step_state(
 }
 
 fn storage_needs_recovery(context: &SourceSetContext, work_path: &Path) -> bool {
-    HashStorage::new(context.storage_path(work_path)).needs_recovery()
+    context.persists_snapshot()
+        && HashStorage::new(context.storage_path(work_path)).needs_recovery()
 }
 
 pub(super) fn remove_storage_path(path: &Path) -> std::io::Result<()> {

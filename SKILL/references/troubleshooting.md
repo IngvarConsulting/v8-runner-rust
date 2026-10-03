@@ -47,7 +47,8 @@ workPath/temp/<runner-id>/runs/<run-id>/
 
 Useful `workPath` locations:
 
-- `workPath/hash-storages/`: persisted change-detection state.
+- `workPath/infobases/<name>/hashes/<source-set>.redb`: named-base source hashes; foreign memory is refused.
+- `workPath/hash-storages/`: shared EDT export and external-artifact caches.
 - `workPath/edt-workspace/`: shared EDT workspace for `infobase create`.
 - `workPath/convert/edt-workspace/`: separate EDT workspace for `convert`.
 - `workPath/designer/<sourceSetName>/`: generated Designer representation, especially for EDT flows.

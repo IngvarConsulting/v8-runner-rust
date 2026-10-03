@@ -2616,10 +2616,8 @@ fn every_staged_publication_rechecks_its_target_first() {
         "crate::use_cases::artifacts::agent::run_external_agent_export",
         "crate::use_cases::artifacts::run_designer_export",
         "crate::use_cases::artifacts::run_external_designer_export",
-        "crate::use_cases::dump_config::agent::publish_full",
         "crate::use_cases::dump_config::finalize_edt_dump",
-        "crate::use_cases::dump_config::run_full_dump_designer",
-        "crate::use_cases::dump_config::run_full_dump_ibcmd",
+        "crate::use_cases::dump_config::publish_full_dump",
         "crate::use_cases::infobase_export::execute_configuration_export",
         "crate::use_cases::infobase_export::execute_infobase_snapshot",
     ];

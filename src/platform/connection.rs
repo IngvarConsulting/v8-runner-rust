@@ -79,6 +79,34 @@ impl V8Connection {
             .map(|(_, value)| value)
     }
 
+    /// Stable address identity, excluding credentials and the selected executor.
+    pub fn snapshot_identity(&self, base_path: &std::path::Path) -> Option<String> {
+        use crate::support::path::{nearest_existing_canonical_path, snapshot_path_identity};
+        if let Some(path) = self.file_path() {
+            let path = std::path::Path::new(unquote_connection_value(path));
+            let absolute = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                base_path.join(path)
+            };
+            let canonical = nearest_existing_canonical_path(&absolute).unwrap_or(absolute);
+            return Some(format!(
+                "file:{} ({})",
+                snapshot_path_identity(&canonical),
+                canonical.display()
+            ));
+        }
+        if let Some(address) = declared_server_address(&self.raw) {
+            return Some(format!("server:{}\\{}", address.server, address.reference));
+        }
+        for pair in self.connection_args.windows(2) {
+            if pair[0].eq_ignore_ascii_case("/s") || pair[0].eq_ignore_ascii_case("-s") {
+                return Some(format!("server:{}", pair[1]));
+            }
+        }
+        None
+    }
+
     /// Returns whether the raw value has a supported file or server connection shape.
     /// The declared form is answered by [`declared_server_address`], the same predicate
     /// that decides how the address reaches the platform.
@@ -263,6 +291,40 @@ fn split_arg_string(raw: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::V8Connection;
+
+    #[test]
+    fn snapshot_address_identity_ignores_credentials_and_canonicalizes_file_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("db")).expect("db");
+        let declared = V8Connection::from_connection_string("File='db';Usr=a;Pwd=secret");
+        let absolute = V8Connection::from_connection_string(&format!(
+            "/F \"{}\"",
+            dir.path().join("db").display()
+        ));
+        assert_eq!(
+            declared.snapshot_identity(dir.path()),
+            absolute.snapshot_identity(dir.path())
+        );
+        let server = V8Connection::from_connection_string("Srvr='host';Ref='db';Pwd=secret");
+        let args = V8Connection::from_connection_string(r"/S host\db /N alice /P other");
+        assert_eq!(
+            server.snapshot_identity(dir.path()),
+            args.snapshot_identity(dir.path())
+        );
+        for connection in [&declared, &server, &args] {
+            let identity = connection.snapshot_identity(dir.path()).expect("identity");
+            for secret in ["secret", "alice", "other"] {
+                assert!(
+                    !identity.contains(secret),
+                    "credentials must not reach identity: {identity}"
+                );
+            }
+        }
+        assert_eq!(
+            V8Connection::from_connection_string("unknown").snapshot_identity(dir.path()),
+            None
+        );
+    }
 
     #[test]
     fn wraps_plain_connection_string_as_flag_and_value() {

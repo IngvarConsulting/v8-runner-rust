@@ -120,6 +120,76 @@ fn run_dump(config: &AppConfig, args: &DumpArgs) -> UseCaseResult<DumpResult> {
     execute(&context, config, args)
 }
 
+/// Seal the platform output before publication; only that tree may become the baseline.
+/// No storage is opened until publication succeeds, including its Git and cancellation guards.
+fn publish_full_dump(
+    context: &ExecutionContext,
+    config: &AppConfig,
+    resolved: &ResolvedDumpTarget,
+    publication: &StagedPublication,
+) -> Result<Option<String>, AppError> {
+    use crate::change_detection::analyzer::{commit_full_snapshot, prepare_full_snapshot};
+
+    let inventory = SourceSetInventory::new(config);
+    let snapshot = inventory
+        .designer_context(&resolved.source_set_name)
+        .filter(|source| config.format == SourceFormat::Designer && source.persists_snapshot())
+        .map(|source| prepare_full_snapshot(source, publication.staging_path()));
+
+    validate_platform_target(resolved).map_err(|error| publication.cleanup_failure(error))?;
+    validate_full_dump_work_path(config, resolved)
+        .map_err(|error| publication.cleanup_failure(error))?;
+    let published = publication
+        .publish_dir(
+            context,
+            DUMP_BACKUP_PREFIX,
+            "failed to publish staged dump",
+            resolved.platform_consent(),
+        )
+        .map_err(|error| publication.cleanup_failure(error))?;
+
+    // Cancellation observed during publication must not leave a successfully published
+    // tree unrecorded. This local commit starts no process and has no cancellation check.
+    let memory_warning = snapshot.and_then(|prepared| {
+        // Publication can replace a symlink with a real directory. Bind the prepared
+        // bytes to the resulting source root, without scanning its contents again.
+        let published_inventory = SourceSetInventory::new(config);
+        let Some(source) = published_inventory.designer_context(&resolved.source_set_name) else {
+            return Some(format!(
+                "sources published for '{}', but hash memory was not updated: source context is missing; repeat a full pull to refresh memory",
+                resolved.source_set_name
+            ));
+        };
+        prepared
+            .and_then(|snapshot| commit_full_snapshot(source, &config.work_path, &snapshot))
+            .err()
+            .map(|error| format!(
+                "sources published for '{}', but hash memory was not updated: {error}; repeat a full pull to refresh memory",
+                resolved.source_set_name
+            ))
+    });
+    Ok(merge_optional_messages(
+        merge_optional_messages(published.cleanup_warning, memory_warning),
+        dump_publication_warning(context.command(), published.deferred_interruption),
+    ))
+}
+
+fn validate_full_dump_work_path(
+    config: &AppConfig,
+    resolved: &ResolvedDumpTarget,
+) -> Result<(), AppError> {
+    let work = nearest_existing_canonical_path(&config.work_path)
+        .map_err(|error| AppError::Runtime(format!("failed to canonicalize workPath: {error}")))?;
+    if work.starts_with(&resolved.canonical_target_path)
+        || work.starts_with(&resolved.canonical_platform_target_path)
+    {
+        return Err(AppError::Validation(
+            "full pull target must not contain workPath".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn run_incremental_dump_designer(
     context: &ExecutionContext,
     config: &AppConfig,
@@ -194,28 +264,8 @@ fn run_full_dump_designer(
     ensure_platform_success("dump", resolved, &dump_result)
         .map_err(|error| publication.cleanup_failure(error))?;
 
-    validate_platform_target(resolved).map_err(|error| publication.cleanup_failure(error))?;
-    if let Some(error) = interruption_before_publish(context, "dump publication") {
-        return Err(publication.cleanup_failure(error));
-    }
-
-    let publish_phase = publication
-        .publish_dir(
-            context,
-            DUMP_BACKUP_PREFIX,
-            "failed to publish staged dump",
-            resolved.platform_consent(),
-        )
-        .map_err(|error| publication.cleanup_failure(error))?;
-    debug!(target = %resolved.platform_target_path.display(), "published staged dump");
-
-    Ok((
-        dump_result,
-        merge_optional_messages(
-            publish_phase.cleanup_warning,
-            dump_publication_warning(context.command(), publish_phase.deferred_interruption),
-        ),
-    ))
+    let warning = publish_full_dump(context, config, resolved, &publication)?;
+    Ok((dump_result, warning))
 }
 
 fn run_incremental_dump_ibcmd(
@@ -275,28 +325,8 @@ fn run_full_dump_ibcmd(
     ensure_platform_success("dump", resolved, &dump_result)
         .map_err(|error| publication.cleanup_failure(error))?;
 
-    validate_platform_target(resolved).map_err(|error| publication.cleanup_failure(error))?;
-    if let Some(error) = interruption_before_publish(context, "dump publication") {
-        return Err(publication.cleanup_failure(error));
-    }
-
-    let publish_phase = publication
-        .publish_dir(
-            context,
-            DUMP_BACKUP_PREFIX,
-            "failed to publish staged dump",
-            resolved.platform_consent(),
-        )
-        .map_err(|error| publication.cleanup_failure(error))?;
-    debug!(target = %resolved.platform_target_path.display(), "published staged dump");
-
-    Ok((
-        dump_result,
-        merge_optional_messages(
-            publish_phase.cleanup_warning,
-            dump_publication_warning(context.command(), publish_phase.deferred_interruption),
-        ),
-    ))
+    let warning = publish_full_dump(context, config, resolved, &publication)?;
+    Ok((dump_result, warning))
 }
 
 fn run_partial_dump_designer(
@@ -969,7 +999,7 @@ fn resolve_target(config: &AppConfig, args: &DumpArgs) -> Result<ResolvedDumpTar
     let lock_path = hashed_lock_path(&canonical_target_path, "dump")
         .map_err(|error| AppError::Runtime(format!("failed to resolve dump lock path: {error}")))?;
 
-    Ok(ResolvedDumpTarget {
+    let resolved = ResolvedDumpTarget {
         source_set_name: source_set.name.clone(),
         source_set_purpose: source_set.purpose,
         extension,
@@ -988,7 +1018,11 @@ fn resolve_target(config: &AppConfig, args: &DumpArgs) -> Result<ResolvedDumpTar
         } else {
             DestructionConsent::AskFirst
         },
-    })
+    };
+    if matches!(args.mode, DumpModeRequest::Full) {
+        validate_full_dump_work_path(config, &resolved)?;
+    }
+    Ok(resolved)
 }
 
 #[cfg(test)]
@@ -1033,6 +1067,206 @@ mod tests {
 
     #[cfg(unix)]
     use std::os::unix::fs::{symlink, PermissionsExt};
+
+    fn publication_fixture() -> (
+        tempfile::TempDir,
+        AppConfig,
+        super::ResolvedDumpTarget,
+        super::StagedPublication,
+    ) {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        fs::create_dir_all(base.join("main")).expect("source");
+        fs::write(base.join("main/Module.bsl"), "old source").expect("old source");
+        let mut config = build_config(&base, &dir.path().join("work"), &dir.path().join("1cv8"));
+        config.infobase_name = Some("origin".to_owned());
+        let args = DumpArgs {
+            mode: DumpModeRequest::Full,
+            source_set: Some("main".to_owned()),
+            extension: None,
+            objects: vec![],
+            discard_uncommitted: true,
+            dry_run: false,
+        };
+        let resolved = resolve_target(&config, &args).expect("target");
+        let publication = super::StagedPublication::prepare_dir(
+            &resolved.platform_target_path,
+            &resolved.platform_target_identity,
+            ".dump-stage",
+        )
+        .expect("staging");
+        fs::write(
+            publication.staging_path().join("Module.bsl"),
+            "database source",
+        )
+        .expect("stage");
+        (dir, config, resolved, publication)
+    }
+
+    #[test]
+    fn cancelled_full_publication_leaves_source_and_memory_unchanged_and_can_retry() {
+        use crate::change_detection::analyzer::{
+            analyze_context, rescan_and_commit_full, AnalysisOutcome,
+        };
+        let (_dir, config, resolved, publication) = publication_fixture();
+        let inventory = super::SourceSetInventory::new(&config);
+        let source = inventory.designer_context("main").expect("context");
+        rescan_and_commit_full(source, &config.work_path).expect("old snapshot");
+        let before = fs::read(source.storage_path(&config.work_path)).expect("old memory");
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump)
+            .with_cancellation(cancel);
+        super::publish_full_dump(&context, &config, &resolved, &publication).expect_err("cancel");
+        assert_eq!(
+            fs::read_to_string(source.path().join("Module.bsl")).expect("source"),
+            "old source"
+        );
+        assert_eq!(
+            fs::read(source.storage_path(&config.work_path)).expect("memory"),
+            before
+        );
+        assert!(matches!(
+            analyze_context(source, &config.work_path).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+        let retry = super::StagedPublication::prepare_dir(
+            &resolved.platform_target_path,
+            &resolved.platform_target_identity,
+            ".dump-stage",
+        )
+        .expect("retry stage");
+        fs::write(retry.staging_path().join("Module.bsl"), "database source")
+            .expect("retry source");
+        let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump);
+        assert!(
+            super::publish_full_dump(&context, &config, &resolved, &retry)
+                .expect("retry")
+                .is_none()
+        );
+        assert_eq!(
+            fs::read_to_string(source.path().join("Module.bsl")).expect("source"),
+            "database source"
+        );
+        assert!(matches!(
+            analyze_context(source, &config.work_path).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+        fs::write(source.path().join("Module.bsl"), "user change").expect("edit");
+        assert!(matches!(
+            analyze_context(source, &config.work_path).outcome,
+            Ok(AnalysisOutcome::Changes { .. })
+        ));
+    }
+
+    #[test]
+    fn full_publication_reports_memory_write_failure_after_publishing() {
+        let (_dir, config, resolved, publication) = publication_fixture();
+        let inventory = super::SourceSetInventory::new(&config);
+        let source = inventory.designer_context("main").expect("context");
+        let storage = source.storage_path(&config.work_path);
+        fs::create_dir_all(storage.parent().expect("parent")).expect("parent dir");
+        fs::create_dir(&storage).expect("block storage with a directory");
+        let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump);
+        let warning = super::publish_full_dump(&context, &config, &resolved, &publication)
+            .expect("publication succeeds")
+            .expect("memory warning");
+        assert!(warning.contains("sources published"), "{warning}");
+        assert!(warning.contains("hash memory was not updated"), "{warning}");
+        assert!(warning.contains("full pull"), "{warning}");
+        assert_eq!(
+            fs::read_to_string(source.path().join("Module.bsl")).expect("source"),
+            "database source"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_staging_scan_failure_does_not_discard_the_successful_full_dump() {
+        use crate::change_detection::analyzer::rescan_and_commit_full;
+        let (_dir, config, resolved, publication) = publication_fixture();
+        let inventory = super::SourceSetInventory::new(&config);
+        let source = inventory.designer_context("main").expect("context");
+        rescan_and_commit_full(source, &config.work_path).expect("old memory");
+        let before = fs::read(source.storage_path(&config.work_path)).expect("memory");
+        fs::set_permissions(
+            publication.staging_path().join("Module.bsl"),
+            fs::Permissions::from_mode(0o000),
+        )
+        .expect("unreadable");
+        let context = ExecutionContext::cli(crate::use_cases::context::CommandName::Dump);
+        let result = super::publish_full_dump(&context, &config, &resolved, &publication);
+        fs::set_permissions(
+            source.path().join("Module.bsl"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("restore access");
+        let warning = result.expect("publication succeeds").expect("scan warning");
+        assert!(warning.contains("sources published"), "{warning}");
+        assert_eq!(
+            fs::read_to_string(source.path().join("Module.bsl")).expect("source"),
+            "database source"
+        );
+        assert_eq!(
+            fs::read(source.storage_path(&config.work_path)).expect("memory"),
+            before
+        );
+    }
+
+    #[test]
+    fn only_full_pull_refuses_a_target_containing_work_path() {
+        let dir = tempdir().expect("tempdir");
+        let config = build_config(
+            dir.path(),
+            &dir.path().join("main/work"),
+            &dir.path().join("1cv8"),
+        );
+        fs::create_dir_all(dir.path().join("main")).expect("source");
+        let mut args = DumpArgs {
+            mode: DumpModeRequest::Full,
+            source_set: Some("main".to_owned()),
+            extension: None,
+            objects: vec![],
+            discard_uncommitted: true,
+            dry_run: false,
+        };
+        assert!(resolve_target(&config, &args)
+            .expect_err("full refused")
+            .to_string()
+            .contains("contain workPath"));
+        args.mode = DumpModeRequest::Incremental;
+        resolve_target(&config, &args).expect("incremental allowed");
+        args.mode = DumpModeRequest::Partial;
+        resolve_target(&config, &args).expect("partial allowed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_pull_refuses_an_aliased_work_path_but_allows_a_mirror_beneath_work_path() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("main/work")).expect("nested work");
+        symlink(dir.path().join("main/work"), dir.path().join("work-alias")).expect("alias");
+        let mut config = build_config(
+            dir.path(),
+            &dir.path().join("work-alias"),
+            &dir.path().join("1cv8"),
+        );
+        let args = DumpArgs {
+            mode: DumpModeRequest::Full,
+            source_set: Some("main".to_owned()),
+            extension: None,
+            objects: vec![],
+            discard_uncommitted: true,
+            dry_run: false,
+        };
+        assert!(resolve_target(&config, &args)
+            .expect_err("alias refused")
+            .to_string()
+            .contains("contain workPath"));
+        config.work_path = dir.path().join("work");
+        config.source_sets[0].path = PathBuf::from("work/designer/main");
+        resolve_target(&config, &args).expect("reverse nesting allowed");
+    }
 
     #[cfg(unix)]
     fn make_executable(path: &Path) {

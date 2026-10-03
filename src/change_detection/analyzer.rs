@@ -78,7 +78,11 @@ pub enum ChangeDetectionError {
 /// Analyze one source-set context and produce either concrete changes or a safe fallback.
 pub fn analyze_context(context: &SourceSetContext, work_path: &Path) -> ContextAnalysis {
     let storage = HashStorage::new(context.storage_path(work_path));
-    let snapshot = match storage.load_snapshot() {
+    let snapshot = match if context.persists_snapshot() {
+        storage.load_snapshot()
+    } else {
+        Ok(Default::default())
+    } {
         Ok(snapshot) => snapshot,
         Err(e) => {
             if e.is_recoverable() {
@@ -98,6 +102,22 @@ pub fn analyze_context(context: &SourceSetContext, work_path: &Path) -> ContextA
             };
         }
     };
+
+    if let Some(expected) = context.storage_identity() {
+        if (snapshot.generation > 0 || snapshot.watermark.is_some() || !snapshot.entries.is_empty())
+            && snapshot.identity.as_deref() != Some(expected)
+        {
+            return ContextAnalysis {
+                context: context.clone(),
+                outcome: Err(ChangeDetectionError::StorageHard {
+                    source_set: context.name().to_owned(),
+                    storage_path: storage.path().to_path_buf(),
+                    reason: format!("snapshot belongs to {}; selected target is {}. Run a full pull to establish this directory/base relationship",
+                        snapshot.identity.as_deref().unwrap_or("an unidentified infobase"), expected),
+                }),
+            };
+        }
+    }
 
     let stored_keys: HashSet<String> = snapshot.entries.keys().cloned().collect();
     let scan = match scanner::scan(context.path(), snapshot.watermark, &stored_keys) {
@@ -159,13 +179,17 @@ pub fn commit_success(
     work_path: &Path,
     prepared: &PreparedStateUpdate,
 ) -> Result<(), ChangeDetectionError> {
+    if !context.persists_snapshot() {
+        return Ok(());
+    }
     let storage = HashStorage::new(context.storage_path(work_path));
     let snapshot = to_storage_snapshot(&prepared.snapshot);
     storage
-        .commit_snapshot(
+        .commit_snapshot_with_identity(
             &snapshot,
             prepared.scan_started_at,
             prepared.observed_generation,
+            context.storage_identity(),
         )
         .map_err(|e| map_commit_error(context, storage.path(), e))
 }
@@ -175,33 +199,69 @@ pub fn rescan_and_commit_full(
     context: &SourceSetContext,
     work_path: &Path,
 ) -> Result<(), ChangeDetectionError> {
-    let storage = HashStorage::new(context.storage_path(work_path));
-    let current_generation = match storage.current_generation() {
-        Ok(generation) => generation,
-        Err(e) if e.is_recoverable() => {
-            let full = full_snapshot(context, &StorageSnapshotInputs::empty())?;
-            return storage
-                .recover_and_commit_snapshot(&full.snapshot, full.scan_started_at)
-                .map_err(|err| map_commit_error(context, storage.path(), err));
-        }
-        Err(e) => return Err(map_storage_hard(context, storage.path(), e)),
-    };
+    if !context.persists_snapshot() {
+        return Ok(());
+    }
+    let prepared = prepare_full_snapshot(context, context.path())?;
+    commit_full_snapshot(context, work_path, &prepared)
+}
 
-    let full = full_snapshot(
-        context,
-        &StorageSnapshotInputs {
-            watermark: None,
-            stored_keys: HashSet::new(),
-            observed_generation: current_generation,
-        },
-    )?;
+/// Hash an exported tree before publishing it; does not open or mutate storage.
+pub fn prepare_full_snapshot(
+    context: &SourceSetContext,
+    source_path: &Path,
+) -> Result<FullSnapshot, ChangeDetectionError> {
+    let scan = scanner::scan(source_path, None, &HashSet::new())
+        .map_err(|error| map_scan_error(context, error))?;
+    Ok(FullSnapshot {
+        snapshot: scan
+            .candidates
+            .into_iter()
+            .map(|candidate| {
+                (
+                    candidate.rel_path,
+                    StoredFileState {
+                        mtime_ns: candidate.mtime_ns,
+                        hash: candidate.hash,
+                    },
+                )
+            })
+            .collect(),
+        scan_started_at: scan.scan_started_at,
+    })
+}
+
+/// Commit after successful publication or full loading, replacing a foreign identity.
+pub fn commit_full_snapshot(
+    context: &SourceSetContext,
+    work_path: &Path,
+    prepared: &FullSnapshot,
+) -> Result<(), ChangeDetectionError> {
+    if !context.persists_snapshot() {
+        return Ok(());
+    }
+    let storage = HashStorage::new(context.storage_path(work_path));
+    let generation = match storage.current_generation() {
+        Ok(generation) => generation,
+        Err(error) if error.is_recoverable() => {
+            return storage
+                .recover_and_commit_snapshot_with_identity(
+                    &prepared.snapshot,
+                    prepared.scan_started_at,
+                    context.storage_identity(),
+                )
+                .map_err(|error| map_commit_error(context, storage.path(), error))
+        }
+        Err(error) => return Err(map_storage_hard(context, storage.path(), error)),
+    };
     storage
-        .commit_snapshot(
-            &full.snapshot,
-            full.scan_started_at,
-            full.observed_generation,
+        .commit_snapshot_with_identity(
+            &prepared.snapshot,
+            prepared.scan_started_at,
+            generation,
+            context.storage_identity(),
         )
-        .map_err(|e| map_commit_error(context, storage.path(), e))
+        .map_err(|error| map_commit_error(context, storage.path(), error))
 }
 
 fn detect_changes(
@@ -282,49 +342,9 @@ fn build_prepared_state(
     }
 }
 
-struct StorageSnapshotInputs {
-    watermark: Option<u64>,
-    stored_keys: HashSet<String>,
-    observed_generation: u64,
-}
-
-impl StorageSnapshotInputs {
-    fn empty() -> Self {
-        Self {
-            watermark: None,
-            stored_keys: HashSet::new(),
-            observed_generation: 0,
-        }
-    }
-}
-
-struct FullSnapshot {
+pub struct FullSnapshot {
     snapshot: HashMap<String, StoredFileState>,
     scan_started_at: u64,
-    observed_generation: u64,
-}
-
-fn full_snapshot(
-    context: &SourceSetContext,
-    input: &StorageSnapshotInputs,
-) -> Result<FullSnapshot, ChangeDetectionError> {
-    let scan = scanner::scan(context.path(), input.watermark, &input.stored_keys)
-        .map_err(|e| map_scan_error(context, e))?;
-    let mut snapshot = HashMap::new();
-    for candidate in scan.candidates {
-        snapshot.insert(
-            candidate.rel_path,
-            StoredFileState {
-                mtime_ns: candidate.mtime_ns,
-                hash: candidate.hash,
-            },
-        );
-    }
-    Ok(FullSnapshot {
-        snapshot,
-        scan_started_at: scan.scan_started_at,
-        observed_generation: input.observed_generation,
-    })
 }
 
 fn to_storage_snapshot(snapshot: &[PreparedFileState]) -> HashMap<String, StoredFileState> {
@@ -476,5 +496,26 @@ mod tests {
             .map(|change| (change.path, change.kind))
             .collect();
         assert_eq!(changed, [(edited, ChangeKind::Modified)]);
+    }
+    #[test]
+    fn publishing_a_prepared_snapshot_does_not_absorb_a_later_user_edit() {
+        let dir = tempdir().expect("tempdir");
+        let staging = dir.path().join("staging");
+        let target = dir.path().join("target");
+        let work = dir.path().join("work");
+        std::fs::create_dir(&staging).expect("staging");
+        std::fs::write(staging.join("Module.bsl"), "exported").expect("export");
+        let context = SourceSetContext::new("main", target.clone(), "designer-main")
+            .with_infobase_memory(Some("origin"), "safe-base-identity".to_owned());
+        let prepared = super::prepare_full_snapshot(&context, &staging).expect("prepare");
+        assert!(!work.exists(), "preparation never opens memory");
+        std::fs::rename(&staging, &target).expect("publish");
+        std::fs::write(target.join("Module.bsl"), "user edit after publication")
+            .expect("user edit");
+        super::commit_full_snapshot(&context, &work, &prepared).expect("commit prepared");
+        let outcome = analyze_context(&context, &work).outcome.expect("analysis");
+        assert!(
+            matches!(outcome, AnalysisOutcome::Changes { ref changes, .. } if changes.len() == 1 && changes[0].kind == ChangeKind::Modified)
+        );
     }
 }

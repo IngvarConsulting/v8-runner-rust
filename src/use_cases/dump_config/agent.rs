@@ -3,7 +3,7 @@
 //! Агент читает и пишет только внутри своего `AgentBaseDir`, поэтому цель выставляется
 //! ему символической ссылкой: инкрементальная и частичная выгрузка обновляют цель на
 //! месте, как у пакетного Конфигуратора, а полная идёт в каталог пользователя агента
-//! и оттуда переносится той же ступенчатой публикацией. Перед полной и
+//! и оттуда переносится той же ступенчатой публикацией. Перед
 //! инкрементальной выгрузкой агента спрашивают о поколении конфигурации: если оно
 //! не изменилось с последней удачной загрузки или выгрузки, выгружать нечего.
 
@@ -76,7 +76,7 @@ fn dump_through(
     // Поколение спрашивается до выгрузки: сравнение на равенство с записью после
     // последней удачной операции и говорит, есть ли что выгружать.
     let generation = generation_id(handle.session(), extension, wait)?;
-    if objects.is_none() {
+    if matches!(mode, DumpMode::Incremental) && objects.is_none() {
         if let Some(record) = ledger.read(&resolved.source_set_name) {
             if record.token == generation {
                 return Ok((
@@ -120,7 +120,7 @@ fn dump_through(
             tidy(handle, &exchange, &out_relative);
             let transcript = transcript?;
             collected.transpose()?;
-            let cleanup = publish_full(context, resolved, &produced);
+            let cleanup = publish_full(context, config, resolved, &produced);
             let _ = std::fs::remove_dir(produced.parent().unwrap_or(&produced));
             (transcript, cleanup?)
         }
@@ -273,6 +273,7 @@ fn run_command(
 /// Перенос выгрузки в цель той же ступенчатой публикацией, что у Конфигуратора.
 fn publish_full(
     context: &ExecutionContext,
+    config: &AppConfig,
     resolved: &ResolvedDumpTarget,
     produced: &Path,
 ) -> Result<Option<String>, AppError> {
@@ -289,20 +290,5 @@ fn publish_full(
     {
         return Err(publication.cleanup_failure(error));
     }
-    validate_platform_target(resolved).map_err(|error| publication.cleanup_failure(error))?;
-    if let Some(error) = interruption_before_publish(context, "dump publication") {
-        return Err(publication.cleanup_failure(error));
-    }
-    let publish_phase = publication
-        .publish_dir(
-            context,
-            DUMP_BACKUP_PREFIX,
-            "failed to publish staged dump",
-            resolved.platform_consent(),
-        )
-        .map_err(|error| publication.cleanup_failure(error))?;
-    Ok(merge_optional_messages(
-        publish_phase.cleanup_warning,
-        dump_publication_warning(context.command(), publish_phase.deferred_interruption),
-    ))
+    publish_full_dump(context, config, resolved, &publication)
 }

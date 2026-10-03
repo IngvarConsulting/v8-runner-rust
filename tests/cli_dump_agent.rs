@@ -351,7 +351,7 @@ fn incremental_mode_updates_the_target_in_place_through_a_link() {
 
 /// Поколение конфигурации, не изменившееся с последней выгрузки, не выгружается снова.
 #[test]
-fn an_unchanged_generation_is_not_dumped_twice() {
+fn an_unchanged_generation_skips_an_incremental_dump() {
     let harness = harness(true, Some(true), false);
 
     let (first, payload) = run_dump(&harness, &["--mode", "full"]);
@@ -362,7 +362,7 @@ fn an_unchanged_generation_is_not_dumped_twice() {
         .count();
     assert_eq!(dumps_after_first, 1);
 
-    let (second, payload) = run_dump(&harness, &["--mode", "full"]);
+    let (second, payload) = run_dump(&harness, &["--mode", "incremental"]);
 
     assert_eq!(second, 0, "{payload}");
     assert_eq!(payload["data"]["up_to_date"], true, "{payload}");
@@ -381,6 +381,27 @@ fn an_unchanged_generation_is_not_dumped_twice() {
     assert_eq!(
         dumps_after_second, 1,
         "the second command must ask for the generation and stop there"
+    );
+}
+
+/// Явная полная выгрузка восстанавливает дерево и память даже при прежнем поколении.
+#[test]
+fn a_full_dump_repeats_even_when_the_generation_is_unchanged() {
+    let harness = harness(true, Some(true), false);
+    let (first, payload) = run_dump(&harness, &["--mode", "full"]);
+    assert_eq!(first, 0, "{payload}");
+    fs::write(harness.target.join("local-edit.txt"), "local edit").expect("local edit");
+
+    let (second, payload) = run_dump(&harness, &["--mode", "full"]);
+    assert_eq!(second, 0, "{payload}");
+    assert_eq!(payload["data"]["up_to_date"], false, "{payload}");
+    assert!(!harness.target.join("local-edit.txt").exists());
+    assert_eq!(
+        commands(&harness)
+            .iter()
+            .filter(|line| line.starts_with("config dump-config-to-files"))
+            .count(),
+        2
     );
 }
 
