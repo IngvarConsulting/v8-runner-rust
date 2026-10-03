@@ -2125,18 +2125,15 @@ mod tests {
         );
         assert!(!dir.path().join("handed-off").exists());
 
-        // A killed client may reject the write immediately. In either case it
-        // must expose EOF, never answer a new request after its owner was killed.
+        // Linux can report ECONNRESET when the killed peer closes with this
+        // ping unread. Both EOF and reset prove closure; data and timeout do not.
         let _ = peer.0.write_all(b"ping");
         let mut reply = [0; 4];
-        let received = peer
-            .read(&mut reply)
-            .expect("client must close its socket before startup handoff");
-        assert_eq!(
-            received,
-            0,
-            "client survived wrapper cleanup before handoff: {:?}",
-            &reply[..received]
+        let received = peer.read(&mut reply);
+        assert!(
+            matches!(&received, Ok(0))
+                || matches!(&received, Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset),
+            "client must close its socket before startup handoff: {received:?}; reply: {reply:?}"
         );
         // Peer Drop sends stop even when the assertion fails, so the detached
         // counterexample is cleaned up without signalling a numeric client PID.
@@ -2705,6 +2702,11 @@ mod tests {
                     .expect("client connected before ready event")
                     .0,
             );
+            // Winsock inherits the listener's nonblocking mode. Timeout options
+            // only bound blocking reads; reset the accepted socket explicitly.
+            peer.0
+                .set_nonblocking(false)
+                .expect("blocking fixture protocol after ready event");
             peer.0
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .expect("bound host reads");
