@@ -20,6 +20,8 @@ case "$CI_SCOPE" in
         windows_contract_tests=(
           "platform::process::tests::detached_child_does_not_hold_redirected_stdout_open"
           "platform::process::tests::managed_detached_child_does_not_hold_redirected_stdout_open"
+          "platform::process::tests::windows_client_owner::host_job_terminates_client_before_startup_handoff"
+          "platform::process::tests::windows_client_owner::released_host_job_preserves_client_after_runner_exit"
           "support::path::tests::filesystem_object_identity_changes_when_directory_is_replaced"
           "support::fs::tests::replace_file_restores_original_bytes_when_stage_disappeared"
           "use_cases::staged_publication::tests::orphan_cleanup_requires_exact_target_kind_and_run_name_contract"
