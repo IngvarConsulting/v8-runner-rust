@@ -589,6 +589,166 @@ fn setup_mcp_va_project_with_options(
 }
 
 #[test]
+fn launch_without_sources_previews_only_the_selected_client() {
+    for source_declaration in ["", "source-set: []\n", "source-set:\n  - name: unavailable\n    type: CONFIGURATION\n    path: missing-edt-project\n"] {
+        for mode in ["thin", "thick", "ordinary", "designer", "web", "mcp"] {
+            let dir = temp_workspace();
+            let work_path = dir.path().join("work");
+            let config_path = dir.path().join("v8project.yaml");
+            let install_dir = dir.path().join("platform");
+            let dispatch_log = dir.path().join("dispatch.log");
+            let action_log = dir.path().join("actions.log");
+            for executable in ["1cv8", "1cv8c"] {
+                write_logging_script(&install_dir.join("bin").join(executable), &dispatch_log);
+            }
+            let config = format!(
+                "workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\n  web:\n    url: http://localhost/demo\n{source_declaration}tools:\n  platform:\n    path: '{}'\n",
+                work_path.display(), install_dir.display(),
+            );
+            fs::write(&config_path, &config).expect("config");
+            let output = v8_runner_command()
+                .env("V8TR_ACTION_LOG_FILE", &action_log)
+                .args([
+                    "--config",
+                    &config_path.display().to_string(),
+                    "--json-message",
+                    "launch",
+                    mode,
+                    "--dry-run",
+                ])
+                .output()
+                .expect("preview without sources");
+            assert!(
+                output.status.success(),
+                "mode={mode}, sources={source_declaration:?}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let payload: Value = serde_json::from_slice(&output.stdout).expect("preview json");
+            assert_eq!(payload["ok"], true, "{payload}");
+            assert_eq!(payload["data"]["provider_dispatched"], false, "{payload}");
+            assert!(payload["data"]["pid"].is_null(), "{payload}");
+            assert!(!work_path.exists(), "preview created workPath for {mode}");
+            assert!(!dispatch_log.exists(), "preview dispatched {mode}");
+            assert!(!action_log.exists(), "preview wrote action log for {mode}");
+            assert_eq!(fs::read_to_string(&config_path).unwrap(), config);
+        }
+    }
+}
+
+#[test]
+fn launch_without_sources_dispatches_the_client_when_requested() {
+    for source_declaration in ["", "source-set: []\n"] {
+        let dir = temp_workspace();
+        let work_path = dir.path().join("work");
+        let config_path = dir.path().join("v8project.yaml");
+        let install_dir = dir.path().join("platform");
+        let dispatch_log = dir.path().join("dispatch.log");
+        write_logging_script(&install_dir.join("bin/1cv8c"), &dispatch_log);
+        fs::write(&config_path, format!("workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\n{source_declaration}tools:\n  platform:\n    path: '{}'\n", work_path.display(), install_dir.display())).unwrap();
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "launch",
+                "thin",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let payload: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(payload["ok"], true);
+        assert!(payload["data"]["pid"].as_u64().unwrap() > 0);
+        assert!(
+            wait_for_file(&dispatch_log, Duration::from_secs(5)),
+            "client was not dispatched"
+        );
+        assert!(fs::read_to_string(dispatch_log)
+            .unwrap()
+            .contains("ENTERPRISE"));
+    }
+}
+
+#[test]
+fn launch_without_sources_does_not_admit_a_source_command() {
+    let dir = temp_workspace();
+    let config_path = dir.path().join("v8project.yaml");
+    let work_path = dir.path().join("work");
+    fs::write(&config_path, format!("workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set: []\n", work_path.display())).unwrap();
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "push",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("source-set must contain at least one supported entry"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(!work_path.exists());
+    fs::write(&config_path, format!("workPath: '{}'\nformat: EDT\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set:\n  - name: unavailable\n    type: CONFIGURATION\n    path: missing-edt-project\n", work_path.display())).unwrap();
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "push",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let payload: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+    assert!(!work_path.exists());
+}
+
+#[test]
+fn launch_without_sources_still_validates_client_settings() {
+    for settings in ["port: 0", "wait_ready_timeout_ms: 0"] {
+        let dir = temp_workspace();
+        let config_path = dir.path().join("v8project.yaml");
+        let work_path = dir.path().join("work");
+        fs::write(&config_path, format!("workPath: '{}'\nformat: DESIGNER\ninfobase:\n  connection: 'File=/tmp/ib'\nsource-set: []\ntools:\n  client_mcp:\n    {settings}\n", work_path.display())).unwrap();
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "launch",
+                "mcp",
+                "--dry-run",
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let payload: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("client_mcp"),
+            "{payload}"
+        );
+        assert!(!work_path.exists());
+    }
+}
+
+#[test]
 fn launch_json_returns_pid_and_selected_binary() {
     let (_dir, config_path, install_dir, _work_path) = setup_project();
     let output = v8_runner_command()
@@ -1043,6 +1203,85 @@ fn launch_ordinary_supports_typed_keys_and_filters_reserved_raw_duplicates() {
     assert!(args.contains("/WA-"));
     assert!(args.contains("/tmp/user.out.log"));
     assert!(!args.contains("/tmp/ignored.out.log"));
+}
+
+#[test]
+fn launch_mcp_va_rejects_missing_inputs_before_preparation_or_dispatch() {
+    for missing in ["epf", "params", "feature-path", "feature-declaration"] {
+        for dry_run in [true, false] {
+            let (dir, config_path, install_dir, args_log) = setup_mcp_va_project();
+            let work_path = dir.path().join("work");
+            fs::remove_dir(&work_path).unwrap();
+            write_logging_script(&install_dir.join("bin/1cv8c"), &args_log);
+            let mut config = fs::read_to_string(&config_path).unwrap().replace(
+                "source-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\n",
+                "source-set: []\n",
+            );
+            match missing {
+                "epf" => fs::remove_file(dir.path().join("va/vanessa-automation.epf")).unwrap(),
+                "params" => fs::remove_file(dir.path().join("cfg/va-base.json")).unwrap(),
+                "feature-path" => fs::remove_dir_all(dir.path().join("features/smoke")).unwrap(),
+                "feature-declaration" => {
+                    config = config
+                        .lines()
+                        .filter(|line| !line.contains("feature_path:"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                }
+                _ => unreachable!(),
+            }
+            fs::write(&config_path, &config).unwrap();
+            let mut command = v8_runner_command();
+            command.args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "launch",
+                "mcp",
+                "va",
+            ]);
+            if dry_run {
+                command.arg("--dry-run");
+            }
+            let output = command.output().unwrap();
+            let payload: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert!(
+                !output.status.success(),
+                "{missing}, dry_run={dry_run}: {payload}"
+            );
+            assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+            assert!(!args_log.exists(), "invalid VA inputs dispatched a client");
+            assert!(
+                !work_path.join("temp/client-mcp").exists(),
+                "invalid VA inputs were materialized"
+            );
+            if dry_run {
+                assert!(!work_path.exists(), "invalid VA preview created workPath");
+            }
+
+            // The same unrelated VA settings must not block ordinary client use.
+            for mode in ["thin", "mcp"] {
+                let output = v8_runner_command()
+                    .args([
+                        "--config",
+                        &config_path.display().to_string(),
+                        "--json-message",
+                        "launch",
+                        mode,
+                        "--dry-run",
+                    ])
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{missing}, {mode}: {}",
+                    String::from_utf8_lossy(&output.stdout)
+                );
+                assert!(!args_log.exists());
+                assert!(!work_path.join("temp/client-mcp").exists());
+            }
+        }
+    }
 }
 
 #[test]
