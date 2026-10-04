@@ -260,10 +260,15 @@ tests:
 - Обязателен: да
 
 Для обычных project-команд список должен содержать поддерживаемый source-set. Исключение —
-`infobase configuration export` и `infobase dump`: они используют только ИБ и принимают
+`launch`, `infobase configuration export` и `infobase dump`: они используют только ИБ и принимают
 отсутствующий `source-set` как пустой список (явный `source-set: []` равнозначен). Это
 command-specific validation, а не ослабление `build`, source `dump`, `convert`, `make` или
 остальных project workflows.
+
+`launch` также не требует доступности исходников, EDT, build- и test-настроек.
+Сохраняются проверки подключения, платформы, `workPath`, `execution_timeout` и
+настроек client MCP; `launch mcp va` отдельно проверяет входы Vanessa Automation.
+Превью запуска сохраняет прежнее журналирование команды.
 
 Корень runtime state:
 

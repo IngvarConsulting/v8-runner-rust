@@ -54,6 +54,8 @@ pub(crate) fn prepare_test_launch(
 }
 
 pub(crate) fn prepare_client_mcp_launch(config: &AppConfig) -> Result<VanessaLaunch, AppError> {
+    crate::config::validate::validate_vanessa_launch_config(config)
+        .map_err(|error| AppError::Validation(error.to_string()))?;
     let va = &config.tests.va;
     let (epf_path, params_template_path) = resolve_vanessa_paths(config)?;
     let profile_name = va

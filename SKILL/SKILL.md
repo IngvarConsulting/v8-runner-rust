@@ -48,7 +48,7 @@ Useful global flags:
 
 1. Check whether `v8project.yaml` exists in the 1C project root.
 2. If it is missing and source files already exist, run the narrowest `v8-runner config init ...` command that fits the project shape.
-3. If it is missing and the only goal is to export CF/CFE/DT from an existing infobase, create a
+3. If it is missing and the only goal is to launch a client or export CF/CFE/DT from an existing infobase, create a
    minimal `v8project.yaml` with `workPath`, `format`, `infobase`, platform discovery settings and
    `source-set: []`; do not bootstrap project sources that the user did not request.
 4. If it is missing and the current source of truth is an existing infobase that must become
