@@ -1171,6 +1171,15 @@ fn validate_test_config(config: &AppConfig) -> Result<(), ConfigValidationError>
         return Ok(());
     }
 
+    validate_vanessa_launch_config(config)
+}
+
+/// Inputs consumed by both a Vanessa test and a client MCP Vanessa launch.
+/// Unrelated test engines and their execution timeouts are not launch inputs.
+pub(crate) fn validate_vanessa_launch_config(
+    config: &AppConfig,
+) -> Result<(), ConfigValidationError> {
+    let va = &config.tests.va;
     let epf_path = config
         .tools
         .va

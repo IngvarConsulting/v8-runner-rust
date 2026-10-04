@@ -1206,6 +1206,85 @@ fn launch_ordinary_supports_typed_keys_and_filters_reserved_raw_duplicates() {
 }
 
 #[test]
+fn launch_mcp_va_rejects_missing_inputs_before_preparation_or_dispatch() {
+    for missing in ["epf", "params", "feature-path", "feature-declaration"] {
+        for dry_run in [true, false] {
+            let (dir, config_path, install_dir, args_log) = setup_mcp_va_project();
+            let work_path = dir.path().join("work");
+            fs::remove_dir(&work_path).unwrap();
+            write_logging_script(&install_dir.join("bin/1cv8c"), &args_log);
+            let mut config = fs::read_to_string(&config_path).unwrap().replace(
+                "source-set:\n  - name: main\n    type: CONFIGURATION\n    path: project\n",
+                "source-set: []\n",
+            );
+            match missing {
+                "epf" => fs::remove_file(dir.path().join("va/vanessa-automation.epf")).unwrap(),
+                "params" => fs::remove_file(dir.path().join("cfg/va-base.json")).unwrap(),
+                "feature-path" => fs::remove_dir_all(dir.path().join("features/smoke")).unwrap(),
+                "feature-declaration" => {
+                    config = config
+                        .lines()
+                        .filter(|line| !line.contains("feature_path:"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                }
+                _ => unreachable!(),
+            }
+            fs::write(&config_path, &config).unwrap();
+            let mut command = v8_runner_command();
+            command.args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "launch",
+                "mcp",
+                "va",
+            ]);
+            if dry_run {
+                command.arg("--dry-run");
+            }
+            let output = command.output().unwrap();
+            let payload: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert!(
+                !output.status.success(),
+                "{missing}, dry_run={dry_run}: {payload}"
+            );
+            assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+            assert!(!args_log.exists(), "invalid VA inputs dispatched a client");
+            assert!(
+                !work_path.join("temp/client-mcp").exists(),
+                "invalid VA inputs were materialized"
+            );
+            if dry_run {
+                assert!(!work_path.exists(), "invalid VA preview created workPath");
+            }
+
+            // The same unrelated VA settings must not block ordinary client use.
+            for mode in ["thin", "mcp"] {
+                let output = v8_runner_command()
+                    .args([
+                        "--config",
+                        &config_path.display().to_string(),
+                        "--json-message",
+                        "launch",
+                        mode,
+                        "--dry-run",
+                    ])
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{missing}, {mode}: {}",
+                    String::from_utf8_lossy(&output.stdout)
+                );
+                assert!(!args_log.exists());
+                assert!(!work_path.join("temp/client-mcp").exists());
+            }
+        }
+    }
+}
+
+#[test]
 fn launch_mcp_va_builds_payload_from_configured_port_and_ordinary_mode() {
     let (_dir, config_path, install_dir, args_log) = setup_mcp_va_project();
     let output = v8_runner_command()
