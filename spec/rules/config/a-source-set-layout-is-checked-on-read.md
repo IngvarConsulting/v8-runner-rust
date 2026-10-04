@@ -11,6 +11,9 @@ check:
   - src/config/validate.rs::designer_external_source_set_accepts_matching_top_level_xml_descriptors
   - src/config/validate.rs::designer_format_allows_missing_source_set_path
   - tests/contract_config_boundary.rs::an_unsupported_combination_is_refused_before_any_utility_runs
+  - tests/cli_launch.rs::launch_without_sources_previews_only_the_selected_client
+  - tests/cli_launch.rs::launch_without_sources_dispatches_the_client_when_requested
+  - tests/cli_launch.rs::launch_without_sources_does_not_admit_a_source_command
 ---
 
 # Раскладка набора EDT и корня внешних объектов проверяется при чтении конфигурации
@@ -20,4 +23,7 @@ check:
 манифестом; корень внешних объектов — проекты EDT или описания Конфигуратора того вида, что
 объявлен. Обычный набор формата Конфигуратора при чтении не проверяется: его каталога может
 ещё не быть. `download`, `infobase dump`, `infobase restore`, `test --no-push` и
-`tools download` исходников не читают и раскладку не проверяют.
+`tools download` и `launch` исходников не читают и раскладку не проверяют.
+Запуск клиента допускает отсутствие наборов и пустой `source-set`; загрузчик
+сервера `mcp serve`, который обслуживает также команды с исходниками, остаётся
+на полной проверке проекта.
