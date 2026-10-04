@@ -1985,38 +1985,48 @@ mod tests {
             .contains("/UpdateDBCfg"));
     }
 
+    /// Отмена ещё не означает, что исполнитель её заметил: проба остаётся
+    /// удержанной, пока выполняется проверяемый вызов.
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_operator_keeps_the_probe_held_for_the_runner() {
+        let dir = tempdir().expect("tempdir");
+        let started = dir.path().join("started");
+        let release = dir.path().join("release");
+        let (cancellation, operator) = cancel_once_started(&started);
+        fs::write(&started, "").expect("mark probe start");
+        assert!(operator.join().expect("operator"));
+        assert!(cancellation.is_cancelled());
+        assert!(
+            !release.exists(),
+            "operator released the probe before the runner observed cancellation"
+        );
+    }
+
     /// Подставная программа, которая отмечается, что запущена, и ждёт, пока её не отпустят.
     #[cfg(unix)]
     fn write_waiting_program(path: &Path, started: &Path, release: &Path, when: &str) {
+        let held = crate::platform::process::HeldCommand::with_markers(
+            started.to_owned(),
+            release.to_owned(),
+        );
         fs::write(
             path,
             format!(
-                "#!/bin/sh\nif printf '%s' \"$*\" | grep -F -q -- '{when}'; then\n  : > '{}'\n  while [ ! -e '{}' ]; do sleep 0.05; done\nfi\nexit 0\n",
-                started.display(),
-                release.display()
+                "#!/bin/sh\nargs=\"$*\"\n{}\nexit 0\n",
+                held.script_branch(when, 0)
             ),
         )
         .expect("write program");
         make_executable(path);
     }
 
-    /// Отменяет команду, когда подставная программа отметилась, что запущена, и отпускает её.
-    /// Поток отвечает, дождался ли он отметки.
+    /// Отменяет начавшуюся пробу, оставляя её удержанной для исполнителя.
+    /// Оператор не выпускает процесс: при отмене его снимает сам раннер.
     #[cfg(unix)]
-    fn cancel_once_started(
-        started: &Path,
-        release: PathBuf,
-    ) -> (CancellationToken, thread::JoinHandle<bool>) {
+    fn cancel_once_started(started: &Path) -> (CancellationToken, thread::JoinHandle<bool>) {
         let cancellation = CancellationToken::new();
-        let canceller =
-            crate::platform::process::cancel_when_started(started, cancellation.clone());
-        let operator = thread::spawn(move || {
-            let began = canceller
-                .join()
-                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-            fs::write(&release, "").expect("release");
-            began
-        });
+        let operator = crate::platform::process::cancel_when_started(started, cancellation.clone());
         (cancellation, operator)
     }
 
@@ -2043,7 +2053,7 @@ mod tests {
             settings_path: None,
             extension: Some("ExistingExt".to_owned()),
         };
-        let (cancellation, operator) = cancel_once_started(&started, release);
+        let (cancellation, operator) = cancel_once_started(&started);
 
         let failure = execute(
             &ExecutionContext::cli(CommandName::Load).with_cancellation(cancellation),
@@ -2080,7 +2090,7 @@ mod tests {
             extension: None,
         };
         fs::write(root.join("merge.xml"), "<settings/>").expect("settings");
-        let (cancellation, operator) = cancel_once_started(&started, release);
+        let (cancellation, operator) = cancel_once_started(&started);
 
         let failure = execute(
             &ExecutionContext::cli(CommandName::Load).with_cancellation(cancellation),
