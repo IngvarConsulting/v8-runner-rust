@@ -321,6 +321,42 @@ pub fn validate_prepared_test(config: &AppConfig) -> Result<(), ConfigValidation
     Ok(())
 }
 
+/// Launch consumes an existing infobase and client settings, never project sources.
+/// Validate workPath without creating it; the command owns logging and execution.
+pub fn validate_launch(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    validate_base_path(&config.base_path)?;
+    validate_planned_work_path(config)?;
+    validate_connection_contract(config)?;
+    validate_platform_version(config)?;
+    validate_execution_timeout(config)?;
+    validate_client_mcp_launch_config(config)
+}
+
+fn validate_planned_work_path(config: &AppConfig) -> Result<(), ConfigValidationError> {
+    // Resolve without creating directories. A missing component followed by
+    // `..` must not hide an existing non-directory.
+    let path = crate::support::path::nearest_existing_canonical_path(&config.work_path).map_err(
+        |error| {
+            ConfigValidationError::WorkPathInvalid(format!(
+                "cannot resolve '{}': {error}",
+                config.work_path.display()
+            ))
+        },
+    )?;
+    match std::fs::metadata(&path) {
+        Ok(metadata) if !metadata.is_dir() => Err(ConfigValidationError::WorkPathInvalid(format!(
+            "'{}' is not a directory",
+            path.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ConfigValidationError::WorkPathInvalid(format!(
+            "cannot inspect '{}': {error}",
+            path.display()
+        ))),
+    }
+}
+
 /// Validate configuration for operations that read only the configured infobase.
 ///
 /// Source trees, build settings, test runners, EDT and client MCP tooling are not inputs to
@@ -937,6 +973,14 @@ fn validate_test_config(config: &AppConfig) -> Result<(), ConfigValidationError>
         return Ok(());
     }
 
+    validate_vanessa_launch_config(config)
+}
+
+/// Inputs consumed by both a Vanessa test and a client MCP Vanessa launch.
+pub(crate) fn validate_vanessa_launch_config(
+    config: &AppConfig,
+) -> Result<(), ConfigValidationError> {
+    let va = &config.tests.va;
     let epf_path = config
         .tools
         .va
@@ -1062,6 +1106,10 @@ fn validate_mcp_config(config: &AppConfig) -> Result<(), ConfigValidationError> 
         return Err(ConfigValidationError::InvalidMcpShutdownGracePeriodSecs);
     }
 
+    validate_client_mcp_launch_config(config)
+}
+
+fn validate_client_mcp_launch_config(config: &AppConfig) -> Result<(), ConfigValidationError> {
     if config.tools.client_mcp.port == Some(0) {
         return Err(ConfigValidationError::InvalidMcpClientPort);
     }
