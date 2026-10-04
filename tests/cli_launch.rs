@@ -150,7 +150,11 @@ fn start_fake_mcp_server(tools: &[&str]) -> (u16, JoinHandle<()>) {
             stream
                 .set_nonblocking(false)
                 .expect("fake MCP blocking stream");
-            let http_request = read_http_json_request(&mut stream);
+            let Some(http_request) = read_http_json_request(&mut stream) else {
+                // A readiness request can expire while its body is in flight.
+                // Keep the session alive for subsequent polling and DELETE.
+                continue;
+            };
             if http_request.method == "DELETE" {
                 assert_eq!(
                     http_request.session_id.as_deref(),
@@ -301,15 +305,25 @@ impl Drop for UnresponsiveEndpoint {
     }
 }
 
-fn read_http_json_request(stream: &mut TcpStream) -> FakeHttpRequest {
+fn read_http_json_request(stream: &mut TcpStream) -> Option<FakeHttpRequest> {
     stream
         .set_read_timeout(Some(Duration::from_millis(IDLE_WAIT_TIMEOUT_MS)))
         .expect("read timeout");
     let mut bytes = Vec::new();
     let mut buffer = [0; 1024];
     loop {
-        let read = stream.read(&mut buffer).expect("read request");
-        assert!(read > 0, "request closed before body");
+        let read = match stream.read(&mut buffer) {
+            Ok(0) => return None,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                ) =>
+            {
+                return None;
+            }
+            result => result.expect("read request"),
+        };
         bytes.extend_from_slice(&buffer[..read]);
         if let Some((method, session_id, body_start, content_length)) = http_body_bounds(&bytes) {
             if bytes.len() >= body_start + content_length {
@@ -321,11 +335,11 @@ fn read_http_json_request(stream: &mut TcpStream) -> FakeHttpRequest {
                             .expect("request json"),
                     )
                 };
-                return FakeHttpRequest {
+                return Some(FakeHttpRequest {
                     method,
                     session_id,
                     body,
-                };
+                });
             }
         }
     }
@@ -352,6 +366,108 @@ fn http_body_bounds(bytes: &[u8]) -> Option<(String, Option<String>, usize, usiz
         .and_then(|(_, value)| value.trim().parse::<usize>().ok())
         .unwrap_or(0);
     Some((method, session_id, header_end + 4, content_length))
+}
+
+#[test]
+fn fake_mcp_server_keeps_session_and_cleanup_after_abandoned_requests() {
+    let (port, server) = start_fake_mcp_server(&["ping"]);
+    let exchange = |bytes: &[u8]| -> std::io::Result<String> {
+        let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+        stream.set_read_timeout(Some(Duration::from_millis(IDLE_WAIT_TIMEOUT_MS)))?;
+        stream.set_write_timeout(Some(Duration::from_millis(IDLE_WAIT_TIMEOUT_MS)))?;
+        stream.write_all(bytes)?;
+        stream.shutdown(std::net::Shutdown::Write)?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+        Ok(response)
+    };
+    let conversation = (|| -> std::io::Result<()> {
+        // EOF is the barrier: the server has handled this connection before
+        // the next request is sent. No readiness sleeps or timing races.
+        for bytes in [b"".as_slice(), b"POST /mcp HTTP/1.1\r\nContent-Length:"] {
+            assert!(exchange(bytes)?.is_empty());
+        }
+        let initialize = br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
+        // Even valid JSON is not a complete HTTP request when its declared
+        // body is longer. It must not count as an initialized session.
+        let abandoned = format!(
+            "POST /mcp HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+            initialize.len() + 7,
+            std::str::from_utf8(initialize).unwrap()
+        );
+        assert!(exchange(abandoned.as_bytes())?.is_empty());
+        for (method, body, session, status) in [
+            ("POST", initialize.as_slice(), "", "200 OK"),
+            (
+                "POST",
+                br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.as_slice(),
+                "Mcp-Session-Id: fake-session\r\n",
+                "202 Accepted",
+            ),
+            (
+                "POST",
+                br#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#.as_slice(),
+                "Mcp-Session-Id: fake-session\r\n",
+                "200 OK",
+            ),
+            (
+                "DELETE",
+                b"".as_slice(),
+                "Mcp-Session-Id: fake-session\r\n",
+                "202 Accepted",
+            ),
+        ] {
+            let request = format!(
+                "{method} /mcp HTTP/1.1\r\n{session}Content-Length: {}\r\n\r\n{}",
+                body.len(),
+                std::str::from_utf8(body).unwrap()
+            );
+            let response = exchange(request.as_bytes())?;
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status}")),
+                "{response}"
+            );
+            if body
+                .windows(b"tools/list".len())
+                .any(|part| part == b"tools/list")
+            {
+                assert!(response.contains("\"name\":\"ping\""), "{response}");
+            }
+        }
+        Ok(())
+    })();
+    // Join preserves the server's initialize-count/initialized/tools-list
+    // assertions, including when a client-side request could not complete.
+    server
+        .join()
+        .expect("fake MCP session and cleanup must complete");
+    conversation.expect("complete HTTP conversation");
+}
+
+#[test]
+fn fake_mcp_request_reader_rejects_complete_malformed_json() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut client = TcpStream::connect(address).unwrap();
+    let (mut peer, _) = listener.accept().unwrap();
+    client
+        .write_all(b"POST /mcp HTTP/1.1\r\nContent-Length: 1\r\n\r\n{")
+        .unwrap();
+    client.shutdown(std::net::Shutdown::Write).unwrap();
+    let failure = thread::spawn(move || {
+        read_http_json_request(&mut peer);
+    })
+    .join()
+    .expect_err("a complete malformed body must not be treated as an abandoned request");
+    let message = failure
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| failure.downcast_ref::<&str>().copied())
+        .expect("JSON parse failure must have a textual panic reason");
+    assert!(
+        message.contains("request json"),
+        "expected JSON parse failure, got: {message}"
+    );
 }
 
 fn prepend_config(path: &Path, prefix: &str) {
