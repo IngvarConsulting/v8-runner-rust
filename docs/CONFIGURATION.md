@@ -300,7 +300,8 @@ command-specific validation, а не ослабление `push`, source `pull`,
 - `workPath/logs`
 - `workPath/temp`
 - `workPath/edt-workspace`
-- `workPath/designer`
+- `workPath/designer` — выгрузки наборов EDT в формат Конфигуратора
+- `workPath/tool-extensions/<имя>` — выгрузка расширения-инструмента с исходниками EDT
 
 Хеши привязаны к адресу базы без учётных данных, каталогу и назначению набора;
 исполнитель в привязку не входит. Именованные базы сохраняют независимые хеши,

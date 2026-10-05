@@ -20,7 +20,7 @@ use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::edt_project;
 use crate::support::error::AppError;
-use crate::support::temp::platform_logs_dir;
+use crate::support::temp::{platform_logs_dir, tool_extension_export_dir};
 use crate::use_cases::build_progress::{log_timeline_stage, TimelineStageStatus};
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
@@ -564,11 +564,7 @@ fn export_edt_source_extension(
     {
         return Err(error);
     }
-    let target = config
-        .work_path
-        .join("designer")
-        .join("tool-extensions")
-        .join(&extension.name);
+    let target = tool_extension_export_dir(&config.work_path, &extension.name);
     recreate_directory(&target).map_err(|error| {
         AppError::Runtime(format!(
             "failed to prepare tool extension export directory '{}': {error}",
