@@ -37,6 +37,7 @@ const SUPPORTED_LOAD_ERROR: &str =
     "load currently supports only the Designer provider and format=DESIGNER";
 const UNSUPPORTED_EXTERNAL_ARTIFACTS_ERROR: &str =
     "load currently supports only .cf and .cfe artifacts";
+const CFE_REQUIRES_EXTENSION_ERROR: &str = ".cfe artifacts require --extension <name>";
 const UNSUPPORTED_UPDATE_MODE_ERROR: &str =
     "load --mode update is not supported; use --mode load or --mode merge";
 
@@ -531,7 +532,7 @@ fn probe_compatibility(
     // and told it in prose.
     if resolved.target_kind == LoadTargetKind::Extension {
         let presence = installed_extension_state(context, config, utilities, resolved)
-            .map_err(|cancelled| (cancelled, None))?;
+            .map_err(|error| (error, None))?;
         let (state, diagnostic) = match presence {
             ExtensionPresence::Absent => (CompatibilityState::Absent, None),
             ExtensionPresence::Present => (CompatibilityState::Supported, None),
@@ -619,27 +620,28 @@ enum ExtensionPresence {
     NotEstablished(String),
 }
 
-/// Asks the infobase whether the extension is installed, by its own keyed list. `Err` is only a
-/// cancellation of the list read: it answers nothing about the extension, it ends the command.
+/// Asks the infobase whether the extension is installed, by its own keyed list.
+///
+/// `NotEstablished` is kept for one case only: the platform was asked and did not answer.
+/// Everything that stops the question before it is asked keeps its own kind as `Err` — a
+/// missing or unsuitable `ibcmd` is the environment's
+/// (INV.WIRE.A-MISSING-TOOL-IS-AN-ENVIRONMENT-FAILURE), an incomplete connection config and an
+/// unnamed extension are the request's — and so does a cancellation of the list read.
 fn installed_extension_state(
     context: &ExecutionContext,
     config: &AppConfig,
     utilities: &mut PlatformUtilities,
     resolved: &ResolvedLoadRequest,
 ) -> Result<ExtensionPresence, AppError> {
+    // `resolve_request` already refuses a `.cfe` without `--extension`; this keeps the same
+    // answer should that ever change.
     let Some(name) = resolved.extension.as_deref() else {
-        return Ok(ExtensionPresence::NotEstablished(
-            "the extension is not named".to_owned(),
+        return Err(AppError::Validation(
+            CFE_REQUIRES_EXTENSION_ERROR.to_owned(),
         ));
     };
-    let connection = match IbcmdConnection::from_infobase(&config.infobase) {
-        Ok(connection) => connection,
-        Err(error) => return Ok(ExtensionPresence::NotEstablished(error.to_string())),
-    };
-    let binary = match utilities.locate(UtilityType::Ibcmd) {
-        Ok(location) => location.path,
-        Err(error) => return Ok(ExtensionPresence::NotEstablished(error.to_string())),
-    };
+    let connection = IbcmdConnection::from_infobase(&config.infobase).map_err(AppError::from)?;
+    let binary = utilities.locate(UtilityType::Ibcmd)?.path;
     let dsl = IbcmdDsl::new(
         binary,
         connection,
@@ -726,11 +728,10 @@ fn validate_probe_mode_compatibility(
         (_, Update, _) => Some(AppError::Validation(
             UNSUPPORTED_UPDATE_MODE_ERROR.to_owned(),
         )),
-        // Asked and not proven permits no change, in either mode and for either target: the
-        // fail-closed rule carried from DEC.2026-09-02.LOAD-COMPATIBILITY-STATES-ARE-CLOSED-AND-FAIL-CLOSED. An unreadable extension list or an
-        // infobase that will not open stops a load too.
-        // The request was right and the platform did not answer — the infobase did not open or
-        // the extension list did not read — so the refusal is the platform's, not the request's
+        // Asked and not proven permits no change, in either mode and for either target
+        // (DEC.2026-09-02.LOAD-COMPATIBILITY-STATES-ARE-CLOSED-AND-FAIL-CLOSED). The request was
+        // right and the platform did not answer — the infobase did not open or the extension
+        // list did not read — so the refusal is the platform's, not the request's
         // (INV.USE-CASES.AN-UNESTABLISHED-COMPATIBILITY-IS-A-PLATFORM-FAILURE).
         (Configuration | Extension, Load | Merge, NotEstablished) => {
             Some(AppError::Platform(unproven_message()))
@@ -857,9 +858,8 @@ fn resolve_request(
             (LoadTargetKind::Configuration, None)
         }
         ArtifactBuildMode::ExtensionCfe => {
-            let extension = extension.ok_or_else(|| {
-                AppError::Validation(".cfe artifacts require --extension <name>".to_owned())
-            })?;
+            let extension = extension
+                .ok_or_else(|| AppError::Validation(CFE_REQUIRES_EXTENSION_ERROR.to_owned()))?;
             (LoadTargetKind::Extension, Some(extension))
         }
         ArtifactBuildMode::ExternalDataProcessorEpf | ArtifactBuildMode::ExternalReportErf => {
@@ -1616,9 +1616,7 @@ mod tests {
     }
 
     /// Совместимость спросили и не установили — отказ рода `platform`, а не `validation`:
-    /// запрос верен, не ответила платформа. Перебор закрывает каждую цель и каждый режим, а
-    /// прогон сценария — то, что этот род доезжает до вызывающего.
-    #[cfg(unix)]
+    /// запрос верен, не ответила платформа. Перебор закрывает каждую цель и каждый режим.
     #[test]
     fn an_unestablished_compatibility_answers_a_platform_failure() {
         for target_kind in [LoadTargetKind::Configuration, LoadTargetKind::Extension] {
@@ -1646,7 +1644,12 @@ mod tests {
                 );
             }
         }
+    }
 
+    /// Прогон сценария: род `platform` неустановленной совместимости доезжает до вызывающего.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_extension_list_answers_a_platform_failure() {
         let dir = tempdir().expect("tempdir");
         let failure = load_an_extension_whose_presence_cannot_be_read(
             dir.path(),
@@ -1664,6 +1667,96 @@ mod tests {
             load_payload(&payload).compatibility_state,
             CompatibilityState::NotEstablished
         );
+    }
+
+    /// Загрузка расширения, у которой вопрос о его наличии не задан: `ibcmd` не нашёлся
+    /// или конфигурация подключения к базе неполна. Конфигуратор подставной и записывает вызовы.
+    #[cfg(unix)]
+    fn load_an_extension_without_asking(
+        root: &Path,
+        calls: &Path,
+        infobase: crate::config::model::InfobaseConfig,
+    ) -> super::LoadExecutionFailure {
+        fs::create_dir_all(root.join("work")).expect("work");
+        let binary = root.join("1cv8");
+        fs::write(root.join("ext.cfe"), "cfe").expect("artifact");
+        write_absent_extension_designer_script(&binary, calls, None, None, None);
+        let mut config = sample_config(root, &binary);
+        config.infobase = infobase;
+        let request = LoadRequest {
+            vendor_name: None,
+            dry_run: false,
+            mode: LoadMode::Load,
+            artifact_path: "ext.cfe".to_owned(),
+            settings_path: None,
+            extension: Some("ListedExt".to_owned()),
+        };
+
+        execute(&ExecutionContext::cli(CommandName::Load), &config, &request)
+            .expect_err("a question that was never asked permits no change")
+    }
+
+    /// Неполная установка без server tools — норма: `ibcmd` нет рядом с Конфигуратором, и
+    /// отказ несёт род `environment`, а не `platform` — платформу ни о чём не спрашивали
+    /// (INV.WIRE.A-MISSING-TOOL-IS-AN-ENVIRONMENT-FAILURE).
+    #[cfg(unix)]
+    #[test]
+    fn an_extension_load_without_ibcmd_answers_an_environment_failure() {
+        let dir = tempdir().expect("tempdir");
+        let calls = dir.path().join("calls.log");
+        let failure = load_an_extension_without_asking(
+            dir.path(),
+            &calls,
+            crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
+        );
+
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Environment,
+            "{}",
+            failure.error
+        );
+        assert_eq!(failure.error.exit_code(), 2);
+        assert!(
+            failure.error.message().contains("ibcmd"),
+            "{}",
+            failure.error
+        );
+        let payload = failure.payload.expect("payload");
+        assert_eq!(
+            load_payload(&payload).compatibility_state,
+            CompatibilityState::NotProbed,
+            "nobody asked the infobase"
+        );
+        assert!(!calls.exists(), "nothing may be applied: {calls:?}");
+    }
+
+    /// Серверная база без `infobase.dbms` — ошибка конфигурации, как и везде, где строится
+    /// подключение `ibcmd`: род `validation`, а не `platform`.
+    #[cfg(unix)]
+    #[test]
+    fn an_incomplete_ibcmd_connection_answers_a_validation_failure() {
+        let dir = tempdir().expect("tempdir");
+        let calls = dir.path().join("calls.log");
+        let mut infobase = crate::config::model::InfobaseConfig::server(
+            "Srvr=demo;Ref=test",
+            crate::config::model::InfobaseDbmsConfig::new("PostgreSQL", "localhost", "demo"),
+        );
+        infobase.dbms = None;
+        let failure = load_an_extension_without_asking(dir.path(), &calls, infobase);
+
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Validation,
+            "{}",
+            failure.error
+        );
+        assert!(
+            failure.error.message().contains("infobase.dbms"),
+            "{}",
+            failure.error
+        );
+        assert!(!calls.exists(), "nothing may be applied: {calls:?}");
     }
 
     #[cfg(unix)]

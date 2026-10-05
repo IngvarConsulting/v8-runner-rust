@@ -343,9 +343,12 @@ mod tests {
     use crate::platform::designer::DesignerError;
     use crate::platform::edt_session::EdtSessionError;
     use crate::platform::ibcmd::IbcmdError;
-    use crate::platform::locator::{LocatorError, UtilityType};
+    use crate::platform::locator::{
+        LocatorError, PlatformVersion, PlatformVersionRequirement, UtilityType,
+    };
     use crate::platform::process::{ProcessError, WorkGiven};
     use crate::support::error::{AppError, CancelledAt, CapabilityReason};
+    use std::path::PathBuf;
 
     /// Форма с признаком в миниатюре.
     #[derive(Debug)]
@@ -568,6 +571,32 @@ mod tests {
             assert_eq!(error.kind(), UseCaseErrorKind::Environment, "{error}");
             assert_eq!(error.exit_code(), 2, "{error}");
             assert!(error.message().contains("was not found"), "{error}");
+        }
+    }
+
+    /// Утилита нашлась, но не той версии, или версию прочитать нельзя — тоже дело окружения:
+    /// поставьте подходящую, и заработает.
+    #[test]
+    fn an_unsuitable_utility_version_is_an_environment_failure() {
+        let required = || PlatformVersionRequirement::parse("8.3.25").expect("requirement");
+        for locator_error in [
+            LocatorError::VersionMismatch {
+                utility: UtilityType::Ibcmd,
+                path: PathBuf::from("/opt/1cv8/8.3.24.1000/ibcmd"),
+                required: required(),
+                found: PlatformVersion::parse_strict("8.3.24.1000").expect("version"),
+            },
+            LocatorError::UnknownVersion {
+                utility: UtilityType::Ibcmd,
+                path: PathBuf::from("/opt/custom/ibcmd"),
+                required: required(),
+            },
+        ] {
+            let error = UseCaseError::from(AppError::from(locator_error));
+
+            assert_eq!(error.kind(), UseCaseErrorKind::Environment, "{error}");
+            assert_eq!(error.exit_code(), 2, "{error}");
+            assert!(error.message().contains("required"), "{error}");
         }
     }
 
