@@ -29,7 +29,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `push` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.push: agent` при `format=DESIGNER`; у автономного сервера (`infobase.standalone`) — только `agent` через SSH-шлюз сервера, платформа на машине раннера не нужна | Incremental/full загрузка в ИБ; при `format=EDT` сначала экспортирует изменённые EDT `source-set`; у `agent` загрузка и `update-db-cfg` — одна сессия на команду, исходники выставляются агенту ссылкой в `AgentBaseDir`, после загрузки записывается поколение конфигурации |
 | `test` | Та же матрица, что и у `push` | По умолчанию запускает `push` |
 | `test --no-push` | Подготовленная file/server ИБ; source-set и build tooling не требуются | Запускает выбранный test engine без `push` |
-| `pull` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.pull: agent` при `format=DESIGNER` | Полная, инкрементальная или object-scoped partial выгрузка; у `ibcmd` `partial` деградирует в incremental с warning; у `agent` `incremental` и `partial` обновляют цель на месте через ссылку в `AgentBaseDir`, `full` публикуется через staging; перед `incremental` агента спрашивают поколение конфигурации, и равное записанному после последней сборки или выгрузки через агента означает «выгружать нечего»; при `format=EDT` — reverse sync через internal Designer snapshot и EDT import; перед заменой каталога цели раннер спрашивает git, что в нём не восстановить, и найдя незафиксированное, файл вне учёта или в игноре, отказывает с выходом 2 и называет потери, а `--force` уничтожает их без копии; там, где git не отвечает, поведение прежнее и защиты нет |
+| `pull` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.pull: agent` при `format=DESIGNER` | Полная, инкрементальная или object-scoped partial выгрузка; у `ibcmd` `partial` деградирует в incremental с warning; у `agent` `incremental` и `partial` обновляют цель на месте через ссылку в `AgentBaseDir`, `full` публикуется через staging; перед `incremental` агента спрашивают поколение конфигурации, и равное записанному после последней сборки или выгрузки через агента означает «выгружать нечего»; при `format=EDT` — reverse sync через internal Designer snapshot и EDT import; перед заменой каталога цели раннер спрашивает git, что в нём не восстановить, и найдя незафиксированное, файл вне учёта или в игноре (кроме `ConfigDumpInfo.xml` в корне цели полной выгрузки в формате Конфигуратора — она пишет его заново; у reverse sync EDT и у `convert` исключения нет), отказывает с выходом 2 и называет потери, а `--force` уничтожает их без копии; там, где git не отвечает, поведение прежнее и защиты нет |
 | `download` | цепочка `designer` → `ibcmd`; `agent` только по `providers.download: agent` | Выгружает working/database configuration в `.cf` или named extension в `.cfe`; раннер берёт первого готового до spawn, квитанция называет пропущенных; у `agent` только `working` (`config dump-cfg`, команды для конфигурации базы данных у агента нет — `database` отказывает до сессии), файл пишется в каталог агента и переносится в staging |
 | `infobase dump` | провайдер `designer`; `ibcmd` только по `providers.infobase.dump`; `agent` только по `providers.infobase.dump: agent`; у автономного сервера (`infobase.standalone`) строки нет | Выгружает полную ИБ в переносимый `.dt`; это не backup; у `ibcmd` адаптера для DT нет — названный ключом, он отказывает при запуске; у `agent` — `infobase-tools dump-ib` в каталог агента и перенос в staging |
 | `convert` | CLI-only repo-aware конвертация текущих `source-set` | Строки в матрице провайдеров не имеет и не требует ИБ |
@@ -230,7 +230,13 @@ v8-runner init [--force] [--output <FILE>] [--connection <CONNECTION>] [--format
 - Не требует существующего `v8project.yaml`.
 - Пишет результат в текущий каталог или в `--output`.
 - Рядом с primary config создает/обновляет пустой `v8project.local.yaml` со schema modeline и
-  добавляет `v8project.local.yaml` в `.gitignore`, если подходящий pattern еще не указан.
+  добавляет в `.gitignore` недостающие шаблоны `v8project.local.yaml`, `ConfigDumpInfo.xml`
+  и `.dump-*.lock*`. Это `.gitignore` каталога проекта — каталога запуска, где ищутся наборы,
+  в git и вне его; шаблоны без `/` покрывают каталоги наборов и вложенный `--output`.
+  `.gitignore` корня рабочей копии выше проекта (монорепо) не трогается; `gitignore_path` в
+  ответе называет файл проекта. Уже покрытый шаблон повторно не пишется; покрытием считается
+  любой `.gitignore` внутри рабочей копии, в том числе выше проекта, но не
+  `.git/info/exclude` или `core.excludesFile` — они с репозиторием не уезжают.
 - Не использует глобальный `--config` как shortcut output path.
 - Ищет supported `DESIGNER` / `EDT` `source-set` по marker files и их содержимому.
 - Для external roots создаёт aggregate `source-set` только при однородной классификации каталога.
@@ -246,7 +252,10 @@ v8-runner clone --connection <CONNECTION> --platform-version <VERSION> [--projec
 ```
 
 - Работает до загрузки `v8project.yaml` и предназначен для пустого project directory.
-- Создаёт `v8project.yaml`, schema-modelined `v8project.local.yaml`, `.gitignore` entry и
+- Создаёт `v8project.yaml`, schema-modelined `v8project.local.yaml`, `.gitignore` с теми же
+  шаблонами и по тем же правилам, что и `init` (`v8project.local.yaml`,
+  `ConfigDumpInfo.xml`, `.dump-*.lock*`; файл — `<project-dir>/.gitignore`, существующий
+  только дописывается), и
   `source-set main` типа `CONFIGURATION`.
 - Выгружает основную конфигурацию из указанной ИБ в `src/configuration` через Designer full dump.
 - `--connection` не должен содержать embedded credentials; используйте `--user` и `--password`.
@@ -402,6 +411,7 @@ v8-runner push [--source-set <NAME>] [--full] [--dry-run]
 - С `--source-set` project stage анализирует и строит только указанный `source-set`; неизвестное
   имя отклоняется как validation error.
 - Для `DESIGNER` выбирает incremental, partial или full path по изменённым файлам выбранного scope.
+- Опись `ConfigDumpInfo.xml` в каталоге `DESIGNER`-набора принадлежит одной базе и в git не хранится: если `ConfigDumpInfo.xml` в каталоге набора лежит в индексе git, команда отказывает до запуска платформы с кодом выхода 2 (`validation`), называет путь и рецепт `git rm --cached <путь> && git commit …`; превью (`--dry-run`) отказывает так же. Там, где git не отвечает, работа идёт молча.
 - Для `EDT` сначала анализирует и экспортирует выбранные EDT `source-set`, затем грузит generated
   Designer files выбранным backend.
 - После успешного project stage, включая scoped `--source-set`, подготавливает
@@ -507,6 +517,7 @@ v8-runner pull --mode <full|incremental|partial> [--source-set <NAME>] [--extens
   слияния. Найдя такое, она отказывает с кодом выхода 2 и называет файлы;
   `--force` заменяет каталог всё равно. Там, где git не отвечает,
   поведение прежнее и защиты нет.
+- Опись версий `ConfigDumpInfo.xml` принадлежит одной базе и в git не хранится: если `ConfigDumpInfo.xml` в каталоге набора лежит в индексе git, команда отказывает до запуска платформы с кодом выхода 2 (`validation`), называет путь и рецепт `git rm --cached <путь> && git commit …`; превью (`--dry-run`) отказывает так же. Там, где git не отвечает, работа идёт молча.
 - Канонический ввод селектора — `TYPE:NAME` (например, `Catalog:Items`); для
   совместимости принимается и `TYPE.NAME`. Переданный селектор сохраняется в JSON как
   `data.selectors[*].requested`, а в списке Designer и как

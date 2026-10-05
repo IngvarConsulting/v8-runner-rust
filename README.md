@@ -102,8 +102,10 @@ v8-runner init
 
 Команда анализирует структуру проекта, находит поддержанные `source-set` (наборы исходников),
 создает `v8project.yaml`, `v8project.local.yaml` со schema modeline и базой `origin`
-(`--connection`, по умолчанию `File=build/ib`) и добавляет local overlay в `.gitignore`, если
-он еще не указан.
+(`--connection`, по умолчанию `File=build/ib`) и дописывает в `.gitignore` каталога проекта
+недостающие шаблоны local overlay, описи версий `ConfigDumpInfo.xml` и замка выгрузки
+`.dump-*.lock*`. `pull` и `push` отказывают, если `ConfigDumpInfo.xml` лежит в индексе git;
+подробности — в [docs/CAPABILITIES.md](docs/CAPABILITIES.md#init).
 
 Базы проекта объявляются в `v8project.local.yaml` картой `infobases`: умолчание — `origin`,
 другую выбирает `--infobase <имя|строка соединения>`. Там же живут machine-local пути,

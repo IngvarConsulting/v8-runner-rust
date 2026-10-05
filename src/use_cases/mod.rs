@@ -32,6 +32,8 @@ pub mod extension_inventory;
 pub mod external_artifacts;
 /// Shared formatting helpers for IBCMD diagnostics.
 pub mod ibcmd_diagnostics;
+/// What stays out of the project git: `.gitignore` patterns and the tracked version-file refusal.
+pub(crate) mod ignored_files;
 pub mod infobase_export;
 /// Init orchestration use case.
 pub mod init_project;
