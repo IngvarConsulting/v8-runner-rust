@@ -1584,3 +1584,103 @@ fn test_timeout_retains_artifacts() {
         .expect("platform log");
     assert!(!platform_log.is_empty());
 }
+
+/// #4: конфиг во вложенном каталоге, команда из корня рабочего каталога. Один относительный
+/// `tools.va.epf_path` даёт один абсолютный путь в проверке конфигурации, в `/Execute`
+/// `test va` и от `WorkspaceRoot` порождённых VAParams, по которому Vanessa разрешает
+/// относительные пути своих параметров.
+#[test]
+fn vanessa_resolves_a_relative_epf_path_from_a_nested_config_directory() {
+    let dir = temp_workspace();
+    let workspace = dir.path().join("workspace");
+    let profile_dir = workspace.join(".local").join("profiles");
+    let install_dir = dir.path().join("platform");
+    let build_calls = dir.path().join("build.calls.log");
+    let test_calls = dir.path().join("test.calls.log");
+    let captured_params = dir.path().join("captured-va-params.json");
+    let epf_relative = Path::new("build").join("tools").join("vanessa.epf");
+    let epf = profile_dir.join(&epf_relative);
+    fs::create_dir_all(epf.parent().expect("epf dir")).expect("epf dir");
+    fs::create_dir_all(profile_dir.join("main")).expect("main");
+    fs::create_dir_all(profile_dir.join("features")).expect("features");
+    fs::write(&epf, "epf").expect("epf");
+    fs::write(profile_dir.join("va.json"), "{}\n").expect("params");
+    fs::write(
+        profile_dir.join("features").join("login.feature"),
+        "Feature: Login\n",
+    )
+    .expect("feature");
+    fs::write(
+        profile_dir.join("main").join("Module.bsl"),
+        "procedure Test() endprocedure",
+    )
+    .expect("module");
+    write_build_script(&install_dir.join("bin").join("1cv8"), &build_calls, false);
+    write_va_test_script(
+        &install_dir.join("bin").join("1cv8c"),
+        &test_calls,
+        &captured_params,
+        JUNIT_SMOKE_REPORT_FIXTURE,
+        0,
+    );
+    let config_path = profile_dir.join("v8project.yaml");
+    fs::write(
+        &config_path,
+        format!(
+            "workPath: ./work\nformat: DESIGNER\ntests:\n  execution_timeout_seconds: 5\n  va:\n    params_path: ./va.json\n    profile: smoke\n    profiles:\n      smoke:\n        feature_path: ./features\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: main\ntools:\n  va:\n    epf_path: ./build/tools/vanessa.epf\n  platform:\n    path: '{}'\n",
+            install_dir.display()
+        ),
+    )
+    .expect("config");
+    write_local_origin(&config_path, "File=./ib", None);
+    let run_test_va = || {
+        v8_runner_command()
+            .args([
+                "--config",
+                ".local/profiles/v8project.yaml",
+                "--json-message",
+                "test",
+                "va",
+            ])
+            .current_dir(&workspace)
+            .output()
+            .expect("run")
+    };
+
+    let output = run_test_va();
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config_dir = fs::canonicalize(&profile_dir).expect("canonical config dir");
+    let expected_epf = config_dir.join(&epf_relative);
+    let calls = fs::read_to_string(&test_calls).expect("test calls");
+    assert!(
+        calls.contains(&format!("/Execute {} ", expected_epf.display())),
+        "{calls}"
+    );
+    let params = fs::read_to_string(&captured_params).expect("params");
+    assert!(!params.contains("/./"), "{params}");
+    let params: Value = serde_json::from_str(&params).expect("params json");
+    let workspace_root = PathBuf::from(params["WorkspaceRoot"].as_str().expect("WorkspaceRoot"));
+    assert_eq!(workspace_root, config_dir);
+    assert_eq!(workspace_root.join(&epf_relative), expected_epf);
+    assert_eq!(
+        params["КаталогФич"].as_str(),
+        Some(config_dir.join("features").to_str().expect("utf-8"))
+    );
+
+    fs::remove_file(&epf).expect("remove epf");
+    let output = run_test_va();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!(
+            "tools.va.epf_path does not exist: {}",
+            expected_epf.display()
+        )),
+        "{stdout}"
+    );
+}

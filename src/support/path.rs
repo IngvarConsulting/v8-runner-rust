@@ -250,16 +250,33 @@ pub fn strip_windows_verbatim_prefix(value: &str) -> String {
     value.to_owned()
 }
 
+/// Путь не в UTF-8 возвращается как есть: через `display()` он потерял бы байты, а
+/// префикс `\\?\` у такого пути не распознать текстом.
 pub fn normalize_windows_verbatim_path(path: &Path) -> PathBuf {
-    PathBuf::from(strip_windows_verbatim_prefix(&path.display().to_string()))
+    match path.to_str() {
+        Some(text) => PathBuf::from(strip_windows_verbatim_prefix(text)),
+        None => path.to_path_buf(),
+    }
+}
+
+/// Единственное правило путей из настроек: абсолютный путь остаётся собой, относительный
+/// считается от `base` — каталога основного `v8project.yaml`.
+///
+/// Результат собран из компонентов пути: внутренние `.` и повторные разделители уходят,
+/// разделители становятся родными для ОС. Утилиты платформы получают путь в argv как есть,
+/// и `E:\proj\./src/cf` `ibcmd` не прочёл (#4). `..` остаётся: свернуть его лексически
+/// значит пройти мимо символьной ссылки.
+pub fn resolve_from(base: &Path, path: &Path) -> PathBuf {
+    let resolved: PathBuf = base.join(path).components().collect();
+    normalize_windows_verbatim_path(&resolved)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         filesystem_object_identity, hashed_lock_path, is_filesystem_root, is_safe_path_segment,
-        nearest_existing_canonical_path, normalize_windows_verbatim_path, stable_path_identity,
-        strip_windows_verbatim_prefix,
+        nearest_existing_canonical_path, normalize_windows_verbatim_path, resolve_from,
+        stable_path_identity, strip_windows_verbatim_prefix,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -437,6 +454,25 @@ mod tests {
         assert_eq!(
             strip_windows_verbatim_prefix(r"\\?\UNC\server\share\ib"),
             r"\\server\share\ib"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolve_from_drops_current_dir_components_and_keeps_parent_dir() {
+        let base = PathBuf::from("/srv/project");
+
+        assert_eq!(
+            resolve_from(&base, std::path::Path::new("./src//cf/./")),
+            PathBuf::from("/srv/project/src/cf")
+        );
+        assert_eq!(
+            resolve_from(&base.join("."), std::path::Path::new("../shared")),
+            PathBuf::from("/srv/project/../shared")
+        );
+        assert_eq!(
+            resolve_from(&base, std::path::Path::new("/opt/./va.epf")),
+            PathBuf::from("/opt/va.epf")
         );
     }
 

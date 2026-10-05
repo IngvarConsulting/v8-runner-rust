@@ -4416,3 +4416,35 @@ fn the_cancellation_guard_sees_every_bypass() {
         "the guard flags a legitimate place: {found:?}"
     );
 }
+
+/// Путь из настроек разрешается одним правилом — `support::path::resolve_from` (#4).
+///
+/// Корень проблемы: «абсолютный оставить, относительный присоединить к базе» было написано
+/// заново в каждом модуле, который брал путь набора, и голое `join` оставляло в argv
+/// `ibcmd` путь вида `E:\proj\./src/cf`. Признак повтора — присоединение чужого `path` к
+/// базе проекта или к каталогу конфига под любым именем вызывающей функции.
+#[test]
+fn config_paths_are_resolved_only_by_their_owner() {
+    let owner = repo_path("src/support/path.rs");
+    static HAND_RESOLUTION: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(base_path|config_dir)\.join\(&?[A-Za-z_][\w.]*path\)").expect("regex")
+    });
+    let mut offenders = Vec::new();
+
+    for file in collect_rust_files(&repo_path("src")) {
+        if file == owner {
+            continue;
+        }
+        let production = production_tokens(&file);
+        if let Some(found) = HAND_RESOLUTION.find(&production) {
+            offenders.push(format!("{}: {}", file.display(), found.as_str()));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these modules resolve a configured path by hand instead of calling \
+         support::path::resolve_from (or SourceSetConfig::root_in):\n{}",
+        offenders.join("\n")
+    );
+}

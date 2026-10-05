@@ -548,3 +548,74 @@ fn upload_mode_combine_reaches_the_platform_and_answers_under_the_new_name() {
         assert!(calls.contains("/MergeCfg"), "{mode}: {calls}");
     }
 }
+
+/// #4: `upload` при `providers.push: ibcmd` и конфиге, открытом из другого каталога, отдаёт
+/// `ibcmd` и Конфигуратору пути, посчитанные от каталога `v8project.yaml`, без `.` внутри.
+#[test]
+fn upload_with_ibcmd_push_receives_config_relative_paths_resolved_from_the_config_directory() {
+    let dir = temp_workspace();
+    let project = dir.path().join("project");
+    let elsewhere = dir.path().join("elsewhere");
+    let calls_log = dir.path().join("calls.log");
+    let platform = project.join("platform");
+    fs::create_dir_all(project.join("main")).expect("main");
+    fs::create_dir_all(&elsewhere).expect("elsewhere");
+    fs::write(project.join("release.cfe"), "cfe").expect("artifact");
+    write_designer_script(&platform.join("1cv8"), &calls_log);
+    let records = platform.join("ibcmd.records");
+    fs::write(&records, "").expect("records");
+    write_script(
+        &platform.join("ibcmd"),
+        &format!(
+            "printf 'ibcmd %s\\n' \"$*\" >> \"{}\"\ncat \"{}\"\nexit 0",
+            calls_log.display(),
+            records.display()
+        ),
+    );
+    fs::write(
+        project.join("v8project.yaml"),
+        "workPath: ./work\nformat: DESIGNER\nproviders:\n  push: ibcmd\ninfobase:\n  connection: 'File=./ib'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: ./main\ntools:\n  platform:\n    path: ./platform/1cv8\n",
+    )
+    .expect("config");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            "../project/v8project.yaml",
+            "--json-message",
+            "upload",
+            "--path",
+            "./release.cfe",
+            "--extension",
+            "FirstExt",
+        ])
+        .current_dir(&elsewhere)
+        .output()
+        .expect("run command");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let project = fs::canonicalize(&project).expect("canonical project");
+    let infobase = project.join("ib");
+    let calls = fs::read_to_string(&calls_log).expect("calls");
+    assert!(
+        calls.contains(&format!("ibcmd infobase --db-path {} ", infobase.display())),
+        "{calls}"
+    );
+    assert!(
+        calls.contains(&format!(
+            "/LoadCfg {}",
+            project.join("release.cfe").display()
+        )),
+        "{calls}"
+    );
+    assert!(
+        calls.contains(&format!("File={}", infobase.display())),
+        "{calls}"
+    );
+    assert!(!calls.contains("/./"), "{calls}");
+}

@@ -752,12 +752,7 @@ fn mapping_contains_key(mapping: &serde_yaml::Mapping, key: &str) -> bool {
 }
 
 fn normalize_optional_path(path: &Path, config_dir: &Path) -> PathBuf {
-    let normalized = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        config_dir.join(path)
-    };
-    normalize_windows_verbatim_path(&normalized)
+    crate::support::path::resolve_from(config_dir, path)
 }
 
 fn normalize_connection_string(connection: &str, config_dir: &Path) -> String {
@@ -814,13 +809,7 @@ fn normalize_raw_connection_args(connection: &str, config_dir: &Path) -> String 
 fn normalize_connection_file_path(path: &str, config_dir: &Path) -> String {
     let path = path.trim();
     let path = strip_matching_quotes(path).unwrap_or(path);
-    let path = Path::new(path);
-    let normalized = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        config_dir.join(path)
-    };
-    normalize_windows_verbatim_path(&normalized)
+    normalize_optional_path(Path::new(path), config_dir)
         .display()
         .to_string()
 }

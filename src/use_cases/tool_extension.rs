@@ -334,14 +334,9 @@ fn tool_extension_source_context(
     source: &ToolExtensionSourceConfig,
 ) -> Result<SourceSetContext, AppError> {
     let base_path = absolutize_path(&config.base_path)?;
-    let source_path = if source.path.is_absolute() {
-        source.path.clone()
-    } else {
-        base_path.join(&source.path)
-    };
     Ok(SourceSetContext::new(
         format!("tool:{}", extension.name),
-        source_path,
+        crate::support::path::resolve_from(&base_path, &source.path),
         format!("tool-{}-source", extension.name),
     ))
 }

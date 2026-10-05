@@ -765,14 +765,6 @@ fn edt_workspace_marker_path(path: &Path) -> PathBuf {
     path.join(EDT_WORKSPACE_MARKER)
 }
 
-fn resolve_source_set_path(config: &AppConfig, source_set: &SourceSetConfig) -> PathBuf {
-    if source_set.path.is_absolute() {
-        source_set.path.clone()
-    } else {
-        config.base_path.join(&source_set.path)
-    }
-}
-
 fn ordered_source_sets(config: &AppConfig) -> Vec<&SourceSetConfig> {
     let mut configuration = Vec::new();
     let mut extensions = Vec::new();
@@ -816,7 +808,7 @@ fn edt_import_projects(
         projects.extend(ordered_source_sets(config).into_iter().map(|source_set| {
             EdtImportProject {
                 name: source_set.name.clone(),
-                path: resolve_source_set_path(config, source_set),
+                path: source_set.root_in(&config.base_path),
             }
         }));
     }

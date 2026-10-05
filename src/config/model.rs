@@ -540,6 +540,14 @@ pub struct SourceSetConfig {
     pub path: PathBuf,
 }
 
+impl SourceSetConfig {
+    /// Каталог source-set: `path` считается от `base_path` тем же правилом, что и остальные
+    /// пути конфига ([`crate::support::path::resolve_from`]).
+    pub fn root_in(&self, base_path: &Path) -> PathBuf {
+        crate::support::path::resolve_from(base_path, &self.path)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SourceSetPurpose {
