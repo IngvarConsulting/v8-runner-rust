@@ -165,6 +165,73 @@ mod tests {
             .ends_with(Path::new("target/tmp-work/designer/main")));
     }
 
+    /// Готовит в корне контекста модуль и служебный дочерний `build`, запоминает снимок и
+    /// правит оба файла: изменение видно только в модуле.
+    fn assert_root_named_like_a_service_dir_is_analyzed(config: &AppConfig) {
+        use crate::change_detection::analyzer::{
+            analyze_context, rescan_and_commit_full, AnalysisOutcome, ChangeKind,
+        };
+        let context = SourceSetsService::new(config).designer_contexts().remove(0);
+        let root = context.path().to_path_buf();
+        assert_eq!(root.file_name(), Some(std::ffi::OsStr::new("build")));
+        let module = root.join("Module.bsl");
+        let generated = root.join("build").join("Generated.bsl");
+        std::fs::create_dir_all(generated.parent().expect("parent")).expect("set root");
+        std::fs::write(&module, "Процедура А() КонецПроцедуры").expect("module");
+        std::fs::write(&generated, "generated").expect("generated");
+        rescan_and_commit_full(&context, &config.work_path).expect("snapshot");
+        assert!(matches!(
+            analyze_context(&context, &config.work_path).outcome,
+            Ok(AnalysisOutcome::NoChanges)
+        ));
+
+        std::fs::write(&module, "Процедура А() Возврат; КонецПроцедуры").expect("edit");
+        std::fs::write(&generated, "regenerated").expect("regenerate");
+
+        let Ok(AnalysisOutcome::Changes { changes, .. }) =
+            analyze_context(&context, &config.work_path).outcome
+        else {
+            panic!("the edited module in the set root must be a change");
+        };
+        let changed: Vec<_> = changes
+            .into_iter()
+            .map(|change| (change.path, change.kind))
+            .collect();
+        assert_eq!(changed, [(module, ChangeKind::Modified)]);
+    }
+
+    /// Набор, чей каталог называется как служебный (`build`), анализируется: служебные
+    /// каталоги пропускаются только внутри набора.
+    #[test]
+    fn a_source_set_rooted_at_a_service_named_directory_is_analyzed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = single_set_config(SourceFormat::Designer, "unused");
+        config.base_path = dir.path().to_path_buf();
+        config.work_path = dir.path().join("work");
+        config.source_sets[0].path = PathBuf::from("build");
+
+        assert_root_named_like_a_service_dir_is_analyzed(&config);
+    }
+
+    /// Порождённая копия набора EDT `workPath/designer/build` анализируется так же.
+    #[test]
+    fn a_generated_designer_copy_named_build_is_analyzed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = single_set_config(SourceFormat::Edt, "unused");
+        config.base_path = dir.path().to_path_buf();
+        config.work_path = dir.path().join("work");
+        config.source_sets[0].name = "build".to_owned();
+        let generated_root = SourceSetsService::new(&config).designer_contexts()[0]
+            .path()
+            .to_path_buf();
+        assert_eq!(
+            generated_root,
+            config.work_path.join("designer").join("build")
+        );
+
+        assert_root_named_like_a_service_dir_is_analyzed(&config);
+    }
+
     /// Состояние анализа лежит под `workPath`, у каждого логического контекста набора своё:
     /// у набора EDT контекстов два, и хранилища у них разные.
     #[test]

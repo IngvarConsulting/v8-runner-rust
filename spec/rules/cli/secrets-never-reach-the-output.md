@@ -6,6 +6,7 @@ check:
   - tests/cli_launch.rs::launch_failure_never_echoes_the_password_inside_the_connection_string
   - tests/cli_launch.rs::launch_dry_run_text_masks_credentials_and_says_nothing_was_dispatched
   - tests/cli_extensions.rs::extension_preview_never_echoes_the_infobase_password
+  - tests/cli_init.rs::server_infobase_create_never_echoes_the_connection_string_credentials
 ---
 
 # Пароль не появляется в выводе

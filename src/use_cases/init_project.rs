@@ -360,6 +360,9 @@ fn ensure_server_infobase(
     dry_run: bool,
 ) -> StepOutcome {
     let started = Instant::now();
+    // Строка подключения из конфигурации бывает с `Usr=`/`Pwd=`: базу называет
+    // `describe_target`, а не строка как есть (INV.CLI.SECRETS-NEVER-REACH-THE-OUTPUT).
+    let target = config.v8_connection().describe_target();
     if dry_run {
         // A server infobase cannot be observed without acting: `ibcmd infobase create`
         // is what distinguishes created from already-present. The preview therefore names
@@ -370,9 +373,8 @@ fn ensure_server_infobase(
                 "create",
                 started,
                 format!(
-                    "would ensure the server infobase '{}' via {}; whether it already exists is not observable without creating it",
-                    config.infobase.connection,
-                    binary.display()
+                    "would ensure {target} via {binary}; whether it already exists is not observable without creating it",
+                    binary = binary.display()
                 ),
             ),
             Err(error) => StepOutcome::failed("infobase", "create", started, error),
@@ -395,19 +397,13 @@ fn ensure_server_infobase(
                 "infobase",
                 "create",
                 started,
-                format!(
-                    "server infobase ensured via ibcmd: {}",
-                    config.infobase.connection
-                ),
+                format!("{target} ensured via ibcmd"),
             )),
             IbcmdInfobaseCreateStatus::AlreadyExists => Ok(StepOutcome::skipped(
                 "infobase",
                 "create",
                 started,
-                format!(
-                    "server infobase already exists: {}",
-                    config.infobase.connection
-                ),
+                format!("{target} already exists"),
             )),
             IbcmdInfobaseCreateStatus::Failed => Err(failed_create(&created.result)),
             IbcmdInfobaseCreateStatus::Unconfirmed(error) => {
