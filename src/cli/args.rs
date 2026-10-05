@@ -514,7 +514,7 @@ pub enum TestScope {
 #[derive(Args, Debug)]
 #[command(
     next_help_heading = "Command options",
-    after_help = "Without keys: incremental dump - changed objects are written over the source tree; nothing else in it is touched.\nWith --object: partial dump of the named objects only.\nWith --force: full dump that replaces the source tree with the infobase state; uncommitted changes and untracked files there are discarded."
+    after_help = "Without keys: incremental dump - changed objects are written over the source tree; in a Designer-format project nothing else in it is touched.\nWith --object: partial dump of the named objects only.\nWith --force: full dump that replaces the source tree with the infobase state; uncommitted changes and untracked files there are discarded.\nEDT-format project: every dump replaces the whole project directory, with or without keys. Without --force, uncommitted work there makes the dump refuse: commit or stash it and repeat, or run `pull --force`."
 )]
 pub struct DumpArgs {
     /// Previous mode key; hidden from help for one release cycle. `incremental` and
@@ -534,7 +534,8 @@ pub struct DumpArgs {
     pub objects: Vec<String>,
 
     /// Full dump that replaces the source tree with the infobase state: uncommitted changes and
-    /// untracked files there are discarded. Without it the dump is incremental
+    /// untracked files there are discarded. Without it the dump is incremental; in an EDT-format
+    /// project it still replaces the project directory and refuses over uncommitted work
     #[arg(long = "force", alias = "discard-uncommitted")]
     pub discard_uncommitted: bool,
 }

@@ -133,7 +133,7 @@ impl StagedPublication {
         regenerated: &[&str],
     ) -> Result<StagedPublicationOutcome, AppError> {
         // Сторож спрашивает до подмены: после неё прежнего содержимого уже нет.
-        guard_replacement(&self.target_path, consent, regenerated)?;
+        guard_replacement(context, &self.target_path, consent, regenerated)?;
         if let Some(error) = interruption_before_publish(context, "staged directory publication") {
             return Err(error);
         }

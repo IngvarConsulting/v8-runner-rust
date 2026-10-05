@@ -524,7 +524,7 @@ fn mode_full_is_refused_and_names_pull_force() {
 }
 
 /// Прежний режим, который спорит с `--force`, не превращается молча в замену каталога:
-/// отказ до платформы называет оба выхода (решение владельца 05.10.2026, #191).
+/// отказ до платформы называет выбор.
 #[test]
 fn a_mode_that_contradicts_force_is_refused_with_the_choice() {
     let project = project();
@@ -542,15 +542,6 @@ fn a_mode_that_contradicts_force_is_refused_with_the_choice() {
     }
     assert_refused(
         &project,
-        &["pull", "--object", "Catalog:Items", "--force", "--dry-run"],
-        &[
-            "`--object` contradicts `--force`",
-            "keep `--object`",
-            FORCE_MEANS,
-        ],
-    );
-    assert_refused(
-        &project,
         &[
             "pull",
             "--mode",
@@ -560,6 +551,22 @@ fn a_mode_that_contradicts_force_is_refused_with_the_choice() {
             "--force",
         ],
         &["`--mode partial` contradicts `--force`"],
+    );
+}
+
+/// `--force` — полная выгрузка, `--object` — частичная: вместе они отказывают до платформы и
+/// называют выбор.
+#[test]
+fn object_next_to_force_is_refused_with_the_choice() {
+    let project = project();
+    assert_refused(
+        &project,
+        &["pull", "--object", "Catalog:Items", "--force", "--dry-run"],
+        &[
+            "`--object` contradicts `--force`",
+            "keep `--object`",
+            FORCE_MEANS,
+        ],
     );
 }
 

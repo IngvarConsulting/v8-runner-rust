@@ -736,7 +736,7 @@ fn build_dry_run_plans_every_source_set_without_dispatching_designer() {
             &config_path.display().to_string(),
             "--json-message",
             "build",
-            "--full-rebuild",
+            "--full",
             "--dry-run",
         ])
         .output()
@@ -787,7 +787,7 @@ fn build_json_failure_returns_step_payload() {
             &config_path.display().to_string(),
             "--json-message",
             "build",
-            "--full-rebuild",
+            "--full",
         ])
         .output()
         .expect("run command");
@@ -822,7 +822,7 @@ fn build_ibcmd_json_failure_reports_operation_target_and_exit_code() {
             &config_path.display().to_string(),
             "--json-message",
             "build",
-            "--full-rebuild",
+            "--full",
         ])
         .output()
         .expect("run command");
@@ -848,7 +848,7 @@ fn build_text_failure_does_not_print_success_footer() {
             "--config",
             &config_path.display().to_string(),
             "build",
-            "--full-rebuild",
+            "--full",
         ])
         .output()
         .expect("run command");
@@ -1054,7 +1054,7 @@ fn build_source_set_json_limits_steps_to_requested_source_set() {
             "build",
             "--source-set",
             "ext",
-            "--full-rebuild",
+            "--full",
         ])
         .output()
         .expect("run command");
@@ -1172,7 +1172,7 @@ fn build_text_groups_tool_extension_stages_under_single_build_node() {
             "--config",
             &config_path.display().to_string(),
             "build",
-            "--full-rebuild",
+            "--full",
         ])
         .output()
         .expect("run command");
@@ -1469,7 +1469,7 @@ fn build_ibcmd_full_rebuild_invokes_import_and_apply() {
             "--config",
             &config_path.display().to_string(),
             "build",
-            "--full-rebuild",
+            "--full",
         ])
         .output()
         .expect("run command");
@@ -1500,7 +1500,7 @@ fn build_ibcmd_passes_credentials_to_import_and_apply() {
             "--config",
             &config_path.display().to_string(),
             "build",
-            "--full-rebuild",
+            "--full",
         ])
         .current_dir(dir.path())
         .output()
@@ -1527,7 +1527,7 @@ fn build_ibcmd_partial_uses_relative_positional_args_and_base_dir() {
             "--config",
             &config_path.display().to_string(),
             "build",
-            "--full-rebuild",
+            "--full",
         ])
         .output()
         .expect("run command");
@@ -1590,7 +1590,7 @@ fn build_ibcmd_server_connection_passes_dbms_and_infobase_credentials() {
             "--config",
             &config_path.display().to_string(),
             "build",
-            "--full-rebuild",
+            "--full",
         ])
         .output()
         .expect("run command");
@@ -1621,7 +1621,7 @@ fn build_ibcmd_accepts_raw_f_connection() {
             "--config",
             &config_path.display().to_string(),
             "build",
-            "--full-rebuild",
+            "--full",
         ])
         .output()
         .expect("run command");
@@ -1734,7 +1734,7 @@ fn a_push_refuses_when_the_version_file_is_tracked_by_git() {
 
     for extra in [&["--dry-run"][..], &[][..]] {
         let config = config_path.display().to_string();
-        let mut args = vec!["--config", config.as_str(), "push", "--full-rebuild"];
+        let mut args = vec!["--config", config.as_str(), "push", "--full"];
         args.extend_from_slice(extra);
         let output = v8_runner_command().args(&args).output().expect("run push");
         let rendered = format!(

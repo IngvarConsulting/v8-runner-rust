@@ -23,27 +23,10 @@ include!(concat!(
     "/src/cli/global_flags_expected.in"
 ));
 
-/// Имя, которым отказ называет лист: прежний путь (`config init`) отвечает записью словаря.
-fn answered_as(leaf: &str) -> &str {
-    let parts: Vec<&str> = leaf.split(' ').collect();
-    synonyms::SYNONYMS
-        .iter()
-        .find_map(|synonym| match synonym.previous {
-            synonyms::Previous::Command(previous) => {
-                let scope = synonym.command.len();
-                (parts.len() > scope
-                    && parts[..scope] == *synonym.command
-                    && parts[scope] == previous)
-                    .then_some(synonym.current)
-            }
-            _ => None,
-        })
-        .unwrap_or(leaf)
-}
-
-/// Ответ называет лист словаря и молчит о прежнем пути.
+/// Ответ называет лист словаря и молчит о прежнем пути. Имя словаря даёт тот же владелец,
+/// что и коду: прежний путь (`config init`) отвечает записью словаря.
 fn assert_names_the_leaf(arguments: &[&str], leaf: &str, reported: &str) {
-    let name = answered_as(leaf);
+    let name = synonyms::dictionary_path(leaf);
     assert!(
         reported.contains(&format!("`{name}`")),
         "{arguments:?}: {reported}"

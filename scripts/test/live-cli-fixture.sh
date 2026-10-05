@@ -477,24 +477,24 @@ run_extended_steps() {
     rm -f \
         "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH/Configuration.xml" \
         "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH/ConfigDumpInfo.xml"
-    run_cli dump --mode full --source-set "$CONFIGURATION_SOURCE_SET_NAME"
+    run_cli pull "$CONFIGURATION_SOURCE_SET_NAME" --force
     assert_file_exists "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH/Configuration.xml"
     assert_file_exists "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH/ConfigDumpInfo.xml"
     snapshot_dir "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH" "$dump_root/full"
 
     rm -f "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH/ConfigDumpInfo.xml"
-    run_cli dump --mode incremental --source-set "$CONFIGURATION_SOURCE_SET_NAME"
+    run_cli pull "$CONFIGURATION_SOURCE_SET_NAME"
     assert_dir_exists "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH"
     assert_file_exists "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH/ConfigDumpInfo.xml"
     snapshot_dir "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH" "$dump_root/incremental"
 
     rm -f "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH/Catalogs/Справочник1.xml"
-    run_cli dump --mode partial --source-set "$CONFIGURATION_SOURCE_SET_NAME" --object Catalog.Справочник1
+    run_cli pull "$CONFIGURATION_SOURCE_SET_NAME" --object Catalog:Справочник1
     assert_file_exists "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH/Catalogs/Справочник1.xml"
     snapshot_dir "$WORK_BASE_PATH/$CONFIGURATION_SOURCE_SET_PATH" "$dump_root/partial"
 
     rm -f "$WORK_BASE_PATH/$EXTENSION_SOURCE_SET_PATH/ConfigDumpInfo.xml"
-    run_cli dump --mode incremental --source-set "$EXTENSION_SOURCE_SET_NAME" --extension "$EXTENSION_SOURCE_SET_NAME"
+    run_cli pull "$EXTENSION_SOURCE_SET_NAME" --extension "$EXTENSION_SOURCE_SET_NAME"
     assert_file_exists "$WORK_BASE_PATH/$EXTENSION_SOURCE_SET_PATH/ConfigDumpInfo.xml"
     snapshot_dir "$WORK_BASE_PATH/$EXTENSION_SOURCE_SET_PATH" "$dump_root/extension-incremental"
 }
@@ -630,13 +630,13 @@ assert_file_exists "$(extract_connection_file_path)/1Cv8.1CD"
 
 build_json="$OUTPUT_ROOT/json/build.json"
 print_stage "build full rebuild"
-run_cli_json_to_file "$build_json" build --full-rebuild
+run_cli_json_to_file "$build_json" push --full
 assert_json_step_ok "$build_json" "$CONFIGURATION_SOURCE_SET_NAME"
 assert_json_step_ok "$build_json" "$EXTENSION_SOURCE_SET_NAME"
 
 incremental_build_json="$OUTPUT_ROOT/json/build-incremental.json"
 print_stage "build incremental no-op"
-run_cli_json_to_file "$incremental_build_json" build
+run_cli_json_to_file "$incremental_build_json" push
 assert_json_step_ok "$incremental_build_json" "$CONFIGURATION_SOURCE_SET_NAME"
 assert_json_step_ok "$incremental_build_json" "$EXTENSION_SOURCE_SET_NAME"
 
@@ -650,7 +650,7 @@ if [[ "$BUILDER_BACKEND" == "DESIGNER" ]]; then
     print_stage "build partial after Cyrillic source change"
     run_cli_json_to_file \
         "$partial_build_json" \
-        build --source-set "$CONFIGURATION_SOURCE_SET_NAME"
+        push "$CONFIGURATION_SOURCE_SET_NAME"
     assert_json_step_ok "$partial_build_json" "$CONFIGURATION_SOURCE_SET_NAME"
     assert_json_step_partial "$partial_build_json" "$CONFIGURATION_SOURCE_SET_NAME"
 fi
@@ -679,20 +679,17 @@ if [[ "$BUILDER_BACKEND" == "DESIGNER" ]]; then
     run_cli make --output "$OUTPUT_ROOT/artifacts/configuration.cf"
     assert_file_nonempty "$OUTPUT_ROOT/artifacts/configuration.cf"
 
-    run_cli make \
+    run_cli make "$EXTENSION_SOURCE_SET_NAME" \
         --output "$OUTPUT_ROOT/artifacts/extension.cfe" \
-        --source-set "$EXTENSION_SOURCE_SET_NAME" \
         --extension "$EXTENSION_SOURCE_SET_NAME"
     assert_file_nonempty "$OUTPUT_ROOT/artifacts/extension.cfe"
 
-    run_cli make \
-        --output "$OUTPUT_ROOT/artifacts/external-processor" \
-        --source-set "$EXTERNAL_PROCESSOR_SOURCE_SET_NAME"
+    run_cli make "$EXTERNAL_PROCESSOR_SOURCE_SET_NAME" \
+        --output "$OUTPUT_ROOT/artifacts/external-processor"
     assert_file_nonempty "$OUTPUT_ROOT/artifacts/external-processor/${EXTERNAL_PROCESSOR_ARTIFACT_NAME}.epf"
 
-    run_cli make \
-        --output "$OUTPUT_ROOT/artifacts/external-report" \
-        --source-set "$EXTERNAL_REPORT_SOURCE_SET_NAME"
+    run_cli make "$EXTERNAL_REPORT_SOURCE_SET_NAME" \
+        --output "$OUTPUT_ROOT/artifacts/external-report"
     assert_file_nonempty "$OUTPUT_ROOT/artifacts/external-report/${EXTERNAL_REPORT_ARTIFACT_NAME}.erf"
 
     print_stage "deploy-ready artifact validation"
@@ -708,12 +705,12 @@ if [[ "$BUILDER_BACKEND" == "DESIGNER" ]]; then
     print_stage "launch smoke"
     run_launch_smoke
 else
-    print_stage "dump full"
-    run_cli dump --mode full
-    print_stage "dump incremental"
-    run_cli dump --mode incremental
-    print_stage "dump partial"
-    run_cli dump --mode partial --object Catalog.Items
+    print_stage "pull --force (full replacement)"
+    run_cli pull --force
+    print_stage "pull (incremental)"
+    run_cli pull
+    print_stage "pull --object (partial)"
+    run_cli pull --object Catalog:Items
 fi
 
 if [[ "$DESIGNER_SMOKE_PROFILE" == "extended" ]]; then

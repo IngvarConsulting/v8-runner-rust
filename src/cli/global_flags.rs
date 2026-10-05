@@ -12,7 +12,7 @@
 
 use clap::ArgMatches;
 
-use crate::cli::synonyms::{Previous, SYNONYMS};
+use crate::cli::synonyms::dictionary_path;
 use crate::config::model::InfobaseSelector;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 
@@ -25,26 +25,6 @@ pub fn leaf_command_path(matches: &ArgMatches) -> String {
         current = sub;
     }
     parts.join(" ")
-}
-
-/// Имя листа в словаре. Псевдонимы `clap` уже сводит к новому имени; скрытые прежние пути
-/// (`config init`, `infobase configuration export`, `check edt`) отвечают именем команды,
-/// которая их заменила, — его называет перечень прежних имён.
-pub fn dictionary_path(path: &str) -> String {
-    let parts: Vec<&str> = path.split(' ').collect();
-    SYNONYMS
-        .iter()
-        .find_map(|synonym| match synonym.previous {
-            Previous::Command(previous) => {
-                let scope = synonym.command.len();
-                (parts.len() > scope
-                    && parts[..scope] == *synonym.command
-                    && parts[scope] == previous)
-                    .then(|| synonym.current.to_owned())
-            }
-            Previous::Key(_) | Previous::Value { .. } => None,
-        })
-        .unwrap_or_else(|| path.to_owned())
 }
 
 /// Умеет ли лист превью.

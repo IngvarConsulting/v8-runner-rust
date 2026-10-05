@@ -7,15 +7,14 @@
 //! появляется ни в справке, ни мимо перечня.
 //!
 //! Ответ называет лист словаря и тогда, когда вызван прежний путь: `global_flags` берёт
-//! новое имя отсюда же. Файл не зависит от остального крейта: интеграционные тесты
+//! новое имя у [`dictionary_path`], и тест глобальных ключей спрашивает её же. Файл не зависит от остального крейта: интеграционные тесты
 //! подключают его по пути.
 
 /// Что именно названо прежним именем.
 ///
 /// Во время работы читаются только имена команд: ответ называет лист словаря. Ключи и
-/// значения читают сверка с разбором и страж справки, поэтому вне тестов их поля молчат.
+/// значения читают сверка с разбором и страж справки.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub enum Previous {
     /// Подкоманда, скрытая или скрытый псевдоним.
     Command(&'static str),
@@ -111,3 +110,39 @@ pub const SYNONYMS: &[Synonym] = &[
     value(&["download"], "state", "working", "without the key"),
     value(&["download"], "state", "database", "db"),
 ];
+
+/// Путь листа в словаре. Псевдонимы `clap` сам сводит к новому имени; скрытые прежние пути
+/// (`config init`, `infobase configuration export`, `check edt`) отвечают именем команды,
+/// которая их заменила. Путь вне перечня возвращается как есть.
+pub fn dictionary_path(path: &str) -> &str {
+    let parts: Vec<&str> = path.split(' ').collect();
+    SYNONYMS
+        .iter()
+        .find_map(|synonym| match synonym.previous {
+            Previous::Command(previous) => {
+                let scope = synonym.command.len();
+                (parts.len() > scope
+                    && parts[..scope] == *synonym.command
+                    && parts[scope] == previous)
+                    .then_some(synonym.current)
+            }
+            Previous::Key(_) | Previous::Value { .. } => None,
+        })
+        .unwrap_or(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dictionary_path;
+
+    /// Прежний путь команды отвечает записью словаря, прочий путь — собой. Модуль
+    /// подключают и интеграционные тесты, поэтому проверка идёт и в каждом из них.
+    #[test]
+    fn a_previous_command_path_answers_as_its_dictionary_entry() {
+        assert_eq!(dictionary_path("config init"), "init");
+        assert_eq!(dictionary_path("infobase configuration export"), "download");
+        assert_eq!(dictionary_path("check edt"), "check");
+        assert_eq!(dictionary_path("pull"), "pull");
+        assert_eq!(dictionary_path("infobase dump"), "infobase dump");
+    }
+}

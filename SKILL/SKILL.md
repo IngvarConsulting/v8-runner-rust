@@ -147,7 +147,7 @@ v8-runner infobase create
   `invalid_argument` (exit 2, message lists the implemented executors); fix the key, do not
   retry. `download`, `infobase configuration export`, `infobase dump` and `infobase restore`
   each check only the key of their own operation (`download`, `infobase.dump` or
-  `infobase.restore`), so a key of another operation does not block them; `test --no-build` and `launch` check no key; every
+  `infobase.restore`), so a key of another operation does not block them; `test --no-push` and `launch` check no key; every
   other command that loads the project checks all keys.
 - For infobase export failures, distinguish `capability_unavailable` (no implemented adapter)
   from `environment_unavailable` (adapter exists, but binary/version/connection is not ready).
@@ -165,12 +165,14 @@ v8-runner infobase create
   `--object <TYPE:NAME>` — partial; `--force` — full dump that replaces the directory. The hidden
   `--mode incremental|partial` means no key; `--mode full` is refused and names `pull --force`.
   `--force` next to `--object` or `--mode` is refused before the platform; pick one form.
-- Owner decision 05.10.2026, #191: `pull --force` is a full dump already in wave 1 (it discards uncommitted changes in the source tree); #217 adds "merge" and a refusal without `--force`.
-- `convert` (and a full pull requested without consent, as MCP `dump_config` with `FULL` does)
-  replaces the target source directory as a whole, so it first asks git what
+- In an EDT-format project every `pull` (no key, `--object`) replaces the whole project directory.
+  Without `--force`, uncommitted work there makes it refuse: commit or stash it and repeat, or run
+  `pull --force` (full dump, uncommitted work is lost). There is no partial EDT pull with consent.
+- `convert`, any EDT-format `pull` without `--force` and MCP `dump_config` with `FULL` (any mode
+  in an EDT project) replace the target source directory as a whole, so they first ask git what
   inside it exists nowhere else — untracked files, ignored files, a worktree edit on top of the
   index, unresolved merge markers. Finding any, the command refuses before touching anything with
-  exit 2 and names them. Commit or stash them, or pass `--force` to replace the
+  exit 2 and names them. Commit or stash them and repeat, or run `pull --force` / `convert --force` (from MCP: the CLI command) to replace the
   directory anyway; the flag destroys them and keeps no copy, so check `git status` before
   `pull --force`. Staged content is not a loss: it is
   recoverable from the index. Where git cannot answer — no git, outside a worktree, a git error, a

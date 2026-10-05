@@ -54,7 +54,7 @@ generated_envelope_schema_is_current` и руками не правится.
       "properties": {
         "mode": {
           "default": null,
-          "description": "Dump mode, for example FULL or INCREMENTAL.",
+          "description": "Dump mode. INCREMENTAL (default) dumps changed objects over the source directory; PARTIAL dumps only the listed objects; FULL dumps the whole configuration and replaces the source directory. A replacement refuses while uncommitted work there would be lost: commit or stash it and call again, or run the CLI `pull --force`, which discards it. In an EDT-format project every mode replaces the project directory.",
           "type": ["string", "null"]
         }
       }

@@ -252,6 +252,23 @@ fn dump_help_clarifies_object_selector_compatibility() {
     assert!(stdout.contains("legacy TYPE.NAME selectors are accepted for compatibility"));
 }
 
+/// В проекте EDT любая выгрузка заменяет каталог проекта: справка не обещает «поверх» и
+/// называет оба выхода из отказа сторожа.
+#[test]
+fn pull_help_says_every_edt_dump_replaces_the_project() {
+    for flag in ["-h", "--help"] {
+        let help = help(&["pull".to_owned()], flag);
+        for phrase in [
+            "EDT-format project: every dump replaces the whole project directory",
+            "uncommitted work there makes the dump refuse",
+            "commit or stash it and repeat, or run `pull --force`",
+            "in a Designer-format project nothing else in it is touched",
+        ] {
+            assert!(help.contains(phrase), "{flag} must say {phrase:?}:\n{help}");
+        }
+    }
+}
+
 #[test]
 fn tools_download_help_exposes_tool_commands() {
     let output = v8_runner_command()
