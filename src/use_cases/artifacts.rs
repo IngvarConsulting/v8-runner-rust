@@ -1047,13 +1047,12 @@ fn ensure_platform_success(
     source_set_name: &str,
     result: &PlatformCommandResult,
 ) -> Result<(), AppError> {
-    if result.process.exit_code == 0 {
+    let Err(code) = result.process.outcome() else {
         return Ok(());
-    }
+    };
 
     let mut details = vec![format!(
-        "designer artifact export failed for source-set '{source_set_name}' with exit code {}",
-        result.process.exit_code
+        "designer artifact export failed for source-set '{source_set_name}' with exit code {code}"
     )];
     if !result.process.stdout.trim().is_empty() {
         details.push(format!("stdout: {}", result.process.stdout.trim()));

@@ -1,4 +1,5 @@
 use std::io::Read;
+use std::num::NonZeroI32;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -46,6 +47,18 @@ pub struct ProcessResult {
     pub stderr: String,
     /// Command-boundary interruption observed while the child was running.
     pub interruption: Option<ProcessInterruption>,
+}
+
+impl ProcessResult {
+    /// Исход утилиты по её коду выхода: ноль — утилита сообщила удачу, любой другой код —
+    /// отказ, и код идёт с ним уликой для текста ответа. Код читает этот слой, а сценарий
+    /// получает исход (INV.PLATFORM.EXIT-CODES-ARE-READ-IN-THE-PLATFORM-LAYER).
+    pub fn outcome(&self) -> Result<(), NonZeroI32> {
+        match NonZeroI32::new(self.exit_code) {
+            None => Ok(()),
+            Some(code) => Err(code),
+        }
+    }
 }
 
 /// Result of a detached `spawn()` invocation.
@@ -1436,7 +1449,7 @@ mod tests {
         is_invalid_standard_handle_error, render_command, ManagedSpawnMode, ProcessError,
         ProcessExecutionPolicy, ProcessExecutor, ProcessInterruptionAction,
         ProcessInterruptionReason, ProcessInterruptionSafety, ProcessIoMode, ProcessRequest,
-        ProcessRunner, WorkGiven, WINDOWS_ERROR_INVALID_HANDLE,
+        ProcessResult, ProcessRunner, WorkGiven, WINDOWS_ERROR_INVALID_HANDLE,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1444,6 +1457,25 @@ mod tests {
     use std::time::Duration;
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
+
+    /// Удача — только нулевой код; любой другой, отрицательный тоже, — отказ со своим кодом.
+    #[test]
+    fn the_exit_code_becomes_an_outcome_here() {
+        let finished = |exit_code| ProcessResult {
+            exit_code,
+            stdout: String::new(),
+            stderr: String::new(),
+            interruption: None,
+        };
+
+        assert_eq!(finished(0).outcome(), Ok(()));
+        for code in [1, 101, 255, -1] {
+            assert_eq!(
+                finished(code).outcome().map_err(std::num::NonZeroI32::get),
+                Err(code)
+            );
+        }
+    }
 
     #[test]
     fn ignores_only_windows_invalid_handle_errors() {

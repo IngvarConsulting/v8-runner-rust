@@ -1,3 +1,4 @@
+use std::num::NonZeroI32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -8,7 +9,7 @@ use crate::domain::issue::{EdtIssue, Issue, IssueSeverity, ObjectIssue};
 use crate::domain::syntax::{CheckName, SyntaxCheckResult, SyntaxCheckStatus, SyntaxIssueSummary};
 use crate::parsers::designer_validation;
 use crate::parsers::edt_validation;
-use crate::platform::designer::DesignerDsl;
+use crate::platform::designer::{syntax_check_status, DesignerDsl};
 use crate::platform::edt::{render_interactive_validate_command, EdtDsl, EdtError};
 use crate::platform::edt_session::{
     EdtSessionError, EdtSessionHostOptions, EdtSessionManager, EdtSessionRequest,
@@ -641,7 +642,8 @@ fn check_edt_projects(
     let validation = EdtValidation::open(config, server_session, started)?;
     let mut issues = Vec::new();
     let mut status = SyntaxCheckStatus::Clean;
-    let mut exit_code = 0;
+    // Код первого отказа, а при сбое инструмента — код сбоя; без отказов ответ несёт ноль.
+    let mut failed_exit: Option<NonZeroI32> = None;
     let mut stderr_lines = Vec::new();
     let mut log_warnings = Vec::new();
     let mut single_platform_log_path = None;
@@ -675,21 +677,22 @@ fn check_edt_projects(
             log_warnings.push(format!("{}: {log_warning}", project.name));
         }
         status = combine_status(status, run.status);
-        if run.exit_code != 0 && (run.status == SyntaxCheckStatus::ToolFailed || exit_code == 0) {
-            exit_code = run.exit_code;
+        if let Err(code) = run.exit {
+            if run.status == SyntaxCheckStatus::ToolFailed || failed_exit.is_none() {
+                failed_exit = Some(code);
+            }
         }
-        // Ненулевой код без замечаний — всегда сбой инструмента, и замечание о нём заводит
+        // Отказ без замечаний — всегда сбой инструмента, и замечание о нём заводит
         // исполнитель: иначе сбой ушёл бы в ответ без единой строки о причине.
-        if run.exit_code != 0 && run.issues.is_empty() {
-            issues.push(fallback_edt_issue(
+        match run.exit {
+            Err(code) if run.issues.is_empty() => issues.push(fallback_edt_issue(
                 project.name,
-                run.exit_code,
+                code.get(),
                 run.detail.as_deref(),
                 run.log_read_warning.as_deref(),
                 Some(project.log_path.as_path()),
-            ));
-        } else {
-            issues.extend(run.issues);
+            )),
+            Ok(()) | Err(_) => issues.extend(run.issues),
         }
         if alone {
             single_platform_log_path = Some(project.log_path);
@@ -703,7 +706,7 @@ fn check_edt_projects(
         provider_dispatched: false,
         message: None,
         status,
-        exit_code,
+        exit_code: failed_exit.map_or(0, NonZeroI32::get),
         check_name: CheckName::Edt,
         summary: summarize_issues(&issues),
         issues,
@@ -755,7 +758,8 @@ impl ProjectToValidate<'_> {
 /// Исход проверки одного проекта, каким его читает исполнитель.
 struct ProjectRun {
     status: SyntaxCheckStatus,
-    exit_code: i32,
+    /// Исход проекта; у отказа — его код.
+    exit: Result<(), NonZeroI32>,
     issues: Vec<Issue>,
     /// Поток ошибок EDT без пробелов по краям; пустой — `None`.
     stderr: Option<String>,
@@ -892,14 +896,13 @@ fn validate_one_shot(
         .as_deref()
         .map(edt_validation::parse)
         .unwrap_or_default();
-    let exit_code = result.process.exit_code;
-    let status =
-        edt_status_from_result(exit_code, &issues, result.platform_log_read_error.is_some());
+    let exit = result.process.outcome();
+    let status = edt_status_from_result(exit, &issues, result.platform_log_read_error.is_some());
     let stderr = result.process.stderr.trim();
     let stderr = (!stderr.is_empty()).then(|| stderr.to_owned());
     Ok(ProjectRun {
         status,
-        exit_code,
+        exit,
         issues,
         detail: stderr.clone(),
         stderr,
@@ -970,7 +973,7 @@ fn validate_in_session(
     let status = session_status(stdout, stderr, &issues, log_read_warning.is_some());
     Ok(ProjectRun {
         status,
-        exit_code: session_exit_code(status),
+        exit: session_exit(status),
         issues,
         stderr: (!stderr.is_empty()).then(|| stderr.to_owned()),
         detail: (!detail.is_empty()).then(|| detail.join("\n")),
@@ -1001,12 +1004,19 @@ fn session_status(
     }
 }
 
-fn session_exit_code(status: SyntaxCheckStatus) -> i32 {
+/// Код замечаний, который ответ сессии берёт у Конфигуратора.
+const SESSION_ISSUES_FOUND: NonZeroI32 = NonZeroI32::new(101).unwrap();
+/// `-1` — принятый здесь знак «кода выхода не наблюдалось».
+const SESSION_EXIT_NOT_OBSERVED: NonZeroI32 = NonZeroI32::new(-1).unwrap();
+
+/// Исход команды общей сессии: кода выхода у неё нет, и его заменяет знак по вердикту.
+fn session_exit(status: SyntaxCheckStatus) -> Result<(), NonZeroI32> {
     match status {
-        SyntaxCheckStatus::Clean => 0,
-        SyntaxCheckStatus::IssuesFound => 101,
-        // `-1` — принятый здесь знак «кода выхода не наблюдалось».
-        SyntaxCheckStatus::ToolFailed | SyntaxCheckStatus::Planned => -1,
+        SyntaxCheckStatus::Clean => Ok(()),
+        SyntaxCheckStatus::IssuesFound => Err(SESSION_ISSUES_FOUND),
+        SyntaxCheckStatus::ToolFailed | SyntaxCheckStatus::Planned => {
+            Err(SESSION_EXIT_NOT_OBSERVED)
+        }
     }
 }
 
@@ -1199,14 +1209,14 @@ fn resolve_edt_source_sets<'a>(
 }
 
 fn edt_status_from_result(
-    exit_code: i32,
+    exit: Result<(), NonZeroI32>,
     issues: &[Issue],
     log_unreadable: bool,
 ) -> SyntaxCheckStatus {
-    if log_unreadable && exit_code == 0 && issues.is_empty() {
+    if log_unreadable && exit.is_ok() && issues.is_empty() {
         return SyntaxCheckStatus::ToolFailed;
     }
-    if exit_code == 0 && issues.is_empty() {
+    if exit.is_ok() && issues.is_empty() {
         SyntaxCheckStatus::Clean
     } else if !issues.is_empty() {
         SyntaxCheckStatus::IssuesFound
@@ -1325,7 +1335,7 @@ fn failed_result(
 /// называется отдельным значением, а не сводится к чистоте: проверка, чьи замечания никто
 /// не прочитал, чистой не является, и зелёный CI на ней — худший из возможных ответов.
 fn verdict(exit_code: i32, log_unreadable: bool) -> SyntaxCheckStatus {
-    let status = status_from_exit_code(exit_code);
+    let status = syntax_check_status(exit_code);
     // Помета только ужесточает: непрочитанный журнал превращает чистоту в сбой, но уже
     // известный вердикт не переписывает — про найденные замечания инструмент сказал
     // кодом выхода, и это знание не пропадает оттого, что подробностей не видно.
@@ -1333,14 +1343,6 @@ fn verdict(exit_code: i32, log_unreadable: bool) -> SyntaxCheckStatus {
         return SyntaxCheckStatus::ToolFailed;
     }
     status
-}
-
-fn status_from_exit_code(exit_code: i32) -> SyntaxCheckStatus {
-    match exit_code {
-        0 => SyntaxCheckStatus::Clean,
-        101 => SyntaxCheckStatus::IssuesFound,
-        _ => SyntaxCheckStatus::ToolFailed,
-    }
 }
 
 fn elapsed_millis(started: Instant) -> u64 {
@@ -1445,8 +1447,8 @@ fn fallback_edt_issue(
 mod tests {
     use super::{
         edt_status_from_result, execute, execute_in_server_session, missed_session,
-        normalize_config_flags, run_syntax, session_failure, session_halt, session_status,
-        status_from_exit_code, EdtHalt, EdtSessionMiss, ProjectToValidate,
+        normalize_config_flags, run_syntax, session_failure, session_halt, session_status, EdtHalt,
+        EdtSessionMiss, ProjectToValidate,
     };
     use crate::config::model::{
         AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
@@ -1454,6 +1456,7 @@ mod tests {
     };
     use crate::domain::issue::{Issue, IssueSeverity};
     use crate::domain::syntax::{CheckName, SyntaxCheckStatus};
+    use crate::platform::designer::syntax_check_status;
     use crate::platform::edt_session::{EdtSessionError, EdtSessionHostOptions, EdtSessionManager};
     use crate::platform::process::WorkGiven;
     use crate::support::error::CancelledAt;
@@ -1472,15 +1475,15 @@ mod tests {
 
     /// DEC.2026-09-12.A-LABEL-MAY-ONLY-MAKE-A-VERDICT-STRICTER admits prose as a *label* on a finding, never as a verdict, and that admission
     /// rests on three properties. Two of them are proven here; the third — that the verdict comes
-    /// from the exit code — is `status_from_exit_code` having no other input.
+    /// from the exit code — is `designer::syntax_check_status` having no other input.
     #[test]
     fn labels_can_only_make_a_verdict_stricter() {
         // Designer: the verdict is the exit code and nothing else. No text reaches it, so no
         // wording can turn a failure into a pass.
-        assert_eq!(status_from_exit_code(0), SyntaxCheckStatus::Clean);
-        assert_eq!(status_from_exit_code(101), SyntaxCheckStatus::IssuesFound);
-        assert_eq!(status_from_exit_code(1), SyntaxCheckStatus::ToolFailed);
-        assert_eq!(status_from_exit_code(-1), SyntaxCheckStatus::ToolFailed);
+        assert_eq!(syntax_check_status(0), SyntaxCheckStatus::Clean);
+        assert_eq!(syntax_check_status(101), SyntaxCheckStatus::IssuesFound);
+        assert_eq!(syntax_check_status(1), SyntaxCheckStatus::ToolFailed);
+        assert_eq!(syntax_check_status(-1), SyntaxCheckStatus::ToolFailed);
 
         // EDT: findings may only tighten the answer. Recognising nothing keeps the exit code's
         // verdict; recognising something can add `IssuesFound` but never `Clean`.
@@ -1490,24 +1493,29 @@ mod tests {
             severity: IssueSeverity::Error,
         })];
         assert_eq!(
-            edt_status_from_result(0, &[], false),
+            edt_status_from_result(Ok(()), &[], false),
             SyntaxCheckStatus::Clean,
             "nothing recognised and the tool is happy: the exit code decides"
         );
         assert_eq!(
-            edt_status_from_result(0, &finding, false),
+            edt_status_from_result(Ok(()), &finding, false),
             SyntaxCheckStatus::IssuesFound,
             "a recognised finding may only tighten the verdict"
         );
         assert_eq!(
-            edt_status_from_result(7, &[], false),
+            edt_status_from_result(failed(7), &[], false),
             SyntaxCheckStatus::ToolFailed,
             "nothing recognised and the tool failed: still a failure, never a pass"
         );
         assert_eq!(
-            edt_status_from_result(7, &finding, false),
+            edt_status_from_result(failed(7), &finding, false),
             SyntaxCheckStatus::IssuesFound
         );
+    }
+
+    /// Отказ утилиты с этим кодом, каким его отдаёт слой платформы.
+    fn failed(code: i32) -> Result<(), std::num::NonZeroI32> {
+        Err(std::num::NonZeroI32::new(code).expect("a failure carries a non-zero code"))
     }
 
     /// The unsafe side is the default: a line whose severity nobody recognises is an error.
@@ -1721,13 +1729,6 @@ mod tests {
             mcp: Default::default(),
             tests: TestsConfig::default(),
         }
-    }
-
-    #[test]
-    fn status_mapping_matches_designer_exit_codes() {
-        assert_eq!(status_from_exit_code(0), SyntaxCheckStatus::Clean);
-        assert_eq!(status_from_exit_code(101), SyntaxCheckStatus::IssuesFound);
-        assert_eq!(status_from_exit_code(1), SyntaxCheckStatus::ToolFailed);
     }
 
     #[test]

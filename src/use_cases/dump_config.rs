@@ -729,13 +729,13 @@ fn ensure_import_success(
     resolved: &ResolvedDumpTarget,
     result: &PlatformCommandResult,
 ) -> Result<(), AppError> {
-    if result.process.exit_code == 0 {
+    let Err(code) = result.process.outcome() else {
         return Ok(());
-    }
+    };
 
     let mut details = vec![format!(
-        "dump EDT import failed for source-set '{}' with exit code {}",
-        resolved.source_set_name, result.process.exit_code
+        "dump EDT import failed for source-set '{}' with exit code {code}",
+        resolved.source_set_name
     )];
     if !result.process.stdout.trim().is_empty() {
         details.push(format!("stdout: {}", result.process.stdout.trim()));
@@ -819,12 +819,9 @@ pub(crate) fn run_external_dump_designer(
     let result = dsl
         .dump_external_data_processor_or_report_to_files(binary_path, root_xml_path)
         .map_err(|error| (AppError::from(error), None))?;
-    if result.process.exit_code != 0 {
+    if let Err(code) = result.process.outcome() {
         return Err((
-            AppError::Platform(format!(
-                "external dump failed with exit code {}",
-                result.process.exit_code
-            )),
+            AppError::Platform(format!("external dump failed with exit code {code}")),
             result.platform_log_path.clone(),
         ));
     }
