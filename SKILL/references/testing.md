@@ -43,6 +43,8 @@ When driving tests through the MCP `run_all_tests` tool, pass `runner: "vanessa"
 
 When setting `tests.va.profiles.<name>.filter_tags` or `ignore_tags`, or passing `--filter-tag` / `--ignore-tag`, a leading `@` is accepted for user convenience but the generated `СписокТеговОтбор` and `СписокТеговИсключение` in runtime `VAParams` must be written without that leading `@`.
 
+`test va` overwrites both `КаталогВыгрузкиJUnit` and `ОтчетJUnit.КаталогВыгрузкиJUnit` in runtime `VAParams` with the run's `junit` directory; look for the JUnit report in the run artifacts, not in the template's directory.
+
 ## VA Debugging And Scenario Authoring
 
 Use `launch mcp va` when the goal is interactive Vanessa Automation debugging, scenario writing, or driving the VA feature player through onec-client-mcp-devkit:

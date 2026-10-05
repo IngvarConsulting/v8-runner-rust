@@ -4543,3 +4543,119 @@ fn the_config_path_guard_sees_every_hand_resolution() {
         .collect::<Vec<_>>();
     assert_eq!(found, ["by_absolute", "by_relative", "by_method"]);
 }
+
+/// Раскладка выгрузки платформе не называется: она одна, и это платформенное умолчание.
+///
+/// `INV.PLATFORM.THE-RUNNER-NEVER-NAMES-A-DUMP-FORMAT`. Появившийся аргумент раскладки
+/// означает либо вторую поддержанную раскладку, либо зависимость от того, что умолчание не
+/// изменится, — оба случая решает владелец, а не правка аргументов.
+#[test]
+fn the_runner_never_names_a_dump_format() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let named: Vec<String> = collect_rust_files(&root)
+        .into_iter()
+        .flat_map(|file| {
+            dump_format_arguments(&parse_rust_file(&file))
+                .into_iter()
+                .map(move |literal| format!("{}: {literal}", file.display()))
+        })
+        .collect();
+
+    assert!(
+        named.is_empty(),
+        "the dump layout is not named to the platform; one layout is supported and it is the platform default:\n{}",
+        named.join("\n")
+    );
+}
+
+/// Страж видит ключ раскладки в любом написании и в строке команды агента, а прозу,
+/// тесты и `--output-format` не трогает.
+#[test]
+fn the_dump_format_guard_sees_every_spelling() {
+    let caught = |source: &str| {
+        !dump_format_arguments(&syn::parse_file(source).expect("sample parses")).is_empty()
+    };
+    for bypass in [
+        r#"fn f(a: &mut Vec<String>) { a.push("-Format".to_owned()); }"#,
+        r#"fn f(a: &mut Vec<String>) { a.push("-format".to_owned()); }"#,
+        r#"fn f(a: &mut Vec<String>) { a.push("--format".to_owned()); }"#,
+        r#"fn f(d: &str) -> String { format!("config dump-config-to-files --dir={d} --format=plain") }"#,
+        r#"fn f(a: &mut Vec<String>) { a.push("-FORMAT".into()); }"#,
+        r##"fn f(d: &str) -> String { format!(r#"config "--format=plain" --dir={d}"#) }"##,
+        r##"fn f() -> String { format!("{}", vec![r#"-Format"#]) }"##,
+    ] {
+        assert!(caught(bypass), "the guard must catch: {bypass}");
+    }
+    for allowed in [
+        r#"/// We never pass `--format` or `-Format`.
+fn f(a: &mut Vec<String>) { a.push("/DumpConfigToFiles".to_owned()); }"#,
+        r#"fn f() -> &'static str { "agent --output-format=json" }"#,
+        r#"fn f() -> &'static str { "Source-format and Designer-format differ" }"#,
+        r#"fn f() -> &'static str { "check supports only format=DESIGNER" }"#,
+        r#"#[cfg(test)] mod tests { fn f(a: &mut Vec<String>) { a.push("-Format".to_owned()); } }"#,
+    ] {
+        assert!(!caught(allowed), "the guard must allow: {allowed}");
+    }
+}
+
+/// Строковые литералы рабочего кода, которые называют ключ раскладки (`-Format`,
+/// `--format` в любом регистре) отдельным словом. Doc-комментарии и тесты не в счёт;
+/// строки внутри макросов (`format!`) — в счёт: так собираются команды агента.
+fn dump_format_arguments(file: &syn::File) -> Vec<String> {
+    static KEY: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)(^|[\s\x22'=])--?format\b").expect("dump format key regex")
+    });
+
+    struct Literals(Vec<String>);
+    impl<'ast> syn::visit::Visit<'ast> for Literals {
+        fn visit_attribute(&mut self, _: &'ast syn::Attribute) {}
+        fn visit_item(&mut self, item: &'ast syn::Item) {
+            if !item_has_cfg_test(item) {
+                syn::visit::visit_item(self, item);
+            }
+        }
+        fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
+            if !has_cfg_test(&function.attrs) {
+                syn::visit::visit_impl_item_fn(self, function);
+            }
+        }
+        fn visit_lit_str(&mut self, literal: &'ast syn::LitStr) {
+            self.0.push(literal.value());
+        }
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            // Аргументы макроса для syn — сырые токены: строковые литералы, сырые тоже,
+            // достаются из них разбором, а не по тексту.
+            let buffer = syn::buffer::TokenBuffer::new2(mac.tokens.clone());
+            collect_macro_strings(buffer.begin(), &mut self.0);
+        }
+    }
+
+    fn collect_macro_strings(mut cursor: syn::buffer::Cursor<'_>, out: &mut Vec<String>) {
+        while !cursor.eof() {
+            if let Some((literal, next)) = cursor.literal() {
+                if let Ok(text) = syn::parse_str::<syn::LitStr>(&literal.to_string()) {
+                    out.push(text.value());
+                }
+                cursor = next;
+            } else if let Some((inside, _, _, next)) = cursor.any_group() {
+                collect_macro_strings(inside, out);
+                cursor = next;
+            } else if let Some((_, next)) = cursor.token_tree() {
+                cursor = next;
+            } else {
+                break;
+            }
+        }
+    }
+
+    let mut literals = Literals(Vec::new());
+    syn::visit::visit_file(&mut literals, file);
+    literals
+        .0
+        .into_iter()
+        .filter(|literal| {
+            let cleaned = literal.to_lowercase().replace("--output-format", "");
+            KEY.is_match(&cleaned)
+        })
+        .collect()
+}
