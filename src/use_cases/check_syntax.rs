@@ -863,6 +863,9 @@ impl<'a> EdtValidation<'a> {
     }
 }
 
+/// Класс прерывания проверки EDT — один у отдельного процесса и у общей сессии.
+const EDT_VALIDATION_SAFETY: InterruptionSafetyClass = InterruptionSafetyClass::GracefulThenKill;
+
 /// Отдельный процесс: исход — код выхода EDT CLI, уточнённый журналом.
 fn validate_one_shot(
     context: &ExecutionContext,
@@ -876,10 +879,7 @@ fn validate_one_shot(
         binary.to_path_buf(),
         config.work_path.join("edt-workspace"),
         utilities.runner_for(UtilityType::EdtCli),
-        context.process_policy(
-            InterruptionSafetyClass::GracefulThenKill,
-            context.edt_timeout(),
-        ),
+        context.process_policy(EDT_VALIDATION_SAFETY, context.edt_timeout()),
     )
     .with_timeout(context.edt_timeout())
     .validate_project(&project.source_path, &project.log_path)
@@ -928,6 +928,7 @@ fn validate_in_session(
             command.clone(),
             Instant::now() + cap,
             context.work().clone(),
+            EDT_VALIDATION_SAFETY.process_safety(),
         )
         .with_cancellation(context.cancellation())
     };
@@ -2448,6 +2449,7 @@ mod tests {
             "validate",
             Instant::now() + Duration::from_secs(1),
             WorkGiven::for_command(),
+            super::EDT_VALIDATION_SAFETY.process_safety(),
         );
 
         assert!(matches!(

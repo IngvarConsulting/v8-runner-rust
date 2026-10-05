@@ -158,7 +158,7 @@ impl ManagedSpawnResult {
             }
             if policy.cancellation.is_cancelled() {
                 terminate_child_group_gracefully(&mut spawned, policy.graceful_shutdown_timeout);
-                let _ = spawned.child.wait();
+                confirm_interrupted_exit(&mut spawned, &self.rendered_command)?;
                 return Err(ProcessError::Cancelled {
                     cmd: self.rendered_command.clone(),
                     delivered: self.delivered,
@@ -169,7 +169,7 @@ impl ManagedSpawnResult {
                 .is_some_and(|timeout| started.elapsed() >= timeout)
             {
                 terminate_child_group_gracefully(&mut spawned, policy.graceful_shutdown_timeout);
-                let _ = spawned.child.wait();
+                confirm_interrupted_exit(&mut spawned, &self.rendered_command)?;
                 return Ok(ManagedProcessOutcome {
                     exit_code: None,
                     timed_out: true,
@@ -688,6 +688,24 @@ impl ChildHandle {
         }
     }
 
+    /// Ожидание конца снимаемого процесса. Тестовый шов `REFUSED_INTERRUPTED_WAITS` может
+    /// заставить его отказать, как отказал бы `waitpid`.
+    fn wait_interrupted(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        match refused_interrupted_wait() {
+            Some(error) => Err(error),
+            None => self.wait(),
+        }
+    }
+
+    /// Опрос снимаемого процесса, с тем же тестовым швом, что у `wait_interrupted`.
+    #[cfg(unix)]
+    fn try_wait_interrupted(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        match refused_interrupted_wait() {
+            Some(error) => Err(error),
+            None => self.try_wait(),
+        }
+    }
+
     #[cfg(not(unix))]
     fn start_kill(&mut self) -> std::io::Result<()> {
         match self {
@@ -1163,7 +1181,7 @@ fn interrupt_child(
         }
         ProcessInterruptionSafety::Interruptible => {
             terminate_child_group(spawned);
-            let _ = spawned.child.wait();
+            confirm_interrupted_exit(spawned, rendered_command)?;
             Ok(Some(process_error_from_reason(
                 rendered_command,
                 policy,
@@ -1172,7 +1190,7 @@ fn interrupt_child(
         }
         ProcessInterruptionSafety::GracefulThenKill => {
             terminate_child_group_gracefully(spawned, policy.graceful_shutdown_timeout);
-            let _ = spawned.child.wait();
+            confirm_interrupted_exit(spawned, rendered_command)?;
             Ok(Some(process_error_from_reason(
                 rendered_command,
                 policy,
@@ -1180,6 +1198,58 @@ fn interrupt_child(
             )))
         }
     }
+}
+
+/// Подтверждает конец снятого процесса, прежде чем ответ назовёт прерывание. Ошибка
+/// ожидания конца не подтверждает: процесс снимается жёстко и ожидается снова. Если и это
+/// ожидание отказало, ответ — отказ наблюдения за процессом, а не отмена и не истёкший
+/// предел.
+fn confirm_interrupted_exit(
+    spawned: &mut SpawnedChild,
+    rendered_command: &str,
+) -> Result<(), ProcessError> {
+    let Err(error) = spawned.child.wait_interrupted() else {
+        return Ok(());
+    };
+    warn!(
+        command = rendered_command,
+        %error,
+        "waiting for the interrupted process failed; killing it and waiting again"
+    );
+    terminate_child_group(spawned);
+    spawned
+        .child
+        .wait_interrupted()
+        .map(drop)
+        .map_err(|source| ProcessError::StartupCheckFailed {
+            cmd: rendered_command.to_owned(),
+            source: std::io::Error::new(
+                source.kind(),
+                format!("the end of the interrupted process was not confirmed: {source}"),
+            ),
+        })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Тестовый шов: сколько следующих ожиданий снимаемого процесса на этом потоке
+    /// отказывают.
+    static REFUSED_INTERRUPTED_WAITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn refused_interrupted_wait() -> Option<std::io::Error> {
+    #[cfg(test)]
+    {
+        let refused = REFUSED_INTERRUPTED_WAITS.with(|left| {
+            let count = left.get();
+            left.set(count.saturating_sub(1));
+            count > 0
+        });
+        if refused {
+            return Some(std::io::Error::other("wait refused by the test"));
+        }
+    }
+    None
 }
 
 /// Процесс уже запущен: отмена обрывает работу команды, если он был ею.
@@ -1233,8 +1303,11 @@ fn terminate_child_group_gracefully(spawned: &mut SpawnedChild, timeout: Duratio
 
         let start = std::time::Instant::now();
         while start.elapsed() < timeout {
-            if spawned.child.try_wait().is_err() || !unix_process_group_exists(pgid) {
-                return;
+            match spawned.child.try_wait_interrupted() {
+                // Опрос отказал: конец группы не подтверждён, и её снимают жёстко.
+                Err(_) => break,
+                Ok(_) if !unix_process_group_exists(pgid) => return,
+                Ok(_) => {}
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -3140,6 +3213,93 @@ mod tests {
                     !process_exists(pid),
                     "{safety:?}, by timeout {by_timeout}: the interrupted process {pid} is still there"
                 );
+            }
+        }
+    }
+
+    /// Отказ ожидания не подтверждает конец снятого процесса. Отказал один опрос — процесс
+    /// снимается жёстко, подбирается повторным ожиданием, и только тогда ответ — отмена.
+    /// Отказывает и повторное ожидание — ответ не называет прерывания, которого не видел.
+    #[cfg(unix)]
+    #[test]
+    fn an_interruption_answers_only_after_a_confirmed_end() {
+        for safety in [
+            ProcessInterruptionSafety::Interruptible,
+            ProcessInterruptionSafety::GracefulThenKill,
+        ] {
+            for refused_waits in [1, usize::MAX] {
+                let dir = tempdir().expect("tempdir");
+                let pid_file = dir.path().join("pid");
+                let script = dir.path().join("sleep.sh");
+                // Мягкое снятие процесс не слышит: снять его может только жёсткое.
+                write_script(
+                    &script,
+                    &format!(
+                        "trap '' TERM\necho $$ > '{}'\nexec sleep 30",
+                        pid_file.display()
+                    ),
+                );
+                let cancellation = CancellationToken::new();
+                let canceller = {
+                    let cancellation = cancellation.clone();
+                    let pid_file = pid_file.clone();
+                    thread::spawn(move || {
+                        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                        while std::time::Instant::now() < deadline && !pid_file.exists() {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        cancellation.cancel();
+                    })
+                };
+                super::REFUSED_INTERRUPTED_WAITS.with(|left| left.set(refused_waits));
+
+                let started = std::time::Instant::now();
+                let err = ProcessExecutor
+                    .run_with_policy(
+                        &ProcessRequest {
+                            program: script,
+                            args: vec![],
+                            workdir: None,
+                            stdout_log_path: None,
+                            stderr_log_path: None,
+                            startup_probe: None,
+                        },
+                        &ProcessExecutionPolicy::new(
+                            None,
+                            cancellation,
+                            safety,
+                            WorkGiven::for_command(),
+                        ),
+                    )
+                    .expect_err("the process must be interrupted");
+                super::REFUSED_INTERRUPTED_WAITS.with(|left| left.set(0));
+                canceller.join().expect("canceller");
+                let case = format!("{safety:?}, refused waits {refused_waits}");
+
+                assert!(
+                    started.elapsed() < Duration::from_secs(15),
+                    "{case}: the process was killed, not waited out"
+                );
+                let pid = read_pid(&pid_file);
+                if refused_waits == 1 {
+                    assert!(
+                        matches!(err, ProcessError::Cancelled { .. }),
+                        "{case}: {err:?}"
+                    );
+                    assert!(
+                        !process_exists(pid),
+                        "{case}: the interrupted process {pid} is still there"
+                    );
+                } else {
+                    assert!(
+                        matches!(err, ProcessError::StartupCheckFailed { .. }),
+                        "{case}: an unconfirmed end is not a cancellation: {err:?}"
+                    );
+                    // Процесс снят жёстко, но не подобран: подбирает его тест.
+                    unsafe {
+                        libc::waitpid(pid, std::ptr::null_mut(), 0);
+                    }
+                }
             }
         }
     }

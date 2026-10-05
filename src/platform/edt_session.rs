@@ -15,7 +15,7 @@ use crate::config::model::AppConfig;
 use crate::platform::edt::{
     render_interactive_change_dir_command, render_interactive_probe_workdir_command,
 };
-use crate::platform::process::WorkGiven;
+use crate::platform::process::{ProcessInterruption, ProcessInterruptionSafety, WorkGiven};
 
 mod runtime;
 
@@ -35,30 +35,49 @@ pub struct EdtSessionRequest {
     /// Куда отметить работу команды, когда запрос доставлен в процесс; у служебной команды
     /// сессии — `None`.
     work: Option<WorkGiven>,
+    /// Класс прерывания шага. Отмену и истёкший срок критического запроса, который уже
+    /// работает, сессия откладывает до его исхода, как одноразовый EDT.
+    safety: ProcessInterruptionSafety,
 }
 
 impl EdtSessionRequest {
     /// Команда запроса: её доставка в процесс — работа команды. Значения по умолчанию у
-    /// отметки нет, чтобы новая команда запроса не забыла её передать.
-    pub fn new(command: impl Into<String>, deadline: Instant, work: WorkGiven) -> Self {
+    /// отметки нет, чтобы новая команда запроса не забыла её передать; нет его и у класса
+    /// прерывания.
+    pub fn new(
+        command: impl Into<String>,
+        deadline: Instant,
+        work: WorkGiven,
+        safety: ProcessInterruptionSafety,
+    ) -> Self {
         Self {
             command: command.into(),
             deadline,
             cancellation: CancellationToken::new(),
             work: Some(work),
+            safety,
         }
     }
 
     /// Служебная команда самой сессии — переход в рабочее пространство перед первым
     /// запросом: работы команды она не отмечает. Объявить так команду может только
     /// платформа.
-    pub(in crate::platform) fn service(command: impl Into<String>, deadline: Instant) -> Self {
+    pub(in crate::platform) fn service(
+        command: impl Into<String>,
+        deadline: Instant,
+        safety: ProcessInterruptionSafety,
+    ) -> Self {
         Self {
             command: command.into(),
             deadline,
             cancellation: CancellationToken::new(),
             work: None,
+            safety,
         }
+    }
+
+    fn is_critical(&self) -> bool {
+        self.safety == ProcessInterruptionSafety::CriticalNonAbortable
     }
 
     /// Overrides the cancellation token carried by this request.
@@ -73,6 +92,8 @@ impl EdtSessionRequest {
 pub struct EdtSessionResponse {
     pub stdout: String,
     pub stderr: String,
+    /// Отмена или срок, которые критический запрос отложил до своего исхода.
+    pub interruption: Option<ProcessInterruption>,
 }
 
 /// Reason why the actor drained pending work without executing it.
@@ -362,6 +383,7 @@ impl EdtSessionManager {
             EdtSessionRequest::service(
                 render_interactive_change_dir_command(workspace),
                 Instant::now() + startup_timeout,
+                ProcessInterruptionSafety::GracefulThenKill,
             )
             .with_cancellation(cancellation),
         )
@@ -408,6 +430,7 @@ impl EdtSessionManager {
         let (response_tx, mut response_rx) = oneshot::channel();
         let deadline = tokio::time::Instant::from_std(request.deadline);
         let cancellation = request.cancellation.clone();
+        let critical = request.is_critical();
         let queued = Arc::new(QueuedRequest {
             request,
             state: Arc::new(RequestState::queued(permit)),
@@ -467,6 +490,10 @@ impl EdtSessionManager {
             None
         };
         let mut shutdown_armed = true;
+        // Критический запрос, который уже работает, отмену и срок не слушает: их отложит
+        // исполнитель и назовёт в ответе, когда запрос кончится.
+        let mut cancellation_armed = true;
+        let mut deadline_armed = true;
 
         loop {
             tokio::select! {
@@ -478,12 +505,16 @@ impl EdtSessionManager {
                         })
                     }));
                 }
-                _ = cancellation.cancelled() => {
+                _ = cancellation.cancelled(), if cancellation_armed => {
                     if let Some(execution) = remove_if_still_queued(
                         EdtSessionError::QueuedCancelled,
                         EdtQueueDepthReason::QueuedCancelled,
                     ) {
                         return execution;
+                    }
+                    if state.is_running() && critical {
+                        cancellation_armed = false;
+                        continue;
                     }
                     if state.is_running() {
                         // Что известно сейчас; окончательно — после конца запроса.
@@ -496,12 +527,16 @@ impl EdtSessionManager {
                     }
                     continue;
                 }
-                _ = tokio::time::sleep_until(deadline) => {
+                _ = tokio::time::sleep_until(deadline), if deadline_armed => {
                     if let Some(execution) = remove_if_still_queued(
                         EdtSessionError::QueuedTimeout,
                         EdtQueueDepthReason::QueuedTimeout,
                     ) {
                         return execution;
+                    }
+                    if state.is_running() && critical {
+                        deadline_armed = false;
+                        continue;
                     }
                     if state.is_running() {
                         return ObservedEdtExecution::running(
@@ -1016,9 +1051,10 @@ mod tests {
         SessionFactory,
     };
     use crate::platform::interactive::{
-        InteractiveCommandOutput, InteractiveProcessError, ShutdownOutcome,
+        InteractiveCommandExecution, InteractiveCommandOutput, InteractiveProcessError,
+        ShutdownOutcome,
     };
-    use crate::platform::process::WorkGiven;
+    use crate::platform::process::{ProcessInterruptionSafety, WorkGiven};
     use std::collections::VecDeque;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1432,6 +1468,18 @@ mod tests {
             }
         }
 
+        fn execute_critical(
+            &mut self,
+            _command: &str,
+            _timeout: Duration,
+            _cancellation: &CancellationToken,
+            _delivered: &dyn Fn(),
+        ) -> Result<InteractiveCommandExecution, InteractiveProcessError> {
+            // Отсрочку критического шага держит настоящий исполнитель: её проверяет тест
+            // общей сессии над поддельным `1cedtcli` в `edt.rs`.
+            unreachable!("fake sessions run no critical requests")
+        }
+
         fn shutdown(
             &mut self,
             _timeout: Duration,
@@ -1524,7 +1572,11 @@ mod tests {
     }
 
     fn request(command: &str, after_ms: u64) -> EdtSessionRequest {
-        EdtSessionRequest::service(command, Instant::now() + Duration::from_millis(after_ms))
+        EdtSessionRequest::service(
+            command,
+            Instant::now() + Duration::from_millis(after_ms),
+            ProcessInterruptionSafety::GracefulThenKill,
+        )
     }
 
     async fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
@@ -1704,6 +1756,7 @@ mod tests {
                         "validate",
                         Instant::now() + Duration::from_secs(10),
                         work,
+                        ProcessInterruptionSafety::GracefulThenKill,
                     ))
                     .await
             }
@@ -1759,6 +1812,7 @@ mod tests {
                             "validate",
                             Instant::now() + Duration::from_secs(10),
                             work,
+                            ProcessInterruptionSafety::GracefulThenKill,
                         )
                         .with_cancellation(cancellation),
                     )
@@ -1926,6 +1980,7 @@ mod tests {
                 "cmd-2",
                 Instant::now() + Duration::from_secs(10),
                 work.clone(),
+                ProcessInterruptionSafety::GracefulThenKill,
             ))
             .await;
         release.store(true, Ordering::SeqCst);
@@ -2363,6 +2418,7 @@ mod tests {
                     "validate",
                     Instant::now() + Duration::from_secs(10),
                     work.clone(),
+                    ProcessInterruptionSafety::GracefulThenKill,
                 )
                 .with_cancellation(cancellation),
             )
@@ -2404,6 +2460,7 @@ mod tests {
                             "validate",
                             Instant::now() + Duration::from_secs(10),
                             work,
+                            ProcessInterruptionSafety::GracefulThenKill,
                         )
                         .with_cancellation(cancellation),
                     )
@@ -2458,6 +2515,7 @@ mod tests {
                 "cmd-1",
                 Instant::now() + Duration::from_secs(10),
                 work.clone(),
+                ProcessInterruptionSafety::GracefulThenKill,
             )
             .with_cancellation(cancellation),
         );
@@ -2502,6 +2560,7 @@ mod tests {
                 "cmd-1",
                 Instant::now() + Duration::from_secs(10),
                 WorkGiven::for_command(),
+                ProcessInterruptionSafety::GracefulThenKill,
             )
             .with_cancellation(cancellation),
         );

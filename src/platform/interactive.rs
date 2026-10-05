@@ -335,6 +335,19 @@ impl InteractiveProcessExecutor {
         timeout: Duration,
         policy: &ProcessExecutionPolicy,
     ) -> Result<InteractiveCommandExecution, InteractiveProcessError> {
+        self.execute_with_policy_delivering(command, timeout, policy, || {})
+    }
+
+    /// Как `execute_with_policy`, но `delivered` вызывается, как только команда доставлена в
+    /// процесс, — после отметки работы в `policy.work`. Так общая сессия EDT узнаёт доставку
+    /// запроса, исполняя его под классом шага.
+    pub(in crate::platform) fn execute_with_policy_delivering(
+        &mut self,
+        command: &str,
+        timeout: Duration,
+        policy: &ProcessExecutionPolicy,
+        delivered: impl FnOnce(),
+    ) -> Result<InteractiveCommandExecution, InteractiveProcessError> {
         if self.poisoned {
             return Err(InteractiveProcessError::Poisoned);
         }
@@ -362,6 +375,7 @@ impl InteractiveProcessExecutor {
         if let Some(work) = &policy.work {
             work.mark_work_given();
         }
+        delivered();
 
         self.wait_for_prompt_with_policy(
             WaitMode::Command {
