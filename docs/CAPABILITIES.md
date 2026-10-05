@@ -167,7 +167,9 @@ CLI help, доверяйте текущему коду и затем синхр�
 код `environment_unavailable` и выход 2, найдена ли она цепочкой исполнителей или прямым
 поиском, как `1cedtcli` у `convert`. Прежде прямой поиск отвечал `platform_failure` с
 выходом 4; род `platform` теперь означает сбой самой платформы. У MCP такой отказ приходит
-как `runtime_failure`.
+как `runtime_failure`. Код шага в `data.execution.errors[]` у `download`, `infobase dump` и
+`infobase restore` следует за родом: `environment_unavailable`, а не прежний
+`platform_failure`.
 
 Занятый рабочий каталог у любой команды командной строки отвечает `workspace_busy` на шаге
 `workspace lock`, одним конвертом. Инструменты MCP на том же отказе отвечают

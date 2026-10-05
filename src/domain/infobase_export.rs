@@ -119,30 +119,30 @@ impl ConfigurationSubject {
         })
     }
 
-    pub const fn artifact_kind(&self) -> InfobaseExportArtifactKind {
+    pub const fn artifact_kind(&self) -> TransferArtifactKind {
         match self {
-            Self::Main => InfobaseExportArtifactKind::Cf,
-            Self::Extension { .. } => InfobaseExportArtifactKind::Cfe,
+            Self::Main => TransferArtifactKind::Cf,
+            Self::Extension { .. } => TransferArtifactKind::Cfe,
         }
     }
 }
 
 use crate::domain::capability::{Provider, ProviderReceipt};
 
-/// Closed file format vocabulary for information-base exports.
+/// Closed file format vocabulary for information-base transfers (export, dump, restore).
 ///
 /// This type is deliberately namespaced: [`crate::domain::artifact::ArtifactKind`]
 /// classifies retained execution artifacts and does not distinguish CF, CFE,
 /// and DT package formats.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum InfobaseExportArtifactKind {
+pub enum TransferArtifactKind {
     Cf,
     Cfe,
     Dt,
 }
 
-impl InfobaseExportArtifactKind {
+impl TransferArtifactKind {
     pub const fn file_extension(self) -> &'static str {
         match self {
             Self::Cf => "cf",
@@ -163,10 +163,11 @@ pub enum InfobaseSnapshotSubject {
     Infobase,
 }
 
-/// Observable state of the final output path after an export attempt.
+/// Observable state of the transfer target after an attempt: the output file of an export
+/// or dump, the information base of a restore.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum ExportTargetState {
+pub enum InfobaseTargetState {
     Unchanged,
     Created,
     Replaced,
@@ -177,7 +178,7 @@ pub enum ExportTargetState {
 /// Whether the command only proves its execution plan or applies it.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum InfobaseExportMode {
+pub enum InfobaseTransferMode {
     Preview,
     Apply,
 }
@@ -186,7 +187,7 @@ pub enum InfobaseExportMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct InfobaseExportPlan {
     pub provider: Provider,
-    pub artifact_kind: InfobaseExportArtifactKind,
+    pub artifact_kind: TransferArtifactKind,
     pub output: PathBuf,
 }
 
@@ -201,7 +202,7 @@ pub struct ExportConfigurationPackageRequest {
 /// Typed presentation data for a configuration package export.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExportConfigurationPackageResult {
-    pub mode: InfobaseExportMode,
+    pub mode: InfobaseTransferMode,
     /// Present only in a preview, and then `false`: no executor got work. An apply answer
     /// omits it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -211,10 +212,10 @@ pub struct ExportConfigurationPackageResult {
     /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderReceipt>,
-    pub artifact_kind: InfobaseExportArtifactKind,
+    pub artifact_kind: TransferArtifactKind,
     pub output: PathBuf,
     pub published: bool,
-    pub target_state: ExportTargetState,
+    pub target_state: InfobaseTargetState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<InfobaseExportPlan>,
     #[serde(skip)]
@@ -231,7 +232,7 @@ impl ExportConfigurationPackageResult {
     ) -> Self {
         let artifact_kind = request.subject.artifact_kind();
         Self {
-            mode: InfobaseExportMode::Apply,
+            mode: InfobaseTransferMode::Apply,
             provider_dispatched: None,
             state: request.state,
             subject: request.subject,
@@ -239,7 +240,7 @@ impl ExportConfigurationPackageResult {
             artifact_kind,
             output: request.output,
             published: false,
-            target_state: ExportTargetState::Unchanged,
+            target_state: InfobaseTargetState::Unchanged,
             plan: None,
             warnings: Vec::new(),
             execution: ExecutionOutcome::new(ExecutionStatus::Failed),
@@ -252,7 +253,7 @@ impl ExportConfigurationPackageResult {
     }
 
     pub fn mark_preview(&mut self) {
-        self.mode = InfobaseExportMode::Preview;
+        self.mode = InfobaseTransferMode::Preview;
         self.provider_dispatched = Some(false);
         self.plan = self
             .provider
@@ -267,7 +268,7 @@ impl ExportConfigurationPackageResult {
     }
 
     pub fn mark_preview_failure(&mut self) {
-        self.mode = InfobaseExportMode::Preview;
+        self.mode = InfobaseTransferMode::Preview;
         self.provider_dispatched = Some(false);
     }
 }
@@ -281,7 +282,7 @@ pub struct ExportInfobaseSnapshotRequest {
 /// Typed presentation data for an information-base snapshot export.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ExportInfobaseSnapshotResult {
-    pub mode: InfobaseExportMode,
+    pub mode: InfobaseTransferMode,
     /// Present only in a preview, and then `false`: no executor got work. An apply answer
     /// omits it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -290,10 +291,10 @@ pub struct ExportInfobaseSnapshotResult {
     /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderReceipt>,
-    pub artifact_kind: InfobaseExportArtifactKind,
+    pub artifact_kind: TransferArtifactKind,
     pub output: PathBuf,
     pub published: bool,
-    pub target_state: ExportTargetState,
+    pub target_state: InfobaseTargetState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<InfobaseExportPlan>,
     #[serde(skip)]
@@ -306,14 +307,14 @@ pub struct ExportInfobaseSnapshotResult {
 impl ExportInfobaseSnapshotResult {
     pub fn new(request: ExportInfobaseSnapshotRequest, provider: Option<ProviderReceipt>) -> Self {
         Self {
-            mode: InfobaseExportMode::Apply,
+            mode: InfobaseTransferMode::Apply,
             provider_dispatched: None,
             subject: InfobaseSnapshotSubject::Infobase,
             provider,
-            artifact_kind: InfobaseExportArtifactKind::Dt,
+            artifact_kind: TransferArtifactKind::Dt,
             output: request.output,
             published: false,
-            target_state: ExportTargetState::Unchanged,
+            target_state: InfobaseTargetState::Unchanged,
             plan: None,
             warnings: Vec::new(),
             execution: ExecutionOutcome::new(ExecutionStatus::Failed),
@@ -326,7 +327,7 @@ impl ExportInfobaseSnapshotResult {
     }
 
     pub fn mark_preview(&mut self) {
-        self.mode = InfobaseExportMode::Preview;
+        self.mode = InfobaseTransferMode::Preview;
         self.provider_dispatched = Some(false);
         self.plan = self
             .provider
@@ -341,7 +342,7 @@ impl ExportInfobaseSnapshotResult {
     }
 
     pub fn mark_preview_failure(&mut self) {
-        self.mode = InfobaseExportMode::Preview;
+        self.mode = InfobaseTransferMode::Preview;
         self.provider_dispatched = Some(false);
     }
 }
@@ -381,7 +382,7 @@ pub struct RestoreInfobaseSnapshotRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct InfobaseRestorePlan {
     pub provider: Provider,
-    pub artifact_kind: InfobaseExportArtifactKind,
+    pub artifact_kind: TransferArtifactKind,
     pub input: PathBuf,
     pub target_mode: RestoreTargetMode,
 }
@@ -389,7 +390,7 @@ pub struct InfobaseRestorePlan {
 /// Typed presentation data for an information-base restore.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct RestoreInfobaseSnapshotResult {
-    pub mode: InfobaseExportMode,
+    pub mode: InfobaseTransferMode,
     /// Present only in a preview, and then `false`: no executor got work. An apply answer
     /// omits it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -398,12 +399,12 @@ pub struct RestoreInfobaseSnapshotResult {
     /// Квитанция о выборе исполнителя; `None`, пока выбор не начинался.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderReceipt>,
-    pub artifact_kind: InfobaseExportArtifactKind,
+    pub artifact_kind: TransferArtifactKind,
     pub input: PathBuf,
     pub target_mode: RestoreTargetMode,
     /// `true` only after the provider reported a completed load.
     pub restored: bool,
-    pub target_state: ExportTargetState,
+    pub target_state: InfobaseTargetState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<InfobaseRestorePlan>,
     #[serde(skip)]
@@ -416,15 +417,15 @@ pub struct RestoreInfobaseSnapshotResult {
 impl RestoreInfobaseSnapshotResult {
     pub fn new(request: RestoreInfobaseSnapshotRequest, provider: Option<ProviderReceipt>) -> Self {
         Self {
-            mode: InfobaseExportMode::Apply,
+            mode: InfobaseTransferMode::Apply,
             provider_dispatched: None,
             subject: InfobaseSnapshotSubject::Infobase,
             provider,
-            artifact_kind: InfobaseExportArtifactKind::Dt,
+            artifact_kind: TransferArtifactKind::Dt,
             input: request.input,
             target_mode: request.target_mode,
             restored: false,
-            target_state: ExportTargetState::Unchanged,
+            target_state: InfobaseTargetState::Unchanged,
             plan: None,
             warnings: Vec::new(),
             execution: ExecutionOutcome::new(ExecutionStatus::Failed),
@@ -437,7 +438,7 @@ impl RestoreInfobaseSnapshotResult {
     }
 
     pub fn mark_preview(&mut self) {
-        self.mode = InfobaseExportMode::Preview;
+        self.mode = InfobaseTransferMode::Preview;
         self.provider_dispatched = Some(false);
         self.plan = self
             .provider
@@ -453,7 +454,7 @@ impl RestoreInfobaseSnapshotResult {
     }
 
     pub fn mark_preview_failure(&mut self) {
-        self.mode = InfobaseExportMode::Preview;
+        self.mode = InfobaseTransferMode::Preview;
         self.provider_dispatched = Some(false);
     }
 }
@@ -467,8 +468,8 @@ mod tests {
     use super::{
         ConfigurationState, ConfigurationSubject, ExportConfigurationPackageRequest,
         ExportConfigurationPackageResult, ExportInfobaseSnapshotRequest,
-        ExportInfobaseSnapshotResult, ExportTargetState, InfobaseExportArtifactKind,
-        InfobaseTransferPhase, Provider, ProviderReceipt,
+        ExportInfobaseSnapshotResult, InfobaseTargetState, InfobaseTransferPhase, Provider,
+        ProviderReceipt, TransferArtifactKind,
     };
     use crate::domain::capability::Implementation;
     use crate::domain::execution::ExecutionStepKind;
@@ -538,10 +539,7 @@ mod tests {
             serde_json::to_value(Implementation::Experimental).expect("implementation json"),
             json!("experimental")
         );
-        assert_eq!(
-            request.subject.artifact_kind(),
-            InfobaseExportArtifactKind::Cfe
-        );
+        assert_eq!(request.subject.artifact_kind(), TransferArtifactKind::Cfe);
     }
 
     #[test]
@@ -553,7 +551,7 @@ mod tests {
         };
         let result = ExportConfigurationPackageResult::new(request, chosen(Provider::Ibcmd));
 
-        assert_eq!(result.artifact_kind, InfobaseExportArtifactKind::Cf);
+        assert_eq!(result.artifact_kind, TransferArtifactKind::Cf);
         assert!(!result.published);
         assert!(result.warnings.is_empty());
         assert_eq!(
@@ -579,11 +577,11 @@ mod tests {
         };
         let mut result = ExportInfobaseSnapshotResult::new(request, chosen(Provider::Designer));
         result.published = true;
-        result.target_state = ExportTargetState::Created;
+        result.target_state = InfobaseTargetState::Created;
         result.mark_succeeded();
         result.warnings.push("staging cleanup deferred".to_owned());
 
-        assert_eq!(result.artifact_kind, InfobaseExportArtifactKind::Dt);
+        assert_eq!(result.artifact_kind, TransferArtifactKind::Dt);
         assert_eq!(
             serde_json::to_value(result).expect("snapshot result json"),
             json!({
