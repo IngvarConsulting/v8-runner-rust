@@ -193,6 +193,11 @@ pub struct InteractiveProcessExecutor {
     prompt: Vec<u8>,
     poisoned: bool,
     terminated: bool,
+    /// Только для тестов: `waitpid` ещё не сообщил выход, хотя процесс уже вышел и потоки
+    /// закрыты. Пока флаг стоит, `try_wait_child` отвечает «жив», и тест сам задаёт порядок
+    /// «конец потоков раньше статуса», который в работе даёт окно выхода в ядре.
+    #[cfg(test)]
+    exit_unreported: bool,
 }
 
 impl InteractiveProcessExecutor {
@@ -235,6 +240,8 @@ impl InteractiveProcessExecutor {
             prompt: request.prompt,
             poisoned: false,
             terminated: false,
+            #[cfg(test)]
+            exit_unreported: false,
         };
 
         if executor.prompt.is_empty() {
@@ -720,6 +727,10 @@ impl InteractiveProcessExecutor {
         let Some(child) = self.child.as_mut() else {
             return Ok(Some(exit_status_unavailable()));
         };
+        #[cfg(test)]
+        if self.exit_unreported {
+            return Ok(None);
+        }
         let status = child.try_wait();
         // Подобранный процесс уходит из исполнителя, и подобранный кем-то другим (`ECHILD`)
         // тоже: сигналить по его номеру больше нельзя. При прочих ошибках ручка остаётся,
@@ -1500,6 +1511,58 @@ mod tests {
             "{err:?}"
         );
         assert_eq!(executor.pid(), None, "the leader is reaped");
+    }
+
+    /// Гонка #277 по шагам ожидания, без нагрузки. Процесс уже вышел с кодом 5 и потоки
+    /// закрыты, а `waitpid` его выхода ещё не сообщил: каждый опрос цикла видит «жив», и
+    /// цикл узнаёт о конце потоков раньше, чем о выходе. Под нагрузкой это окно даёт ядро
+    /// (трубы закрываются в выходе раньше, чем выход становится виден родителю); здесь его
+    /// держит тест. Ответ обязан нести настоящий код, а не выдуманный `-1`.
+    #[cfg(unix)]
+    fn assert_streams_closed_before_exit_report_keep_the_code(
+        wait: impl FnOnce(&mut InteractiveProcessExecutor) -> InteractiveProcessError,
+    ) {
+        let dir = tempdir().expect("tempdir");
+        let mut executor = executor_with_an_exited_leader(dir.path());
+        executor.exit_unreported = true;
+
+        let err = wait(&mut executor);
+        assert!(
+            matches!(
+                err,
+                InteractiveProcessError::ProcessExited { exit_code: 5, .. }
+            ),
+            "the exit code was lost: {err:?}"
+        );
+        assert_eq!(executor.pid(), None, "the leader is reaped");
+    }
+
+    /// Ожидание подсказки при запуске — путь, на котором #277 видел `-1` у `/usr/bin/false`.
+    #[cfg(unix)]
+    #[test]
+    fn startup_wait_keeps_the_exit_code_when_streams_close_before_the_exit_is_reported() {
+        assert_streams_closed_before_exit_report_keep_the_code(|executor| {
+            executor
+                .wait_for_prompt(super::WaitMode::Startup, TEST_COMMAND_TIMEOUT)
+                .expect_err("the process has exited")
+        });
+    }
+
+    /// Ожидание ответа команды под политикой: тот же порядок событий в его цикле.
+    #[cfg(unix)]
+    #[test]
+    fn command_wait_keeps_the_exit_code_when_streams_close_before_the_exit_is_reported() {
+        assert_streams_closed_before_exit_report_keep_the_code(|executor| {
+            executor
+                .wait_for_prompt_with_policy(
+                    super::WaitMode::Command {
+                        command: "pid".to_owned(),
+                    },
+                    TEST_COMMAND_TIMEOUT,
+                    &super::ProcessExecutionPolicy::default(),
+                )
+                .expect_err("the process has exited")
+        });
     }
 
     /// Подобранный процесс исполнитель больше не держит: его номер свободен, и сигнал группе

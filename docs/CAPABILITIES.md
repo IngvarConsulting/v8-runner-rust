@@ -23,7 +23,7 @@ CLI help, доверяйте текущему коду и затем синхр�
 | `version` | Работает без существующего конфига | Печатает имя приложения и версию; с `--json-message` возвращает JSON envelope |
 | `clone` | Работает без существующего конфига | Создаёт проект из существующей ИБ: config, local overlay, `.gitignore`, `src/configuration` |
 | `init` | Работает без существующего конфига | Создаёт `v8project.yaml`, sibling `v8project.local.yaml`, `.gitignore` entry, autodetect-ит supported `source-set` и aggregate external roots |
-| `tools download <tool>` | CLI-only загрузка latest releases | Загружает выбранный YAxUnit, Vanessa Automation single или onec-client-mcp-devkit; обновляет local overlay для Vanessa/client MCP и при `yaxunit --sources` добавляет YAxUnit как `source-set` `tests` |
+| `tools download <tool>` | CLI-only загрузка выпусков (по умолчанию latest; у vanessa есть `--prerelease`) | Загружает выбранный YAxUnit, Vanessa Automation single или onec-client-mcp-devkit; обновляет local overlay для Vanessa/client MCP и при `yaxunit --sources` добавляет YAxUnit как `source-set` `tests` |
 | `infobase create` | провайдер `designer` (умолчание) или `ibcmd` | Конфигуратор создаёт файловую ИБ, серверную оставляет ручной предпосылкой; `providers.infobase.create: ibcmd` создаёт файловую или серверную через `ibcmd infobase create` (серверной нужна `infobase.dbms`); при `format=EDT` дополнительно импортирует EDT workspace |
 | `extensions` | `format=DESIGNER` или `format=EDT`; провайдер `ibcmd`, `agent` только по `providers.extensions: agent` | Обновляет свойства extension `source-set` или установленного расширения, названного платформенным именем (`--installed-name`); `list`/`info`/`create`/`delete`/`activate` — состав расширений ИБ; у `agent` всё это группа `config extensions` одной сессией на команду, состав читается из структурного ответа `properties get`, синоним при `create` уходит в форме `NStr()` |
 | `push` | цепочка `designer` → `ibcmd`, любой `format`; `agent` только по `providers.push: agent` при `format=DESIGNER`; у автономного сервера (`infobase.standalone`) — только `agent` через SSH-шлюз сервера, платформа на машине раннера не нужна | Incremental/full загрузка в ИБ; при `format=EDT` сначала экспортирует изменённые EDT `source-set`; у `agent` загрузка и `update-db-cfg` — одна сессия на команду, исходники выставляются агенту ссылкой в `AgentBaseDir`, после загрузки записывается поколение конфигурации |
@@ -289,13 +289,18 @@ v8-runner infobase create [--dry-run]
 
 ```bash
 v8-runner tools download yaxunit [--sources] [--force]
-v8-runner tools download vanessa [--force]
+v8-runner tools download vanessa [--prerelease] [--force]
 v8-runner tools download client-mcp [--sources] [--force]
 ```
 
 - CLI-only; не публикуется как MCP tool.
-- Берёт latest release из GitHub для выбранного инструмента: `bia-technologies/yaxunit`,
-  `Pr-Mex/vanessa-automation-single` или `1c-neurofish/onec-client-mcp-devkit`.
+- По умолчанию берёт выпуск, который GitHub отдаёт как `releases/latest`, для выбранного
+  инструмента: `bia-technologies/yaxunit`, `Pr-Mex/vanessa-automation-single` или
+  `1c-neurofish/onec-client-mcp-devkit`; pre-release туда не попадает.
+- `vanessa --prerelease` берёт самый новый выпуск с учётом pre-release: список выпусков
+  читается со всех страниц, черновики пропускаются, теги сравниваются покомпонентно как
+  числа (`1.2.043.42` > `1.2.043.9`). Ключ есть только у `vanessa`.
+- Выбранная версия — поле `tag` в `destinations`.
 - `yaxunit --sources` распаковывает source subtree в `tests` и добавляет в primary
   `v8project.yaml` `source-set` с именем `tests`; без `--sources` скачивает `.cfe` в
   `build/tools`.

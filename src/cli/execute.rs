@@ -50,7 +50,7 @@ use crate::domain::runner::{
 use crate::domain::syntax::{SyntaxCheckResult, SyntaxCheckStatus};
 use crate::domain::test::{RetainedPaths, TestReport, TestRunResult, TestStatus, TestTarget};
 use crate::domain::tools_download::{
-    ToolDownloadTarget, ToolExtensionInstallMode, ToolsDownloadResult,
+    ToolDownloadTarget, ToolExtensionInstallMode, ToolReleaseChannel, ToolsDownloadResult,
 };
 use crate::output::presenter::Presenter;
 use crate::output::text::{TimelineItem, TimelineStatus};
@@ -455,6 +455,7 @@ fn execute_tools_download(
         target: map_tools_download_target(args),
         extensions: map_tool_extension_mode(args),
         force: map_tools_download_force(args),
+        release: map_tools_download_release(args),
     };
     let context = cli_context(config, CommandName::ToolsDownload, cancellation);
     with_cli_workspace_lock(
@@ -2513,6 +2514,17 @@ fn map_tools_download_force(args: &ToolsDownloadArgs) -> bool {
     match &args.command {
         ToolsDownloadCommand::Yaxunit(args) | ToolsDownloadCommand::ClientMcp(args) => args.force,
         ToolsDownloadCommand::Vanessa(args) => args.force,
+    }
+}
+
+fn map_tools_download_release(args: &ToolsDownloadArgs) -> ToolReleaseChannel {
+    match &args.command {
+        ToolsDownloadCommand::Vanessa(args) if args.prerelease => {
+            ToolReleaseChannel::NewestIncludingPrerelease
+        }
+        ToolsDownloadCommand::Yaxunit(_)
+        | ToolsDownloadCommand::ClientMcp(_)
+        | ToolsDownloadCommand::Vanessa(_) => ToolReleaseChannel::Latest,
     }
 }
 

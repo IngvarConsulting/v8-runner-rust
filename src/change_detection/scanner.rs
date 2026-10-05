@@ -184,24 +184,6 @@ fn is_ignored_dir(entry: &walkdir::DirEntry) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn selected_roots_are_scanned_while_ignored_descendants_stay_excluded() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        for root_name in super::IGNORED_DIRS {
-            let root = dir.path().join(root_name);
-            std::fs::create_dir(&root).expect("root");
-            std::fs::write(root.join("Module.bsl"), "source").expect("source");
-            for child_name in super::IGNORED_DIRS {
-                let child = root.join(child_name);
-                std::fs::create_dir(&child).expect("ignored child");
-                std::fs::write(child.join("Module.bsl"), "generated").expect("child source");
-            }
-            let scanned = scan(&root, None, &HashSet::new()).expect("scan");
-            assert_eq!(scanned.seen_files.len(), 1, "root {root_name}");
-            assert_eq!(scanned.candidates.len(), 1, "root {root_name}");
-            assert_eq!(scanned.candidates[0].rel_path, "Module.bsl");
-        }
-    }
     use super::{scan, ScanSnapshot, COARSE_MARGIN_NS};
     use crate::change_detection::file_state::mtime_nanos;
     use std::collections::HashSet;
@@ -275,5 +257,26 @@ mod tests {
             .collect();
         assert_eq!(seen, ["Module.bsl"]);
         assert_eq!(candidates(&snapshot), ["Module.bsl"]);
+    }
+
+    /// Корень набора сканируется всегда, даже названный как служебный каталог; служебные
+    /// каталоги внутри него пропускаются.
+    #[test]
+    fn selected_roots_are_scanned_while_ignored_descendants_stay_excluded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for root_name in super::IGNORED_DIRS {
+            let root = dir.path().join(root_name);
+            std::fs::create_dir(&root).expect("root");
+            std::fs::write(root.join("Module.bsl"), "source").expect("source");
+            for child_name in super::IGNORED_DIRS {
+                let child = root.join(child_name);
+                std::fs::create_dir(&child).expect("ignored child");
+                std::fs::write(child.join("Module.bsl"), "generated").expect("child source");
+            }
+            let scanned = scan(&root, None, &HashSet::new()).expect("scan");
+            assert_eq!(scanned.seen_files.len(), 1, "root {root_name}");
+            assert_eq!(scanned.candidates.len(), 1, "root {root_name}");
+            assert_eq!(scanned.candidates[0].rel_path, "Module.bsl");
+        }
     }
 }
