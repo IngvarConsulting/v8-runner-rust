@@ -130,8 +130,9 @@ v8-runner tools download vanessa
 v8-runner tools download client-mcp --sources
 ```
 
-Команды берут latest release выбранного инструмента; для Vanessa — наибольшую версию среди
-выпусков без пометки pre-release (флаг latest не учитывается). Для YAxUnit и onec-client-mcp-devkit
+Команды берут latest release выбранного инструмента; pre-release туда не попадает.
+`tools download vanessa --prerelease` берёт самый новый выпуск Vanessa с учётом pre-release:
+наибольшую версию из списка выпусков, без черновиков. Для YAxUnit и onec-client-mcp-devkit
 `--sources` выбирает source install; без него скачивается `.cfe` artifact в `build/tools`.
 Vanessa Automation single всегда скачивается как EPF в `build/tools` и прописывается в
 `v8project.local.yaml`.

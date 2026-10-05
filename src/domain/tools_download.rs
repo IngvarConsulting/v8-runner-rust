@@ -8,6 +8,15 @@ pub enum ToolExtensionInstallMode {
     Artifacts,
 }
 
+/// Какой выпуск инструмента брать.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolReleaseChannel {
+    /// Выпуск, который GitHub отдаёт как `releases/latest`; pre-release туда не попадает.
+    Latest,
+    /// Наибольшая версия среди всех опубликованных выпусков, pre-release тоже.
+    NewestIncludingPrerelease,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolDownloadTarget {
     Yaxunit,

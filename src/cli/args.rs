@@ -201,6 +201,10 @@ pub struct ToolsDownloadToolArgs {
     /// Re-download managed targets created by tools download
     #[arg(long)]
     pub force: bool,
+
+    /// Take the newest release including pre-releases instead of the GitHub latest release
+    #[arg(long)]
+    pub prerelease: bool,
 }
 
 #[derive(Args, Debug)]

@@ -287,16 +287,18 @@ v8-runner infobase create [--dry-run]
 
 ```bash
 v8-runner tools download yaxunit [--sources] [--force]
-v8-runner tools download vanessa [--force]
+v8-runner tools download vanessa [--prerelease] [--force]
 v8-runner tools download client-mcp [--sources] [--force]
 ```
 
 - CLI-only; не публикуется как MCP tool.
-- Берёт latest release из GitHub для выбранного инструмента: `bia-technologies/yaxunit`,
-  `Pr-Mex/vanessa-automation-single` или `1c-neurofish/onec-client-mcp-devkit`.
-- Для `vanessa` «последний» выпуск — наибольшая версия среди выпусков без пометки
-  pre-release: теги сравниваются покомпонентно как числа (`1.2.043.42` > `1.2.043.9`),
-  флаг latest на GitHub не учитывается. Выбранная версия — поле `tag` в `destinations`.
+- По умолчанию берёт выпуск, который GitHub отдаёт как `releases/latest`, для выбранного
+  инструмента: `bia-technologies/yaxunit`, `Pr-Mex/vanessa-automation-single` или
+  `1c-neurofish/onec-client-mcp-devkit`; pre-release туда не попадает.
+- `vanessa --prerelease` берёт самый новый выпуск с учётом pre-release: список выпусков
+  читается со всех страниц, черновики пропускаются, теги сравниваются покомпонентно как
+  числа (`1.2.043.42` > `1.2.043.9`). Ключ есть только у `vanessa`.
+- Выбранная версия — поле `tag` в `destinations`.
 - `yaxunit --sources` распаковывает source subtree в `tests` и добавляет в primary
   `v8project.yaml` `source-set` с именем `tests`; без `--sources` скачивает `.cfe` в
   `build/tools`.
