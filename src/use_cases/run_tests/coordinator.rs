@@ -321,7 +321,7 @@ pub(super) fn run_tests(
     let platform_result = match enterprise.run_launch(&platform_launch) {
         Ok(result) => {
             steps.push(
-                if result.process.exit_code == 0 {
+                if result.process.outcome().is_ok() {
                     succeeded_step(
                         "run",
                         ExecutionStepKind::PlatformCommand,
@@ -457,7 +457,7 @@ pub(super) fn run_tests(
     };
 
     let has_test_failures = report.summary.failed > 0 || report.summary.errors > 0;
-    let process_failed = platform_result.process.exit_code != 0;
+    let process_failed = platform_result.process.outcome().is_err();
     let diagnostics = collect_diagnostics(&platform_result, Vec::new(), config);
 
     if process_failed || has_test_failures {

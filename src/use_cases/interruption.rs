@@ -153,12 +153,11 @@ pub(crate) fn deferred_process_interruption(
 pub(crate) struct Deferrals(Vec<String>);
 
 impl Deferrals {
-    /// Команда процесса платформы кончилась; удача — нулевой код выхода.
+    /// Команда процесса платформы кончилась; удачу или отказ называет её исход.
     pub(crate) fn note_result(&mut self, action: &str, result: &PlatformCommandResult) {
-        let end = if result.process.exit_code == 0 {
-            CommandEnd::Succeeded
-        } else {
-            CommandEnd::Failed
+        let end = match result.process.outcome() {
+            Ok(()) => CommandEnd::Succeeded,
+            Err(_code) => CommandEnd::Failed,
         };
         self.note(action, end, result.process.interruption);
     }
