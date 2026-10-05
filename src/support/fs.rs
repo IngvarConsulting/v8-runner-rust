@@ -425,11 +425,12 @@ fn publish_advisory_lock_metadata(
 
 /// The caller holds the system lock and found an owner record in place. Only a record
 /// marked as written under the system lock, whose process is known to be gone, may be
-/// replaced. A marked record whose process still runs here means the system lock did
-/// not exclude it — some network file systems ignore it — so the lock is busy. A
-/// record from another machine cannot be checked from here, and an unmarked one may
-/// belong to a writer that never takes the system lock; both stay until removed by
-/// hand.
+/// replaced. A marked record whose process still runs here, although the caller holds
+/// the system lock, means either that the pid was reused by an unrelated process or
+/// that the file system ignored the system lock (some network file systems do).
+/// Neither ends by waiting, so the record stays until removed by hand. A record from
+/// another machine cannot be checked from here, and an unmarked one may belong to a
+/// writer that never takes the system lock; both stay until removed by hand too.
 fn refuse_unless_left_by_dead_owner(path: &Path) -> std::io::Result<()> {
     let Ok(metadata) = read_advisory_lock_metadata(path) else {
         return Err(legacy_lock_requires_offline_cleanup(path));
@@ -443,7 +444,7 @@ fn refuse_unless_left_by_dead_owner(path: &Path) -> std::io::Result<()> {
         }
     }
     if is_process_alive(metadata.pid) {
-        return Err(lock_held_by_live_owner(path, metadata.pid));
+        return Err(owner_process_still_running(path, metadata.pid));
     }
     Ok(())
 }
@@ -455,11 +456,11 @@ fn lock_already_held(path: &Path) -> std::io::Error {
     )
 }
 
-fn lock_held_by_live_owner(path: &Path, pid: u32) -> std::io::Error {
+fn owner_process_still_running(path: &Path, pid: u32) -> std::io::Error {
     std::io::Error::new(
-        ErrorKind::WouldBlock,
+        ErrorKind::AlreadyExists,
         format!(
-            "lock is already held: {} (owner process {pid} is still running)",
+            "lock at '{}' is owned by process {pid}, which is still running; if that process is not v8-runner, remove this file manually",
             path.display()
         ),
     )
@@ -1230,7 +1231,8 @@ mod tests {
 
     /// Where the OS lock is ignored (some network file systems), the system file no
     /// longer keeps a second process out, and a marked record of a running owner is the
-    /// only sign that the lock is held.
+    /// only sign that the lock is held. The same record with a reused pid would never
+    /// clear by itself, so acquisition refuses at once instead of waiting.
     #[test]
     fn a_marked_record_of_a_running_owner_is_not_replaced() {
         let dir = tempdir().expect("tempdir");
@@ -1239,9 +1241,19 @@ mod tests {
 
         let error = try_acquire_advisory_lock(&lock_path).expect_err("the owner still runs");
 
-        assert_eq!(error.kind(), ErrorKind::WouldBlock);
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert!(error
+            .to_string()
+            .contains(&format!("process {}", std::process::id())));
+        assert!(error.to_string().contains("remove this file manually"));
         assert_eq!(recorded_owner_id(&lock_path), "recorded-owner");
         assert_eq!(directory_entries(dir.path()), ["running.lock"]);
+
+        let started = std::time::Instant::now();
+        let error = acquire_advisory_lock(&lock_path).expect_err("blocking acquisition refuses");
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(recorded_owner_id(&lock_path), "recorded-owner");
     }
 
     #[test]
