@@ -21,13 +21,13 @@ use crate::platform::locator::UtilityType;
 use crate::platform::process::ProcessRunner;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
-use crate::support::error::AppError;
+use crate::support::error::{AppError, CancelledAt};
 use crate::support::path::normalize_windows_verbatim_path;
 use crate::support::temp::platform_logs_dir;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::ibcmd_diagnostics::format_ibcmd_failure_details;
 use crate::use_cases::interruption::{
-    cancellation_record, deferred_process_interruption, SafePoint, SafePointCancel,
+    cancelled_outcome, deferred_process_interruption, SafePoint, SafePointCancel,
 };
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::LoadRequest;
@@ -154,8 +154,10 @@ fn run_load(
             &resolved,
             CompatibilityState::NotProbed,
             started,
+            // Безопасная точка: фаза записи — `command_boundary`, работа не оборвана.
+            CancelledAt::Boundary,
+            ExecutionInterruptionPhase::CommandBoundary,
             cancel.message().to_owned(),
-            cancel.record(),
             None,
         );
         return Err(LoadExecutionFailure::with_payload(
@@ -398,8 +400,10 @@ fn run_load_selected(
             &resolved,
             compatibility_state,
             started,
+            // Безопасная точка: фаза записи — `command_boundary`, работа не оборвана.
+            CancelledAt::Boundary,
+            ExecutionInterruptionPhase::CommandBoundary,
             cancel.message().to_owned(),
-            cancel.record(),
             apply_result.platform_log_path.or(probe_log_path),
         ));
         // Если отмена пришла во время загрузки, загрузка её отложила и довела дело до конца;
@@ -1020,15 +1024,18 @@ fn target_label(resolved: &ResolvedLoadRequest) -> String {
     }
 }
 
-/// Итог загрузки, остановленной отменой: `message` — её текст, `record` — запись о
-/// прерывании. Получил ли исполнитель работу, ставит отметка команды на выходе `execute`;
-/// что пакет уже загружен, отмечает `with_loaded_artifact` у места вызова.
+/// Итог загрузки, остановленной отменой в `at`, с её текстом `message` в диагностике.
+/// Статус, ошибку `cancelled` и запись о прерывании — с фазой `work_phase` у оборванной
+/// работы — ставит владелец, `cancelled_outcome`. Получил ли исполнитель работу, ставит
+/// отметка команды на выходе `execute`; что пакет уже загружен, отмечает
+/// `with_loaded_artifact` у места вызова.
 fn interrupted_result_from_resolved(
     resolved: &ResolvedLoadRequest,
     compatibility_state: CompatibilityState,
     started: Instant,
+    at: CancelledAt,
+    work_phase: ExecutionInterruptionPhase,
     message: String,
-    record: ExecutionInterruptionDetails,
     platform_log_path: Option<PathBuf>,
 ) -> LoadResult {
     LoadResult {
@@ -1040,13 +1047,8 @@ fn interrupted_result_from_resolved(
         extension: resolved.extension.clone(),
         duration_ms: started.elapsed().as_millis() as u64,
         execution: with_platform_log_artifact(
-            ExecutionOutcome::new(ExecutionStatus::Cancelled)
-                .with_diagnostics(vec![message.clone()])
-                .with_errors(vec![ExecutionError::new(
-                    "artifact_load_interrupted",
-                    message,
-                )])
-                .with_interruptions(vec![record])
+            cancelled_outcome(at, work_phase, message.clone())
+                .with_diagnostics(vec![message])
                 .with_payload(LoadExecutionMetadata {
                     applied: false,
                     target_kind: resolved.target_kind,
@@ -1071,13 +1073,14 @@ fn failed_result_from_resolved(
     update_db_cfg_ran: bool,
 ) -> LoadResult {
     let message = error.to_string();
-    match cancellation_record(error, work_phase, message.clone()) {
-        Some(record) => interrupted_result_from_resolved(
+    match error.cancellation() {
+        Some(at) => interrupted_result_from_resolved(
             resolved,
             compatibility_state,
             started,
+            at,
+            work_phase,
             message,
-            record,
             platform_log_path,
         ),
         None => empty_result_from_resolved(
@@ -2011,6 +2014,7 @@ mod tests {
         let payload = failure.payload.expect("payload");
 
         assert_eq!(payload.execution.status, ExecutionStatus::Cancelled);
+        crate::use_cases::interruption::assert_stopped_at_a_safe_point(&payload.execution);
         assert!(payload.execution.errors[0]
             .message
             .contains("before entering load probe"));
@@ -2073,6 +2077,7 @@ mod tests {
         let payload = failure.payload.expect("payload");
 
         assert_eq!(payload.execution.status, ExecutionStatus::Cancelled);
+        crate::use_cases::interruption::assert_stopped_at_a_safe_point(&payload.execution);
         assert!(payload.execution.errors[0]
             .message
             .contains("before entering update_db_cfg safe point"));
@@ -2306,6 +2311,17 @@ mod tests {
         assert_eq!(
             interruption.phase,
             Some(ExecutionInterruptionPhase::ProviderCommand)
+        );
+        let [error] = payload.execution.errors.as_slice() else {
+            panic!(
+                "a cut probe is one cancelled error: {:?}",
+                payload.execution.errors
+            );
+        };
+        assert_eq!(error.code, "cancelled");
+        assert_eq!(
+            interruption.message.as_deref(),
+            Some(error.message.as_str())
         );
         assert_eq!(
             load_payload(&payload).compatibility_state,

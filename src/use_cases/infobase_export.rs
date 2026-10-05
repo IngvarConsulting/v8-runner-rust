@@ -19,7 +19,7 @@ use crate::domain::infobase_export::{
 use crate::platform::designer::DesignerDsl;
 use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
 use crate::platform::locator::UtilityType;
-use crate::platform::process::{ProcessError, ProcessInterruptionReason};
+use crate::platform::process::ProcessError;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
@@ -34,8 +34,8 @@ use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
 
 use super::interruption::{
-    cancellation_record, deferred_command_interruption_details, pending_interruption_error,
-    process_interruption_details, record_deferral, CommandFailure,
+    deferred_command_interruption_details, pending_interruption_error, record_cancellation,
+    record_deferral, timed_out_record, CommandFailure,
 };
 use super::staged_publication::{
     cleanup_owned_orphan_files, interruption_before_publish, PublicationFailureState,
@@ -1105,23 +1105,14 @@ fn record_execution_failure(
     let message = error.to_string();
     // Отмену и её место называет ошибка: безопасная точка — `command_boundary`, где бы её
     // ни проверили, оборванная работа исполнителя — фаза шага.
-    if let Some(details) = cancellation_record(error, phase.interruption_phase(), &message) {
-        execution.status = ExecutionStatus::Cancelled;
-        execution
-            .errors
-            .push(ExecutionError::new("cancelled", message));
-        execution.interruptions.push(details);
+    if let Some(at) = error.cancellation() {
+        record_cancellation(execution, at, phase.interruption_phase(), message);
         return;
     }
     let mut interruption_details = None;
     let (status, code) = match process_error(error) {
         Some(ProcessError::TimedOut { .. }) => {
-            interruption_details = Some(process_interruption_details(
-                ProcessInterruptionReason::TimedOut,
-                phase.interruption_phase(),
-                false,
-                &message,
-            ));
+            interruption_details = Some(timed_out_record(phase.interruption_phase(), &message));
             (ExecutionStatus::TimedOut, "timed_out")
         }
         _ => match error {
@@ -1129,12 +1120,7 @@ fn record_execution_failure(
             // агентской сессии, у которого предел свой. Срок команды его дать не может,
             // поэтому улика записывается как процессная, а не командная.
             AppError::TimedOut(_) => {
-                interruption_details = Some(process_interruption_details(
-                    ProcessInterruptionReason::TimedOut,
-                    phase.interruption_phase(),
-                    false,
-                    &message,
-                ));
+                interruption_details = Some(timed_out_record(phase.interruption_phase(), &message));
                 (ExecutionStatus::TimedOut, "timed_out")
             }
             AppError::CapabilityUnavailable(_) => {
@@ -1771,7 +1757,7 @@ mod tests {
         );
         let result = failure.payload.expect("typed payload");
         assert_eq!(result.execution.status, ExecutionStatus::Cancelled);
-        assert_eq!(result.execution.errors[0].code, "cancelled");
+        crate::use_cases::interruption::assert_stopped_at_a_safe_point(&result.execution);
         // Прерывание замечено на безопасной точке команды; шаг выбора называет `steps[]`.
         let [interruption] = result.execution.interruptions.as_slice() else {
             panic!(
@@ -1788,6 +1774,38 @@ mod tests {
             failed.name,
             InfobaseTransferPhase::ProviderSelection.as_str()
         );
+    }
+
+    /// `download`, остановленный на безопасной точке выбора исполнителя, пишет остановку как
+    /// всякая форма: ошибка `cancelled` рядом с записью `command_boundary` (#319).
+    #[test]
+    fn a_download_stopped_at_provider_selection_names_the_cancellation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&base).expect("base");
+        let config = config(&base, &work);
+        let request = crate::domain::infobase_export::ExportConfigurationPackageRequest {
+            state: crate::domain::infobase_export::ConfigurationState::Working,
+            subject: crate::domain::infobase_export::ConfigurationSubject::Main,
+            output: base.join("main.cf"),
+        };
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
+        let context = ExecutionContext::cli(
+            crate::use_cases::context::CommandName::InfobaseConfigurationExport,
+        )
+        .with_cancellation(cancellation);
+
+        let failure = super::prepare_configuration_export(&context, &config, &request)
+            .expect_err("an interrupted run must not pick a provider");
+
+        assert_eq!(
+            failure.error.kind(),
+            UseCaseErrorKind::Cancelled(crate::support::error::CancelledAt::Boundary)
+        );
+        let result = failure.payload.expect("typed payload");
+        crate::use_cases::interruption::assert_stopped_at_a_safe_point(&result.execution);
     }
 
     #[test]
@@ -2190,6 +2208,7 @@ mod tests {
         assert!(!dir.path().join("ran").exists(), "the platform never ran");
         let result = failure.payload.expect("typed payload");
         assert_eq!(result.execution.status, ExecutionStatus::Cancelled);
+        crate::use_cases::interruption::assert_stopped_at_a_safe_point(&result.execution);
         let [interruption] = result.execution.interruptions.as_slice() else {
             panic!(
                 "one interruption expected: {:?}",

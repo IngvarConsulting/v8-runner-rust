@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use crate::config::model::AppConfig;
 use crate::domain::artifact::ArtifactSet;
 use crate::domain::execution::{
-    ExecutionInterruptionDetails, ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus,
+    ExecutionError, ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus,
     ExecutionStepKind, ExecutionStepStatus, StepResult,
 };
 use crate::domain::runner::{LaunchClientModeRequest, LaunchOptions, RunnerKind};
@@ -12,13 +12,13 @@ use crate::domain::test::{
 };
 use crate::platform::enterprise::{EnterpriseDsl, EnterpriseError};
 use crate::platform::locator::UtilityType;
-use crate::platform::process::{ProcessError, ProcessInterruptionReason};
+use crate::platform::process::ProcessError;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
 use crate::support::path::is_safe_path_segment;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::interruption::{
-    interruption_record, process_interruption_details, SafePoint, SafePointCancel,
+    cancelled_outcome, timed_out_record, SafePoint, SafePointCancel,
 };
 use crate::use_cases::launch_keys::vanessa_enterprise_launch_keys;
 use crate::use_cases::request::{TestRequest as TestArgs, TestScopeRequest as TestScope};
@@ -98,9 +98,9 @@ pub(super) fn interrupted_test_failure(
     started: Instant,
 ) -> Option<super::TestExecutionFailure> {
     let cancel = SafePointCancel::noticed(context, SafePoint::Command)?;
-    let outcome = ExecutionOutcome::new(cancel.status())
-        .with_diagnostics(vec![cancel.message().to_owned()])
-        .with_interruptions(vec![cancel.record()]);
+    let outcome = cancel
+        .outcome()
+        .with_diagnostics(vec![cancel.message().to_owned()]);
     let result = make_test_result(
         target.clone(),
         mode.clone(),
@@ -126,13 +126,8 @@ pub(super) fn build_prerequisite_failure(
     match error.cancellation() {
         Some(at) => (
             step,
-            ExecutionOutcome::new(ExecutionStatus::Cancelled)
-                .with_diagnostics(vec![summary.to_owned()])
-                .with_interruptions(vec![interruption_record(
-                    at,
-                    ExecutionInterruptionPhase::ProviderCommand,
-                    summary,
-                )]),
+            cancelled_outcome(at, ExecutionInterruptionPhase::ProviderCommand, summary)
+                .with_diagnostics(vec![summary.to_owned()]),
         ),
         None => (
             step.with_errors(vec![test_execution_error(
@@ -338,43 +333,49 @@ pub(super) fn collect_diagnostics(
     diagnostics
 }
 
-pub(super) fn enterprise_error_kind(
-    error: EnterpriseError,
-) -> (
-    Option<TestErrorKind>,
-    AppError,
-    Option<ExecutionInterruptionDetails>,
-    ExecutionStatus,
-) {
+/// Отказ прогона Enterprise: ошибка команды и итог исполнения с диагностикой, ошибкой и
+/// записью о прерывании.
+pub(super) struct EnterpriseFailure {
+    pub(super) error: AppError,
+    pub(super) outcome: ExecutionOutcome<TestReport>,
+}
+
+impl EnterpriseFailure {
+    /// Ошибки шага `run`. Отказ прогона — та же ошибка теста, что в итоге исполнения;
+    /// отмена и истёкший срок — запись о прерывании, а не ошибка шага.
+    pub(super) fn step_errors(&self) -> Vec<ExecutionError> {
+        match self.outcome.status {
+            ExecutionStatus::Failed => self.outcome.errors.clone(),
+            ExecutionStatus::Cancelled
+            | ExecutionStatus::TimedOut
+            | ExecutionStatus::Succeeded
+            | ExecutionStatus::InvalidOutput => Vec::new(),
+        }
+    }
+}
+
+pub(super) fn enterprise_failure(error: EnterpriseError) -> EnterpriseFailure {
     let error = AppError::from(error);
     // Отмену и её место называет ошибка: снятый прогон — фаза `run`, отказ запустить его по
     // отмене — безопасная точка.
     if let Some(at) = error.cancellation() {
         let message = "enterprise test run cancelled";
-        return (
-            None,
-            error.with_context(message),
-            Some(interruption_record(
-                at,
-                ExecutionInterruptionPhase::Run,
-                message,
-            )),
-            ExecutionStatus::Cancelled,
-        );
+        let error = error.with_context(message);
+        let outcome = cancelled_outcome(at, ExecutionInterruptionPhase::Run, message)
+            .with_diagnostics(vec![error.to_string()]);
+        return EnterpriseFailure { error, outcome };
     }
     let kind = match &error {
         AppError::PlatformProcess(ProcessError::TimedOut { .. }) => {
-            return (
-                None,
-                AppError::Runtime("enterprise test run timed out".to_owned()),
-                Some(process_interruption_details(
-                    ProcessInterruptionReason::TimedOut,
+            let message = "enterprise test run timed out";
+            let error = AppError::Runtime(message.to_owned());
+            let outcome = ExecutionOutcome::new(ExecutionStatus::TimedOut)
+                .with_diagnostics(vec![error.to_string()])
+                .with_interruptions(vec![timed_out_record(
                     ExecutionInterruptionPhase::Run,
-                    false,
-                    "enterprise test run timed out",
-                )),
-                ExecutionStatus::TimedOut,
-            );
+                    message,
+                )]);
+            return EnterpriseFailure { error, outcome };
         }
         AppError::PlatformProcess(ProcessError::StartupCheckFailed { .. }) => {
             TestErrorKind::EnterpriseStartupCheckFailed
@@ -401,14 +402,18 @@ pub(super) fn enterprise_error_kind(
             TestErrorKind::EnterpriseSpawnFailed
         }
     };
-    (Some(kind), error, None, ExecutionStatus::Failed)
+    let message = error.to_string();
+    let outcome = ExecutionOutcome::new(ExecutionStatus::Failed)
+        .with_errors(vec![test_execution_error(kind, message.clone())])
+        .with_diagnostics(vec![message]);
+    EnterpriseFailure { error, outcome }
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use super::enterprise_error_kind;
+    use super::{enterprise_failure, EnterpriseFailure};
     use crate::domain::execution::{
         ExecutionInterruptionKind, ExecutionInterruptionPhase, ExecutionStatus,
     };
@@ -422,13 +427,21 @@ mod tests {
         expected_kind: TestErrorKind,
         assert_typed_error: impl FnOnce(AppError),
     ) {
-        let (kind, app_error, interruption, status) =
-            enterprise_error_kind(EnterpriseError::Spawn(process_error));
+        let failure = enterprise_failure(EnterpriseError::Spawn(process_error));
+        assert_eq!(failure.step_errors(), failure.outcome.errors);
+        let EnterpriseFailure {
+            error: app_error,
+            outcome,
+        } = failure;
 
-        assert_eq!(kind, Some(expected_kind));
+        let [error] = outcome.errors.as_slice() else {
+            panic!("one test error expected: {:?}", outcome.errors);
+        };
+        assert_eq!(error.code, expected_kind.code());
+        assert_eq!(error.message, app_error.to_string());
         assert_typed_error(app_error);
-        assert!(interruption.is_none());
-        assert_eq!(status, ExecutionStatus::Failed);
+        assert!(outcome.interruptions.is_empty());
+        assert_eq!(outcome.status, ExecutionStatus::Failed);
     }
 
     #[test]
@@ -508,22 +521,34 @@ mod tests {
             (true, ExecutionInterruptionPhase::Run),
             (false, ExecutionInterruptionPhase::CommandBoundary),
         ] {
-            let (kind, app_error, interruption, status) =
-                enterprise_error_kind(EnterpriseError::Spawn(ProcessError::Cancelled {
-                    cmd: "1cv8c ENTERPRISE".to_owned(),
-                    delivered,
-                }));
+            let failure = enterprise_failure(EnterpriseError::Spawn(ProcessError::Cancelled {
+                cmd: "1cv8c ENTERPRISE".to_owned(),
+                delivered,
+            }));
+            assert!(failure.step_errors().is_empty(), "delivered: {delivered}");
+            let EnterpriseFailure {
+                error: app_error,
+                outcome,
+            } = failure;
 
-            assert_eq!(kind, None);
             assert_eq!(
                 app_error.cancellation(),
                 Some(crate::support::error::CancelledAt::after(delivered))
             );
-            let interruption = interruption.expect("a cancelled run is an interruption");
+            let [interruption] = outcome.interruptions.as_slice() else {
+                panic!(
+                    "a cancelled run is one interruption: {:?}",
+                    outcome.interruptions
+                );
+            };
             assert_eq!(interruption.kind, ExecutionInterruptionKind::Cancelled);
             assert!(!interruption.deferred);
             assert_eq!(interruption.phase, Some(phase), "delivered: {delivered}");
-            assert_eq!(status, ExecutionStatus::Cancelled);
+            assert_eq!(outcome.status, ExecutionStatus::Cancelled);
+            let [error] = outcome.errors.as_slice() else {
+                panic!("one error expected: {:?}", outcome.errors);
+            };
+            assert_eq!(error.code, "cancelled", "delivered: {delivered}");
         }
     }
 
@@ -558,7 +583,10 @@ mod tests {
 
             assert!(step.errors.is_empty(), "{at:?}: {step:?}");
             assert_eq!(outcome.status, ExecutionStatus::Cancelled);
-            assert!(outcome.errors.is_empty(), "{at:?}: {:?}", outcome.errors);
+            let [error] = outcome.errors.as_slice() else {
+                panic!("{at:?}: one error expected: {:?}", outcome.errors);
+            };
+            assert_eq!(error.code, "cancelled", "{at:?}");
             let [interruption] = outcome.interruptions.as_slice() else {
                 panic!("one interruption expected: {:?}", outcome.interruptions);
             };
@@ -579,18 +607,27 @@ mod tests {
 
     #[test]
     fn enterprise_timeout_keeps_interruption_contract() {
-        let (kind, app_error, interruption, status) =
-            enterprise_error_kind(EnterpriseError::Spawn(ProcessError::TimedOut {
-                cmd: "1cv8c ENTERPRISE".to_owned(),
-                timeout_ms: 500,
-            }));
+        let failure = enterprise_failure(EnterpriseError::Spawn(ProcessError::TimedOut {
+            cmd: "1cv8c ENTERPRISE".to_owned(),
+            timeout_ms: 500,
+        }));
+        assert!(failure.step_errors().is_empty());
+        let EnterpriseFailure {
+            error: app_error,
+            outcome,
+        } = failure;
 
-        assert_eq!(kind, None);
         assert!(matches!(app_error, AppError::Runtime(_)));
-        let interruption = interruption.expect("a timed-out run is an interruption");
+        assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+        let [interruption] = outcome.interruptions.as_slice() else {
+            panic!(
+                "a timed-out run is one interruption: {:?}",
+                outcome.interruptions
+            );
+        };
         assert_eq!(interruption.kind, ExecutionInterruptionKind::TimedOut);
         assert!(!interruption.deferred);
         assert_eq!(interruption.phase, Some(ExecutionInterruptionPhase::Run));
-        assert_eq!(status, ExecutionStatus::TimedOut);
+        assert_eq!(outcome.status, ExecutionStatus::TimedOut);
     }
 }
