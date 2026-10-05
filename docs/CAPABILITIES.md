@@ -556,9 +556,11 @@ v8-runner download --state <working|database> --extension <NAME> --output <FILE.
   ожидание ничего не изменит. По истечении окна отказ приходит как `workspace_busy`
   (`error.kind: workspace`, `execution.status: failed`, код возврата CLI `3`), а не как
   `timed_out` — раньше это окно задавал общий срок и отказ назывался таймаутом.
-- После аварийного завершения owner lock может остаться на диске. Для совместимости с уже
-  опубликованными версиями runner такой lock обрабатывается fail-closed: удалять его вручную можно
-  только при остановленных старых и новых процессах runner.
+- Файлы lock (`<name>.lock` и `<name>.lock.system`) удаляются при его снятии. После
+  аварийного завершения (`kill -9`) они остаются, но следующий запуск берёт lock как обычно,
+  заменяет owner record, записанный под lock ОС, и убирает файлы за собой. Owner record без
+  такой отметки оставлен более ранней версией runner и обрабатывается fail-closed: удалять его
+  вручную можно только при остановленных старых и новых процессах runner.
 - `execution.status` использует общий terminal vocabulary runner; он не заменяет `published`,
   который отдельно отвечает только за commit финального файла.
 - `cancelled`, `timed_out` и `invalid_output` не сводятся к generic failure; ошибки считаются

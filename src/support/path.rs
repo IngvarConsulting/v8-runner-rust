@@ -39,14 +39,41 @@ pub fn filesystem_object_identity(path: &Path) -> std::io::Result<FilesystemObje
     }
 }
 
+/// Identity of the object an open handle refers to — the same value
+/// `filesystem_object_identity` gives for the path that names it. A file removed or
+/// replaced after it was opened no longer matches its former name.
+pub fn open_file_identity(file: &std::fs::File) -> std::io::Result<FilesystemObjectIdentity> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        Ok(FilesystemObjectIdentity::Unix {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        windows_handle_identity(file.as_raw_handle())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = file;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "open file identity is not available on this platform",
+        ))
+    }
+}
+
 #[cfg(windows)]
 fn windows_filesystem_object_identity(path: &Path) -> std::io::Result<FilesystemObjectIdentity> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
 
     let wide_path = path
@@ -54,6 +81,8 @@ fn windows_filesystem_object_identity(path: &Path) -> std::io::Result<Filesystem
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
+    // SAFETY: `wide_path` is a NUL-terminated UTF-16 buffer that outlives the call; the
+    // other pointers are documented as optional and passed as null.
     let handle = unsafe {
         CreateFileW(
             wide_path.as_ptr(),
@@ -68,18 +97,28 @@ fn windows_filesystem_object_identity(path: &Path) -> std::io::Result<Filesystem
     if handle == INVALID_HANDLE_VALUE {
         return Err(std::io::Error::last_os_error());
     }
-    let mut information = BY_HANDLE_FILE_INFORMATION::default();
-    let success = unsafe { GetFileInformationByHandle(handle, &mut information) };
-    let query_error = if success == 0 {
-        Some(std::io::Error::last_os_error())
-    } else {
-        None
-    };
+    let identity = windows_handle_identity(handle);
+    // SAFETY: `handle` was opened above, is valid, and is closed exactly once here.
     unsafe {
         CloseHandle(handle);
     }
-    if let Some(error) = query_error {
-        return Err(error);
+    identity
+}
+
+#[cfg(windows)]
+fn windows_handle_identity(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+) -> std::io::Result<FilesystemObjectIdentity> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the caller keeps `handle` open for the duration of the call, and
+    // `information` is a valid out-pointer the call only writes.
+    let success = unsafe { GetFileInformationByHandle(handle, &mut information) };
+    if success == 0 {
+        return Err(std::io::Error::last_os_error());
     }
     Ok(FilesystemObjectIdentity::Windows {
         volume_serial: information.dwVolumeSerialNumber,
