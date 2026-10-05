@@ -76,7 +76,7 @@ use crate::use_cases::load_artifact;
 use crate::use_cases::request::{
     effective_test_timeouts, ArtifactsModeRequest, ArtifactsRequest, BuildRequest,
     ClientMcpAddonRequest, ClientMcpMode, ClientMcpOptionsRequest, ConfigureExtensionsRequest,
-    ConvertRequest, ConvertScopeRequest, DesignerClientScope, DesignerClientScopes,
+    ConsentKey, ConvertRequest, ConvertScopeRequest, DesignerClientScope, DesignerClientScopes,
     DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest, DumpModeRequest,
     DumpRequest, ExtensionInventoryRequest, ExtensionInventoryScope, InitRequest, LaunchRequest,
     LoadRequest, SyntaxExtensionScope, SyntaxRequest, SyntaxTargetRequest, TestRequest,
@@ -2867,6 +2867,7 @@ fn map_dump_request(args: &DumpArgs, dry_run: bool) -> Result<DumpRequest, UseCa
         extension: args.extension.clone(),
         objects: args.objects.clone(),
         discard_uncommitted: args.discard_uncommitted,
+        consent_key: ConsentKey::Force,
     })
 }
 

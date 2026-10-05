@@ -261,11 +261,16 @@ fn pull_help_says_every_edt_dump_replaces_the_project() {
         for phrase in [
             "EDT-format project: every dump replaces the whole project directory",
             "uncommitted work there makes the dump refuse",
-            "commit or stash it and repeat, or run `pull --force`",
+            "commit or stash it and repeat, or repeat the same command with `--force` added",
             "in a Designer-format project nothing else in it is touched",
         ] {
             assert!(help.contains(phrase), "{flag} must say {phrase:?}:\n{help}");
         }
+        // Голый `pull --force` в выходе из отказа теряет набор и бьёт в другой каталог.
+        assert!(
+            !help.contains("run `pull --force`"),
+            "{flag} must not offer a bare `pull --force`:\n{help}"
+        );
     }
 }
 

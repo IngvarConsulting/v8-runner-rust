@@ -59,7 +59,7 @@ pub struct McpRunModuleTestsRequest {
 pub struct McpDumpConfigRequest {
     /// Optional raw dump mode. Null/blank defaults to `INCREMENTAL` in service mappers.
     #[schemars(
-        description = "Dump mode. INCREMENTAL (default) dumps changed objects over the source directory; PARTIAL dumps only the listed objects; FULL dumps the whole configuration and replaces the source directory. A replacement refuses while uncommitted work there would be lost: commit or stash it and call again, or run the CLI `pull --force`, which discards it. In an EDT-format project every mode replaces the project directory."
+        description = "Dump mode. INCREMENTAL (default) dumps changed objects over the source directory; PARTIAL dumps only the listed objects; FULL dumps the whole configuration and replaces the source directory. A replacement refuses while uncommitted work there would be lost: commit or stash it and call again, or run the CLI `pull <SET> --force` for the same source set, which discards it; the refusal names the exact command. In an EDT-format project every mode replaces the project directory."
     )]
     pub mode: Option<String>,
     /// Optional extension name.
@@ -260,7 +260,7 @@ mod tests {
             .expect("mode description");
         for phrase in [
             "FULL dumps the whole configuration and replaces the source directory",
-            "commit or stash it and call again, or run the CLI `pull --force`",
+            "commit or stash it and call again, or run the CLI `pull <SET> --force` for the same source set",
             "In an EDT-format project every mode replaces the project directory",
         ] {
             assert!(mode.contains(phrase), "{phrase:?}: {mode}");

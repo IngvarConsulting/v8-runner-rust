@@ -12,7 +12,7 @@ use crate::support::error::AppError;
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::dump_config;
 use crate::use_cases::ignored_files::{ProjectGitignore, LOCAL_CONFIG_FILE_NAME};
-use crate::use_cases::request::{DumpModeRequest, DumpRequest};
+use crate::use_cases::request::{ConsentKey, DumpModeRequest, DumpRequest};
 use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
 use crate::use_cases::workspace_lock::is_workspace_lock_file;
 
@@ -199,6 +199,8 @@ fn run_bootstrap(context: &ExecutionContext, plan: &ClonePlan) -> UseCaseResult<
         extension: None,
         objects: Vec::new(),
         discard_uncommitted: false,
+        // Клонирование согласия на уничтожение не берёт: выход из отказа один — сохранить работу.
+        consent_key: ConsentKey::Absent,
     };
     match dump_config::execute(context, config, &dump_request) {
         Ok(dump) => Ok(bootstrap_result(

@@ -1361,3 +1361,75 @@ fn convert_output_root_rejects_overlapping_targets_before_workspace_lock() {
         .expect("message")
         .contains("output targets overlap"));
 }
+
+/// `convert <SET> --output X` над работой вне учёта: совет — тот же вызов с `--force`, а не
+/// урезанный `convert --force`, который потерял бы набор и каталог вывода.
+#[test]
+fn a_convert_refusal_does_not_offer_a_truncated_command() {
+    let (dir, config_path, base_path, work_path, edt_cli_path, _calls_log) = setup_project();
+    write_config(
+        &config_path,
+        &base_path,
+        &work_path,
+        &edt_cli_path,
+        "EDT",
+        &[SourceSetSpec {
+            name: "main",
+            kind: "CONFIGURATION",
+            path: "main",
+        }],
+        None,
+    );
+    write_edt_source(
+        &base_path.join("main"),
+        "MainConfiguration",
+        "<Configuration />",
+    );
+    let repository = dir.path().join("elsewhere");
+    let output_dir = repository.join("designer");
+    // Один набор с `--output` кладётся в каталог с именем набора внутри него.
+    let target = output_dir.join("main");
+    fs::create_dir_all(&target).expect("target dir");
+    let vcs = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    vcs(&["init", "-q", "-b", "main", "."]);
+    vcs(&["config", "user.email", "test@example.com"]);
+    vcs(&["config", "user.name", "Test"]);
+    fs::write(repository.join("README.md"), "readme\n").expect("readme");
+    vcs(&["add", "-A"]);
+    vcs(&["commit", "-qm", "readme"]);
+    fs::write(target.join("hand-written.xml"), "mine\n").expect("hand-written");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "convert",
+            "main",
+            "--output",
+            &output_dir.display().to_string(),
+        ])
+        .output()
+        .expect("run convert");
+
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(output.status.code(), Some(2), "{payload}");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("hand-written.xml"), "{message}");
+    assert!(!message.contains("`convert --force`"), "{message}");
+    assert!(
+        message.contains("repeat the same command with `--force` added"),
+        "{message}"
+    );
+    assert!(target.join("hand-written.xml").is_file());
+}

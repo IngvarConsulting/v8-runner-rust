@@ -21,13 +21,13 @@ use crate::support::path::{
     is_filesystem_root, nearest_existing_canonical_path, stable_path_identity,
 };
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
-use crate::use_cases::destruction_guard::{guard_replacement, DestructionConsent};
+use crate::use_cases::destruction_guard::{guard_replacement, DestructionConsent, WaysOut};
 use crate::use_cases::external_artifacts::{
     discover_designer_external_artifacts, parse_external_descriptor, ExternalArtifactKind,
 };
 use crate::use_cases::interruption;
 use crate::use_cases::progress::log_live_stage;
-use crate::use_cases::request::{ConvertRequest, ConvertScopeRequest};
+use crate::use_cases::request::{ConsentKey, ConvertRequest, ConvertScopeRequest};
 use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
 
@@ -476,7 +476,7 @@ fn execute_with_dsl(
         }
 
         // Преобразование заменяет каталог исходников так же, как выгрузка.
-        guard_replacement(context, &item.target_path, resolved.consent, &[]).map_err(|error| {
+        guard_replacement(context, &item.target_path, &resolved.consent, &[]).map_err(|error| {
             let message = error.to_string();
             ConvertExecutionFailure::with_payload(
                 error,
@@ -634,11 +634,15 @@ fn resolve_request(
         source_set,
         workspace_path: convert_workspace_path(config),
         items,
-        consent: if request.discard_uncommitted {
-            DestructionConsent::Granted
-        } else {
-            DestructionConsent::AskFirst
-        },
+        // Преобразование есть только в командной строке, и у него ключ `--force`: совет —
+        // тот же вызов с ключом, со всеми его аргументами.
+        consent: DestructionConsent::requested(
+            request.discard_uncommitted,
+            WaysOut {
+                key: ConsentKey::Force,
+                cli_command: None,
+            },
+        ),
     })
 }
 

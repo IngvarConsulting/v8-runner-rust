@@ -30,9 +30,10 @@ use crate::support::path::is_safe_path_segment;
 use crate::use_cases::context::{CommandName, ExecutionContext, ExecutionTransport};
 use crate::use_cases::request::{
     effective_test_timeouts, BuildRequest, ClientMcpAddonRequest, ClientMcpMode,
-    ClientMcpOptionsRequest, DesignerClientScope, DesignerClientScopes, DesignerConfigCheck,
-    DesignerConfigChecks, DesignerConfigSyntaxRequest, DumpModeRequest, DumpRequest, LaunchRequest,
-    SyntaxRequest, SyntaxTargetRequest, TestBuildPolicy, TestRequest, TestScopeRequest,
+    ClientMcpOptionsRequest, ConsentKey, DesignerClientScope, DesignerClientScopes,
+    DesignerConfigCheck, DesignerConfigChecks, DesignerConfigSyntaxRequest, DumpModeRequest,
+    DumpRequest, LaunchRequest, SyntaxRequest, SyntaxTargetRequest, TestBuildPolicy, TestRequest,
+    TestScopeRequest,
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind, UseCaseFailure, UseCaseResult};
 
@@ -195,6 +196,8 @@ where
             // У MCP согласия взять неоткуда: инструмент работает без человека
             // у экрана, а уничтожение незафиксированной работы требует его решения.
             discard_uncommitted: false,
+            // Ключ согласия есть у той же цели в командной строке: отказ назовёт её.
+            consent_key: ConsentKey::Force,
         };
 
         match self

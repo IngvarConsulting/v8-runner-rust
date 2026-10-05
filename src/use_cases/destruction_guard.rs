@@ -18,21 +18,45 @@ use std::path::{Path, PathBuf};
 
 use crate::platform::git::{uncommitted_work_in, UncommittedWork};
 use crate::support::error::AppError;
-use crate::use_cases::context::{CommandName, ExecutionContext, ExecutionTransport};
+use crate::use_cases::context::{ExecutionContext, ExecutionTransport};
+use crate::use_cases::request::ConsentKey;
 
 /// Сколько потерь перечислять в отказе, прежде чем считать их числом.
 const NAMED_LOSS_LIMIT: usize = 20;
 
 /// Чьё содержимое лежит в каталоге и разрешено ли его уничтожить.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum DestructionConsent {
     /// Каталог раннер завёл для себя: кеш инструментов и тому подобное. Спрашивать
     /// систему контроля версий не о чем.
     RunnerOwned,
-    /// Каталог назвал человек. Незафиксированное останавливает работу.
-    AskFirst,
+    /// Каталог назвал человек. Незафиксированное останавливает работу, и отказ называет
+    /// выходы, которые у вызывающего есть.
+    AskFirst(WaysOut),
     /// Человек попросил уничтожить явно.
     Granted,
+}
+
+impl DestructionConsent {
+    /// Согласие по просьбе вызывающего: уничтожить, если он попросил, иначе спросить.
+    pub(super) fn requested(discard_uncommitted: bool, ways_out: WaysOut) -> Self {
+        if discard_uncommitted {
+            Self::Granted
+        } else {
+            Self::AskFirst(ways_out)
+        }
+    }
+}
+
+/// Выходы из отказа. Их сообщает вызывающий: только он знает, какой ключ согласия есть у
+/// его команды и какой командой строки та же цель достижима.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct WaysOut {
+    /// Ключ согласия команды вызывающего.
+    pub(super) key: ConsentKey,
+    /// Та же цель командой строки без ключа — например, `pull main`. Её называет отказ
+    /// транспорту, у которого ключа нет (MCP). `None` — точно собрать нельзя.
+    pub(super) cli_command: Option<String>,
 }
 
 /// Отказывает до того, как что-либо стёрто, либо пропускает работу дальше.
@@ -44,28 +68,33 @@ pub(super) enum DestructionConsent {
 /// каждой выгрузке. Преобразование и замена проекта EDT описи не пишут — у них
 /// исключений нет.
 ///
-/// `context` называет команду и транспорт: отказ советует путь, который у вызывающего есть.
+/// `context` называет транспорт: повторить вызов человек командной строки и клиент MCP
+/// могут по-разному.
 pub(super) fn guard_replacement(
     context: &ExecutionContext,
     target: &Path,
-    consent: DestructionConsent,
+    consent: &DestructionConsent,
     regenerated: &[&str],
 ) -> Result<(), AppError> {
-    if consent == DestructionConsent::RunnerOwned {
-        return Ok(());
-    }
+    let ways_out = match consent {
+        DestructionConsent::RunnerOwned => return Ok(()),
+        DestructionConsent::Granted => None,
+        DestructionConsent::AskFirst(ways_out) => Some(ways_out),
+    };
 
     match uncommitted_work_in(target, regenerated) {
         // Терять нечего: прежнее содержимое система контроля версий вернёт сама.
         UncommittedWork::Nothing => Ok(()),
-        // Попросили уничтожить — уничтожаем, как и обещает имя ключа.
-        UncommittedWork::AtRisk(_) if consent == DestructionConsent::Granted => Ok(()),
-        UncommittedWork::AtRisk(paths) => Err(AppError::Validation(refusal(
-            target,
-            &paths,
-            context.command(),
-            context.transport(),
-        ))),
+        UncommittedWork::AtRisk(paths) => match ways_out {
+            // Попросили уничтожить — уничтожаем, как и обещает имя ключа.
+            None => Ok(()),
+            Some(ways_out) => Err(AppError::Validation(refusal(
+                target,
+                &paths,
+                ways_out,
+                context.transport(),
+            ))),
+        },
         // Ответа нет — работа идёт, как шла до сторожа. Это не защита и не
         // выдаётся за неё.
         UncommittedWork::Unknown(_) => Ok(()),
@@ -75,7 +104,7 @@ pub(super) fn guard_replacement(
 fn refusal(
     target: &Path,
     paths: &[PathBuf],
-    command: CommandName,
+    ways_out: &WaysOut,
     transport: ExecutionTransport,
 ) -> String {
     let named: Vec<String> = paths
@@ -97,21 +126,40 @@ fn refusal(
         paths.len(),
         named.join(", "),
         tail,
-        remedy(command, transport)
+        remedy(ways_out, transport)
     )
 }
 
-/// Выход из отказа, который у вызывающего есть. Согласие на уничтожение даёт только ключ
-/// командной строки: у MCP его нет, и инструмент называет команду, а не ключ.
-fn remedy(command: CommandName, transport: ExecutionTransport) -> String {
-    let command = command.as_str();
-    match transport {
-        ExecutionTransport::Cli => format!(
-            "commit or stash them and run `{command}` again, or run `{command} --force` to replace the directory and discard them"
+/// Выход из отказа, который у вызывающего есть.
+///
+/// Готовой команды из имени команды отказ не собирает: урезанная до имени, она теряет
+/// набор, каталог вывода и прочие аргументы, и буквальный повтор бьёт в чужой каталог.
+/// В командной строке совет — тот же вызов с добавленным ключом, и только тому, у кого
+/// ключ есть. У MCP ключа нет: отказ называет команду строки для той же цели, собранную
+/// вызывающим.
+fn remedy(ways_out: &WaysOut, transport: ExecutionTransport) -> String {
+    const DISCARDS: &str = "which replaces the directory and discards them";
+    match (transport, ways_out.key) {
+        (ExecutionTransport::Cli, ConsentKey::Absent) => {
+            "commit or stash them and run the same command again".to_owned()
+        }
+        (ExecutionTransport::Cli, ConsentKey::Force) => format!(
+            "commit or stash them and run the same command again, or repeat the same command with `--force` added, {DISCARDS}"
         ),
-        ExecutionTransport::McpStdio | ExecutionTransport::McpHttp => format!(
-            "commit or stash them and call the tool again, or run `v8-runner {command} --force` from the command line to replace the directory and discard them"
-        ),
+        (ExecutionTransport::McpStdio | ExecutionTransport::McpHttp, ConsentKey::Absent) => {
+            "commit or stash them and call the tool again".to_owned()
+        }
+        (ExecutionTransport::McpStdio | ExecutionTransport::McpHttp, ConsentKey::Force) => {
+            let command = match &ways_out.cli_command {
+                Some(command) => format!("`v8-runner {command} --force`"),
+                None => {
+                    "the matching `v8-runner` command with `--force` for the same target".to_owned()
+                }
+            };
+            format!(
+                "commit or stash them and call the tool again, or run {command} from the command line, {DISCARDS}"
+            )
+        }
     }
 }
 
@@ -123,19 +171,32 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    use crate::use_cases::context::CommandName;
+
     fn cli() -> ExecutionContext {
         ExecutionContext::cli(CommandName::Dump)
     }
 
+    fn with_force(cli_command: Option<&str>) -> WaysOut {
+        WaysOut {
+            key: ConsentKey::Force,
+            cli_command: cli_command.map(str::to_owned),
+        }
+    }
+
+    fn ask_first() -> DestructionConsent {
+        DestructionConsent::AskFirst(with_force(Some("pull main")))
+    }
+
     fn cli_refusal(target: &Path, paths: &[PathBuf]) -> String {
-        refusal(target, paths, CommandName::Dump, ExecutionTransport::Cli)
+        refusal(target, paths, &with_force(None), ExecutionTransport::Cli)
     }
 
     #[test]
     fn a_runner_owned_directory_is_never_questioned() {
         let dir = tempdir().expect("tempdir");
         assert!(
-            guard_replacement(&cli(), dir.path(), DestructionConsent::RunnerOwned, &[]).is_ok()
+            guard_replacement(&cli(), dir.path(), &DestructionConsent::RunnerOwned, &[]).is_ok()
         );
     }
 
@@ -144,7 +205,7 @@ mod tests {
     fn without_an_answer_the_work_goes_on_as_before() {
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join("hand-written.xml"), "mine\n").expect("write");
-        assert!(guard_replacement(&cli(), dir.path(), DestructionConsent::AskFirst, &[]).is_ok());
+        assert!(guard_replacement(&cli(), dir.path(), &ask_first(), &[]).is_ok());
     }
 
     #[test]
@@ -157,36 +218,61 @@ mod tests {
     }
 
     /// Отказ называет выходы: сохранить работу и повторить либо заменить каталог с её
-    /// потерей — тем путём, который у вызывающего действительно есть.
+    /// потерей — и только тем путём, который у вызывающего действительно есть. Готовой
+    /// команды из имени команды он не собирает: урезанная, она бьёт в другой каталог.
     #[test]
     fn the_refusal_names_the_ways_out_the_caller_has() {
         let lost = [PathBuf::from("src/cf/hand-written.xml")];
         let target = Path::new("/project/src/cf");
+        let without_key = WaysOut {
+            key: ConsentKey::Absent,
+            cli_command: None,
+        };
 
-        let cli = refusal(target, &lost, CommandName::Dump, ExecutionTransport::Cli);
+        let cli = refusal(
+            target,
+            &lost,
+            &with_force(Some("pull ext")),
+            ExecutionTransport::Cli,
+        );
         assert!(
-            cli.contains("commit or stash them and run `pull` again"),
+            cli.contains("commit or stash them and run the same command again"),
             "{cli}"
         );
         assert!(
-            cli.contains("run `pull --force` to replace the directory and discard them"),
+            cli.contains("repeat the same command with `--force` added"),
             "{cli}"
         );
+        assert!(!cli.contains("`pull --force`"), "{cli}");
+        assert!(!cli.contains("`pull ext"), "{cli}");
 
-        let convert = refusal(target, &lost, CommandName::Convert, ExecutionTransport::Cli);
-        assert!(convert.contains("run `convert --force`"), "{convert}");
+        let no_key = refusal(target, &lost, &without_key, ExecutionTransport::Cli);
+        assert!(
+            no_key.contains("commit or stash them and run the same command again"),
+            "{no_key}"
+        );
+        assert!(!no_key.contains("--force"), "{no_key}");
 
         for transport in [ExecutionTransport::McpStdio, ExecutionTransport::McpHttp] {
-            let mcp = refusal(target, &lost, CommandName::Dump, transport);
+            let mcp = refusal(target, &lost, &with_force(Some("pull ext")), transport);
             assert!(
                 mcp.contains("commit or stash them and call the tool again"),
                 "{mcp}"
             );
             assert!(
-                mcp.contains("run `v8-runner pull --force` from the command line"),
+                mcp.contains("run `v8-runner pull ext --force` from the command line"),
                 "{mcp}"
             );
             assert!(!mcp.contains("pass --force"), "{mcp}");
+
+            let unknown = refusal(target, &lost, &with_force(None), transport);
+            assert!(
+                unknown.contains("the matching `v8-runner` command with `--force`"),
+                "{unknown}"
+            );
+
+            let no_key = refusal(target, &lost, &without_key, transport);
+            assert!(!no_key.contains("--force"), "{no_key}");
         }
     }
 
@@ -198,9 +284,9 @@ mod tests {
         init_git_repo(root);
         fs::write(root.join("hand-written.xml"), "mine\n").expect("write");
 
-        assert!(guard_replacement(&cli(), root, DestructionConsent::Granted, &[]).is_ok());
+        assert!(guard_replacement(&cli(), root, &DestructionConsent::Granted, &[]).is_ok());
         assert!(matches!(
-            guard_replacement(&cli(), root, DestructionConsent::AskFirst, &[]),
+            guard_replacement(&cli(), root, &ask_first(), &[]),
             Err(AppError::Validation(_))
         ));
     }
@@ -216,13 +302,7 @@ mod tests {
         let asked = root.join("cf");
         fs::create_dir_all(&asked).expect("cf");
         fs::write(asked.join(VERSION_FILE_NAME), "<info/>\n").expect("version file");
-        assert!(guard_replacement(
-            &cli(),
-            &asked,
-            DestructionConsent::AskFirst,
-            &[VERSION_FILE_NAME]
-        )
-        .is_ok());
+        assert!(guard_replacement(&cli(), &asked, &ask_first(), &[VERSION_FILE_NAME]).is_ok());
     }
 
     /// Замена, которая опись не пишет (преобразование, проект EDT), не вправе
@@ -238,7 +318,7 @@ mod tests {
         fs::create_dir_all(&asked).expect("cf");
         fs::write(asked.join(VERSION_FILE_NAME), "<info/>\n").expect("version file");
         assert!(matches!(
-            guard_replacement(&cli(), &asked, DestructionConsent::AskFirst, &[]),
+            guard_replacement(&cli(), &asked, &ask_first(), &[]),
             Err(AppError::Validation(_))
         ));
     }

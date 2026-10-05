@@ -166,15 +166,18 @@ v8-runner infobase create
   `--mode incremental|partial` means no key; `--mode full` is refused and names `pull --force`.
   `--force` next to `--object` or `--mode` is refused before the platform; pick one form.
 - In an EDT-format project every `pull` (no key, `--object`) replaces the whole project directory.
-  Without `--force`, uncommitted work there makes it refuse: commit or stash it and repeat, or run
-  `pull --force` (full dump, uncommitted work is lost). There is no partial EDT pull with consent.
+  Without `--force`, uncommitted work there makes it refuse: commit or stash it and repeat, or
+  repeat the same command with `--force` added, e.g. `pull <SET> --force` (full dump, uncommitted
+  work is lost). There is no partial EDT pull with consent.
 - `convert`, any EDT-format `pull` without `--force` and MCP `dump_config` with `FULL` (any mode
   in an EDT project) replace the target source directory as a whole, so they first ask git what
   inside it exists nowhere else — untracked files, ignored files, a worktree edit on top of the
   index, unresolved merge markers. Finding any, the command refuses before touching anything with
-  exit 2 and names them. Commit or stash them and repeat, or run `pull --force` / `convert --force` (from MCP: the CLI command) to replace the
-  directory anyway; the flag destroys them and keeps no copy, so check `git status` before
-  `pull --force`. Staged content is not a loss: it is
+  exit 2 and names them. Commit or stash them and repeat, or repeat the same command with
+  `--force` added — never drop the set or `--output` — to replace the directory anyway (from MCP:
+  run the `v8-runner pull <SET> --force` the refusal names). The flag destroys them and keeps no
+  copy, so check `git status` first. `clone` has no such consent: commit or stash.
+  Staged content is not a loss: it is
   recoverable from the index. Where git cannot answer — no git, outside a worktree, a git error, a
   directory git could not read — the command proceeds exactly as it did before this check existed,
   and the guard claims no protection there.

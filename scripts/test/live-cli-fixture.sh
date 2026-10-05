@@ -466,7 +466,7 @@ run_launch_smoke() {
     fi
 
     local launch_json="$OUTPUT_ROOT/json/launch-designer.json"
-    run_cli_json_to_file "$launch_json" launch --mode designer --output "$OUTPUT_ROOT/launch/designer.log"
+    run_cli_json_to_file "$launch_json" launch designer --output "$OUTPUT_ROOT/launch/designer.log"
     assert_json_command_ok "$launch_json" "launch"
 }
 
@@ -624,8 +624,8 @@ if [[ "$BUILDER_BACKEND" == "DESIGNER" ]]; then
     EXTERNAL_REPORT_ARTIFACT_NAME="$(extract_artifact_root_name "$EXTERNAL_REPORT_SOURCE_SET_PATH")"
 fi
 
-print_stage "init and setup infobase"
-run_cli init
+print_stage "create infobase"
+run_cli infobase create
 assert_file_exists "$(extract_connection_file_path)/1Cv8.1CD"
 
 build_json="$OUTPUT_ROOT/json/build.json"

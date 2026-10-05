@@ -547,7 +547,8 @@ v8-runner pull [<SET>] [--extension <EXTENSION>] [--object <TYPE:NAME>...] [--dr
 - В проекте `EDT` любая выгрузка — и без ключей, и с `--object` — заменяет каталог
   проекта целиком. Без `--force` незафиксированная работа там останавливает выгрузку
   отказом сторожа (ниже). Выход — закоммитить или спрятать изменения и повторить либо
-  `pull --force`: полная выгрузка с заменой каталога и потерей незафиксированного.
+  повторить ту же команду с добавленным `--force` (`pull <SET> --force`): полная выгрузка
+  с заменой каталога и потерей незафиксированного.
   Частичной выгрузки EDT с согласием командная строка не даёт: `--object` рядом с
   `--force` отказывает.
 - `--force` не сочетается с другим режимом: `--object … --force` отказывает
@@ -579,9 +580,11 @@ v8-runner pull [<SET>] [--extension <EXTENSION>] [--object <TYPE:NAME>...] [--dr
   `--force` и MCP `dump_config` (полная и, в проекте `EDT`, любая) — перед заменой
   спрашивает git, что нельзя вернуть: неотслеживаемые и игнорируемые файлы, правки рабочего
   дерева, неразрешённые маркеры слияния. Найдя такое, она отказывает (выход 2), называет
-  файлы и выход, который есть у вызывающего: в командной строке — закоммитить или спрятать
-  и повторить либо `pull --force`; у MCP — закоммитить или спрятать и повторить вызов
-  либо выполнить `v8-runner pull --force` в командной строке. Там, где git не отвечает,
+  файлы и выход, который есть у вызывающего. Совет повторяет исходную цель: в командной
+  строке — закоммитить или спрятать и повторить ту же команду либо повторить её с
+  добавленным `--force`; у MCP — закоммитить или спрятать и повторить вызов либо выполнить
+  в командной строке `v8-runner pull <SET> --force` с именем того же набора. У `clone`
+  ключа согласия на уничтожение нет: выход — только закоммитить или спрятать. Там, где git не отвечает,
   поведение прежнее и защиты нет. В проекте `DESIGNER` отказ `pull` без ключа, когда
   инкрементальная выгрузка перезаписала бы незафиксированное, —
   [#217](https://github.com/IngvarConsulting/v8-runner-rust/issues/217).
@@ -903,7 +906,7 @@ v8-runner mcp serve http
 | `build_project` | `fullRebuild`, `sourceSet` | `fullRebuild=false`; `sourceSet` omitted значит все source-set |
 | `run_all_tests` | `full`, `runner`, `profile`, `feature`, `filterTag`, `ignoreTag`, `scenarioFilter` | Компактный вывод по умолчанию; `runner=vanessa` запускает Vanessa Automation с выбранным профилем и фильтрами |
 | `run_module_tests` | `moduleName`, `full` | Отклоняет пустой `moduleName` |
-| `dump_config` | `mode`, `extension`, `objects` | Пустой `mode` нормализуется в `INCREMENTAL`; согласия на уничтожение у MCP нет: отказ сторожа называет повтор после коммита или `v8-runner pull --force` |
+| `dump_config` | `mode`, `extension`, `objects` | Пустой `mode` нормализуется в `INCREMENTAL`; согласия на уничтожение у MCP нет: отказ сторожа называет повтор после коммита или `v8-runner pull <SET> --force` с именем того же набора |
 | `launch_app` | `utilityType`, `mcpScenario`, `mode`, `mcpConfig`, `mcpPort`, `waitReady`, `via` | `utilityType=mcp` запускает client MCP; `mcpScenario=va` загружает Vanessa Automation; остальные MCP-поля доступны только для `utilityType=mcp`; `via` (`web` или `connection`) выбирает адрес и принимается только у тонкого клиента |
 | `check_syntax_edt` | `projectName` | Пустой `projectName` значит “все EDT-проекты” |
 | `check_syntax_designer_config` | Designer-config flags в `camelCase` | Область расширений нормализуется в service layer |

@@ -149,6 +149,20 @@ pub struct DumpRequest {
     /// Replace the target directory although it holds work version control cannot
     /// give back. Only a human can grant this; automated transports never do.
     pub discard_uncommitted: bool,
+    /// The consent key the caller's own command has. A refusal offers only this way out:
+    /// a caller that cannot grant consent must not be told to repeat itself with a key
+    /// that does nothing.
+    pub consent_key: ConsentKey,
+}
+
+/// The key that grants consent to discard uncommitted work, as the caller has it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsentKey {
+    /// The caller has no such key: the only way out of a refusal is to save the work.
+    Absent,
+    /// The same command run again with `--force` replaces the directory and discards the
+    /// work. A transport without the key (MCP) names the command line that has it.
+    Force,
 }
 
 /// Transport-neutral convert scope.
