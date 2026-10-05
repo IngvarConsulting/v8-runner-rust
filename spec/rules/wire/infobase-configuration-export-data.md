@@ -38,12 +38,12 @@ check:
     "selected": null,
     "origin": {"kind": "default"},
     "skipped": [
-      {"provider": "designer", "reason": "file infobase is not ready: 'build/ib/1Cv8.1CD' is missing or is not a file"},
-      {"provider": "ibcmd", "reason": "file infobase is not ready: 'build/ib/1Cv8.1CD' is missing or is not a file"}
+      {"provider": "designer", "reason": "file infobase is not ready: '/home/dev/project/build/ib/1Cv8.1CD' is missing or is not a file"},
+      {"provider": "ibcmd", "reason": "file infobase is not ready: '/home/dev/project/build/ib/1Cv8.1CD' is missing or is not a file"}
     ]
   },
   "artifact_kind": "cf",
-  "output": "build/main.cf",
+  "output": "/home/dev/project/build/main.cf",
   "published": false,
   "target_state": "unchanged",
   "execution": {
@@ -51,7 +51,7 @@ check:
     "errors": [
       {
         "code": "environment_unavailable",
-        "message": "environment unavailable: file infobase is not ready"
+        "message": "environment unavailable: designer: file infobase is not ready: '/home/dev/project/build/ib/1Cv8.1CD' is missing or is not a file; ibcmd: file infobase is not ready: '/home/dev/project/build/ib/1Cv8.1CD' is missing or is not a file"
       }
     ]
   }

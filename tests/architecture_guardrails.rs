@@ -139,8 +139,7 @@ fn mcp_surface_snapshot_stays_explicit_and_documented() {
 /// перечень адаптеров, записанный руками.
 ///
 /// Как читается код:
-/// - сценарий — свободная функция модуля `use_cases` или `mcp::edt_syntax` (единственного
-///   сценария, который живёт в адаптере, — arc42 §5.1, §6.7); ссылка на него — любой путь
+/// - сценарий — свободная функция модуля `use_cases`; ссылка на него — любой путь
 ///   в выражении: вызов или указатель на функцию, после разрешения через `use` модуля и
 ///   функции, `crate`, `self` и `super`. Типы и их методы (`ExecutionContext::cli`) —
 ///   не сценарии;
@@ -412,6 +411,104 @@ fn the_ibcmd_site_finder_names_the_type_and_reads_nested_modules() {
         .into_iter()
         .collect()
     );
+}
+
+/// Корень #249: проверку проекта EDT выполняли два исполнителя — сценарий командной строки
+/// и свой путь MCP над общей сессией, — и копии их помощников расходились молча. Владелец
+/// теперь один, `use_cases::check_syntax`; транспорт выбирает только сессию и способ её
+/// ждать. Второй исполнитель под любым именем узнаётся по тому, без чего проверки нет: он
+/// запускает `validate` EDT — через DSL или командой общей сессии — либо читает её журнал.
+#[test]
+fn the_edt_project_check_has_one_executor() {
+    assert_eq!(
+        edt_check_modules(&SourceIndex::of_src()),
+        ["crate::use_cases::check_syntax"]
+            .map(str::to_owned)
+            .into_iter()
+            .collect(),
+        "the EDT project check runs in one executor; a transport picks only its session"
+    );
+}
+
+/// Исполнитель узнаётся по любому признаку — вызову `validate_project`, команде `validate`
+/// общей сессии, чтению журнала проверки — в любом модуле, в том числе вложенном, и через
+/// `use` с переименованием. Соседние команды EDT исполнителем не считаются.
+#[test]
+fn the_edt_check_finder_sees_a_second_executor_under_another_name() {
+    let index = SourceIndex::from_sources(&[
+        (
+            "crate::use_cases::check_syntax",
+            "use crate::parsers::edt_validation;\n\
+             fn run() { let _ = Some(\"\").map(edt_validation::parse); }",
+        ),
+        (
+            "crate::mcp::live_check",
+            "use crate::platform::edt::render_interactive_validate_command as command;\n\
+             fn submit() { command(); }",
+        ),
+        (
+            "crate::mcp::other",
+            "mod inner { fn read() { crate::parsers::edt_validation::parse(\"\"); } }",
+        ),
+        (
+            "crate::use_cases::export",
+            "struct Step;\n\
+             impl Step { fn run(dsl: Dsl) { dsl.validate_project(); } }",
+        ),
+        (
+            "crate::use_cases::unrelated",
+            "fn run(dsl: Dsl) { dsl.export_project(); validate(); }",
+        ),
+    ]);
+
+    assert_eq!(
+        edt_check_modules(&index),
+        [
+            "crate::mcp::live_check",
+            "crate::mcp::other::inner",
+            "crate::use_cases::check_syntax",
+            "crate::use_cases::export",
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .collect()
+    );
+}
+
+/// Модули, чей производственный код выполняет проверку проекта EDT.
+fn edt_check_modules(index: &SourceIndex) -> std::collections::BTreeSet<String> {
+    struct ValidateCall(bool);
+    impl<'ast> syn::visit::Visit<'ast> for ValidateCall {
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            self.0 |= node.method == "validate_project";
+            syn::visit::visit_expr_method_call(self, node);
+        }
+    }
+
+    let markers = [
+        path_of("crate::parsers::edt_validation::parse"),
+        path_of("crate::platform::edt::render_interactive_validate_command"),
+    ];
+    production_bodies(index)
+        .into_iter()
+        .filter(|body| {
+            let mut call = ValidateCall(false);
+            syn::visit::visit_block(&mut call, body.block);
+            call.0
+                || markers.iter().any(|marker| {
+                    let mut finder = PathFinder {
+                        index,
+                        module: &body.module,
+                        local_uses: body.local_uses(index),
+                        target: marker,
+                        found: false,
+                    };
+                    syn::visit::visit_block(&mut finder, body.block);
+                    finder.found
+                })
+        })
+        .map(|body| body.module.join("::"))
+        .collect()
 }
 
 fn ibcmd_connection_sites(index: &SourceIndex) -> std::collections::BTreeSet<String> {
@@ -1205,7 +1302,6 @@ struct DispatchScan {
 
 fn is_scenario_module(path: &[String]) -> bool {
     path.starts_with(&path_of("crate::use_cases"))
-        || path.starts_with(&path_of("crate::mcp::edt_syntax"))
 }
 
 /// Свободная функция сценария: модульный путь и имя в `snake_case`, без типов.
@@ -1613,6 +1709,110 @@ fn the_loopback_question_is_answered_in_one_place() {
          support::authority, which is the single owner:\n{}",
         offenders.join("\n")
     );
+}
+
+/// Значение реализованности или улики, названное в токенах кода: так выглядит строка
+/// матрицы, записанная мимо её владельца, — и сравнение с ней, с которого такая строка
+/// начинается. Glob-импорт вариантов (`Implementation::*`) ловится сам по себе: после него
+/// варианты в `match` называются голыми именами. Известный предел поиска по тексту:
+/// импорт под другим именем (`Implementation as I`) он не видит, а то же имя в
+/// doc-комментарии или строке даёт ложное срабатывание.
+const CAPABILITY_ROW_MARKERS: &[&str] = &[
+    "Implementation::Implemented",
+    "Implementation::Experimental",
+    "Implementation::{",
+    "Implementation::*",
+    "Evidence::Documented",
+    "Evidence::ArgvTested",
+    "Evidence::LiveVerified",
+    "Evidence::{",
+    "Evidence::*",
+];
+
+fn names_a_capability_row(production: &str) -> bool {
+    CAPABILITY_ROW_MARKERS
+        .iter()
+        .any(|marker| production.contains(marker))
+}
+
+#[test]
+fn capability_rows_are_written_in_one_place() {
+    // Корень проблемы: экспортное семейство выросло мимо общей проверки настроек и
+    // завело свою таблицу `match (намерение, исполнитель)`, отдававшую реализованность
+    // и улику, — вторую матрицу, расходившуюся с доменом. Владелец строк один —
+    // `domain::capability`; остальные читают его ответ (`capabilities`, `default_chain`,
+    // `capability_of`) и значений реализованности или улики сами не называют.
+    let owner = repo_path("src/domain/capability.rs");
+    let mut offenders = Vec::new();
+    for file in collect_rust_files(&repo_path("src")) {
+        if file == owner {
+            continue;
+        }
+        if names_a_capability_row(&production_tokens(&file)) {
+            offenders.push(file.display().to_string());
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these modules write capability rows on their own instead of reading \
+         domain::capability, which is the single owner of the matrix:\n{}",
+        offenders.join("\n")
+    );
+
+    // Страж проверяет себя на той форме, которой дефект и был написан.
+    let second_matrix = production_tokens_of(
+        r#"
+        fn capability(intent: Intent, provider: Provider) -> (Implementation, &'static str) {
+            match (intent, provider) {
+                (Intent::Snapshot, Provider::Ibcmd) => (Implementation::Experimental, "why"),
+                (_, _) => (Implementation::Experimental, "no adapter"),
+            }
+        }
+        "#,
+    );
+    assert!(names_a_capability_row(&second_matrix));
+
+    // Та же таблица на glob-импорте: в `match` варианты уже без имени типа.
+    let glob_matrix = production_tokens_of(
+        r#"
+        use crate::domain::capability::Implementation::*;
+
+        fn capability(intent: Intent) -> Implementation {
+            match intent {
+                Intent::Snapshot => Experimental,
+                _ => Implemented,
+            }
+        }
+        "#,
+    );
+    assert!(names_a_capability_row(&glob_matrix));
+    let glob_evidence = production_tokens_of(
+        r#"
+        use crate::domain::capability::Evidence::*;
+
+        fn proof(intent: Intent) -> Evidence {
+            match intent {
+                Intent::Snapshot => LiveVerified,
+                _ => Documented,
+            }
+        }
+        "#,
+    );
+    assert!(names_a_capability_row(&glob_evidence));
+
+    // Чтение ответа владельца — законный путь: страж его не задевает.
+    let reader = production_tokens_of(
+        r#"
+        use crate::domain::capability::{capabilities, capability_of, has_a_choice};
+
+        fn implements(operation: Operation, target: TargetKind, provider: Provider) -> bool {
+            has_a_choice(operation, target)
+                && capability_of(operation, target, provider).is_some()
+                && !capabilities(operation, target).is_empty()
+        }
+        "#,
+    );
+    assert!(!names_a_capability_row(&reader));
 }
 
 #[test]
@@ -3736,7 +3936,7 @@ fn provider_dispatched_takes_its_value_only_from_the_work_mark() {
     let platform = path_of("crate::platform");
     let result = path_of("crate::use_cases::result");
     let context = path_of("crate::use_cases::context");
-    let owners_of_command_work = [context.clone(), path_of("crate::mcp::edt_syntax")];
+    let owners_of_command_work = [context.clone()];
 
     let mut violations = Vec::new();
     let mut stamping = Vec::new();

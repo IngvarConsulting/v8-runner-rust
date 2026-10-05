@@ -358,25 +358,21 @@ impl<'a> EdtDsl<'a> {
                 startup_timeout,
                 command_timeout,
             } => {
-                if !manager.has_live_session() {
-                    manager
-                        .execute_blocking(
-                            EdtSessionRequest::service(
-                                render_interactive_change_dir_command(&self.workspace),
-                                Instant::now() + *startup_timeout,
-                            )
-                            .with_cancellation(self.execution_policy.cancellation.clone()),
+                manager
+                    .start_blocking(
+                        &self.workspace,
+                        *startup_timeout,
+                        self.execution_policy.cancellation.clone(),
+                    )
+                    .map_err(|error| {
+                        map_shared_session_error(
+                            &self.binary,
+                            &self.workspace,
+                            &render_interactive_change_dir_command(&self.workspace),
+                            error,
+                            *startup_timeout,
                         )
-                        .map_err(|error| {
-                            map_shared_session_error(
-                                &self.binary,
-                                &self.workspace,
-                                &render_interactive_change_dir_command(&self.workspace),
-                                error,
-                                *startup_timeout,
-                            )
-                        })?;
-                }
+                    })?;
                 let effective_timeout = match (
                     self.remaining_budget_cap(self.timeout),
                     self.remaining_budget_cap(self.execution_policy.timeout),

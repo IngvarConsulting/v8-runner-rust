@@ -103,6 +103,7 @@ v8-runner infobase create
 - Full `pull` refuses a target containing `workPath`, including symlink aliases. EDT export cache stays shared; per-base agent generation/version-file memory remains pending in #214.
 - Branch switch, rebase, large object moves, stale source-backed tool extension state, or suspicious incremental state: run `v8-runner push --full`.
 - Configuration check: run `v8-runner check`. The project `format` picks the branch — `/CheckConfig` for DESIGNER, EDT validation for EDT — and a key the branch does not execute is refused. With no mode key the default profile runs; name modes to narrow it. One executor (Designer), no `providers` key. A project of external data processors and reports only is refused with `error.code: subject`. `--dry-run` stops after the utility is located and before the platform runs: no platform log directory is created, and the answer names `status: planned`, `provider_dispatched: false` and `exit_code: -1`.
+- EDT check with `interactive-mode: true` reads the shared session's verdict exactly as MCP `check_syntax_edt` does: any stderr or stdout without log issues is `tool_failed`, `exit_code` is `101` for issues and `-1` for a failure, and `tools.edt_cli.command_timeout_ms` bounds each project.
 - Behavior validation: run the relevant `v8-runner test ...` command; tests run `push` first unless the
   caller explicitly requests `--no-push` for an already prepared infobase.
 - Missing local YAxUnit, Vanessa Automation, or onec-client-mcp-devkit setup: run
@@ -129,6 +130,9 @@ v8-runner infobase create
   `capability_unavailable`, `target` (not for this target), `soon` (not yet). A refusal that has a
   way out names it in `error.next` — `{command, source_set?, keys?}` — so an orchestrator reads the
   step instead of parsing the message.
+- A busy `workPath` (another run holds its lock) answers at once with `error.kind: workspace`,
+  `error.code: workspace_busy`, step `workspace lock` and exit 3 for every CLI command; MCP
+  answers `runtime_failure`. Wait for the other run and retry.
 - When an operator's interrupt (Ctrl+C, SIGTERM) ends a command, the CLI envelope answers
   `error.kind: interruption`, `error.code: cancelled` and exit 4 for every command; MCP folds it
   into `platform_failure`. A pending interrupt alone decides nothing: an unrelated failure keeps
@@ -139,6 +143,12 @@ v8-runner infobase create
   interruption record's `phase` says where it stopped: `command_boundary` — a safe point, no work
   of the command was cut short; `provider_command`, `run`, `apply`, `update_db_cfg`,
   `publication` — the executor's work was cut short or, with `deferred: true`, waited for.
+- A `providers.*` key naming an executor outside the matrix is refused at config load with
+  `invalid_argument` (exit 2, message lists the implemented executors); fix the key, do not
+  retry. `download`, `infobase configuration export`, `infobase dump` and `infobase restore`
+  each check only the key of their own operation (`download`, `infobase.dump` or
+  `infobase.restore`), so a key of another operation does not block them; `test --no-build` and `launch` check no key; every
+  other command that loads the project checks all keys.
 - For infobase export failures, distinguish `capability_unavailable` (no implemented adapter)
   from `environment_unavailable` (adapter exists, but binary/version/connection is not ready).
   Never retry another provider after the selected provider has been spawned.
@@ -225,7 +235,8 @@ v8-runner infobase create
   the runner does not yet detect two working copies sharing one base; pushes from different
   branches silently mix in it, and a test run in one copy blocks apply in the other.
 - Preserve failed test artifacts under `workPath/temp/<runner-id>/runs/<run-id>/` for diagnosis instead of cleaning them immediately.
-- Report missing local 1C utilities as environment/setup issues, not as project source failures.
+- Report missing local 1C utilities as environment/setup issues, not as project source failures:
+  a missing or wrong-version utility answers `environment_unavailable` (exit 2).
 - Keep final answers concrete: command run, result, relevant artifact path, and any follow-up command.
 
 ## Output Discipline
