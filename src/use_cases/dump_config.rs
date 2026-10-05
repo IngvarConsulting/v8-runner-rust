@@ -45,6 +45,7 @@ use self::helpers::{
     merge_optional_messages, resolve_dump_edt_base_project_name, validate_dump_objects,
     validate_platform_target, validate_publish_target, validate_supported_matrix,
 };
+use super::ignored_files::VERSION_FILE_NAME;
 #[cfg(test)]
 use super::staged_publication::cleanup_staging_path;
 use super::staged_publication::{interruption_before_publish, StagedPublication};
@@ -157,6 +158,8 @@ fn publish_full_dump(
             DUMP_BACKUP_PREFIX,
             "failed to publish staged dump",
             resolved.platform_consent(),
+            // Платформа пишет опись версий в каждую полную выгрузку.
+            &[VERSION_FILE_NAME],
         )
         .map_err(|error| publication.cleanup_failure(error))?;
     debug!(target = %resolved.platform_target_path.display(), "published staged dump");
@@ -681,6 +684,8 @@ fn finalize_edt_dump(
             "failed to publish staged dump",
             // Здесь публикуется дерево человека, а не служебный снимок.
             resolved.consent,
+            // Импорт EDT описи версий не пишет: исключений нет.
+            &[],
         )
         .map_err(|error| publication.cleanup_failure(error))?;
 

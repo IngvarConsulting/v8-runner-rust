@@ -11,9 +11,11 @@
 //! индексе, раннер останавливается. Чинить индекс сам он не вправе — `git rm
 //! --cached` трогает чужой репозиторий, — и называет рецепт.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::platform::git::{check_ignored, tracking_of, Tracking};
+use tracing::debug;
+
+use crate::platform::git::{ignored_by_worktree_gitignore, tracking_of, worktree_root, Tracking};
 use crate::support::error::AppError;
 
 /// Местный слой конфига: адреса баз и пути этой машины.
@@ -22,80 +24,160 @@ pub(crate) const LOCAL_CONFIG_FILE_NAME: &str = "v8project.local.yaml";
 /// Имя описи версий, которую платформа пишет в каталог выгрузки.
 pub(crate) const VERSION_FILE_NAME: &str = "ConfigDumpInfo.xml";
 
-/// Шаблон `.gitignore` и имя, на котором гит проверяет, покрыт ли он.
+const GITIGNORE_FILE_NAME: &str = ".gitignore";
+
+/// Подкаталог, на котором проверяется, что шаблон действует на любой глубине, а
+/// не только в корне: якорный `/ConfigDumpInfo.xml` наборы в `src/…` не покрывает.
+/// Каталога на диске нет и не будет — гит сопоставляет шаблоны по имени.
+const NESTED_PROBE_DIR: &str = "v8-runner-probe";
+
+/// Где шаблон обязан действовать.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// Рядом с конфигом: местный слой лежит только там.
+    BesideConfig,
+    /// В любом каталоге рабочей копии: опись и замок лежат в каталогах наборов,
+    /// а те бывают где угодно.
+    AnyDepth,
+}
+
+/// Шаблон `.gitignore` и имена, на которых гит проверяет, покрыт ли он.
 struct IgnoredPattern {
     /// Строка, которую генератор дописывает. Без косой черты гит сопоставляет её
-    /// на любой глубине — один шаблон закрывает все наборы исходников.
+    /// на любой глубине ниже файла `.gitignore`.
     pattern: &'static str,
-    /// Имя, которое шаблон обязан покрывать.
-    probe: &'static str,
+    /// Имена, которые шаблон обязан покрывать все до одного.
+    probes: &'static [&'static str],
+    reach: Reach,
 }
 
 /// Всё, что генератор пишет в `.gitignore` проекта.
 const IGNORED_PATTERNS: &[IgnoredPattern] = &[
     IgnoredPattern {
         pattern: LOCAL_CONFIG_FILE_NAME,
-        probe: LOCAL_CONFIG_FILE_NAME,
+        probes: &[LOCAL_CONFIG_FILE_NAME],
+        reach: Reach::BesideConfig,
     },
     // Опись версий одной базы.
     IgnoredPattern {
         pattern: VERSION_FILE_NAME,
-        probe: VERSION_FILE_NAME,
+        probes: &[VERSION_FILE_NAME],
+        reach: Reach::AnyDepth,
     },
     // Замок выгрузки рядом с целью (#332): после сбоя он остаётся на диске и не
-    // должен уехать в коммит.
+    // должен уехать в коммит. Файла у замка два, и пользовательский `*.lock`
+    // покрывает только первый.
     IgnoredPattern {
         pattern: ".dump-*.lock*",
-        probe: ".dump-main.lock",
+        probes: &[".dump-main.lock", ".dump-main.lock.system"],
+        reach: Reach::AnyDepth,
     },
 ];
 
-/// Дописывает в `.gitignore` недостающие шаблоны проекта.
+/// Файл `.gitignore` проекта и правила, по которым он дописывается.
 ///
-/// Шаблон пропускается, если гит говорит, что имя уже покрыто, — любым файлом
-/// игнора, хоть родительским. Без гита решает текст самого файла: шаблон считается
-/// записанным, если в нём есть та же строка, с `/` или `**/` впереди. Повторный
-/// запуск ничего не дублирует.
-pub(crate) fn ensure_project_gitignore(gitignore_path: &Path) -> Result<(), AppError> {
-    let dir = gitignore_path.parent().unwrap_or_else(|| Path::new("."));
-    let existing = match std::fs::read_to_string(gitignore_path) {
-        Ok(content) => Some(content),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => {
-            return Err(AppError::Runtime(format!(
-                "failed to read gitignore file '{}': {error}",
-                gitignore_path.display()
-            )))
+/// Файл один: корневой `.gitignore` рабочей копии, а вне гита — тот, что рядом с
+/// конфигом. Корневой — потому что опись и замок лежат в каталогах наборов, а не
+/// рядом с конфигом: `.gitignore` в `config/` до `src/…` не дотягивается.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectGitignore {
+    path: PathBuf,
+    config_dir: PathBuf,
+    /// Корень рабочей копии; `None` — гита нет или каталог вне рабочей копии.
+    worktree_root: Option<PathBuf>,
+}
+
+impl ProjectGitignore {
+    /// Находит файл `.gitignore` для проекта, конфиг которого лежит в `config_dir`.
+    ///
+    /// Ничего не пишет: план `clone` называет этот путь до того, как что-либо
+    /// записано. Каталога может ещё не быть.
+    pub(crate) fn locate(config_dir: &Path) -> Self {
+        let worktree_root = worktree_root(config_dir);
+        let path = worktree_root
+            .as_deref()
+            .unwrap_or(config_dir)
+            .join(GITIGNORE_FILE_NAME);
+        Self {
+            path,
+            config_dir: config_dir.to_path_buf(),
+            worktree_root,
         }
-    };
-    let text = existing.as_deref().unwrap_or_default();
+    }
 
-    let missing: Vec<&str> = IGNORED_PATTERNS
-        .iter()
-        .filter(|entry| match check_ignored(&dir.join(entry.probe)) {
-            Some(covered) => !covered,
-            None => !gitignore_mentions(text, entry.pattern),
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Дописывает недостающие шаблоны проекта.
+    ///
+    /// Шаблон пропускается, если гит говорит, что имя уже покрыто файлом
+    /// `.gitignore` внутри рабочей копии — любым, хоть вложенным. Игнор одной
+    /// машины (`.git/info/exclude`, `core.excludesFile`) не считается: с
+    /// репозиторием он не уезжает. Без гита решает текст самого файла: шаблон
+    /// считается записанным, если в нём есть та же строка, с `/` или `**/`
+    /// впереди. Повторный запуск ничего не дублирует.
+    pub(crate) fn ensure(&self) -> Result<(), AppError> {
+        let existing = match std::fs::read_to_string(&self.path) {
+            Ok(content) => Some(content),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(AppError::Runtime(format!(
+                    "failed to read gitignore file '{}': {error}",
+                    self.path.display()
+                )))
+            }
+        };
+        let text = existing.as_deref().unwrap_or_default();
+
+        let missing: Vec<&str> = IGNORED_PATTERNS
+            .iter()
+            .filter(|entry| match self.covered_by_git(entry) {
+                Some(covered) => !covered,
+                None => !gitignore_mentions(text, entry.pattern),
+            })
+            .map(|entry| entry.pattern)
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+
+        let mut content = existing.unwrap_or_default();
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        for pattern in missing {
+            content.push_str(pattern);
+            content.push('\n');
+        }
+        std::fs::write(&self.path, content).map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to write gitignore file '{}': {error}",
+                self.path.display()
+            ))
         })
-        .map(|entry| entry.pattern)
-        .collect();
-    if missing.is_empty() {
-        return Ok(());
     }
 
-    let mut content = existing.unwrap_or_default();
-    if !content.is_empty() && !content.ends_with('\n') {
-        content.push('\n');
+    /// Покрыт ли шаблон по ответу гита; `None` — гит не ответил на пробу.
+    fn covered_by_git(&self, entry: &IgnoredPattern) -> Option<bool> {
+        let root = self.worktree_root.as_deref()?;
+        for probe in entry.probes.iter().map(Path::new) {
+            let covered = match entry.reach {
+                Reach::BesideConfig => ignored_by_worktree_gitignore(&self.config_dir, probe)?,
+                Reach::AnyDepth => {
+                    ignored_by_worktree_gitignore(root, probe)?
+                        && ignored_by_worktree_gitignore(
+                            root,
+                            &Path::new(NESTED_PROBE_DIR).join(probe),
+                        )?
+                }
+            };
+            if !covered {
+                return Some(false);
+            }
+        }
+        Some(true)
     }
-    for pattern in missing {
-        content.push_str(pattern);
-        content.push('\n');
-    }
-    std::fs::write(gitignore_path, content).map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to write gitignore file '{}': {error}",
-            gitignore_path.display()
-        ))
-    })
 }
 
 fn gitignore_mentions(content: &str, pattern: &str) -> bool {
@@ -110,11 +192,20 @@ fn gitignore_mentions(content: &str, pattern: &str) -> bool {
 ///
 /// Проверка чистая: она ничего не пишет и потому одинакова в превью и в боевом
 /// прогоне. Ответ «неизвестно» — гита нет, каталог вне рабочей копии, гит вернул
-/// ошибку — работу не останавливает.
+/// ошибку — работу не останавливает; причина уходит в журнал отладки.
 pub(crate) fn refuse_tracked_version_file(dir: &Path) -> Result<(), AppError> {
-    match tracking_of(&dir.join(VERSION_FILE_NAME)) {
+    let version_file = dir.join(VERSION_FILE_NAME);
+    match tracking_of(&version_file) {
         Tracking::Tracked(path) => Err(AppError::Validation(tracked_refusal(&path))),
-        Tracking::Untracked | Tracking::Unknown(_) => Ok(()),
+        Tracking::Untracked => Ok(()),
+        Tracking::Unknown(reason) => {
+            debug!(
+                path = %version_file.display(),
+                %reason,
+                "git tracking of the version file is unknown; proceeding"
+            );
+            Ok(())
+        }
     }
 }
 
@@ -127,13 +218,18 @@ fn tracked_refusal(path: &Path) -> String {
     )
 }
 
-/// Путь, пригодный для вставки в командную строку как одно слово.
+/// Путь, пригодный для вставки в командную строку POSIX-оболочки как одно слово.
+///
+/// Путь из одних безопасных знаков идёт как есть. Любой другой заключается в
+/// одинарные кавычки, внутри которых оболочка ничего не раскрывает; сама кавычка
+/// закрывается, экранируется и открывается снова: `'` → `'\''`.
 fn shell_word(path: &Path) -> String {
     let text = path.display().to_string();
-    if text.chars().any(char::is_whitespace) {
-        format!("\"{text}\"")
-    } else {
+    let safe = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-');
+    if !text.is_empty() && text.chars().all(safe) {
         text
+    } else {
+        format!("'{}'", text.replace('\'', r"'\''"))
     }
 }
 
@@ -141,50 +237,178 @@ fn shell_word(path: &Path) -> String {
 mod tests {
     use super::*;
     use std::fs;
+    use std::process::{Command, Stdio};
     use tempfile::tempdir;
+
+    const ALL_PATTERNS: &str = "v8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n";
+
+    fn init_git_repo(dir: &Path) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["init", "-q", "-b", "main", "."])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git init failed");
+    }
 
     #[test]
     fn writes_every_pattern_into_a_new_gitignore() {
         let dir = tempdir().expect("tempdir");
-        let path = dir.path().join(".gitignore");
+        let gitignore = ProjectGitignore::locate(dir.path());
+        assert_eq!(gitignore.path(), dir.path().join(".gitignore"));
 
-        ensure_project_gitignore(&path).expect("gitignore");
+        gitignore.ensure().expect("gitignore");
 
         assert_eq!(
-            fs::read_to_string(&path).expect("read"),
-            "v8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
+            fs::read_to_string(gitignore.path()).expect("read"),
+            ALL_PATTERNS
         );
     }
 
     #[test]
     fn a_second_run_adds_nothing() {
         let dir = tempdir().expect("tempdir");
-        let path = dir.path().join(".gitignore");
+        let gitignore = ProjectGitignore::locate(dir.path());
 
-        ensure_project_gitignore(&path).expect("first");
-        ensure_project_gitignore(&path).expect("second");
+        gitignore.ensure().expect("first");
+        gitignore.ensure().expect("second");
 
         assert_eq!(
-            fs::read_to_string(&path).expect("read"),
-            "v8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
+            fs::read_to_string(gitignore.path()).expect("read"),
+            ALL_PATTERNS
+        );
+    }
+
+    #[test]
+    fn a_second_run_in_a_git_worktree_adds_nothing() {
+        let dir = tempdir().expect("tempdir");
+        init_git_repo(dir.path());
+        let gitignore = ProjectGitignore::locate(dir.path());
+
+        gitignore.ensure().expect("first");
+        gitignore.ensure().expect("second");
+
+        assert_eq!(
+            fs::read_to_string(gitignore.path()).expect("read"),
+            ALL_PATTERNS
         );
     }
 
     #[test]
     fn only_the_missing_patterns_are_appended() {
         let dir = tempdir().expect("tempdir");
-        let path = dir.path().join(".gitignore");
+        let gitignore = ProjectGitignore::locate(dir.path());
         fs::write(
-            &path,
+            gitignore.path(),
             "# local\n**/v8project.local.yaml\n/ConfigDumpInfo.xml",
         )
         .expect("seed");
 
-        ensure_project_gitignore(&path).expect("gitignore");
+        gitignore.ensure().expect("gitignore");
 
         assert_eq!(
-            fs::read_to_string(&path).expect("read"),
+            fs::read_to_string(gitignore.path()).expect("read"),
             "# local\n**/v8project.local.yaml\n/ConfigDumpInfo.xml\n.dump-*.lock*\n"
+        );
+    }
+
+    /// Конфиг во вложенном каталоге, наборы — в `src/…`: опись и замок пишутся в
+    /// корневой `.gitignore`, иначе до наборов они не дотягиваются.
+    #[test]
+    fn a_nested_config_ignores_the_version_file_from_the_worktree_root() {
+        let dir = tempdir().expect("tempdir");
+        init_git_repo(dir.path());
+        let config_dir = dir.path().join("config");
+        fs::create_dir_all(&config_dir).expect("config dir");
+
+        let gitignore = ProjectGitignore::locate(&config_dir);
+        assert_eq!(gitignore.path(), dir.path().join(".gitignore"));
+        gitignore.ensure().expect("gitignore");
+
+        assert_eq!(
+            fs::read_to_string(dir.path().join(".gitignore")).expect("read"),
+            ALL_PATTERNS
+        );
+        assert!(!config_dir.join(".gitignore").exists());
+        for probe in [
+            "src/cf/ConfigDumpInfo.xml",
+            "src/cf/.dump-main.lock",
+            "src/cf/.dump-main.lock.system",
+            "config/v8project.local.yaml",
+        ] {
+            assert_eq!(
+                ignored_by_worktree_gitignore(dir.path(), Path::new(probe)),
+                Some(true),
+                "{probe}"
+            );
+        }
+    }
+
+    /// Якорный шаблон покрывает только корень: наборам в `src/…` нужен шаблон без
+    /// якоря.
+    #[test]
+    fn an_anchored_pattern_does_not_count_for_source_sets() {
+        let dir = tempdir().expect("tempdir");
+        init_git_repo(dir.path());
+        fs::write(
+            dir.path().join(".gitignore"),
+            "/v8project.local.yaml\n/ConfigDumpInfo.xml\n",
+        )
+        .expect("seed");
+
+        ProjectGitignore::locate(dir.path())
+            .ensure()
+            .expect("gitignore");
+
+        assert_eq!(
+            fs::read_to_string(dir.path().join(".gitignore")).expect("read"),
+            "/v8project.local.yaml\n/ConfigDumpInfo.xml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
+        );
+    }
+
+    /// Игнор одной машины с репозиторием не уезжает: генератор всё равно пишет
+    /// шаблон в `.gitignore`, иначе коллега закоммитит опись.
+    #[test]
+    fn a_pattern_in_info_exclude_is_still_written() {
+        let dir = tempdir().expect("tempdir");
+        init_git_repo(dir.path());
+        fs::write(
+            dir.path().join(".git").join("info").join("exclude"),
+            "v8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n",
+        )
+        .expect("exclude");
+
+        let gitignore = ProjectGitignore::locate(dir.path());
+        gitignore.ensure().expect("gitignore");
+
+        assert_eq!(
+            fs::read_to_string(gitignore.path()).expect("read"),
+            ALL_PATTERNS
+        );
+    }
+
+    /// Пользовательский `*.lock` покрывает `.dump-main.lock`, но не его
+    /// `.system`-соседа: шаблон замка всё равно нужен.
+    #[test]
+    fn a_lock_pattern_must_cover_both_lock_files() {
+        let dir = tempdir().expect("tempdir");
+        init_git_repo(dir.path());
+        fs::write(
+            dir.path().join(".gitignore"),
+            "v8project.local.yaml\nConfigDumpInfo.xml\n*.lock\n",
+        )
+        .expect("seed");
+
+        ProjectGitignore::locate(dir.path())
+            .ensure()
+            .expect("gitignore");
+
+        assert_eq!(
+            fs::read_to_string(dir.path().join(".gitignore")).expect("read"),
+            "v8project.local.yaml\nConfigDumpInfo.xml\n*.lock\n.dump-*.lock*\n"
         );
     }
 
@@ -202,8 +426,34 @@ mod tests {
     fn a_path_with_spaces_stays_one_word() {
         let message = tracked_refusal(Path::new("my src/ConfigDumpInfo.xml"));
         assert!(
-            message.contains("git rm --cached \"my src/ConfigDumpInfo.xml\""),
+            message.contains("git rm --cached 'my src/ConfigDumpInfo.xml'"),
             "{message}"
         );
+    }
+
+    /// Оболочка раскрывает не только пробелы: `$`, `*`, `;`, кавычки и прочее
+    /// вне безопасного набора идут в одинарных кавычках, а сама кавычка
+    /// экранируется.
+    #[test]
+    fn a_path_with_shell_metacharacters_is_quoted() {
+        for (path, expected) in [
+            ("src/cf/ConfigDumpInfo.xml", "src/cf/ConfigDumpInfo.xml"),
+            (
+                "src/$HOME/ConfigDumpInfo.xml",
+                "'src/$HOME/ConfigDumpInfo.xml'",
+            ),
+            ("src/a;b/ConfigDumpInfo.xml", "'src/a;b/ConfigDumpInfo.xml'"),
+            ("src/*/ConfigDumpInfo.xml", "'src/*/ConfigDumpInfo.xml'"),
+            (
+                "src/it's/ConfigDumpInfo.xml",
+                r"'src/it'\''s/ConfigDumpInfo.xml'",
+            ),
+            (
+                "src/конф/ConfigDumpInfo.xml",
+                "'src/конф/ConfigDumpInfo.xml'",
+            ),
+        ] {
+            assert_eq!(shell_word(Path::new(path)), expected, "{path}");
+        }
     }
 }

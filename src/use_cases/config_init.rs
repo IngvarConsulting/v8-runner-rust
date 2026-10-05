@@ -11,7 +11,7 @@ use crate::support::path::{is_safe_path_segment, nearest_existing_canonical_path
 use crate::support::source_descriptor::{
     self, SourceDescriptorParseError, SourceDescriptorPurpose, SourceSetRootScanError,
 };
-use crate::use_cases::ignored_files::{ensure_project_gitignore, LOCAL_CONFIG_FILE_NAME};
+use crate::use_cases::ignored_files::{ProjectGitignore, LOCAL_CONFIG_FILE_NAME};
 
 const LOCAL_CONFIG_SCHEMA_MODEL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.local.schema.json";
 
@@ -116,7 +116,7 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
     let yaml = render_config(format, &source_sets, platform_version.as_deref());
 
     let local_path = output_dir.join(LOCAL_CONFIG_FILE_NAME);
-    let gitignore_path = output_dir.join(".gitignore");
+    let gitignore = ProjectGitignore::locate(output_dir);
 
     std::fs::write(&output_path, yaml).map_err(|error| {
         AppError::Runtime(format!(
@@ -125,13 +125,13 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
         ))
     })?;
     ensure_local_config(&local_path, request.connection.as_ref())?;
-    ensure_project_gitignore(&gitignore_path)?;
+    gitignore.ensure()?;
 
     Ok(ConfigInitResult {
         ok: true,
         path: output_path.display().to_string(),
         local_path: local_path.display().to_string(),
-        gitignore_path: gitignore_path.display().to_string(),
+        gitignore_path: gitignore.path().display().to_string(),
         format: format.as_yaml().to_owned(),
         platform_version,
         source_sets,
@@ -1666,7 +1666,7 @@ mod tests {
     }
 
     #[test]
-    fn a_nested_gitignore_does_not_repeat_a_pattern_the_root_gitignore_covers() {
+    fn a_nested_config_writes_only_the_missing_patterns_into_the_root_gitignore() {
         let dir = tempdir().expect("tempdir");
         init_git_repo(dir.path());
         std::fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("main xml");
@@ -1676,7 +1676,7 @@ mod tests {
         )
         .expect("gitignore");
 
-        execute(&ConfigInitRequest {
+        let result = execute(&ConfigInitRequest {
             project_dir: dir.path().to_path_buf(),
             output_path: "config/v8project.yaml".into(),
             force: false,
@@ -1690,11 +1690,21 @@ mod tests {
             .join("config")
             .join("v8project.local.yaml")
             .exists());
-        let nested =
-            std::fs::read_to_string(dir.path().join("config").join(".gitignore")).expect("nested");
-        assert_eq!(nested, "ConfigDumpInfo.xml\n.dump-*.lock*\n");
+        // Опись и замок лежат в каталогах наборов, а не рядом с конфигом: шаблоны
+        // уходят в корневой `.gitignore`, местный слой там уже покрыт.
+        assert!(!dir.path().join("config").join(".gitignore").exists());
         let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
-        assert_eq!(gitignore, "config/v8project.local.yaml\n");
+        assert_eq!(
+            gitignore,
+            "config/v8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
+        );
+        assert_eq!(
+            result.gitignore_path,
+            canonical(dir.path())
+                .join(".gitignore")
+                .display()
+                .to_string()
+        );
     }
 
     #[test]

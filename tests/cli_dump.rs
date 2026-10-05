@@ -860,6 +860,13 @@ fn a_full_dump_replaces_an_ignored_version_file_without_asking() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    // Поддельная платформа описи не пишет: в заменённом каталоге файла с прежним
+    // содержимым остаться не должно.
+    assert_ne!(
+        fs::read_to_string(&version_file).ok().as_deref(),
+        Some("<info previous=\"yes\"/>\n"),
+        "the previous version file must be replaced, not kept"
+    );
 }
 
 /// Попросили явно — уничтожаем, как и обещает имя ключа. Резервная копия, о

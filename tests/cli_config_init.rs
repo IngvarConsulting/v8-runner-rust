@@ -726,3 +726,62 @@ fn init_ignores_project_local_files_once() {
         "v8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
     );
 }
+
+/// Конфиг во вложенном каталоге, наборы — в `src/…`: `.gitignore` рядом с конфигом
+/// до наборов не дотягивается, поэтому шаблоны уходят в корневой `.gitignore`
+/// рабочей копии, и ответ называет именно его.
+#[test]
+fn init_with_a_nested_config_ignores_the_version_file_of_every_source_set() {
+    let dir = temp_workspace();
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["init", "-q", "-b", "main", "."])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run git");
+    assert!(status.success(), "git init failed");
+    let main = dir.path().join("src").join("configuration");
+    fs::create_dir_all(&main).expect("main");
+    fs::write(main.join("Configuration.xml"), "<Configuration/>").expect("main xml");
+
+    let output = v8_runner_command()
+        .current_dir(dir.path())
+        .args([
+            "--json-message",
+            "init",
+            "--output",
+            "config/v8project.yaml",
+        ])
+        .output()
+        .expect("run init");
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    let canonical_dir = fs::canonicalize(dir.path()).expect("canonical project dir");
+    assert_eq!(
+        payload["data"]["gitignore_path"],
+        canonical_dir.join(".gitignore").display().to_string()
+    );
+    assert!(!dir.path().join("config").join(".gitignore").exists());
+    for probe in [
+        "src/configuration/ConfigDumpInfo.xml",
+        "src/configuration/.dump-main.lock",
+        "src/configuration/.dump-main.lock.system",
+        "config/v8project.local.yaml",
+    ] {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["check-ignore", "-q", "--no-index", "--", probe])
+            .status()
+            .expect("run git");
+        assert!(status.success(), "{probe} must be ignored");
+    }
+}

@@ -18,7 +18,6 @@ use std::path::{Path, PathBuf};
 
 use crate::platform::git::{uncommitted_work_in, UncommittedWork};
 use crate::support::error::AppError;
-use crate::use_cases::ignored_files::VERSION_FILE_NAME;
 
 /// Сколько потерь перечислять в отказе, прежде чем считать их числом.
 const NAMED_LOSS_LIMIT: usize = 20;
@@ -36,17 +35,23 @@ pub(super) enum DestructionConsent {
 }
 
 /// Отказывает до того, как что-либо стёрто, либо пропускает работу дальше.
+///
+/// `regenerated` — имена файлов в корне `target`, которые эта замена пишет заново;
+/// их называет вызывающий, потому что только он знает, что пишет. Выгрузка в
+/// формате Конфигуратора передаёт опись версий: платформа пишет её в каждую полную
+/// выгрузку, а штатно опись лежит в игноре, и без исключения отказ стоял бы на
+/// каждой выгрузке. Преобразование и замена проекта EDT описи не пишут — у них
+/// исключений нет.
 pub(super) fn guard_replacement(
     target: &Path,
     consent: DestructionConsent,
+    regenerated: &[&str],
 ) -> Result<(), AppError> {
     if consent == DestructionConsent::RunnerOwned {
         return Ok(());
     }
 
-    // Опись версий в корне замена пишет заново: её прежнее содержимое не потеря, а
-    // штатно она лежит в игноре, и без исключения отказ стоял бы на каждой выгрузке.
-    match uncommitted_work_in(target, &[VERSION_FILE_NAME]) {
+    match uncommitted_work_in(target, regenerated) {
         // Терять нечего: прежнее содержимое система контроля версий вернёт сама.
         UncommittedWork::Nothing => Ok(()),
         // Попросили уничтожить — уничтожаем, как и обещает имя ключа.
@@ -84,13 +89,14 @@ fn refusal(target: &Path, paths: &[PathBuf]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::use_cases::ignored_files::VERSION_FILE_NAME;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
     fn a_runner_owned_directory_is_never_questioned() {
         let dir = tempdir().expect("tempdir");
-        assert!(guard_replacement(dir.path(), DestructionConsent::RunnerOwned).is_ok());
+        assert!(guard_replacement(dir.path(), DestructionConsent::RunnerOwned, &[]).is_ok());
     }
 
     /// Вне репозитория ответа нет — и сторож не притворяется, что защитил.
@@ -98,7 +104,7 @@ mod tests {
     fn without_an_answer_the_work_goes_on_as_before() {
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join("hand-written.xml"), "mine\n").expect("write");
-        assert!(guard_replacement(dir.path(), DestructionConsent::AskFirst).is_ok());
+        assert!(guard_replacement(dir.path(), DestructionConsent::AskFirst, &[]).is_ok());
     }
 
     #[test]
@@ -133,9 +139,9 @@ mod tests {
         }
         fs::write(root.join("hand-written.xml"), "mine\n").expect("write");
 
-        assert!(guard_replacement(root, DestructionConsent::Granted).is_ok());
+        assert!(guard_replacement(root, DestructionConsent::Granted, &[]).is_ok());
         assert!(matches!(
-            guard_replacement(root, DestructionConsent::AskFirst),
+            guard_replacement(root, DestructionConsent::AskFirst, &[]),
             Err(AppError::Validation(_))
         ));
     }
@@ -165,7 +171,41 @@ mod tests {
         let asked = root.join("cf");
         fs::create_dir_all(&asked).expect("cf");
         fs::write(asked.join(VERSION_FILE_NAME), "<info/>\n").expect("version file");
-        assert!(guard_replacement(&asked, DestructionConsent::AskFirst).is_ok());
+        assert!(
+            guard_replacement(&asked, DestructionConsent::AskFirst, &[VERSION_FILE_NAME]).is_ok()
+        );
+    }
+
+    /// Замена, которая опись не пишет (преобразование, проект EDT), не вправе
+    /// считать её восстановимой: файл в игноре — потеря, как любой другой.
+    #[test]
+    fn a_replacement_that_does_not_regenerate_the_version_file_protects_it() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        for args in [
+            vec!["init", "-q", "-b", "main", "."],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(&args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("git");
+            assert!(status.success());
+        }
+        fs::write(root.join(".gitignore"), format!("{VERSION_FILE_NAME}\n")).expect("ignore");
+
+        let asked = root.join("cf");
+        fs::create_dir_all(&asked).expect("cf");
+        fs::write(asked.join(VERSION_FILE_NAME), "<info/>\n").expect("version file");
+        assert!(matches!(
+            guard_replacement(&asked, DestructionConsent::AskFirst, &[]),
+            Err(AppError::Validation(_))
+        ));
     }
 
     #[test]

@@ -1,33 +1,109 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// Покрывает ли `path` шаблон игнора.
+/// Покрывает ли имя `relative` в каталоге `dir` шаблон из `.gitignore` рабочей
+/// копии.
+///
+/// Считается только шаблон, который уезжает вместе с репозиторием: файл
+/// `.gitignore` внутри рабочей копии. `.git/info/exclude` и `core.excludesFile`
+/// живут на одной машине — у коллеги их нет, и опись, «покрытая» ими здесь, у него
+/// уйдёт в коммит. Решает последний совпавший шаблон: отрицание (`!имя`) значит
+/// «не покрыто».
 ///
 /// Проба идёт с `--no-index`: без него гит объявляет отслеживаемый файл
 /// неигнорируемым даже под шаблоном, и генератор `.gitignore` дописывал бы шаблон
 /// при каждом запуске. Вопрос здесь — о шаблоне, а не об индексе; об индексе
 /// спрашивает [`tracking_of`].
 ///
-/// `None` means Git is unavailable, `path` is outside a worktree, or Git reported
-/// an execution error that should fall back to local `.gitignore` editing.
-pub fn check_ignored(path: &Path) -> Option<bool> {
-    let workdir = path.parent().unwrap_or_else(|| Path::new("."));
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(workdir)
-        .args(["check-ignore", "--quiet", "--no-index", "--"])
-        .arg(path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .ok()?;
+/// Путь передаётся от `dir`, а не абсолютным: абсолютный путь гит сравнивает с
+/// корнем рабочей копии буквально, и ссылка в пути превращала бы ответ в «вне
+/// репозитория».
+///
+/// `None` — гита нет, `dir` вне рабочей копии или гит вернул ошибку: тогда решает
+/// текст самого `.gitignore`.
+pub fn ignored_by_worktree_gitignore(dir: &Path, relative: &Path) -> Option<bool> {
+    use std::io::Write;
 
-    match status.code() {
-        Some(0) => Some(true),
+    // `-z` гит принимает только вместе с `--stdin`: путь уходит на вход, ответ
+    // приходит полями через NUL, и никакое имя не ломает разбор.
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["check-ignore", "-z", "--stdin", "--verbose", "--no-index"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut request = relative.as_os_str().as_encoded_bytes().to_vec();
+    request.push(0);
+    let written = child
+        .stdin
+        .take()
+        .map(|mut stdin| stdin.write_all(&request));
+    let output = child.wait_with_output().ok()?;
+    written?.ok()?;
+
+    match output.status.code() {
+        Some(0) => Some(match_comes_from_worktree_gitignore(&output.stdout)),
         Some(1) => Some(false),
         _ => None,
     }
+}
+
+/// Разбирает ответ `git check-ignore -z --verbose`: источник, строка, шаблон, путь.
+///
+/// Файл из `core.excludesFile` гит называет абсолютным путём, а файлы игнора
+/// внутри дерева — путём от корня рабочей копии. «Внутри дерева» поэтому — это
+/// относительный путь к файлу с именем `.gitignore` вне каталога `.git`.
+fn match_comes_from_worktree_gitignore(stdout: &[u8]) -> bool {
+    let mut fields = stdout.split(|byte| *byte == 0);
+    let (Some(source), Some(_line), Some(pattern)) = (fields.next(), fields.next(), fields.next())
+    else {
+        return false;
+    };
+    if source.is_empty() || pattern.starts_with(b"!") {
+        return false;
+    }
+    let source = path_from_bytes(source);
+    source.is_relative()
+        && source.file_name() == Some(std::ffi::OsStr::new(".gitignore"))
+        && !source
+            .components()
+            .any(|component| component.as_os_str() == ".git")
+}
+
+/// Корень рабочей копии, в которой лежит `dir`.
+///
+/// Каталога может ещё не быть на диске — гит спрашивают из ближайшего
+/// существующего предка. Корень получается подъёмом от этого предка на столько
+/// уровней, сколько назвал гит, а не из абсолютного пути гита: так путь остаётся в
+/// той форме, в какой его дал вызывающий, и написание в ответе команды не меняется.
+///
+/// `None` — гита нет, каталог вне рабочей копии или гит вернул ошибку.
+pub fn worktree_root(dir: &Path) -> Option<PathBuf> {
+    let anchor = dir.ancestors().find(|candidate| candidate.is_dir())?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(anchor)
+        .args(["rev-parse", "--show-cdup"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let cdup = String::from_utf8(output.stdout).ok()?;
+    let mut levels = 0;
+    for component in Path::new(cdup.trim_end()).components() {
+        match component {
+            std::path::Component::ParentDir => levels += 1,
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    anchor.ancestors().nth(levels).map(Path::to_path_buf)
 }
 
 /// Лежит ли файл в индексе гита.
@@ -512,9 +588,94 @@ mod tests {
         let repo = repo_with_committed_source();
         fs::write(repo.path().join(".gitignore"), "Configuration.xml\n").expect("gitignore");
         assert_eq!(
-            check_ignored(&source_dir(&repo).join("Configuration.xml")),
+            ignored_by_worktree_gitignore(&source_dir(&repo), Path::new("Configuration.xml")),
             Some(true)
         );
+    }
+
+    /// `.git/info/exclude` в репозиторий не попадает: у коллеги этого шаблона нет.
+    #[test]
+    fn a_pattern_in_info_exclude_does_not_count() {
+        let repo = repo_with_committed_source();
+        fs::write(
+            repo.path().join(".git").join("info").join("exclude"),
+            "ConfigDumpInfo.xml\n",
+        )
+        .expect("exclude");
+        assert_eq!(
+            ignored_by_worktree_gitignore(&source_dir(&repo), Path::new("ConfigDumpInfo.xml")),
+            Some(false)
+        );
+    }
+
+    /// `core.excludesFile` — настройка одной машины, даже если файл зовут `.gitignore`.
+    #[test]
+    fn a_pattern_in_the_excludes_file_does_not_count() {
+        let repo = repo_with_committed_source();
+        let elsewhere = tempdir().expect("tempdir");
+        let excludes = elsewhere.path().join(".gitignore");
+        fs::write(&excludes, "ConfigDumpInfo.xml\n").expect("excludes");
+        let excludes = excludes.to_str().expect("utf-8 temp path");
+        run_git(repo.path(), &["config", "core.excludesFile", excludes]);
+        assert_eq!(
+            ignored_by_worktree_gitignore(&source_dir(&repo), Path::new("ConfigDumpInfo.xml")),
+            Some(false)
+        );
+    }
+
+    /// Шаблон во вложенном `.gitignore` уезжает с репозиторием так же, как корневой.
+    #[test]
+    fn a_pattern_in_a_nested_gitignore_counts() {
+        let repo = repo_with_committed_source();
+        fs::write(source_dir(&repo).join(".gitignore"), "ConfigDumpInfo.xml\n").expect("nested");
+        assert_eq!(
+            ignored_by_worktree_gitignore(&source_dir(&repo), Path::new("ConfigDumpInfo.xml")),
+            Some(true)
+        );
+    }
+
+    /// Отрицание — последнее слово: имя не покрыто.
+    #[test]
+    fn a_negated_pattern_does_not_cover() {
+        let repo = repo_with_committed_source();
+        fs::write(
+            repo.path().join(".gitignore"),
+            "ConfigDumpInfo.xml\n!ConfigDumpInfo.xml\n",
+        )
+        .expect("gitignore");
+        assert_eq!(
+            ignored_by_worktree_gitignore(&source_dir(&repo), Path::new("ConfigDumpInfo.xml")),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn ignore_coverage_outside_a_worktree_is_unknown() {
+        let dir = tempdir().expect("tempdir");
+        assert_eq!(
+            ignored_by_worktree_gitignore(dir.path(), Path::new("ConfigDumpInfo.xml")),
+            None
+        );
+    }
+
+    #[test]
+    fn the_worktree_root_is_found_from_a_nested_and_an_absent_directory() {
+        let repo = repo_with_committed_source();
+        assert_eq!(
+            worktree_root(&source_dir(&repo)),
+            Some(repo.path().to_path_buf())
+        );
+        assert_eq!(
+            worktree_root(&repo.path().join("never").join("was")),
+            Some(repo.path().to_path_buf())
+        );
+        assert_eq!(worktree_root(repo.path()), Some(repo.path().to_path_buf()));
+    }
+
+    #[test]
+    fn a_directory_outside_a_worktree_has_no_root() {
+        let dir = tempdir().expect("tempdir");
+        assert_eq!(worktree_root(dir.path()), None);
     }
 
     #[test]

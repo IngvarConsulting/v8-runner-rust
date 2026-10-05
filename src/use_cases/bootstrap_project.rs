@@ -11,12 +11,11 @@ use crate::platform::connection::V8Connection;
 use crate::support::error::AppError;
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::dump_config;
-use crate::use_cases::ignored_files::{ensure_project_gitignore, LOCAL_CONFIG_FILE_NAME};
+use crate::use_cases::ignored_files::{ProjectGitignore, LOCAL_CONFIG_FILE_NAME};
 use crate::use_cases::request::{DumpModeRequest, DumpRequest};
 use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
 
 const CONFIG_FILE_NAME: &str = "v8project.yaml";
-const GITIGNORE_FILE_NAME: &str = ".gitignore";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapRequest {
@@ -254,7 +253,7 @@ fn written_settings(paths: &BootstrapPaths) -> Result<LoadedConfig, AppError> {
 struct BootstrapPaths {
     config_path: PathBuf,
     local_config_path: PathBuf,
-    gitignore_path: PathBuf,
+    gitignore: ProjectGitignore,
     source_dir: PathBuf,
 }
 
@@ -263,7 +262,7 @@ impl BootstrapPaths {
         Self {
             config_path: project_dir.join(CONFIG_FILE_NAME),
             local_config_path: project_dir.join(LOCAL_CONFIG_FILE_NAME),
-            gitignore_path: project_dir.join(GITIGNORE_FILE_NAME),
+            gitignore: ProjectGitignore::locate(project_dir),
             source_dir: if source_dir.is_absolute() {
                 source_dir.to_path_buf()
             } else {
@@ -337,7 +336,7 @@ fn write_bootstrap_files(paths: &BootstrapPaths, text: &ProjectText<'_>) -> Resu
             paths.config_path.display()
         ))
     })?;
-    ensure_project_gitignore(&paths.gitignore_path)?;
+    paths.gitignore.ensure()?;
     std::fs::write(&paths.local_config_path, text.local_overlay).map_err(|error| {
         AppError::Runtime(format!(
             "failed to write local config file '{}': {error}",
@@ -484,7 +483,7 @@ fn bootstrap_result(
         ok: outcome.ok,
         path: paths.config_path.clone(),
         local_path: paths.local_config_path.clone(),
-        gitignore_path: paths.gitignore_path.clone(),
+        gitignore_path: paths.gitignore.path().to_path_buf(),
         source_dir: paths.source_dir.clone(),
         dump_target_path: paths.source_dir.clone(),
         dumped: outcome.dumped,

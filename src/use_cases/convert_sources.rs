@@ -475,7 +475,7 @@ fn execute_with_dsl(
         }
 
         // Преобразование заменяет каталог исходников так же, как выгрузка.
-        guard_replacement(&item.target_path, resolved.consent).map_err(|error| {
+        guard_replacement(&item.target_path, resolved.consent, &[]).map_err(|error| {
             let message = error.to_string();
             ConvertExecutionFailure::with_payload(
                 error,
