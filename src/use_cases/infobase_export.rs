@@ -917,7 +917,6 @@ fn select_provider(
     }
     let mut utilities = PlatformUtilities::from_config(config);
     let mut skipped: Vec<SkippedProvider> = Vec::new();
-    let mut had_an_adapter = false;
 
     for provider in plan.candidates() {
         if let Some(error) = pending_interruption_error(context, "during provider selection") {
@@ -928,8 +927,11 @@ fn select_provider(
             skipped.push(no_adapter(provider, operation));
             continue;
         };
-        had_an_adapter = true;
         // Исполнителю переноса нужна не больше чем одна утилита: первая из его списка.
+        debug_assert!(
+            needed.len() <= 1,
+            "a transfer executor needs at most one utility, {provider} needs {needed:?}"
+        );
         let utility = needed.first().copied();
         match readiness(config, &mut utilities, intent, provider, utility) {
             Ok(executable) => {
@@ -944,7 +946,7 @@ fn select_provider(
         }
     }
 
-    let error = nobody_ready(&skipped, had_an_adapter);
+    let error = nobody_ready(config, &plan, &skipped);
     Err((error, plan.receipt_for_nobody(skipped)))
 }
 

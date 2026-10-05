@@ -64,7 +64,7 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
    утилиты, выбирает исполнителя и возвращает план с `provider_dispatched: false`.
 
 Правила: [умолчания живут в коде](../rules/use-cases/provider-defaults-live-in-code.md),
-[строки матрицы пишутся в домене](../rules/use-cases/capability-rows-are-written-in-the-domain.md),
+[значения реализованности называет домен](../rules/use-cases/capability-values-are-named-in-the-domain.md),
 [исполнителя не выбирают флагом](../rules/cli/provider-is-not-a-flag.md),
 [превью не запускает исполнителя](../rules/cli/preview-dispatches-nothing.md),
 [превью не оставляет следов](../rules/cli/preview-leaves-no-trace.md).

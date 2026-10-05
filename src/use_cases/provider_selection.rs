@@ -10,7 +10,9 @@
 //! квитанцию и род отказа отдаёт те же.
 
 use crate::config::model::{AppConfig, DesignerAgentMode};
-use crate::domain::capability::{Operation, Provider, ProviderReceipt, SkippedProvider};
+use crate::domain::capability::{
+    Operation, Provider, ProviderPlan, ProviderReceipt, SkippedProvider,
+};
 use crate::platform::locator::{UtilityLocation, UtilityType};
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
@@ -26,9 +28,10 @@ pub struct SelectedProvider {
     pub receipt: ProviderReceipt,
 }
 
-/// Утилиты, которыми исполнитель делает работу: `None` — адаптера в этой сборке
-/// нет, пустой список — исполнитель готов без утилит. Первая в списке становится
-/// `location` выбранного исполнителя.
+/// Утилиты, которыми исполнитель делает работу: `None` — у исполнителя нет утилиты в
+/// этой сборке раннера, пустой список — исполнитель готов без утилит. Есть ли у него
+/// адаптер именно этой операции, здесь не решается: это ответ `domain::capability`. Первая
+/// в списке становится `location` выбранного исполнителя.
 pub(crate) fn utilities_of(provider: Provider, config: &AppConfig) -> Option<Vec<UtilityType>> {
     match provider {
         Provider::Designer => Some(vec![UtilityType::V8]),
@@ -61,14 +64,12 @@ pub fn select(
         ));
     }
     let mut skipped: Vec<SkippedProvider> = Vec::new();
-    let mut had_an_adapter = false;
 
     for provider in plan.candidates() {
         let Some(needed) = utilities_of(provider, config) else {
             skipped.push(no_adapter(provider, operation));
             continue;
         };
-        had_an_adapter = true;
         let mut located = Vec::with_capacity(needed.len());
         let mut not_ready = None;
         for utility in needed {
@@ -93,7 +94,7 @@ pub fn select(
         }
     }
 
-    let error = nobody_ready(&skipped, had_an_adapter);
+    let error = nobody_ready(config, &plan, &skipped);
     Err((error, plan.receipt_for_nobody(skipped)))
 }
 
@@ -116,13 +117,21 @@ pub(crate) fn no_adapter(provider: Provider, operation: Operation) -> SkippedPro
 }
 
 /// Отказ, когда не готов никто: перечень пропущенных с причинами. Род — среда, если хоть
-/// у кого-то адаптер был, иначе — возможность.
-pub(crate) fn nobody_ready(skipped: &[SkippedProvider], had_an_adapter: bool) -> AppError {
+/// у одного кандидата плана утилита в этой сборке есть, иначе — возможность.
+pub(crate) fn nobody_ready(
+    config: &AppConfig,
+    plan: &ProviderPlan,
+    skipped: &[SkippedProvider],
+) -> AppError {
     let reason = skipped
         .iter()
         .map(|entry| format!("{}: {}", entry.provider.as_str(), entry.reason))
         .collect::<Vec<_>>()
         .join("; ");
+    let had_an_adapter = plan
+        .candidates()
+        .into_iter()
+        .any(|provider| utilities_of(provider, config).is_some());
     if had_an_adapter {
         AppError::EnvironmentUnavailable(reason)
     } else {

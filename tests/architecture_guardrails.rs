@@ -1616,15 +1616,19 @@ fn the_loopback_question_is_answered_in_one_place() {
 }
 
 /// Значение реализованности или улики, названное в токенах кода: так выглядит строка
-/// матрицы, записанная мимо её владельца.
+/// матрицы, записанная мимо её владельца, — и сравнение с ней, с которого такая строка
+/// начинается. Glob-импорт вариантов (`Implementation::*`) ловится сам по себе: после него
+/// варианты в `match` называются голыми именами.
 const CAPABILITY_ROW_MARKERS: &[&str] = &[
     "Implementation::Implemented",
     "Implementation::Experimental",
     "Implementation::{",
+    "Implementation::*",
     "Evidence::Documented",
     "Evidence::ArgvTested",
     "Evidence::LiveVerified",
     "Evidence::{",
+    "Evidence::*",
 ];
 
 fn names_a_capability_row(production: &str) -> bool {
@@ -1669,6 +1673,48 @@ fn capability_rows_are_written_in_one_place() {
         "#,
     );
     assert!(names_a_capability_row(&second_matrix));
+
+    // Та же таблица на glob-импорте: в `match` варианты уже без имени типа.
+    let glob_matrix = production_tokens_of(
+        r#"
+        use crate::domain::capability::Implementation::*;
+
+        fn capability(intent: Intent) -> Implementation {
+            match intent {
+                Intent::Snapshot => Experimental,
+                _ => Implemented,
+            }
+        }
+        "#,
+    );
+    assert!(names_a_capability_row(&glob_matrix));
+    let glob_evidence = production_tokens_of(
+        r#"
+        use crate::domain::capability::Evidence::*;
+
+        fn proof(intent: Intent) -> Evidence {
+            match intent {
+                Intent::Snapshot => LiveVerified,
+                _ => Documented,
+            }
+        }
+        "#,
+    );
+    assert!(names_a_capability_row(&glob_evidence));
+
+    // Чтение ответа владельца — законный путь: страж его не задевает.
+    let reader = production_tokens_of(
+        r#"
+        use crate::domain::capability::{capabilities, capability_of, has_a_choice};
+
+        fn implements(operation: Operation, target: TargetKind, provider: Provider) -> bool {
+            has_a_choice(operation, target)
+                && capability_of(operation, target, provider).is_some()
+                && !capabilities(operation, target).is_empty()
+        }
+        "#,
+    );
+    assert!(!names_a_capability_row(&reader));
 }
 
 #[test]

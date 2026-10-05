@@ -7,6 +7,7 @@ use crate::config::model::{
     AppConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, ToolExtensionConfig,
     ToolExtensionInput, ToolExtensionSourceConfig, VanessaProfileConfig,
 };
+use crate::domain::capability::Operation;
 use crate::platform::connection::V8Connection;
 use crate::platform::locator::PlatformVersionRequirement;
 use crate::support::authority::{host_and_port_of_authority, host_of_authority};
@@ -406,7 +407,7 @@ fn validate_planned_work_path(config: &AppConfig) -> Result<(), ConfigValidation
 }
 
 fn validate_project_checks(config: &AppConfig) -> Result<(), ConfigValidationError> {
-    validate_providers(config)?;
+    validate_providers(config, &Operation::ALL)?;
     validate_source_sets(config)?;
     validate_connection_contract(config)?;
     validate_web_publication(config)?;
@@ -428,7 +429,7 @@ fn validate_project_checks(config: &AppConfig) -> Result<(), ConfigValidationErr
 pub fn validate_tools_download_bootstrap(config: &AppConfig) -> Result<(), ConfigValidationError> {
     validate_base_path(&config.base_path)?;
     validate_work_path(&config.work_path)?;
-    validate_providers(config)?;
+    validate_providers(config, &Operation::ALL)?;
     validate_connection_contract(config)?;
     validate_platform_version(config)?;
     validate_build_config(config)?;
@@ -466,12 +467,14 @@ pub fn validate_launch(config: &AppConfig) -> Result<(), ConfigValidationError> 
 /// Validate configuration for operations that read only the configured infobase.
 ///
 /// Source trees, build settings, test runners, EDT and client MCP tooling are not inputs to
-/// CF/CFE/DT export and must not block an infobase-only workspace.
+/// CF/CFE/DT export and must not block an infobase-only workspace. Of `providers.*` only the
+/// keys of the transfer family are checked: a key of another operation (say, `push`) is not
+/// an input here either, even when the selected infobase leaves that operation no choice.
 pub fn validate_infobase_export(config: &AppConfig) -> Result<(), ConfigValidationError> {
     validate_base_path(&config.base_path)?;
     // Export provider selection is intentionally side-effect free. workPath is
     // created only when the selected command acquires its workspace lock.
-    validate_providers(config)?;
+    validate_providers(config, &TRANSFER_OPERATIONS)?;
     validate_connection_contract(config)?;
     validate_platform_version(config)?;
     validate_mcp_admission_timeout(config)?;
@@ -1084,11 +1087,28 @@ fn validate_web_publication(config: &AppConfig) -> Result<(), ConfigValidationEr
 /// Переопределение провайдера принимается только там, где есть развилка, и только
 /// для исполнителя, который операцию реализует. Ключ для операции с одним исполнителем —
 /// ошибка, а не подтверждение очевидного.
-fn validate_providers(config: &AppConfig) -> Result<(), ConfigValidationError> {
+/// Операции семейства переноса: их ключи `providers.*` — единственные, что читают
+/// `download`, `infobase configuration export`, `infobase dump` и `infobase restore`.
+const TRANSFER_OPERATIONS: [Operation; 3] = [
+    Operation::ConfigurationExport,
+    Operation::InfobaseDump,
+    Operation::InfobaseRestore,
+];
+
+/// Ключи `providers.*` названных операций против матрицы цели выбранной базы. Ключи
+/// других операций команда не читает и здесь не проверяет.
+fn validate_providers(
+    config: &AppConfig,
+    operations: &[Operation],
+) -> Result<(), ConfigValidationError> {
     use crate::domain::capability::{capabilities, capability_of, has_a_choice};
 
     let target = config.target_kind();
-    for (operation, provider) in &config.providers {
+    let checked = config
+        .providers
+        .iter()
+        .filter(|(operation, _)| operations.contains(operation));
+    for (operation, provider) in checked {
         if !has_a_choice(*operation, target) {
             return Err(ConfigValidationError::ProviderKeyWithoutChoice {
                 operation: operation.as_str(),

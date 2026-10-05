@@ -231,8 +231,11 @@ fn a_foreign_download_provider_is_refused_like_push_before_the_platform_starts()
             "`{shown}` names the key and the executors that implement it: {message}"
         );
         assert!(
-            payload["data"]["provider"].is_null(),
-            "`{shown}`: selection must not begin: {payload}"
+            payload
+                .get("data")
+                .and_then(|data| data.get("provider"))
+                .is_none(),
+            "`{shown}`: selection must not begin, no provider receipt: {payload}"
         );
         messages.push(message);
     }
@@ -241,6 +244,65 @@ fn a_foreign_download_provider_is_refused_like_push_before_the_platform_starts()
         "every command answers one wrong key with one refusal: {messages:#?}"
     );
     assert!(!started.exists(), "no platform utility may start");
+}
+
+/// Семейство переноса читает только свои ключи `providers.*`: ключ сборки, у которой на
+/// автономном сервере выбора нет, не входит в настройки `download` и `infobase dump` и
+/// отказа по себе не даёт. Превью доходит до выбора исполнителя: `download` берёт шлюз,
+/// а снимку автономного сервера отказывает матрица, а не проверка настроек.
+#[test]
+fn a_foreign_operation_key_does_not_block_the_transfer_family() {
+    let dir = temp_workspace();
+    let config_path = write_project(dir.path(), "providers:\n  build: agent\n");
+    let exchange = dir.path().join("exchange");
+    fs::create_dir_all(&exchange).expect("exchange dir");
+    let yaml = fs::read_to_string(&config_path).expect("config");
+    let file_infobase = format!(
+        "infobase:\n  connection: 'File={}'\n",
+        dir.path().join("ib").display()
+    );
+    assert!(yaml.contains(&file_infobase), "{yaml}");
+    // Превью к шлюзу не подключается: порт закрыт, и дойти до него было бы ошибкой.
+    let standalone = format!(
+        "infobase:\n  user: agent\n  password: secret\n  standalone:\n    gate: 127.0.0.1:1\n    exchange:\n      dir: {}\n",
+        exchange.display()
+    );
+    fs::write(&config_path, yaml.replace(&file_infobase, &standalone)).expect("config");
+    let output = dir.path().join("out").join("main.cf");
+    let output = output.display().to_string();
+    let snapshot = dir.path().join("out").join("base.dt");
+    let snapshot = snapshot.display().to_string();
+
+    let download = [
+        "download",
+        "--state",
+        "working",
+        "--output",
+        &output,
+        "--dry-run",
+    ];
+    let (code, payload) = run(&config_path, &download);
+    assert_eq!(code, 0, "the build key does not block download: {payload}");
+    assert_eq!(
+        payload["data"]["provider"]["selected"], "agent",
+        "{payload}"
+    );
+    assert_eq!(payload["data"]["provider_dispatched"], false, "{payload}");
+
+    let dump = ["infobase", "dump", "--output", &snapshot, "--dry-run"];
+    let (code, payload) = run(&config_path, &dump);
+    assert_ne!(code, 0, "{payload}");
+    assert_eq!(
+        payload["error"]["code"], "capability_unavailable",
+        "the matrix refuses the snapshot, not the build key: {payload}"
+    );
+    assert!(
+        !payload["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("providers."),
+        "{payload}"
+    );
 }
 
 /// Публикация не входит ни в одну цепочку умолчаний: она меняет веб-сервер вне

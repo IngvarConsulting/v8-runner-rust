@@ -137,8 +137,11 @@ v8-runner infobase create
   of the command was cut short; `provider_command`, `run`, `apply`, `update_db_cfg`,
   `publication` — the executor's work was cut short or, with `deferred: true`, waited for.
 - A `providers.*` key naming an executor outside the matrix is refused at config load with
-  `invalid_argument` (exit 2, message lists the implemented executors) for every command,
-  `download` and `infobase *` included; fix the key, do not retry.
+  `invalid_argument` (exit 2, message lists the implemented executors); fix the key, do not
+  retry. `download`, `infobase configuration export`, `infobase dump` and `infobase restore`
+  check only their own keys (`download`, `infobase.dump`, `infobase.restore`), so a key of
+  another operation does not block them; `test --no-build` and `launch` check no key; every
+  other command that loads the project checks all keys.
 - For infobase export failures, distinguish `capability_unavailable` (no implemented adapter)
   from `environment_unavailable` (adapter exists, but binary/version/connection is not ready).
   Never retry another provider after the selected provider has been spawned.
