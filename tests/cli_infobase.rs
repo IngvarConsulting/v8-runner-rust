@@ -1757,6 +1757,43 @@ fn no_ready_provider_wins_over_workspace_contention_without_side_effects() {
     );
 }
 
+/// `infobase dump` без утилиты: род конверта `environment`, и код шага в
+/// `data.execution.errors[]` тот же — `environment_unavailable`, а не `platform_failure`.
+#[test]
+fn infobase_dump_without_its_utility_records_an_environment_step_code() {
+    let (dir, config, base, calls) = setup("DESIGNER");
+    fs::remove_file(dir.path().join("1cv8")).expect("remove designer");
+    let output = base.join("dist/main.dt");
+
+    let command = v8_runner_command()
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "--json-message",
+            "infobase",
+            "dump",
+            "--output",
+            &output.display().to_string(),
+        ])
+        .output()
+        .expect("run dump");
+
+    assert_eq!(command.status.code(), Some(2));
+    let envelope: Value = serde_json::from_slice(&command.stdout).expect("json envelope");
+    assert_eq!(envelope["error"]["code"], "environment_unavailable");
+    assert_eq!(envelope["error"]["kind"], "environment");
+    assert_eq!(
+        envelope["data"]["execution"]["status"], "failed",
+        "{envelope}"
+    );
+    assert_eq!(
+        envelope["data"]["execution"]["errors"][0]["code"], "environment_unavailable",
+        "{envelope}"
+    );
+    assert!(!calls.exists());
+    assert!(!output.exists());
+}
+
 /// Пакет конфигурации — не образ базы: `infobase dump --output main.cf` отказывает до
 /// платформы и называет `download`, которая такой файл и пишет.
 #[test]

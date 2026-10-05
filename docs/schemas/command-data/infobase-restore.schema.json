@@ -301,40 +301,12 @@
       ],
       "type": "string"
     },
-    "ExportTargetState": {
-      "description": "Observable state of the final output path after an export attempt.",
-      "enum": [
-        "unchanged",
-        "created",
-        "replaced",
-        "restored",
-        "uncertain"
-      ],
-      "type": "string"
-    },
-    "InfobaseExportArtifactKind": {
-      "description": "Closed file format vocabulary for information-base exports.\n\nThis type is deliberately namespaced: [`crate::domain::artifact::ArtifactKind`]\nclassifies retained execution artifacts and does not distinguish CF, CFE,\nand DT package formats.",
-      "enum": [
-        "cf",
-        "cfe",
-        "dt"
-      ],
-      "type": "string"
-    },
-    "InfobaseExportMode": {
-      "description": "Whether the command only proves its execution plan or applies it.",
-      "enum": [
-        "preview",
-        "apply"
-      ],
-      "type": "string"
-    },
     "InfobaseRestorePlan": {
       "additionalProperties": false,
       "description": "Compact machine-facing plan produced by a non-executing restore preflight.",
       "properties": {
         "artifact_kind": {
-          "$ref": "#/$defs/InfobaseExportArtifactKind"
+          "$ref": "#/$defs/TransferArtifactKind"
         },
         "input": {
           "type": "string"
@@ -371,6 +343,25 @@
           "type": "object"
         }
       ]
+    },
+    "InfobaseTargetState": {
+      "description": "Observable state of the transfer target after an attempt: the output file of an export\nor dump, the information base of a restore.",
+      "enum": [
+        "unchanged",
+        "created",
+        "replaced",
+        "restored",
+        "uncertain"
+      ],
+      "type": "string"
+    },
+    "InfobaseTransferMode": {
+      "description": "Whether the command only proves its execution plan or applies it.",
+      "enum": [
+        "preview",
+        "apply"
+      ],
+      "type": "string"
     },
     "Provider": {
       "description": "Исполнитель. Имя называет того, кто делает работу, а не способ его запуска.",
@@ -499,6 +490,15 @@
         "reason"
       ],
       "type": "object"
+    },
+    "TransferArtifactKind": {
+      "description": "Closed file format vocabulary for information-base transfers (export, dump, restore).\n\nThis type is deliberately namespaced: [`crate::domain::artifact::ArtifactKind`]\nclassifies retained execution artifacts and does not distinguish CF, CFE,\nand DT package formats.",
+      "enum": [
+        "cf",
+        "cfe",
+        "dt"
+      ],
+      "type": "string"
     }
   },
   "$id": "https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/command-data/infobase-restore.schema.json",
@@ -507,7 +507,7 @@
   "description": "Typed presentation data for an information-base restore.",
   "properties": {
     "artifact_kind": {
-      "$ref": "#/$defs/InfobaseExportArtifactKind"
+      "$ref": "#/$defs/TransferArtifactKind"
     },
     "execution": {
       "$ref": "#/$defs/ExecutionOutcome"
@@ -516,7 +516,7 @@
       "type": "string"
     },
     "mode": {
-      "$ref": "#/$defs/InfobaseExportMode"
+      "$ref": "#/$defs/InfobaseTransferMode"
     },
     "plan": {
       "anyOf": [
@@ -557,7 +557,7 @@
       "$ref": "#/$defs/RestoreTargetMode"
     },
     "target_state": {
-      "$ref": "#/$defs/ExportTargetState"
+      "$ref": "#/$defs/InfobaseTargetState"
     }
   },
   "required": [
