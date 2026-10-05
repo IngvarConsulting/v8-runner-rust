@@ -19,7 +19,7 @@ use crate::domain::infobase_export::{
 use crate::platform::designer::DesignerDsl;
 use crate::platform::ibcmd::{IbcmdConnection, IbcmdDsl};
 use crate::platform::locator::UtilityType;
-use crate::platform::process::{ProcessError, ProcessInterruptionReason};
+use crate::platform::process::ProcessError;
 use crate::platform::result::PlatformCommandResult;
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
@@ -34,8 +34,8 @@ use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
 
 use super::interruption::{
-    deferred_command_interruption_details, pending_interruption_error,
-    process_interruption_details, record_cancellation, record_deferral, CommandFailure,
+    deferred_command_interruption_details, pending_interruption_error, record_cancellation,
+    record_deferral, timed_out_record, CommandFailure,
 };
 use super::staged_publication::{
     cleanup_owned_orphan_files, interruption_before_publish, PublicationFailureState,
@@ -1112,12 +1112,7 @@ fn record_execution_failure(
     let mut interruption_details = None;
     let (status, code) = match process_error(error) {
         Some(ProcessError::TimedOut { .. }) => {
-            interruption_details = Some(process_interruption_details(
-                ProcessInterruptionReason::TimedOut,
-                phase.interruption_phase(),
-                false,
-                &message,
-            ));
+            interruption_details = Some(timed_out_record(phase.interruption_phase(), &message));
             (ExecutionStatus::TimedOut, "timed_out")
         }
         _ => match error {
@@ -1125,12 +1120,7 @@ fn record_execution_failure(
             // агентской сессии, у которого предел свой. Срок команды его дать не может,
             // поэтому улика записывается как процессная, а не командная.
             AppError::TimedOut(_) => {
-                interruption_details = Some(process_interruption_details(
-                    ProcessInterruptionReason::TimedOut,
-                    phase.interruption_phase(),
-                    false,
-                    &message,
-                ));
+                interruption_details = Some(timed_out_record(phase.interruption_phase(), &message));
                 (ExecutionStatus::TimedOut, "timed_out")
             }
             AppError::CapabilityUnavailable(_) => {

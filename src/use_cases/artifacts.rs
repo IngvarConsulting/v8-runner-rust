@@ -1890,6 +1890,18 @@ mod tests {
             interruption.phase,
             Some(ExecutionInterruptionPhase::ProviderCommand)
         );
+        assert!(!interruption.deferred);
+        let [error] = payload.execution.errors.as_slice() else {
+            panic!(
+                "a cut export is one cancelled error: {:?}",
+                payload.execution.errors
+            );
+        };
+        assert_eq!(error.code, "cancelled");
+        assert_eq!(
+            interruption.message.as_deref(),
+            Some(error.message.as_str())
+        );
     }
 
     #[test]

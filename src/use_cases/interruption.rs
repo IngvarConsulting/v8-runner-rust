@@ -68,6 +68,15 @@ impl SafePointCancel {
         }
     }
 
+    /// Новый итог исполнения, остановленный этой отменой: то же, что [`Self::record_into`]
+    /// у пустого итога.
+    #[must_use]
+    pub(crate) fn outcome<T>(&self) -> ExecutionOutcome<T> {
+        let mut execution = ExecutionOutcome::new(ExecutionStatus::Cancelled);
+        self.record_into(&mut execution);
+        execution
+    }
+
     pub(crate) fn into_error(self) -> AppError {
         AppError::Cancelled {
             message: self.message,
@@ -84,8 +93,11 @@ pub(crate) const CANCELLED_ERROR_CODE: &str = "cancelled";
 /// записи выбирает [`interruption_record`]: безопасная точка — `command_boundary`,
 /// оборванная работа — `work_phase`.
 ///
-/// Остановку отменой итог исполнения получает только отсюда, поэтому ни записи без ошибки,
-/// ни ошибки без записи ни одна форма не несёт.
+/// Остановку отменой итог исполнения получает только отсюда — сам, через
+/// [`cancelled_outcome`] или через [`SafePointCancel`], — поэтому ни записи без ошибки, ни
+/// ошибки без записи ни одна форма не несёт. Запись `cancelled` и ошибку с кодом
+/// [`CANCELLED_ERROR_CODE`] вне этого модуля не строят: это держит страж
+/// `tests/architecture_guardrails.rs::a_cancellation_stop_is_recorded_only_by_its_owner`.
 pub(crate) fn record_cancellation<T>(
     execution: &mut ExecutionOutcome<T>,
     at: CancelledAt,
@@ -100,6 +112,20 @@ pub(crate) fn record_cancellation<T>(
     execution
         .interruptions
         .push(interruption_record(at, work_phase, message));
+}
+
+/// Новый итог исполнения, остановленный отменой в `at`: всё, что ставит
+/// [`record_cancellation`], и ничего больше — диагностику и полезную нагрузку дописывает
+/// место вызова.
+#[must_use]
+pub(crate) fn cancelled_outcome<T>(
+    at: CancelledAt,
+    work_phase: ExecutionInterruptionPhase,
+    message: impl Into<String>,
+) -> ExecutionOutcome<T> {
+    let mut execution = ExecutionOutcome::new(ExecutionStatus::Cancelled);
+    record_cancellation(&mut execution, at, work_phase, message);
+    execution
 }
 
 /// Запись об отмене, остановившей команду в `at`. Безопасная точка — фаза
@@ -130,13 +156,24 @@ pub(crate) fn deferred_command_interruption_details(
     command_interruption_details_with_deferred(interruption, phase, true, message)
 }
 
-pub(crate) fn process_interruption_details(
-    interruption: ProcessInterruptionReason,
+/// Запись о сроке, истёкшем в фазе `phase`: процесс снят, отсрочки нет. Отмена такой
+/// записи не получает — её ставит только [`record_cancellation`], вместе с ошибкой.
+pub(crate) fn timed_out_record(
     phase: ExecutionInterruptionPhase,
-    deferred: bool,
     message: impl Into<String>,
 ) -> ExecutionInterruptionDetails {
-    ExecutionInterruptionDetails::new(process_interruption_kind(interruption), deferred)
+    ExecutionInterruptionDetails::new(ExecutionInterruptionKind::TimedOut, false)
+        .with_phase(phase)
+        .with_message(message)
+}
+
+/// Запись о прерывании, которое процесс отложил и пережил: отсрочка у неё всегда.
+fn deferred_process_record(
+    interruption: ProcessInterruptionReason,
+    phase: ExecutionInterruptionPhase,
+    message: impl Into<String>,
+) -> ExecutionInterruptionDetails {
+    ExecutionInterruptionDetails::new(process_interruption_kind(interruption), true)
         .with_phase(phase)
         .with_message(message)
 }
@@ -151,8 +188,7 @@ pub(crate) fn deferred_process_interruption(
 ) -> Option<(String, ExecutionInterruptionDetails)> {
     interruption.map(|interruption| {
         let warning = deferred_process_interruption_message(completed_action, interruption.reason);
-        let details =
-            process_interruption_details(interruption.reason, phase, true, warning.clone());
+        let details = deferred_process_record(interruption.reason, phase, warning.clone());
         (warning, details)
     })
 }
@@ -485,15 +521,17 @@ pub(crate) fn assert_stopped_at_a_safe_point<T: std::fmt::Debug>(execution: &Exe
 
 #[cfg(test)]
 mod tests {
-    use crate::domain::execution::{ExecutionInterruptionPhase, ExecutionStatus};
+    use crate::domain::execution::{
+        ExecutionInterruptionKind, ExecutionInterruptionPhase, ExecutionStatus,
+    };
     use crate::platform::process::ProcessInterruptionReason;
     use crate::support::error::CancelledAt;
     use crate::use_cases::context::{CommandName, ExecutionContext, ExecutionInterruption};
 
     use super::{
         append_warnings, collecting_deferrals, deferred_interruption_warning,
-        deferred_interruption_warning_for_command, prefix_warnings, process_interruption_details,
-        CommandFailure, SafePoint, SafePointCancel,
+        deferred_interruption_warning_for_command, deferred_process_record, prefix_warnings,
+        timed_out_record, CommandFailure, SafePoint, SafePointCancel,
     };
     use crate::domain::execution::ExecutionOutcome;
     use crate::platform::process::{ProcessInterruption, ProcessResult};
@@ -707,15 +745,24 @@ mod tests {
 
     #[test]
     fn process_details_preserve_deferred_flag() {
-        let details = process_interruption_details(
+        let details = deferred_process_record(
             ProcessInterruptionReason::Cancelled,
             ExecutionInterruptionPhase::Run,
-            true,
             "deferred",
         );
 
         assert!(details.deferred);
         assert_eq!(details.phase, Some(ExecutionInterruptionPhase::Run));
         assert_eq!(details.message.as_deref(), Some("deferred"));
+    }
+
+    #[test]
+    fn a_timed_out_record_is_neither_deferred_nor_a_cancellation() {
+        let details = timed_out_record(ExecutionInterruptionPhase::Run, "timed out");
+
+        assert_eq!(details.kind, ExecutionInterruptionKind::TimedOut);
+        assert!(!details.deferred);
+        assert_eq!(details.phase, Some(ExecutionInterruptionPhase::Run));
+        assert_eq!(details.message.as_deref(), Some("timed out"));
     }
 }

@@ -72,6 +72,7 @@ use crate::use_cases::extension_inventory;
 use crate::use_cases::extension_inventory::ExtensionChangeRequest;
 use crate::use_cases::infobase_export;
 use crate::use_cases::init_project;
+use crate::use_cases::interruption::{record_cancellation, CANCELLED_ERROR_CODE};
 use crate::use_cases::launch_app;
 use crate::use_cases::load_artifact;
 use crate::use_cases::request::{
@@ -1795,10 +1796,23 @@ fn failed_phase_step(phase: InfobaseTransferPhase, error: &UseCaseError) -> Step
     StepResult::failed(phase.as_str(), phase.kind(), 0).with_message(error.message().to_owned())
 }
 
-fn annotate_pre_dispatch_failure(execution: &mut ExecutionOutcome<()>, error: &UseCaseError) {
+/// Итог исполнения у отказа до работы исполнителя в фазе `phase`.
+///
+/// Отмены здесь сегодня не бывает: сюда приходят только отказы разбора запроса, загрузки
+/// настроек, набора исходников и границы `workPath` (замок и очистка журналов) — ни один
+/// из этих шагов не смотрит на сигнал отмены и не зовёт платформу. Если отмена всё же
+/// придёт, её статус, ошибку и запись ставит владелец, а не этот разбор.
+fn annotate_pre_dispatch_failure(
+    execution: &mut ExecutionOutcome<()>,
+    error: &UseCaseError,
+    phase: InfobaseTransferPhase,
+) {
+    if let Some(at) = error.cancellation() {
+        record_cancellation(execution, at, phase.interruption_phase(), error.message());
+        return;
+    }
     execution.status = match error.kind() {
         UseCaseErrorKind::InvalidOutput => ExecutionStatus::InvalidOutput,
-        UseCaseErrorKind::Cancelled(_) => ExecutionStatus::Cancelled,
         UseCaseErrorKind::TimedOut => ExecutionStatus::TimedOut,
         _ => ExecutionStatus::Failed,
     };
@@ -1819,7 +1833,7 @@ const fn execution_step_code(kind: UseCaseErrorKind) -> &'static str {
         UseCaseErrorKind::Environment => "environment_unavailable",
         UseCaseErrorKind::WorkspaceBusy => "workspace_busy",
         UseCaseErrorKind::InvalidOutput => "invalid_output",
-        UseCaseErrorKind::Cancelled(_) => "cancelled",
+        UseCaseErrorKind::Cancelled(_) => CANCELLED_ERROR_CODE,
         UseCaseErrorKind::TimedOut => "timed_out",
         UseCaseErrorKind::Validation => "invalid_argument",
         UseCaseErrorKind::Runtime => "runtime_failure",
@@ -1834,7 +1848,7 @@ fn configuration_pre_dispatch_failure(
     phase: InfobaseTransferPhase,
 ) -> ExportConfigurationPackageResult {
     let mut result = ExportConfigurationPackageResult::new(request.clone(), selection);
-    annotate_pre_dispatch_failure(&mut result.execution, error);
+    annotate_pre_dispatch_failure(&mut result.execution, error, phase);
     result.steps.push(failed_phase_step(phase, error));
     result
 }
@@ -1846,7 +1860,7 @@ fn snapshot_pre_dispatch_failure(
     phase: InfobaseTransferPhase,
 ) -> ExportInfobaseSnapshotResult {
     let mut result = ExportInfobaseSnapshotResult::new(request.clone(), selection);
-    annotate_pre_dispatch_failure(&mut result.execution, error);
+    annotate_pre_dispatch_failure(&mut result.execution, error, phase);
     result.steps.push(failed_phase_step(phase, error));
     result
 }
@@ -1858,7 +1872,7 @@ fn restore_pre_dispatch_failure(
     phase: InfobaseTransferPhase,
 ) -> RestoreInfobaseSnapshotResult {
     let mut result = RestoreInfobaseSnapshotResult::new(request.clone(), selection);
-    annotate_pre_dispatch_failure(&mut result.execution, error);
+    annotate_pre_dispatch_failure(&mut result.execution, error, phase);
     result.steps.push(failed_phase_step(phase, error));
     result
 }
@@ -5302,5 +5316,48 @@ mod tests {
         assert!(message.contains("load main.cf applied successfully after NotEstablished"));
         assert!(message.contains("deferred cancellation during apply"));
         assert!(message.contains("deferred timeout during update_db_cfg"));
+    }
+
+    /// Отказ до исполнителя, если в нём всё же окажется отмена, итог исполнения получает
+    /// через владельца: статус, ошибку `cancelled` и запись с тем же текстом.
+    #[test]
+    fn a_pre_dispatch_cancellation_is_recorded_by_the_owner() {
+        use crate::domain::execution::{
+            ExecutionInterruptionKind, ExecutionInterruptionPhase, ExecutionOutcome,
+            ExecutionStatus,
+        };
+        use crate::domain::infobase_export::InfobaseTransferPhase;
+        use crate::support::error::{AppError, CancelledAt};
+        use crate::use_cases::result::UseCaseError;
+
+        let error = UseCaseError::from(AppError::Cancelled {
+            message: "cancelled before the provider".to_owned(),
+            at: CancelledAt::Boundary,
+        });
+        let mut execution = ExecutionOutcome::<()>::new(ExecutionStatus::Failed);
+        super::annotate_pre_dispatch_failure(
+            &mut execution,
+            &error,
+            InfobaseTransferPhase::WorkspaceLock,
+        );
+
+        assert_eq!(execution.status, ExecutionStatus::Cancelled);
+        let [recorded] = execution.errors.as_slice() else {
+            panic!("one error expected: {:?}", execution.errors);
+        };
+        assert_eq!(recorded.code, "cancelled");
+        let [interruption] = execution.interruptions.as_slice() else {
+            panic!("one interruption expected: {:?}", execution.interruptions);
+        };
+        assert_eq!(interruption.kind, ExecutionInterruptionKind::Cancelled);
+        assert!(!interruption.deferred);
+        assert_eq!(
+            interruption.phase,
+            Some(ExecutionInterruptionPhase::CommandBoundary)
+        );
+        assert_eq!(
+            interruption.message.as_deref(),
+            Some(recorded.message.as_str())
+        );
     }
 }

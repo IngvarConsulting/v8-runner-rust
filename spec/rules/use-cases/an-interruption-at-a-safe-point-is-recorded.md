@@ -11,6 +11,8 @@ check:
   - src/use_cases/infobase_export.rs::cancelled_process_is_not_collapsed_into_generic_failure
   - src/use_cases/infobase_export.rs::provider_selection_observes_the_operators_interrupt
   - src/use_cases/infobase_export.rs::a_restore_cancelled_before_the_provider_stops_at_the_boundary
+  - tests/architecture_guardrails.rs::a_cancellation_stop_is_recorded_only_by_its_owner
+  - tests/architecture_guardrails.rs::the_cancellation_stop_guard_sees_every_bypass
 ---
 
 # Прерывание на безопасной точке записано
@@ -23,3 +25,7 @@ check:
 проверка команды между шагами или отказ до работы исполнителя: процесс не запущен, команда
 запроса не отправлена. Работы команды такое прерывание не обрывает, поэтому фазу работы
 запись не называет.
+
+Статус, ошибку и запись ставит один владелец — `use_cases::interruption`; вне него
+производственный код не строит ни запись `cancelled`, ни ошибку с кодом
+`cancelled`.
