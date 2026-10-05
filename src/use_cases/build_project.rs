@@ -1928,6 +1928,77 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn edt_source_set_named_tool_extensions_and_tool_extension_export_apart() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path().join("base");
+        let work = dir.path().join("work");
+        let platform = dir.path().join("platform").join("bin").join("1cv8");
+        let edt = dir.path().join("edt").join("1cedtcli");
+        let designer_calls = dir.path().join("designer.calls.log");
+        let edt_calls = dir.path().join("edt.calls.log");
+        let tool_source = base.join("tool-client-mcp");
+        create_source_tree(&base);
+        fs::create_dir_all(tool_source.join("DT-INF")).expect("tool dt-inf");
+        fs::create_dir_all(tool_source.join("src").join("Configuration")).expect("tool src");
+        fs::write(
+            tool_source.join(".project"),
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<projectDescription>\n  <name>client-mcp-project</name>\n  <natures>\n    <nature>com._1c.g5.v8.dt.core.V8ExtensionNature</nature>\n  </natures>\n</projectDescription>\n",
+        )
+        .expect("tool project");
+        fs::write(
+            tool_source.join("DT-INF").join("PROJECT.PMF"),
+            "Base-Project: main\nManifest-Version: 1.0\nRuntime-Version: 8.3.27\n",
+        )
+        .expect("tool manifest");
+        fs::write(
+            tool_source
+                .join("src")
+                .join("Configuration")
+                .join("Configuration.mdo"),
+            "<Configuration />\n",
+        )
+        .expect("tool mdo");
+        write_designer_script(&platform, &designer_calls, None);
+        write_edt_script(&edt, &edt_calls, None);
+        let mut config = build_edt_config(&base, &work, &dir.path().join("platform"), &edt);
+        config.source_sets = vec![SourceSetConfig {
+            name: "tool-extensions".to_owned(),
+            purpose: SourceSetPurpose::Configuration,
+            path: PathBuf::from("main"),
+        }];
+        config.tools.client_mcp.extension = Some(ToolExtensionConfig {
+            name: "client_mcp".to_owned(),
+            input: ToolExtensionInput::Source(ToolExtensionSourceConfig {
+                path: tool_source,
+                format: Some(SourceFormat::Edt),
+            }),
+        });
+
+        let result = run_build(&config, &build_args(true)).expect("build");
+
+        assert!(result.ok);
+        let source_set_export = work.join("designer").join("tool-extensions");
+        let tool_export = work.join("tool-extensions").join("client_mcp");
+        assert_eq!(
+            fs::read_to_string(source_set_export.join("exported.txt")).expect("set export"),
+            "exported from main\n"
+        );
+        assert_eq!(
+            fs::read_to_string(tool_export.join("exported.txt")).expect("tool export"),
+            "exported from client-mcp-project\n"
+        );
+        assert!(
+            !source_set_export.join("client_mcp").exists(),
+            "tool extension must not be exported into the source-set tree"
+        );
+        let edt_calls_text = fs::read_to_string(&edt_calls).expect("edt calls");
+        assert!(edt_calls_text.contains(&tool_export.display().to_string()));
+        let designer_calls_text = fs::read_to_string(&designer_calls).expect("designer calls");
+        assert!(designer_calls_text.contains(&tool_export.display().to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn build_skips_unchanged_edt_client_mcp_source_tool_extension() {
         let dir = tempdir().expect("tempdir");
         let base = dir.path().join("base");
