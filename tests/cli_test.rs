@@ -122,6 +122,8 @@ fn write_native_edt_project(
     .expect("module marker");
 }
 
+/// Поддельная Vanessa Automation. Каталог JUnit-отчёта она, как нынешняя Vanessa, берёт
+/// из вложенного `ОтчетJUnit.КаталогВыгрузкиJUnit`, а без него — из верхнего поля.
 fn write_va_test_script(
     path: &Path,
     calls_log: &Path,
@@ -130,7 +132,7 @@ fn write_va_test_script(
     exit_code: i32,
 ) {
     let body = format!(
-        "printf '%s\\n' \"$*\" >> '{}'\npayload=\"\"\nout=\"\"\nexecute=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/C\" ]; then payload=\"$arg\"; fi\n  case \"$arg\" in /C*) payload=\"${{arg#/C}}\" ;; esac\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"/Execute\" ]; then execute=\"$arg\"; fi\n  prev=\"$arg\"\ndone\ncfg=$(printf '%s' \"$payload\" | sed 's/^\"//; s/\"$//; s/^StartFeaturePlayer;VAParams=//')\ncp \"$cfg\" '{}'\nreport_dir=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    data = json.load(fh)\nprint(data['КаталогВыгрузкиJUnit'])\nPY\n)\ntext_log=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    data = json.load(fh)\nprint(data['ИмяФайлаЛогВыполненияСценариев'])\nPY\n)\nmkdir -p \"$report_dir\" \"$(dirname \"$out\")\" \"$(dirname \"$text_log\")\"\ncat <<'XML' > \"$report_dir/result.xml\"\n{}\nXML\nprintf 'va execute=%s\\n' \"$execute\" > \"$out\"\nprintf 'INFO ok\\nОшибка VA из текстового лога\\n' > \"$text_log\"\nexit {}",
+        "printf '%s\\n' \"$*\" >> '{}'\npayload=\"\"\nout=\"\"\nexecute=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"/C\" ]; then payload=\"$arg\"; fi\n  case \"$arg\" in /C*) payload=\"${{arg#/C}}\" ;; esac\n  if [ \"$prev\" = \"/Out\" ]; then out=\"$arg\"; fi\n  if [ \"$prev\" = \"/Execute\" ]; then execute=\"$arg\"; fi\n  prev=\"$arg\"\ndone\ncfg=$(printf '%s' \"$payload\" | sed 's/^\"//; s/\"$//; s/^StartFeaturePlayer;VAParams=//')\ncp \"$cfg\" '{}'\nreport_dir=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    data = json.load(fh)\nnested = data.get('ОтчетJUnit')\nif isinstance(nested, dict) and nested.get('КаталогВыгрузкиJUnit'):\n    print(nested['КаталогВыгрузкиJUnit'])\nelse:\n    print(data['КаталогВыгрузкиJUnit'])\nPY\n)\ntext_log=$(python3 - <<'PY' \"$cfg\"\nimport json, sys\nwith open(sys.argv[1], 'r', encoding='utf-8') as fh:\n    data = json.load(fh)\nprint(data['ИмяФайлаЛогВыполненияСценариев'])\nPY\n)\nmkdir -p \"$report_dir\" \"$(dirname \"$out\")\" \"$(dirname \"$text_log\")\"\ncat <<'XML' > \"$report_dir/result.xml\"\n{}\nXML\nprintf 'va execute=%s\\n' \"$execute\" > \"$out\"\nprintf 'INFO ok\\nОшибка VA из текстового лога\\n' > \"$text_log\"\nexit {}",
         calls_log.display(),
         captured_params.display(),
         report_xml,
@@ -1002,6 +1004,89 @@ fn test_va_builds_vanessa_command_and_overlay() {
     assert_eq!(
         payload["data"]["report"]["extracted_errors"][0],
         "Ошибка VA из текстового лога"
+    );
+}
+
+#[test]
+fn test_va_directs_nested_junit_directory_into_the_run() {
+    let (dir, config_path, _build_calls, _test_calls, captured_params) =
+        setup_va_project(JUNIT_SMOKE_REPORT_FIXTURE, &[]);
+    let template_junit_dir = dir.path().join("build").join("out").join("junit");
+    let template = serde_json::json!({
+        "existing": true,
+        "КаталогВыгрузкиJUnit": template_junit_dir.display().to_string(),
+        "ОтчетJUnit": {
+            "КаталогВыгрузкиJUnit": template_junit_dir.display().to_string(),
+            "ИмяФайлаОтчета": "keep-me",
+        },
+    });
+    fs::write(
+        dir.path().join("cfg").join("va-base.json"),
+        serde_json::to_vec_pretty(&template).expect("template json"),
+    )
+    .expect("params template");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "test",
+            "va",
+        ])
+        .output()
+        .expect("run");
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let params: Value =
+        serde_json::from_slice(&fs::read(captured_params).expect("params")).expect("params json");
+    let top_level = params["КаталогВыгрузкиJUnit"]
+        .as_str()
+        .expect("КаталогВыгрузкиJUnit");
+    assert!(top_level.ends_with("/junit"), "{top_level}");
+    assert_ne!(top_level, template_junit_dir.display().to_string());
+    assert_eq!(params["ОтчетJUnit"]["КаталогВыгрузкиJUnit"], top_level);
+    assert_eq!(params["ОтчетJUnit"]["ИмяФайлаОтчета"], "keep-me");
+    assert!(
+        !template_junit_dir.exists(),
+        "the report must not land in the template directory"
+    );
+
+    // Раннер ищет отчёт только в каталоге своего прогона: разобранный итог значит, что
+    // отчёт лёг туда, а не в каталог шаблона.
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["data"]["report"]["summary"]["total"], 1);
+}
+
+#[test]
+fn test_va_creates_the_nested_junit_directory_when_the_template_lacks_it() {
+    let (_dir, config_path, _build_calls, _test_calls, captured_params) =
+        setup_va_project(JUNIT_SMOKE_REPORT_FIXTURE, &[]);
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "test",
+            "va",
+        ])
+        .output()
+        .expect("run");
+
+    assert!(output.status.success());
+    let params: Value =
+        serde_json::from_slice(&fs::read(captured_params).expect("params")).expect("params json");
+    assert_eq!(
+        params["ОтчетJUnit"]["КаталогВыгрузкиJUnit"],
+        params["КаталогВыгрузкиJUnit"]
     );
 }
 
