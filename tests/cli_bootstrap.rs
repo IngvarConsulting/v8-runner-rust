@@ -536,6 +536,8 @@ fn clone_refuses_a_busy_workspace_before_writing_the_project() {
     let payload: Value = serde_json::from_slice(&output.stdout).expect("one json document");
     assert_eq!(payload["command"], "clone");
     assert_eq!(payload["error"]["code"], "workspace_busy");
+    assert_eq!(payload["error"]["kind"], "workspace");
+    assert_eq!(payload["steps"][0]["name"], "workspace lock");
     assert!(payload["error"]["message"]
         .as_str()
         .is_some_and(|message| message.contains("cannot start clone")));

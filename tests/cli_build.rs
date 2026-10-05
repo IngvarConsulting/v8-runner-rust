@@ -937,7 +937,7 @@ fn build_text_workspace_lock_conflict_prints_single_error() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let error_prefix = "runtime error: cannot start push";
+    let error_prefix = "workspace busy: cannot start push";
     let combined = format!("{stdout}{stderr}");
 
     assert_eq!(
@@ -946,7 +946,7 @@ fn build_text_workspace_lock_conflict_prints_single_error() {
         "stdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("ERROR: runtime error: cannot start push"),
+        stderr.contains("ERROR: workspace busy: cannot start push"),
         "stderr:\n{stderr}"
     );
     assert!(

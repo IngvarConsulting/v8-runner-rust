@@ -779,7 +779,7 @@ fn convert_unknown_source_set_json_keeps_convert_command_identity_before_workspa
 }
 
 #[test]
-fn convert_workspace_lock_conflict_uses_runtime_error_after_valid_preflight() {
+fn convert_workspace_lock_conflict_answers_workspace_busy_after_valid_preflight() {
     let (_dir, config_path, base_path, work_path, edt_cli_path, _calls_log) = setup_project();
     write_config(
         &config_path,
@@ -811,7 +811,7 @@ fn convert_workspace_lock_conflict_uses_runtime_error_after_valid_preflight() {
     assert_eq!(output.status.code(), Some(3));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("ERROR: runtime error: cannot start convert"),
+        stderr.contains("ERROR: workspace busy: cannot start convert"),
         "stderr:\n{stderr}"
     );
 }

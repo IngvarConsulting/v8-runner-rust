@@ -163,9 +163,9 @@ CLI help, доверяйте текущему коду и затем синхр�
 заполнятся `base_generation` и `local_generation`. Код `subject` таблица называет, но ни
 один отказ пока им не отвечает.
 
-Занятый рабочий каталог сегодня отвечает `workspace_busy` только у `download`,
-`infobase dump` и `clone`, а у `clone` — без шага `workspace lock`; остальные команды
-отвечают `runtime_failure` ([#295](https://github.com/IngvarConsulting/v8-runner-rust/issues/295)).
+Занятый рабочий каталог у любой команды командной строки отвечает `workspace_busy` на шаге
+`workspace lock`, одним конвертом. Инструменты MCP на том же отказе отвечают
+`runtime_failure`: словарь MCP уже.
 
 Отмена оператором — род `interruption` и код `cancelled` у любой команды, где бы её ни
 заметили: на безопасной точке, в снятом процессе, в брошенной команде агента или общей сессии
