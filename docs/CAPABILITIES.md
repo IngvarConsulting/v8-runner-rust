@@ -182,6 +182,10 @@ EDT, в прерванной загрузке `tools download`. Прежде т�
 не сигнал. Запись в базу отмену откладывает и доводится до конца, а ответ `upload`,
 `infobase restore`, `push`, `extensions` и `infobase create` называет отложенную отмену, чем
 бы команда ни кончилась: удачей, отказом или остановкой на следующей безопасной точке.
+В `test`, `upload`, `make`, `download`, `infobase dump` и `infobase restore` рядом с записью о
+прерывании `data.execution.errors[]` несёт ошибку с кодом `cancelled` и тем же текстом; прежде
+`upload` писал там `artifact_load_interrupted`, а `make` и `test` ошибки не писали
+([#319](https://github.com/IngvarConsulting/v8-runner-rust/issues/319)).
 Формы без итога исполнения прерывание по-прежнему называют своими словами: `check` пишет
 `tool_failed`, шаги `infobase create` и `push` — `failed`. Истёкший предел шага остаётся
 своим родом.

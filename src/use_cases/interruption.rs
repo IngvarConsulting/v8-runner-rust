@@ -1,6 +1,6 @@
 use crate::domain::execution::{
-    ExecutionInterruptionDetails, ExecutionInterruptionKind, ExecutionInterruptionPhase,
-    ExecutionOutcome, ExecutionStatus,
+    ExecutionError, ExecutionInterruptionDetails, ExecutionInterruptionKind,
+    ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus,
 };
 use crate::platform::process::{ProcessInterruption, ProcessInterruptionReason};
 use crate::platform::result::PlatformCommandResult;
@@ -55,19 +55,17 @@ impl SafePointCancel {
         &self.message
     }
 
-    pub(crate) fn status(&self) -> ExecutionStatus {
+    /// Отмена в итоге исполнения: безопасная точка, работа команды не оборвана. Статус,
+    /// ошибку и запись ставит [`record_cancellation`].
+    pub(crate) fn record_into<T>(&self, execution: &mut ExecutionOutcome<T>) {
         match self.interruption {
-            ExecutionInterruption::Cancelled => ExecutionStatus::Cancelled,
+            ExecutionInterruption::Cancelled => record_cancellation(
+                execution,
+                CancelledAt::Boundary,
+                ExecutionInterruptionPhase::CommandBoundary,
+                self.message.clone(),
+            ),
         }
-    }
-
-    /// Запись о прерывании: безопасная точка, работа команды не оборвана.
-    pub(crate) fn record(&self) -> ExecutionInterruptionDetails {
-        interruption_record(
-            CancelledAt::Boundary,
-            ExecutionInterruptionPhase::CommandBoundary,
-            self.message.clone(),
-        )
     }
 
     pub(crate) fn into_error(self) -> AppError {
@@ -78,22 +76,36 @@ impl SafePointCancel {
     }
 }
 
-/// Прерывание, которое принесла ошибка, как его пишет ответ. Ошибка не отмена — `None`:
-/// сигнал, пришедший во время чужого отказа, её не переписывает.
-pub(crate) fn cancellation_record(
-    error: &AppError,
+/// Код ошибки отмены в `execution.errors[]` — тот же, что код отмены в конверте.
+pub(crate) const CANCELLED_ERROR_CODE: &str = "cancelled";
+
+/// Отмена, остановившая команду в `at`, в итоге исполнения: статус `cancelled`, ошибка с
+/// кодом [`CANCELLED_ERROR_CODE`] и запись о прерывании — с одним текстом `message`. Фазу
+/// записи выбирает [`interruption_record`]: безопасная точка — `command_boundary`,
+/// оборванная работа — `work_phase`.
+///
+/// Остановку отменой итог исполнения получает только отсюда, поэтому ни записи без ошибки,
+/// ни ошибки без записи ни одна форма не несёт.
+pub(crate) fn record_cancellation<T>(
+    execution: &mut ExecutionOutcome<T>,
+    at: CancelledAt,
     work_phase: ExecutionInterruptionPhase,
     message: impl Into<String>,
-) -> Option<ExecutionInterruptionDetails> {
-    error
-        .cancellation()
-        .map(|at| interruption_record(at, work_phase, message))
+) {
+    let message = message.into();
+    execution.status = ExecutionStatus::Cancelled;
+    execution
+        .errors
+        .push(ExecutionError::new(CANCELLED_ERROR_CODE, message.clone()));
+    execution
+        .interruptions
+        .push(interruption_record(at, work_phase, message));
 }
 
 /// Запись об отмене, остановившей команду в `at`. Безопасная точка — фаза
 /// `command_boundary`, где бы её ни проверили; оборванная работа исполнителя — `work_phase`,
 /// фаза места вызова.
-pub(crate) fn interruption_record(
+fn interruption_record(
     at: CancelledAt,
     work_phase: ExecutionInterruptionPhase,
     message: impl Into<String>,
@@ -444,6 +456,34 @@ fn format_deferred_interruption_warning(
     }
 }
 
+/// Остановка на безопасной точке в итоге исполнения, как её пишет каждая форма: статус
+/// `cancelled`, единственная ошибка `cancelled` и последней — запись `command_boundary` без
+/// отсрочки с тем же текстом. Отложенная раньше отмена может идти перед ней.
+#[cfg(test)]
+#[track_caller]
+pub(crate) fn assert_stopped_at_a_safe_point<T: std::fmt::Debug>(execution: &ExecutionOutcome<T>) {
+    assert_eq!(
+        execution.status,
+        ExecutionStatus::Cancelled,
+        "{execution:?}"
+    );
+    let [error] = execution.errors.as_slice() else {
+        panic!("one error expected: {:?}", execution.errors);
+    };
+    assert_eq!(error.code, CANCELLED_ERROR_CODE, "{error:?}");
+    let record = execution
+        .interruptions
+        .last()
+        .expect("a stop at a safe point is recorded");
+    assert_eq!(record.kind, ExecutionInterruptionKind::Cancelled);
+    assert!(!record.deferred, "{record:?}");
+    assert_eq!(
+        record.phase,
+        Some(ExecutionInterruptionPhase::CommandBoundary)
+    );
+    assert_eq!(record.message.as_deref(), Some(error.message.as_str()));
+}
+
 #[cfg(test)]
 mod tests {
     use crate::domain::execution::{ExecutionInterruptionPhase, ExecutionStatus};
@@ -624,13 +664,22 @@ mod tests {
         ] {
             let cancel = SafePointCancel::noticed(&context, point).expect("pending cancel");
             assert!(cancel.message().ends_with(tail), "{}", cancel.message());
-            assert_eq!(cancel.status(), ExecutionStatus::Cancelled);
-            let record = cancel.record();
+            let mut execution = ExecutionOutcome::<()>::new(ExecutionStatus::Failed);
+            cancel.record_into(&mut execution);
+            assert_eq!(execution.status, ExecutionStatus::Cancelled);
+            let [record] = execution.interruptions.as_slice() else {
+                panic!("one interruption expected: {:?}", execution.interruptions);
+            };
             assert!(!record.deferred);
             assert_eq!(
                 record.phase,
                 Some(ExecutionInterruptionPhase::CommandBoundary)
             );
+            let [error] = execution.errors.as_slice() else {
+                panic!("one error expected: {:?}", execution.errors);
+            };
+            assert_eq!(error.code, "cancelled");
+            assert_eq!(error.message, cancel.message());
             assert_eq!(
                 cancel.into_error().cancellation(),
                 Some(CancelledAt::Boundary)

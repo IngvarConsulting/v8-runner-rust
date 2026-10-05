@@ -140,6 +140,8 @@ v8-runner infobase create
   interruption record's `phase` says where it stopped: `command_boundary` — a safe point, no work
   of the command was cut short; `provider_command`, `run`, `apply`, `update_db_cfg`,
   `publication` — the executor's work was cut short or, with `deferred: true`, waited for.
+  `test`, `upload`, `make`, `download`, `infobase dump` and `infobase restore` also put
+  `{code: "cancelled"}` in `execution.errors[]` next to that record.
 - A `providers.*` key naming an executor outside the matrix is refused at config load with
   `invalid_argument` (exit 2, message lists the implemented executors); fix the key, do not
   retry. `download`, `infobase configuration export`, `infobase dump` and `infobase restore`

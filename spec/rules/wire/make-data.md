@@ -1,10 +1,11 @@
 ---
 id: CTR.WIRE.MAKE-DATA
-version: 4
+version: 5
 artifact: docs/schemas/command-data/make.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/contract_command_data.rs::every_previewable_command_answers_in_the_form_declared_for_it
+  - src/use_cases/artifacts.rs::run_artifacts_honors_interruption_before_export_safe_point
   - src/use_cases/artifacts.rs::a_designer_export_cancelled_after_its_start_is_a_cut_provider_command
   - src/use_cases/artifacts.rs::an_unrelated_failure_while_an_interruption_is_pending_stays_a_failure
 ---
@@ -18,12 +19,15 @@ check:
 `published: false` при успешном исполнении означает превью: артефакт спланирован, но не
 выложен.
 
-**Что изменила версия 4.** Значение `export_or_publication` ушло из набора фаз
-`execution.interruptions[].phase`: прерывание называет, что прервано. Остановка на безопасной
-точке — перед экспортом или перед публикацией — даёт `command_boundary`, выгрузка, снятая после
-запуска Конфигуратора, — `provider_command`. Отказ, пришедший, когда прерывание уже запрошено,
+Прерывание называет, что прервано. Остановка на безопасной точке — перед экспортом или перед
+публикацией — даёт запись `command_boundary`, выгрузка, снятая после запуска Конфигуратора, —
+`provider_command`. Рядом с записью стоят `status: cancelled` и ошибка `cancelled` в
+`execution.errors[]` с тем же текстом. Отказ, пришедший, когда прерывание уже запрошено,
 остаётся отказом: `status: failed` и ошибка `designer_export_failed`, без записи о прерывании.
-Набор фаз общий для всех форм с итогом исполнения, и версию они сменили вместе.
+
+**Что изменила версия 5.** Отмена пишет в `execution.errors[]` ошибку с кодом `cancelled` —
+тем же, что отмена в конверте. Прежде `make` ограничивался диагностикой и записью о
+прерывании.
 
 ## Пример
 

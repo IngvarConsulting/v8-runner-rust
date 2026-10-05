@@ -34,8 +34,8 @@ use crate::use_cases::external_artifacts::{
     source_set_external_kind, ExternalArtifactDescriptor,
 };
 use crate::use_cases::interruption::{
-    cancellation_record, deferred_command_interruption_details,
-    deferred_interruption_warning_for_command, interruption_before_safe_point,
+    deferred_command_interruption_details, deferred_interruption_warning_for_command,
+    interruption_before_safe_point, record_cancellation,
 };
 use crate::use_cases::progress::log_live_stage;
 use crate::use_cases::request::{ArtifactsModeRequest, ArtifactsRequest};
@@ -320,7 +320,8 @@ fn run_artifacts_selected(
 }
 
 /// Отказ сборки артефакта формой команды. Отмену и её место называет ошибка: безопасная
-/// точка — `command_boundary`, снятый экспорт — `provider_command`. Отказ, пришедший, когда
+/// точка — `command_boundary`, снятый экспорт — `provider_command`; статус, ошибку
+/// `cancelled` и запись ставит `record_cancellation`. Отказ, пришедший, когда
 /// отмена уже ожидала, остаётся отказом со своим кодом: сигнал сюда не доходит вовсе.
 fn export_refusal(
     resolved: &ResolvedArtifactsTarget,
@@ -348,31 +349,27 @@ fn export_refusal(
         .get_by_role(ARTIFACT_ROLE_PLATFORM_LOG)
         .or_else(|| artifacts.get_by_role(ARTIFACT_ROLE_STAGE_FILE))
         .map(|path| ArtifactRef::new(ArtifactKind::Other("diagnostic".to_owned()), path));
-    let interruption = cancellation_record(
-        &error,
-        ExecutionInterruptionPhase::ProviderCommand,
-        message.clone(),
-    );
-    let status = if interruption.is_some() {
-        ExecutionStatus::Cancelled
-    } else {
-        ExecutionStatus::Failed
-    };
-    let execution = ExecutionOutcome::new(status)
+    let mut execution = ExecutionOutcome::new(ExecutionStatus::Failed)
         .with_artifacts(artifacts.clone())
         .with_payload(metadata);
-    let execution = match interruption {
-        Some(interruption) => execution
-            .with_diagnostics(vec![message.clone()])
-            .with_interruptions(vec![interruption]),
-        None => execution.with_errors(vec![ExecutionError {
+    match error.cancellation() {
+        Some(at) => {
+            execution.diagnostics.push(message.clone());
+            record_cancellation(
+                &mut execution,
+                at,
+                ExecutionInterruptionPhase::ProviderCommand,
+                message,
+            );
+        }
+        None => execution.errors.push(ExecutionError {
             code: "designer_export_failed".to_owned(),
-            message: message.clone(),
+            message,
             details: Vec::new(),
             artifact: artifact_for_error,
             retryable: false,
-        }]),
-    };
+        }),
+    }
     let payload = ArtifactsResult {
         provider: None,
         provider_dispatched: false,
@@ -1633,6 +1630,7 @@ mod tests {
             )
         );
         assert_eq!(payload.execution.status, ExecutionStatus::Cancelled);
+        crate::use_cases::interruption::assert_stopped_at_a_safe_point(&payload.execution);
         let [interruption] = payload.execution.interruptions.as_slice() else {
             panic!(
                 "one interruption expected: {:?}",

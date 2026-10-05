@@ -341,7 +341,7 @@ pub(super) fn run_tests(
             result
         }
         Err(error) => {
-            let (kind, app_error, interruption, status) = enterprise_error_kind(error);
+            let (kind, app_error, outcome) = enterprise_failure(error);
             let mut step = failed_step(
                 "run",
                 ExecutionStepKind::PlatformCommand,
@@ -349,20 +349,11 @@ pub(super) fn run_tests(
                 app_error.to_string(),
             )
             .with_target(artifacts.platform_log.display().to_string());
-            if let Some(kind) = kind.clone() {
+            if let Some(kind) = kind {
                 step = step.with_errors(vec![test_execution_error(kind, app_error.to_string())]);
             }
             steps.push(step);
             let retained_paths = retain_run_artifacts(config, &artifacts).ok();
-            let mut outcome =
-                ExecutionOutcome::new(status).with_diagnostics(vec![app_error.to_string()]);
-            if let Some(kind) = kind {
-                outcome =
-                    outcome.with_errors(vec![test_execution_error(kind, app_error.to_string())]);
-            }
-            if let Some(interruption) = interruption {
-                outcome = outcome.with_interruptions(vec![interruption]);
-            }
             let outcome = with_retained_artifacts(outcome, retained_paths);
             let result = make_test_result(
                 target,
