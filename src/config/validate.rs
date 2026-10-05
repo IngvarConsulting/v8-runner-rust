@@ -1496,10 +1496,8 @@ fn validate_tool_extension_edt_runtime_path(
                 config.work_path.display()
             ))
         })?;
-    let generated_path = work_path
-        .join("designer")
-        .join("tool-extensions")
-        .join(&extension.name);
+    let generated_path =
+        crate::support::temp::tool_extension_export_dir(&work_path, &extension.name);
     if paths_overlap(&source_path, &generated_path) {
         return Err(ConfigValidationError::ToolExtensionSourceLayoutInvalid(
             format!(
@@ -3427,11 +3425,7 @@ mod tests {
         let base = tempdir().expect("base");
         let work = tempdir().expect("work");
         let source_dir = base.path().join("src");
-        let tool_source = work
-            .path()
-            .join("designer")
-            .join("tool-extensions")
-            .join("client_mcp");
+        let tool_source = work.path().join("tool-extensions").join("client_mcp");
         write_native_edt_project(
             &source_dir,
             "main",
