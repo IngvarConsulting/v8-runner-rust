@@ -163,6 +163,12 @@ CLI help, доверяйте текущему коду и затем синхр�
 заполнятся `base_generation` и `local_generation`. Код `subject` таблица называет, но ни
 один отказ пока им не отвечает.
 
+Утилиты платформы или EDT нет в окружении либо найдена не та версия — род `environment`,
+код `environment_unavailable` и выход 2, найдена ли она цепочкой исполнителей или прямым
+поиском, как `1cedtcli` у `convert`. Прежде прямой поиск отвечал `platform_failure` с
+выходом 4; род `platform` теперь означает сбой самой платформы. У MCP такой отказ приходит
+как `runtime_failure`.
+
 Занятый рабочий каталог сегодня отвечает `workspace_busy` только у `download`,
 `infobase dump` и `clone`, а у `clone` — без шага `workspace lock`; остальные команды
 отвечают `runtime_failure` ([#295](https://github.com/IngvarConsulting/v8-runner-rust/issues/295)).
@@ -718,6 +724,13 @@ v8-runner upload <FILE> [--mode <load|combine>] [--settings <FILE>] [--extension
 - `not_established` не разрешает изменяющую операцию ни в одном режиме: ни
   загрузку, ни слияние. Сюда попадают отказ авторизации, недоступная ИБ и
   нечитаемый состав расширений — всё, что платформа сообщает ненулевым кодом.
+  Отказ несёт род `platform` (`platform_failure`, выход 4): запрос верен, не ответила
+  платформа. Прежде он отвечал `invalid_argument` с выходом 2.
+- Состав расширений спрашивают через `ibcmd`. Если `ibcmd` не найден или не той версии,
+  вопрос не задан: `compatibility_state=not_probed`, род `environment`
+  (`environment_unavailable`, выход 2). Неполная конфигурация подключения
+  (`infobase.dbms` у серверной базы) — род `validation` (`invalid_argument`, выход 2).
+  Изменений ни то, ни другое не разрешает.
 - `--mode combine` для конфигурации требует `--vendor-name <ИМЯ>`: без имени
   конфигурации поставщика платформа сравнение не выполняет, поэтому состояние
   остаётся `not_probed` и слияние отклоняется. `--mode load` имени не требует.
