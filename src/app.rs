@@ -312,8 +312,8 @@ fn load_cli_config(
         })
     ) {
         load_config_for_tools_download(config_path, workdir, &selector)
-    } else if execute::uses_infobase_export_config(&cli.command) {
-        load_config_for_infobase_export(config_path, workdir, &selector)
+    } else if let Some(operation) = execute::infobase_transfer_operation(&cli.command) {
+        load_config_for_infobase_export(config_path, workdir, &selector, operation)
     } else if matches!(&cli.command, Command::Test(args) if args.no_build) {
         load_config_for_prepared_test(config_path, workdir, &selector)
     } else if matches!(&cli.command, Command::Launch(_)) {

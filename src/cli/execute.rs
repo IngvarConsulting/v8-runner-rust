@@ -411,16 +411,24 @@ pub fn command_name(command: &Command) -> CommandName {
     }
 }
 
-pub fn uses_infobase_export_config(command: &Command) -> bool {
-    matches!(
-        command,
-        Command::Infobase(InfobaseArgs {
-            command: InfobaseCommand::Configuration(crate::cli::args::InfobaseConfigurationArgs {
+/// Операция семейства переноса, которую выполняет команда, или `None`, если команда
+/// не из этого семейства. По ней настройки проверяют ключ `providers.*` только этой
+/// операции.
+pub fn infobase_transfer_operation(
+    command: &Command,
+) -> Option<crate::domain::capability::Operation> {
+    use crate::domain::capability::Operation;
+    match command {
+        Command::Infobase(InfobaseArgs { command }) => match command {
+            InfobaseCommand::Configuration(crate::cli::args::InfobaseConfigurationArgs {
                 command: InfobaseConfigurationCommand::Export(_),
-            }) | InfobaseCommand::Dump(_)
-                | InfobaseCommand::Restore(_),
-        })
-    )
+            }) => Some(Operation::ConfigurationExport),
+            InfobaseCommand::Dump(_) => Some(Operation::InfobaseDump),
+            InfobaseCommand::Restore(_) => Some(Operation::InfobaseRestore),
+            InfobaseCommand::Create => None,
+        },
+        _ => None,
+    }
 }
 
 fn execute_tools(
