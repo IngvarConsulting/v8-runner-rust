@@ -1621,8 +1621,10 @@ mod tests {
         if std::env::args().any(|arg| arg == EXIT_ON_EOF_HELPER_ARG) {
             use std::io::{Read, Write};
 
+            // Подсказка узнаётся только с начала строки, а тестовый раннер уже напечатал
+            // «test … ... » без перевода строки.
             let mut out = std::io::stdout();
-            out.write_all(b"1C:EDT>")
+            out.write_all(b"\n1C:EDT>")
                 .and_then(|()| out.flush())
                 .expect("write the prompt");
             let _ = std::io::stdin().read_to_end(&mut Vec::new());
