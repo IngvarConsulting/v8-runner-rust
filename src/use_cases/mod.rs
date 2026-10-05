@@ -38,7 +38,7 @@ pub mod infobase_export;
 /// Init orchestration use case.
 pub mod init_project;
 /// Shared command interruption status, metadata and message vocabulary.
-mod interruption;
+pub(crate) mod interruption;
 /// Launch orchestration use case.
 pub mod launch_app;
 /// Shared launch key policy for Enterprise-backed use cases.

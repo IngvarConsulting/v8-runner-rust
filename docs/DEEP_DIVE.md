@@ -148,6 +148,9 @@ Interruption policy:
 - terminal cancellation и deferred interruption должны различаться;
 - отмена — род `interruption` у любой команды, и решает это сама ошибка, а не сигнал: отказ,
   пришедший при ожидающей отмене, остаётся отказом;
+- в формах с итогом исполнения `test`, `upload`, `make`, `download`, `infobase dump` и
+  `infobase restore` остановку отменой пишет один владелец (`record_cancellation`): статус
+  `cancelled`, ошибка `cancelled` и запись о прерывании с одним текстом;
 - critical publish/apply phases не hard-kill by default; запись в базу, и `/RestoreIB` тоже,
   дорабатывает до конца.
 

@@ -30,13 +30,13 @@ use crate::domain::convert::{ConvertDirection, ConvertResult, ConvertScope};
 use crate::domain::dump::{DumpMode, DumpResult};
 use crate::domain::execution::{
     ExecutionError, ExecutionInterruptionDetails, ExecutionInterruptionKind,
-    ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus, ExecutionStepStatus, StepResult,
+    ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStepStatus, StepResult,
 };
 use crate::domain::infobase_export::{
     ConfigurationState, ConfigurationSubject, ExportConfigurationPackageRequest,
     ExportConfigurationPackageResult, ExportInfobaseSnapshotRequest, ExportInfobaseSnapshotResult,
-    InfobaseExportArtifactKind, InfobaseTransferPhase, RestoreInfobaseSnapshotRequest,
-    RestoreInfobaseSnapshotResult, RestoreTargetMode,
+    InfobaseTransferPhase, RestoreInfobaseSnapshotRequest, RestoreInfobaseSnapshotResult,
+    RestoreTargetMode, TransferArtifactKind,
 };
 use crate::domain::init::{InitResult, InitStep, InitStepStatus};
 use crate::domain::issue::{Issue, IssueSeverity};
@@ -71,6 +71,7 @@ use crate::use_cases::extension_inventory;
 use crate::use_cases::extension_inventory::ExtensionChangeRequest;
 use crate::use_cases::infobase_export;
 use crate::use_cases::init_project;
+use crate::use_cases::interruption::record_cancellation;
 use crate::use_cases::launch_app;
 use crate::use_cases::load_artifact;
 use crate::use_cases::request::{
@@ -1378,7 +1379,7 @@ fn map_infobase_configuration_export_request(
         .extension()
         .and_then(|suffix| suffix.to_str())
         .is_some_and(|suffix| {
-            suffix.eq_ignore_ascii_case(InfobaseExportArtifactKind::Cfe.file_extension())
+            suffix.eq_ignore_ascii_case(TransferArtifactKind::Cfe.file_extension())
         });
     let extension = match args.set.as_deref() {
         Some(set) if names_an_extension_package => Some(set),
@@ -1794,36 +1795,26 @@ fn failed_phase_step(phase: InfobaseTransferPhase, error: &UseCaseError) -> Step
     StepResult::failed(phase.as_str(), phase.kind(), 0).with_message(error.message().to_owned())
 }
 
-fn annotate_pre_dispatch_failure(execution: &mut ExecutionOutcome<()>, error: &UseCaseError) {
-    execution.status = match error.kind() {
-        UseCaseErrorKind::InvalidOutput => ExecutionStatus::InvalidOutput,
-        UseCaseErrorKind::Cancelled(_) => ExecutionStatus::Cancelled,
-        UseCaseErrorKind::TimedOut => ExecutionStatus::TimedOut,
-        _ => ExecutionStatus::Failed,
-    };
+/// Итог исполнения у отказа до работы исполнителя в фазе `phase`.
+///
+/// Отмены здесь сегодня не бывает: сюда приходят только отказы разбора запроса, загрузки
+/// настроек, набора исходников и границы `workPath` (замок и очистка журналов) — ни один
+/// из этих шагов не смотрит на сигнал отмены и не зовёт платформу. Если отмена всё же
+/// придёт, её статус, ошибку и запись ставит владелец, а не этот разбор.
+fn annotate_pre_dispatch_failure(
+    execution: &mut ExecutionOutcome<()>,
+    error: &UseCaseError,
+    phase: InfobaseTransferPhase,
+) {
+    if let Some(at) = error.cancellation() {
+        record_cancellation(execution, at, phase.interruption_phase(), error.message());
+        return;
+    }
+    execution.status = error.kind().execution_status();
     execution.errors.push(ExecutionError::new(
-        execution_step_code(error.kind()),
+        error.kind().execution_step_code(),
         error.message(),
     ));
-}
-
-/// Код шага исполнителя: свой словарь, едущий внутри `data.execution.errors[]`.
-///
-/// Имена совпадают с кодами конверта, но поля разные, и различать их должен код, а не
-/// читатель: конверт стал точнее — у рода `capability` там четыре кода, — а шаг остаётся
-/// при прежнем словаре, потому что его читает другой потребитель.
-const fn execution_step_code(kind: UseCaseErrorKind) -> &'static str {
-    match kind {
-        UseCaseErrorKind::Capability(_) => "capability_unavailable",
-        UseCaseErrorKind::Environment => "environment_unavailable",
-        UseCaseErrorKind::WorkspaceBusy => "workspace_busy",
-        UseCaseErrorKind::InvalidOutput => "invalid_output",
-        UseCaseErrorKind::Cancelled(_) => "cancelled",
-        UseCaseErrorKind::TimedOut => "timed_out",
-        UseCaseErrorKind::Validation => "invalid_argument",
-        UseCaseErrorKind::Runtime => "runtime_failure",
-        UseCaseErrorKind::Platform => "platform_failure",
-    }
 }
 
 fn configuration_pre_dispatch_failure(
@@ -1833,7 +1824,7 @@ fn configuration_pre_dispatch_failure(
     phase: InfobaseTransferPhase,
 ) -> ExportConfigurationPackageResult {
     let mut result = ExportConfigurationPackageResult::new(request.clone(), selection);
-    annotate_pre_dispatch_failure(&mut result.execution, error);
+    annotate_pre_dispatch_failure(&mut result.execution, error, phase);
     result.steps.push(failed_phase_step(phase, error));
     result
 }
@@ -1845,7 +1836,7 @@ fn snapshot_pre_dispatch_failure(
     phase: InfobaseTransferPhase,
 ) -> ExportInfobaseSnapshotResult {
     let mut result = ExportInfobaseSnapshotResult::new(request.clone(), selection);
-    annotate_pre_dispatch_failure(&mut result.execution, error);
+    annotate_pre_dispatch_failure(&mut result.execution, error, phase);
     result.steps.push(failed_phase_step(phase, error));
     result
 }
@@ -1857,7 +1848,7 @@ fn restore_pre_dispatch_failure(
     phase: InfobaseTransferPhase,
 ) -> RestoreInfobaseSnapshotResult {
     let mut result = RestoreInfobaseSnapshotResult::new(request.clone(), selection);
-    annotate_pre_dispatch_failure(&mut result.execution, error);
+    annotate_pre_dispatch_failure(&mut result.execution, error, phase);
     result.steps.push(failed_phase_step(phase, error));
     result
 }
@@ -1935,7 +1926,7 @@ struct InfobaseExportText<'a> {
     applied: bool,
     target_state: &'a str,
     warnings: &'a [String],
-    mode: crate::domain::infobase_export::InfobaseExportMode,
+    mode: crate::domain::infobase_export::InfobaseTransferMode,
     provider_dispatched: Option<bool>,
 }
 
@@ -1957,7 +1948,7 @@ fn render_configuration_export_text(
             provider: result.provider.as_ref(),
             applied_label: "published",
             applied: result.published,
-            target_state: export_target_state_label(result.target_state),
+            target_state: target_state_label(result.target_state),
             warnings: &result.warnings,
             mode: result.mode,
             provider_dispatched: result.provider_dispatched,
@@ -1984,7 +1975,7 @@ fn render_snapshot_export_text(
             provider: result.provider.as_ref(),
             applied_label: "published",
             applied: result.published,
-            target_state: export_target_state_label(result.target_state),
+            target_state: target_state_label(result.target_state),
             warnings: &result.warnings,
             mode: result.mode,
             provider_dispatched: result.provider_dispatched,
@@ -2011,7 +2002,7 @@ fn render_restore_text(
             provider: result.provider.as_ref(),
             applied_label: "restored",
             applied: result.restored,
-            target_state: export_target_state_label(result.target_state),
+            target_state: target_state_label(result.target_state),
             warnings: &result.warnings,
             mode: result.mode,
             provider_dispatched: result.provider_dispatched,
@@ -2039,7 +2030,7 @@ fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Present
         provider_dispatched,
     } = view;
     let status = if applied
-        || (mode == crate::domain::infobase_export::InfobaseExportMode::Preview
+        || (mode == crate::domain::infobase_export::InfobaseTransferMode::Preview
             && execution_status == "succeeded")
     {
         TimelineStatus::Succeeded
@@ -2061,8 +2052,8 @@ fn render_infobase_export_text(view: InfobaseExportText<'_>, presenter: &Present
         format!(
             "mode: {}",
             match mode {
-                crate::domain::infobase_export::InfobaseExportMode::Preview => "preview",
-                crate::domain::infobase_export::InfobaseExportMode::Apply => "apply",
+                crate::domain::infobase_export::InfobaseTransferMode::Preview => "preview",
+                crate::domain::infobase_export::InfobaseTransferMode::Apply => "apply",
             }
         ),
         format!("subject: {subject}"),
@@ -2124,16 +2115,14 @@ fn provider_origin_label(origin: &crate::domain::capability::ProviderOrigin) -> 
     }
 }
 
-fn export_target_state_label(
-    state: crate::domain::infobase_export::ExportTargetState,
-) -> &'static str {
-    use crate::domain::infobase_export::ExportTargetState;
+fn target_state_label(state: crate::domain::infobase_export::InfobaseTargetState) -> &'static str {
+    use crate::domain::infobase_export::InfobaseTargetState;
     match state {
-        ExportTargetState::Unchanged => "unchanged",
-        ExportTargetState::Created => "created",
-        ExportTargetState::Replaced => "replaced",
-        ExportTargetState::Restored => "restored",
-        ExportTargetState::Uncertain => "uncertain",
+        InfobaseTargetState::Unchanged => "unchanged",
+        InfobaseTargetState::Created => "created",
+        InfobaseTargetState::Replaced => "replaced",
+        InfobaseTargetState::Restored => "restored",
+        InfobaseTargetState::Uncertain => "uncertain",
     }
 }
 
@@ -5415,5 +5404,48 @@ mod tests {
         assert!(message.contains("load main.cf applied successfully after NotEstablished"));
         assert!(message.contains("deferred cancellation during apply"));
         assert!(message.contains("deferred timeout during update_db_cfg"));
+    }
+
+    /// Отказ до исполнителя, если в нём всё же окажется отмена, итог исполнения получает
+    /// через владельца: статус, ошибку `cancelled` и запись с тем же текстом.
+    #[test]
+    fn a_pre_dispatch_cancellation_is_recorded_by_the_owner() {
+        use crate::domain::execution::{
+            ExecutionInterruptionKind, ExecutionInterruptionPhase, ExecutionOutcome,
+            ExecutionStatus,
+        };
+        use crate::domain::infobase_export::InfobaseTransferPhase;
+        use crate::support::error::{AppError, CancelledAt};
+        use crate::use_cases::result::UseCaseError;
+
+        let error = UseCaseError::from(AppError::Cancelled {
+            message: "cancelled before the provider".to_owned(),
+            at: CancelledAt::Boundary,
+        });
+        let mut execution = ExecutionOutcome::<()>::new(ExecutionStatus::Failed);
+        super::annotate_pre_dispatch_failure(
+            &mut execution,
+            &error,
+            InfobaseTransferPhase::WorkspaceLock,
+        );
+
+        assert_eq!(execution.status, ExecutionStatus::Cancelled);
+        let [recorded] = execution.errors.as_slice() else {
+            panic!("one error expected: {:?}", execution.errors);
+        };
+        assert_eq!(recorded.code, "cancelled");
+        let [interruption] = execution.interruptions.as_slice() else {
+            panic!("one interruption expected: {:?}", execution.interruptions);
+        };
+        assert_eq!(interruption.kind, ExecutionInterruptionKind::Cancelled);
+        assert!(!interruption.deferred);
+        assert_eq!(
+            interruption.phase,
+            Some(ExecutionInterruptionPhase::CommandBoundary)
+        );
+        assert_eq!(
+            interruption.message.as_deref(),
+            Some(recorded.message.as_str())
+        );
     }
 }

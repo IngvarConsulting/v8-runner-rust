@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.INFOBASE-RESTORE-DATA
-version: 5
+version: 6
 artifact: docs/schemas/command-data/infobase-restore.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -15,13 +15,20 @@ check:
 (создать или заместить), `restored` — сделано ли. `target_state` остаётся `unchanged`,
 пока платформа не отработала: превью цель не трогает.
 
-**Что изменила версия 5.** Значение `export_or_publication` ушло из общего набора фаз; эта
-форма его не давала. Каждая остановка на безопасной точке теперь пишет прерывание: статус
-`cancelled` и запись с фазой `command_boundary`, а не `failed` без записи. Процесс, которому
-отмена не дала запуститься, тоже называется `command_boundary`, а не `provider_command`:
-работы он не получил. Отказ исполнителя, так и не получившего работу, базу не трогал:
+Отказ исполнителя, так и не получившего работу, базу не трогал:
 `target_state` остаётся `unchanged`, и предупреждения о неудавшемся откате в ответе нет.
-Имена шагов в `steps[]` прежние.
+
+**Что изменила версия 6.** Значения на проводе прежние; изменились имена типов в схеме и
+код шага у недостающей утилиты. Типы, общие для выгрузки, снимка и подъёма базы, названы без
+слова «export», которое врало подъёму: `$defs.ExportTargetState` стал
+`$defs.InfobaseTargetState`, `$defs.InfobaseExportMode` — `$defs.InfobaseTransferMode`,
+`$defs.InfobaseExportArtifactKind` — `$defs.TransferArtifactKind`; ссылки `$ref` и описания
+этих типов следуют за ними. Код шага в `execution.errors[]` выводится из того же рода
+отказа, что и род конверта, а не из своего отображения ошибок. Утилита, которой нет, или не
+той версии, или с нечитаемой версией, пишет там `environment_unavailable`, как и род
+`environment` конверта; прежнее отображение давало `platform_failure` всякому такому отказу,
+дошедшему до шага после выбора исполнителя. Выбор, не нашедший готового исполнителя, и прежде
+писал `environment_unavailable`. Прочие коды шага прежние.
 
 ## Пример
 

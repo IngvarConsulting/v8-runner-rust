@@ -35,7 +35,7 @@ mod helpers;
 
 use self::helpers::{
     build_enterprise_dsl, build_platform_launch, build_summary, collect_diagnostics, degraded_step,
-    enterprise_error_kind, failed_step, interrupted_test_failure, make_test_result,
+    enterprise_failure, failed_step, interrupted_test_failure, make_test_result,
     prepare_runner_artifacts, prepared_run_summary, skipped_step, succeeded_step,
     validate_runner_profile_id, validate_target, with_retained_artifacts,
 };
@@ -813,7 +813,7 @@ mod tests {
             payload.execution.interruptions[0].phase,
             Some(crate::domain::execution::ExecutionInterruptionPhase::CommandBoundary)
         );
-        assert!(payload.execution.errors.is_empty());
+        crate::use_cases::interruption::assert_stopped_at_a_safe_point(&payload.execution);
     }
 
     fn create_artifacts(root: &std::path::Path) -> RunArtifacts {

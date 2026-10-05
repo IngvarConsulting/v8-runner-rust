@@ -1,12 +1,13 @@
 ---
 id: CTR.WIRE.TEST-DATA
-version: 3
+version: 4
 artifact: docs/schemas/command-data/test.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
   - tests/cli_test.rs::test_all_full_json_runs_build_first_and_returns_report
   - src/use_cases/run_tests/helpers.rs::a_build_prerequisite_stopped_by_a_cancellation_is_an_interruption
   - src/use_cases/run_tests/helpers.rs::a_cancelled_run_is_classified_by_where_it_stopped
+  - src/use_cases/run_tests.rs::run_tests_reports_cancelled_execution_before_first_safe_point
 ---
 
 # `data` команды `test`
@@ -18,12 +19,17 @@ check:
 Живой проверки у формы пока нет: прогон требует настоящей платформы и установленного
 YaXUnit. Форму держит сверка с типом, который её сериализует.
 
-**Что изменила версия 3.** Значение `export_or_publication` ушло из общего набора фаз;
-`test` его не давал. Сборка-предпосылка, остановленная отменой, отвечает прерыванием, а не
-отказом сборки: `status: cancelled` без ошибки `build_failed` и запись с фазой
-`command_boundary`, если сборку остановила безопасная точка, или `provider_command`, если снят
-её исполнитель. Прогон, который отмена не дала запустить, называется `command_boundary`, а не
-`run`: `run` — только прогон, снятый после запуска.
+Отмена отвечает `status: cancelled`, записью о прерывании и ошибкой `cancelled` в
+`execution.errors[]` с тем же текстом; `error_kind` ответа пуст, потому что отмена не вид
+ошибки теста. Сборка-предпосылка, остановленная отменой, отвечает прерыванием, а не отказом
+сборки: без ошибки `build_failed`, с записью фазы `command_boundary`, если сборку остановила
+безопасная точка, или `provider_command`, если снят её исполнитель. Прогон, который отмена не
+дала запустить, называется `command_boundary`, а не `run`: `run` — только прогон, снятый после
+запуска.
+
+**Что изменила версия 4.** Отмена пишет в `execution.errors[]` ошибку с кодом `cancelled` —
+тем же, что отмена в конверте. Прежде `test` ограничивался диагностикой и записью о
+прерывании.
 
 ## Пример
 

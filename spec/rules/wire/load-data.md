@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.LOAD-DATA
-version: 4
+version: 5
 artifact: docs/schemas/command-data/upload.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -35,14 +35,17 @@ check:
 `command_boundary`. Если отмену до этого отложила загрузка, её запись `apply` с
 `deferred: true` идёт перед `command_boundary`.
 
-**Что изменила версия 4.** Значение `export_or_publication` ушло из общего набора фаз;
-`upload` его не давал. Проба совместимости, снятая отменой после запуска, отвечает
-`status: cancelled` с записью фазы `provider_command` и `compatibility_state: not_established`:
-вопрос задан, ответа нет. Прежде такая проба отвечала `failed` с `not_probed`, а проба
-расширения — отказом проверки. `not_established` теперь и у всякой другой пробы, которая
-запустилась и ответа не дала. Загрузка или `/UpdateDBCfg`, пережившие отложенную отмену и
-потом не удавшиеся, остаются отказом, но отложенную отмену называют: её запись с
-`deferred: true` и предупреждение идут первыми.
+Отмена отвечает `status: cancelled`, записью о прерывании и ошибкой `cancelled` в
+`execution.errors[]` с тем же текстом. Проба совместимости, снятая отменой после запуска,
+даёт запись фазы `provider_command` и `compatibility_state: not_established`: вопрос задан,
+ответа нет; `not_established` и у всякой другой пробы, которая запустилась и ответа не дала.
+Загрузка или `/UpdateDBCfg`, пережившие отложенную отмену и потом не удавшиеся, остаются
+отказом, но отложенную отмену называют: её запись с `deferred: true` и предупреждение идут
+первыми.
+
+**Что изменила версия 5.** Ошибка отмены в `execution.errors[]` называется `cancelled` —
+тем же кодом, что отмена в конверте и в формах `download`, `infobase dump` и
+`infobase restore`. Прежде `upload` писал `artifact_load_interrupted`.
 
 ## Пример
 

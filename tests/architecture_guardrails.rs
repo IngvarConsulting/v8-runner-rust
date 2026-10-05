@@ -321,6 +321,10 @@ const UNLOCKED_SCENARIOS: &[(&str, &str)] = &[
         "crate::use_cases::request::effective_test_timeouts",
         "чистая функция над запросом",
     ),
+    (
+        "crate::use_cases::interruption::record_cancellation",
+        "чистая запись отмены в итог отказа до исполнителя; в `workPath` ничего",
+    ),
 ];
 
 /// Подключение `ibcmd` — а с ним требование секции `infobase.dbms` — строится только
@@ -4808,6 +4812,321 @@ fn the_cancellation_guard_sees_every_bypass() {
             || line.contains("AppError::cancellation")),
         "the guard flags a legitimate place: {found:?}"
     );
+}
+
+/// Хвосты путей, по которым страж узнаёт остановку отменой: запись `cancelled` и ошибку.
+const CANCELLED_RECORD: &[&str] = &["ExecutionInterruptionKind", "Cancelled"];
+const EXECUTION_ERROR_NEW: &[&str] = &["ExecutionError", "new"];
+const CANCELLED_ERROR_CODE: &str = "CANCELLED_ERROR_CODE";
+
+fn path_ends_with(path: &[String], tail: &[&str]) -> bool {
+    path.len() >= tail.len()
+        && path[path.len() - tail.len()..]
+            .iter()
+            .zip(tail)
+            .all(|(segment, expected)| segment == expected)
+}
+
+/// Код ошибки — `"cancelled"` или константа владельца, как бы его ни превращали в строку:
+/// `.to_owned()`, `.into()`, `String::from(..)`, ссылка, скобки.
+fn is_cancelled_code(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(literal),
+            ..
+        }) => literal.value() == "cancelled",
+        syn::Expr::Path(path) => path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == CANCELLED_ERROR_CODE),
+        syn::Expr::MethodCall(call) => is_cancelled_code(&call.receiver),
+        syn::Expr::Call(call) => call.args.first().is_some_and(is_cancelled_code),
+        syn::Expr::Reference(reference) => is_cancelled_code(&reference.expr),
+        syn::Expr::Paren(paren) => is_cancelled_code(&paren.expr),
+        syn::Expr::Group(group) => is_cancelled_code(&group.expr),
+        _ => false,
+    }
+}
+
+/// Места производственного кода вне `use_cases::interruption`, где остановку отменой
+/// записывают в итог исполнения в обход владельца: строят запись
+/// `ExecutionInterruptionKind::Cancelled` или ошибку с кодом `cancelled`. Образец — чтение
+/// записи в `match` или `matches!` — не построение и не считается.
+fn cancellation_stop_bypasses(index: &SourceIndex) -> Vec<String> {
+    struct Scan<'a, 'b> {
+        index: &'a SourceIndex,
+        body: &'a Body<'b>,
+        local_uses: std::collections::HashMap<String, Vec<String>>,
+        found: Vec<String>,
+    }
+
+    impl Scan<'_, '_> {
+        fn note(&mut self, what: impl std::fmt::Display) {
+            self.found.push(format!(
+                "{} ({}): {what}",
+                self.body.unit.file.display(),
+                self.body.context
+            ));
+        }
+
+        /// Полные пути выражения: через `use`, `Self` и звёздочки модуля; неразрешённый —
+        /// как написан.
+        fn paths(&self, path: &syn::Path) -> Vec<Vec<String>> {
+            let written = path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            let mut paths = vec![self
+                .index
+                .resolve(&self.body.module, &self.local_uses, path)
+                .unwrap_or_else(|| written.clone())];
+            if let [name] = written.as_slice() {
+                paths.extend(
+                    self.body
+                        .globs
+                        .iter()
+                        .map(|glob| [glob.as_slice(), std::slice::from_ref(name)].concat()),
+                );
+            }
+            paths
+        }
+
+        fn names(&self, path: &syn::Path, tail: &[&str]) -> bool {
+            self.paths(path)
+                .iter()
+                .any(|full| path_ends_with(full, tail))
+        }
+
+        /// Тело макроса, которое не разбирается как выражения, проверяется по словам.
+        fn scan_tokens(&mut self, tokens: &impl std::fmt::Display) {
+            let text = tokens.to_string().replace(' ', "");
+            if text.contains("ExecutionInterruptionKind::Cancelled") {
+                self.note("builds ExecutionInterruptionKind::Cancelled in a macro");
+            }
+            if text.contains(CANCELLED_ERROR_CODE) {
+                self.note("names CANCELLED_ERROR_CODE in a macro");
+            }
+        }
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for Scan<'_, '_> {
+        /// Образец читает запись, а не строит её.
+        fn visit_pat(&mut self, _node: &'ast syn::Pat) {}
+
+        fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+            if self.names(&node.path, CANCELLED_RECORD) {
+                self.note("builds ExecutionInterruptionKind::Cancelled");
+            }
+            syn::visit::visit_expr_path(self, node);
+        }
+
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(function) = node.func.as_ref() {
+                if self.names(&function.path, EXECUTION_ERROR_NEW)
+                    && node.args.first().is_some_and(is_cancelled_code)
+                {
+                    self.note("builds an ExecutionError with the cancelled code");
+                }
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+
+        fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+            let builds_the_error = self.names(&node.path, &EXECUTION_ERROR_NEW[..1])
+                && node.fields.iter().any(|field| {
+                    matches!(&field.member, syn::Member::Named(name) if name == "code")
+                        && is_cancelled_code(&field.expr)
+                });
+            if builds_the_error {
+                self.note("builds an ExecutionError with the cancelled code");
+            }
+            syn::visit::visit_expr_struct(self, node);
+        }
+
+        /// `matches!` — образец; тело прочих макросов — выражения через запятую, а что так
+        /// не разбирается, проверяется по словам.
+        fn visit_macro(&mut self, node: &'ast syn::Macro) {
+            if node
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "matches")
+            {
+                return;
+            }
+            let parsed = node.parse_body_with(
+                syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated,
+            );
+            match parsed {
+                Ok(exprs) => {
+                    for expr in &exprs {
+                        syn::visit::Visit::visit_expr(self, expr);
+                    }
+                }
+                Err(_) => self.scan_tokens(&node.tokens),
+            }
+        }
+    }
+
+    let owner = path_of("crate::use_cases::interruption");
+    let mut found = Vec::new();
+    for body in production_bodies(index) {
+        if body.module == owner {
+            continue;
+        }
+        let mut scan = Scan {
+            index,
+            body: &body,
+            local_uses: body.local_uses(index),
+            found: Vec::new(),
+        };
+        syn::visit::Visit::visit_block(&mut scan, body.block);
+        found.extend(scan.found);
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// Остановку отменой в итоге исполнения ставит один владелец —
+/// `use_cases::interruption::record_cancellation` (#319). Корень прежней ошибки: формы
+/// собирали статус `cancelled` и запись о прерывании каждая сама, и одни забывали ошибку
+/// `cancelled`, а другие писали свой код. Страж ловит возвращение под любым именем: вне
+/// владельца производственный код не строит запись `ExecutionInterruptionKind::Cancelled` и
+/// ошибку с кодом `cancelled` — ни литералом, ни константой, ни в макросе. Отложенную отмену
+/// пишет тот же модуль, истёкший срок — `timed_out_record`.
+///
+/// Чего страж не видит: код, пришедший в `ExecutionError::new` через переменную или
+/// функцию, — как `UseCaseErrorKind::execution_step_code`, — поэтому такой разбор сначала отдаёт
+/// отмену владельцу.
+#[test]
+fn a_cancellation_stop_is_recorded_only_by_its_owner() {
+    let bypasses = cancellation_stop_bypasses(&SourceIndex::of_src());
+    assert!(
+        bypasses.is_empty(),
+        "a cancellation stop is recorded around its owner; call \
+         `crate::use_cases::interruption::record_cancellation` (or `cancelled_outcome`, \
+         `SafePointCancel::record_into`):\n{}",
+        bypasses.join("\n")
+    );
+}
+
+/// Страж видит построение в каждом виде и не видит чтения, чужого кода, владельца и тестов.
+#[test]
+fn the_cancellation_stop_guard_sees_every_bypass() {
+    let index = SourceIndex::from_sources(&[
+        (
+            "crate::use_cases::sample",
+            "use crate::domain::execution::{\n\
+                 ExecutionError, ExecutionInterruptionDetails, ExecutionInterruptionKind,\n\
+             };\n\
+             use crate::use_cases::interruption::CANCELLED_ERROR_CODE;\n\
+             fn by_record() -> ExecutionInterruptionDetails {\n\
+                 ExecutionInterruptionDetails::new(ExecutionInterruptionKind::Cancelled, false)\n\
+             }\n\
+             fn by_qualified() -> ExecutionInterruptionKind {\n\
+                 crate::domain::execution::ExecutionInterruptionKind::Cancelled\n\
+             }\n\
+             fn by_literal(message: String) -> ExecutionError {\n\
+                 ExecutionError::new(\"cancelled\", message)\n\
+             }\n\
+             fn by_constant(message: String) -> ExecutionError {\n\
+                 ExecutionError::new(CANCELLED_ERROR_CODE, message)\n\
+             }\n\
+             fn by_owned(message: String) -> ExecutionError {\n\
+                 ExecutionError::new(\"cancelled\".to_owned(), message)\n\
+             }\n\
+             fn by_struct(message: String) -> ExecutionError {\n\
+                 ExecutionError { code: \"cancelled\".into(), message, details: Vec::new(), \
+                     artifact: None, retryable: false }\n\
+             }\n\
+             fn in_macro() -> Vec<ExecutionInterruptionDetails> {\n\
+                 vec![ExecutionInterruptionDetails::new(ExecutionInterruptionKind::Cancelled, false)]\n\
+             }\n\
+             fn in_macro_error(message: String) -> Vec<ExecutionError> {\n\
+                 vec![ExecutionError::new(CANCELLED_ERROR_CODE, message)]\n\
+             }\n\
+             fn by_reading(kind: ExecutionInterruptionKind) -> &'static str {\n\
+                 match kind { ExecutionInterruptionKind::Cancelled => \"cancelled\", _ => \"other\" }\n\
+             }\n\
+             fn by_matching(kind: ExecutionInterruptionKind) -> bool {\n\
+                 matches!(kind, ExecutionInterruptionKind::Cancelled)\n\
+             }\n\
+             fn by_other_code(message: String) -> ExecutionError {\n\
+                 ExecutionError::new(\"timed_out\", message)\n\
+             }\n\
+             fn by_timeout() -> ExecutionInterruptionKind {\n\
+                 ExecutionInterruptionKind::TimedOut\n\
+             }\n\
+             fn by_code_name() -> &'static str {\n\
+                 CANCELLED_ERROR_CODE\n\
+             }\n\
+             #[cfg(test)]\n\
+             mod tests {\n\
+                 fn in_a_test(message: String) -> ExecutionError {\n\
+                     ExecutionError::new(\"cancelled\", message)\n\
+                 }\n\
+             }",
+        ),
+        (
+            "crate::use_cases::globbed",
+            "use crate::domain::execution::ExecutionInterruptionKind::*;\n\
+             fn by_glob() -> crate::domain::execution::ExecutionInterruptionKind {\n\
+                 Cancelled\n\
+             }",
+        ),
+        (
+            "crate::use_cases::interruption",
+            "use crate::domain::execution::{ExecutionError, ExecutionInterruptionKind};\n\
+             pub(crate) const CANCELLED_ERROR_CODE: &str = \"cancelled\";\n\
+             fn the_owner(message: String) -> (ExecutionError, ExecutionInterruptionKind) {\n\
+                 (ExecutionError::new(CANCELLED_ERROR_CODE, message), \
+                  ExecutionInterruptionKind::Cancelled)\n\
+             }",
+        ),
+    ]);
+
+    let found = cancellation_stop_bypasses(&index);
+
+    for (context, what) in [
+        ("by_record", "builds ExecutionInterruptionKind::Cancelled"),
+        (
+            "by_qualified",
+            "builds ExecutionInterruptionKind::Cancelled",
+        ),
+        ("by_literal", "the cancelled code"),
+        ("by_constant", "the cancelled code"),
+        ("by_owned", "the cancelled code"),
+        ("by_struct", "the cancelled code"),
+        ("in_macro", "builds ExecutionInterruptionKind::Cancelled"),
+        ("in_macro_error", "the cancelled code"),
+        ("by_glob", "builds ExecutionInterruptionKind::Cancelled"),
+    ] {
+        assert!(
+            found
+                .iter()
+                .any(|line| line.contains(&format!("({context})")) && line.contains(what)),
+            "the guard misses {context}: {found:?}"
+        );
+    }
+    for legitimate in [
+        "by_reading",
+        "by_matching",
+        "by_other_code",
+        "by_timeout",
+        "by_code_name",
+        "in_a_test",
+        "the_owner",
+    ] {
+        assert!(
+            !found
+                .iter()
+                .any(|line| line.contains(&format!("({legitimate})"))),
+            "the guard flags a legitimate place {legitimate}: {found:?}"
+        );
+    }
 }
 
 /// Функции production-кода, где путь разрешён вручную: проверка `is_absolute()` или
