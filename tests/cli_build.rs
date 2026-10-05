@@ -1586,3 +1586,60 @@ fn build_ibcmd_accepts_raw_f_connection() {
     assert!(calls.contains("--db-path /tmp/ib"));
     assert!(calls.contains("config apply"));
 }
+
+fn git(dir: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run git");
+    assert!(status.success(), "git {args:?} failed");
+}
+
+/// Загрузка из файлов переписывает опись версий в каталоге набора. Опись в индексе
+/// гита останавливает сборку до платформы — и превью отказывает так же.
+#[test]
+fn a_push_refuses_when_the_version_file_is_tracked_by_git() {
+    let (dir, config_path, binary_path, _work_path) = setup_project();
+    let marker = dir.path().join("designer-ran.marker");
+    write_script(
+        &binary_path,
+        &format!("printf 'ran' > '{}'\nexit 0", marker.display()),
+    );
+    let project = dir.path().join("project");
+    fs::write(
+        project.join("main").join("ConfigDumpInfo.xml"),
+        "<ConfigDumpInfo/>\n",
+    )
+    .expect("version file");
+    git(&project, &["init", "-q", "-b", "main", "."]);
+    git(&project, &["config", "user.email", "test@example.com"]);
+    git(&project, &["config", "user.name", "Test"]);
+    git(&project, &["add", "-A"]);
+    git(&project, &["commit", "-qm", "committed sources"]);
+
+    for extra in [&["--dry-run"][..], &[][..]] {
+        let config = config_path.display().to_string();
+        let mut args = vec!["--config", config.as_str(), "push", "--full-rebuild"];
+        args.extend_from_slice(extra);
+        let output = v8_runner_command().args(&args).output().expect("run push");
+        let rendered = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "a tracked version file is a validation refusal ({extra:?}): {rendered}"
+        );
+        assert!(
+            rendered.contains("git rm --cached main/ConfigDumpInfo.xml && git commit"),
+            "the refusal names the file and carries the recipe ({extra:?}): {rendered}"
+        );
+    }
+    assert!(!marker.exists(), "the platform must not start");
+}

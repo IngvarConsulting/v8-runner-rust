@@ -11,8 +11,8 @@ use crate::support::path::{is_safe_path_segment, nearest_existing_canonical_path
 use crate::support::source_descriptor::{
     self, SourceDescriptorParseError, SourceDescriptorPurpose, SourceSetRootScanError,
 };
+use crate::use_cases::ignored_files::{ProjectGitignore, LOCAL_CONFIG_FILE_NAME};
 
-const LOCAL_CONFIG_FILE_NAME: &str = "v8project.local.yaml";
 const LOCAL_CONFIG_SCHEMA_MODEL_LINE: &str = "# yaml-language-server: $schema=https://raw.githubusercontent.com/IngvarConsulting/v8-runner-rust/master/docs/schemas/v8project.local.schema.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,7 +116,7 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
     let yaml = render_config(format, &source_sets, platform_version.as_deref());
 
     let local_path = output_dir.join(LOCAL_CONFIG_FILE_NAME);
-    let gitignore_path = output_dir.join(".gitignore");
+    let gitignore = ProjectGitignore::locate(&project_dir, output_dir);
 
     std::fs::write(&output_path, yaml).map_err(|error| {
         AppError::Runtime(format!(
@@ -125,13 +125,13 @@ pub fn execute(request: &ConfigInitRequest) -> Result<ConfigInitResult, AppError
         ))
     })?;
     ensure_local_config(&local_path, request.connection.as_ref())?;
-    ensure_gitignore_ignores_local_config(&local_path, &gitignore_path)?;
+    gitignore.ensure()?;
 
     Ok(ConfigInitResult {
         ok: true,
         path: output_path.display().to_string(),
         local_path: local_path.display().to_string(),
-        gitignore_path: gitignore_path.display().to_string(),
+        gitignore_path: gitignore.path().display().to_string(),
         format: format.as_yaml().to_owned(),
         platform_version,
         source_sets,
@@ -396,66 +396,6 @@ fn yaml_document_is_empty(content: &str) -> bool {
         serde_yaml::from_str::<serde_yaml::Value>(content),
         Ok(serde_yaml::Value::Null)
     )
-}
-
-fn ensure_gitignore_ignores_local_config(
-    local_config_path: &Path,
-    gitignore_path: &Path,
-) -> Result<(), AppError> {
-    match crate::platform::git::check_ignored(local_config_path) {
-        Some(true) => Ok(()),
-        Some(false) => append_local_config_gitignore_pattern(gitignore_path, false),
-        None => append_local_config_gitignore_pattern(gitignore_path, true),
-    }
-}
-
-fn append_local_config_gitignore_pattern(
-    path: &Path,
-    skip_existing_pattern: bool,
-) -> Result<(), AppError> {
-    if path.exists() {
-        let existing = std::fs::read_to_string(path).map_err(|error| {
-            AppError::Runtime(format!(
-                "failed to read gitignore file '{}': {error}",
-                path.display()
-            ))
-        })?;
-        if skip_existing_pattern && gitignore_mentions_local_config(&existing) {
-            return Ok(());
-        }
-
-        let mut content = existing;
-        if !content.is_empty() && !content.ends_with('\n') {
-            content.push('\n');
-        }
-        content.push_str("v8project.local.yaml\n");
-        std::fs::write(path, content).map_err(|error| {
-            AppError::Runtime(format!(
-                "failed to write gitignore file '{}': {error}",
-                path.display()
-            ))
-        })?;
-        return Ok(());
-    }
-
-    std::fs::write(path, "v8project.local.yaml\n").map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to write gitignore file '{}': {error}",
-            path.display()
-        ))
-    })
-}
-
-fn gitignore_mentions_local_config(content: &str) -> bool {
-    content.lines().any(|line| {
-        let pattern = line.trim();
-        !pattern.is_empty()
-            && !pattern.starts_with('#')
-            && !pattern.starts_with('!')
-            && (pattern == LOCAL_CONFIG_FILE_NAME
-                || pattern == "/v8project.local.yaml"
-                || pattern == "**/v8project.local.yaml")
-    })
 }
 
 fn resolve_output_path(project_dir: &Path, output_path: &Path) -> std::io::Result<PathBuf> {
@@ -1463,7 +1403,10 @@ mod tests {
             std::fs::read_to_string(dir.path().join("v8project.yaml")).expect("project config");
         assert!(!project_config.contains("infobase"), "{project_config}");
         let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
-        assert_eq!(gitignore, "v8project.local.yaml\n");
+        assert_eq!(
+            gitignore,
+            "v8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
+        );
     }
 
     #[test]
@@ -1500,7 +1443,10 @@ mod tests {
             "origin is appended to a layer that does not declare it:\n{local_config}"
         );
         let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
-        assert_eq!(gitignore, "# local state\n**/v8project.local.yaml\n");
+        assert_eq!(
+            gitignore,
+            "# local state\n**/v8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
+        );
     }
 
     #[test]
@@ -1665,7 +1611,7 @@ mod tests {
         let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
         assert_eq!(
             gitignore,
-            "docs/v8project.local.yaml\nv8project.local.yaml\n"
+            "docs/v8project.local.yaml\nv8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
         );
     }
 
@@ -1686,7 +1632,10 @@ mod tests {
         .expect("init config");
 
         let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
-        assert_eq!(gitignore, "*.local.yaml\n");
+        assert_eq!(
+            gitignore,
+            "*.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
+        );
     }
 
     #[test]
@@ -1712,12 +1661,12 @@ mod tests {
         let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
         assert_eq!(
             gitignore,
-            "v8project.local.yaml\n!v8project.local.yaml\nv8project.local.yaml\n"
+            "v8project.local.yaml\n!v8project.local.yaml\nv8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
         );
     }
 
     #[test]
-    fn does_not_create_nested_gitignore_when_root_gitignore_covers_output_override_local_config() {
+    fn a_nested_config_writes_only_the_missing_patterns_into_the_root_gitignore() {
         let dir = tempdir().expect("tempdir");
         init_git_repo(dir.path());
         std::fs::write(dir.path().join("Configuration.xml"), "<Configuration/>").expect("main xml");
@@ -1727,7 +1676,7 @@ mod tests {
         )
         .expect("gitignore");
 
-        execute(&ConfigInitRequest {
+        let result = execute(&ConfigInitRequest {
             project_dir: dir.path().to_path_buf(),
             output_path: "config/v8project.yaml".into(),
             force: false,
@@ -1741,9 +1690,21 @@ mod tests {
             .join("config")
             .join("v8project.local.yaml")
             .exists());
+        // Опись и замок лежат в каталогах наборов, а не рядом с конфигом: шаблоны
+        // уходят в корневой `.gitignore`, местный слой там уже покрыт.
         assert!(!dir.path().join("config").join(".gitignore").exists());
         let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
-        assert_eq!(gitignore, "config/v8project.local.yaml\n");
+        assert_eq!(
+            gitignore,
+            "config/v8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
+        );
+        assert_eq!(
+            result.gitignore_path,
+            canonical(dir.path())
+                .join(".gitignore")
+                .display()
+                .to_string()
+        );
     }
 
     #[test]
