@@ -712,6 +712,15 @@ fn run_external_designer_export(
     ))
 }
 
+fn requested_extension_name(extension: Option<&str>) -> Result<&str, AppError> {
+    extension
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::Validation("artifacts cfe export requires non-empty --extension".to_owned())
+        })
+}
+
 fn resolve_target(
     config: &AppConfig,
     args: &ArtifactsRequest,
@@ -738,17 +747,6 @@ fn resolve_target(
             (source_set, None)
         }
         ArtifactsModeRequest::ExtensionCfe => {
-            let requested_extension = args
-                .extension
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    AppError::Validation(
-                        "artifacts cfe export requires non-empty --extension".to_owned(),
-                    )
-                })?;
-
             if let Some(source_set_name) = args.source_set.as_deref() {
                 let source_set = inventory.source_set(source_set_name).ok_or_else(|| {
                     AppError::Validation(format!("unknown source-set '{source_set_name}'"))
@@ -759,6 +757,12 @@ fn resolve_target(
                     )));
                 }
                 let resolved_extension_name = platform_extension_name(source_set);
+                // Набор расширения называет и само расширение: `--extension` лишь сверяется
+                // с ним, когда назван.
+                let requested_extension = match args.extension.as_deref() {
+                    None => resolved_extension_name,
+                    Some(extension) => requested_extension_name(Some(extension))?,
+                };
                 if resolved_extension_name != requested_extension {
                     return Err(AppError::Validation(format!(
                         "source-set '{source_set_name}' resolves to extension '{resolved_extension_name}', expected '{requested_extension}'"
@@ -766,6 +770,7 @@ fn resolve_target(
                 }
                 (source_set, Some(requested_extension.to_owned()))
             } else {
+                let requested_extension = requested_extension_name(args.extension.as_deref())?;
                 let candidates = inventory
                     .source_sets_with_purpose(SourceSetPurpose::Extension)
                     .into_iter()

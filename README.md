@@ -102,7 +102,7 @@ v8-runner init
 
 Команда анализирует структуру проекта, находит поддержанные `source-set` (наборы исходников),
 создает `v8project.yaml`, `v8project.local.yaml` со schema modeline и базой `origin`
-(`--connection`, по умолчанию `File=build/ib`) и дописывает в `.gitignore` каталога проекта
+(`--infobase <строка соединения>`, по умолчанию `File=build/ib`) и дописывает в `.gitignore` каталога проекта
 недостающие шаблоны local overlay, описи версий `ConfigDumpInfo.xml` и замка выгрузки
 `.dump-*.lock*`. `pull` и `push` отказывают, если `ConfigDumpInfo.xml` лежит в индексе git;
 подробности — в [docs/CAPABILITIES.md](docs/CAPABILITIES.md#init).
@@ -115,7 +115,7 @@ credentials и настройки инструментов. Файл приме�
 
 ```bash
 v8-runner clone \
-  --connection "File=/path/to/ib" \
+  --from "File=/path/to/ib" \
   --platform-version 8.3.27
 ```
 
@@ -159,9 +159,15 @@ v8-runner push
 ### Спланируйте или выгрузите состояние ИБ:
 
 ```bash
-v8-runner download --state working --output dist/main.cf --dry-run
+v8-runner download --output dist/main.cf --dry-run
+v8-runner download --state db --output dist/main.cf --dry-run
 v8-runner infobase dump --output dist/base.dt --dry-run
 ```
+
+Позиционный аргумент `push`, `pull`, `make`, `download` и `convert` — набор исходников
+(`v8-runner push my-ext`), никогда не база: базу называет `--infobase`. Пакет `.cf`/`.cfe`
+забирает `download`, образ `.dt` — `infobase dump`; перепутанное расширение команда отвергает
+до запуска платформы и называет соседнюю.
 
 `--dry-run` валидирует окружение и показывает выбранный provider без запуска платформы и без
 создания файлов. Уберите флаг, чтобы атомарно опубликовать CF/CFE или переносимый DT-файл.

@@ -25,6 +25,7 @@ use crate::support::path::{
 use crate::support::source_descriptor::{self, ExternalDescriptorParseError};
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::destruction_guard::DestructionConsent;
+use crate::use_cases::extension_identity::platform_extension_name;
 use crate::use_cases::external_artifacts::ExternalArtifactKind;
 use crate::use_cases::interruption;
 use crate::use_cases::progress::log_live_stage;
@@ -914,16 +915,24 @@ fn resolve_target(config: &AppConfig, args: &DumpArgs) -> Result<ResolvedDumpTar
     let inventory = SourceSetInventory::new(config);
 
     let (source_set, extension) = match (args.source_set.as_deref(), args.extension.as_deref()) {
+        // Набор называет и предмет: набор расширения — это расширение с именем набора, как
+        // если бы его назвали `--extension`.
         (Some(source_set_name), None) => {
             let source_set = inventory.source_set(source_set_name).ok_or_else(|| {
                 AppError::Validation(format!("unknown source-set '{source_set_name}'"))
             })?;
-            if source_set.purpose != SourceSetPurpose::Configuration {
-                return Err(AppError::Validation(format!(
-                    "source-set '{source_set_name}' is an extension and requires --extension"
-                )));
+            match source_set.purpose {
+                SourceSetPurpose::Configuration => (source_set, None),
+                SourceSetPurpose::Extension => (
+                    source_set,
+                    Some(platform_extension_name(source_set).to_owned()),
+                ),
+                SourceSetPurpose::ExternalDataProcessors | SourceSetPurpose::ExternalReports => {
+                    return Err(AppError::Validation(format!(
+                        "source-set '{source_set_name}' holds external files; pull takes the main configuration or an extension"
+                    )));
+                }
             }
-            (source_set, None)
         }
         (None, Some(extension_name)) => {
             let source_set = inventory.source_set(extension_name).ok_or_else(|| {

@@ -123,8 +123,8 @@ pub struct BootstrapArgs {
     #[arg(long)]
     pub project_dir: Option<String>,
 
-    /// Existing infobase connection string used as bootstrap source
-    #[arg(long)]
+    /// Connection string of the existing infobase the project is cloned from
+    #[arg(long = "from", alias = "connection", value_name = "CONNECTION")]
     pub connection: String,
 
     /// 1C:Enterprise platform version written to project config
@@ -230,13 +230,49 @@ pub struct ConfigInitArgs {
     #[arg(long)]
     pub output: Option<String>,
 
-    /// Infobase connection string written to config
-    #[arg(long)]
+    /// Previous spelling of `--infobase <CONNECTION>`: the base is named by the global key
+    #[arg(long, hide = true)]
     pub connection: Option<String>,
 
     /// Source format to write
     #[arg(long, default_value = "auto", value_parser = ["auto", "designer", "edt"])]
     pub format: String,
+}
+
+/// Набор исходников, которым ограничена команда.
+///
+/// Позиционный аргумент — всегда набор из `v8project.yaml` и никогда не база: базу называет
+/// `--infobase`. Значение, которого нет среди наборов, отвергает сценарий команды до
+/// запуска платформы. Прежний ключ `--source-set` принимается скрыто.
+#[derive(Args, Debug, Clone, Default, PartialEq, Eq)]
+pub struct SourceSetArg {
+    /// Source set declared in v8project.yaml (never an infobase)
+    #[arg(value_name = "SET")]
+    set: Option<String>,
+
+    /// Previous spelling of the positional source set; hidden from help
+    #[arg(
+        long = "source-set",
+        value_name = "SET",
+        hide = true,
+        conflicts_with = "set"
+    )]
+    previous_key: Option<String>,
+}
+
+impl SourceSetArg {
+    /// Набор, названный позиционно или прежним ключом.
+    pub fn name(&self) -> Option<&str> {
+        self.set.as_deref().or(self.previous_key.as_deref())
+    }
+
+    #[cfg(test)]
+    pub fn named(name: &str) -> Self {
+        Self {
+            set: Some(name.to_owned()),
+            previous_key: None,
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -246,17 +282,20 @@ pub struct BuildArgs {
     #[arg(long = "full", alias = "full-rebuild")]
     pub full_rebuild: bool,
 
-    /// Limit build to one source-set from v8project.yaml
-    #[arg(long)]
-    pub source_set: Option<String>,
+    #[command(flatten)]
+    pub source_set: SourceSetArg,
 }
 
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Command options")]
 pub struct LoadArgs {
-    /// Path to a built artifact (.cf/.cfe)
-    #[arg(long)]
-    pub path: String,
+    /// Built package to upload (.cf/.cfe); a .dt transfer file is `infobase restore`
+    #[arg(value_name = "FILE", required_unless_present = "path")]
+    pub file: Option<String>,
+
+    /// Previous spelling of the positional package file; hidden from help
+    #[arg(long, value_name = "FILE", hide = true, conflicts_with = "file")]
+    pub path: Option<String>,
 
     /// Upload mode
     #[arg(
@@ -283,6 +322,16 @@ pub struct LoadArgs {
     /// Vendor configuration name, required to ask whether a configuration is on support
     #[arg(long)]
     pub vendor_name: Option<String>,
+}
+
+impl LoadArgs {
+    /// Файл пакета: позиционный или названный прежним ключом `--path`.
+    pub fn artifact_path(&self) -> &str {
+        self.file
+            .as_deref()
+            .or(self.path.as_deref())
+            .expect("clap requires the package file or --path")
+    }
 }
 
 #[derive(Args, Debug)]
@@ -464,9 +513,8 @@ pub struct DumpArgs {
     #[arg(long, value_parser = ["full", "incremental", "partial"])]
     pub mode: String,
 
-    /// Source set name
-    #[arg(long)]
-    pub source_set: Option<String>,
+    #[command(flatten)]
+    pub source_set: SourceSetArg,
 
     /// Extension name
     #[arg(long)]
@@ -515,11 +563,24 @@ pub enum InfobaseConfigurationCommand {
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Command options")]
 pub struct InfobaseConfigurationExportArgs {
-    /// Configuration state to export
-    #[arg(long, value_parser = ["working", "database"])]
-    pub state: String,
+    /// Source set whose configuration is taken: the main configuration or an extension
+    #[arg(value_name = "SET", conflicts_with = "extension")]
+    pub set: Option<String>,
 
-    /// Extension name; omit to export the main configuration
+    /// Configuration state to export: `db` takes the database configuration; without the
+    /// key the main configuration is taken
+    #[arg(
+        long,
+        value_parser = clap::builder::PossibleValuesParser::new([
+            clap::builder::PossibleValue::new("db"),
+            // Прежние значения живут один цикл выпуска и в справке не печатаются.
+            clap::builder::PossibleValue::new("working").hide(true),
+            clap::builder::PossibleValue::new("database").hide(true),
+        ]),
+    )]
+    pub state: Option<String>,
+
+    /// Extension name as the platform knows it; omit to export the main configuration
     #[arg(long)]
     pub extension: Option<String>,
 
@@ -555,9 +616,8 @@ pub struct InfobaseRestoreArgs {
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Command options")]
 pub struct ConvertArgs {
-    /// Limit conversion to one source-set from v8project.yaml
-    #[arg(long)]
-    pub source_set: Option<String>,
+    #[command(flatten)]
+    pub source_set: SourceSetArg,
 
     /// Target root for converted source-set layout. Defaults to workPath/convert/out
     #[arg(long)]
@@ -575,9 +635,8 @@ pub struct ArtifactsArgs {
     #[arg(long)]
     pub output: String,
 
-    /// Optional source set name used to disambiguate repository context
-    #[arg(long)]
-    pub source_set: Option<String>,
+    #[command(flatten)]
+    pub source_set: SourceSetArg,
 
     /// Extension name in the infobase for cfe export
     #[arg(long)]
@@ -986,14 +1045,16 @@ mod tests {
             .expect("parse load");
 
         match cli.command {
-            Command::Load(LoadArgs {
-                path,
-                mode,
-                settings,
-                extension,
-                vendor_name,
-            }) => {
-                assert_eq!(path, "dist/main.cf");
+            Command::Load(
+                ref args @ LoadArgs {
+                    ref mode,
+                    ref settings,
+                    ref extension,
+                    ref vendor_name,
+                    ..
+                },
+            ) => {
+                assert_eq!(args.artifact_path(), "dist/main.cf");
                 assert_eq!(mode, "load");
                 assert!(settings.is_none());
                 assert!(extension.is_none());
@@ -1020,14 +1081,15 @@ mod tests {
         .expect("parse load merge");
 
         match cli.command {
-            Command::Load(LoadArgs {
-                path,
-                mode,
-                settings,
-                extension,
-                vendor_name: _,
-            }) => {
-                assert_eq!(path, "dist/ext.cfe");
+            Command::Load(
+                ref args @ LoadArgs {
+                    ref mode,
+                    ref settings,
+                    ref extension,
+                    ..
+                },
+            ) => {
+                assert_eq!(args.artifact_path(), "dist/ext.cfe");
                 assert_eq!(mode, "merge");
                 assert_eq!(settings.as_deref(), Some("merge.xml"));
                 assert_eq!(extension.as_deref(), Some("SalesAddon"));
@@ -1353,7 +1415,7 @@ mod tests {
                 extension,
             }) => {
                 assert_eq!(output, "dist/main.cf");
-                assert!(source_set.is_none());
+                assert!(source_set.name().is_none());
                 assert!(extension.is_none());
             }
             _ => panic!("unexpected command"),
@@ -1371,7 +1433,7 @@ mod tests {
                 discard_uncommitted,
             }) => {
                 assert!(!discard_uncommitted);
-                assert!(source_set.is_none());
+                assert!(source_set.name().is_none());
                 assert!(output.is_none());
             }
             _ => panic!("unexpected command"),
@@ -1390,7 +1452,7 @@ mod tests {
                 discard_uncommitted,
             }) => {
                 assert!(!discard_uncommitted);
-                assert_eq!(source_set.as_deref(), Some("ext-sales"));
+                assert_eq!(source_set.name(), Some("ext-sales"));
                 assert!(output.is_none());
             }
             _ => panic!("unexpected command"),
@@ -1409,7 +1471,7 @@ mod tests {
                 discard_uncommitted,
             }) => {
                 assert!(!discard_uncommitted);
-                assert!(source_set.is_none());
+                assert!(source_set.name().is_none());
                 assert_eq!(output.as_deref(), Some("tests/fixtures/edt"));
             }
             _ => panic!("unexpected command"),
@@ -1437,7 +1499,7 @@ mod tests {
                 extension,
             }) => {
                 assert_eq!(output, "dist/ext.cfe");
-                assert_eq!(source_set.as_deref(), Some("ext-sales"));
+                assert_eq!(source_set.name(), Some("ext-sales"));
                 assert_eq!(extension.as_deref(), Some("SalesAddon"));
             }
             _ => panic!("unexpected command"),
@@ -1473,7 +1535,7 @@ mod tests {
                 super::InfobaseCommand::Configuration(configuration) => {
                     match configuration.command {
                         super::InfobaseConfigurationCommand::Export(export) => {
-                            assert_eq!(export.state, "database");
+                            assert_eq!(export.state.as_deref(), Some("database"));
                             assert_eq!(export.extension.as_deref(), Some("SalesAddon"));
                             assert_eq!(export.output, "dist/sales.cfe");
                         }

@@ -1241,3 +1241,52 @@ fn clone_into_a_subdirectory_of_a_repository_writes_the_project_gitignore() {
         "v8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
     );
 }
+
+/// Источник клона называет `--from`, как в словаре сайта: позиционного адреса у `clone`
+/// нет, а прежний ключ `--connection` в справке не печатается.
+#[test]
+fn clone_takes_its_source_from_the_from_key() {
+    let dir = temp_workspace();
+    let project_dir = dir.path().join("project");
+    let platform_path = dir.path().join("1cv8");
+    let calls_log = dir.path().join("calls.log");
+    write_designer_dump_script(&platform_path, &calls_log, 0);
+
+    let output = v8_runner_command()
+        .args([
+            "clone",
+            "--project-dir",
+            &project_dir.display().to_string(),
+            "--from",
+            "File=/tmp/source-ib",
+            "--platform-version",
+            "8.3.27",
+            "--platform-path",
+            &platform_path.display().to_string(),
+        ])
+        .output()
+        .expect("run command");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let local = fs::read_to_string(project_dir.join("v8project.local.yaml")).expect("local");
+    assert!(
+        local.contains("connection: '/F \"/tmp/source-ib\"'"),
+        "{local}"
+    );
+    assert!(fs::read_to_string(calls_log)
+        .expect("calls")
+        .contains("/F /tmp/source-ib"));
+
+    let help = v8_runner_command()
+        .args(["clone", "--help"])
+        .output()
+        .expect("run help");
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(help.contains("--from <CONNECTION>"), "{help}");
+    assert!(!help.contains("--connection"), "{help}");
+}
