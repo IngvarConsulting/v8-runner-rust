@@ -188,20 +188,7 @@ fn run_syntax_branch(
 
     let mut result = build_result(CheckName::DesignerConfig, platform_result, started);
     result.provider = Some(receipt);
-    match result.status {
-        // Превью сюда не доходит — оно возвращается раньше запуска, — но исход у него
-        // тот же: отказом становятся только приговоры конфигурации.
-        SyntaxCheckStatus::Clean | SyntaxCheckStatus::Planned => Ok(result),
-        SyntaxCheckStatus::IssuesFound | SyntaxCheckStatus::ToolFailed => {
-            Err(SyntaxExecutionFailure::with_payload(
-                AppError::Runtime(format!(
-                    "syntax check '{}' finished with status {:?} (exit code {})",
-                    result.check_name, result.status, result.exit_code
-                )),
-                result,
-            ))
-        }
-    }
+    conclude(result)
 }
 
 /// Исполнитель, выбранный для проверки конфигурации: та же квитанция и тот же путь, что
@@ -579,14 +566,15 @@ fn run_edt_syntax(
     server_session: Option<&EdtSessionManager>,
 ) -> Result<UseCaseResult<SyntaxCheckResult>, EdtSessionMissed> {
     match check_edt_projects(context, config, projects, dry_run, started, server_session) {
-        Ok(result) => Ok(conclude_edt(result)),
+        Ok(result) => Ok(conclude(result)),
         Err(EdtHalt::Failed(failure)) => Ok(Err(failure)),
         Err(EdtHalt::Missed(missed)) => Err(missed),
     }
 }
 
-/// Ответ по собранному результату: отказом становятся только приговоры проверки.
-fn conclude_edt(result: SyntaxCheckResult) -> UseCaseResult<SyntaxCheckResult> {
+/// Ответ по собранному результату — у обеих веток один: отказом становятся только
+/// приговоры проверки.
+fn conclude(result: SyntaxCheckResult) -> UseCaseResult<SyntaxCheckResult> {
     match result.status {
         // Превью сюда не доходит — оно возвращается раньше запуска, — но исход у него
         // тот же: отказом становятся только приговоры проверки.
@@ -657,11 +645,12 @@ fn check_edt_projects(
     let mut stderr_lines = Vec::new();
     let mut log_warnings = Vec::new();
     let mut single_platform_log_path = None;
-    let single_source_set = source_sets.len() == 1;
+    let alone = source_sets.len() == 1;
 
     for source_set in source_sets {
         let project = ProjectToValidate {
             name: &source_set.name,
+            alone,
             source_path: inventory.source_path(source_set),
             log_path: unique_log_path(
                 &log_dir,
@@ -677,7 +666,7 @@ fn check_edt_projects(
             return Err(failure.into());
         }
         log_live_stage("check: edt", "[EDT] validating project");
-        let run = validation.validate(context, config, &project, started, single_source_set)?;
+        let run = validation.validate(context, config, &project, started)?;
 
         if let Some(stderr) = &run.stderr {
             stderr_lines.push(format!("{}: {stderr}", project.name));
@@ -702,7 +691,7 @@ fn check_edt_projects(
         } else {
             issues.extend(run.issues);
         }
-        if single_source_set {
+        if alone {
             single_platform_log_path = Some(project.log_path);
         }
     }
@@ -750,8 +739,17 @@ fn edt_refusal(
 /// Проект, который проверяется сейчас.
 struct ProjectToValidate<'a> {
     name: &'a str,
+    /// Проект — единственный в проверке, и его журнал — журнал ответа.
+    alone: bool,
     source_path: PathBuf,
     log_path: PathBuf,
+}
+
+impl ProjectToValidate<'_> {
+    /// Журнал, который называет ответ: у проверки нескольких проектов он не один.
+    fn answer_log_path(&self) -> Option<PathBuf> {
+        self.alone.then(|| self.log_path.clone())
+    }
 }
 
 /// Исход проверки одного проекта, каким его читает исполнитель.
@@ -850,16 +848,13 @@ impl<'a> EdtValidation<'a> {
         config: &AppConfig,
         project: &ProjectToValidate<'_>,
         started: Instant,
-        single_source_set: bool,
     ) -> Result<ProjectRun, EdtHalt> {
         match self {
             Self::OneShot { utilities, binary } => {
                 validate_one_shot(context, config, utilities, binary, project, started)
                     .map_err(EdtHalt::Failed)
             }
-            Self::Session(wait) => {
-                validate_in_session(context, config, wait, project, started, single_source_set)
-            }
+            Self::Session(wait) => validate_in_session(context, config, wait, project, started),
         }
     }
 }
@@ -919,7 +914,6 @@ fn validate_in_session(
     wait: &SessionWait<'_>,
     project: &ProjectToValidate<'_>,
     started: Instant,
-    single_source_set: bool,
 ) -> Result<ProjectRun, EdtHalt> {
     // Предел свой у каждого проекта: шаг ограничен только собственным пределом.
     let cap = context.edt_timeout().unwrap_or(Duration::from_millis(
@@ -947,7 +941,7 @@ fn validate_in_session(
             .and_then(|()| session.manager.execute_blocking(request())),
         SessionWait::Server(manager) => manager.execute_until_finished(request()),
     }
-    .map_err(|error| session_halt(error, project, context.work(), started, single_source_set))?;
+    .map_err(|error| session_halt(error, project, context.work(), started))?;
 
     let stdout = response.stdout.trim();
     let stderr = response.stderr.trim();
@@ -1022,7 +1016,6 @@ fn session_halt(
     project: &ProjectToValidate<'_>,
     work: &WorkGiven,
     started: Instant,
-    single_source_set: bool,
 ) -> EdtHalt {
     if error.ended_in_queue() {
         return missed_session(error, project.name, work, started);
@@ -1039,7 +1032,7 @@ fn session_halt(
                 vec![],
                 None,
                 Some(message),
-                single_source_set.then(|| project.log_path.clone()),
+                project.answer_log_path(),
             ),
         ));
     }
@@ -1047,7 +1040,7 @@ fn session_halt(
         error,
         started,
         project.log_path.clone(),
-        single_source_set,
+        project.alone,
     ))
 }
 
@@ -1452,8 +1445,8 @@ fn fallback_edt_issue(
 mod tests {
     use super::{
         edt_status_from_result, execute, execute_in_server_session, missed_session,
-        normalize_config_flags, run_syntax, session_failure, session_status, status_from_exit_code,
-        EdtHalt, EdtSessionMiss,
+        normalize_config_flags, run_syntax, session_failure, session_halt, session_status,
+        status_from_exit_code, EdtHalt, EdtSessionMiss, ProjectToValidate,
     };
     use crate::config::model::{
         AppConfig, BuildConfig, SourceFormat, SourceSetConfig, SourceSetPurpose, TestsConfig,
@@ -2324,6 +2317,37 @@ mod tests {
                 stderr.contains("'second'") && stderr.contains(waited),
                 "{stderr}"
             );
+        }
+    }
+
+    /// Отказ общей сессии и истёкший срок запроса — отказы выполнения в форме `check`, у
+    /// командной строки и у сервера одинаково.
+    #[test]
+    fn a_session_refusal_or_timeout_is_a_runtime_failure() {
+        let project = ProjectToValidate {
+            name: "main",
+            alone: true,
+            source_path: PathBuf::from("main-edt"),
+            log_path: PathBuf::from("edt.log"),
+        };
+        for error in [
+            EdtSessionError::RunningTimeout,
+            EdtSessionError::StartupFailed {
+                message: "EDT did not start".to_owned(),
+            },
+            EdtSessionError::SessionFailed {
+                message: "EDT exited".to_owned(),
+            },
+        ] {
+            let EdtHalt::Failed(failure) =
+                session_halt(error, &project, &WorkGiven::for_command(), Instant::now())
+            else {
+                panic!("a running request's refusal answers in the `check` form");
+            };
+            assert_eq!(failure.error.kind(), UseCaseErrorKind::Runtime);
+            let form = failure.payload.expect("the `check` form");
+            assert_eq!(form.status, SyntaxCheckStatus::ToolFailed);
+            assert_eq!(form.exit_code, -1);
         }
     }
 
