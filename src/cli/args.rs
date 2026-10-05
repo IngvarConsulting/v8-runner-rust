@@ -160,7 +160,7 @@ pub struct ToolsArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum ToolsCommand {
-    /// Download a supported test or MCP helper tool from its latest GitHub release
+    /// Download a supported test or MCP helper tool from its GitHub release (latest by default)
     Download(ToolsDownloadArgs),
 }
 
