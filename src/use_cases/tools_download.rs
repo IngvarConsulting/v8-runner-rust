@@ -12,7 +12,8 @@ use crate::config::loader::LOCAL_CONFIG_FILE_NAME;
 use crate::config::model::AppConfig;
 use crate::domain::capability::{Operation, Provider};
 use crate::domain::tools_download::{
-    ToolDownloadDestination, ToolDownloadTarget, ToolExtensionInstallMode, ToolsDownloadResult,
+    ToolDownloadDestination, ToolDownloadTarget, ToolExtensionInstallMode, ToolReleaseChannel,
+    ToolsDownloadResult,
 };
 use crate::platform::download;
 use crate::support::error::AppError;
@@ -72,7 +73,7 @@ fn tools_download(
             &config_path,
         )?,
         ToolDownloadTarget::VanessaAutomationSingle => {
-            download_vanessa(context, &tools_dir, request.force)?
+            download_vanessa(context, &tools_dir, request.release, request.force)?
         }
         ToolDownloadTarget::ClientMcp => download_client_mcp(
             context,
@@ -149,9 +150,15 @@ fn download_yaxunit(
 fn download_vanessa(
     context: &ExecutionContext,
     tools_dir: &Path,
+    channel: ToolReleaseChannel,
     force: bool,
 ) -> Result<Vec<ToolDownloadDestination>, AppError> {
-    let release = fetch_latest_release(context, VANESSA_REPO)?;
+    let release = match channel {
+        ToolReleaseChannel::Latest => fetch_latest_release(context, VANESSA_REPO)?,
+        ToolReleaseChannel::NewestIncludingPrerelease => {
+            fetch_newest_release_including_prerelease(context, VANESSA_REPO)?
+        }
+    };
     let asset = release.required_asset("vanessa-automation-single", ".zip")?;
     let path = tools_dir.join("vanessa-automation-single.epf");
     download_single_file_from_zip(
@@ -244,6 +251,101 @@ fn fetch_latest_release(context: &ExecutionContext, repo: &str) -> Result<GitHub
     serde_json::from_str::<GitHubRelease>(&text).map_err(|error| {
         AppError::Runtime(format!("failed to parse latest release {repo}: {error}"))
     })
+}
+
+/// Сколько выпусков просить за страницу: больше GitHub не отдаёт.
+const RELEASES_PER_PAGE: usize = 100;
+
+/// Предел страниц списка выпусков — защита от сервера, который отдаёт полные страницы
+/// без конца; у реальных репозиториев инструментов выпусков на порядки меньше.
+const RELEASES_MAX_PAGES: usize = 50;
+
+/// Выпуск с наибольшей версией среди всех опубликованных выпусков, pre-release тоже.
+///
+/// `releases/latest` pre-release не отдаёт никогда, поэтому по явной просьбе взять
+/// pre-release выбор идёт по списку выпусков со всех его страниц (#160): черновики
+/// пропускаются, теги сравниваются как версии — покомпонентно числами, а не строками.
+/// Тег, который не читается как версия, в выборе не участвует.
+fn fetch_newest_release_including_prerelease(
+    context: &ExecutionContext,
+    repo: &str,
+) -> Result<GitHubRelease, AppError> {
+    let base = release_base_url();
+    let cancellation = context.cancellation();
+    let mut releases = Vec::new();
+    let mut complete = false;
+    for page in 1..=RELEASES_MAX_PAGES {
+        let url = format!("{base}/repos/{repo}/releases?per_page={RELEASES_PER_PAGE}&page={page}");
+        debug!(repo, url = %url, "fetching tool release list page");
+        let text = download::get_text(&url, TRANSFER_IS_BOUNDED_BY_SILENCE, &cancellation)
+            .map_err(|error| {
+                AppError::from(error).with_context(format!("failed to fetch releases of {repo}"))
+            })?;
+        let batch = serde_json::from_str::<Vec<GitHubRelease>>(&text).map_err(|error| {
+            AppError::Runtime(format!("failed to parse releases of {repo}: {error}"))
+        })?;
+        let last_page = batch.len() < RELEASES_PER_PAGE;
+        releases.extend(batch);
+        if last_page {
+            complete = true;
+            break;
+        }
+    }
+    // Выбор из неполного списка мог бы молча пропустить наибольшую версию.
+    if !complete {
+        return Err(AppError::Runtime(format!(
+            "release list of {repo} did not end within {RELEASES_MAX_PAGES} pages of \
+             {RELEASES_PER_PAGE} releases; the newest release cannot be chosen"
+        )));
+    }
+    select_newest_release(releases).ok_or_else(|| {
+        AppError::Runtime(format!(
+            "repository {repo} has no published release with a numeric version tag"
+        ))
+    })
+}
+
+/// Наибольший по версии опубликованный выпуск, pre-release тоже; черновики пропускаются,
+/// флаг latest не учитывается. При равных версиях берётся первый в выдаче.
+fn select_newest_release(releases: Vec<GitHubRelease>) -> Option<GitHubRelease> {
+    releases
+        .into_iter()
+        .filter(|release| !release.draft)
+        .filter_map(|release| {
+            ReleaseVersion::parse(&release.tag_name).map(|version| (version, release))
+        })
+        .reduce(|best, candidate| {
+            if candidate.0 > best.0 {
+                candidate
+            } else {
+                best
+            }
+        })
+        .map(|(_, release)| release)
+}
+
+/// Версия выпуска: компоненты тега через точку, сравниваются покомпонентно как числа.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ReleaseVersion(Vec<u64>);
+
+impl ReleaseVersion {
+    /// Каждый компонент — неотрицательное целое; ведущая `v` допустима. `1.2.043.42`
+    /// читается как `[1, 2, 43, 42]` и больше `1.2.043.9`.
+    fn parse(tag: &str) -> Option<Self> {
+        let tag = tag.trim();
+        let digits = tag.strip_prefix(['v', 'V']).unwrap_or(tag);
+        digits
+            .split('.')
+            .map(|component| {
+                // Цифры проверяются вручную: `parse::<u64>()` принимает ведущий `+`.
+                if component.is_empty() || !component.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return None;
+                }
+                component.parse::<u64>().ok()
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(Self)
+    }
 }
 
 fn release_base_url() -> String {
@@ -1004,6 +1106,9 @@ struct GitHubRelease {
     html_url: String,
     assets: Vec<GitHubAsset>,
     zipball_url: String,
+    /// Черновик: публичный API их не отдаёт, но если отдал — это не выпуск.
+    #[serde(default)]
+    draft: bool,
 }
 
 impl GitHubRelease {
@@ -1017,7 +1122,7 @@ impl GitHubRelease {
             .find(|asset| asset.name.contains(name_contains) && asset.name.ends_with(extension))
             .ok_or_else(|| {
                 AppError::Runtime(format!(
-                    "latest release '{}' does not contain asset matching '*{}*{}'",
+                    "release '{}' does not contain asset matching '*{}*{}'",
                     self.tag_name, name_contains, extension
                 ))
             })
@@ -1193,6 +1298,7 @@ mod tests {
             assets: Vec::new(),
             zipball_url: "https://api.github.com/repos/bia-technologies/yaxunit/zipball/25.12"
                 .to_owned(),
+            draft: false,
         };
 
         assert_eq!(
@@ -1208,11 +1314,67 @@ mod tests {
             html_url: "https://example.invalid/test".to_owned(),
             assets: Vec::new(),
             zipball_url: "http://127.0.0.1:1234/archive.zip".to_owned(),
+            draft: false,
         };
 
         assert_eq!(
             source_archive_url(&release),
             "http://127.0.0.1:1234/archive.zip"
         );
+    }
+
+    /// Опубликован выпуск или лежит черновиком.
+    #[derive(Clone, Copy)]
+    enum Publication {
+        Published,
+        Draft,
+    }
+
+    fn release(tag: &str, publication: Publication) -> GitHubRelease {
+        GitHubRelease {
+            tag_name: tag.to_owned(),
+            html_url: format!("https://example.invalid/{tag}"),
+            assets: Vec::new(),
+            zipball_url: String::new(),
+            draft: matches!(publication, Publication::Draft),
+        }
+    }
+
+    fn version(tag: &str) -> Option<ReleaseVersion> {
+        ReleaseVersion::parse(tag)
+    }
+
+    /// Версии сравниваются числами покомпонентно, а не строками (#160).
+    #[test]
+    fn release_versions_compare_numerically_by_component() {
+        assert_eq!(
+            version("1.2.043.42"),
+            Some(ReleaseVersion(vec![1, 2, 43, 42]))
+        );
+        assert_eq!(version("v0.6.4"), Some(ReleaseVersion(vec![0, 6, 4])));
+        assert!(version("1.2.043.42") > version("1.2.043.9"));
+        assert_eq!(version("1.2.043.42-rc1"), None);
+        assert_eq!(version("nightly"), None);
+        assert_eq!(version("1..2"), None);
+        assert_eq!(version("+1.2"), None);
+
+        let picked = select_newest_release(vec![
+            release("1.2.043.9", Publication::Published),
+            release("1.2.045.1", Publication::Draft),
+            release("nightly", Publication::Published),
+            release("1.2.043.42", Publication::Published),
+            release("1.2.043.1", Publication::Published),
+        ])
+        .expect("a published release is present");
+        assert_eq!(picked.tag_name, "1.2.043.42");
+        assert!(select_newest_release(vec![release("2.0.0", Publication::Draft)]).is_none());
+
+        // Равные версии: берётся первый в выдаче.
+        let first = select_newest_release(vec![
+            release("v1.0", Publication::Published),
+            release("1.0", Publication::Published),
+        ])
+        .expect("a published release is present");
+        assert_eq!(first.tag_name, "v1.0");
     }
 }
