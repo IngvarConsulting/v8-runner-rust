@@ -139,8 +139,7 @@ fn mcp_surface_snapshot_stays_explicit_and_documented() {
 /// перечень адаптеров, записанный руками.
 ///
 /// Как читается код:
-/// - сценарий — свободная функция модуля `use_cases` или `mcp::edt_syntax` (единственного
-///   сценария, который живёт в адаптере, — arc42 §5.1, §6.7); ссылка на него — любой путь
+/// - сценарий — свободная функция модуля `use_cases`; ссылка на него — любой путь
 ///   в выражении: вызов или указатель на функцию, после разрешения через `use` модуля и
 ///   функции, `crate`, `self` и `super`. Типы и их методы (`ExecutionContext::cli`) —
 ///   не сценарии;
@@ -412,6 +411,104 @@ fn the_ibcmd_site_finder_names_the_type_and_reads_nested_modules() {
         .into_iter()
         .collect()
     );
+}
+
+/// Корень #249: проверку проекта EDT выполняли два исполнителя — сценарий командной строки
+/// и свой путь MCP над общей сессией, — и копии их помощников расходились молча. Владелец
+/// теперь один, `use_cases::check_syntax`; транспорт выбирает только сессию и способ её
+/// ждать. Второй исполнитель под любым именем узнаётся по тому, без чего проверки нет: он
+/// запускает `validate` EDT — через DSL или командой общей сессии — либо читает её журнал.
+#[test]
+fn the_edt_project_check_has_one_executor() {
+    assert_eq!(
+        edt_check_modules(&SourceIndex::of_src()),
+        ["crate::use_cases::check_syntax"]
+            .map(str::to_owned)
+            .into_iter()
+            .collect(),
+        "the EDT project check runs in one executor; a transport picks only its session"
+    );
+}
+
+/// Исполнитель узнаётся по любому признаку — вызову `validate_project`, команде `validate`
+/// общей сессии, чтению журнала проверки — в любом модуле, в том числе вложенном, и через
+/// `use` с переименованием. Соседние команды EDT исполнителем не считаются.
+#[test]
+fn the_edt_check_finder_sees_a_second_executor_under_another_name() {
+    let index = SourceIndex::from_sources(&[
+        (
+            "crate::use_cases::check_syntax",
+            "use crate::parsers::edt_validation;\n\
+             fn run() { let _ = Some(\"\").map(edt_validation::parse); }",
+        ),
+        (
+            "crate::mcp::live_check",
+            "use crate::platform::edt::render_interactive_validate_command as command;\n\
+             fn submit() { command(); }",
+        ),
+        (
+            "crate::mcp::other",
+            "mod inner { fn read() { crate::parsers::edt_validation::parse(\"\"); } }",
+        ),
+        (
+            "crate::use_cases::export",
+            "struct Step;\n\
+             impl Step { fn run(dsl: Dsl) { dsl.validate_project(); } }",
+        ),
+        (
+            "crate::use_cases::unrelated",
+            "fn run(dsl: Dsl) { dsl.export_project(); validate(); }",
+        ),
+    ]);
+
+    assert_eq!(
+        edt_check_modules(&index),
+        [
+            "crate::mcp::live_check",
+            "crate::mcp::other::inner",
+            "crate::use_cases::check_syntax",
+            "crate::use_cases::export",
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .collect()
+    );
+}
+
+/// Модули, чей производственный код выполняет проверку проекта EDT.
+fn edt_check_modules(index: &SourceIndex) -> std::collections::BTreeSet<String> {
+    struct ValidateCall(bool);
+    impl<'ast> syn::visit::Visit<'ast> for ValidateCall {
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            self.0 |= node.method == "validate_project";
+            syn::visit::visit_expr_method_call(self, node);
+        }
+    }
+
+    let markers = [
+        path_of("crate::parsers::edt_validation::parse"),
+        path_of("crate::platform::edt::render_interactive_validate_command"),
+    ];
+    production_bodies(index)
+        .into_iter()
+        .filter(|body| {
+            let mut call = ValidateCall(false);
+            syn::visit::visit_block(&mut call, body.block);
+            call.0
+                || markers.iter().any(|marker| {
+                    let mut finder = PathFinder {
+                        index,
+                        module: &body.module,
+                        local_uses: body.local_uses(index),
+                        target: marker,
+                        found: false,
+                    };
+                    syn::visit::visit_block(&mut finder, body.block);
+                    finder.found
+                })
+        })
+        .map(|body| body.module.join("::"))
+        .collect()
 }
 
 fn ibcmd_connection_sites(index: &SourceIndex) -> std::collections::BTreeSet<String> {
@@ -1205,7 +1302,6 @@ struct DispatchScan {
 
 fn is_scenario_module(path: &[String]) -> bool {
     path.starts_with(&path_of("crate::use_cases"))
-        || path.starts_with(&path_of("crate::mcp::edt_syntax"))
 }
 
 /// Свободная функция сценария: модульный путь и имя в `snake_case`, без типов.
@@ -3736,7 +3832,7 @@ fn provider_dispatched_takes_its_value_only_from_the_work_mark() {
     let platform = path_of("crate::platform");
     let result = path_of("crate::use_cases::result");
     let context = path_of("crate::use_cases::context");
-    let owners_of_command_work = [context.clone(), path_of("crate::mcp::edt_syntax")];
+    let owners_of_command_work = [context.clone()];
 
     let mut violations = Vec::new();
     let mut stamping = Vec::new();
