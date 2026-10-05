@@ -27,6 +27,7 @@ case "$CI_SCOPE" in
           "support::fs::tests::replace_file_restores_original_bytes_when_stage_disappeared"
           "use_cases::staged_publication::tests::orphan_cleanup_requires_exact_target_kind_and_run_name_contract"
           "use_cases::build_project::tests::partial_load_list_releases_writer_before_reader_and_cleans_up_after_use"
+          "platform::interactive::tests::closed_streams_on_windows_answer_with_the_exit_code_seen_after_them"
         )
         listed_tests="$(cargo test --locked -- --list)"
         for test_name in "${windows_contract_tests[@]}"; do

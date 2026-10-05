@@ -20,7 +20,6 @@ const EXECUTABLE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(10);
 const IO_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const PROMPT_DRAIN_GRACE: Duration = Duration::from_millis(20);
 /// Сколько ждать статуса ведущего, который уже выходит, но ещё не подобран ядром.
-#[cfg(unix)]
 const EXITING_LEADER_GRACE: Duration = Duration::from_secs(1);
 const STREAM_BUFFER_SIZE: usize = 1024;
 
@@ -194,10 +193,10 @@ pub struct InteractiveProcessExecutor {
     poisoned: bool,
     terminated: bool,
     /// Только для тестов: `waitpid` ещё не сообщил выход, хотя процесс уже вышел и потоки
-    /// закрыты. Пока флаг стоит, `try_wait_child` отвечает «жив», и тест сам задаёт порядок
-    /// «конец потоков раньше статуса», который в работе даёт окно выхода в ядре.
+    /// закрыты. Столько ближайших опросов `try_wait_child` отвечают «жив», и тест сам задаёт
+    /// порядок «конец потоков раньше статуса», который в работе даёт окно выхода в ядре.
     #[cfg(test)]
-    exit_unreported: bool,
+    exit_unreported_polls: usize,
 }
 
 impl InteractiveProcessExecutor {
@@ -241,7 +240,7 @@ impl InteractiveProcessExecutor {
             poisoned: false,
             terminated: false,
             #[cfg(test)]
-            exit_unreported: false,
+            exit_unreported_polls: 0,
         };
 
         if executor.prompt.is_empty() {
@@ -674,8 +673,8 @@ impl InteractiveProcessExecutor {
     }
 
     /// Оба потока закрыты. Процесс либо уже выходит — трубы доходят до конца файла раньше,
-    /// чем `waitpid` сообщит выход, — либо живёт без них. Его снимают и подбирают; ответ
-    /// несёт код выхода, если процесс вышел сам.
+    /// чем `waitpid` сообщит выход, — либо живёт без них. Его подбирают, а не вышедшего сам
+    /// снимают; ответ несёт код выхода, если процесс вышел сам.
     fn on_streams_closed(
         &mut self,
         stdout: &mut Vec<u8>,
@@ -705,14 +704,26 @@ impl InteractiveProcessExecutor {
         }
     }
 
-    /// На Windows снятие само ставит код выхода, поэтому сначала смотрят, не вышел ли
-    /// процесс сам; снятый отвечает `-1`.
+    /// На Windows снятие само ставит код выхода, поэтому снимать сразу нельзя: потоки
+    /// закрываются в выходе раньше, чем выход становится виден. Сначала недолго ждут, не
+    /// выйдет ли процесс сам, и берут его код; снятый по истечении ожидания отвечает `-1`.
     #[cfg(not(unix))]
     fn reap_after_streams_closed(&mut self) -> i32 {
-        if let Ok(Some(status)) = self.try_wait_child() {
-            self.stdin = None;
-            self.terminated = true;
-            return status.code().unwrap_or(-1);
+        let deadline = Instant::now() + EXITING_LEADER_GRACE;
+        loop {
+            match self.try_wait_child() {
+                Ok(Some(status)) => {
+                    self.stdin = None;
+                    self.terminated = true;
+                    return status.code().unwrap_or(-1);
+                }
+                Ok(None) if Instant::now() < deadline => thread::sleep(IO_POLL_INTERVAL),
+                Ok(None) => break,
+                Err(error) => {
+                    warn!(error = %error, "interactive process with closed streams was not observed");
+                    break;
+                }
+            }
         }
         if let Err(error) = self.kill_internal() {
             warn!(error = %error, "interactive process with closed streams was not taken down");
@@ -728,7 +739,8 @@ impl InteractiveProcessExecutor {
             return Ok(Some(exit_status_unavailable()));
         };
         #[cfg(test)]
-        if self.exit_unreported {
+        if self.exit_unreported_polls > 0 {
+            self.exit_unreported_polls -= 1;
             return Ok(None);
         }
         let status = child.try_wait();
@@ -779,7 +791,11 @@ impl InteractiveProcessExecutor {
             match self.events.recv_timeout(remaining.min(IO_POLL_INTERVAL)) {
                 Ok(event) => self.apply_event(event, stdout, stderr)?,
                 Err(RecvTimeoutError::Timeout) => break,
-                Err(RecvTimeoutError::Disconnected) => break,
+                // Оба потока закрылись сразу после подсказки: процесс выходит, даже если
+                // `waitpid` этого ещё не показал. Ответ — его исход, а не готовая подсказка.
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(self.on_streams_closed(stdout, stderr));
+                }
             }
         }
 
@@ -1279,9 +1295,12 @@ mod tests {
         write_script(path, "sleep 2\nprintf '1C:EDT>'\n");
     }
 
+    /// Выход сразу после подсказки. Наследника, который держал бы потоки, нет, и сама
+    /// оболочка их не закрывает: конец потоков наступает в её выходе, и ответ не зависит от
+    /// того, успел ли `waitpid` этот выход показать.
     #[cfg(unix)]
     fn prompt_then_exit_startup_script(path: &Path) {
-        write_script(path, "printf '1C:EDT>\\n'\nsleep 1 &\nexit 0\n");
+        write_script(path, "printf '1C:EDT>\\n'; exit 0\n");
     }
 
     #[cfg(unix)]
@@ -1514,7 +1533,7 @@ mod tests {
     ) {
         let dir = tempdir().expect("tempdir");
         let mut executor = executor_with_an_exited_leader(dir.path());
-        executor.exit_unreported = true;
+        executor.exit_unreported_polls = usize::MAX;
 
         let err = wait(&mut executor);
         assert!(
@@ -1553,6 +1572,103 @@ mod tests {
                 )
                 .expect_err("the process has exited")
         });
+    }
+
+    /// Процесс вышел сразу после подсказки: оба потока закрыты, а `waitpid` выхода ещё не
+    /// сообщил. Ожидание после подсказки отвечает исходом процесса, а не готовностью.
+    #[cfg(unix)]
+    #[test]
+    fn prompt_wait_reports_an_exit_right_after_the_prompt_before_waitpid_does() {
+        let dir = tempdir().expect("tempdir");
+        let mut executor = executor_with_an_exited_leader(dir.path());
+        executor.exit_unreported_polls = usize::MAX;
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        // Конец обоих потоков уже дошёл до исполнителя: процесс вышел, читатели закончили.
+        while let Ok(event) = executor.events.recv() {
+            executor
+                .apply_event(event, &mut stdout, &mut stderr)
+                .expect("event");
+        }
+
+        let err = executor
+            .finish_prompt_wait(&mut stdout, &mut stderr)
+            .expect_err("the process has exited");
+        assert!(
+            matches!(
+                err,
+                InteractiveProcessError::ProcessExited { exit_code: 5, .. }
+            ),
+            "the exit was reported as a ready prompt or lost its code: {err:?}"
+        );
+        assert_eq!(executor.pid(), None, "the leader is reaped");
+    }
+
+    /// Имя Windows-теста ниже: он запускает сам себя помощником.
+    #[cfg(windows)]
+    const CLOSED_STREAMS_WINDOWS_TEST: &str =
+        "platform::interactive::tests::closed_streams_on_windows_answer_with_the_exit_code_seen_after_them";
+    /// Второй фильтр запуска помощника: ни одному тесту не соответствует и отличает
+    /// помощника от обычного прогона.
+    #[cfg(windows)]
+    const EXIT_ON_EOF_HELPER_ARG: &str = "v8-runner-interactive-exit-on-eof-helper";
+
+    /// На Windows снятие само ставит код выхода. Потоки закрылись, а выход процесса ещё не
+    /// виден: первый опрос отвечает «жив». Исполнитель не снимает процесс сразу, а дожидается
+    /// его выхода, и ответ несёт настоящий код, а не `-1` снятого.
+    #[cfg(windows)]
+    #[test]
+    fn closed_streams_on_windows_answer_with_the_exit_code_seen_after_them() {
+        if std::env::args().any(|arg| arg == EXIT_ON_EOF_HELPER_ARG) {
+            use std::io::{Read, Write};
+
+            // Подсказка узнаётся только с начала строки, а тестовый раннер уже напечатал
+            // «test … ... » без перевода строки.
+            let mut out = std::io::stdout();
+            out.write_all(b"\n1C:EDT>")
+                .and_then(|()| out.flush())
+                .expect("write the prompt");
+            let _ = std::io::stdin().read_to_end(&mut Vec::new());
+            std::process::exit(5);
+        }
+
+        let helper = std::env::current_exe().expect("current unit-test executable");
+        let mut executor = InteractiveProcessExecutor::spawn(
+            InteractiveProcessRequest::new(helper).with_args([
+                "--exact",
+                CLOSED_STREAMS_WINDOWS_TEST,
+                EXIT_ON_EOF_HELPER_ARG,
+                "--nocapture",
+                "--test-threads=1",
+            ]),
+            TEST_STARTUP_TIMEOUT,
+        )
+        .expect("spawn helper");
+        executor.stdin = None;
+        let child = executor.child.as_mut().expect("unreaped leader");
+        let deadline = std::time::Instant::now() + TEST_PROCESS_EXIT_TIMEOUT;
+        // `try_wait` на Windows процесс не забирает: ручка остаётся у исполнителя.
+        while child.try_wait().expect("try_wait").is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the helper did not exit"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        executor.exit_unreported_polls = 1;
+
+        let err = executor.on_streams_closed(&mut Vec::new(), &mut Vec::new());
+        assert!(
+            matches!(
+                err,
+                InteractiveProcessError::ProcessExited { exit_code: 5, .. }
+            ),
+            "the exit code was lost: {err:?}"
+        );
+        assert_eq!(
+            executor.pid(),
+            None,
+            "the leader is taken out of the executor"
+        );
     }
 
     /// Подобранный процесс исполнитель больше не держит: его номер свободен, и сигнал группе
