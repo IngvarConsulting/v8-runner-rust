@@ -9,8 +9,17 @@ pub struct SourceSetContext {
     name: String,
     /// Absolute root directory of the sources.
     path: PathBuf,
-    /// Key used to name the redb hash-storage file (`workPath/hash-storages/<key>.redb`).
+    /// Key naming a shared redb hash-storage file (`workPath/hash-storages/<key>.redb`).
+    /// Infobase memory lives under `workPath/infobases/<base>/hashes/<name>.redb` instead.
     storage_key: String,
+    memory: SnapshotMemory,
+}
+
+#[derive(Debug, Clone)]
+enum SnapshotMemory {
+    Shared,
+    Disabled,
+    Infobase { name: String, identity: String },
 }
 
 impl SourceSetContext {
@@ -31,6 +40,42 @@ impl SourceSetContext {
             name,
             path,
             storage_key,
+            memory: SnapshotMemory::Shared,
+        }
+    }
+
+    /// Bind hash memory to a named infobase; `identity` is stored and compared with the snapshot.
+    pub fn with_infobase_memory(mut self, infobase: &str, identity: String) -> Self {
+        assert!(
+            is_safe_path_segment(&self.name),
+            "source set name must be a safe path segment"
+        );
+        assert!(
+            is_safe_path_segment(infobase),
+            "infobase name must be a safe path segment"
+        );
+        self.memory = SnapshotMemory::Infobase {
+            name: infobase.to_owned(),
+            identity,
+        };
+        self
+    }
+
+    /// A context whose changes are never remembered: it has no storage path at all.
+    pub fn without_memory(mut self) -> Self {
+        self.memory = SnapshotMemory::Disabled;
+        self
+    }
+
+    /// Same answer as `storage_path(..).is_some()`, for callers without a `workPath`.
+    pub fn persists_snapshot(&self) -> bool {
+        !matches!(self.memory, SnapshotMemory::Disabled)
+    }
+
+    pub fn storage_identity(&self) -> Option<&str> {
+        match &self.memory {
+            SnapshotMemory::Infobase { identity, .. } => Some(identity),
+            SnapshotMemory::Shared | SnapshotMemory::Disabled => None,
         }
     }
 
@@ -42,11 +87,24 @@ impl SourceSetContext {
         &self.path
     }
 
-    /// Absolute path to the redb hash-storage file for this context.
-    pub fn storage_path(&self, work_path: &Path) -> PathBuf {
-        work_path
-            .join("hash-storages")
-            .join(format!("{}.redb", self.storage_key))
+    /// Absolute path to the redb hash-storage file for this context, or `None` when the
+    /// context keeps no memory. Every storage access goes through this answer.
+    pub fn storage_path(&self, work_path: &Path) -> Option<PathBuf> {
+        match &self.memory {
+            SnapshotMemory::Disabled => None,
+            SnapshotMemory::Infobase { name, .. } => Some(
+                work_path
+                    .join("infobases")
+                    .join(name)
+                    .join("hashes")
+                    .join(format!("{}.redb", self.name)),
+            ),
+            SnapshotMemory::Shared => Some(
+                work_path
+                    .join("hash-storages")
+                    .join(format!("{}.redb", self.storage_key)),
+            ),
+        }
     }
 }
 
@@ -63,7 +121,7 @@ mod tests {
         assert_eq!(context.path(), PathBuf::from("/tmp/src-main").as_path());
         assert_eq!(
             context.storage_path(PathBuf::from("/tmp/work").as_path()),
-            PathBuf::from("/tmp/work/hash-storages/designer-main.redb")
+            Some(PathBuf::from("/tmp/work/hash-storages/designer-main.redb"))
         );
     }
 
@@ -79,7 +137,7 @@ mod tests {
             SourceSetContext::new("main", PathBuf::from("/tmp/src-main"), "main-config_01");
         assert_eq!(
             context.storage_path(PathBuf::from("/tmp/work").as_path()),
-            PathBuf::from("/tmp/work/hash-storages/main-config_01.redb")
+            Some(PathBuf::from("/tmp/work/hash-storages/main-config_01.redb"))
         );
     }
 

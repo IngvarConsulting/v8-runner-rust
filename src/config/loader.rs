@@ -771,13 +771,13 @@ fn normalize_connection_string(connection: &str, config_dir: &Path) -> String {
         .split(';')
         .map(|part| {
             let part = part.trim();
-            let lower = part.to_ascii_lowercase();
-            if lower.starts_with("file=") {
-                let normalized = normalize_connection_file_path(&part[5..], config_dir);
-                changed |= normalized != part[5..];
-                format!("{}{}", &part[..5], normalized)
-            } else {
-                part.to_owned()
+            match crate::platform::connection::declared_parameter(part) {
+                Some((key, value)) if key == "file" => {
+                    let normalized = normalize_connection_file_path(value, config_dir);
+                    changed |= normalized != value;
+                    format!("File={normalized}")
+                }
+                _ => part.to_owned(),
             }
         })
         .collect();
@@ -1706,6 +1706,32 @@ mod tests {
             config.infobase.connection,
             format!("File={}", config.base_path.join("build/ib").display())
         );
+    }
+
+    #[test]
+    fn spaced_file_parameters_use_the_project_directory_for_runtime_and_memory() {
+        use crate::platform::connection::V8Connection;
+        let dir = tempdir().expect("tempdir");
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(project.join("sources")).expect("source");
+        let config_path = project.join("v8project.yaml");
+        for connection in ["File=db", "File = db", "fIlE  =  'db'"] {
+            std::fs::write(&config_path, format!(
+                "workPath: work\nformat: DESIGNER\ninfobase:\n  connection: \"{connection}\"\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: sources\n"
+            )).expect("config");
+            let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+                .expect("load")
+                .config;
+            let runtime = config.v8_connection();
+            let expected = canonical(&project).join("db");
+            assert_eq!(runtime.file_path(), expected.to_str(), "{connection}");
+            let absolute =
+                V8Connection::from_connection_string(&format!("File={}", expected.display()));
+            assert_eq!(
+                runtime.snapshot_identity(&config.base_path),
+                absolute.snapshot_identity(&config.base_path)
+            );
+        }
     }
 
     #[test]

@@ -223,14 +223,14 @@ fn a_changed_file_loads_partially_with_a_list_file() {
     );
 }
 
-/// Выгрузка после сборки видит то же поколение и ничего не выгружает.
+/// Инкрементальная выгрузка после сборки видит то же поколение и ничего не выгружает.
 #[test]
-fn a_dump_after_a_build_with_an_unchanged_generation_dumps_nothing() {
+fn an_incremental_dump_after_a_build_with_an_unchanged_generation_dumps_nothing() {
     let harness = harness();
     let (build, payload) = run(&harness, &["build"]);
     assert_eq!(build, 0, "{payload}");
 
-    let (dump, payload) = run(&harness, &["dump", "--mode", "full"]);
+    let (dump, payload) = run(&harness, &["dump", "--mode", "incremental"]);
 
     assert_eq!(dump, 0, "{payload}");
     assert_eq!(payload["data"]["up_to_date"], true, "{payload}");

@@ -15,7 +15,7 @@
 | [`domain`](../../src/domain/) | Результаты команд и часть запросов; грамматика исполнения `ExecutionOutcome<T>`, `StepResult`; матрица исполнителей | [`execution.rs`](../../src/domain/execution.rs), [`capability.rs`](../../src/domain/capability.rs) |
 | [`config`](../../src/config/) | Чтение `v8project.yaml` и местного слоя, модель `AppConfig`, схемы, проверка по виду команды | [`loader.rs`](../../src/config/loader.rs), [`validate.rs`](../../src/config/validate.rs) |
 | [`platform`](../../src/platform/) | Процессы, SSH, загрузка по HTTP, git, браузер — 5.5 | [`utilities.rs`](../../src/platform/utilities.rs) |
-| [`change_detection`](../../src/change_detection/) | Обход дерева, отметки времени и хеши, хранилище redb на контекст, решение о частичной загрузке | [`analyzer.rs`](../../src/change_detection/analyzer.rs), [`partial_load.rs`](../../src/change_detection/partial_load.rs) |
+| [`change_detection`](../../src/change_detection/) | Обход дерева, отметки времени и хеши, хранилище redb на контекст с привязкой к базе и каталогу, решение о частичной загрузке | [`analyzer.rs`](../../src/change_detection/analyzer.rs), [`partial_load.rs`](../../src/change_detection/partial_load.rs) |
 | [`parsers`](../../src/parsers/) | JUnit, журналы YaXUnit и Vanessa, журналы проверки Конфигуратора и EDT. Ответы `ibcmd` и агента разбирают `platform` и сценарии | [`mod.rs`](../../src/parsers/mod.rs) |
 | [`output`](../../src/output/) | Вывод командной строки: `Presenter`, словарь текстовой ленты | [`text.rs`](../../src/output/text.rs) |
 | [`command_envelope`](../../src/command_envelope.rs) | Конверт ответа `Envelope<T>`, закрытые наборы родов и кодов отказа | `Envelope` |

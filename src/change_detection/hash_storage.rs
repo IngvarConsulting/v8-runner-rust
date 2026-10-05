@@ -12,6 +12,10 @@ pub const FILES_MTIME: TableDefinition<&str, u64> = TableDefinition::new("files_
 pub const FILES_HASH: TableDefinition<&str, &str> = TableDefinition::new("files_hash");
 /// `redb` table with storage metadata.
 pub const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
+/// `redb` table naming the base and source directory the snapshot describes.
+const IDENTITY: TableDefinition<&str, &str> = TableDefinition::new("identity");
+/// Key of the single row in [`IDENTITY`].
+const IDENTITY_KEY: &str = "target";
 /// Metadata key storing the latest scan watermark.
 pub const META_KEY_WATERMARK: &str = "watermark";
 /// Metadata key storing optimistic-lock generation.
@@ -30,6 +34,14 @@ pub struct StorageSnapshot {
     pub entries: HashMap<String, StoredFileState>,
     pub watermark: Option<u64>,
     pub generation: u64,
+    pub identity: Option<String>,
+}
+
+impl StorageSnapshot {
+    /// Nothing has ever been committed: there is no memory to be foreign.
+    pub fn is_blank(&self) -> bool {
+        self.generation == 0 && self.watermark.is_none() && self.entries.is_empty()
+    }
 }
 
 /// Storage-layer failures split into recoverable and hard categories.
@@ -95,6 +107,14 @@ impl HashStorage {
             .begin_read()
             .map_err(|e| map_tx_error(&self.path, e, "begin read"))?;
 
+        let identity = match tx.open_table(IDENTITY) {
+            Ok(table) => table
+                .get(IDENTITY_KEY)
+                .map_err(|e| map_storage_error(&self.path, "read identity", e))?
+                .map(|value| value.value().to_owned()),
+            Err(TableError::TableDoesNotExist(_)) => None,
+            Err(e) => return Err(map_table_error(&self.path, e)),
+        };
         let mtime_tbl = match tx.open_table(FILES_MTIME) {
             Ok(t) => Some(t),
             Err(TableError::TableDoesNotExist(_)) => None,
@@ -116,6 +136,7 @@ impl HashStorage {
         if !mtime_exists || !hash_exists {
             if !mtime_exists && !hash_exists {
                 return Ok(StorageSnapshot {
+                    identity,
                     entries: HashMap::new(),
                     watermark: read_watermark(meta_tbl.as_ref(), &self.path)?,
                     generation: read_generation(meta_tbl.as_ref(), &self.path)?,
@@ -171,6 +192,7 @@ impl HashStorage {
         }
 
         Ok(StorageSnapshot {
+            identity,
             entries,
             watermark: read_watermark(meta_tbl.as_ref(), &self.path)?,
             generation: read_generation(meta_tbl.as_ref(), &self.path)?,
@@ -178,11 +200,12 @@ impl HashStorage {
     }
 
     /// Persist a full snapshot if the caller still owns the expected generation.
-    pub fn commit_snapshot(
+    pub fn commit_snapshot_with_identity(
         &self,
         snapshot: &HashMap<String, StoredFileState>,
         watermark: u64,
         expected_generation: u64,
+        identity: Option<&str>,
     ) -> Result<(), StorageError> {
         self.ensure_parent_dir()?;
         let db = Database::create(&self.path).map_err(|e| map_database_error(&self.path, e))?;
@@ -214,6 +237,12 @@ impl HashStorage {
                 .open_table(FILES_HASH)
                 .map_err(|e| map_table_error(&self.path, e))?;
             sync_file_tables(&self.path, &mut mtime, &mut hash, snapshot)?;
+            if let Some(identity) = identity {
+                tx.open_table(IDENTITY)
+                    .map_err(|e| map_table_error(&self.path, e))?
+                    .insert(IDENTITY_KEY, identity)
+                    .map_err(|e| map_storage_error(&self.path, "write identity", e))?;
+            }
 
             meta.insert(META_KEY_WATERMARK, watermark)
                 .map_err(|e| map_storage_error(&self.path, "write watermark", e))?;
@@ -232,10 +261,11 @@ impl HashStorage {
     }
 
     /// Replace a corrupt or missing storage file with a fresh snapshot.
-    pub fn recover_and_commit_snapshot(
+    pub fn recover_and_commit_snapshot_with_identity(
         &self,
         snapshot: &HashMap<String, StoredFileState>,
         watermark: u64,
+        identity: Option<&str>,
     ) -> Result<(), StorageError> {
         if self.path.exists() {
             let ts = std::time::SystemTime::now()
@@ -248,7 +278,7 @@ impl HashStorage {
                 reason: format!("failed to rename corrupt db to '{}': {e}", backup.display()),
             })?;
         }
-        self.commit_snapshot(snapshot, watermark, 0)
+        self.commit_snapshot_with_identity(snapshot, watermark, 0, identity)
     }
 
     fn ensure_parent_dir(&self) -> Result<(), StorageError> {

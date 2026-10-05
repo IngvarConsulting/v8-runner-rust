@@ -972,7 +972,7 @@ mod tests {
             provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
-            infobase_name: None,
+            infobase_name: Some("origin".to_owned()),
             source_sets: vec![
                 SourceSetConfig {
                     name: "main".to_owned(),
@@ -1015,7 +1015,7 @@ mod tests {
             provider_origins: Default::default(),
             infobase: crate::config::model::InfobaseConfig::file("File=/tmp/ib"),
             infobases: Default::default(),
-            infobase_name: None,
+            infobase_name: Some("origin".to_owned()),
             source_sets: vec![
                 SourceSetConfig {
                     name: "main".to_owned(),
@@ -1728,10 +1728,14 @@ mod tests {
             .into_iter()
             .find(|context| context.name() == source_set_name)
             .expect("context");
-        HashStorage::new(context.storage_path(&config.work_path))
-            .load_snapshot()
-            .expect("snapshot")
-            .generation
+        HashStorage::new(
+            context
+                .storage_path(&config.work_path)
+                .expect("memory path"),
+        )
+        .load_snapshot()
+        .expect("snapshot")
+        .generation
     }
 
     fn tool_extension_storage_generation(
@@ -1756,7 +1760,9 @@ mod tests {
             source_path.to_path_buf(),
             format!("tool-{extension_name}-source"),
         );
-        context.storage_path(&config.work_path)
+        context
+            .storage_path(&config.work_path)
+            .expect("memory path")
     }
 
     fn write_recoverable_tool_extension_storage(path: &Path) {
@@ -1777,10 +1783,14 @@ mod tests {
             .into_iter()
             .find(|context| context.name() == source_set_name)
             .expect("edt context");
-        HashStorage::new(context.storage_path(&config.work_path))
-            .load_snapshot()
-            .expect("snapshot")
-            .generation
+        HashStorage::new(
+            context
+                .storage_path(&config.work_path)
+                .expect("memory path"),
+        )
+        .load_snapshot()
+        .expect("snapshot")
+        .generation
     }
 
     #[cfg(unix)]
@@ -2752,7 +2762,8 @@ mod tests {
             .into_iter()
             .find(|context| context.name() == "client_mcp")
             .expect("designer context")
-            .storage_path(&config.work_path);
+            .storage_path(&config.work_path)
+            .expect("memory path");
         let designer_calls_text = fs::read_to_string(&designer_calls).expect("designer calls");
 
         assert!(!result.ok);
@@ -2992,7 +3003,8 @@ mod tests {
             .into_iter()
             .find(|context| context.name() == "main")
             .expect("designer context")
-            .storage_path(&config.work_path);
+            .storage_path(&config.work_path)
+            .expect("memory path");
 
         assert!(!result.ok);
         assert!(matches!(result.steps[0].mode, BuildMode::EdtExport));
@@ -3342,7 +3354,13 @@ mod tests {
             .into_iter()
             .find(|context| context.name() == "main")
             .expect("main context");
-        fs::write(main_context.storage_path(&config.work_path), "corrupt").expect("corrupt main");
+        fs::write(
+            main_context
+                .storage_path(&config.work_path)
+                .expect("memory path"),
+            "corrupt",
+        )
+        .expect("corrupt main");
         fs::write(
             base.join("ext").join("CommonModules").join("Module.bsl"),
             "procedure Test()\n  // ext changed\nendprocedure",
@@ -3477,7 +3495,9 @@ mod tests {
 
         let service = SourceSetsService::new(&config);
         for context in service.designer_contexts() {
-            let storage_path = context.storage_path(&config.work_path);
+            let storage_path = context
+                .storage_path(&config.work_path)
+                .expect("memory path");
             fs::write(storage_path, "corrupt").expect("corrupt storage");
         }
 
@@ -3518,7 +3538,9 @@ mod tests {
             .into_iter()
             .find(|context| context.name() == "main")
             .expect("main context");
-        let storage_path = main_context.storage_path(&config.work_path);
+        let storage_path = main_context
+            .storage_path(&config.work_path)
+            .expect("memory path");
         std::fs::remove_file(&storage_path).expect("remove storage file");
         std::fs::create_dir_all(&storage_path).expect("replace with directory");
 
