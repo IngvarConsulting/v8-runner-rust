@@ -163,7 +163,7 @@ v8-runner infobase create
   provider and the planned input without touching the infobase.
 - `pull` modes come from dictionary keys: no key — incremental dump over the directory;
   `--object <TYPE:NAME>` — partial; `--force` — full dump that replaces the directory. The hidden
-  `--mode incremental|partial` means no key; `--mode full` is refused and names `pull --force`.
+  `--mode incremental|partial` means no key; `--mode full` is refused and names `pull [SET] --force` for the same set.
   `--force` next to `--object` or `--mode` is refused before the platform; pick one form.
 - In an EDT-format project every `pull` (no key, `--object`) replaces the whole project directory.
   Without `--force`, uncommitted work there makes it refuse: commit or stash it and repeat, or

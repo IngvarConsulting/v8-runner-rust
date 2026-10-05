@@ -2819,7 +2819,7 @@ fn map_load_request(args: &LoadArgs, dry_run: bool) -> Result<LoadRequest, UseCa
 /// Что делает `pull --force`: фраза одна для справки отказов, чтобы последствие было видно
 /// без документации.
 const PULL_FORCE_MEANS: &str =
-    "`pull --force` is a full dump that replaces the source tree and discards uncommitted changes there";
+    "`pull [SET] --force` is a full dump that replaces the source tree of that set and discards uncommitted changes there";
 
 /// Режим выгрузки по ключам словаря: без ключей — инкрементальная поверх каталога,
 /// `--object` — названные объекты, `--force` — полная с заменой каталога.
@@ -2834,7 +2834,7 @@ fn dump_mode(args: &DumpArgs) -> Result<DumpModeRequest, UseCaseError> {
     match (args.mode, args.discard_uncommitted) {
         (Some(PreviousDumpMode::Full), _) => {
             return refuse(format!(
-                "`--mode full` is gone: use `pull --force`; {PULL_FORCE_MEANS}"
+                "`--mode full` is gone: drop `--mode full` and add `--force` to the same command (`pull [SET] --force`, the same source set); {PULL_FORCE_MEANS}"
             ));
         }
         (Some(previous @ (PreviousDumpMode::Incremental | PreviousDumpMode::Partial)), true) => {
@@ -4921,12 +4921,12 @@ mod tests {
             for force in [false, true] {
                 let message = refusal(&args(Some(PreviousDumpMode::Full), objects, force));
                 assert!(
-                    message.contains("`--mode full` is gone: use `pull --force`"),
+                    message.contains("`--mode full` is gone: drop `--mode full` and add `--force` to the same command"),
                     "{message}"
                 );
                 assert!(
                     message.contains(
-                        "full dump that replaces the source tree and discards uncommitted changes"
+                        "full dump that replaces the source tree of that set and discards uncommitted changes"
                     ),
                     "{message}"
                 );

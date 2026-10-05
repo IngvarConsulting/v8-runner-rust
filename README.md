@@ -274,7 +274,7 @@ v8-runner mcp serve stdio
 `--no-build` → `--no-push`, `--mode merge` → `--mode combine`, `--source-set <NAME>` →
 позиционный набор, `--state working` → без ключа, `--state database` → `--state db`,
 `pull --mode incremental|partial` → без ключа. `pull --mode full` не отображается, а
-отказывает и называет `pull --force`. Ответ приходит под новым именем.
+отказывает и называет `pull [SET] --force` для того же набора. Ответ приходит под новым именем.
 Создание базы синонима не имеет: имя `init` занято подготовкой проекта, база создаётся командой
 `infobase create`.
 

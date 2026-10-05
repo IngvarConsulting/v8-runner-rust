@@ -502,14 +502,15 @@ fn assert_refused(project: &Project, args: &[&str], phrases: &[&str]) {
 
 /// Что делает замена — так, чтобы последствие было видно без документации.
 const FORCE_MEANS: &str =
-    "`pull --force` is a full dump that replaces the source tree and discards uncommitted changes";
+    "`pull [SET] --force` is a full dump that replaces the source tree of that set and discards uncommitted changes";
 
 /// `--mode full` не отображается в `--force`: молчаливое отображение дало бы согласие на
-/// уничтожение, о котором не просили. Отказ называет `pull --force` и говорит, что он делает.
+/// уничтожение, о котором не просили. Отказ называет `pull [SET] --force` для того же набора и
+/// говорит, что он делает: совет не теряет цель исходного вызова.
 #[test]
 fn mode_full_is_refused_and_names_pull_force() {
     let project = project();
-    let gone = "`--mode full` is gone: use `pull --force`";
+    let gone = "`--mode full` is gone: drop `--mode full` and add `--force` to the same command";
     assert_refused(&project, &["pull", "--mode", "full"], &[gone, FORCE_MEANS]);
     assert_refused(
         &project,
