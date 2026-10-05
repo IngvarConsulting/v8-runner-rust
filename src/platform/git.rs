@@ -1,26 +1,165 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// Returns Git's effective ignore decision for `path`.
+/// Покрывает ли имя `relative` в каталоге `dir` шаблон из `.gitignore` рабочей
+/// копии.
 ///
-/// `None` means Git is unavailable, `path` is outside a worktree, or Git reported
-/// an execution error that should fall back to local `.gitignore` editing.
-pub fn check_ignored(path: &Path) -> Option<bool> {
-    let workdir = path.parent().unwrap_or_else(|| Path::new("."));
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(workdir)
-        .args(["check-ignore", "--quiet", "--"])
-        .arg(path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .ok()?;
+/// Считается только шаблон, который уезжает вместе с репозиторием: файл
+/// `.gitignore` внутри рабочей копии. `.git/info/exclude` и `core.excludesFile`
+/// живут на одной машине — у коллеги их нет, и опись, «покрытая» ими здесь, у него
+/// уйдёт в коммит. Решает последний совпавший шаблон: отрицание (`!имя`) значит
+/// «не покрыто».
+///
+/// Проба идёт с `--no-index`: без него гит объявляет отслеживаемый файл
+/// неигнорируемым даже под шаблоном, и генератор `.gitignore` дописывал бы шаблон
+/// при каждом запуске. Вопрос здесь — о шаблоне, а не об индексе; об индексе
+/// спрашивает [`tracking_of`].
+///
+/// Путь передаётся от `dir`, а не абсолютным: абсолютный путь гит сравнивает с
+/// корнем рабочей копии буквально, и ссылка в пути превращала бы ответ в «вне
+/// репозитория».
+///
+/// `None` — гита нет, `dir` вне рабочей копии или гит вернул ошибку: тогда решает
+/// текст самого `.gitignore`.
+pub fn ignored_by_worktree_gitignore(dir: &Path, relative: &Path) -> Option<bool> {
+    use std::io::Write;
 
-    match status.code() {
-        Some(0) => Some(true),
+    let unknown = |reason: &dyn std::fmt::Display| -> Option<bool> {
+        tracing::debug!(
+            dir = %dir.display(),
+            path = %relative.display(),
+            %reason,
+            "git ignore coverage is unknown"
+        );
+        None
+    };
+
+    // `-z` гит принимает только вместе с `--stdin`: путь уходит на вход, ответ
+    // приходит полями через NUL, и никакое имя не ломает разбор.
+    let mut child = match Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["check-ignore", "-z", "--stdin", "--verbose", "--no-index"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => return unknown(&format_args!("git check-ignore failed to run: {error}")),
+    };
+    let mut request = relative.as_os_str().as_encoded_bytes().to_vec();
+    request.push(0);
+    // Вход закрывается до ожидания: иначе гит ждал бы конца ввода вечно.
+    let written = child
+        .stdin
+        .take()
+        .map(|mut stdin| stdin.write_all(&request));
+    let output = match child.wait_with_output() {
+        Ok(output) => output,
+        Err(error) => return unknown(&format_args!("git check-ignore failed: {error}")),
+    };
+    match written {
+        Some(Ok(())) => {}
+        Some(Err(error)) => {
+            return unknown(&format_args!(
+                "failed to write to git check-ignore: {error}"
+            ))
+        }
+        None => return unknown(&"git check-ignore has no standard input"),
+    }
+
+    match output.status.code() {
+        Some(0) => Some(match_comes_from_worktree_gitignore(&output.stdout)),
         Some(1) => Some(false),
-        _ => None,
+        Some(code) => unknown(&format_args!("git check-ignore exited with {code}")),
+        None => unknown(&"git check-ignore was terminated by a signal"),
+    }
+}
+
+/// Разбирает ответ `git check-ignore -z --verbose`: источник, строка, шаблон, путь.
+///
+/// Файл из `core.excludesFile` гит называет абсолютным путём, а файлы игнора
+/// внутри дерева — путём от корня рабочей копии. «Внутри дерева» поэтому — это
+/// относительный путь к файлу с именем `.gitignore` вне каталога `.git`.
+fn match_comes_from_worktree_gitignore(stdout: &[u8]) -> bool {
+    let mut fields = stdout.split(|byte| *byte == 0);
+    let (Some(source), Some(_line), Some(pattern)) = (fields.next(), fields.next(), fields.next())
+    else {
+        return false;
+    };
+    if source.is_empty() || pattern.starts_with(b"!") {
+        return false;
+    }
+    let source = path_from_bytes(source);
+    source.is_relative()
+        && source.file_name() == Some(std::ffi::OsStr::new(".gitignore"))
+        && !source
+            .components()
+            .any(|component| component.as_os_str() == ".git")
+}
+
+/// Лежит ли файл в индексе гита.
+///
+/// Состояний три, как и у [`UncommittedWork`]: незнание — самостоятельный ответ.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Tracking {
+    /// Гит отвечает: файла в индексе нет.
+    Untracked,
+    /// Файл в индексе. Путь дан от корня рабочей копии — в том виде, в каком его
+    /// принимает `git rm --cached`, запущенный из корня.
+    Tracked(PathBuf),
+    /// Ответа нет, причина названа: гита нет, путь вне рабочей копии, гит вернул
+    /// ошибку.
+    Unknown(String),
+}
+
+/// Спрашивает гит, лежит ли `path` в индексе.
+///
+/// Каталога файла может не быть на диске — например, до первой выгрузки. Гит
+/// запускается из ближайшего существующего предка, а путь передаётся от него:
+/// абсолютный путь гит сравнивает с корнем рабочей копии буквально, и ссылка в
+/// пути превращала бы ответ в «вне репозитория».
+pub fn tracking_of(path: &Path) -> Tracking {
+    let Some(anchor) = path.ancestors().skip(1).find(|dir| dir.is_dir()) else {
+        return Tracking::Unknown(format!("no existing directory above '{}'", path.display()));
+    };
+    let Ok(relative) = path.strip_prefix(anchor) else {
+        return Tracking::Unknown(format!(
+            "'{}' is not under '{}'",
+            path.display(),
+            anchor.display()
+        ));
+    };
+
+    let output = match Command::new("git")
+        // Имя файла — не шаблон: `*` или `[` в пути не должны ничего расширять.
+        .arg("--literal-pathspecs")
+        .arg("-C")
+        .arg(anchor)
+        .args(["ls-files", "-z", "--full-name", "--cached", "--"])
+        .arg(relative)
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => return Tracking::Unknown(format!("git ls-files failed to run: {error}")),
+    };
+
+    if !output.status.success() {
+        return Tracking::Unknown(match output.status.code() {
+            Some(code) => format!("git ls-files exited with {code}"),
+            None => "git ls-files was terminated by a signal".to_owned(),
+        });
+    }
+
+    match output
+        .stdout
+        .split(|byte| *byte == 0)
+        .find(|entry| !entry.is_empty())
+    {
+        Some(entry) => Tracking::Tracked(path_from_bytes(entry)),
+        None => Tracking::Untracked,
     }
 }
 
@@ -47,7 +186,11 @@ pub enum UncommittedWork {
 /// Безвозвратно — это правка, живущая только на диске: незафиксированное изменение,
 /// файл вне учёта и файл в игноре. Проиндексированное сюда не относится: его
 /// содержимое лежит в `.git/index` и достаётся оттуда.
-pub fn uncommitted_work_in(dir: &Path) -> UncommittedWork {
+///
+/// `regenerated` — имена файлов в корне `dir`, которые сама замена пишет заново:
+/// их прежнее содержимое не потеря, а вопрос о них отказывал бы в каждой замене.
+/// Имена сравниваются буквально и только в корне `dir`.
+pub fn uncommitted_work_in(dir: &Path, regenerated: &[&str]) -> UncommittedWork {
     if !dir.exists() {
         return UncommittedWork::Nothing;
     }
@@ -66,6 +209,11 @@ pub fn uncommitted_work_in(dir: &Path) -> UncommittedWork {
             "--",
             ".",
         ])
+        .args(
+            regenerated
+                .iter()
+                .map(|name| format!(":(exclude,literal){name}")),
+        )
         .stdin(Stdio::null())
         .output()
     {
@@ -169,6 +317,7 @@ fn is_unrecoverable(index: u8, worktree: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::test_git::{init_git_repo, run_git};
     use std::fs;
     use tempfile::{tempdir, TempDir};
 
@@ -176,9 +325,7 @@ mod tests {
     fn repo_with_committed_source() -> TempDir {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
-        run_git(root, &["init", "-q", "-b", "main", "."]);
-        run_git(root, &["config", "user.email", "test@example.com"]);
-        run_git(root, &["config", "user.name", "Test"]);
+        init_git_repo(root);
         fs::create_dir_all(root.join("src").join("cf")).expect("source dir");
         fs::write(
             root.join("src").join("cf").join("Configuration.xml"),
@@ -190,18 +337,6 @@ mod tests {
         dir
     }
 
-    fn run_git(dir: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .expect("run git");
-        assert!(status.success(), "git {args:?} failed");
-    }
-
     fn source_dir(repo: &TempDir) -> PathBuf {
         repo.path().join("src").join("cf")
     }
@@ -210,7 +345,7 @@ mod tests {
     fn a_clean_tree_has_nothing_to_lose() {
         let repo = repo_with_committed_source();
         assert_eq!(
-            uncommitted_work_in(&source_dir(&repo)),
+            uncommitted_work_in(&source_dir(&repo), &[]),
             UncommittedWork::Nothing
         );
     }
@@ -219,7 +354,7 @@ mod tests {
     fn an_absent_directory_has_nothing_to_lose() {
         let repo = repo_with_committed_source();
         assert_eq!(
-            uncommitted_work_in(&repo.path().join("src").join("never-was")),
+            uncommitted_work_in(&repo.path().join("src").join("never-was"), &[]),
             UncommittedWork::Nothing
         );
     }
@@ -229,7 +364,7 @@ mod tests {
         let repo = repo_with_committed_source();
         fs::write(source_dir(&repo).join("hand-written.xml"), "mine\n").expect("write");
         assert_eq!(
-            uncommitted_work_in(&source_dir(&repo)),
+            uncommitted_work_in(&source_dir(&repo), &[]),
             UncommittedWork::AtRisk(vec![PathBuf::from("src/cf/hand-written.xml")])
         );
     }
@@ -245,8 +380,27 @@ mod tests {
         fs::write(source_dir(&repo).join("scratch.local.xml"), "mine\n").expect("write");
 
         assert_eq!(
-            uncommitted_work_in(&source_dir(&repo)),
+            uncommitted_work_in(&source_dir(&repo), &[]),
             UncommittedWork::AtRisk(vec![PathBuf::from("src/cf/scratch.local.xml")])
+        );
+    }
+
+    /// Файл, который замена пишет заново, не потеря — но только в корне каталога:
+    /// одноимённый файл глубже остаётся под защитой.
+    #[test]
+    fn a_regenerated_file_at_the_root_is_not_at_risk() {
+        let repo = repo_with_committed_source();
+        fs::write(repo.path().join(".gitignore"), "ConfigDumpInfo.xml\n").expect("gitignore");
+        run_git(repo.path(), &["add", ".gitignore"]);
+        run_git(repo.path(), &["commit", "-qm", "ignore"]);
+        let source = source_dir(&repo);
+        fs::write(source.join("ConfigDumpInfo.xml"), "<info/>\n").expect("root inventory");
+        fs::create_dir_all(source.join("nested")).expect("nested dir");
+        fs::write(source.join("nested").join("ConfigDumpInfo.xml"), "mine\n").expect("nested");
+
+        assert_eq!(
+            uncommitted_work_in(&source, &["ConfigDumpInfo.xml"]),
+            UncommittedWork::AtRisk(vec![PathBuf::from("src/cf/nested/ConfigDumpInfo.xml")])
         );
     }
 
@@ -260,7 +414,7 @@ mod tests {
         fs::write(repo.path().join("other").join("notes.md"), "unrelated\n").expect("write");
 
         assert_eq!(
-            uncommitted_work_in(&source_dir(&repo)),
+            uncommitted_work_in(&source_dir(&repo), &[]),
             UncommittedWork::Nothing
         );
     }
@@ -273,7 +427,7 @@ mod tests {
         run_git(repo.path(), &["add", "src/cf/added.xml"]);
 
         assert_eq!(
-            uncommitted_work_in(&source_dir(&repo)),
+            uncommitted_work_in(&source_dir(&repo), &[]),
             UncommittedWork::Nothing
         );
     }
@@ -288,7 +442,7 @@ mod tests {
         fs::write(&path, "and then edited\n").expect("write");
 
         assert_eq!(
-            uncommitted_work_in(&source_dir(&repo)),
+            uncommitted_work_in(&source_dir(&repo), &[]),
             UncommittedWork::AtRisk(vec![PathBuf::from("src/cf/added.xml")])
         );
     }
@@ -303,9 +457,7 @@ mod tests {
     fn a_rename_does_not_invent_a_loss() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
-        run_git(root, &["init", "-q", "-b", "main", "."]);
-        run_git(root, &["config", "user.email", "test@example.com"]);
-        run_git(root, &["config", "user.name", "Test"]);
+        init_git_repo(root);
         fs::write(root.join("aM.xml"), "renamed away\n").expect("write");
         run_git(root, &["add", "-A"]);
         run_git(root, &["commit", "-qm", "init"]);
@@ -313,7 +465,7 @@ mod tests {
         fs::write(root.join("hand-written.xml"), "mine\n").expect("write");
 
         assert_eq!(
-            uncommitted_work_in(root),
+            uncommitted_work_in(root, &[]),
             UncommittedWork::AtRisk(vec![PathBuf::from("hand-written.xml")])
         );
     }
@@ -328,7 +480,7 @@ mod tests {
         run_git(repo.path(), &["add", "-N", "src/cf/precious.xml"]);
 
         assert_eq!(
-            uncommitted_work_in(&source_dir(&repo)),
+            uncommitted_work_in(&source_dir(&repo), &[]),
             UncommittedWork::AtRisk(vec![PathBuf::from("src/cf/precious.xml")])
         );
     }
@@ -339,9 +491,7 @@ mod tests {
     fn a_rename_seen_in_the_worktree_column_does_not_invent_a_loss() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
-        run_git(root, &["init", "-q", "-b", "main", "."]);
-        run_git(root, &["config", "user.email", "test@example.com"]);
-        run_git(root, &["config", "user.name", "Test"]);
+        init_git_repo(root);
         fs::write(root.join("aM.xml"), "moved away\n").expect("write");
         run_git(root, &["add", "-A"]);
         run_git(root, &["commit", "-qm", "init"]);
@@ -353,15 +503,141 @@ mod tests {
         // в хранилище объектов. Проверяется здесь другое — что прежнее имя не
         // прочиталось как очередная запись и не породило путь `xml`.
         assert_eq!(
-            uncommitted_work_in(root),
+            uncommitted_work_in(root, &[]),
             UncommittedWork::AtRisk(vec![PathBuf::from("hand-written.xml")])
+        );
+    }
+
+    #[test]
+    fn a_committed_file_is_tracked_under_its_repository_path() {
+        let repo = repo_with_committed_source();
+        assert_eq!(
+            tracking_of(&source_dir(&repo).join("Configuration.xml")),
+            Tracking::Tracked(PathBuf::from("src/cf/Configuration.xml"))
+        );
+    }
+
+    #[test]
+    fn a_file_outside_the_index_is_untracked() {
+        let repo = repo_with_committed_source();
+        fs::write(source_dir(&repo).join("hand-written.xml"), "mine\n").expect("write");
+        assert_eq!(
+            tracking_of(&source_dir(&repo).join("hand-written.xml")),
+            Tracking::Untracked
+        );
+    }
+
+    /// Каталога ещё нет — гит спрашивают из ближайшего существующего предка.
+    #[test]
+    fn a_file_in_an_absent_directory_is_untracked() {
+        let repo = repo_with_committed_source();
+        assert_eq!(
+            tracking_of(&repo.path().join("never").join("was").join("file.xml")),
+            Tracking::Untracked
+        );
+    }
+
+    /// Имя файла — не шаблон: `*` не должен найти соседа.
+    #[test]
+    fn a_name_is_not_a_pattern() {
+        let repo = repo_with_committed_source();
+        assert_eq!(
+            tracking_of(&source_dir(&repo).join("*.xml")),
+            Tracking::Untracked
+        );
+    }
+
+    #[test]
+    fn a_file_outside_a_worktree_has_unknown_tracking() {
+        let dir = tempdir().expect("tempdir");
+        let answer = tracking_of(&dir.path().join("file.xml"));
+        assert!(
+            matches!(answer, Tracking::Unknown(_)),
+            "expected Unknown, got {answer:?}"
+        );
+    }
+
+    /// Над отслеживаемым файлом гит без `--no-index` шаблон не признаёт: проба
+    /// обязана видеть шаблон, иначе генератор дописывает его снова и снова.
+    #[test]
+    fn a_pattern_covers_a_tracked_file() {
+        let repo = repo_with_committed_source();
+        fs::write(repo.path().join(".gitignore"), "Configuration.xml\n").expect("gitignore");
+        assert_eq!(
+            ignored_by_worktree_gitignore(&source_dir(&repo), Path::new("Configuration.xml")),
+            Some(true)
+        );
+    }
+
+    /// `.git/info/exclude` в репозиторий не попадает: у коллеги этого шаблона нет.
+    #[test]
+    fn a_pattern_in_info_exclude_does_not_count() {
+        let repo = repo_with_committed_source();
+        fs::write(
+            repo.path().join(".git").join("info").join("exclude"),
+            "ConfigDumpInfo.xml\n",
+        )
+        .expect("exclude");
+        assert_eq!(
+            ignored_by_worktree_gitignore(&source_dir(&repo), Path::new("ConfigDumpInfo.xml")),
+            Some(false)
+        );
+    }
+
+    /// `core.excludesFile` — настройка одной машины, даже если файл зовут `.gitignore`.
+    #[test]
+    fn a_pattern_in_the_excludes_file_does_not_count() {
+        let repo = repo_with_committed_source();
+        let elsewhere = tempdir().expect("tempdir");
+        let excludes = elsewhere.path().join(".gitignore");
+        fs::write(&excludes, "ConfigDumpInfo.xml\n").expect("excludes");
+        let excludes = excludes.to_str().expect("utf-8 temp path");
+        run_git(repo.path(), &["config", "core.excludesFile", excludes]);
+        assert_eq!(
+            ignored_by_worktree_gitignore(&source_dir(&repo), Path::new("ConfigDumpInfo.xml")),
+            Some(false)
+        );
+    }
+
+    /// Шаблон во вложенном `.gitignore` уезжает с репозиторием так же, как корневой.
+    #[test]
+    fn a_pattern_in_a_nested_gitignore_counts() {
+        let repo = repo_with_committed_source();
+        fs::write(source_dir(&repo).join(".gitignore"), "ConfigDumpInfo.xml\n").expect("nested");
+        assert_eq!(
+            ignored_by_worktree_gitignore(&source_dir(&repo), Path::new("ConfigDumpInfo.xml")),
+            Some(true)
+        );
+    }
+
+    /// Отрицание — последнее слово: имя не покрыто.
+    #[test]
+    fn a_negated_pattern_does_not_cover() {
+        let repo = repo_with_committed_source();
+        fs::write(
+            repo.path().join(".gitignore"),
+            "ConfigDumpInfo.xml\n!ConfigDumpInfo.xml\n",
+        )
+        .expect("gitignore");
+        assert_eq!(
+            ignored_by_worktree_gitignore(&source_dir(&repo), Path::new("ConfigDumpInfo.xml")),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn ignore_coverage_outside_a_worktree_is_unknown() {
+        let dir = tempdir().expect("tempdir");
+        assert_eq!(
+            ignored_by_worktree_gitignore(dir.path(), Path::new("ConfigDumpInfo.xml")),
+            None
         );
     }
 
     #[test]
     fn a_directory_outside_a_worktree_is_unknown() {
         let dir = tempdir().expect("tempdir");
-        let answer = uncommitted_work_in(dir.path());
+        let answer = uncommitted_work_in(dir.path(), &[]);
         assert!(
             matches!(answer, UncommittedWork::Unknown(_)),
             "expected Unknown, got {answer:?}"
@@ -381,7 +657,7 @@ mod tests {
         fs::write(hidden.join("hand-written.xml"), "mine\n").expect("write");
         fs::set_permissions(&hidden, fs::Permissions::from_mode(0o000)).expect("chmod");
 
-        let answer = uncommitted_work_in(&source_dir(&repo));
+        let answer = uncommitted_work_in(&source_dir(&repo), &[]);
 
         fs::set_permissions(&hidden, fs::Permissions::from_mode(0o755)).expect("restore");
         assert!(

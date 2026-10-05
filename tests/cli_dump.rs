@@ -820,6 +820,55 @@ fn a_dump_refuses_to_destroy_work_version_control_cannot_give_back() {
     );
 }
 
+/// Опись версий штатно лежит в игноре, а полная выгрузка пишет её заново: её
+/// прежнее содержимое не потеря, и выгрузка идёт без `--discard-uncommitted`.
+#[test]
+fn a_full_dump_replaces_an_ignored_version_file_without_asking() {
+    let (_dir, config_path, _binary, _work, base_path, _calls) = setup_project_in_a_repository();
+    let version_file = base_path.join("main").join("ConfigDumpInfo.xml");
+    fs::write(base_path.join(".gitignore"), "ConfigDumpInfo.xml\n").expect("gitignore");
+    git(
+        &base_path,
+        &[
+            "rm",
+            "-q",
+            "--cached",
+            "--ignore-unmatch",
+            "main/ConfigDumpInfo.xml",
+        ],
+    );
+    git(&base_path, &["add", ".gitignore"]);
+    git(&base_path, &["commit", "-qm", "ignore the version file"]);
+    fs::write(&version_file, "<info previous=\"yes\"/>\n").expect("version file");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "dump",
+            "--mode",
+            "full",
+            "--source-set",
+            "main",
+        ])
+        .output()
+        .expect("run dump");
+
+    assert!(
+        output.status.success(),
+        "an ignored version file must not stop a full dump: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Поддельная платформа описи не пишет: в заменённом каталоге файла с прежним
+    // содержимым остаться не должно.
+    assert_ne!(
+        fs::read_to_string(&version_file).ok().as_deref(),
+        Some("<info previous=\"yes\"/>\n"),
+        "the previous version file must be replaced, not kept"
+    );
+}
+
 /// Попросили явно — уничтожаем, как и обещает имя ключа. Резервная копия, о
 /// которой не просили и про которую молчат, была бы мусором в чужом каталоге.
 #[test]
@@ -914,4 +963,94 @@ fn without_version_control_the_dump_proceeds_untouched() {
         "nothing is kept behind: {:?}",
         kept_backups(&base_path)
     );
+}
+
+/// Запускает полную выгрузку набора `main` и отдаёт выход вместе с выводом.
+fn pull_main(config_path: &Path, extra: &[&str]) -> (std::process::Output, String) {
+    let config = config_path.display().to_string();
+    let mut args = vec![
+        "--config",
+        config.as_str(),
+        "pull",
+        "--mode",
+        "full",
+        "--source-set",
+        "main",
+    ];
+    args.extend_from_slice(extra);
+    let output = v8_runner_command().args(&args).output().expect("run pull");
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (output, rendered)
+}
+
+/// Опись версий в индексе — состояние чужой базы, которое `checkout` и `merge`
+/// подменяют молча. Выгрузка останавливается до платформы, называет путь и рецепт,
+/// а превью отказывает так же, как боевой прогон.
+#[test]
+fn a_pull_refuses_when_the_version_file_is_tracked_by_git() {
+    let (_dir, config_path, _binary, _work, base_path, calls_log) = setup_project();
+    fs::write(
+        base_path.join("main").join("ConfigDumpInfo.xml"),
+        "<ConfigDumpInfo/>\n",
+    )
+    .expect("version file");
+    git(&base_path, &["init", "-q", "-b", "main", "."]);
+    git(&base_path, &["config", "user.email", "test@example.com"]);
+    git(&base_path, &["config", "user.name", "Test"]);
+    git(&base_path, &["add", "-A"]);
+    git(&base_path, &["commit", "-qm", "committed sources"]);
+
+    for extra in [&["--dry-run"][..], &[][..]] {
+        let (output, rendered) = pull_main(&config_path, extra);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "a tracked version file is a validation refusal ({extra:?}): {rendered}"
+        );
+        assert!(
+            rendered.contains("git rm --cached main/ConfigDumpInfo.xml && git commit"),
+            "the refusal names the file and carries the recipe ({extra:?}): {rendered}"
+        );
+    }
+    assert!(
+        !calls_log.exists(),
+        "the platform must not start: {:?}",
+        fs::read_to_string(&calls_log).ok()
+    );
+}
+
+/// Описи в индексе нет — выгрузка идёт как обычно.
+#[test]
+fn a_pull_proceeds_when_the_version_file_is_not_tracked() {
+    let (_dir, config_path, _binary, _work, _base_path, calls_log) =
+        setup_project_in_a_repository();
+
+    let (output, rendered) = pull_main(&config_path, &[]);
+
+    assert!(output.status.success(), "pull must proceed: {rendered}");
+    assert!(calls_log.exists(), "the platform must run: {rendered}");
+}
+
+/// Вне репозитория ответа нет: работа идёт молча, без отказа и без предупреждения.
+#[test]
+fn a_pull_proceeds_silently_when_tracking_is_unknown() {
+    let (_dir, config_path, _binary, _work, base_path, calls_log) = setup_project();
+    fs::write(
+        base_path.join("main").join("ConfigDumpInfo.xml"),
+        "<ConfigDumpInfo/>\n",
+    )
+    .expect("version file");
+
+    let (output, rendered) = pull_main(&config_path, &[]);
+
+    assert!(output.status.success(), "pull must proceed: {rendered}");
+    assert!(
+        !rendered.contains("ConfigDumpInfo.xml"),
+        "an unknown answer is silent: {rendered}"
+    );
+    assert!(calls_log.exists(), "the platform must run: {rendered}");
 }

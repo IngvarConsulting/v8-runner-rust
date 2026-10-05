@@ -684,7 +684,7 @@ const NORMATIVE_NUMERALS: &[(&str, &str)] = &[
     ("use-cases/edt-keeps-two-change-contexts.md", "две"),
     ("use-cases/replacing-a-user-directory-asks-first.md", "три"),
     ("wire/check-data.md", "двумя,три"),
-    ("wire/clone-data.md", "два,обоими,четырёх"),
+    ("wire/clone-data.md", "два,обоими"),
     ("wire/command-envelope.md", "два,четыре,обоими,два,два"),
     ("wire/infobase-restore-data.md", "двумя"),
     ("wire/launch-data.md", "двух"),
