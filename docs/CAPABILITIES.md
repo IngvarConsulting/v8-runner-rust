@@ -528,7 +528,8 @@ v8-runner convert [--source-set <NAME>] [--output <DIR>] [--dry-run] [--force]
   `--force` заменяет каталог всё равно. Там, где git не отвечает,
   поведение прежнее и защиты нет.
 - Работает от текущего `v8project.yaml`, а не по arbitrary source/target paths.
-- Направление определяется только из `format`.
+- Направление определяется из `format` (до [#236](https://github.com/IngvarConsulting/v8-runner-rust/issues/236)).
+- Позиционный набор или файл пакета вместо `--source-set` и ключ `--to xml|edt|package` — разрыв [#236](https://github.com/IngvarConsulting/v8-runner-rust/issues/236).
 - Без `--output` публикует результат под `workPath/convert/out/<sourceSetName>/<designer|edt>/`.
 - `--output` задаёт только target root и зеркалит `source-set.path` относительно каталога primary config.
 - Публикация остаётся staged full replacement с overlap guardrails.
@@ -820,5 +821,7 @@ v8-runner mcp serve http
 - `check` через `ibcmd`.
 - `make` через `ibcmd`.
 - `extensions` через `designer`.
-- Arbitrary path-based `convert source -> target` contract.
+- `convert` с пакетом: файл `.cf`/`.cfe` на входе, `--to package` и цепочка `ibcmd` → `ibcmd-rs` ([#236](https://github.com/IngvarConsulting/v8-runner-rust/issues/236)).
+- `apply` отдельной командой и `push --no-apply` ([#210](https://github.com/IngvarConsulting/v8-runner-rust/issues/210)); `apply --sessions disable|force` ([#211](https://github.com/IngvarConsulting/v8-runner-rust/issues/211)).
+- Проверка версии формата файла версий до загрузки и восстановление одного файла версий без полной выгрузки ([#214](https://github.com/IngvarConsulting/v8-runner-rust/issues/214)).
 - Отдельная пользовательская настройка EDT `working-directory`.

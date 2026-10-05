@@ -8,4 +8,5 @@ gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/214
 
 Выгрузка по изменившемуся при отсутствующем у раннера файле версий или при чужой версии
 его формата переводится в полную до запуска платформы: `-update` в аргументах не
-появляется, а ответ называет причину.
+появляется, а ответ называет причину. Исключение — восстановление файла версий по
+`INV.USE-CASES.A-VERSION-FILE-ALONE-IS-DUMPED-ONLY-WHEN-THE-DIRECTORY-MATCHES-THE-BASE`.
