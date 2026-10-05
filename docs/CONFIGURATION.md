@@ -63,7 +63,7 @@ v8-runner init
 (`--config .local/profiles/v8project.yaml`). Утилиты платформы получают такие пути
 абсолютными, без внутренних `.` и с родными для ОС разделителями. Исключения:
 
-- `tools.edt_cli.path` без разделителя — имя или version-like hint, а не путь (см.
+- `tools.edt_cli.path` — голое имя без каталога — имя или version-like hint, а не путь (см.
   [`tools.edt_cli.path`](#toolsedt_clipath));
 - пути внутри шаблона `tests.va.params_path` раннер не трогает: их разрешает сама Vanessa
   от `WorkspaceRoot` (по умолчанию — каталог `v8project.yaml`);
@@ -892,8 +892,9 @@ utility '1cv8' was not found: version 8.5.1 is installed (8.5.1.1519, 8.5.1.1469
 - путь к каталогу установки EDT;
 - version-like hint, например `2025.2.3`.
 
-Значение с разделителем — путь: относительный считается от каталога `v8project.yaml`.
-Значение без разделителя — имя или hint, его разбирает автопоиск EDT.
+Голое имя без каталога (`1cedtcli`, `2025.2.3`) — имя или hint, его разбирает автопоиск
+EDT. Абсолютное значение и значение с каталогом (`./1cedtcli`, `tools/edt`) — путь:
+относительный считается от каталога `v8project.yaml`.
 
 ### `tools.edt_cli.version`
 

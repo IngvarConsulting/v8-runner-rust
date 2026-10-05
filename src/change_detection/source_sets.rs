@@ -102,7 +102,7 @@ impl<'a> SourceSetsService<'a> {
 /// собранных в коде, и тогда он считается от рабочего каталога процесса.
 fn absolutize_path(path: &Path) -> PathBuf {
     crate::support::path::absolute_from_current_dir(path)
-        .expect("failed to resolve current working directory")
+        .expect("project paths are absolute after loading, or the current directory is readable")
 }
 
 #[cfg(test)]

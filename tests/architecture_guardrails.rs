@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 
 use guardrail_support::{
     collect_rust_files, free_function_tokens, has_cfg_test, item_has_cfg_test, normalize_tokens,
-    parse_rust_file, production_source, production_tokens,
+    parse_rust_file, production_source, production_tokens, production_tokens_of,
 };
 
 const EXPECTED_MCP_TOOLS: &[&str] = &[
@@ -4417,59 +4417,129 @@ fn the_cancellation_guard_sees_every_bypass() {
     );
 }
 
+/// Функции production-кода, где путь разрешён вручную: проверка `is_absolute()` или
+/// `is_relative()` и следом `.join(` в той же функции. Пары — файл и имя функции (у метода
+/// — его имя); на вход — файлы и их production-токены.
+fn hand_resolved_paths<'a>(
+    sources: impl IntoIterator<Item = (String, &'a str)>,
+) -> Vec<(String, String)> {
+    static HAND_RESOLUTION: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\.is_(?:absolute|relative)\(\)[^\n]*?\.join\(").expect("regex")
+    });
+    static ITEM_NAME: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"fn([A-Za-z_]\w*)[<(]").expect("regex"));
+    sources
+        .into_iter()
+        .flat_map(|(file, tokens)| {
+            tokens
+                .lines()
+                .filter(|item| HAND_RESOLUTION.is_match(item))
+                .map(move |item| {
+                    let name = ITEM_NAME
+                        .captures(item)
+                        .map(|captures| captures[1].to_owned())
+                        .unwrap_or_default();
+                    (file.clone(), name)
+                })
+        })
+        .collect()
+}
+
 /// Путь из настроек разрешается одним правилом — `support::path::resolve_from` (#4).
 ///
 /// Корень проблемы: «абсолютный оставить, относительный присоединить к базе» было написано
 /// заново в каждом модуле, который брал путь, и голое `join` оставляло в argv `ibcmd` путь
 /// вида `E:\proj\./src/cf`. Признак повтора — сама форма, а не имена: проверка
-/// `is_absolute()` и следом `.join(` в той же функции production-кода. Найденное место
-/// переводится на `resolve_from` или попадает в список ниже с причиной.
+/// `is_absolute()` или `is_relative()` и следом `.join(` в той же функции production-кода.
+/// Найденное место переводится на `resolve_from` или попадает в список ниже с причиной;
+/// запись списка, чья функция формы больше не содержит, — ошибка: список не копит
+/// разрешений впрок.
 #[test]
 fn config_paths_are_resolved_only_by_their_owner() {
     /// Файл и функция (у метода — его имя), где форма оставлена намеренно, и почему.
-    const ALLOWED: &[(&str, &str, &str)] = &[(
-        "src/use_cases/bootstrap_project.rs",
-        "new",
-        "the clone writes the source directory into the new v8project.yaml as the user spelled \
-         it; resolve_from would make the separators native and the committed file Windows-only",
-    )];
-    static HAND_RESOLUTION: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"\.is_absolute\(\)[^\n]*?\.join\(").expect("regex"));
-    static ITEM_NAME: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"fn([A-Za-z_]\w*)[<(]").expect("regex"));
+    const ALLOWED: &[(&str, &str, &str)] = &[];
     let owner = repo_path("src/support/path.rs");
-    let mut offenders = Vec::new();
+    let sources = collect_rust_files(&repo_path("src"))
+        .into_iter()
+        .filter(|file| *file != owner)
+        .map(|file| {
+            let relative = file
+                .strip_prefix(repo_path(""))
+                .expect("source under the repository")
+                .to_string_lossy()
+                .replace('\\', "/");
+            (relative, production_tokens(&file))
+        })
+        .collect::<Vec<_>>();
+    let found = hand_resolved_paths(
+        sources
+            .iter()
+            .map(|(file, tokens)| (file.clone(), tokens.as_str())),
+    );
 
-    for file in collect_rust_files(&repo_path("src")) {
-        if file == owner {
-            continue;
-        }
-        let relative = file
-            .strip_prefix(repo_path(""))
-            .expect("source under the repository")
-            .to_string_lossy()
-            .replace('\\', "/");
-        for item in production_tokens(&file).lines() {
-            if !HAND_RESOLUTION.is_match(item) {
-                continue;
-            }
-            let name = ITEM_NAME
-                .captures(item)
-                .map(|captures| captures[1].to_owned())
-                .unwrap_or_default();
-            let allowed = ALLOWED
+    let offenders = found
+        .iter()
+        .filter(|(file, name)| {
+            !ALLOWED
                 .iter()
-                .any(|(path, item_name, _)| *path == relative && *item_name == name);
-            if !allowed {
-                offenders.push(format!("{relative}: {name}"));
-            }
-        }
-    }
-
+                .any(|(path, item_name, _)| path == file && item_name == name)
+        })
+        .map(|(file, name)| format!("{file}: {name}"))
+        .collect::<Vec<_>>();
     assert!(
         offenders.is_empty(),
         "these items keep an absolute path and join a relative one by hand instead of calling \
          support::path::resolve_from (or SourceSetConfig::root_in):\n{}",
         offenders.join("\n")
     );
+    let stale = ALLOWED
+        .iter()
+        .filter(|(path, item_name, _)| {
+            !found
+                .iter()
+                .any(|(file, name)| file == path && name == item_name)
+        })
+        .map(|(path, item_name, _)| format!("{path}: {item_name}"))
+        .collect::<Vec<_>>();
+    assert!(
+        stale.is_empty(),
+        "these allowlist entries name no hand resolution any more; remove them:\n{}",
+        stale.join("\n")
+    );
+}
+
+/// Страж ручного разрешения видит форму в каждом виде и не видит законных мест.
+#[test]
+fn the_config_path_guard_sees_every_hand_resolution() {
+    let sample = production_tokens_of(
+        "fn by_absolute(base: &Path, path: &Path) -> PathBuf {\n\
+             if path.is_absolute() { path.to_path_buf() } else { base.join(path) }\n\
+         }\n\
+         fn by_relative(base: &Path, path: &Path) -> PathBuf {\n\
+             if path.is_relative() { base.join(path) } else { path.to_path_buf() }\n\
+         }\n\
+         struct Paths;\n\
+         impl Paths {\n\
+             fn by_method(base: &Path, path: &Path) -> PathBuf {\n\
+                 let joined = base.join(path);\n\
+                 if path.is_absolute() { path.into() } else { base.join(path) }\n\
+             }\n\
+         }\n\
+         fn by_owner(base: &Path, path: &Path) -> PathBuf {\n\
+             crate::support::path::resolve_from(base, path)\n\
+         }\n\
+         fn only_checks(path: &Path) -> bool { path.is_absolute() }\n\
+         fn only_joins(base: &Path) -> PathBuf { base.join(\"x\") }\n\
+         #[cfg(test)]\n\
+         mod tests {\n\
+             fn in_tests(base: &Path, path: &Path) -> PathBuf {\n\
+                 if path.is_absolute() { path.into() } else { base.join(path) }\n\
+             }\n\
+         }",
+    );
+    let found = hand_resolved_paths([("src/sample.rs".to_owned(), sample.as_str())])
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect::<Vec<_>>();
+    assert_eq!(found, ["by_absolute", "by_relative", "by_method"]);
 }

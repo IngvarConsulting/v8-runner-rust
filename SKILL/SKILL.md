@@ -20,7 +20,7 @@ Keep this file as the decision entrypoint. Load only the reference file that mat
 
 Use the available `v8-runner` binary directly. If it is not on `PATH`, ask for the binary path or use a project-provided wrapper script.
 
-`v8project.yaml` is the default project config name. A sibling `v8project.local.yaml` declares the project's infobases (`infobases` map, `origin` by default) and holds machine-local paths, credentials, tools, tests, and MCP settings. Do not pass `--config v8project.yaml` unless the user explicitly wants a non-default command shape or the active config path differs from the default; never pass `v8project.local.yaml` as `--config`.
+`v8project.yaml` is the default project config name. A sibling `v8project.local.yaml` declares the project's infobases (`infobases` map, `origin` by default) and holds machine-local paths, credentials, tools, tests, and MCP settings. Do not pass `--config v8project.yaml` unless the user explicitly wants a non-default command shape or the active config path differs from the default; never pass `v8project.local.yaml` as `--config`. Relative paths in both files resolve from the directory of `v8project.yaml`, also when `--config` points into a nested directory.
 
 Generated `v8project.yaml` files include a `yaml-language-server` modeline that points to the published `master` JSON Schema artifact. `init` and `clone` also create sibling `v8project.local.yaml` with the local overlay schema modeline and add it to `.gitignore` when needed.
 

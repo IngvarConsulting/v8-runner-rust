@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::config::model::{
-    is_infobase_name, AppConfig, InfobaseConfig, InfobaseSelector, DEFAULT_INFOBASE_NAME,
-    INFOBASE_NAME_PATTERN,
+    is_infobase_name, AppConfig, EdtCliConfig, InfobaseConfig, InfobaseSelector,
+    DEFAULT_INFOBASE_NAME, INFOBASE_NAME_PATTERN,
 };
 use crate::config::schema::{
     validate_local_overlay_schema_boundary, validate_main_config_schema_boundary,
@@ -678,14 +678,13 @@ fn normalize_config_paths(config: &mut AppConfig, config_dir: &Path) {
     if let Some(path) = config.tools.platform.path.as_mut() {
         *path = resolve_from(config_dir, path);
     }
-    // Голое имя без разделителя — подсказка версии или имя, которое разбирает автопоиск
-    // EDT, а не путь. Путь с разделителем считается от каталога конфига, как любой.
+    // Голое имя без каталога — подсказка автопоиска EDT, а не путь.
     if let Some(path) = config
         .tools
         .edt_cli
         .path
         .as_mut()
-        .filter(|path| path.is_absolute() || path.components().count() > 1)
+        .filter(|path| EdtCliConfig::names_location(path))
     {
         *path = resolve_from(config_dir, path);
     }

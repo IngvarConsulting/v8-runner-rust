@@ -34,7 +34,13 @@ pub fn parse_rust_file(path: &Path) -> File {
 }
 
 pub fn production_tokens(path: &Path) -> String {
-    let file = parse_rust_file(path);
+    let contents = fs::read_to_string(path).expect("read source");
+    production_tokens_of(&contents)
+}
+
+/// [`production_tokens`] над текстом, а не файлом: так стражи проверяют себя на образцах.
+pub fn production_tokens_of(source: &str) -> String {
+    let file = syn::parse_file(source).expect("parse rust source");
     let mut tokens = Vec::new();
     for item in &file.items {
         collect_item_tokens(item, &mut tokens);

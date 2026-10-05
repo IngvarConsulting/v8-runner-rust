@@ -274,12 +274,13 @@ pub fn resolve_from(base: &Path, path: &Path) -> PathBuf {
     base.join(path).components().collect()
 }
 
-/// Абсолютный путь от рабочего каталога процесса тем же правилом, что [`resolve_from`].
+/// Абсолютный путь от рабочего каталога процесса тем же правилом, что [`resolve_from`]:
+/// абсолютный путь тоже собирается из компонентов, рабочий каталог для него не читается.
 /// Для мест, где путь ещё может прийти относительным (настройки, собранные в коде, а не
 /// загрузчиком); загрузчик отдаёт пути проекта уже абсолютными.
 pub fn absolute_from_current_dir(path: &Path) -> std::io::Result<PathBuf> {
     if path.is_absolute() {
-        return Ok(path.to_path_buf());
+        return Ok(resolve_from(Path::new(""), path));
     }
     Ok(resolve_from(&std::env::current_dir()?, path))
 }
@@ -486,6 +487,11 @@ mod tests {
         assert_eq!(
             resolve_from(&base, std::path::Path::new("/opt/./va.epf")),
             PathBuf::from("/opt/va.epf")
+        );
+        assert_eq!(
+            super::absolute_from_current_dir(std::path::Path::new("/opt/./tools//x"))
+                .expect("absolute path needs no current directory"),
+            PathBuf::from("/opt/tools/x")
         );
     }
 

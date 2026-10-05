@@ -3,6 +3,7 @@ id: INV.CONFIG.A-RESOLVED-CONFIG-PATH-IS-BUILT-FROM-ITS-COMPONENTS
 check:
   - src/support/path.rs::resolve_from_drops_current_dir_components_and_keeps_parent_dir
   - src/support/path.rs::resolve_from_builds_native_windows_paths
+  - tests/cli_bootstrap.rs::clone_with_a_dotted_source_dir_hands_the_platform_a_clean_path
 ---
 
 # Разрешённый путь конфига собран из своих компонентов
