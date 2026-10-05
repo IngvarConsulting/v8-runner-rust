@@ -459,12 +459,10 @@ fn gitignore_mentions_local_config(content: &str) -> bool {
 }
 
 fn resolve_output_path(project_dir: &Path, output_path: &Path) -> std::io::Result<PathBuf> {
-    let output_path = if output_path.is_absolute() {
-        output_path.to_path_buf()
-    } else {
-        project_dir.join(output_path)
-    };
-    nearest_existing_canonical_path(&output_path)
+    nearest_existing_canonical_path(&crate::support::path::resolve_from(
+        project_dir,
+        output_path,
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -98,14 +98,11 @@ impl<'a> SourceSetsService<'a> {
     }
 }
 
+/// Пути проекта приходят из загрузчика абсолютными; относительный — только у настроек,
+/// собранных в коде, и тогда он считается от рабочего каталога процесса.
 fn absolutize_path(path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        return path.to_path_buf();
-    }
-
-    std::env::current_dir()
+    crate::support::path::absolute_from_current_dir(path)
         .expect("failed to resolve current working directory")
-        .join(path)
 }
 
 #[cfg(test)]

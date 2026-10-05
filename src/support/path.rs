@@ -262,13 +262,26 @@ pub fn normalize_windows_verbatim_path(path: &Path) -> PathBuf {
 /// Единственное правило путей из настроек: абсолютный путь остаётся собой, относительный
 /// считается от `base` — каталога основного `v8project.yaml`.
 ///
-/// Результат собран из компонентов пути: внутренние `.` и повторные разделители уходят,
+/// Приставка `\\?\` снимается с `base` и `path` до сборки: внутри такого пути `/` не
+/// разделитель, а `.` — обычное имя, и разбор компонентов оставил бы их как есть. Дальше
+/// результат собран из компонентов: внутренние `.` и повторные разделители уходят,
 /// разделители становятся родными для ОС. Утилиты платформы получают путь в argv как есть,
 /// и `E:\proj\./src/cf` `ibcmd` не прочёл (#4). `..` остаётся: свернуть его лексически
 /// значит пройти мимо символьной ссылки.
 pub fn resolve_from(base: &Path, path: &Path) -> PathBuf {
-    let resolved: PathBuf = base.join(path).components().collect();
-    normalize_windows_verbatim_path(&resolved)
+    let base = normalize_windows_verbatim_path(base);
+    let path = normalize_windows_verbatim_path(path);
+    base.join(path).components().collect()
+}
+
+/// Абсолютный путь от рабочего каталога процесса тем же правилом, что [`resolve_from`].
+/// Для мест, где путь ещё может прийти относительным (настройки, собранные в коде, а не
+/// загрузчиком); загрузчик отдаёт пути проекта уже абсолютными.
+pub fn absolute_from_current_dir(path: &Path) -> std::io::Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    Ok(resolve_from(&std::env::current_dir()?, path))
 }
 
 #[cfg(test)]
@@ -473,6 +486,34 @@ mod tests {
         assert_eq!(
             resolve_from(&base, std::path::Path::new("/opt/./va.epf")),
             PathBuf::from("/opt/va.epf")
+        );
+    }
+
+    /// Сравнение текстом, а не `PathBuf`: равенство путей на Windows идёт по компонентам и
+    /// не отличило бы `E:\proj/src` от `E:\proj\src`.
+    #[test]
+    #[cfg(windows)]
+    fn resolve_from_builds_native_windows_paths() {
+        fn resolved(base: &str, path: &str) -> String {
+            resolve_from(std::path::Path::new(base), std::path::Path::new(path))
+                .into_os_string()
+                .into_string()
+                .expect("utf-8 path")
+        }
+
+        assert_eq!(resolved(r"E:\proj", "./src/cf"), r"E:\proj\src\cf");
+        assert_eq!(resolved(r"E:/proj", r"src/cf\x"), r"E:\proj\src\cf\x");
+        assert_eq!(resolved(r"\\srv\share\p", r".\x"), r"\\srv\share\p\x");
+        assert_eq!(resolved(r"\\?\C:\p", "x"), r"C:\p\x");
+        assert_eq!(resolved(r"\\?\C:\proj\./src/cf", ""), r"C:\proj\src\cf");
+        assert_eq!(
+            resolved(r"E:\proj", r"\\?\C:\proj\./src/cf"),
+            r"C:\proj\src\cf"
+        );
+        assert_eq!(resolved(r"E:\proj", r"..\shared"), r"E:\proj\..\shared");
+        assert_eq!(
+            resolved(r"E:\proj", r"D:\other\.\va.epf"),
+            r"D:\other\va.epf"
         );
     }
 

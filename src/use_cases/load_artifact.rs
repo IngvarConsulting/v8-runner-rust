@@ -884,12 +884,7 @@ fn resolve_existing_file(
             "{flag} requires a non-empty file path"
         )));
     }
-    let candidate = PathBuf::from(trimmed);
-    let candidate = if candidate.is_absolute() {
-        candidate
-    } else {
-        config.base_path.join(candidate)
-    };
+    let candidate = crate::support::path::resolve_from(&config.base_path, Path::new(trimmed));
     if !candidate.exists() {
         return Err(AppError::Validation(format!(
             "{flag} file does not exist: {}",

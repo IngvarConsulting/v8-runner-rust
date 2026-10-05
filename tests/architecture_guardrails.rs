@@ -4420,30 +4420,55 @@ fn the_cancellation_guard_sees_every_bypass() {
 /// Путь из настроек разрешается одним правилом — `support::path::resolve_from` (#4).
 ///
 /// Корень проблемы: «абсолютный оставить, относительный присоединить к базе» было написано
-/// заново в каждом модуле, который брал путь набора, и голое `join` оставляло в argv
-/// `ibcmd` путь вида `E:\proj\./src/cf`. Признак повтора — присоединение чужого `path` к
-/// базе проекта или к каталогу конфига под любым именем вызывающей функции.
+/// заново в каждом модуле, который брал путь, и голое `join` оставляло в argv `ibcmd` путь
+/// вида `E:\proj\./src/cf`. Признак повтора — сама форма, а не имена: проверка
+/// `is_absolute()` и следом `.join(` в той же функции production-кода. Найденное место
+/// переводится на `resolve_from` или попадает в список ниже с причиной.
 #[test]
 fn config_paths_are_resolved_only_by_their_owner() {
+    /// Файл и функция (у метода — его имя), где форма оставлена намеренно, и почему.
+    const ALLOWED: &[(&str, &str, &str)] = &[(
+        "src/use_cases/bootstrap_project.rs",
+        "new",
+        "the clone writes the source directory into the new v8project.yaml as the user spelled \
+         it; resolve_from would make the separators native and the committed file Windows-only",
+    )];
+    static HAND_RESOLUTION: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\.is_absolute\(\)[^\n]*?\.join\(").expect("regex"));
+    static ITEM_NAME: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"fn([A-Za-z_]\w*)[<(]").expect("regex"));
     let owner = repo_path("src/support/path.rs");
-    static HAND_RESOLUTION: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(base_path|config_dir)\.join\(&?[A-Za-z_][\w.]*path\)").expect("regex")
-    });
     let mut offenders = Vec::new();
 
     for file in collect_rust_files(&repo_path("src")) {
         if file == owner {
             continue;
         }
-        let production = production_tokens(&file);
-        if let Some(found) = HAND_RESOLUTION.find(&production) {
-            offenders.push(format!("{}: {}", file.display(), found.as_str()));
+        let relative = file
+            .strip_prefix(repo_path(""))
+            .expect("source under the repository")
+            .to_string_lossy()
+            .replace('\\', "/");
+        for item in production_tokens(&file).lines() {
+            if !HAND_RESOLUTION.is_match(item) {
+                continue;
+            }
+            let name = ITEM_NAME
+                .captures(item)
+                .map(|captures| captures[1].to_owned())
+                .unwrap_or_default();
+            let allowed = ALLOWED
+                .iter()
+                .any(|(path, item_name, _)| *path == relative && *item_name == name);
+            if !allowed {
+                offenders.push(format!("{relative}: {name}"));
+            }
         }
     }
 
     assert!(
         offenders.is_empty(),
-        "these modules resolve a configured path by hand instead of calling \
+        "these items keep an absolute path and join a relative one by hand instead of calling \
          support::path::resolve_from (or SourceSetConfig::root_in):\n{}",
         offenders.join("\n")
     );
