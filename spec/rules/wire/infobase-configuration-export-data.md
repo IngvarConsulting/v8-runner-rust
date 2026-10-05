@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.INFOBASE-CONFIGURATION-EXPORT-DATA
-version: 6
+version: 5
 artifact: docs/schemas/command-data/download.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -23,13 +23,6 @@ check:
 `cancelled` и запись с фазой `command_boundary`, а не `failed` без записи. Процесс, которому
 отмена не дала запуститься, тоже называется `command_boundary`, а не `provider_command`:
 работы он не получил. Имена шагов в `steps[]` прежние.
-
-**Что изменила версия 6.** Причина пропуска исполнителя одна — почему он не взят:
-приставка о реализованности адаптера (`Designer CF/CFE adapter is implemented …; `) ушла из
-`provider.skipped[].reason`, а с ней из `execution.errors[].message`, `steps[].message` и
-`error.message`. Исполнитель вне матрицы, названный ключом `providers.*`, до выбора не
-доходит: команда отказывает при загрузке настроек родом `invalid_argument`, как `push`, и
-квитанции в ответе нет. Путь в причине — канонизованный абсолютный.
 
 ## Пример
 

@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.INFOBASE-RESTORE-DATA
-version: 6
+version: 5
 artifact: docs/schemas/command-data/infobase-restore.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -22,13 +22,6 @@ check:
 работы он не получил. Отказ исполнителя, так и не получившего работу, базу не трогал:
 `target_state` остаётся `unchanged`, и предупреждения о неудавшемся откате в ответе нет.
 Имена шагов в `steps[]` прежние.
-
-**Что изменила версия 6.** Причина пропуска исполнителя одна — почему он не взят:
-приставка о реализованности адаптера (`Designer DT restore is implemented …; `) ушла из
-`provider.skipped[].reason`, а с ней из `execution.errors[].message`, `steps[].message` и
-`error.message`. Исполнитель вне матрицы, названный ключом `providers.*`, до выбора не
-доходит: команда отказывает при загрузке настроек родом `invalid_argument`, как `push`.
-Отказ запроса до выбора исполнителя квитанции не несёт — пример показывает именно это.
 
 ## Пример
 
