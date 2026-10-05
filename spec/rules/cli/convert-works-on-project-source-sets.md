@@ -14,5 +14,6 @@ check:
 `--output` задаёт только корень результата и проверяется на пересечение с исходниками,
 базовым и рабочим каталогами.
 
-Как называется набор и что ещё принимает команда, держит
-`INV.CLI.CONVERT-TAKES-A-SET-OR-A-PACKAGE-AND-A-DIRECTION`.
+Как называется набор, держит `INV.CLI.CONVERT-TAKES-A-SET-OR-A-PACKAGE-FILE`; направление —
+`INV.CLI.CONVERT-DIRECTION-IS-SET-BY-TO`; исполнителей для пакета —
+`INV.CLI.A-PACKAGE-DIRECTION-OF-CONVERT-HAS-AN-EXECUTOR-CHAIN`.
