@@ -730,7 +730,9 @@ fn server_infobase_create_never_echoes_the_connection_string_credentials() {
         let (_dir, config_path, _work_path, calls_log) = setup_ibcmd_server_init_project(script);
         fs::write(
             config_path.with_file_name("v8project.local.yaml"),
-            "infobases:\n  origin:\n    connection: 'Srvr=cluster:1541;Ref=demo;Usr=ConnUser;Pwd=conn-s3cret'\n",
+            // An address the project file does not declare: seeing it in the message proves the
+            // credential-bearing string from the local layer is the one the command used.
+            "infobases:\n  origin:\n    connection: 'Srvr=cluster-local:1641;Ref=demo_local;Usr=ConnUser;Pwd=conn-s3cret'\n",
         )
         .expect("local overlay");
         let output = v8_runner_command()
@@ -749,7 +751,7 @@ fn server_infobase_create_never_echoes_the_connection_string_credentials() {
         assert_eq!(step["status"], expected, "{stdout}");
         let message = step["message"].as_str().expect("message");
         assert!(
-            message.contains("server infobase 'demo' on 'cluster:1541' as 'Admin'"),
+            message.contains("server infobase 'demo_local' on 'cluster-local:1641' as 'Admin'"),
             "{message}"
         );
         for leaked in ["conn-s3cret", "Pwd=", "Usr=", "ConnUser"] {
