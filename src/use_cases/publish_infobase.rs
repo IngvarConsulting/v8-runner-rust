@@ -158,7 +158,7 @@ fn run_publish(
         startup_probe: None,
     };
     let runner = utilities.runner_for(UtilityType::Webinst);
-    let outcome = runner
+    let finished = runner
         .run_with_policy(
             &process,
             &context.process_policy(InterruptionSafetyClass::GracefulThenKill, None),
@@ -179,27 +179,29 @@ fn run_publish(
 
     let mut done = result(None);
     done.platform_log_path = Some(log_path);
-    if outcome.exit_code == 0 {
-        done.message = Some(format!(
-            "{} '{}' on {} completed",
-            request.action.as_str(),
-            wsdir,
-            server.as_str()
-        ));
-        Ok(done)
-    } else {
-        done.ok = false;
-        let message = format!(
-            "webinst exited with status {} while trying to {} '{}' on {}",
-            outcome.exit_code,
-            request.action.as_str(),
-            wsdir,
-            server.as_str()
-        );
-        done.message = Some(message.clone());
-        Err(UseCaseFailure::with_payload(
-            AppError::Platform(message),
-            done,
-        ))
+    match finished.outcome() {
+        Ok(()) => {
+            done.message = Some(format!(
+                "{} '{}' on {} completed",
+                request.action.as_str(),
+                wsdir,
+                server.as_str()
+            ));
+            Ok(done)
+        }
+        Err(code) => {
+            done.ok = false;
+            let message = format!(
+                "webinst exited with status {code} while trying to {} '{}' on {}",
+                request.action.as_str(),
+                wsdir,
+                server.as_str()
+            );
+            done.message = Some(message.clone());
+            Err(UseCaseFailure::with_payload(
+                AppError::Platform(message),
+                done,
+            ))
+        }
     }
 }

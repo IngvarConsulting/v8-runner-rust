@@ -614,10 +614,9 @@ fn probe_compatibility(
     // The whole classification: the comparison either ran or it did not. Exit zero is the
     // platform's own guarantee, and exactly then it writes the comparison report; every other
     // outcome leaves the state unestablished, whatever sentence the log carries.
-    let state = if result.process.exit_code == 0 {
-        CompatibilityState::Supported
-    } else {
-        CompatibilityState::NotEstablished
+    let state = match result.process.outcome() {
+        Ok(()) => CompatibilityState::Supported,
+        Err(_code) => CompatibilityState::NotEstablished,
     };
     let diagnostic = probe_evidence(&result);
     Ok(ProbeResult {
@@ -675,10 +674,9 @@ fn installed_extension_state(
             return Ok(ExtensionPresence::NotEstablished(error.to_string()));
         }
     };
-    if result.process.exit_code != 0 {
+    if let Err(code) = result.process.outcome() {
         return Ok(ExtensionPresence::NotEstablished(format!(
-            "reading the extension list exited with {}",
-            result.process.exit_code
+            "reading the extension list exited with {code}"
         )));
     }
     Ok(match parse_extension_inventory(&result.process.stdout) {
@@ -698,9 +696,7 @@ fn installed_extension_state(
 /// Evidence is not a decision: nothing reads this back. It exists so the caller can see which
 /// sentence the runner deliberately refused to interpret.
 fn probe_evidence(result: &PlatformCommandResult) -> Option<String> {
-    if result.process.exit_code == 0 {
-        return None;
-    }
+    result.process.outcome().err()?;
     let log = result.platform_log.as_deref()?;
     let text = log
         .strip_prefix('\u{feff}')
@@ -994,9 +990,9 @@ fn ensure_platform_success(
     resolved: &ResolvedLoadRequest,
     result: &PlatformCommandResult,
 ) -> Result<(), AppError> {
-    if result.process.exit_code == 0 {
+    let Err(code) = result.process.outcome() else {
         return Ok(());
-    }
+    };
     Err(AppError::Platform(format_ibcmd_failure_details(
         action,
         match resolved.target_kind {
@@ -1005,7 +1001,7 @@ fn ensure_platform_success(
             LoadTargetKind::Unknown => "unknown",
         },
         resolved.extension.as_deref().unwrap_or("main"),
-        result.process.exit_code,
+        code.get(),
         &result.process.stdout,
         &result.process.stderr,
         result.platform_log.as_deref(),
