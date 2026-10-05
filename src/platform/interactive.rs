@@ -9,7 +9,7 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::platform::process::{
-    ProcessExecutionPolicy, ProcessInterruption, ProcessInterruptionReason,
+    reaped_elsewhere, ProcessExecutionPolicy, ProcessInterruption, ProcessInterruptionReason,
     ProcessInterruptionSafety,
 };
 use crate::platform::secrets::render_masked_command;
@@ -335,6 +335,19 @@ impl InteractiveProcessExecutor {
         timeout: Duration,
         policy: &ProcessExecutionPolicy,
     ) -> Result<InteractiveCommandExecution, InteractiveProcessError> {
+        self.execute_with_policy_delivering(command, timeout, policy, || {})
+    }
+
+    /// Как `execute_with_policy`, но `delivered` вызывается, как только команда доставлена в
+    /// процесс, — после отметки работы в `policy.work`. Так общая сессия EDT узнаёт доставку
+    /// запроса, исполняя его под классом шага.
+    pub(in crate::platform) fn execute_with_policy_delivering(
+        &mut self,
+        command: &str,
+        timeout: Duration,
+        policy: &ProcessExecutionPolicy,
+        delivered: impl FnOnce(),
+    ) -> Result<InteractiveCommandExecution, InteractiveProcessError> {
         if self.poisoned {
             return Err(InteractiveProcessError::Poisoned);
         }
@@ -362,6 +375,7 @@ impl InteractiveProcessExecutor {
         if let Some(work) = &policy.work {
             work.mark_work_given();
         }
+        delivered();
 
         self.wait_for_prompt_with_policy(
             WaitMode::Command {
@@ -1082,19 +1096,6 @@ fn configure_process_group(command: &mut Command) {
 
 #[cfg(not(unix))]
 fn configure_process_group(_command: &mut Command) {}
-
-/// `ECHILD`: процесс подобрал кто-то другой, и его номер уже не наш.
-fn reaped_elsewhere(error: &std::io::Error) -> bool {
-    #[cfg(unix)]
-    {
-        error.raw_os_error() == Some(libc::ECHILD)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = error;
-        false
-    }
-}
 
 /// Снимает группу неподобранного процесса. `ESRCH` значит, что группы уже нет. `EPERM`
 /// macOS отвечает, когда сигнал в группе принять некому: ведущий уже выходит или стал

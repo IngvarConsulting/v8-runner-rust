@@ -383,6 +383,11 @@ pub(super) fn enterprise_failure(error: EnterpriseError) -> EnterpriseFailure {
         AppError::PlatformProcess(ProcessError::ExitedEarly { .. }) => {
             TestErrorKind::EnterpriseExitedEarly
         }
+        // Снятый прогон, конец которого не подтвердился, — не отмена, не истёкший срок и не
+        // отказ проверки запуска.
+        AppError::PlatformProcess(ProcessError::InterruptedEndUnconfirmed { .. }) => {
+            TestErrorKind::EnterpriseEndUnconfirmed
+        }
         AppError::PlatformProcess(ProcessError::StdoutLogIo { .. }) => {
             TestErrorKind::EnterpriseStdoutLogIo
         }
@@ -469,6 +474,19 @@ mod tests {
                 assert!(matches!(
                     error,
                     AppError::PlatformProcess(ProcessError::StartupCheckFailed { .. })
+                ));
+            },
+        );
+        assert_process_mapping(
+            ProcessError::InterruptedEndUnconfirmed {
+                cmd: "1cv8c ENTERPRISE".to_owned(),
+                source: std::io::Error::other("wait refused"),
+            },
+            TestErrorKind::EnterpriseEndUnconfirmed,
+            |error| {
+                assert!(matches!(
+                    error,
+                    AppError::PlatformProcess(ProcessError::InterruptedEndUnconfirmed { .. })
                 ));
             },
         );

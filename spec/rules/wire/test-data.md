@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.TEST-DATA
-version: 4
+version: 5
 artifact: docs/schemas/command-data/test.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -27,9 +27,12 @@ YaXUnit. Форму держит сверка с типом, который её
 дала запустить, называется `command_boundary`, а не `run`: `run` — только прогон, снятый после
 запуска.
 
-**Что изменила версия 4.** Отмена пишет в `execution.errors[]` ошибку с кодом `cancelled` —
-тем же, что отмена в конверте. Прежде `test` ограничивался диагностикой и записью о
-прерывании.
+Снятый прогон, конец которого не подтверждён, отвечает `error_kind:
+enterprise_end_unconfirmed` со статусом `failed`, а не отменой и не истёкшим пределом.
+
+**Что изменила версия 5.** В `error_kind` добавлено значение `enterprise_end_unconfirmed`.
+Отмена по-прежнему пишет в `execution.errors[]` ошибку с кодом `cancelled` — тем же, что
+отмена в конверте.
 
 ## Пример
 
