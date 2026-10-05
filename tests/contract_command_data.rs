@@ -119,11 +119,22 @@ fn every_previewable_command_answers_in_the_form_declared_for_it() {
     let payload = run(&config_path, &["version"]);
     assert_eq!(payload["command"], "version", "{payload}");
     assert_data_matches_its_command_form(&payload, "`version`");
+
+    // Настоящий прогон, не превью: поля, которые появляются только при реальном исходе,
+    // превью не несёт. Прежнее имя `syntax` заодно держит, что синоним отвечает под новым.
+    let payload = run(
+        &config_path,
+        &["syntax", "designer-config", "--thin-client"],
+    );
+    assert_eq!(payload["command"], "check", "{payload}");
+    assert_data_matches_its_command_form(&payload, "`syntax designer-config --thin-client`");
 }
 
 /// Половина сверки, которой не хватало проверке выше: перечень превью назывался руками и
-/// держал шестнадцать вызовов при двадцати трёх листьях (#268). Лист, получивший превью,
-/// в перечень не попадал, и сверка форм оставалась зелёной, ничего о нём не сказав.
+/// держал не все листья (#268). Лист, получивший превью, в перечень не попадал, и сверка
+/// форм оставалась зелёной, ничего о нём не сказав. Состав страхуется и в
+/// `contract_previews::every_leaf_with_a_preview_is_exercised_here` — намеренно: таблица
+/// общая, а сверки у неё разные.
 #[test]
 fn every_leaf_with_a_preview_is_checked_against_its_form() {
     let mut checked: Vec<&str> = previews::with_preview(Path::new("."))
