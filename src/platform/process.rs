@@ -372,6 +372,12 @@ pub enum ProcessError {
     #[error("failed to observe process startup '{cmd}': {source}")]
     StartupCheckFailed { cmd: String, source: std::io::Error },
 
+    /// Процесс снимали по отмене или пределу, но его конец так и не подтвердился: ожидание
+    /// отказало и после жёсткого снятия. Это не отмена и не истёкший предел — прерывания,
+    /// которого не видели, ответ не называет.
+    #[error("the end of the interrupted process '{cmd}' was not confirmed: {source}")]
+    InterruptedEndUnconfirmed { cmd: String, source: std::io::Error },
+
     #[error("process exited before startup completed '{cmd}' (exit {exit_code})")]
     ExitedEarly { cmd: String, exit_code: i32 },
 
@@ -1177,39 +1183,43 @@ fn interrupt_child(
                 "{}",
                 CRITICAL_INTERRUPTION_DEFERRED
             );
-            Ok(None)
+            return Ok(None);
         }
-        ProcessInterruptionSafety::Interruptible => {
-            terminate_child_group(spawned);
-            confirm_interrupted_exit(spawned, rendered_command)?;
-            Ok(Some(process_error_from_reason(
-                rendered_command,
-                policy,
-                reason,
-            )))
-        }
+        ProcessInterruptionSafety::Interruptible => terminate_child_group(spawned),
         ProcessInterruptionSafety::GracefulThenKill => {
             terminate_child_group_gracefully(spawned, policy.graceful_shutdown_timeout);
-            confirm_interrupted_exit(spawned, rendered_command)?;
-            Ok(Some(process_error_from_reason(
-                rendered_command,
-                policy,
-                reason,
-            )))
         }
     }
+    answer_after_confirmed_end(spawned, rendered_command, policy, reason).map(Some)
 }
 
-/// Подтверждает конец снятого процесса, прежде чем ответ назовёт прерывание. Ошибка
-/// ожидания конца не подтверждает: процесс снимается жёстко и ожидается снова. Если и это
-/// ожидание отказало, ответ — отказ наблюдения за процессом, а не отмена и не истёкший
-/// предел.
+/// Ответ снятого процесса: прерывание он называет, только когда конец процесса подтверждён.
+fn answer_after_confirmed_end(
+    spawned: &mut SpawnedChild,
+    rendered_command: &str,
+    policy: &ProcessExecutionPolicy,
+    reason: ProcessInterruptionReason,
+) -> Result<ProcessError, ProcessError> {
+    confirm_interrupted_exit(spawned, rendered_command)?;
+    Ok(process_error_from_reason(rendered_command, policy, reason))
+}
+
+/// Подтверждает конец снятого процесса, прежде чем ответ назовёт прерывание.
+///
+/// `ECHILD` — конец подтверждён: лидера подобрал кто-то другой (например, при `SIGCHLD`,
+/// игнорируемом по наследству от родителя). Его номер уже не наш, и повторный сигнал по нему
+/// мог бы попасть в чужую группу (INV.PLATFORM.DETACHED-CLIENT-OWNERSHIP). Прочая ошибка
+/// ожидания конца не подтверждает, но и процесс не подобран: номер держит хотя бы зомби, так
+/// что процесс снимается жёстко и ожидается снова. Если и это ожидание отказало, ответ —
+/// неподтверждённый конец, а не отмена и не истёкший предел.
 fn confirm_interrupted_exit(
     spawned: &mut SpawnedChild,
     rendered_command: &str,
 ) -> Result<(), ProcessError> {
-    let Err(error) = spawned.child.wait_interrupted() else {
-        return Ok(());
+    let error = match spawned.child.wait_interrupted() {
+        Ok(_) => return Ok(()),
+        Err(error) if reaped_elsewhere(&error) => return Ok(()),
+        Err(error) => error,
     };
     warn!(
         command = rendered_command,
@@ -1217,17 +1227,29 @@ fn confirm_interrupted_exit(
         "waiting for the interrupted process failed; killing it and waiting again"
     );
     terminate_child_group(spawned);
-    spawned
-        .child
-        .wait_interrupted()
-        .map(drop)
-        .map_err(|source| ProcessError::StartupCheckFailed {
+    match spawned.child.wait_interrupted() {
+        Ok(_) => Ok(()),
+        Err(error) if reaped_elsewhere(&error) => Ok(()),
+        Err(source) => Err(ProcessError::InterruptedEndUnconfirmed {
             cmd: rendered_command.to_owned(),
-            source: std::io::Error::new(
-                source.kind(),
-                format!("the end of the interrupted process was not confirmed: {source}"),
-            ),
-        })
+            source,
+        }),
+    }
+}
+
+/// `ECHILD`: процесс подобрал кто-то другой, и его номер уже не наш — конец его подтверждён,
+/// а сигнал по сохранённому номеру запрещён. Единственный владелец этого признака в модуле
+/// платформы.
+pub(in crate::platform) fn reaped_elsewhere(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(libc::ECHILD)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
 }
 
 #[cfg(test)]
@@ -1304,7 +1326,11 @@ fn terminate_child_group_gracefully(spawned: &mut SpawnedChild, timeout: Duratio
         let start = std::time::Instant::now();
         while start.elapsed() < timeout {
             match spawned.child.try_wait_interrupted() {
-                // Опрос отказал: конец группы не подтверждён, и её снимают жёстко.
+                // Лидера подобрал кто-то другой: конец его подтверждён, а номер уже не наш, и
+                // жёсткий сигнал по нему запрещён.
+                Err(error) if reaped_elsewhere(&error) => return,
+                // Опрос отказал иначе: конец группы не подтверждён, лидер не подобран и держит
+                // номер, так что группу снимают жёстко.
                 Err(_) => break,
                 Ok(_) if !unix_process_group_exists(pgid) => return,
                 Ok(_) => {}
@@ -2471,6 +2497,74 @@ mod tests {
         assert_eq!(&reply, b"pong");
     }
 
+    /// Лидера снимаемого процесса подобрал кто-то другой, пока его жива группа: потомок,
+    /// глухой к SIGTERM, держит её. `ECHILD` подтверждает конец лидера — ответ отмена, и
+    /// по сохранённому номеру не уходит больше ни одного сигнала: потомок жив.
+    /// `Interruptible` шлёт свой SIGKILL до ожидания, когда о подборе ещё не известно, поэтому
+    /// у него проверяется путь после сигнала — подтверждение конца; `GracefulThenKill`
+    /// проходит снятие целиком — мягкий цикл и подтверждение.
+    #[cfg(unix)]
+    #[test]
+    fn an_interruption_after_the_leader_was_reaped_elsewhere_signals_nothing_more() {
+        use std::io::{Read, Write};
+        for safety in [
+            ProcessInterruptionSafety::Interruptible,
+            ProcessInterruptionSafety::GracefulThenKill,
+        ] {
+            let dir = tempfile::Builder::new()
+                .prefix("v8r")
+                .tempdir_in("/tmp")
+                .unwrap();
+            let listener = std::os::unix::net::UnixListener::bind(dir.path().join("s")).unwrap();
+            let mut request = failed_detached_fixture_request(dir.path());
+            // Игнорируемый сигнал наследуется через exec: потомок переживает мягкое снятие.
+            request.args[1] = format!("trap '' TERM; {}", request.args[1]);
+            request.startup_probe = None;
+            let mut spawned = super::spawn_command(&request, ProcessIoMode::Detached, "fixture")
+                .expect("spawn the leader of a group its descendant holds");
+            let mut peer = accept_detached_fixture(&listener);
+            let pid = spawned.child.id() as libc::pid_t;
+            let mut status = 0;
+            // Подбирает не исполнитель: так ведёт себя чужой подборщик процесса.
+            assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+            assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 7);
+            let policy = ProcessExecutionPolicy::new(
+                None,
+                CancellationToken::new(),
+                safety,
+                WorkGiven::for_command(),
+            );
+
+            let answer = match safety {
+                ProcessInterruptionSafety::Interruptible => super::answer_after_confirmed_end(
+                    &mut spawned,
+                    "fixture",
+                    &policy,
+                    ProcessInterruptionReason::Cancelled,
+                )
+                .map(Some),
+                ProcessInterruptionSafety::GracefulThenKill
+                | ProcessInterruptionSafety::CriticalNonAbortable => super::interrupt_child(
+                    &mut spawned,
+                    "fixture",
+                    &policy,
+                    ProcessInterruptionReason::Cancelled,
+                ),
+            };
+
+            assert!(
+                matches!(answer, Ok(Some(ProcessError::Cancelled { .. }))),
+                "{safety:?}: a confirmed end answers as a cancellation: {answer:?}"
+            );
+            peer.0.write_all(b"ping").unwrap();
+            let mut reply = [0; 4];
+            peer.read_exact(&mut reply).unwrap_or_else(|error| {
+                panic!("{safety:?}: no signal may follow a reaped leader: {error}")
+            });
+            assert_eq!(&reply, b"pong");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn spawn_returns_pid_and_binary_without_waiting() {
@@ -3220,6 +3314,17 @@ mod tests {
     /// Отказ ожидания не подтверждает конец снятого процесса. Отказал один опрос — процесс
     /// снимается жёстко, подбирается повторным ожиданием, и только тогда ответ — отмена.
     /// Отказывает и повторное ожидание — ответ не называет прерывания, которого не видел.
+    ///
+    /// Какой путь покрывает каждый случай:
+    /// - `Interruptible`, один отказ: после SIGKILL группе отказывает первое ожидание в
+    ///   `confirm_interrupted_exit`; повторный SIGKILL и второе ожидание подтверждают конец.
+    /// - `Interruptible`, все отказы: отказывают оба ожидания в `confirm_interrupted_exit` —
+    ///   ответ `InterruptedEndUnconfirmed`.
+    /// - `GracefulThenKill`, один отказ: отказывает опрос мягкого цикла в
+    ///   `terminate_child_group_gracefully`, цикл прерывается жёстким снятием группы, и первое
+    ///   же ожидание в `confirm_interrupted_exit` конец подтверждает.
+    /// - `GracefulThenKill`, все отказы: отказывают опрос мягкого цикла и оба ожидания в
+    ///   `confirm_interrupted_exit` — ответ `InterruptedEndUnconfirmed`.
     #[cfg(unix)]
     #[test]
     fn an_interruption_answers_only_after_a_confirmed_end() {
@@ -3292,7 +3397,7 @@ mod tests {
                     );
                 } else {
                     assert!(
-                        matches!(err, ProcessError::StartupCheckFailed { .. }),
+                        matches!(err, ProcessError::InterruptedEndUnconfirmed { .. }),
                         "{case}: an unconfirmed end is not a cancellation: {err:?}"
                     );
                     // Процесс снят жёстко, но не подобран: подбирает его тест.
@@ -3338,6 +3443,87 @@ mod tests {
             .expect_err("expected cancellation");
 
         assert!(matches!(err, ProcessError::Cancelled { .. }));
+    }
+
+    /// `SIGCHLD`, игнорируемый по наследству от родителя, подбирает снятый процесс без
+    /// исполнителя, и его ожидание отвечает `ECHILD`. Это подтверждённый конец: ответ — отмена.
+    /// Игнорирование `SIGCHLD` действует на весь процесс и сломало бы соседние тесты, поэтому
+    /// случай идёт в отдельном процессе тестов, который получает его так же, как раннер, —
+    /// унаследованным через exec.
+    #[cfg(unix)]
+    #[test]
+    fn an_interruption_is_a_cancellation_when_sigchld_is_ignored_by_inheritance() {
+        use std::os::unix::process::CommandExt;
+        const TEST: &str = "platform::process::tests::an_interruption_is_a_cancellation_when_sigchld_is_ignored_by_inheritance";
+        const CASE: &str = "V8_RUNNER_SIGCHLD_IGNORED_CASE";
+        if std::env::var_os(CASE).is_some() {
+            // SAFETY: reading the disposition by setting the same one back changes nothing.
+            let inherited = unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };
+            assert_eq!(
+                inherited,
+                libc::SIG_IGN,
+                "SIGCHLD must be ignored by inheritance"
+            );
+            for safety in [
+                ProcessInterruptionSafety::Interruptible,
+                ProcessInterruptionSafety::GracefulThenKill,
+            ] {
+                let dir = tempdir().expect("tempdir");
+                let script = dir.path().join("sleep.sh");
+                write_script(&script, "exec sleep 30");
+                let cancellation = CancellationToken::new();
+                let canceller = {
+                    let cancellation = cancellation.clone();
+                    thread::spawn(move || {
+                        thread::sleep(Duration::from_millis(100));
+                        cancellation.cancel();
+                    })
+                };
+                let started = std::time::Instant::now();
+                let err = ProcessExecutor
+                    .run_with_policy(
+                        &plain_request(script),
+                        &ProcessExecutionPolicy::new(
+                            None,
+                            cancellation,
+                            safety,
+                            WorkGiven::for_command(),
+                        ),
+                    )
+                    .expect_err("the process must be interrupted");
+                canceller.join().expect("canceller");
+                assert!(
+                    matches!(err, ProcessError::Cancelled { .. }),
+                    "{safety:?}: {err:?}"
+                );
+                assert!(
+                    started.elapsed() < Duration::from_secs(15),
+                    "{safety:?}: the process was killed, not waited out"
+                );
+            }
+            return;
+        }
+        let mut case = std::process::Command::new(std::env::current_exe().unwrap());
+        case.args(["--exact", TEST, "--nocapture"])
+            .env(CASE, "1")
+            .stdin(std::process::Stdio::null());
+        // SAFETY: signal is async-signal-safe; the disposition survives exec like a parent's.
+        unsafe {
+            case.pre_exec(|| {
+                if libc::signal(libc::SIGCHLD, libc::SIG_IGN) == libc::SIG_ERR {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let output = case.output().expect("run the case with SIGCHLD ignored");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "status {:?}\n{stdout}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[cfg(unix)]

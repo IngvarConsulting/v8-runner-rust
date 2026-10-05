@@ -946,6 +946,13 @@ fn validate_in_session(
         SessionWait::Server(manager) => manager.execute_until_finished(request()),
     }
     .map_err(|error| session_halt(error, project, context.work(), started))?;
+    // `response.interruption` не читается: проверка — шаг некритичного класса, и отмену или
+    // предел сессия у неё не откладывает, а снимает её; отложенное прерывание несёт только
+    // ответ критического запроса.
+    debug_assert!(
+        response.interruption.is_none(),
+        "a non-critical validation carries no deferred interruption"
+    );
 
     let stdout = response.stdout.trim();
     let stderr = response.stderr.trim();

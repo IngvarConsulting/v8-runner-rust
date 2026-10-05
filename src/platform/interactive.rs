@@ -9,7 +9,7 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::platform::process::{
-    ProcessExecutionPolicy, ProcessInterruption, ProcessInterruptionReason,
+    reaped_elsewhere, ProcessExecutionPolicy, ProcessInterruption, ProcessInterruptionReason,
     ProcessInterruptionSafety,
 };
 use crate::platform::secrets::render_masked_command;
@@ -1096,19 +1096,6 @@ fn configure_process_group(command: &mut Command) {
 
 #[cfg(not(unix))]
 fn configure_process_group(_command: &mut Command) {}
-
-/// `ECHILD`: процесс подобрал кто-то другой, и его номер уже не наш.
-fn reaped_elsewhere(error: &std::io::Error) -> bool {
-    #[cfg(unix)]
-    {
-        error.raw_os_error() == Some(libc::ECHILD)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = error;
-        false
-    }
-}
 
 /// Снимает группу неподобранного процесса. `ESRCH` значит, что группы уже нет. `EPERM`
 /// macOS отвечает, когда сигнал в группе принять некому: ведущий уже выходит или стал

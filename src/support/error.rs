@@ -317,6 +317,7 @@ fn process_cancellation(error: &ProcessError) -> Option<CancelledAt> {
         ProcessError::Cancelled { delivered, .. } => Some(CancelledAt::after(*delivered)),
         ProcessError::SpawnFailed { .. }
         | ProcessError::StartupCheckFailed { .. }
+        | ProcessError::InterruptedEndUnconfirmed { .. }
         | ProcessError::ExitedEarly { .. }
         | ProcessError::StdoutLogIo { .. }
         | ProcessError::StderrLogIo { .. }

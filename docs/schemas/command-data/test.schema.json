@@ -381,23 +381,32 @@
       "type": "object"
     },
     "TestErrorKind": {
-      "enum": [
-        "build_failed",
-        "infobase_unavailable",
-        "test_setup_failed",
-        "enterprise_spawn_failed",
-        "enterprise_startup_check_failed",
-        "enterprise_exited_early",
-        "enterprise_stdout_log_io",
-        "enterprise_stderr_log_io",
-        "enterprise_timed_out",
-        "enterprise_exited_non_zero",
-        "test_failures",
-        "junit_not_produced",
-        "junit_empty",
-        "junit_malformed"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "build_failed",
+            "infobase_unavailable",
+            "test_setup_failed",
+            "enterprise_spawn_failed",
+            "enterprise_startup_check_failed",
+            "enterprise_exited_early",
+            "enterprise_stdout_log_io",
+            "enterprise_stderr_log_io",
+            "enterprise_timed_out",
+            "enterprise_exited_non_zero",
+            "test_failures",
+            "junit_not_produced",
+            "junit_empty",
+            "junit_malformed"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "enterprise_end_unconfirmed",
+          "description": "Прогон снимали по отмене или пределу, но конец процесса не подтвердился.",
+          "type": "string"
+        }
+      ]
     },
     "TestOutputMode": {
       "enum": [

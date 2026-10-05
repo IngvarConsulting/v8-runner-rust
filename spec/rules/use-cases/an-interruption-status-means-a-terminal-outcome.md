@@ -6,6 +6,7 @@ check:
   - src/use_cases/artifacts.rs::an_unrelated_failure_while_an_interruption_is_pending_stays_a_failure
   - src/platform/process.rs::an_interrupted_process_is_reaped_before_the_answer
   - src/platform/process.rs::an_interruption_answers_only_after_a_confirmed_end
+  - src/platform/process.rs::an_interruption_is_a_cancellation_when_sigchld_is_ignored_by_inheritance
   - src/platform/interactive.rs::command_timeout_kills_process_and_poison_fails_next_call
   - src/platform/edt_session.rs::execute_blocking_running_cancellation_preserves_cancelled_result_after_forced_cleanup
   - src/platform/edt_session.rs::execute_blocking_running_timeout_preserves_timeout_result_after_forced_cleanup

@@ -1470,14 +1470,19 @@ mod tests {
 
         fn execute_critical(
             &mut self,
-            _command: &str,
-            _timeout: Duration,
+            command: &str,
+            timeout: Duration,
             _cancellation: &CancellationToken,
-            _delivered: &dyn Fn(),
+            delivered: &dyn Fn(),
         ) -> Result<InteractiveCommandExecution, InteractiveProcessError> {
-            // Отсрочку критического шага держит настоящий исполнитель: её проверяет тест
-            // общей сессии над поддельным `1cedtcli` в `edt.rs`.
-            unreachable!("fake sessions run no critical requests")
+            // Поддельная команда отмену не слушает и доводится до своего исхода; отсрочку,
+            // которую называет настоящий исполнитель, проверяет тест общей сессии над
+            // поддельным `1cedtcli` в `edt.rs`.
+            self.execute(command, timeout, delivered)
+                .map(|output| InteractiveCommandExecution {
+                    output,
+                    interruption: None,
+                })
         }
 
         fn shutdown(
