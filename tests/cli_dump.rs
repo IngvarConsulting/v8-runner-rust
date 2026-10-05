@@ -820,6 +820,48 @@ fn a_dump_refuses_to_destroy_work_version_control_cannot_give_back() {
     );
 }
 
+/// Опись версий штатно лежит в игноре, а полная выгрузка пишет её заново: её
+/// прежнее содержимое не потеря, и выгрузка идёт без `--discard-uncommitted`.
+#[test]
+fn a_full_dump_replaces_an_ignored_version_file_without_asking() {
+    let (_dir, config_path, _binary, _work, base_path, _calls) = setup_project_in_a_repository();
+    let version_file = base_path.join("main").join("ConfigDumpInfo.xml");
+    fs::write(base_path.join(".gitignore"), "ConfigDumpInfo.xml\n").expect("gitignore");
+    git(
+        &base_path,
+        &[
+            "rm",
+            "-q",
+            "--cached",
+            "--ignore-unmatch",
+            "main/ConfigDumpInfo.xml",
+        ],
+    );
+    git(&base_path, &["add", ".gitignore"]);
+    git(&base_path, &["commit", "-qm", "ignore the version file"]);
+    fs::write(&version_file, "<info previous=\"yes\"/>\n").expect("version file");
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "dump",
+            "--mode",
+            "full",
+            "--source-set",
+            "main",
+        ])
+        .output()
+        .expect("run dump");
+
+    assert!(
+        output.status.success(),
+        "an ignored version file must not stop a full dump: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// Попросили явно — уничтожаем, как и обещает имя ключа. Резервная копия, о
 /// которой не просили и про которую молчат, была бы мусором в чужом каталоге.
 #[test]

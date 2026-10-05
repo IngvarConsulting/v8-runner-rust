@@ -117,7 +117,11 @@ pub enum UncommittedWork {
 /// Безвозвратно — это правка, живущая только на диске: незафиксированное изменение,
 /// файл вне учёта и файл в игноре. Проиндексированное сюда не относится: его
 /// содержимое лежит в `.git/index` и достаётся оттуда.
-pub fn uncommitted_work_in(dir: &Path) -> UncommittedWork {
+///
+/// `regenerated` — имена файлов в корне `dir`, которые сама замена пишет заново:
+/// их прежнее содержимое не потеря, а вопрос о них отказывал бы в каждой замене.
+/// Имена сравниваются буквально и только в корне `dir`.
+pub fn uncommitted_work_in(dir: &Path, regenerated: &[&str]) -> UncommittedWork {
     if !dir.exists() {
         return UncommittedWork::Nothing;
     }
@@ -136,6 +140,11 @@ pub fn uncommitted_work_in(dir: &Path) -> UncommittedWork {
             "--",
             ".",
         ])
+        .args(
+            regenerated
+                .iter()
+                .map(|name| format!(":(exclude,literal){name}")),
+        )
         .stdin(Stdio::null())
         .output()
     {
@@ -280,7 +289,7 @@ mod tests {
     fn a_clean_tree_has_nothing_to_lose() {
         let repo = repo_with_committed_source();
         assert_eq!(
-            uncommitted_work_in(&source_dir(&repo)),
+            uncommitted_work_in(&source_dir(&repo), &[]),
             UncommittedWork::Nothing
         );
     }
@@ -289,7 +298,7 @@ mod tests {
     fn an_absent_directory_has_nothing_to_lose() {
         let repo = repo_with_committed_source();
         assert_eq!(
-            uncommitted_work_in(&repo.path().join("src").join("never-was")),
+            uncommitted_work_in(&repo.path().join("src").join("never-was"), &[]),
             UncommittedWork::Nothing
         );
     }
@@ -299,7 +308,7 @@ mod tests {
         let repo = repo_with_committed_source();
         fs::write(source_dir(&repo).join("hand-written.xml"), "mine\n").expect("write");
         assert_eq!(
-            uncommitted_work_in(&source_dir(&repo)),
+            uncommitted_work_in(&source_dir(&repo), &[]),
             UncommittedWork::AtRisk(vec![PathBuf::from("src/cf/hand-written.xml")])
         );
     }
@@ -315,8 +324,27 @@ mod tests {
         fs::write(source_dir(&repo).join("scratch.local.xml"), "mine\n").expect("write");
 
         assert_eq!(
-            uncommitted_work_in(&source_dir(&repo)),
+            uncommitted_work_in(&source_dir(&repo), &[]),
             UncommittedWork::AtRisk(vec![PathBuf::from("src/cf/scratch.local.xml")])
+        );
+    }
+
+    /// Файл, который замена пишет заново, не потеря — но только в корне каталога:
+    /// одноимённый файл глубже остаётся под защитой.
+    #[test]
+    fn a_regenerated_file_at_the_root_is_not_at_risk() {
+        let repo = repo_with_committed_source();
+        fs::write(repo.path().join(".gitignore"), "ConfigDumpInfo.xml\n").expect("gitignore");
+        run_git(repo.path(), &["add", ".gitignore"]);
+        run_git(repo.path(), &["commit", "-qm", "ignore"]);
+        let source = source_dir(&repo);
+        fs::write(source.join("ConfigDumpInfo.xml"), "<info/>\n").expect("root inventory");
+        fs::create_dir_all(source.join("nested")).expect("nested dir");
+        fs::write(source.join("nested").join("ConfigDumpInfo.xml"), "mine\n").expect("nested");
+
+        assert_eq!(
+            uncommitted_work_in(&source, &["ConfigDumpInfo.xml"]),
+            UncommittedWork::AtRisk(vec![PathBuf::from("src/cf/nested/ConfigDumpInfo.xml")])
         );
     }
 
@@ -330,7 +358,7 @@ mod tests {
         fs::write(repo.path().join("other").join("notes.md"), "unrelated\n").expect("write");
 
         assert_eq!(
-            uncommitted_work_in(&source_dir(&repo)),
+            uncommitted_work_in(&source_dir(&repo), &[]),
             UncommittedWork::Nothing
         );
     }
@@ -343,7 +371,7 @@ mod tests {
         run_git(repo.path(), &["add", "src/cf/added.xml"]);
 
         assert_eq!(
-            uncommitted_work_in(&source_dir(&repo)),
+            uncommitted_work_in(&source_dir(&repo), &[]),
             UncommittedWork::Nothing
         );
     }
@@ -358,7 +386,7 @@ mod tests {
         fs::write(&path, "and then edited\n").expect("write");
 
         assert_eq!(
-            uncommitted_work_in(&source_dir(&repo)),
+            uncommitted_work_in(&source_dir(&repo), &[]),
             UncommittedWork::AtRisk(vec![PathBuf::from("src/cf/added.xml")])
         );
     }
@@ -383,7 +411,7 @@ mod tests {
         fs::write(root.join("hand-written.xml"), "mine\n").expect("write");
 
         assert_eq!(
-            uncommitted_work_in(root),
+            uncommitted_work_in(root, &[]),
             UncommittedWork::AtRisk(vec![PathBuf::from("hand-written.xml")])
         );
     }
@@ -398,7 +426,7 @@ mod tests {
         run_git(repo.path(), &["add", "-N", "src/cf/precious.xml"]);
 
         assert_eq!(
-            uncommitted_work_in(&source_dir(&repo)),
+            uncommitted_work_in(&source_dir(&repo), &[]),
             UncommittedWork::AtRisk(vec![PathBuf::from("src/cf/precious.xml")])
         );
     }
@@ -423,7 +451,7 @@ mod tests {
         // в хранилище объектов. Проверяется здесь другое — что прежнее имя не
         // прочиталось как очередная запись и не породило путь `xml`.
         assert_eq!(
-            uncommitted_work_in(root),
+            uncommitted_work_in(root, &[]),
             UncommittedWork::AtRisk(vec![PathBuf::from("hand-written.xml")])
         );
     }
@@ -492,7 +520,7 @@ mod tests {
     #[test]
     fn a_directory_outside_a_worktree_is_unknown() {
         let dir = tempdir().expect("tempdir");
-        let answer = uncommitted_work_in(dir.path());
+        let answer = uncommitted_work_in(dir.path(), &[]);
         assert!(
             matches!(answer, UncommittedWork::Unknown(_)),
             "expected Unknown, got {answer:?}"
@@ -512,7 +540,7 @@ mod tests {
         fs::write(hidden.join("hand-written.xml"), "mine\n").expect("write");
         fs::set_permissions(&hidden, fs::Permissions::from_mode(0o000)).expect("chmod");
 
-        let answer = uncommitted_work_in(&source_dir(&repo));
+        let answer = uncommitted_work_in(&source_dir(&repo), &[]);
 
         fs::set_permissions(&hidden, fs::Permissions::from_mode(0o755)).expect("restore");
         assert!(
