@@ -345,13 +345,15 @@ fn refuse_existing(targets: &[&Path], force: bool) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Каталог журналов команды под `workPath`: его заводит журнал действий этого же запуска.
+/// Каталог журналов под `workPath`. Проверка пустоты его не читает: в нём может лежать и
+/// журнал прежних запусков.
 const WORK_PATH_LOGS_DIR: &str = "logs";
 
 /// Клон пишет проект только в пустой каталог: пустым считается каталог, где нет ничего,
-/// кроме `.git`. Проверка идёт после замка, а замок и журнал этого же запуска уже лежат в
-/// `workPath` нового проекта. Поэтому `workPath` не в счёт, только пока в нём нет ничего,
-/// кроме файлов замка и каталога `logs`; любой другой файл или каталог в нём — «не пуст».
+/// кроме `.git`. Проверка идёт после замка, а замок и журнал уже могут лежать в `workPath`
+/// нового проекта. Поэтому `workPath` не в счёт, только пока в нём нет ничего, кроме файлов
+/// замка и каталога журналов `logs/` (его содержимое не проверяется); любой другой файл или
+/// каталог в нём — «не пуст».
 /// `--force` снимает отказ, как и запрет перезаписи. Каталога ещё нет — он пуст.
 fn refuse_a_non_empty_project_dir(
     paths: &BootstrapPaths,
@@ -379,7 +381,7 @@ fn refuse_a_non_empty_project_dir(
         }
         if let Some(foreign) = directory_entries(work_path)?
             .into_iter()
-            .find(|inner| !is_created_by_this_run(inner))
+            .find(|inner| !is_lock_file_or_logs_dir(inner))
         {
             return Err(refuse(foreign.path()));
         }
@@ -387,9 +389,9 @@ fn refuse_a_non_empty_project_dir(
     Ok(())
 }
 
-/// Запись `workPath`, которую к проверке пустоты заводит сам запуск: файлы замка и
-/// каталог журналов.
-fn is_created_by_this_run(entry: &std::fs::DirEntry) -> bool {
+/// Запись `workPath`, которую проверка пустоты пропускает: файл замка или каталог журналов
+/// `logs/` целиком, с любым содержимым и чьим бы он ни был.
+fn is_lock_file_or_logs_dir(entry: &std::fs::DirEntry) -> bool {
     let name = entry.file_name();
     is_workspace_lock_file(&name) || (name == WORK_PATH_LOGS_DIR && entry.path().is_dir())
 }

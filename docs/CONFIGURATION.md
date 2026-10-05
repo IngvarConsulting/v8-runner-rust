@@ -787,7 +787,7 @@ MCP endpoint и не гарантирует наличие Vanessa tools.
     `format`);
   - `artifact.path` на существующий `.cfe` файл.
 
-`tools.client_mcp.extension` не добавляется в `source-set` и не выбирается через `--source-set`.
+`tools.client_mcp.extension` не добавляется в `source-set` и не выбирается позиционным `<SET>`.
 `infobase create` импортирует EDT `source` в workspace, `push` подготавливает расширение
 после project source-set, а `launch mcp` и `launch mcp va` расширение не устанавливают и
 не обновляют.

@@ -810,7 +810,7 @@ fn resolve_target(
                 ));
             }
             let source_set_name = args.source_set.as_deref().ok_or_else(|| {
-                AppError::Validation("external artifacts export requires --source-set".to_owned())
+                AppError::Validation("external artifacts export requires <SET>".to_owned())
             })?;
             let source_set = inventory.named(source_set_name)?;
             let expected_purpose = match args.mode {
@@ -945,7 +945,7 @@ fn resolve_single_configuration_source_set<'a>(
             .map(|source_set| source_set.name.as_str())
             .collect::<Vec<_>>();
         return Err(AppError::Validation(format!(
-            "artifacts cf export requires exactly one configuration source-set when --source-set is omitted; found [{}]",
+            "artifacts cf export requires exactly one configuration source-set when <SET> is omitted; found [{}]",
             candidates.join(", ")
         )));
     }
@@ -1533,6 +1533,39 @@ mod tests {
         let error = resolve_target(&config, &request).expect_err("blank extension should fail");
 
         assert!(error.to_string().contains("non-empty --extension"));
+    }
+
+    /// Отказ называет позиционный `<SET>`: прежний ключ `--source-set` скрыт и в текстах
+    /// отказов не звучит.
+    #[test]
+    fn resolve_target_refusals_name_the_positional_set() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = sample_config(
+            dir.path(),
+            dir.path(),
+            Path::new("/tmp/1cv8"),
+            SourceFormat::Designer,
+        );
+        let mut external = cf_request("dist/external");
+        external.mode = ArtifactsModeRequest::ExternalDataProcessorEpf;
+        external.execution =
+            ArtifactsRequest::default_execution(ArtifactsModeRequest::ExternalDataProcessorEpf);
+        let without_set = resolve_target(&config, &external)
+            .expect_err("external export without a set")
+            .to_string();
+        assert!(without_set.contains("requires <SET>"), "{without_set}");
+        assert!(!without_set.contains("--source-set"), "{without_set}");
+
+        config.source_sets.push(SourceSetConfig {
+            name: "configuration-2".to_owned(),
+            purpose: SourceSetPurpose::Configuration,
+            path: PathBuf::from("configuration-2"),
+        });
+        let ambiguous = resolve_target(&config, &cf_request("dist/main.cf"))
+            .expect_err("several configuration sets")
+            .to_string();
+        assert!(ambiguous.contains("when <SET> is omitted"), "{ambiguous}");
+        assert!(!ambiguous.contains("--source-set"), "{ambiguous}");
     }
 
     #[cfg(unix)]

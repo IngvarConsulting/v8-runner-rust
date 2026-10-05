@@ -226,3 +226,92 @@ fn download_refuses_a_set_of_external_files() {
         "the platform must not be started"
     );
 }
+
+/// Прежние значения `--state working` и `--state database` принимаются один цикл, но
+/// справка их не печатает: в ней только словарь сайта.
+#[test]
+fn download_accepts_the_hidden_state_values_and_help_hides_them() {
+    let project = project();
+    let cf = project.out.join("main.cf").display().to_string();
+
+    for value in ["working", "database"] {
+        let preview = envelope(&run(
+            &project,
+            &["download", "--state", value, "--output", &cf, "--dry-run"],
+        ));
+        assert_eq!(preview["ok"], true, "--state {value}: {preview}");
+        assert_eq!(
+            preview["data"]["state"], value,
+            "--state {value}: {preview}"
+        );
+    }
+
+    let help = v8_runner_command()
+        .args(["download", "--help"])
+        .output()
+        .expect("run help");
+    assert!(help.status.success());
+    let help = String::from_utf8_lossy(&help.stdout);
+    // Описание ключа вправе говорить о состояниях словами; скрыты значения в списке.
+    let possible_values = help
+        .lines()
+        .find(|line| line.contains("--state <STATE>"))
+        .and_then(|line| line.split_once("[possible values:"))
+        .and_then(|(_, values)| values.split_once(']'))
+        .map(|(values, _)| values.trim())
+        .unwrap_or_else(|| panic!("--state lists its values:\n{help}"));
+    assert_eq!(possible_values, "db", "{help}");
+}
+
+/// Набор расширения требует `.cfe`: файл `.cf` — отказ до платформы, а не выгрузка
+/// основной конфигурации.
+#[test]
+fn download_of_an_extension_set_into_a_cf_is_refused_before_the_platform() {
+    let project = project();
+    let cf = project.out.join("sales.cf").display().to_string();
+
+    let output = run(&project, &["download", "sales", "--output", &cf]);
+    assert_eq!(output.status.code(), Some(2));
+    let envelope = envelope(&output);
+    assert_eq!(envelope["error"]["kind"], "validation", "{envelope}");
+    let message = envelope["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("must have .cfe suffix"), "{envelope}");
+    assert_eq!(
+        envelope["data"]["subject"]["kind"], "extension",
+        "{envelope}"
+    );
+    assert_eq!(envelope["data"]["subject"]["name"], "sales", "{envelope}");
+    assert!(
+        calls(&project.calls).is_empty(),
+        "the platform must not be started"
+    );
+}
+
+/// Настройки не загрузились — набор не разрешён. Ответ не называет предметом основную
+/// конфигурацию, когда запрос просил пакет расширения: предмет следует суффиксу, который
+/// набор обязан подтвердить.
+#[test]
+fn download_of_a_set_names_no_false_subject_when_the_settings_fail_to_load() {
+    let project = project();
+    fs::write(project.root.join("v8project.yaml"), "source-set: [").expect("broken project");
+    let cfe = project.out.join("sales.cfe").display().to_string();
+    let cf = project.out.join("main.cf").display().to_string();
+
+    let extension = envelope(&run(&project, &["download", "sales", "--output", &cfe]));
+    assert_eq!(extension["ok"], false, "{extension}");
+    assert_eq!(
+        extension["data"]["subject"]["kind"], "extension",
+        "{extension}"
+    );
+    assert_eq!(extension["data"]["subject"]["name"], "sales", "{extension}");
+    assert_eq!(extension["data"]["artifact_kind"], "cfe", "{extension}");
+
+    let main = envelope(&run(&project, &["download", "main", "--output", &cf]));
+    assert_eq!(main["ok"], false, "{main}");
+    assert_eq!(main["data"]["subject"]["kind"], "main", "{main}");
+    assert_eq!(main["data"]["artifact_kind"], "cf", "{main}");
+    assert!(
+        calls(&project.calls).is_empty(),
+        "the platform must not be started"
+    );
+}

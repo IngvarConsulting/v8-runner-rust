@@ -34,8 +34,8 @@ use crate::domain::execution::{
 use crate::domain::infobase_export::{
     ConfigurationState, ConfigurationSubject, ExportConfigurationPackageRequest,
     ExportConfigurationPackageResult, ExportInfobaseSnapshotRequest, ExportInfobaseSnapshotResult,
-    InfobaseTransferPhase, RestoreInfobaseSnapshotRequest, RestoreInfobaseSnapshotResult,
-    RestoreTargetMode,
+    InfobaseExportArtifactKind, InfobaseTransferPhase, RestoreInfobaseSnapshotRequest,
+    RestoreInfobaseSnapshotResult, RestoreTargetMode,
 };
 use crate::domain::init::{InitResult, InitStep, InitStepStatus};
 use crate::domain::issue::{Issue, IssueSeverity};
@@ -1241,7 +1241,7 @@ pub fn prepare_infobase_command(
                 let command = CommandName::InfobaseConfigurationExport;
                 let resolved = match args.set.as_deref() {
                     Some(name) => SourceSetInventory::new(config)
-                        .configuration_package(name, "download")
+                        .configuration_package(name, command)
                         .map(|(_, extension)| {
                             request.subject = ConfigurationSubject::of_extension(extension);
                         }),
@@ -1353,18 +1353,32 @@ fn infobase_command_name(args: &InfobaseArgs) -> CommandName {
 }
 
 /// Запрос выгрузки пакета по ключам команды. Предмет, названный позиционным набором,
-/// здесь ещё не разрешён: до загрузки настроек запрос несёт основную конфигурацию, а набор
-/// разрешает [`SourceSetInventory::configuration_package`].
+/// здесь ещё не разрешён: его разрешает [`SourceSetInventory::configuration_package`],
+/// когда настройки загружены. До того ответ не называет предметом то, чего запрос не
+/// просил: форма требует предмет, и он следует суффиксу файла, который набор обязан
+/// подтвердить, — `.cfe` даёт расширение с именем набора, иначе основная конфигурация.
 fn map_infobase_configuration_export_request(
     args: &InfobaseConfigurationExportArgs,
 ) -> ExportConfigurationPackageRequest {
-    // Без ключа берётся основная конфигурация; `working` и `database` — прежние значения.
+    // Без ключа берётся рабочее состояние; `working` и `database` — прежние значения.
     let state = match args.state.as_deref() {
         None | Some("working") => ConfigurationState::Working,
         Some("db" | "database") => ConfigurationState::Database,
         Some(other) => unreachable!("clap validates configuration state, got {other}"),
     };
-    let subject = ConfigurationSubject::of_extension(args.extension.as_deref());
+    let output = Path::new(&args.output);
+    let names_an_extension_package = output
+        .extension()
+        .and_then(|suffix| suffix.to_str())
+        .is_some_and(|suffix| {
+            suffix.eq_ignore_ascii_case(InfobaseExportArtifactKind::Cfe.file_extension())
+        });
+    let extension = match args.set.as_deref() {
+        Some(set) if names_an_extension_package => Some(set),
+        Some(_) => None,
+        None => args.extension.as_deref(),
+    };
+    let subject = ConfigurationSubject::of_extension(extension);
     ExportConfigurationPackageRequest {
         state,
         subject,

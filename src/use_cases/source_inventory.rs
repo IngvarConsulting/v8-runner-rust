@@ -6,6 +6,7 @@ use crate::change_detection::source_sets::SourceSetsService;
 use crate::config::model::{AppConfig, SourceSetConfig, SourceSetPurpose};
 use crate::domain::source_set::SourceSetContext;
 use crate::support::error::AppError;
+use crate::use_cases::context::CommandName;
 use crate::use_cases::extension_identity::platform_extension_name;
 
 /// Read-only runtime index for source-set orchestration.
@@ -81,7 +82,7 @@ impl<'a> SourceSetInventory<'a> {
     pub(crate) fn configuration_package(
         &self,
         name: &str,
-        command: &str,
+        command: CommandName,
     ) -> Result<(&'a SourceSetConfig, Option<&'a str>), AppError> {
         let source_set = self.named(name)?;
         match source_set.purpose {
@@ -91,7 +92,8 @@ impl<'a> SourceSetInventory<'a> {
             }
             SourceSetPurpose::ExternalDataProcessors | SourceSetPurpose::ExternalReports => {
                 Err(AppError::Validation(format!(
-                    "source-set '{name}' holds external files; {command} takes the main configuration or an extension"
+                    "source-set '{name}' holds external files; {} takes the main configuration or an extension",
+                    command.as_str()
                 )))
             }
         }
@@ -147,7 +149,7 @@ fn index_contexts(contexts: &[SourceSetContext]) -> HashMap<String, SourceSetCon
 
 #[cfg(test)]
 mod tests {
-    use super::SourceSetInventory;
+    use super::{CommandName, SourceSetInventory};
     use crate::config::model::{
         AppConfig, BuildConfig, InfobaseConfig, SourceFormat, SourceSetConfig, SourceSetPurpose,
         TestsConfig, ToolsConfig,
@@ -218,7 +220,7 @@ mod tests {
 
         let package = |name| {
             inventory
-                .configuration_package(name, "download")
+                .configuration_package(name, CommandName::InfobaseConfigurationExport)
                 .map(|(source_set, extension)| (source_set.name.as_str(), extension))
                 .map_err(|error| error.to_string())
         };

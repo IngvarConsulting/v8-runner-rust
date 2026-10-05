@@ -573,7 +573,7 @@ pub struct InfobaseConfigurationExportArgs {
     pub set: Option<String>,
 
     /// Configuration state to export: `db` takes the database configuration; without the
-    /// key the main configuration is taken
+    /// key the working state (not database) is taken
     #[arg(
         long,
         value_parser = clap::builder::PossibleValuesParser::new([
