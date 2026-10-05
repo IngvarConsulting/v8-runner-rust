@@ -1266,11 +1266,7 @@ fn execution_error_code(error: &AppError) -> &'static str {
 }
 
 fn resolve_output(config: &AppConfig, requested: &Path) -> Result<ResolvedOutput, AppError> {
-    let requested = if requested.is_absolute() {
-        requested.to_path_buf()
-    } else {
-        config.base_path.join(requested)
-    };
+    let requested = crate::support::path::resolve_from(&config.base_path, requested);
     let canonical = nearest_existing_canonical_path(&requested).map_err(|error| {
         AppError::Runtime(format!(
             "failed to canonicalize output '{}': {error}",

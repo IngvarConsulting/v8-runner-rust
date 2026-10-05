@@ -1,4 +1,4 @@
-use crate::config::model::AppConfig;
+use crate::config::model::{AppConfig, EdtCliConfig};
 use crate::platform::locator::{
     EdtVersion, Locator, LocatorOptions, PlatformResolutionPolicy, PlatformVersionRequirement,
     UtilityLocation, UtilityType,
@@ -16,8 +16,7 @@ impl PlatformUtilities {
     /// Build platform utilities facade from application configuration.
     pub fn from_config(config: &AppConfig) -> Self {
         let edt_hint = config.tools.edt_cli.path.clone().filter(|path| {
-            path.is_absolute()
-                || path.components().count() > 1
+            EdtCliConfig::names_location(path)
                 || path.exists()
                 || config.tools.edt_cli.version.is_none()
         });
@@ -32,9 +31,9 @@ impl PlatformUtilities {
                     .tools
                     .edt_cli
                     .path
-                    .as_ref()
+                    .as_deref()
+                    .filter(|path| !EdtCliConfig::names_location(path))
                     .and_then(|path| path.to_str())
-                    .filter(|value| !value.contains(std::path::MAIN_SEPARATOR))
                     .and_then(EdtVersion::parse_lenient)
             });
         Self {

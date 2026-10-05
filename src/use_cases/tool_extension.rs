@@ -333,27 +333,15 @@ fn tool_extension_source_context(
     extension: &ToolExtensionConfig,
     source: &ToolExtensionSourceConfig,
 ) -> Result<SourceSetContext, AppError> {
-    let base_path = absolutize_path(&config.base_path)?;
-    let source_path = if source.path.is_absolute() {
-        source.path.clone()
-    } else {
-        base_path.join(&source.path)
-    };
+    let base_path =
+        crate::support::path::absolute_from_current_dir(&config.base_path).map_err(|error| {
+            AppError::Runtime(format!("failed to resolve current directory: {error}"))
+        })?;
     Ok(SourceSetContext::new(
         format!("tool:{}", extension.name),
-        source_path,
+        crate::support::path::resolve_from(&base_path, &source.path),
         format!("tool-{}-source", extension.name),
     ))
-}
-
-fn absolutize_path(path: &Path) -> Result<PathBuf, AppError> {
-    if path.is_absolute() {
-        return Ok(path.to_path_buf());
-    }
-
-    std::env::current_dir()
-        .map(|current_dir| current_dir.join(path))
-        .map_err(|error| AppError::Runtime(format!("failed to resolve current directory: {error}")))
 }
 
 fn log_tool_extension_stage(extension: &ToolExtensionConfig, stage: &str, detail: &str) {

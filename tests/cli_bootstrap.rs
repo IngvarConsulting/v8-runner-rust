@@ -111,6 +111,48 @@ fn bootstrap_empty_dir_creates_config_and_dumps_main_configuration() {
     assert!(calls.contains("/F /tmp/source ib"));
 }
 
+/// `--source-dir ./src`: `v8project.yaml` хранит написание пользователя, а argv платформы,
+/// цель выгрузки в ответе и созданный каталог — путь без внутреннего `.`: та форма сломала
+/// `ibcmd` (#4).
+#[test]
+fn clone_with_a_dotted_source_dir_hands_the_platform_a_clean_path() {
+    let dir = temp_workspace();
+    let project_dir = dir.path().join("project");
+    let platform_path = dir.path().join("1cv8");
+    let calls_log = dir.path().join("calls.log");
+    write_designer_dump_script(&platform_path, &calls_log, 0);
+    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+    args.insert(0, "--json-message".to_owned());
+    args.extend(["--source-dir".to_owned(), "./src".to_owned()]);
+
+    let output = v8_runner_command()
+        .args(args)
+        .output()
+        .expect("run command");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config = fs::read_to_string(project_dir.join("v8project.yaml")).expect("config");
+    assert!(config.contains("path: './src'"), "{config}");
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    let expected = fs::canonicalize(dir.path())
+        .expect("canonical workspace")
+        .join("project")
+        .join("src")
+        .display()
+        .to_string();
+    assert_eq!(payload["data"]["source_dir"], expected.as_str());
+    assert_eq!(payload["data"]["dump_target_path"], expected.as_str());
+    let calls = fs::read_to_string(calls_log).expect("calls");
+    assert!(calls.contains("/DumpConfigToFiles"), "{calls}");
+    assert!(!calls.contains("/./"), "{calls}");
+    assert!(project_dir.join("src/Configuration.xml").exists());
+}
+
 #[test]
 fn bootstrap_unquotes_simple_file_connection_path() {
     let dir = temp_workspace();

@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::config::model::{
-    is_infobase_name, AppConfig, InfobaseConfig, InfobaseSelector, DEFAULT_INFOBASE_NAME,
-    INFOBASE_NAME_PATTERN,
+    is_infobase_name, AppConfig, EdtCliConfig, InfobaseConfig, InfobaseSelector,
+    DEFAULT_INFOBASE_NAME, INFOBASE_NAME_PATTERN,
 };
 use crate::config::schema::{
     validate_local_overlay_schema_boundary, validate_main_config_schema_boundary,
@@ -12,7 +12,7 @@ use crate::config::validate::{
     validate, validate_infobase_export, validate_launch, validate_planned, validate_prepared_test,
     validate_read_only, validate_tools_download_bootstrap, ConfigValidationError,
 };
-use crate::support::path::normalize_windows_verbatim_path;
+use crate::support::path::{normalize_windows_verbatim_path, resolve_from};
 
 pub const DEFAULT_CONFIG_FILE_NAME: &str = "v8project.yaml";
 pub const LOCAL_CONFIG_FILE_NAME: &str = "v8project.local.yaml";
@@ -265,7 +265,7 @@ fn build_config(
     normalize_config_paths(&mut config, config_dir);
 
     if let Some(wd) = workdir_override {
-        config.work_path = normalize_optional_path(Path::new(wd), config_dir);
+        config.work_path = resolve_from(config_dir, Path::new(wd));
     }
 
     match validation_mode {
@@ -652,47 +652,65 @@ fn normalize_infobase_paths(infobase: &mut InfobaseConfig, config_dir: &Path) {
         .as_mut()
         .and_then(|standalone| standalone.exchange.as_mut())
     {
-        *dir = normalize_optional_path(dir, config_dir);
+        *dir = resolve_from(config_dir, dir);
     }
     if let Some(web) = infobase.web.as_mut() {
         if let Some(path) = web.dir.as_mut() {
-            *path = normalize_optional_path(path, config_dir);
+            *path = resolve_from(config_dir, path);
         }
         if let Some(path) = web.conf.as_mut() {
-            *path = normalize_optional_path(path, config_dir);
+            *path = resolve_from(config_dir, path);
         }
     }
 }
 
 fn normalize_config_paths(config: &mut AppConfig, config_dir: &Path) {
-    config.base_path = normalize_optional_path(&config.base_path, config_dir);
-    config.work_path = normalize_optional_path(&config.work_path, config_dir);
+    config.base_path = resolve_from(config_dir, &config.base_path);
+    config.work_path = resolve_from(config_dir, &config.work_path);
     normalize_infobase_paths(&mut config.infobase, config_dir);
     for infobase in config.infobases.values_mut() {
         normalize_infobase_paths(infobase, config_dir);
     }
 
     if let Some(path) = config.tools.va.epf_path.as_mut() {
-        *path = normalize_optional_path(path, config_dir);
+        *path = resolve_from(config_dir, path);
     }
     if let Some(path) = config.tools.platform.path.as_mut() {
-        *path = normalize_optional_path(path, config_dir);
+        *path = resolve_from(config_dir, path);
+    }
+    // Голое имя без каталога — подсказка автопоиска EDT, а не путь.
+    if let Some(path) = config
+        .tools
+        .edt_cli
+        .path
+        .as_mut()
+        .filter(|path| EdtCliConfig::names_location(path))
+    {
+        *path = resolve_from(config_dir, path);
+    }
+    // Ключ хоста и `AgentBaseDir` раннер открывает со своей стороны.
+    let agent = &mut config.tools.designer_agent;
+    for path in [agent.host_key.as_mut(), agent.base_dir.as_mut()]
+        .into_iter()
+        .flatten()
+    {
+        *path = resolve_from(config_dir, path);
     }
     if let Some(extension) = config.tools.client_mcp.extension.as_mut() {
         if let Some(source) = extension.source_mut() {
-            source.path = normalize_optional_path(&source.path, config_dir);
+            source.path = resolve_from(config_dir, &source.path);
         }
         if let Some(artifact) = extension.artifact_mut() {
-            artifact.path = normalize_optional_path(&artifact.path, config_dir);
+            artifact.path = resolve_from(config_dir, &artifact.path);
         }
     }
     let va = &mut config.tests.va;
     if let Some(path) = va.params_path.as_mut() {
-        *path = normalize_optional_path(path, config_dir);
+        *path = resolve_from(config_dir, path);
     }
     for profile in va.profiles.values_mut() {
         if let Some(path) = profile.feature_path.as_mut() {
-            *path = normalize_optional_path(path, config_dir);
+            *path = resolve_from(config_dir, path);
         }
     }
 }
@@ -751,15 +769,6 @@ fn mapping_contains_key(mapping: &serde_yaml::Mapping, key: &str) -> bool {
     mapping.contains_key(serde_yaml::Value::String(key.to_owned()))
 }
 
-fn normalize_optional_path(path: &Path, config_dir: &Path) -> PathBuf {
-    let normalized = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        config_dir.join(path)
-    };
-    normalize_windows_verbatim_path(&normalized)
-}
-
 fn normalize_connection_string(connection: &str, config_dir: &Path) -> String {
     let trimmed = connection.trim();
     if trimmed.starts_with('/') || trimmed.starts_with('-') {
@@ -814,13 +823,7 @@ fn normalize_raw_connection_args(connection: &str, config_dir: &Path) -> String 
 fn normalize_connection_file_path(path: &str, config_dir: &Path) -> String {
     let path = path.trim();
     let path = strip_matching_quotes(path).unwrap_or(path);
-    let path = Path::new(path);
-    let normalized = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        config_dir.join(path)
-    };
-    normalize_windows_verbatim_path(&normalized)
+    resolve_from(config_dir, Path::new(path))
         .display()
         .to_string()
 }
@@ -1705,6 +1708,52 @@ mod tests {
         assert_eq!(
             config.infobase.connection,
             format!("File={}", config.base_path.join("build/ib").display())
+        );
+    }
+
+    /// Путь к утилите и к ключу агента считается от каталога конфига, а не от рабочего
+    /// каталога процесса; голое имя EDT остаётся именем — его ищет локатор.
+    #[test]
+    fn tool_paths_resolve_from_the_config_directory() {
+        let dir = tempdir().expect("tempdir");
+        let config_dir = dir.path().join("project");
+        std::fs::create_dir_all(config_dir.join("sources")).expect("base dir");
+        let config_path = config_dir.join("v8project.yaml");
+        let project = "workPath: build\nformat: DESIGNER\ninfobase:\n  connection: \"File=build/ib\"\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: sources\n";
+
+        std::fs::write(
+            &config_path,
+            format!("{project}tools:\n  edt_cli:\n    path: ./tools/edt/1cedtcli\n  designer_agent:\n    host-key: keys/agent_host\n"),
+        )
+        .expect("write managed config");
+        let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect("load managed config");
+        let config_dir = canonical(&config_dir);
+        assert_eq!(
+            config.tools.edt_cli.path,
+            Some(config_dir.join("tools").join("edt").join("1cedtcli"))
+        );
+        assert_eq!(
+            config.tools.designer_agent.host_key,
+            Some(config_dir.join("keys").join("agent_host"))
+        );
+
+        std::fs::write(
+            &config_path,
+            format!("{project}tools:\n  edt_cli:\n    path: 1cedtcli\n  designer_agent:\n    attach: 127.0.0.1:1543\n    base-dir: agent\n"),
+        )
+        .expect("write attached config");
+        let config = load_config(config_path.to_str(), None, &InfobaseSelector::Default)
+            .map(|loaded| loaded.config)
+            .expect("load attached config");
+        assert_eq!(
+            config.tools.edt_cli.path,
+            Some(std::path::PathBuf::from("1cedtcli"))
+        );
+        assert_eq!(
+            config.tools.designer_agent.base_dir,
+            Some(config_dir.join("agent"))
         );
     }
 

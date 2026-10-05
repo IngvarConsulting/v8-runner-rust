@@ -77,11 +77,7 @@ impl<'a> SourceSetInventory<'a> {
     }
 
     pub(crate) fn source_path(&self, source_set: &SourceSetConfig) -> PathBuf {
-        if source_set.path.is_absolute() {
-            source_set.path.clone()
-        } else {
-            self.config.base_path.join(&source_set.path)
-        }
+        source_set.root_in(&self.config.base_path)
     }
 
     pub(crate) fn designer_contexts(&self) -> &[SourceSetContext] {

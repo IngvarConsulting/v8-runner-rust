@@ -289,16 +289,47 @@ pub fn strip_windows_verbatim_prefix(value: &str) -> String {
     value.to_owned()
 }
 
+/// Путь не в UTF-8 возвращается как есть: через `display()` он потерял бы байты, а
+/// префикс `\\?\` у такого пути не распознать текстом.
 pub fn normalize_windows_verbatim_path(path: &Path) -> PathBuf {
-    PathBuf::from(strip_windows_verbatim_prefix(&path.display().to_string()))
+    match path.to_str() {
+        Some(text) => PathBuf::from(strip_windows_verbatim_prefix(text)),
+        None => path.to_path_buf(),
+    }
+}
+
+/// Единственное правило путей из настроек: абсолютный путь остаётся собой, относительный
+/// считается от `base` — каталога основного `v8project.yaml`.
+///
+/// Приставка `\\?\` снимается с `base` и `path` до сборки: внутри такого пути `/` не
+/// разделитель, а `.` — обычное имя, и разбор компонентов оставил бы их как есть. Дальше
+/// результат собран из компонентов: внутренние `.` и повторные разделители уходят,
+/// разделители становятся родными для ОС. Утилиты платформы получают путь в argv как есть,
+/// и `E:\proj\./src/cf` `ibcmd` не прочёл (#4). `..` остаётся: свернуть его лексически
+/// значит пройти мимо символьной ссылки.
+pub fn resolve_from(base: &Path, path: &Path) -> PathBuf {
+    let base = normalize_windows_verbatim_path(base);
+    let path = normalize_windows_verbatim_path(path);
+    base.join(path).components().collect()
+}
+
+/// Абсолютный путь от рабочего каталога процесса тем же правилом, что [`resolve_from`]:
+/// абсолютный путь тоже собирается из компонентов, рабочий каталог для него не читается.
+/// Для мест, где путь ещё может прийти относительным (настройки, собранные в коде, а не
+/// загрузчиком); загрузчик отдаёт пути проекта уже абсолютными.
+pub fn absolute_from_current_dir(path: &Path) -> std::io::Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(resolve_from(Path::new(""), path));
+    }
+    Ok(resolve_from(&std::env::current_dir()?, path))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         filesystem_object_identity, hashed_lock_path, is_filesystem_root, is_safe_path_segment,
-        nearest_existing_canonical_path, normalize_windows_verbatim_path, stable_path_identity,
-        strip_windows_verbatim_prefix,
+        nearest_existing_canonical_path, normalize_windows_verbatim_path, resolve_from,
+        stable_path_identity, strip_windows_verbatim_prefix,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -476,6 +507,58 @@ mod tests {
         assert_eq!(
             strip_windows_verbatim_prefix(r"\\?\UNC\server\share\ib"),
             r"\\server\share\ib"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolve_from_drops_current_dir_components_and_keeps_parent_dir() {
+        let base = PathBuf::from("/srv/project");
+
+        assert_eq!(
+            resolve_from(&base, std::path::Path::new("./src//cf/./")),
+            PathBuf::from("/srv/project/src/cf")
+        );
+        assert_eq!(
+            resolve_from(&base.join("."), std::path::Path::new("../shared")),
+            PathBuf::from("/srv/project/../shared")
+        );
+        assert_eq!(
+            resolve_from(&base, std::path::Path::new("/opt/./va.epf")),
+            PathBuf::from("/opt/va.epf")
+        );
+        assert_eq!(
+            super::absolute_from_current_dir(std::path::Path::new("/opt/./tools//x"))
+                .expect("absolute path needs no current directory"),
+            PathBuf::from("/opt/tools/x")
+        );
+    }
+
+    /// Сравнение текстом, а не `PathBuf`: равенство путей на Windows идёт по компонентам и
+    /// не отличило бы `E:\proj/src` от `E:\proj\src`.
+    #[test]
+    #[cfg(windows)]
+    fn resolve_from_builds_native_windows_paths() {
+        fn resolved(base: &str, path: &str) -> String {
+            resolve_from(std::path::Path::new(base), std::path::Path::new(path))
+                .into_os_string()
+                .into_string()
+                .expect("utf-8 path")
+        }
+
+        assert_eq!(resolved(r"E:\proj", "./src/cf"), r"E:\proj\src\cf");
+        assert_eq!(resolved(r"E:/proj", r"src/cf\x"), r"E:\proj\src\cf\x");
+        assert_eq!(resolved(r"\\srv\share\p", r".\x"), r"\\srv\share\p\x");
+        assert_eq!(resolved(r"\\?\C:\p", "x"), r"C:\p\x");
+        assert_eq!(resolved(r"\\?\C:\proj\./src/cf", ""), r"C:\proj\src\cf");
+        assert_eq!(
+            resolved(r"E:\proj", r"\\?\C:\proj\./src/cf"),
+            r"C:\proj\src\cf"
+        );
+        assert_eq!(resolved(r"E:\proj", r"..\shared"), r"E:\proj\..\shared");
+        assert_eq!(
+            resolved(r"E:\proj", r"D:\other\.\va.epf"),
+            r"D:\other\va.epf"
         );
     }
 

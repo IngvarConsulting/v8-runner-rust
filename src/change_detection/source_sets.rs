@@ -32,14 +32,7 @@ impl<'a> SourceSetsService<'a> {
                 .config
                 .source_sets
                 .iter()
-                .map(|ss| {
-                    let path = if ss.path.is_absolute() {
-                        ss.path.clone()
-                    } else {
-                        base_path.join(&ss.path)
-                    };
-                    self.designer_context(ss, path)
-                })
+                .map(|ss| self.designer_context(ss, ss.root_in(&base_path)))
                 .collect(),
 
             SourceFormat::Edt => self
@@ -73,7 +66,7 @@ impl<'a> SourceSetsService<'a> {
         ) else {
             return context.without_memory();
         };
-        let original = base_path.join(&source_set.path);
+        let original = source_set.root_in(&base_path);
         let original = nearest_existing_canonical_path(&original).unwrap_or(original);
         let identity = format!(
             "{}; source={}; purpose={}; set={}",
@@ -95,12 +88,7 @@ impl<'a> SourceSetsService<'a> {
             .source_sets
             .iter()
             .map(|ss| {
-                let path = if ss.path.is_absolute() {
-                    ss.path.clone()
-                } else {
-                    base_path.join(&ss.path)
-                };
-                SourceSetContext::new(&ss.name, path, format!("edt-{}", ss.name))
+                SourceSetContext::new(&ss.name, ss.root_in(&base_path), format!("edt-{}", ss.name))
             })
             .collect()
     }
@@ -110,14 +98,11 @@ impl<'a> SourceSetsService<'a> {
     }
 }
 
+/// Пути проекта приходят из загрузчика абсолютными; относительный — только у настроек,
+/// собранных в коде, и тогда он считается от рабочего каталога процесса.
 fn absolutize_path(path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        return path.to_path_buf();
-    }
-
-    std::env::current_dir()
-        .expect("failed to resolve current working directory")
-        .join(path)
+    crate::support::path::absolute_from_current_dir(path)
+        .expect("project paths are absolute after loading, or the current directory is readable")
 }
 
 #[cfg(test)]

@@ -87,7 +87,7 @@ pub fn prepare_edt_external_artifacts(
     source_set: &SourceSetConfig,
     dsl: &EdtDsl<'_>,
 ) -> Result<Vec<ExternalArtifactDescriptor>, AppError> {
-    let source_dir = resolve_source_set_path(config, source_set);
+    let source_dir = source_set.root_in(&config.base_path);
     let expected_kind = source_set_external_kind(source_set).ok_or_else(|| {
         AppError::Validation(format!("source-set '{}' is not external", source_set.name))
     })?;
@@ -133,14 +133,6 @@ pub fn prepare_edt_external_artifacts(
     }
     validate_unique_publish_names(&source_set.name, &exported)?;
     Ok(exported)
-}
-
-pub fn resolve_source_set_path(config: &AppConfig, source_set: &SourceSetConfig) -> PathBuf {
-    if source_set.path.is_absolute() {
-        source_set.path.clone()
-    } else {
-        config.base_path.join(&source_set.path)
-    }
 }
 
 pub fn sanitize_file_stem(value: &str) -> String {

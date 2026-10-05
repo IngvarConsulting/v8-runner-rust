@@ -1587,6 +1587,72 @@ fn build_ibcmd_accepts_raw_f_connection() {
     assert!(calls.contains("config apply"));
 }
 
+/// #4: относительные пути конфига считаются от каталога основного `v8project.yaml`, а не от
+/// рабочего каталога процесса, и в argv `ibcmd` уходят абсолютными и без `.` внутри:
+/// `E:\proj\./src/cf` `ibcmd` не прочёл, хотя тот же путь абсолютным проходил.
+#[test]
+fn ibcmd_push_receives_config_relative_paths_resolved_from_the_config_directory() {
+    let dir = temp_workspace();
+    let project = dir.path().join("project");
+    let elsewhere = dir.path().join("elsewhere");
+    let calls_log = dir.path().join("calls.log");
+    let module = project
+        .join("src")
+        .join("cf")
+        .join("Catalogs.Items")
+        .join("ObjectModule.bsl");
+    fs::create_dir_all(module.parent().expect("module dir")).expect("source");
+    fs::create_dir_all(&elsewhere).expect("elsewhere");
+    fs::write(&module, "procedure Test() endprocedure").expect("module");
+    write_ibcmd_script(&project.join("ibcmd"), &calls_log, None);
+    fs::write(
+        project.join("v8project.yaml"),
+        "workPath: ./work\nformat: DESIGNER\nproviders:\n  push: ibcmd\ninfobase:\n  connection: 'File=./ib'\nbuild:\n  partialLoadThreshold: 20\nsource-set:\n  - name: cf\n    type: CONFIGURATION\n    path: ./src/cf\ntools:\n  platform:\n    path: ./ibcmd\n",
+    )
+    .expect("config");
+
+    let push = |extra: &[&str]| {
+        let output = v8_runner_command()
+            .args([
+                "--no-color",
+                "--config",
+                "../project/v8project.yaml",
+                "push",
+            ])
+            .args(extra)
+            .current_dir(&elsewhere)
+            .output()
+            .expect("run command");
+        assert!(
+            output.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    push(&["--full"]);
+    fs::write(&module, "procedure Test() // changed endprocedure").expect("change");
+    push(&[]);
+
+    let project = fs::canonicalize(&project).expect("canonical project");
+    let source = project.join("src").join("cf");
+    let calls = fs::read_to_string(&calls_log).expect("calls");
+    assert!(
+        calls.contains(&format!(
+            "infobase --db-path {} config import {}\n",
+            project.join("ib").display(),
+            source.display()
+        )),
+        "{calls}"
+    );
+    assert!(
+        calls.contains(&format!("--base-dir {} ", source.display())),
+        "{calls}"
+    );
+    assert!(!calls.contains("/./"), "{calls}");
+    assert!(!elsewhere.join("work").exists());
+}
+
 fn git(dir: &Path, args: &[&str]) {
     let status = std::process::Command::new("git")
         .arg("-C")

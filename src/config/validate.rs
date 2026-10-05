@@ -536,11 +536,7 @@ fn validate_source_sets(config: &AppConfig) -> Result<(), ConfigValidationError>
             ));
         }
 
-        let full_path = if ss.path.is_absolute() {
-            ss.path.clone()
-        } else {
-            config.base_path.join(&ss.path)
-        };
+        let full_path = ss.root_in(&config.base_path);
 
         let path_must_exist = config.format == SourceFormat::Edt || ss.purpose.is_external();
         if path_must_exist && !full_path.exists() {

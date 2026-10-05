@@ -580,7 +580,7 @@ fn resolve_request(
 
     let mut items = Vec::new();
     for selected_source_set in selected {
-        let source_path = resolve_source_set_path(config, selected_source_set);
+        let source_path = selected_source_set.root_in(&config.base_path);
         validate_selected_source(selected_source_set, direction, &source_path)?;
 
         let target_path = convert_output_path(
@@ -689,7 +689,7 @@ fn resolve_base_project_source(
     }
 
     let configuration_source_set = configuration_source_sets[0];
-    let source_path = resolve_source_set_path(config, configuration_source_set);
+    let source_path = configuration_source_set.root_in(&config.base_path);
     validate_selected_source(configuration_source_set, direction, &source_path)?;
 
     Ok(Some(ConvertBaseProjectSource {
@@ -792,7 +792,7 @@ fn validate_convert_target(
     })?;
 
     for source_set in &config.source_sets {
-        let source_path = resolve_source_set_path(config, source_set);
+        let source_path = source_set.root_in(&config.base_path);
         let source = nearest_existing_canonical_path(&source_path).map_err(|error| {
             AppError::Runtime(format!(
                 "failed to canonicalize convert source-set '{}' path '{}': {error}",
@@ -1452,14 +1452,6 @@ fn convert_output_path(
             ConvertDirection::EdtToDesigner => "designer",
             ConvertDirection::DesignerToEdt => "edt",
         }))
-}
-
-fn resolve_source_set_path(config: &AppConfig, source_set: &SourceSetConfig) -> PathBuf {
-    if source_set.path.is_absolute() {
-        source_set.path.clone()
-    } else {
-        config.base_path.join(&source_set.path)
-    }
 }
 
 fn source_set_output_relative_path(

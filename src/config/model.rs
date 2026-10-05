@@ -540,6 +540,14 @@ pub struct SourceSetConfig {
     pub path: PathBuf,
 }
 
+impl SourceSetConfig {
+    /// Каталог source-set: `path` считается от `base_path` тем же правилом, что и остальные
+    /// пути конфига ([`crate::support::path::resolve_from`]).
+    pub fn root_in(&self, base_path: &Path) -> PathBuf {
+        crate::support::path::resolve_from(base_path, &self.path)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SourceSetPurpose {
@@ -953,6 +961,15 @@ pub struct EdtCliConfig {
     pub command_timeout_ms: u64,
 }
 
+impl EdtCliConfig {
+    /// `edt_cli.path` — путь, а не голое имя без каталога. Голое имя (`1cedtcli`,
+    /// `1c-edt-2025.2.3`) остаётся подсказкой автопоиска EDT; всё остальное загрузчик
+    /// считает от каталога конфига. Одно правило для загрузчика и поиска утилит.
+    pub fn names_location(path: &Path) -> bool {
+        path.is_absolute() || path.components().count() > 1
+    }
+}
+
 impl Default for EdtCliConfig {
     fn default() -> Self {
         Self {
@@ -1107,9 +1124,23 @@ const fn default_edt_cli_command_timeout_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ssh_endpoint, DesignerAgentConfig, DesignerAgentMode, Host, PlatformToolConfig,
-        StandaloneConfig,
+        ssh_endpoint, DesignerAgentConfig, DesignerAgentMode, EdtCliConfig, Host,
+        PlatformToolConfig, StandaloneConfig,
     };
+
+    #[test]
+    fn edt_cli_path_is_a_location_unless_it_is_a_bare_name() {
+        use std::path::Path;
+        for bare in ["1cedtcli", "1c-edt-2025.2.3", "2025.2.3"] {
+            assert!(!EdtCliConfig::names_location(Path::new(bare)), "{bare}");
+        }
+        for location in ["./1cedtcli", "tools/edt", "/opt/edt/1cedtcli"] {
+            assert!(
+                EdtCliConfig::names_location(Path::new(location)),
+                "{location}"
+            );
+        }
+    }
 
     #[test]
     fn platform_strict_defaults_to_false_and_deserializes_true() {

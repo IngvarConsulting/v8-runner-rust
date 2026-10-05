@@ -23,6 +23,7 @@ case "$CI_SCOPE" in
           "platform::process::tests::windows_client_owner::host_job_terminates_client_before_startup_handoff"
           "platform::process::tests::windows_client_owner::released_host_job_preserves_client_after_runner_exit"
           "support::path::tests::filesystem_object_identity_changes_when_directory_is_replaced"
+          "support::path::tests::resolve_from_builds_native_windows_paths"
           "support::fs::tests::replace_file_restores_original_bytes_when_stage_disappeared"
           "use_cases::staged_publication::tests::orphan_cleanup_requires_exact_target_kind_and_run_name_contract"
           "use_cases::build_project::tests::partial_load_list_releases_writer_before_reader_and_cleans_up_after_use"
