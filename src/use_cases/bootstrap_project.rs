@@ -14,6 +14,7 @@ use crate::use_cases::dump_config;
 use crate::use_cases::ignored_files::{ProjectGitignore, LOCAL_CONFIG_FILE_NAME};
 use crate::use_cases::request::{DumpModeRequest, DumpRequest};
 use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
+use crate::use_cases::workspace_lock::is_workspace_lock_file;
 
 const CONFIG_FILE_NAME: &str = "v8project.yaml";
 
@@ -344,10 +345,14 @@ fn refuse_existing(targets: &[&Path], force: bool) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Каталог журналов команды под `workPath`: его заводит журнал действий этого же запуска.
+const WORK_PATH_LOGS_DIR: &str = "logs";
+
 /// Клон пишет проект только в пустой каталог: пустым считается каталог, где нет ничего,
-/// кроме `.git`. Не в счёт и `workPath` нового проекта: в нём команда сама держит свой
-/// замок и журнал, и к этой проверке он уже заведён. `--force` снимает отказ, как и запрет
-/// перезаписи. Каталога ещё нет — он пуст.
+/// кроме `.git`. Проверка идёт после замка, а замок и журнал этого же запуска уже лежат в
+/// `workPath` нового проекта. Поэтому `workPath` не в счёт, только пока в нём нет ничего,
+/// кроме файлов замка и каталога `logs`; любой другой файл или каталог в нём — «не пуст».
+/// `--force` снимает отказ, как и запрет перезаписи. Каталога ещё нет — он пуст.
 fn refuse_a_non_empty_project_dir(
     paths: &BootstrapPaths,
     work_path: &Path,
@@ -357,34 +362,51 @@ fn refuse_a_non_empty_project_dir(
         return Ok(());
     }
     let project_dir = &paths.project_dir;
-    let entries = match std::fs::read_dir(project_dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(AppError::Runtime(format!(
-                "failed to read project directory '{}': {error}",
-                project_dir.display()
-            )))
-        }
-    };
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            AppError::Runtime(format!(
-                "failed to read project directory '{}': {error}",
-                project_dir.display()
-            ))
-        })?;
-        let path = entry.path();
-        if entry.file_name() == ".git" || path == work_path {
-            continue;
-        }
-        return Err(AppError::Validation(format!(
+    let refuse = |path: PathBuf| {
+        AppError::Validation(format!(
             "clone target is not empty: {} holds {} (clone writes into an empty directory; use --force to clone into this one)",
             project_dir.display(),
             path.display()
-        )));
+        ))
+    };
+    for entry in directory_entries(project_dir)? {
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        let path = entry.path();
+        if path != work_path {
+            return Err(refuse(path));
+        }
+        if let Some(foreign) = directory_entries(work_path)?
+            .into_iter()
+            .find(|inner| !is_created_by_this_run(inner))
+        {
+            return Err(refuse(foreign.path()));
+        }
     }
     Ok(())
+}
+
+/// Запись `workPath`, которую к проверке пустоты заводит сам запуск: файлы замка и
+/// каталог журналов.
+fn is_created_by_this_run(entry: &std::fs::DirEntry) -> bool {
+    let name = entry.file_name();
+    is_workspace_lock_file(&name) || (name == WORK_PATH_LOGS_DIR && entry.path().is_dir())
+}
+
+/// Записи каталога; каталога нет — записей нет.
+fn directory_entries(dir: &Path) -> Result<Vec<std::fs::DirEntry>, AppError> {
+    let read_error = |error: std::io::Error| {
+        AppError::Runtime(format!(
+            "failed to read directory '{}': {error}",
+            dir.display()
+        ))
+    };
+    match std::fs::read_dir(dir) {
+        Ok(entries) => entries.collect::<Result<Vec<_>, _>>().map_err(read_error),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(read_error(error)),
+    }
 }
 
 fn write_bootstrap_files(paths: &BootstrapPaths, text: &ProjectText<'_>) -> Result<(), AppError> {

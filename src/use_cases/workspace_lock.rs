@@ -92,6 +92,13 @@ pub(crate) fn workspace_lock_path(work_path: &Path) -> PathBuf {
     work_path.join(WORKSPACE_LOCK_FILE_NAME)
 }
 
+/// Файл, который заводит сам замок `workPath`: файл замка и всё, что названо от него, —
+/// системный файл блокировки, sidecar с описанием владельца и их временные копии.
+pub(crate) fn is_workspace_lock_file(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|name| name.starts_with(WORKSPACE_LOCK_FILE_NAME))
+}
+
 fn workspace_lock_sidecar_path(work_path: &Path) -> PathBuf {
     work_path.join(WORKSPACE_LOCK_SIDECAR_FILE_NAME)
 }

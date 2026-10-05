@@ -1361,6 +1361,34 @@ fn clone_refuses_a_non_empty_directory_before_writing_anything() {
     assert_eq!(payload["error"]["code"], "workspace_busy", "{payload}");
 }
 
+/// `workPath` нового проекта не в счёт, только пока в нём лишь замок и журналы этого
+/// запуска: старый файл в `build` делает каталог непустым — отказ `invalid_argument`.
+#[test]
+fn clone_refuses_a_work_path_holding_a_foreign_file() {
+    let dir = temp_workspace();
+    let project_dir = dir.path().join("project");
+    let platform_path = dir.path().join("1cv8");
+    let calls_log = dir.path().join("calls.log");
+    write_designer_dump_script(&platform_path, &calls_log, 0);
+    fs::create_dir_all(project_dir.join("build")).expect("work dir");
+    fs::write(project_dir.join("build/stale.txt"), "old dump").expect("stale file");
+
+    let (code, payload) = run_clone_json(bootstrap_args(
+        &project_dir,
+        &platform_path,
+        "File=/tmp/source-ib",
+    ));
+
+    assert_eq!(code, Some(2), "{payload}");
+    assert_eq!(payload["error"]["code"], "invalid_argument", "{payload}");
+    let message = payload["error"]["message"].as_str().expect("message");
+    assert!(message.contains("clone target is not empty"), "{message}");
+    assert!(message.contains("build"), "{message}");
+    assert!(!project_dir.join("v8project.yaml").exists());
+    assert!(!project_dir.join(".gitignore").exists());
+    assert!(!calls_log.exists(), "the platform must not be started");
+}
+
 /// Каталог, где нет ничего, кроме `.git`, пуст: `clone` в свежий репозиторий проходит.
 #[test]
 fn clone_into_a_directory_holding_only_git_writes_the_project() {
