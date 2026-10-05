@@ -98,7 +98,10 @@ fn bootstrap_empty_dir_creates_config_and_dumps_main_configuration() {
     assert!(local.contains("path: '"));
     assert!(local.contains(platform_path.display().to_string().as_str()));
     let gitignore = fs::read_to_string(project_dir.join(".gitignore")).expect("gitignore");
-    assert!(gitignore.lines().any(|line| line == "v8project.local.yaml"));
+    assert_eq!(
+        gitignore,
+        "v8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
+    );
     assert!(project_dir
         .join("src/configuration/Configuration.xml")
         .exists());

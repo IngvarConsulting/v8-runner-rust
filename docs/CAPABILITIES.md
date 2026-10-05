@@ -230,7 +230,8 @@ v8-runner init [--force] [--output <FILE>] [--connection <CONNECTION>] [--format
 - Не требует существующего `v8project.yaml`.
 - Пишет результат в текущий каталог или в `--output`.
 - Рядом с primary config создает/обновляет пустой `v8project.local.yaml` со schema modeline и
-  добавляет `v8project.local.yaml` в `.gitignore`, если подходящий pattern еще не указан.
+  добавляет в `.gitignore` недостающие шаблоны `v8project.local.yaml`, `ConfigDumpInfo.xml`
+  и `.dump-*.lock*`; уже покрытый шаблон повторно не пишется.
 - Не использует глобальный `--config` как shortcut output path.
 - Ищет supported `DESIGNER` / `EDT` `source-set` по marker files и их содержимому.
 - Для external roots создаёт aggregate `source-set` только при однородной классификации каталога.
@@ -246,7 +247,8 @@ v8-runner clone --connection <CONNECTION> --platform-version <VERSION> [--projec
 ```
 
 - Работает до загрузки `v8project.yaml` и предназначен для пустого project directory.
-- Создаёт `v8project.yaml`, schema-modelined `v8project.local.yaml`, `.gitignore` entry и
+- Создаёт `v8project.yaml`, schema-modelined `v8project.local.yaml`, `.gitignore` с теми же
+  шаблонами, что и `init` (`v8project.local.yaml`, `ConfigDumpInfo.xml`, `.dump-*.lock*`), и
   `source-set main` типа `CONFIGURATION`.
 - Выгружает основную конфигурацию из указанной ИБ в `src/configuration` через Designer full dump.
 - `--connection` не должен содержать embedded credentials; используйте `--user` и `--password`.
@@ -397,6 +399,7 @@ v8-runner push [--source-set <NAME>] [--full] [--dry-run]
 - С `--source-set` project stage анализирует и строит только указанный `source-set`; неизвестное
   имя отклоняется как validation error.
 - Для `DESIGNER` выбирает incremental, partial или full path по изменённым файлам выбранного scope.
+- Опись `ConfigDumpInfo.xml` в каталоге `DESIGNER`-набора принадлежит одной базе и в git не хранится: если `ConfigDumpInfo.xml` в каталоге набора лежит в индексе git, команда отказывает до запуска платформы с кодом выхода 2 (`validation`), называет путь и рецепт `git rm --cached <путь> && git commit …`; превью (`--dry-run`) отказывает так же. Там, где git не отвечает, работа идёт молча.
 - Для `EDT` сначала анализирует и экспортирует выбранные EDT `source-set`, затем грузит generated
   Designer files выбранным backend.
 - После успешного project stage, включая scoped `--source-set`, подготавливает
@@ -502,6 +505,7 @@ v8-runner pull --mode <full|incremental|partial> [--source-set <NAME>] [--extens
   слияния. Найдя такое, она отказывает с кодом выхода 2 и называет файлы;
   `--force` заменяет каталог всё равно. Там, где git не отвечает,
   поведение прежнее и защиты нет.
+- Опись версий `ConfigDumpInfo.xml` принадлежит одной базе и в git не хранится: если `ConfigDumpInfo.xml` в каталоге набора лежит в индексе git, команда отказывает до запуска платформы с кодом выхода 2 (`validation`), называет путь и рецепт `git rm --cached <путь> && git commit …`; превью (`--dry-run`) отказывает так же. Там, где git не отвечает, работа идёт молча.
 - Канонический ввод селектора — `TYPE:NAME` (например, `Catalog:Items`); для
   совместимости принимается и `TYPE.NAME`. Переданный селектор сохраняется в JSON как
   `data.selectors[*].requested`, а в списке Designer и как

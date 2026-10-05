@@ -687,3 +687,42 @@ fn an_existing_origin_is_not_replaced_and_the_refusal_names_the_key_that_was_use
         "infobases:\n  origin:\n    connection: 'File=/srv/ib'\n"
     );
 }
+
+/// Один генератор пишет все шаблоны проекта: местный слой, опись версий одной базы
+/// и замок выгрузки. Повторный запуск ничего не дублирует.
+#[test]
+fn init_ignores_project_local_files_once() {
+    let dir = temp_workspace();
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["init", "-q", "-b", "main", "."])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run git");
+    assert!(status.success(), "git init failed");
+    let main = dir.path().join("src").join("configuration");
+    fs::create_dir_all(&main).expect("main");
+    fs::write(main.join("Configuration.xml"), "<Configuration/>").expect("main xml");
+
+    for _ in 0..2 {
+        let output = v8_runner_command()
+            .current_dir(dir.path())
+            .args(["init", "--force"])
+            .output()
+            .expect("run init");
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let gitignore = fs::read_to_string(dir.path().join(".gitignore")).expect("gitignore");
+    assert_eq!(
+        gitignore,
+        "v8project.local.yaml\nConfigDumpInfo.xml\n.dump-*.lock*\n"
+    );
+}

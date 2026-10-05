@@ -22,7 +22,7 @@ Use the available `v8-runner` binary directly. If it is not on `PATH`, ask for t
 
 `v8project.yaml` is the default project config name. A sibling `v8project.local.yaml` declares the project's infobases (`infobases` map, `origin` by default) and holds machine-local paths, credentials, tools, tests, and MCP settings. Do not pass `--config v8project.yaml` unless the user explicitly wants a non-default command shape or the active config path differs from the default; never pass `v8project.local.yaml` as `--config`.
 
-Generated `v8project.yaml` files include a `yaml-language-server` modeline that points to the published `master` JSON Schema artifact. `init` and `clone` also create sibling `v8project.local.yaml` with the local overlay schema modeline and add it to `.gitignore` when needed.
+Generated `v8project.yaml` files include a `yaml-language-server` modeline that points to the published `master` JSON Schema artifact. `init` and `clone` also create sibling `v8project.local.yaml` with the local overlay schema modeline and add it to `.gitignore` when needed, together with `ConfigDumpInfo.xml` and `.dump-*.lock*`. `pull` and `push` refuse with exit code 2 before starting the platform when `ConfigDumpInfo.xml` is tracked by git (the file belongs to one infobase); follow the printed `git rm --cached` recipe.
 
 Use JSON output only when another tool, script, or final answer needs structured results:
 

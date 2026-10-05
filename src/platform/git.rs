@@ -1,7 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// Returns Git's effective ignore decision for `path`.
+/// Покрывает ли `path` шаблон игнора.
+///
+/// Проба идёт с `--no-index`: без него гит объявляет отслеживаемый файл
+/// неигнорируемым даже под шаблоном, и генератор `.gitignore` дописывал бы шаблон
+/// при каждом запуске. Вопрос здесь — о шаблоне, а не об индексе; об индексе
+/// спрашивает [`tracking_of`].
 ///
 /// `None` means Git is unavailable, `path` is outside a worktree, or Git reported
 /// an execution error that should fall back to local `.gitignore` editing.
@@ -10,8 +15,9 @@ pub fn check_ignored(path: &Path) -> Option<bool> {
     let status = Command::new("git")
         .arg("-C")
         .arg(workdir)
-        .args(["check-ignore", "--quiet", "--"])
+        .args(["check-ignore", "--quiet", "--no-index", "--"])
         .arg(path)
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -21,6 +27,70 @@ pub fn check_ignored(path: &Path) -> Option<bool> {
         Some(0) => Some(true),
         Some(1) => Some(false),
         _ => None,
+    }
+}
+
+/// Лежит ли файл в индексе гита.
+///
+/// Состояний три, как и у [`UncommittedWork`]: незнание — самостоятельный ответ.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Tracking {
+    /// Гит отвечает: файла в индексе нет.
+    Untracked,
+    /// Файл в индексе. Путь дан от корня рабочей копии — в том виде, в каком его
+    /// принимает `git rm --cached`, запущенный из корня.
+    Tracked(PathBuf),
+    /// Ответа нет, причина названа: гита нет, путь вне рабочей копии, гит вернул
+    /// ошибку.
+    Unknown(String),
+}
+
+/// Спрашивает гит, лежит ли `path` в индексе.
+///
+/// Каталога файла может не быть на диске — например, до первой выгрузки. Гит
+/// запускается из ближайшего существующего предка, а путь передаётся от него:
+/// абсолютный путь гит сравнивает с корнем рабочей копии буквально, и ссылка в
+/// пути превращала бы ответ в «вне репозитория».
+pub fn tracking_of(path: &Path) -> Tracking {
+    let Some(anchor) = path.ancestors().skip(1).find(|dir| dir.is_dir()) else {
+        return Tracking::Unknown(format!("no existing directory above '{}'", path.display()));
+    };
+    let Ok(relative) = path.strip_prefix(anchor) else {
+        return Tracking::Unknown(format!(
+            "'{}' is not under '{}'",
+            path.display(),
+            anchor.display()
+        ));
+    };
+
+    let output = match Command::new("git")
+        // Имя файла — не шаблон: `*` или `[` в пути не должны ничего расширять.
+        .arg("--literal-pathspecs")
+        .arg("-C")
+        .arg(anchor)
+        .args(["ls-files", "-z", "--full-name", "--cached", "--"])
+        .arg(relative)
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => return Tracking::Unknown(format!("git ls-files failed to run: {error}")),
+    };
+
+    if !output.status.success() {
+        return Tracking::Unknown(match output.status.code() {
+            Some(code) => format!("git ls-files exited with {code}"),
+            None => "git ls-files was terminated by a signal".to_owned(),
+        });
+    }
+
+    match output
+        .stdout
+        .split(|byte| *byte == 0)
+        .find(|entry| !entry.is_empty())
+    {
+        Some(entry) => Tracking::Tracked(path_from_bytes(entry)),
+        None => Tracking::Untracked,
     }
 }
 
@@ -355,6 +425,67 @@ mod tests {
         assert_eq!(
             uncommitted_work_in(root),
             UncommittedWork::AtRisk(vec![PathBuf::from("hand-written.xml")])
+        );
+    }
+
+    #[test]
+    fn a_committed_file_is_tracked_under_its_repository_path() {
+        let repo = repo_with_committed_source();
+        assert_eq!(
+            tracking_of(&source_dir(&repo).join("Configuration.xml")),
+            Tracking::Tracked(PathBuf::from("src/cf/Configuration.xml"))
+        );
+    }
+
+    #[test]
+    fn a_file_outside_the_index_is_untracked() {
+        let repo = repo_with_committed_source();
+        fs::write(source_dir(&repo).join("hand-written.xml"), "mine\n").expect("write");
+        assert_eq!(
+            tracking_of(&source_dir(&repo).join("hand-written.xml")),
+            Tracking::Untracked
+        );
+    }
+
+    /// Каталога ещё нет — гит спрашивают из ближайшего существующего предка.
+    #[test]
+    fn a_file_in_an_absent_directory_is_untracked() {
+        let repo = repo_with_committed_source();
+        assert_eq!(
+            tracking_of(&repo.path().join("never").join("was").join("file.xml")),
+            Tracking::Untracked
+        );
+    }
+
+    /// Имя файла — не шаблон: `*` не должен найти соседа.
+    #[test]
+    fn a_name_is_not_a_pattern() {
+        let repo = repo_with_committed_source();
+        assert_eq!(
+            tracking_of(&source_dir(&repo).join("*.xml")),
+            Tracking::Untracked
+        );
+    }
+
+    #[test]
+    fn a_file_outside_a_worktree_has_unknown_tracking() {
+        let dir = tempdir().expect("tempdir");
+        let answer = tracking_of(&dir.path().join("file.xml"));
+        assert!(
+            matches!(answer, Tracking::Unknown(_)),
+            "expected Unknown, got {answer:?}"
+        );
+    }
+
+    /// Над отслеживаемым файлом гит без `--no-index` шаблон не признаёт: проба
+    /// обязана видеть шаблон, иначе генератор дописывает его снова и снова.
+    #[test]
+    fn a_pattern_covers_a_tracked_file() {
+        let repo = repo_with_committed_source();
+        fs::write(repo.path().join(".gitignore"), "Configuration.xml\n").expect("gitignore");
+        assert_eq!(
+            check_ignored(&source_dir(&repo).join("Configuration.xml")),
+            Some(true)
         );
     }
 

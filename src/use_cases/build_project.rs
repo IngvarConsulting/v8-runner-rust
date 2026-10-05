@@ -26,6 +26,7 @@ use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
 use crate::use_cases::external_artifacts::{
     discover_designer_external_artifacts, prepare_edt_external_artifacts, source_set_external_kind,
 };
+use crate::use_cases::ignored_files::refuse_tracked_version_file;
 use crate::use_cases::request::BuildRequest as BuildArgs;
 use crate::use_cases::result::{stamp_dispatch, UseCaseFailure, UseCaseResult};
 use crate::use_cases::source_inventory::SourceSetInventory;
@@ -110,7 +111,9 @@ fn run_build_selected(
         return run_build_edt(context, config, args, provider);
     }
 
-    if let Some(error) = validate_designer_supported_matrix(config) {
+    if let Some(error) = validate_designer_supported_matrix(config)
+        .or_else(|| refuse_tracked_version_files(config, args).err())
+    {
         return Err(BuildExecutionFailure::with_payload(
             error,
             BuildResult {
@@ -186,6 +189,25 @@ fn validate_designer_supported_matrix(config: &AppConfig) -> Option<AppError> {
             SUPPORTED_DESIGNER_BUILD_ERROR.to_owned(),
         ))
     }
+}
+
+/// Загрузка из файлов переписывает опись версий в каталоге набора
+/// (`-updateConfigDumpInfo` у Конфигуратора и агента), поэтому опись в индексе
+/// гита останавливает сборку до платформы при любом исполнителе — и в превью
+/// тоже: проверка ничего не пишет.
+///
+/// Неверно названный набор здесь пропускается: отказ о нём — дело плана сборки.
+fn refuse_tracked_version_files(config: &AppConfig, args: &BuildArgs) -> Result<(), AppError> {
+    let inventory = SourceSetInventory::new(config);
+    let Ok(source_sets) = selected_ordered_source_sets(&inventory, args.source_set.as_deref())
+    else {
+        return Ok(());
+    };
+    source_sets
+        .iter()
+        .filter(|source_set| !source_set.purpose.is_external())
+        .filter_map(|source_set| inventory.designer_context(&source_set.name))
+        .try_for_each(|context| refuse_tracked_version_file(context.path()))
 }
 
 fn validate_edt_supported_matrix(config: &AppConfig) -> Option<AppError> {

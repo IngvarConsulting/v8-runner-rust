@@ -11,11 +11,11 @@ use crate::platform::connection::V8Connection;
 use crate::support::error::AppError;
 use crate::use_cases::context::ExecutionContext;
 use crate::use_cases::dump_config;
+use crate::use_cases::ignored_files::{ensure_project_gitignore, LOCAL_CONFIG_FILE_NAME};
 use crate::use_cases::request::{DumpModeRequest, DumpRequest};
 use crate::use_cases::result::{stamp_dispatch, UseCaseError, UseCaseFailure, UseCaseResult};
 
 const CONFIG_FILE_NAME: &str = "v8project.yaml";
-const LOCAL_CONFIG_FILE_NAME: &str = "v8project.local.yaml";
 const GITIGNORE_FILE_NAME: &str = ".gitignore";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,7 +337,7 @@ fn write_bootstrap_files(paths: &BootstrapPaths, text: &ProjectText<'_>) -> Resu
             paths.config_path.display()
         ))
     })?;
-    ensure_gitignore(paths)?;
+    ensure_project_gitignore(&paths.gitignore_path)?;
     std::fs::write(&paths.local_config_path, text.local_overlay).map_err(|error| {
         AppError::Runtime(format!(
             "failed to write local config file '{}': {error}",
@@ -387,52 +387,6 @@ fn render_local_config(request: &BootstrapRequest) -> String {
         ));
     }
     yaml
-}
-
-fn ensure_gitignore(paths: &BootstrapPaths) -> Result<(), AppError> {
-    let pattern = LOCAL_CONFIG_FILE_NAME;
-    if paths.gitignore_path.exists() {
-        let mut content = std::fs::read_to_string(&paths.gitignore_path).map_err(|error| {
-            AppError::Runtime(format!(
-                "failed to read gitignore file '{}': {error}",
-                paths.gitignore_path.display()
-            ))
-        })?;
-        if gitignore_mentions_local_config(&content) {
-            return Ok(());
-        }
-        if !content.is_empty() && !content.ends_with('\n') {
-            content.push('\n');
-        }
-        content.push_str(pattern);
-        content.push('\n');
-        std::fs::write(&paths.gitignore_path, content).map_err(|error| {
-            AppError::Runtime(format!(
-                "failed to write gitignore file '{}': {error}",
-                paths.gitignore_path.display()
-            ))
-        })?;
-        return Ok(());
-    }
-    std::fs::write(&paths.gitignore_path, format!("{pattern}\n")).map_err(|error| {
-        AppError::Runtime(format!(
-            "failed to write gitignore file '{}': {error}",
-            paths.gitignore_path.display()
-        ))
-    })
-}
-
-fn gitignore_mentions_local_config(content: &str) -> bool {
-    content.lines().any(|line| {
-        let line = line.trim();
-        !line.is_empty()
-            && !line.starts_with('#')
-            && !line.starts_with('!')
-            && matches!(
-                line,
-                LOCAL_CONFIG_FILE_NAME | "/v8project.local.yaml" | "**/v8project.local.yaml"
-            )
-    })
 }
 
 fn relative_to_project(config_path: &Path, path: &Path) -> String {

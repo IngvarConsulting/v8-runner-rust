@@ -62,7 +62,16 @@ pub(super) fn run_dump_with_context(
             .collect()
     });
 
-    let resolved = match resolve_target(config, args) {
+    let resolved = match resolve_target(config, args).and_then(|resolved| {
+        // Платформа пишет опись версий в каталог выгрузки. В каталоге человека опись
+        // из индекса гита останавливает выгрузку до платформы, превью — тоже:
+        // проверка ничего не пишет. Служебный снимок EDT в `workPath` — забота
+        // раннера, а не гита.
+        if resolved.platform_target_path == resolved.target_path {
+            crate::use_cases::ignored_files::refuse_tracked_version_file(&resolved.target_path)?;
+        }
+        Ok(resolved)
+    }) {
         Ok(resolved) => resolved,
         Err(error) => {
             let message = error.to_string();
