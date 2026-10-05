@@ -228,15 +228,29 @@ fn apply_test_overlay(object: &mut Map<String, Value>, artifacts: VanessaTestArt
         Value::Bool(true),
     );
     object.insert("ДелатьОтчетВФорматеjUnit".to_owned(), Value::Bool(true));
-    object.insert(
-        "КаталогВыгрузкиJUnit".to_owned(),
-        Value::String(artifacts.junit_dir.display().to_string()),
-    );
+    apply_junit_dir_overlay(object, artifacts.junit_dir);
     apply_logging_overlay(
         object,
         artifacts.runner_log,
         &artifacts.run_dir.join("va-status.log"),
     );
+}
+
+/// Каталог JUnit-отчёта направляется в каталог прогона и в верхнем поле, и во вложенном
+/// `ОтчетJUnit`: нынешняя Vanessa Automation читает вложенное, прежние — верхнее. Вложенный
+/// объект создаётся, если шаблон его не задаёт или задаёт не объектом, — так прогон не
+/// зависит от того, какое поле прочтёт установленная версия; прочие ключи объекта остаются.
+fn apply_junit_dir_overlay(object: &mut Map<String, Value>, junit_dir: &Path) {
+    const JUNIT_DIR_KEY: &str = "КаталогВыгрузкиJUnit";
+    let junit_dir = Value::String(junit_dir.display().to_string());
+    let nested = object.entry("ОтчетJUnit").or_insert(Value::Null);
+    if !nested.is_object() {
+        *nested = Value::Object(Map::new());
+    }
+    if let Some(nested) = nested.as_object_mut() {
+        nested.insert(JUNIT_DIR_KEY.to_owned(), junit_dir.clone());
+    }
+    object.insert(JUNIT_DIR_KEY.to_owned(), junit_dir);
 }
 
 fn apply_logging_overlay(
@@ -341,4 +355,30 @@ fn set_file_permissions(path: &Path) -> std::io::Result<()> {
     #[cfg(not(unix))]
     let _ = path;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn junit_dir_overlay_replaces_a_non_object_nested_report_section() {
+        let mut object = Map::new();
+        object.insert(
+            "ОтчетJUnit".to_owned(),
+            Value::String("build/out".to_owned()),
+        );
+        object.insert(
+            "КаталогВыгрузкиJUnit".to_owned(),
+            Value::String("build/out/junit".to_owned()),
+        );
+
+        apply_junit_dir_overlay(&mut object, Path::new("/runs/1/junit"));
+
+        assert_eq!(object["КаталогВыгрузкиJUnit"], "/runs/1/junit");
+        assert_eq!(
+            object["ОтчетJUnit"],
+            serde_json::json!({ "КаталогВыгрузкиJUnit": "/runs/1/junit" })
+        );
+    }
 }
