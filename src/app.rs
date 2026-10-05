@@ -424,31 +424,30 @@ fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 
     let _signal_guard = crate::cli::signal::CliSignalGuard::install(cancellation.clone());
     let context = crate::use_cases::context::ExecutionContext::cli(CommandName::Bootstrap)
         .with_cancellation(cancellation);
-    let outcome = match crate::use_cases::bootstrap_project::plan(request) {
-        Err(failure) => Err(failure),
-        Ok(plan) => {
-            // Замок берётся по настройкам плана до первого файла проекта: занятый каталог
-            // отказывает, пока проекта ещё нет. Отказ замка граница печатает сама, с шагом
-            // `workspace lock`, как у всякой команды; итог клона — внутри.
-            // `--clean-before-execution` клон не чистит: журналов платформы у нового проекта нет.
-            let clean_before_execution = false;
-            let preview = plan.is_preview();
-            match execute::with_cli_workspace_lock(
-                plan.config(),
-                presenter,
-                CommandName::Bootstrap,
-                clean_before_execution,
-                preview,
-                || {
-                    Ok(crate::use_cases::bootstrap_project::execute(
-                        &context, &plan,
-                    ))
-                },
-            ) {
-                Ok(outcome) => outcome,
-                Err(refusal) => return refusal.exit_code(),
-            }
-        }
+    let plan = match crate::use_cases::bootstrap_project::plan(request) {
+        Ok(plan) => plan,
+        Err(failure) => return render_bootstrap_failure(failure, cli, presenter),
+    };
+    // Замок берётся по настройкам плана до первого файла проекта: занятый каталог
+    // отказывает, пока проекта ещё нет. Отказ замка граница печатает сама, с шагом
+    // `workspace lock`, как у всякой команды; итог клона — внутри.
+    // `--clean-before-execution` клон не чистит: журналов платформы у нового проекта нет.
+    let clean_before_execution = false;
+    let preview = plan.is_preview();
+    let outcome = match execute::with_cli_workspace_lock(
+        plan.config(),
+        presenter,
+        CommandName::Bootstrap,
+        clean_before_execution,
+        preview,
+        || {
+            Ok(crate::use_cases::bootstrap_project::execute(
+                &context, &plan,
+            ))
+        },
+    ) {
+        Ok(outcome) => outcome,
+        Err(refusal) => return refusal.exit_code(),
     };
     match outcome {
         Ok(result) => {
@@ -472,40 +471,47 @@ fn run_bootstrap(args: &BootstrapArgs, cli: &Cli, presenter: &Presenter) -> i32 
             }
             0
         }
-        Err(failure) => {
-            let error = failure.error;
-            if presenter.is_json() {
-                if let Some(result) = failure.payload {
-                    presenter.print_envelope(&failure_envelope(
-                        BOOTSTRAP_COMMAND,
-                        result.duration_ms,
-                        result,
-                        &error,
-                    ));
-                } else {
-                    presenter.print_envelope(&failure_envelope(
-                        BOOTSTRAP_COMMAND,
-                        0,
-                        crate::cli::output::RefusalData {
-                            message: error.message().to_owned(),
-                        },
-                        &error,
-                    ));
-                }
-            } else {
-                if let Some(result) = failure.payload.as_ref() {
-                    render_bootstrap_text(
-                        result,
-                        presenter,
-                        false,
-                        execute::Requested::from_dry_run(cli.dry_run),
-                    );
-                }
-                presenter.print_error(&error.to_string());
-            }
-            error.exit_code()
-        }
+        Err(failure) => render_bootstrap_failure(failure, cli, presenter),
     }
+}
+
+/// Отказ `bootstrap` — плана или клона — печатается одной формой и возвращает код выхода.
+fn render_bootstrap_failure(
+    failure: crate::use_cases::result::UseCaseFailure<crate::domain::bootstrap::BootstrapResult>,
+    cli: &Cli,
+    presenter: &Presenter,
+) -> i32 {
+    let error = failure.error;
+    if presenter.is_json() {
+        if let Some(result) = failure.payload {
+            presenter.print_envelope(&failure_envelope(
+                BOOTSTRAP_COMMAND,
+                result.duration_ms,
+                result,
+                &error,
+            ));
+        } else {
+            presenter.print_envelope(&failure_envelope(
+                BOOTSTRAP_COMMAND,
+                0,
+                crate::cli::output::RefusalData {
+                    message: error.message().to_owned(),
+                },
+                &error,
+            ));
+        }
+    } else {
+        if let Some(result) = failure.payload.as_ref() {
+            render_bootstrap_text(
+                result,
+                presenter,
+                false,
+                execute::Requested::from_dry_run(cli.dry_run),
+            );
+        }
+        presenter.print_error(&error.to_string());
+    }
+    error.exit_code()
 }
 
 fn resolve_bootstrap_project_dir(

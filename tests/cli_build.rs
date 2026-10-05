@@ -955,6 +955,51 @@ fn build_text_workspace_lock_conflict_prints_single_error() {
     );
 }
 
+/// Сбой `--clean-before-execution` у общей команды, как у infobase-команд, назван шагом
+/// `workspace preparation`: замок уже взят, не подготовлен каталог, и до платформы
+/// команда не доходит.
+#[test]
+fn build_clean_before_failure_is_reported_as_workspace_preparation() {
+    let (dir, config_path, binary_path, work_path) = setup_project();
+    // Журнал действий живёт в `logs/mcp`, поэтому блокируется только каталог журналов
+    // платформы, который чистит `--clean-before-execution`.
+    fs::create_dir_all(work_path.join("logs")).expect("logs");
+    fs::write(
+        work_path.join("logs").join("platform"),
+        "blocks platform logs",
+    )
+    .expect("platform log blocker");
+    let dispatched = dir.path().join("designer-dispatched");
+    write_script(
+        &binary_path,
+        &format!(": > '{}'\nexit 0", dispatched.display()),
+    );
+
+    let output = v8_runner_command()
+        .args([
+            "--config",
+            &config_path.display().to_string(),
+            "--json-message",
+            "--clean-before-execution",
+            "build",
+        ])
+        .output()
+        .expect("run command");
+
+    assert_eq!(output.status.code(), Some(3));
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(payload["ok"], false);
+    assert_eq!(payload["command"], "push");
+    assert_eq!(payload["error"]["code"], "runtime_failure");
+    assert_eq!(
+        payload["steps"][0]["name"], "workspace preparation",
+        "{payload}"
+    );
+    assert_eq!(payload["steps"][0]["kind"], "prepare_workspace");
+    assert_eq!(payload["steps"][0]["status"], "failed");
+    assert!(!dispatched.exists(), "designer must not run");
+}
+
 #[test]
 fn build_text_no_changes_collapses_per_source_set_noise() {
     let (_dir, config_path, _binary_path, _work_path) = setup_project();

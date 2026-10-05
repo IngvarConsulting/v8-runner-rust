@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use support::{
-    temp_workspace, v8_runner_binary, v8_runner_command, wait_for_log_contains,
-    wait_until_async_condition, write_shell_script as write_script,
+    hold_workspace_lock, temp_workspace, v8_runner_binary, v8_runner_command,
+    wait_for_log_contains, wait_until_async_condition, write_shell_script as write_script,
 };
 
 const ACCEPT_BOTH: &str = "application/json, text/event-stream";
@@ -877,6 +877,52 @@ async fn mcp_http_dump_config_partial_ibcmd_preserves_partial_mode_on_failure() 
     assert!(fs::read_to_string(calls_log)
         .expect("ibcmd calls")
         .contains("--sync"));
+
+    server.shutdown().await;
+}
+
+/// Занятый `workPath` отказывает инструменту по HTTP так же, как по stdio: MCP сводит
+/// `workspace_busy` командной строки к `runtime_failure` рода `runtime`, и до платформы
+/// вызов не доходит.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_http_dump_config_refuses_a_busy_workspace() {
+    let (dir, config_path, url, calls_log) = setup_http_ibcmd_dump_project(None, 4, 900);
+    hold_workspace_lock(&dir.path().join("work"));
+    let mut server = HttpServerProcess::spawn(&config_path, &url).await;
+    let client = reqwest::Client::builder()
+        .timeout(HTTP_CLIENT_TIMEOUT)
+        .build()
+        .expect("http client");
+
+    let (session_id, _) = initialize_session(&client, &url).await;
+    send_initialized(&client, &url, &session_id).await;
+
+    let response = call_tool(
+        &client,
+        &url,
+        &session_id,
+        "dump_config",
+        json!({ "mode": "FULL" }),
+        32,
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let payload = extract_sse_json(&response.text().await.expect("busy dump body"));
+    assert_eq!(payload["result"]["isError"], true, "{payload}");
+    let structured = &payload["result"]["structuredContent"];
+    assert_envelope_business_failure(structured, "pull");
+    assert_eq!(
+        structured["error"]["code"], "runtime_failure",
+        "{structured}"
+    );
+    assert_eq!(structured["error"]["kind"], "runtime", "{structured}");
+    assert!(
+        structured["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("cannot start pull")),
+        "{structured}"
+    );
+    assert!(!calls_log.exists(), "ibcmd must not run on a busy workPath");
 
     server.shutdown().await;
 }

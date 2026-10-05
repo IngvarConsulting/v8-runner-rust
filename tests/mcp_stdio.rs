@@ -1917,6 +1917,10 @@ fn assert_refused_as_busy(response: &rmcp::model::CallToolResult) {
         .as_ref()
         .expect("structured payload");
     assert_envelope_business_failure(payload, "check");
+    // MCP сводит рода к `validation`, `runtime` и `platform`: `workspace_busy` командной
+    // строки здесь приезжает как `runtime_failure`.
+    assert_eq!(payload["error"]["code"], "runtime_failure", "{payload}");
+    assert_eq!(payload["error"]["kind"], "runtime", "{payload}");
     assert!(
         payload["error"]["message"]
             .as_str()

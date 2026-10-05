@@ -1782,7 +1782,7 @@ fn execute_infobase_dump(
     })
 }
 
-fn infobase_pre_dispatch_execution_phase(workspace_lock_acquired: bool) -> InfobaseTransferPhase {
+fn workspace_refusal_phase(workspace_lock_acquired: bool) -> InfobaseTransferPhase {
     if workspace_lock_acquired {
         InfobaseTransferPhase::WorkspacePreparation
     } else {
@@ -2454,7 +2454,7 @@ fn dispatch_under_cli_workspace_lock<T>(
         run,
     )
     .map_err(|error| WorkspaceRefusal {
-        phase: infobase_pre_dispatch_execution_phase(workspace_lock_acquired),
+        phase: workspace_refusal_phase(workspace_lock_acquired),
         error,
     })
 }
@@ -4327,9 +4327,9 @@ fn status_label(status: &TestStatus) -> &'static str {
 mod tests {
     use super::{
         append_interruptions, build_load_envelope, command_name, execute_command,
-        infobase_pre_dispatch_execution_phase, map_artifacts_request_with_config,
-        map_build_request, map_designer_config_request, map_dump_request, map_extensions_request,
-        map_launch_request, map_load_request, map_syntax_request, map_test_request,
+        map_artifacts_request_with_config, map_build_request, map_designer_config_request,
+        map_dump_request, map_extensions_request, map_launch_request, map_load_request,
+        map_syntax_request, map_test_request, workspace_refusal_phase,
     };
     use crate::cli::args::{
         ArtifactsArgs, BuildArgs, Command, DesignerConfigSyntaxArgs, DesignerModulesSyntaxArgs,
@@ -5248,13 +5248,13 @@ mod tests {
     }
 
     #[test]
-    fn infobase_pre_dispatch_phase_distinguishes_lock_from_workspace_preparation() {
+    fn workspace_refusal_phase_distinguishes_lock_from_workspace_preparation() {
         assert_eq!(
-            infobase_pre_dispatch_execution_phase(false),
+            workspace_refusal_phase(false),
             InfobaseTransferPhase::WorkspaceLock
         );
         assert_eq!(
-            infobase_pre_dispatch_execution_phase(true),
+            workspace_refusal_phase(true),
             InfobaseTransferPhase::WorkspacePreparation
         );
     }
