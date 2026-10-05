@@ -87,7 +87,7 @@ use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
 use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::tools_download;
-use crate::use_cases::transport::{dispatch_with_workspace_lock_policy, WorkspaceBusyPolicy};
+use crate::use_cases::transport::dispatch_with_workspace_lock;
 
 /// Executes a parsed CLI command by mapping it into transport-neutral requests and
 /// rendering the resulting command output.
@@ -1574,16 +1574,8 @@ fn execute_infobase_restore(
 ) -> Result<(), UseCaseError> {
     let command = CommandName::InfobaseRestore;
     let started = Instant::now();
-    let mut workspace_lock_acquired = false;
-    let mut dispatched = false;
-    let outcome = with_cli_workspace_lock_observed(
-        config,
-        presenter,
-        command,
-        clean_before_execution,
-        || workspace_lock_acquired = true,
-        || {
-            dispatched = true;
+    let outcome =
+        dispatch_under_cli_workspace_lock(config, command, clean_before_execution, || {
             info!(
                 command = command.as_str(),
                 "starting command under workspace lock"
@@ -1631,20 +1623,17 @@ fn execute_infobase_restore(
                     Err(error)
                 }
             }
-        },
-    );
-    if !dispatched {
-        if let Err(error) = &outcome {
-            let result = restore_pre_dispatch_failure(
-                &request,
-                Some(prepared.receipt().clone()),
-                error,
-                infobase_pre_dispatch_execution_phase(workspace_lock_acquired),
-            );
-            render_restore_failure(command, result, error, presenter);
-        }
-    }
-    outcome
+        });
+    outcome.unwrap_or_else(|refusal| {
+        let result = restore_pre_dispatch_failure(
+            &request,
+            Some(prepared.receipt().clone()),
+            &refusal.error,
+            refusal.phase,
+        );
+        render_restore_failure(command, result, &refusal.error, presenter);
+        Err(refusal.error)
+    })
 }
 
 fn execute_infobase_configuration_export(
@@ -1657,16 +1646,8 @@ fn execute_infobase_configuration_export(
 ) -> Result<(), UseCaseError> {
     let command = CommandName::InfobaseConfigurationExport;
     let started = Instant::now();
-    let mut workspace_lock_acquired = false;
-    let mut dispatched = false;
-    let outcome = with_cli_workspace_lock_observed(
-        config,
-        presenter,
-        command,
-        clean_before_execution,
-        || workspace_lock_acquired = true,
-        || {
-            dispatched = true;
+    let outcome =
+        dispatch_under_cli_workspace_lock(config, command, clean_before_execution, || {
             info!(
                 command = command.as_str(),
                 "starting command under workspace lock"
@@ -1716,20 +1697,17 @@ fn execute_infobase_configuration_export(
                     Err(error)
                 }
             }
-        },
-    );
-    if !dispatched {
-        if let Err(error) = &outcome {
-            let result = configuration_pre_dispatch_failure(
-                &request,
-                Some(prepared.receipt().clone()),
-                error,
-                infobase_pre_dispatch_execution_phase(workspace_lock_acquired),
-            );
-            render_configuration_failure(command, result, error, presenter);
-        }
-    }
-    outcome
+        });
+    outcome.unwrap_or_else(|refusal| {
+        let result = configuration_pre_dispatch_failure(
+            &request,
+            Some(prepared.receipt().clone()),
+            &refusal.error,
+            refusal.phase,
+        );
+        render_configuration_failure(command, result, &refusal.error, presenter);
+        Err(refusal.error)
+    })
 }
 
 fn execute_infobase_dump(
@@ -1742,16 +1720,8 @@ fn execute_infobase_dump(
 ) -> Result<(), UseCaseError> {
     let command = CommandName::InfobaseDump;
     let started = Instant::now();
-    let mut workspace_lock_acquired = false;
-    let mut dispatched = false;
-    let outcome = with_cli_workspace_lock_observed(
-        config,
-        presenter,
-        command,
-        clean_before_execution,
-        || workspace_lock_acquired = true,
-        || {
-            dispatched = true;
+    let outcome =
+        dispatch_under_cli_workspace_lock(config, command, clean_before_execution, || {
             info!(
                 command = command.as_str(),
                 "starting command under workspace lock"
@@ -1799,28 +1769,30 @@ fn execute_infobase_dump(
                     Err(error)
                 }
             }
-        },
-    );
-    if !dispatched {
-        if let Err(error) = &outcome {
-            let result = snapshot_pre_dispatch_failure(
-                &request,
-                Some(prepared.receipt().clone()),
-                error,
-                infobase_pre_dispatch_execution_phase(workspace_lock_acquired),
-            );
-            render_snapshot_failure(command, result, error, presenter);
-        }
-    }
-    outcome
+        });
+    outcome.unwrap_or_else(|refusal| {
+        let result = snapshot_pre_dispatch_failure(
+            &request,
+            Some(prepared.receipt().clone()),
+            &refusal.error,
+            refusal.phase,
+        );
+        render_snapshot_failure(command, result, &refusal.error, presenter);
+        Err(refusal.error)
+    })
 }
 
-fn infobase_pre_dispatch_execution_phase(workspace_lock_acquired: bool) -> InfobaseTransferPhase {
+fn workspace_refusal_phase(workspace_lock_acquired: bool) -> InfobaseTransferPhase {
     if workspace_lock_acquired {
         InfobaseTransferPhase::WorkspacePreparation
     } else {
         InfobaseTransferPhase::WorkspaceLock
     }
+}
+
+/// Шаг, на котором команда отказала до работы исполнителя.
+fn failed_phase_step(phase: InfobaseTransferPhase, error: &UseCaseError) -> StepResult {
+    StepResult::failed(phase.as_str(), phase.kind(), 0).with_message(error.message().to_owned())
 }
 
 fn annotate_pre_dispatch_failure(execution: &mut ExecutionOutcome<()>, error: &UseCaseError) {
@@ -1863,10 +1835,7 @@ fn configuration_pre_dispatch_failure(
 ) -> ExportConfigurationPackageResult {
     let mut result = ExportConfigurationPackageResult::new(request.clone(), selection);
     annotate_pre_dispatch_failure(&mut result.execution, error);
-    result.steps.push(
-        StepResult::failed(phase.as_str(), phase.kind(), 0)
-            .with_message(error.message().to_owned()),
-    );
+    result.steps.push(failed_phase_step(phase, error));
     result
 }
 
@@ -1878,10 +1847,7 @@ fn snapshot_pre_dispatch_failure(
 ) -> ExportInfobaseSnapshotResult {
     let mut result = ExportInfobaseSnapshotResult::new(request.clone(), selection);
     annotate_pre_dispatch_failure(&mut result.execution, error);
-    result.steps.push(
-        StepResult::failed(phase.as_str(), phase.kind(), 0)
-            .with_message(error.message().to_owned()),
-    );
+    result.steps.push(failed_phase_step(phase, error));
     result
 }
 
@@ -1893,10 +1859,7 @@ fn restore_pre_dispatch_failure(
 ) -> RestoreInfobaseSnapshotResult {
     let mut result = RestoreInfobaseSnapshotResult::new(request.clone(), selection);
     annotate_pre_dispatch_failure(&mut result.execution, error);
-    result.steps.push(
-        StepResult::failed(phase.as_str(), phase.kind(), 0)
-            .with_message(error.message().to_owned()),
-    );
+    result.steps.push(failed_phase_step(phase, error));
     result
 }
 
@@ -2450,40 +2413,38 @@ pub(crate) fn with_cli_workspace_lock<T>(
         );
         return run();
     }
-    with_cli_workspace_lock_observed(
-        config,
-        presenter,
-        command,
-        clean_before_execution,
-        || {},
-        run,
-    )
+    match dispatch_under_cli_workspace_lock(config, command, clean_before_execution, run) {
+        Ok(outcome) => outcome,
+        Err(refusal) => {
+            print_workspace_refusal(presenter, command, &refusal);
+            Err(refusal.error)
+        }
+    }
 }
 
-fn with_cli_workspace_lock_observed<T>(
+/// Отказ границы `workPath` до сценария: замок не взят или каталог не подготовлен.
+///
+/// Фаза называет шаг отказа — `workspace lock` или `workspace preparation`; отказ печатает
+/// вызывающий, своей формой `data`, но с тем же шагом.
+struct WorkspaceRefusal {
+    phase: InfobaseTransferPhase,
+    error: UseCaseError,
+}
+
+/// Граница `workPath` без печати: внешняя ошибка — отказ границы, внутренний итог —
+/// сценария. Занятый каталог у всякой команды — `WorkspaceBusy` на шаге `workspace lock`.
+fn dispatch_under_cli_workspace_lock<T>(
     config: &AppConfig,
-    presenter: &Presenter,
     command: CommandName,
     clean_before_execution: bool,
-    workspace_lock_acquired: impl FnOnce(),
-    run: impl FnOnce() -> Result<T, UseCaseError>,
-) -> Result<T, UseCaseError> {
-    let busy_policy = if matches!(
-        command,
-        CommandName::InfobaseConfigurationExport
-            | CommandName::InfobaseDump
-            | CommandName::Bootstrap
-    ) {
-        WorkspaceBusyPolicy::Typed
-    } else {
-        WorkspaceBusyPolicy::LegacyRuntime
-    };
-    let result = dispatch_with_workspace_lock_policy(
+    run: impl FnOnce() -> T,
+) -> Result<T, WorkspaceRefusal> {
+    let mut workspace_lock_acquired = false;
+    dispatch_with_workspace_lock(
         config,
         command,
-        busy_policy,
         || {
-            workspace_lock_acquired();
+            workspace_lock_acquired = true;
             if clean_before_execution {
                 clean_platform_logs_under_lock(config)
             } else {
@@ -2491,14 +2452,26 @@ fn with_cli_workspace_lock_observed<T>(
             }
         },
         run,
-    );
-    result.map_err(|error| {
-        if matches!(busy_policy, WorkspaceBusyPolicy::Typed) {
-            error
-        } else {
-            render_pre_dispatch_error(presenter, command, error)
-        }
-    })?
+    )
+    .map_err(|error| WorkspaceRefusal {
+        phase: workspace_refusal_phase(workspace_lock_acquired),
+        error,
+    })
+}
+
+/// Отказ границы у команды без своей формы отказа: `data` — текст отказа, шаг — фаза.
+fn print_workspace_refusal(
+    presenter: &Presenter,
+    command: CommandName,
+    refusal: &WorkspaceRefusal,
+) {
+    if presenter.is_json() {
+        let mut envelope = pre_dispatch_error_envelope(command.as_str(), &refusal.error);
+        envelope.steps = vec![failed_phase_step(refusal.phase, &refusal.error)];
+        presenter.print_envelope(&envelope);
+    } else {
+        presenter.print_error(&refusal.error.to_string());
+    }
 }
 
 fn clean_platform_logs_under_lock(config: &AppConfig) -> Result<(), UseCaseError> {
@@ -4354,9 +4327,9 @@ fn status_label(status: &TestStatus) -> &'static str {
 mod tests {
     use super::{
         append_interruptions, build_load_envelope, command_name, execute_command,
-        infobase_pre_dispatch_execution_phase, map_artifacts_request_with_config,
-        map_build_request, map_designer_config_request, map_dump_request, map_extensions_request,
-        map_launch_request, map_load_request, map_syntax_request, map_test_request,
+        map_artifacts_request_with_config, map_build_request, map_designer_config_request,
+        map_dump_request, map_extensions_request, map_launch_request, map_load_request,
+        map_syntax_request, map_test_request, workspace_refusal_phase,
     };
     use crate::cli::args::{
         ArtifactsArgs, BuildArgs, Command, DesignerConfigSyntaxArgs, DesignerModulesSyntaxArgs,
@@ -5057,7 +5030,7 @@ mod tests {
         )
         .expect_err("busy workspace");
 
-        assert_eq!(error.kind(), UseCaseErrorKind::Runtime);
+        assert_eq!(error.kind(), UseCaseErrorKind::WorkspaceBusy);
         assert!(error.to_string().contains("workspace"));
         assert!(error.to_string().contains("already"));
     }
@@ -5091,7 +5064,7 @@ mod tests {
         )
         .expect_err("busy workspace");
 
-        assert_eq!(error.kind(), UseCaseErrorKind::Runtime);
+        assert_eq!(error.kind(), UseCaseErrorKind::WorkspaceBusy);
         assert!(error.to_string().contains("workspace"));
         assert!(error.to_string().contains("already"));
     }
@@ -5275,13 +5248,13 @@ mod tests {
     }
 
     #[test]
-    fn infobase_pre_dispatch_phase_distinguishes_lock_from_workspace_preparation() {
+    fn workspace_refusal_phase_distinguishes_lock_from_workspace_preparation() {
         assert_eq!(
-            infobase_pre_dispatch_execution_phase(false),
+            workspace_refusal_phase(false),
             InfobaseTransferPhase::WorkspaceLock
         );
         assert_eq!(
-            infobase_pre_dispatch_execution_phase(true),
+            workspace_refusal_phase(true),
             InfobaseTransferPhase::WorkspacePreparation
         );
     }
