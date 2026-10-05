@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
 pub mod command_data;
+#[cfg(unix)]
+pub mod previews;
 
 use std::fs;
 use std::future::Future;

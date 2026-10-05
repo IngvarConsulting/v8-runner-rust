@@ -8,91 +8,10 @@
 mod support;
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use serde_json::Value;
-use support::{temp_workspace, v8_runner_command, write_shell_script};
-
-fn write_project(dir: &Path, with_platform: bool) -> PathBuf {
-    let base_path = dir.join("project");
-    let work_path = dir.join("work");
-    let install_dir = dir.join("platform");
-    let extension_source = base_path.join("exts").join("client-mcp");
-    fs::create_dir_all(&extension_source).expect("extension dir");
-    // Расширение инструмента объявлено намеренно: шаг его подготовки — место, где превью
-    // сборки однажды запускало платформу и писало состояние (#252). Без него образец
-    // этого класса не видит.
-    fs::write(
-        extension_source.join("Configuration.xml"),
-        "<Configuration><Properties><Name>client_mcp</Name><ConfigurationExtensionPurpose kind=\"Customization\">Customization</ConfigurationExtensionPurpose></Properties></Configuration>",
-    )
-    .expect("extension marker");
-    fs::write(
-        extension_source.join("Module.bsl"),
-        "procedure Tool() endprocedure",
-    )
-    .expect("extension module");
-    fs::create_dir_all(base_path.join("configuration")).expect("configuration dir");
-    fs::write(
-        base_path.join("configuration").join("Configuration.xml"),
-        "<MetaDataObject/>",
-    )
-    .expect("configuration marker");
-    fs::create_dir_all(&work_path).expect("work dir");
-    fs::create_dir_all(install_dir.join("bin")).expect("platform dir");
-    if with_platform {
-        write_shell_script(&install_dir.join("bin").join("1cv8"), "exit 0");
-        write_shell_script(&install_dir.join("bin").join("ibcmd"), "exit 0");
-        write_shell_script(&install_dir.join("bin").join("1cedtcli"), "exit 0");
-    }
-
-    // Без платформы поиск обязан отказать, а не уйти в PATH или в корни по умолчанию:
-    // строгий режим с версией не даёт локатору найти платформу за пределами каталога.
-    // EDT CLI строгого режима не знает и ищется ещё в PATH и корнях по умолчанию, поэтому
-    // `convert` в `SUCCEEDS_HERE` нет: без стаба на машине с EDT его превью прошло бы.
-    let strictness = if with_platform {
-        ""
-    } else {
-        "    strict: true\n    version: '8.3.27'\n"
-    };
-    let config_path = dir.join("v8project.yaml");
-    fs::write(
-        &config_path,
-        format!(
-            "workPath: {}\nformat: DESIGNER\ninfobase:\n  connection: 'File={}'\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: project/configuration\ntools:\n  platform:\n    path: {}\n{strictness}  edt_cli:\n    path: {}\n    interactive-mode: false\n  client_mcp:\n    extension:\n      name: client_mcp\n      source:\n        path: {}\n",
-            work_path.display(),
-            dir.join("ib").display(),
-            install_dir.display(),
-            install_dir.join("bin").join("1cedtcli").display(),
-            extension_source.display()
-        ),
-    )
-    .expect("write config");
-    config_path
-}
-
-/// Настройки берутся из текущего каталога, а не глобальным ключом: `clone` его отвергает,
-/// а образцу он не нужен — `v8project.yaml` лежит в корне образца. Переменная `V8TR_CONFIG`
-/// снимается вместе с ключом: она объявлена его умолчанием, и чужое окружение увело бы
-/// весь образец в другой проект молча.
-fn run(dir: &Path, arguments: &[String]) -> (i32, Value) {
-    let output = v8_runner_command()
-        .current_dir(dir)
-        .env_remove("V8TR_CONFIG")
-        .arg("--json-message")
-        .args(arguments)
-        .output()
-        .expect("run command");
-    let payload: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
-        panic!(
-            "`{}` printed no json envelope: {error}\nstdout: {}\nstderr: {}",
-            arguments.join(" "),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        )
-    });
-    (output.status.code().unwrap_or(-1), payload)
-}
+use support::previews::{run, with_preview, write_project};
+use support::{temp_workspace, v8_runner_command};
 
 // Состав таблицы листьев, общий с `src/cli/global_flags.rs`.
 include!(concat!(
@@ -100,141 +19,9 @@ include!(concat!(
     "/src/cli/global_flags_expected.in"
 ));
 
-/// Строка таблицы: вызов, путь листа и путь, которого после превью быть не должно.
-struct Previewed {
-    arguments: Vec<String>,
-    leaf: &'static str,
-    /// След, который превью оставило бы, если бы работало. У двадцати двух листьев это
-    /// общий рабочий каталог; у `clone` — каталог проекта, которого он ещё не завёл.
-    trace: PathBuf,
-}
-
-fn row(arguments: &[&str], leaf: &'static str, trace: PathBuf) -> Previewed {
-    Previewed {
-        arguments: arguments.iter().map(|value| (*value).to_owned()).collect(),
-        leaf,
-        trace,
-    }
-}
-
-/// Каждый лист с превью: минимальный вызов и путь листа. Состав сверяется с общим
-/// списком `LEAVES_WITH_PREVIEW`, поэтому новый лист с превью обязан появиться и здесь.
-fn with_preview(dir: &Path) -> Vec<Previewed> {
-    let work = dir.join("work");
-    let artifact = dir.join("main.cf").display().to_string();
-    let snapshot = dir.join("main.dt").display().to_string();
-    let cloned = dir.join("cloned");
-    let platform = dir.join("platform").display().to_string();
-    let source = format!("File={}", dir.join("ib").display());
-    vec![
-        // `clone` проектного файла не читает и глобальный ключ настроек отвергает: адрес,
-        // версию и подсказку платформы он называет своими ключами, а писать будет в свой
-        // каталог. След у него поэтому тоже свой.
-        row(
-            &[
-                "clone",
-                "--project-dir",
-                &cloned.display().to_string(),
-                "--connection",
-                &source,
-                "--platform-version",
-                "8.3.27",
-                "--platform-path",
-                &platform,
-            ],
-            "clone",
-            cloned,
-        ),
-        row(&["extensions"], "extensions", work.clone()),
-        row(&["extensions", "list"], "extensions list", work.clone()),
-        row(
-            &["extensions", "info", "--name", "client_mcp"],
-            "extensions info",
-            work.clone(),
-        ),
-        row(
-            &[
-                "extensions",
-                "create",
-                "--name",
-                "Demo",
-                "--name-prefix",
-                "Demo",
-            ],
-            "extensions create",
-            work.clone(),
-        ),
-        row(
-            &["extensions", "delete", "--name", "client_mcp"],
-            "extensions delete",
-            work.clone(),
-        ),
-        row(
-            &[
-                "extensions",
-                "activate",
-                "--name",
-                "client_mcp",
-                "--active",
-                "yes",
-            ],
-            "extensions activate",
-            work.clone(),
-        ),
-        row(&["build"], "push", work.clone()),
-        row(&["load", "--path", &artifact], "upload", work.clone()),
-        row(&["dump", "--mode", "full"], "pull", work.clone()),
-        row(
-            &["download", "--state", "working", "--output", &artifact],
-            "download",
-            work.clone(),
-        ),
-        row(&["infobase", "create"], "infobase create", work.clone()),
-        row(
-            &[
-                "infobase",
-                "configuration",
-                "export",
-                "--state",
-                "working",
-                "--output",
-                &artifact,
-            ],
-            "infobase configuration export",
-            work.clone(),
-        ),
-        row(
-            &["infobase", "dump", "--output", &snapshot],
-            "infobase dump",
-            work.clone(),
-        ),
-        row(
-            &["infobase", "restore", "--input", &snapshot, "--replace"],
-            "infobase restore",
-            work.clone(),
-        ),
-        row(&["convert"], "convert", work.clone()),
-        row(&["make", "--output", &artifact], "make", work.clone()),
-        row(&["check"], "check", work.clone()),
-        row(
-            &["check", "designer-config"],
-            "check designer-config",
-            work.clone(),
-        ),
-        row(
-            &["check", "designer-modules", "--thin-client"],
-            "check designer-modules",
-            work.clone(),
-        ),
-        row(&["check", "edt"], "check edt", work.clone()),
-        row(&["launch", "designer"], "launch", work.clone()),
-        row(&["publish"], "publish", work),
-    ]
-}
-
 /// Подмножество, у которого превью на этом образце доходит до успеха. Только на нём можно
-/// требовать нулевого кода и сверять содержимое: остальным нужен свой проект — базу,
-/// веб-сервер или формат EDT этот образец не объявляет.
+/// требовать нулевого кода и сверять содержимое: остальным нужен свой проект — базу
+/// или формат EDT этот образец не объявляет.
 const SUCCEEDS_HERE: &[&str] = &[
     "clone",
     "push",
@@ -245,6 +32,7 @@ const SUCCEEDS_HERE: &[&str] = &[
     "check",
     "check designer-modules",
     "launch",
+    "publish",
 ];
 
 fn previews(dir: &Path) -> Vec<Vec<String>> {
@@ -492,8 +280,8 @@ fn no_preview_changes_what_a_real_build_left_in_the_work_path() {
 /// говорит `provider_dispatched: true`. Проверяются все листья с превью на обоих образцах,
 /// с платформой и без неё; утверждение не зависит от исхода. Листья, чьё превью на образце
 /// доходит до плана, обязаны назвать признак прямо: `false`, а не молчание. Остальные
-/// могут ответить общей формой отказа без признака — так отвечает `publish`, которому
-/// образец не объявляет веб-сервер.
+/// могут ответить общей формой отказа без признака: отказ до диспетчеризации утверждения
+/// о запуске не несёт вовсе.
 #[test]
 fn no_preview_claims_that_an_executor_got_work() {
     for with_platform in [true, false] {
