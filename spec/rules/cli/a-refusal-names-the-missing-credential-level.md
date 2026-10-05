@@ -1,7 +1,7 @@
 ---
 id: INV.CLI.A-REFUSAL-NAMES-THE-MISSING-CREDENTIAL-LEVEL
 check: []
-gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/233
+gap: https://github.com/IngvarConsulting/v8-runner-rust/issues/212
 ---
 
 # Отказ называет недостающий уровень учётных данных

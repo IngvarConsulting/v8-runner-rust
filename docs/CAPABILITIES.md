@@ -796,5 +796,7 @@ v8-runner mcp serve http
 - `check` через `ibcmd`.
 - `make` через `ibcmd`.
 - `extensions` через `designer`.
-- Arbitrary path-based `convert source -> target` contract.
+- `convert` с пакетом: файл `.cf`/`.cfe` на входе, `--to package` и цепочка `ibcmd` → `ibcmd-rs` ([#236](https://github.com/IngvarConsulting/v8-runner-rust/issues/236)). Произвольные пути источника, кроме файла пакета, не принимаются.
+- `apply` отдельной командой и `push --no-apply` ([#210](https://github.com/IngvarConsulting/v8-runner-rust/issues/210)); `apply --sessions disable|force` ([#211](https://github.com/IngvarConsulting/v8-runner-rust/issues/211)).
+- Проверка версии формата файла версий до загрузки и восстановление одного файла версий без полной выгрузки ([#214](https://github.com/IngvarConsulting/v8-runner-rust/issues/214)).
 - Отдельная пользовательская настройка EDT `working-directory`.
