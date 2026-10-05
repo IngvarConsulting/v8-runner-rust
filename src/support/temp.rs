@@ -187,6 +187,14 @@ pub fn reserved_source_set_dir(work_path: &Path, source_set_name: &str) -> PathB
     work_path.join("designer").join(source_set_name)
 }
 
+/// Return the EDT export directory of a tool extension inside `work_path`.
+///
+/// It lives outside `work_path/designer`, where source sets are exported, so a source
+/// set may carry any name without sharing a directory with a tool extension.
+pub fn tool_extension_export_dir(work_path: &Path, extension_name: &str) -> PathBuf {
+    work_path.join("tool-extensions").join(extension_name)
+}
+
 /// Create a temporary text file for a partial load list inside `work_path/temp/partial-lists`.
 pub fn partial_list_file(work_path: &Path) -> std::io::Result<NamedTempFile> {
     tempfile::Builder::new()
