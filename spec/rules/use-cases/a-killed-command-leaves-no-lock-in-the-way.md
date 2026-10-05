@@ -4,6 +4,8 @@ check:
   - tests/cli_pull_memory.rs::a_pull_after_a_killed_pull_succeeds_and_removes_the_left_lock_files
   - src/support/fs.rs::files_left_by_a_killed_owner_do_not_block_and_are_removed
   - src/support/fs.rs::a_marked_record_of_a_stopped_owner_on_this_host_is_replaced
+  - src/support/fs.rs::dead_legacy_lock_metadata_is_fail_closed
+  - src/support/fs.rs::blocking_acquisition_fails_fast_for_legacy_owner_lock
 ---
 
 # Файлы замка убитой команды следующей не мешают

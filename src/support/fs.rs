@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::support::machine::{host_name, is_process_alive};
+use crate::support::machine::{host_name, is_process_running};
 use crate::support::path::{filesystem_object_identity, open_file_identity};
 
 pub const TOOL_NAME: &str = "v8-runner";
@@ -93,8 +93,9 @@ pub struct AdvisoryLockMetadata {
     /// writers that did not hold the system lock and stay fail-closed.
     #[serde(default)]
     pub system_lock: bool,
-    /// Machine the owner ran on: `pid` means something only there. A record without it
-    /// is taken as written on this machine.
+    /// Machine the owner ran on: `pid` means something only there. A marked record
+    /// without it is taken as written on this machine only when this machine has no
+    /// name either; otherwise it stays until removed by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
 }
@@ -438,12 +439,16 @@ fn refuse_unless_left_by_dead_owner(path: &Path) -> std::io::Result<()> {
     if !metadata.system_lock {
         return Err(legacy_lock_requires_offline_cleanup(path));
     }
-    if let Some(owner_host) = metadata.host.as_deref() {
-        if host_name().as_deref() != Some(owner_host) {
-            return Err(owner_on_another_host(path, metadata.pid, owner_host));
-        }
+    // A marked record without a host comes only from a writer that could not learn its
+    // own host name; it is taken as written here only by a reader in the same position.
+    if metadata.host != host_name() {
+        return Err(owner_on_another_host(
+            path,
+            metadata.pid,
+            metadata.host.as_deref(),
+        ));
     }
-    if is_process_alive(metadata.pid) {
+    if is_process_running(metadata.pid) {
         return Err(owner_process_still_running(path, metadata.pid));
     }
     Ok(())
@@ -466,11 +471,15 @@ fn owner_process_still_running(path: &Path, pid: u32) -> std::io::Error {
     )
 }
 
-fn owner_on_another_host(path: &Path, pid: u32, owner_host: &str) -> std::io::Error {
+fn owner_on_another_host(path: &Path, pid: u32, owner_host: Option<&str>) -> std::io::Error {
+    let host = owner_host.map_or_else(
+        || "an unrecorded host".to_owned(),
+        |host| format!("host '{host}'"),
+    );
     std::io::Error::new(
         ErrorKind::AlreadyExists,
         format!(
-            "lock at '{}' is owned by process {pid} on host '{owner_host}', which this machine cannot check; once that process has stopped, remove this file manually",
+            "lock at '{}' is owned by process {pid} on {host}, which this machine cannot check; once that process has stopped, remove this file manually",
             path.display()
         ),
     )
@@ -1134,7 +1143,7 @@ mod tests {
             owner_id: "killed-owner".to_owned(),
             created_at: chrono::Utc::now(),
             system_lock: true,
-            host: None,
+            host: host_name(),
         };
         fs::write(
             &lock_path,
@@ -1237,7 +1246,7 @@ mod tests {
     fn a_marked_record_of_a_running_owner_is_not_replaced() {
         let dir = tempdir().expect("tempdir");
         let lock_path = dir.path().join("running.lock");
-        write_owner_record(&lock_path, std::process::id(), None);
+        write_owner_record(&lock_path, std::process::id(), host_name());
 
         let error = try_acquire_advisory_lock(&lock_path).expect_err("the owner still runs");
 
@@ -1286,6 +1295,60 @@ mod tests {
         assert!(error.to_string().contains("remove this file manually"));
         assert_eq!(recorded_owner_id(&lock_path), "recorded-owner");
         assert_eq!(directory_entries(dir.path()), ["remote.lock"]);
+    }
+
+    /// Only a writer that could not learn its host name leaves a marked record without
+    /// one, so a reader that knows its own name cannot take the record as written here.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_marked_record_without_a_host_is_not_replaced() {
+        let dir = tempdir().expect("tempdir");
+        let lock_path = dir.path().join("hostless.lock");
+        write_owner_record(&lock_path, i32::MAX as u32, None);
+
+        let error =
+            try_acquire_advisory_lock(&lock_path).expect_err("the host of the owner is unknown");
+
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert!(error.to_string().contains("remove this file manually"));
+        assert_eq!(recorded_owner_id(&lock_path), "recorded-owner");
+        assert_eq!(directory_entries(dir.path()), ["hostless.lock"]);
+    }
+
+    /// A runner killed with `kill -9` stays a zombie until its parent waits for it, and
+    /// its record already counts as left by a stopped owner.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_marked_record_of_a_killed_unreaped_owner_is_replaced() {
+        let dir = tempdir().expect("tempdir");
+        let lock_path = dir.path().join("zombie.lock");
+        let mut owner = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn owner");
+        owner.kill().expect("kill owner");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while crate::support::machine::is_process_running(owner.id())
+            && std::time::Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            crate::support::machine::is_process_alive(owner.id()),
+            "the killed owner is not reaped yet"
+        );
+        write_owner_record(&lock_path, owner.id(), host_name());
+
+        let acquired = try_acquire_advisory_lock(&lock_path);
+        owner.wait().expect("reap owner");
+
+        let guard = acquired.expect("a killed owner waiting to be reaped has stopped");
+        assert_eq!(
+            recorded_owner_id(&lock_path),
+            advisory_lock_owner_id(&guard)
+        );
+        drop(guard);
+        assert!(directory_entries(dir.path()).is_empty());
     }
 
     #[test]
