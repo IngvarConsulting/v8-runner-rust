@@ -160,7 +160,7 @@ pub struct ToolsArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum ToolsCommand {
-    /// Download a supported test or MCP helper tool from its latest GitHub release
+    /// Download a supported test or MCP helper tool from its GitHub release (latest by default)
     Download(ToolsDownloadArgs),
 }
 
@@ -201,6 +201,10 @@ pub struct ToolsDownloadToolArgs {
     /// Re-download managed targets created by tools download
     #[arg(long)]
     pub force: bool,
+
+    /// Take the newest release including pre-releases instead of the GitHub latest release
+    #[arg(long)]
+    pub prerelease: bool,
 }
 
 #[derive(Args, Debug)]
