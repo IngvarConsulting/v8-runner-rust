@@ -5,6 +5,7 @@ check:
   - src/config/validate.rs::provider_overrides_are_checked_against_the_matrix
   - tests/contract_receipt.rs::an_override_names_its_file_and_never_falls_back
   - tests/cli_infobase.rs::an_override_does_not_fall_back_when_its_provider_is_missing
+  - tests/provider_matrix.rs::a_foreign_download_provider_is_refused_like_push_before_the_platform_starts
 ---
 
 # Переопределение провайдера — скаляр и только для операции с развилкой

@@ -471,6 +471,7 @@ pub fn validate_infobase_export(config: &AppConfig) -> Result<(), ConfigValidati
     validate_base_path(&config.base_path)?;
     // Export provider selection is intentionally side-effect free. workPath is
     // created only when the selected command acquires its workspace lock.
+    validate_providers(config)?;
     validate_connection_contract(config)?;
     validate_platform_version(config)?;
     validate_mcp_admission_timeout(config)?;

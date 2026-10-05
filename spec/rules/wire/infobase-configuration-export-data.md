@@ -1,6 +1,6 @@
 ---
 id: CTR.WIRE.INFOBASE-CONFIGURATION-EXPORT-DATA
-version: 5
+version: 6
 artifact: docs/schemas/command-data/download.schema.json
 check:
   - src/command_data.rs::generated_command_data_schemas_are_current
@@ -24,6 +24,13 @@ check:
 отмена не дала запуститься, тоже называется `command_boundary`, а не `provider_command`:
 работы он не получил. Имена шагов в `steps[]` прежние.
 
+**Что изменила версия 6.** Причина пропуска исполнителя одна — почему он не взят:
+приставка о реализованности адаптера (`Designer CF/CFE adapter is implemented …; `) ушла из
+`provider.skipped[].reason`, а с ней из `execution.errors[].message`, `steps[].message` и
+`error.message`. Исполнитель вне матрицы, названный ключом `providers.*`, до выбора не
+доходит: команда отказывает при загрузке настроек родом `invalid_argument`, как `push`, и
+квитанции в ответе нет. Путь в причине — канонизованный абсолютный.
+
 ## Пример
 
 ```json
@@ -38,12 +45,12 @@ check:
     "selected": null,
     "origin": {"kind": "default"},
     "skipped": [
-      {"provider": "designer", "reason": "file infobase is not ready: 'build/ib/1Cv8.1CD' is missing or is not a file"},
-      {"provider": "ibcmd", "reason": "file infobase is not ready: 'build/ib/1Cv8.1CD' is missing or is not a file"}
+      {"provider": "designer", "reason": "file infobase is not ready: '/home/dev/project/build/ib/1Cv8.1CD' is missing or is not a file"},
+      {"provider": "ibcmd", "reason": "file infobase is not ready: '/home/dev/project/build/ib/1Cv8.1CD' is missing or is not a file"}
     ]
   },
   "artifact_kind": "cf",
-  "output": "build/main.cf",
+  "output": "/home/dev/project/build/main.cf",
   "published": false,
   "target_state": "unchanged",
   "execution": {
@@ -51,7 +58,7 @@ check:
     "errors": [
       {
         "code": "environment_unavailable",
-        "message": "environment unavailable: file infobase is not ready"
+        "message": "environment unavailable: designer: file infobase is not ready: '/home/dev/project/build/ib/1Cv8.1CD' is missing or is not a file; ibcmd: file infobase is not ready: '/home/dev/project/build/ib/1Cv8.1CD' is missing or is not a file"
       }
     ]
   }

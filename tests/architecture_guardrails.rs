@@ -1615,6 +1615,62 @@ fn the_loopback_question_is_answered_in_one_place() {
     );
 }
 
+/// Значение реализованности или улики, названное в токенах кода: так выглядит строка
+/// матрицы, записанная мимо её владельца.
+const CAPABILITY_ROW_MARKERS: &[&str] = &[
+    "Implementation::Implemented",
+    "Implementation::Experimental",
+    "Implementation::{",
+    "Evidence::Documented",
+    "Evidence::ArgvTested",
+    "Evidence::LiveVerified",
+    "Evidence::{",
+];
+
+fn names_a_capability_row(production: &str) -> bool {
+    CAPABILITY_ROW_MARKERS
+        .iter()
+        .any(|marker| production.contains(marker))
+}
+
+#[test]
+fn capability_rows_are_written_in_one_place() {
+    // Корень проблемы: экспортное семейство выросло мимо общей проверки настроек и
+    // завело свою таблицу `match (намерение, исполнитель)`, отдававшую реализованность
+    // и улику, — вторую матрицу, расходившуюся с доменом. Владелец строк один —
+    // `domain::capability`; остальные читают его ответ (`capabilities`, `default_chain`,
+    // `capability_of`) и значений реализованности или улики сами не называют.
+    let owner = repo_path("src/domain/capability.rs");
+    let mut offenders = Vec::new();
+    for file in collect_rust_files(&repo_path("src")) {
+        if file == owner {
+            continue;
+        }
+        if names_a_capability_row(&production_tokens(&file)) {
+            offenders.push(file.display().to_string());
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these modules write capability rows on their own instead of reading \
+         domain::capability, which is the single owner of the matrix:\n{}",
+        offenders.join("\n")
+    );
+
+    // Страж проверяет себя на той форме, которой дефект и был написан.
+    let second_matrix = production_tokens_of(
+        r#"
+        fn capability(intent: Intent, provider: Provider) -> (Implementation, &'static str) {
+            match (intent, provider) {
+                (Intent::Snapshot, Provider::Ibcmd) => (Implementation::Experimental, "why"),
+                (_, _) => (Implementation::Experimental, "no adapter"),
+            }
+        }
+        "#,
+    );
+    assert!(names_a_capability_row(&second_matrix));
+}
+
 #[test]
 fn a_host_port_record_is_read_in_one_place() {
     // Корень проблемы: запись `host:port` резали по последнему двоеточию в двух местах —

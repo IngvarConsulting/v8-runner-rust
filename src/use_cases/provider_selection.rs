@@ -6,7 +6,8 @@
 //! не готов никто, квитанция называет всех пропущенных, а отказ типизирован.
 //!
 //! Экспортное семейство пробует готовность глубже (строка соединения, файл базы) и
-//! держит свой перебор, но квитанцию отдаёт ту же.
+//! держит свой перебор, но утилиты исполнителя, причины пропуска и отказ берёт отсюда —
+//! квитанцию и род отказа отдаёт те же.
 
 use crate::config::model::{AppConfig, DesignerAgentMode};
 use crate::domain::capability::{Operation, Provider, ProviderReceipt, SkippedProvider};
@@ -28,7 +29,7 @@ pub struct SelectedProvider {
 /// Утилиты, которыми исполнитель делает работу: `None` — адаптера в этой сборке
 /// нет, пустой список — исполнитель готов без утилит. Первая в списке становится
 /// `location` выбранного исполнителя.
-fn utilities_of(provider: Provider, config: &AppConfig) -> Option<Vec<UtilityType>> {
+pub(crate) fn utilities_of(provider: Provider, config: &AppConfig) -> Option<Vec<UtilityType>> {
     match provider {
         Provider::Designer => Some(vec![UtilityType::V8]),
         Provider::Ibcmd => Some(vec![UtilityType::Ibcmd]),
@@ -54,12 +55,8 @@ pub fn select(
 ) -> Result<SelectedProvider, (AppError, ProviderReceipt)> {
     let plan = config.provider_plan(operation);
     if plan.candidates().is_empty() {
-        let target = config.target_kind();
         return Err((
-            AppError::capability(format!(
-                "no executor implements {operation} on a {} target",
-                target.as_str()
-            )),
+            no_executor(config, operation),
             plan.receipt_for_nobody(Vec::new()),
         ));
     }
@@ -68,12 +65,7 @@ pub fn select(
 
     for provider in plan.candidates() {
         let Some(needed) = utilities_of(provider, config) else {
-            skipped.push(SkippedProvider {
-                provider,
-                reason: format!(
-                    "no adapter for {provider} is implemented for {operation} in this build of the runner"
-                ),
-            });
+            skipped.push(no_adapter(provider, operation));
             continue;
         };
         had_an_adapter = true;
@@ -101,18 +93,41 @@ pub fn select(
         }
     }
 
+    let error = nobody_ready(&skipped, had_an_adapter);
+    Err((error, plan.receipt_for_nobody(skipped)))
+}
+
+/// Отказ, когда у операции на цели этого вида нет ни одного исполнителя.
+pub(crate) fn no_executor(config: &AppConfig, operation: Operation) -> AppError {
+    AppError::capability(format!(
+        "no executor implements {operation} on a {} target",
+        config.target_kind().as_str()
+    ))
+}
+
+/// Пропуск исполнителя, у которого в этой сборке нет адаптера для операции.
+pub(crate) fn no_adapter(provider: Provider, operation: Operation) -> SkippedProvider {
+    SkippedProvider {
+        provider,
+        reason: format!(
+            "no adapter for {provider} is implemented for {operation} in this build of the runner"
+        ),
+    }
+}
+
+/// Отказ, когда не готов никто: перечень пропущенных с причинами. Род — среда, если хоть
+/// у кого-то адаптер был, иначе — возможность.
+pub(crate) fn nobody_ready(skipped: &[SkippedProvider], had_an_adapter: bool) -> AppError {
     let reason = skipped
         .iter()
         .map(|entry| format!("{}: {}", entry.provider.as_str(), entry.reason))
         .collect::<Vec<_>>()
         .join("; ");
-    let receipt = plan.receipt_for_nobody(skipped);
-    let error = if had_an_adapter {
+    if had_an_adapter {
         AppError::EnvironmentUnavailable(reason)
     } else {
         AppError::capability(reason)
-    };
-    Err((error, receipt))
+    }
 }
 
 /// Форма ответа, которая несёт квитанцию о выборе исполнителя.

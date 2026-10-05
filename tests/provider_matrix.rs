@@ -174,6 +174,75 @@ fn a_provider_override_is_a_scalar_for_an_operation_with_a_choice() {
     assert_eq!(code, 0, "a valid override is accepted: {payload}");
 }
 
+/// Исполнитель вне матрицы у `download` отвергается той же проверкой настроек, что у
+/// `push`: один владелец матрицы, один род отказа, до запуска платформы. Прежде экспорт
+/// пропускал ключ мимо проверки и отвечал `environment_unavailable` из своей таблицы.
+#[test]
+fn a_foreign_download_provider_is_refused_like_push_before_the_platform_starts() {
+    let dir = temp_workspace();
+    let config_path = write_project(dir.path(), "providers:\n  download: webinst\n");
+    // База готова, утилиты на месте и отмечают запуск: отказ обязан прийти от проверки
+    // настроек, а не от неготовой среды.
+    fs::create_dir_all(dir.path().join("ib")).expect("infobase dir");
+    fs::write(dir.path().join("ib").join("1Cv8.1CD"), "").expect("infobase file");
+    let started = dir.path().join("platform-started");
+    for utility in ["1cv8", "ibcmd", "webinst"] {
+        write_shell_script(
+            &dir.path().join("platform").join("bin").join(utility),
+            &format!("touch '{}'\nexit 0", started.display()),
+        );
+    }
+    let output = dir.path().join("out").join("main.cf");
+    let output = output.display().to_string();
+    let commands: [&[&str]; 3] = [
+        &["push", "--dry-run"],
+        &["download", "--state", "working", "--output", &output],
+        &[
+            "infobase",
+            "configuration",
+            "export",
+            "--state",
+            "working",
+            "--output",
+            &output,
+        ],
+    ];
+
+    let mut messages = Vec::new();
+    for arguments in commands {
+        let (code, payload) = run(&config_path, arguments);
+        let shown = arguments.join(" ");
+        assert_eq!(code, 2, "`{shown}` refuses as invalid input: {payload}");
+        assert_eq!(
+            payload["error"]["code"], "invalid_argument",
+            "`{shown}`: {payload}"
+        );
+        assert_eq!(
+            payload["error"]["kind"], "validation",
+            "`{shown}`: {payload}"
+        );
+        let message = payload["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .to_owned();
+        assert!(
+            message.contains("providers.download: 'webinst' does not implement")
+                && message.contains("implemented: designer, ibcmd, agent"),
+            "`{shown}` names the key and the executors that implement it: {message}"
+        );
+        assert!(
+            payload["data"]["provider"].is_null(),
+            "`{shown}`: selection must not begin: {payload}"
+        );
+        messages.push(message);
+    }
+    assert!(
+        messages.windows(2).all(|pair| pair[0] == pair[1]),
+        "every command answers one wrong key with one refusal: {messages:#?}"
+    );
+    assert!(!started.exists(), "no platform utility may start");
+}
+
 /// Публикация не входит ни в одну цепочку умолчаний: она меняет веб-сервер вне
 /// рабочего каталога и делается только отдельной командой.
 #[test]

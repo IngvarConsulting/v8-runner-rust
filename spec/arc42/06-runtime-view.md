@@ -58,11 +58,13 @@ MCP — [`mcp/server.rs`](../../src/mcp/server.rs):
    отказ после выбора, если отказ несёт данные.
 4. `push` на неудачный выбор не обрывается: неизменённым наборам платформа не нужна.
 5. `download`, `infobase dump` и `restore` берут план той же матрицы, но перебирают сами:
-   своя таблица адаптеров и более глубокая проверка готовности.
+   готовность у них глубже — строка соединения и файл базы. Утилиты исполнителя, причину
+   пропуска и отказ они берут из `provider_selection.rs`, своей таблицы адаптеров нет.
 6. Превью `--dry-run` не берёт замка, не создаёт `workPath`, не пишет журнала; находит
    утилиты, выбирает исполнителя и возвращает план с `provider_dispatched: false`.
 
 Правила: [умолчания живут в коде](../rules/use-cases/provider-defaults-live-in-code.md),
+[строки матрицы пишутся в домене](../rules/use-cases/capability-rows-are-written-in-the-domain.md),
 [исполнителя не выбирают флагом](../rules/cli/provider-is-not-a-flag.md),
 [превью не запускает исполнителя](../rules/cli/preview-dispatches-nothing.md),
 [превью не оставляет следов](../rules/cli/preview-leaves-no-trace.md).
