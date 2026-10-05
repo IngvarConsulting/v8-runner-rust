@@ -721,7 +721,19 @@ pub(crate) fn validate_configuration_output(
     validate_output_suffix(output, subject.artifact_kind().file_extension())
 }
 
+/// Снимок базы пишется только в `.dt`. Пакет конфигурации — работа соседней команды, и
+/// отказ называет её, а не одно лишь ожидаемое расширение.
 pub(crate) fn validate_snapshot_output(output: &Path) -> Result<(), AppError> {
+    let package = output
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| value.eq_ignore_ascii_case("cf") || value.eq_ignore_ascii_case("cfe"));
+    if let Some(suffix) = package {
+        return Err(AppError::Validation(format!(
+            "output '{}' must have .dt suffix: infobase dump writes a transfer file of the whole infobase, a .{suffix} configuration package is taken by `download`",
+            output.display()
+        )));
+    }
     validate_output_suffix(output, "dt")
 }
 

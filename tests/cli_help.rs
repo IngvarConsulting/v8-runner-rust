@@ -66,7 +66,12 @@ fn push_help_exposes_source_set_selector() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Command options:"));
-    assert!(stdout.contains("--source-set <SOURCE_SET>"));
+    // Набор называет позиционный аргумент; прежний ключ принимается, но в справке его нет.
+    assert!(
+        stdout.contains("Usage: v8-runner push [OPTIONS] [SET]"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("--source-set"), "{stdout}");
     assert!(stdout.contains("--full"));
     assert!(stdout.contains("--json-message"));
     // Прежнее имя ключа принимается, но в справке его нет.
@@ -193,7 +198,11 @@ fn convert_help_uses_output_target_root_name() {
     assert!(stdout.contains("Command options:"));
     assert!(stdout.contains("Global options:"));
     assert!(stdout.contains("--output <OUTPUT>"));
-    assert!(stdout.contains("--source-set <SOURCE_SET>"));
+    assert!(
+        stdout.contains("Usage: v8-runner convert [OPTIONS] [SET]"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("--source-set"), "{stdout}");
     assert!(stdout.contains("--json-message"));
 }
 
@@ -206,8 +215,10 @@ fn infobase_configuration_export_help_fixes_the_exact_grammar() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[SET]"), "{stdout}");
     assert!(stdout.contains("--state <STATE>"));
-    assert!(stdout.contains("[possible values: working, database]"));
+    // Словарь называет состояние базы данных `db`; прежние значения в справке не печатаются.
+    assert!(stdout.contains("[possible values: db]"), "{stdout}");
     assert!(stdout.contains("--extension <EXTENSION>"));
     assert!(stdout.contains("--output <OUTPUT>"));
     assert!(stdout.contains("--dry-run"));
@@ -227,4 +238,43 @@ fn infobase_dump_help_calls_dt_a_transfer_file_not_a_backup() {
     assert!(stdout.contains("--dry-run"));
     assert!(stdout.contains("--output <OUTPUT>"));
     assert!(stdout.contains("not a backup"));
+}
+
+/// Файл пакета у `upload` обязателен и назван позиционно: прежний ключ `--path`
+/// принимается, но ни в строке вызова, ни в списке ключей его нет.
+#[test]
+fn upload_help_shows_the_package_file_as_required_positional() {
+    let output = v8_runner_command()
+        .args(["upload", "--help"])
+        .output()
+        .expect("run command");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Usage: v8-runner upload [OPTIONS] <FILE>"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("--path"), "{stdout}");
+}
+
+/// Набор у `pull` и `make` называет позиционный аргумент: прежний ключ `--source-set`
+/// в справке не печатается.
+#[test]
+fn pull_and_make_help_name_the_source_set_positionally() {
+    for command in ["pull", "make"] {
+        let output = v8_runner_command()
+            .args([command, "--help"])
+            .output()
+            .expect("run command");
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(&format!("Usage: v8-runner {command} [OPTIONS]")),
+            "{stdout}"
+        );
+        assert!(stdout.contains("[SET]"), "{stdout}");
+        assert!(!stdout.contains("--source-set"), "{stdout}");
+    }
 }

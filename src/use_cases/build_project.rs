@@ -276,12 +276,7 @@ fn selected_ordered_source_sets<'a>(
         .map(str::trim)
         .filter(|name| !name.is_empty())
     {
-        Some(name) => inventory
-            .ordered_source_sets()
-            .into_iter()
-            .find(|source_set| source_set.name == name)
-            .map(|source_set| vec![source_set])
-            .ok_or_else(|| AppError::Validation(format!("unknown source-set '{name}'"))),
+        Some(name) => inventory.named(name).map(|source_set| vec![source_set]),
         None => {
             if source_set_name.is_some() {
                 return Err(AppError::Validation(
