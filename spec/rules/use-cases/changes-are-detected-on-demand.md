@@ -8,6 +8,8 @@ check:
   - src/change_detection/analyzer.rs::a_file_rewritten_with_the_same_content_is_not_a_change
   - src/change_detection/source_sets.rs::ad_hoc_analysis_never_reads_or_writes_memory_and_empty_sources_skip
   - src/change_detection/scanner.rs::service_and_generated_paths_are_never_scanned
+  - src/change_detection/source_sets.rs::a_source_set_rooted_at_a_service_named_directory_is_analyzed
+  - src/change_detection/source_sets.rs::a_generated_designer_copy_named_build_is_analyzed
   - tests/architecture_guardrails.rs::change_detection_has_no_background_watcher
   - tests/architecture_guardrails.rs::change_detection_never_reads_the_executor_choice
 ---
@@ -21,6 +23,8 @@ check:
 Отсутствующий снимок не объявляется ошибкой хранилища: первая сборка видит существующие
 файлы как добавленные, пустой набор пропускается.
 
-Кандидаты отбираются по времени изменения с запасом и подтверждаются хешем; служебные и
-порождённые дочерние каталоги в обход не входят. Анализ отвечает только на вопрос, что
-делать, — выбора исполнителя он не касается.
+Кандидаты отбираются по времени изменения с запасом и подтверждаются хешем. Служебные и
+порождённые каталоги пропускаются только внутри набора: корень набора, в том числе
+порождённая копия набора EDT в `workPath/designer`, сканируется всегда, даже если назван
+как служебный каталог. Анализ отвечает только на вопрос, что делать, — выбора исполнителя
+он не касается.
