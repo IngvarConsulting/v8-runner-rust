@@ -4543,3 +4543,35 @@ fn the_config_path_guard_sees_every_hand_resolution() {
         .collect::<Vec<_>>();
     assert_eq!(found, ["by_absolute", "by_relative", "by_method"]);
 }
+
+/// Раскладка выгрузки платформе не называется: она одна, и это платформенное умолчание.
+///
+/// `INV.PLATFORM.THE-RUNNER-NEVER-NAMES-A-DUMP-FORMAT`. Появившийся аргумент раскладки
+/// означает либо вторую поддержанную раскладку, либо зависимость от того, что умолчание не
+/// изменится, — оба случая решает владелец, а не правка аргументов.
+#[test]
+fn the_runner_never_names_a_dump_format() {
+    // Ищется сам ключ, где бы он ни стоял: отдельным аргументом, через `=` или внутри
+    // строки команды агента. `--output-format` агентской сессии — про форму ответа, а не
+    // про раскладку выгрузки, и под запрет не попадает.
+    const FORBIDDEN: &[&str] = &["-Format", "--format"];
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let named: Vec<String> = collect_rust_files(&root)
+        .into_iter()
+        .flat_map(|file| {
+            // Тесты не в счёт: они вправе проверять, что ключа нет.
+            let source = production_source(&file).replace("--output-format=", "");
+            FORBIDDEN
+                .iter()
+                .filter(|argument| source.contains(*argument))
+                .map(|argument| format!("{}: {argument}", file.display()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    assert!(
+        named.is_empty(),
+        "the dump layout is not named to the platform; one layout is supported and it is the platform default:\n{}",
+        named.join("\n")
+    );
+}
