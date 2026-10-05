@@ -732,9 +732,7 @@ fn resolve_target(
         ArtifactsModeRequest::ConfigurationCf => {
             let source_set = match args.source_set.as_deref() {
                 Some(name) => {
-                    let source_set = inventory.source_set(name).ok_or_else(|| {
-                        AppError::Validation(format!("unknown source-set '{name}'"))
-                    })?;
+                    let source_set = inventory.named(name)?;
                     if source_set.purpose != SourceSetPurpose::Configuration {
                         return Err(AppError::Validation(format!(
                             "source-set '{name}' is not a configuration source-set"
@@ -748,9 +746,7 @@ fn resolve_target(
         }
         ArtifactsModeRequest::ExtensionCfe => {
             if let Some(source_set_name) = args.source_set.as_deref() {
-                let source_set = inventory.source_set(source_set_name).ok_or_else(|| {
-                    AppError::Validation(format!("unknown source-set '{source_set_name}'"))
-                })?;
+                let source_set = inventory.named(source_set_name)?;
                 if source_set.purpose != SourceSetPurpose::Extension {
                     return Err(AppError::Validation(format!(
                         "source-set '{source_set_name}' is not an extension source-set"
@@ -816,9 +812,7 @@ fn resolve_target(
             let source_set_name = args.source_set.as_deref().ok_or_else(|| {
                 AppError::Validation("external artifacts export requires --source-set".to_owned())
             })?;
-            let source_set = inventory.source_set(source_set_name).ok_or_else(|| {
-                AppError::Validation(format!("unknown source-set '{source_set_name}'"))
-            })?;
+            let source_set = inventory.named(source_set_name)?;
             let expected_purpose = match args.mode {
                 ArtifactsModeRequest::ExternalDataProcessorEpf => {
                     SourceSetPurpose::ExternalDataProcessors

@@ -239,3 +239,42 @@ fn infobase_dump_help_calls_dt_a_transfer_file_not_a_backup() {
     assert!(stdout.contains("--output <OUTPUT>"));
     assert!(stdout.contains("not a backup"));
 }
+
+/// Файл пакета у `upload` обязателен и назван позиционно: прежний ключ `--path`
+/// принимается, но ни в строке вызова, ни в списке ключей его нет.
+#[test]
+fn upload_help_shows_the_package_file_as_required_positional() {
+    let output = v8_runner_command()
+        .args(["upload", "--help"])
+        .output()
+        .expect("run command");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Usage: v8-runner upload [OPTIONS] <FILE>"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("--path"), "{stdout}");
+}
+
+/// Набор у `pull` и `make` называет позиционный аргумент: прежний ключ `--source-set`
+/// в справке не печатается.
+#[test]
+fn pull_and_make_help_name_the_source_set_positionally() {
+    for command in ["pull", "make"] {
+        let output = v8_runner_command()
+            .args([command, "--help"])
+            .output()
+            .expect("run command");
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(&format!("Usage: v8-runner {command} [OPTIONS]")),
+            "{stdout}"
+        );
+        assert!(stdout.contains("[SET]"), "{stdout}");
+        assert!(!stdout.contains("--source-set"), "{stdout}");
+    }
+}

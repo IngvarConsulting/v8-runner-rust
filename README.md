@@ -166,8 +166,8 @@ v8-runner infobase dump --output dist/base.dt --dry-run
 
 Позиционный аргумент `push`, `pull`, `make`, `download` и `convert` — набор исходников
 (`v8-runner push my-ext`), никогда не база: базу называет `--infobase`. Пакет `.cf`/`.cfe`
-забирает `download`, образ `.dt` — `infobase dump`; перепутанное расширение команда отвергает
-до запуска платформы и называет соседнюю.
+забирает `download`, образ `.dt` — `infobase dump`. `infobase dump --output *.cf|*.cfe`
+отказывает до запуска платформы и называет `download`, `upload *.dt` — `infobase restore`.
 
 `--dry-run` валидирует окружение и показывает выбранный provider без запуска платформы и без
 создания файлов. Уберите флаг, чтобы атомарно опубликовать CF/CFE или переносимый DT-файл.

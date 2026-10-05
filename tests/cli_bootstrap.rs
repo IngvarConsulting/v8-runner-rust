@@ -324,7 +324,9 @@ fn bootstrap_does_not_write_local_overlay_when_gitignore_update_fails() {
     write_designer_dump_script(&platform_path, &calls_log, 0);
     fs::create_dir_all(project_dir.join(".gitignore")).expect("gitignore dir");
     let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+    // Каталог с `.gitignore` не пуст: `--force` снимает этот отказ, чтобы дойти до записи.
     args.extend([
+        "--force".to_owned(),
         "--user".to_owned(),
         "Admin".to_owned(),
         "--password".to_owned(),
@@ -1289,4 +1291,121 @@ fn clone_takes_its_source_from_the_from_key() {
     let help = String::from_utf8_lossy(&help.stdout);
     assert!(help.contains("--from <CONNECTION>"), "{help}");
     assert!(!help.contains("--connection"), "{help}");
+}
+
+/// Запускает `clone` в формате конверта и разбирает его ответ.
+fn run_clone_json(args: Vec<String>) -> (Option<i32>, Value) {
+    let mut args = args;
+    args.insert(0, "--json-message".to_owned());
+    let output = v8_runner_command()
+        .args(&args)
+        .output()
+        .expect("run command");
+    let payload = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "one json document ({error}):\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    (output.status.code(), payload)
+}
+
+/// `clone` пишет проект только в пустой каталог. Непустой — отказ `invalid_argument` до
+/// записи: ни проекта, ни `.gitignore`, ни каталога исходников, платформа не запускалась.
+/// Превью отказывает так же. Занятый замок отвечает раньше: сначала `workspace_busy`.
+#[test]
+fn clone_refuses_a_non_empty_directory_before_writing_anything() {
+    let dir = temp_workspace();
+    let project_dir = dir.path().join("project");
+    let platform_path = dir.path().join("1cv8");
+    let calls_log = dir.path().join("calls.log");
+    write_designer_dump_script(&platform_path, &calls_log, 0);
+    fs::create_dir_all(&project_dir).expect("project dir");
+    fs::write(project_dir.join("notes.txt"), "user file").expect("user file");
+
+    for preview in [false, true] {
+        let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+        if preview {
+            args.insert(0, "--dry-run".to_owned());
+        }
+        let (code, payload) = run_clone_json(args);
+
+        assert_eq!(code, Some(2), "preview {preview}: {payload}");
+        assert_eq!(payload["command"], "clone");
+        assert_eq!(payload["error"]["code"], "invalid_argument", "{payload}");
+        assert_eq!(payload["error"]["kind"], "validation", "{payload}");
+        let message = payload["error"]["message"].as_str().expect("message");
+        assert!(message.contains("clone target is not empty"), "{message}");
+        assert!(message.contains("notes.txt"), "{message}");
+        assert!(message.contains("--force"), "{message}");
+    }
+
+    assert!(!project_dir.join("v8project.yaml").exists());
+    assert!(!project_dir.join("v8project.local.yaml").exists());
+    assert!(!project_dir.join(".gitignore").exists());
+    assert!(!project_dir.join("src").exists());
+    assert!(!calls_log.exists(), "the platform must not be started");
+    assert_eq!(
+        fs::read_to_string(project_dir.join("notes.txt")).expect("user file"),
+        "user file"
+    );
+
+    hold_workspace_lock(&project_dir.join("build"));
+    let (code, payload) = run_clone_json(bootstrap_args(
+        &project_dir,
+        &platform_path,
+        "File=/tmp/source-ib",
+    ));
+    assert_eq!(code, Some(3), "{payload}");
+    assert_eq!(payload["error"]["code"], "workspace_busy", "{payload}");
+}
+
+/// Каталог, где нет ничего, кроме `.git`, пуст: `clone` в свежий репозиторий проходит.
+#[test]
+fn clone_into_a_directory_holding_only_git_writes_the_project() {
+    let dir = temp_workspace();
+    let project_dir = dir.path().join("project");
+    let platform_path = dir.path().join("1cv8");
+    let calls_log = dir.path().join("calls.log");
+    write_designer_dump_script(&platform_path, &calls_log, 0);
+    fs::create_dir_all(project_dir.join(".git")).expect("git dir");
+    fs::write(project_dir.join(".git/HEAD"), "ref: refs/heads/master\n").expect("head");
+
+    let (code, payload) = run_clone_json(bootstrap_args(
+        &project_dir,
+        &platform_path,
+        "File=/tmp/source-ib",
+    ));
+
+    assert_eq!(code, Some(0), "{payload}");
+    assert_eq!(payload["data"]["dumped"], true, "{payload}");
+    assert!(project_dir.join("v8project.yaml").exists());
+    assert!(project_dir
+        .join("src/configuration/Configuration.xml")
+        .exists());
+}
+
+/// `--force` снимает отказ по непустому каталогу: чужой файл остаётся, проект пишется.
+#[test]
+fn clone_force_writes_the_project_into_a_non_empty_directory() {
+    let dir = temp_workspace();
+    let project_dir = dir.path().join("project");
+    let platform_path = dir.path().join("1cv8");
+    let calls_log = dir.path().join("calls.log");
+    write_designer_dump_script(&platform_path, &calls_log, 0);
+    fs::create_dir_all(&project_dir).expect("project dir");
+    fs::write(project_dir.join("notes.txt"), "user file").expect("user file");
+    let mut args = bootstrap_args(&project_dir, &platform_path, "File=/tmp/source-ib");
+    args.push("--force".to_owned());
+
+    let (code, payload) = run_clone_json(args);
+
+    assert_eq!(code, Some(0), "{payload}");
+    assert_eq!(payload["data"]["dumped"], true, "{payload}");
+    assert!(project_dir.join("v8project.yaml").exists());
+    assert_eq!(
+        fs::read_to_string(project_dir.join("notes.txt")).expect("user file"),
+        "user file"
+    );
 }

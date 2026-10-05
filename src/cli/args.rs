@@ -286,15 +286,22 @@ pub struct BuildArgs {
     pub source_set: SourceSetArg,
 }
 
+/// Файл пакета обязателен: позиционно или прежним ключом `--path`, но не обоими сразу.
+/// Строка вызова в справке написана рукой: выведенная clap печатала бы скрытый `--path`.
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Command options")]
+#[group(skip)]
+#[command(
+    group(clap::ArgGroup::new("package").args(["file", "path"]).required(true)),
+    override_usage = "v8-runner upload [OPTIONS] <FILE>"
+)]
 pub struct LoadArgs {
     /// Built package to upload (.cf/.cfe); a .dt transfer file is `infobase restore`
-    #[arg(value_name = "FILE", required_unless_present = "path")]
+    #[arg(value_name = "FILE")]
     pub file: Option<String>,
 
     /// Previous spelling of the positional package file; hidden from help
-    #[arg(long, value_name = "FILE", hide = true, conflicts_with = "file")]
+    #[arg(long, value_name = "FILE", hide = true)]
     pub path: Option<String>,
 
     /// Upload mode
@@ -325,12 +332,10 @@ pub struct LoadArgs {
 }
 
 impl LoadArgs {
-    /// Файл пакета: позиционный или названный прежним ключом `--path`.
-    pub fn artifact_path(&self) -> &str {
-        self.file
-            .as_deref()
-            .or(self.path.as_deref())
-            .expect("clap requires the package file or --path")
+    /// Файл пакета: позиционный или названный прежним ключом `--path`. Разбор clap без
+    /// одного из них не проходит; `None` бывает только у аргументов, собранных в коде.
+    pub fn artifact_path(&self) -> Option<&str> {
+        self.file.as_deref().or(self.path.as_deref())
     }
 }
 
@@ -1054,7 +1059,7 @@ mod tests {
                     ..
                 },
             ) => {
-                assert_eq!(args.artifact_path(), "dist/main.cf");
+                assert_eq!(args.artifact_path(), Some("dist/main.cf"));
                 assert_eq!(mode, "load");
                 assert!(settings.is_none());
                 assert!(extension.is_none());
@@ -1089,7 +1094,7 @@ mod tests {
                     ..
                 },
             ) => {
-                assert_eq!(args.artifact_path(), "dist/ext.cfe");
+                assert_eq!(args.artifact_path(), Some("dist/ext.cfe"));
                 assert_eq!(mode, "merge");
                 assert_eq!(settings.as_deref(), Some("merge.xml"));
                 assert_eq!(extension.as_deref(), Some("SalesAddon"));

@@ -54,6 +54,8 @@ Useful global flags:
    `source-set: []`, plus a sibling `v8project.local.yaml` with `infobases.origin.connection`; do not bootstrap project sources that the user did not request.
 4. If it is missing and the current source of truth is an existing infobase that must become
    project sources, run `v8-runner clone --from <CONNECTION> --platform-version <VERSION>`.
+   It writes only into an empty directory (nothing but `.git`); a non-empty one is refused with
+   exit code 2 before anything is written, unless `--force`.
    Add `--dry-run` first: it names the four paths it would write and the dump utility it found,
    and creates nothing — not even the project directory.
 5. Inspect generated `v8project.yaml` and keep machine-local overrides in generated `v8project.local.yaml`.
@@ -95,7 +97,7 @@ v8-runner infobase create
 
 - Source files changed and infobase may be stale: run `v8-runner push`.
 - Only one source-set changed: name it positionally (`push <SET>`, `pull <SET>`, `make <SET>`, `download <SET>`, `convert <SET>`) instead of rebuilding or materializing everything. A positional value is always a source set, never a base: name the base with `--infobase`.
-- Package vs whole base: `.cf`/`.cfe` is `download`/`upload <FILE>`, `.dt` is `infobase dump`/`infobase restore`; a wrong suffix is refused before the platform starts and the refusal names the right command. `download --state db` takes the database configuration.
+- Package vs whole base: `.cf`/`.cfe` is `download`/`upload <FILE>`, `.dt` is `infobase dump`/`infobase restore`; `infobase dump --output *.cf|*.cfe` is refused before the platform starts and names `download`; `upload *.dt` names `infobase restore`. `download --state db` takes the database configuration.
 - After successful full `pull` in `DESIGNER` format, the next unchanged `push` skips loading for the same named base/source set. If the response says sources were published without updating hash memory, repeat full `pull`; do not repair a failed pull by pushing old sources.
 - Hash memory is separate per named base; ad hoc connection strings do not reuse it. Foreign memory is named in the refusal: full `pull` if the base is right, `push --full` if the sources are right. Memory from older runner versions is not migrated: first `pull --mode full` before an ordinary `push`, or the push loads the whole tree.
 - Full `pull` refuses a target containing `workPath`, including symlink aliases. EDT export cache stays shared; per-base agent generation/version-file memory remains pending in #214.

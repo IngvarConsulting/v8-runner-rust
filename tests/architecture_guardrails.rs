@@ -287,10 +287,6 @@ const UNLOCKED_SCENARIOS: &[(&str, &str)] = &[
         "проверка запроса до замка",
     ),
     (
-        "crate::use_cases::infobase_export::configuration_subject_of_source_set",
-        "проверка запроса до замка",
-    ),
-    (
         "crate::use_cases::infobase_export::validate_snapshot_output",
         "проверка запроса до замка",
     ),

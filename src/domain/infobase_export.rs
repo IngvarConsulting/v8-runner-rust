@@ -112,6 +112,13 @@ pub enum ConfigurationSubject {
 }
 
 impl ConfigurationSubject {
+    /// Предмет по имени расширения: без имени — основная конфигурация.
+    pub fn of_extension(name: Option<&str>) -> Self {
+        name.map_or(Self::Main, |name| Self::Extension {
+            name: name.to_owned(),
+        })
+    }
+
     pub const fn artifact_kind(&self) -> InfobaseExportArtifactKind {
         match self {
             Self::Main => InfobaseExportArtifactKind::Cf,

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::config::model::{AppConfig, SourceSetPurpose};
+use crate::config::model::AppConfig;
 use crate::domain::capability::{Implementation, Provider, ProviderReceipt};
 use crate::domain::execution::{
     ExecutionError, ExecutionInterruptionPhase, ExecutionOutcome, ExecutionStatus, StepResult,
@@ -30,7 +30,6 @@ use crate::support::path::{
 };
 use crate::support::temp::platform_logs_dir;
 use crate::use_cases::context::{ExecutionContext, InterruptionSafetyClass};
-use crate::use_cases::extension_identity::platform_extension_name;
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::result::{UseCaseFailure, UseCaseResult};
 
@@ -736,31 +735,6 @@ pub(crate) fn validate_snapshot_output(output: &Path) -> Result<(), AppError> {
         )));
     }
     validate_output_suffix(output, "dt")
-}
-
-/// Предмет выгрузки по набору исходников: набор конфигурации — основная конфигурация,
-/// набор расширения — расширение с именем набора. Чужое значение — отказ, а не догадка:
-/// позиционный аргумент базу не называет.
-pub(crate) fn configuration_subject_of_source_set(
-    config: &AppConfig,
-    name: &str,
-) -> Result<ConfigurationSubject, AppError> {
-    let source_set = config
-        .source_sets
-        .iter()
-        .find(|source_set| source_set.name == name)
-        .ok_or_else(|| AppError::Validation(format!("unknown source-set '{name}'")))?;
-    match source_set.purpose {
-        SourceSetPurpose::Configuration => Ok(ConfigurationSubject::Main),
-        SourceSetPurpose::Extension => Ok(ConfigurationSubject::Extension {
-            name: platform_extension_name(source_set).to_owned(),
-        }),
-        SourceSetPurpose::ExternalDataProcessors | SourceSetPurpose::ExternalReports => {
-            Err(AppError::Validation(format!(
-                "source-set '{name}' holds external files; download takes the main configuration or an extension"
-            )))
-        }
-    }
 }
 
 pub(crate) fn validate_configuration_request(

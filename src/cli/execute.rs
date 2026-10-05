@@ -85,6 +85,7 @@ use crate::use_cases::request::{
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
+use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::tools_download;
 use crate::use_cases::transport::{dispatch_with_workspace_lock_policy, WorkspaceBusyPolicy};
 
@@ -1239,10 +1240,11 @@ pub fn prepare_infobase_command(
                 let mut request = map_infobase_configuration_export_request(args);
                 let command = CommandName::InfobaseConfigurationExport;
                 let resolved = match args.set.as_deref() {
-                    Some(name) => {
-                        infobase_export::configuration_subject_of_source_set(config, name)
-                            .map(|subject| request.subject = subject)
-                    }
+                    Some(name) => SourceSetInventory::new(config)
+                        .configuration_package(name, "download")
+                        .map(|(_, extension)| {
+                            request.subject = ConfigurationSubject::of_extension(extension);
+                        }),
                     None => Ok(()),
                 };
                 if let Err(error) = resolved
@@ -1352,7 +1354,7 @@ fn infobase_command_name(args: &InfobaseArgs) -> CommandName {
 
 /// Запрос выгрузки пакета по ключам команды. Предмет, названный позиционным набором,
 /// здесь ещё не разрешён: до загрузки настроек запрос несёт основную конфигурацию, а набор
-/// разрешает [`infobase_export::configuration_subject_of_source_set`].
+/// разрешает [`SourceSetInventory::configuration_package`].
 fn map_infobase_configuration_export_request(
     args: &InfobaseConfigurationExportArgs,
 ) -> ExportConfigurationPackageRequest {
@@ -1362,11 +1364,7 @@ fn map_infobase_configuration_export_request(
         Some("db" | "database") => ConfigurationState::Database,
         Some(other) => unreachable!("clap validates configuration state, got {other}"),
     };
-    let subject = args
-        .extension
-        .as_ref()
-        .map(|name| ConfigurationSubject::Extension { name: name.clone() })
-        .unwrap_or(ConfigurationSubject::Main);
+    let subject = ConfigurationSubject::of_extension(args.extension.as_deref());
     ExportConfigurationPackageRequest {
         state,
         subject,
@@ -2809,7 +2807,15 @@ fn map_load_request(args: &LoadArgs, dry_run: bool) -> Result<LoadRequest, UseCa
                 ));
             }
         },
-        artifact_path: args.artifact_path().to_owned(),
+        artifact_path: args
+            .artifact_path()
+            .ok_or_else(|| {
+                UseCaseError::new(
+                    UseCaseErrorKind::Validation,
+                    "upload requires the package file",
+                )
+            })?
+            .to_owned(),
         settings_path: args.settings.clone(),
         vendor_name: args.vendor_name.clone(),
         extension: args.extension.clone(),
@@ -2849,16 +2855,9 @@ fn map_artifacts_request_with_config(
     let mode = match (args.source_set.name(), args.extension.is_some()) {
         (_, true) => ArtifactsModeRequest::ExtensionCfe,
         (Some(source_set_name), false) => {
-            let source_set = config
-                .source_sets
-                .iter()
-                .find(|source_set| source_set.name == source_set_name)
-                .ok_or_else(|| {
-                    UseCaseError::new(
-                        UseCaseErrorKind::Validation,
-                        format!("unknown source-set '{source_set_name}'"),
-                    )
-                })?;
+            let source_set = SourceSetInventory::new(config)
+                .named(source_set_name)
+                .map_err(UseCaseError::from)?;
             match source_set.purpose {
                 SourceSetPurpose::Configuration => ArtifactsModeRequest::ConfigurationCf,
                 SourceSetPurpose::Extension => ArtifactsModeRequest::ExtensionCfe,
