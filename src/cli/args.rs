@@ -512,7 +512,10 @@ pub enum TestScope {
 }
 
 #[derive(Args, Debug)]
-#[command(next_help_heading = "Command options")]
+#[command(
+    next_help_heading = "Command options",
+    after_help = "Without keys: incremental dump - changed objects are written over the source tree; nothing else in it is touched.\nWith --object: partial dump of the named objects only.\nWith --force: full dump that replaces the source tree with the infobase state; uncommitted changes and untracked files there are discarded."
+)]
 pub struct DumpArgs {
     /// Previous mode key; hidden from help for one release cycle. `incremental` and
     /// `partial` mean the same as no key; `full` is refused in favour of `--force`.
@@ -526,12 +529,12 @@ pub struct DumpArgs {
     #[arg(long)]
     pub extension: Option<String>,
 
-    /// Objects for partial dump. Use canonical TYPE:NAME selectors; legacy TYPE.NAME selectors are accepted for compatibility.
+    /// Partial dump of these objects only; cannot be combined with --force. Use canonical TYPE:NAME selectors; legacy TYPE.NAME selectors are accepted for compatibility.
     #[arg(long = "object")]
     pub objects: Vec<String>,
 
-    /// Replace the target directory with the infobase state (full dump), even when it holds
-    /// work version control cannot give back
+    /// Full dump that replaces the source tree with the infobase state: uncommitted changes and
+    /// untracked files there are discarded. Without it the dump is incremental
     #[arg(long = "force", alias = "discard-uncommitted")]
     pub discard_uncommitted: bool,
 }
@@ -545,6 +548,17 @@ pub enum PreviousDumpMode {
     Incremental,
     #[value(hide = true)]
     Partial,
+}
+
+impl PreviousDumpMode {
+    /// Значение так, как его написали в командной строке.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Incremental => "incremental",
+            Self::Partial => "partial",
+        }
+    }
 }
 
 #[derive(Args, Debug)]

@@ -154,6 +154,8 @@ v8-runner infobase create
 - `pull` modes come from dictionary keys: no key — incremental dump over the directory;
   `--object <TYPE:NAME>` — partial; `--force` — full dump that replaces the directory. The hidden
   `--mode incremental|partial` means no key; `--mode full` is refused and names `pull --force`.
+  `--force` next to `--object` or `--mode` is refused before the platform; pick one form.
+- Owner decision 05.10.2026, #191: `pull --force` is a full dump already in wave 1 (it discards uncommitted changes in the source tree); #217 adds "merge" and a refusal without `--force`.
 - `convert` (and a full pull requested without consent, as MCP `dump_config` with `FULL` does)
   replaces the target source directory as a whole, so it first asks git what
   inside it exists nowhere else — untracked files, ignored files, a worktree edit on top of the

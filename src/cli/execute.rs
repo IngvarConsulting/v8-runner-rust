@@ -2835,21 +2835,39 @@ fn map_load_request(args: &LoadArgs, dry_run: bool) -> Result<LoadRequest, UseCa
     })
 }
 
-/// Режим выгрузки по ключам словаря: `--object` выгружает названные объекты, `--force`
-/// заменяет каталог состоянием базы, без ключей выгрузка ложится поверх по описи версий.
+/// Что делает `pull --force`: фраза одна для справки отказов, чтобы последствие было видно
+/// без документации.
+const PULL_FORCE_MEANS: &str =
+    "`pull --force` is a full dump that replaces the source tree and discards uncommitted changes there";
+
+/// Режим выгрузки по ключам словаря: без ключей — инкрементальная поверх каталога,
+/// `--object` — названные объекты, `--force` — полная с заменой каталога.
 ///
 /// Прежний `--mode incremental|partial` значит то же, что без ключа. `--mode full` не
 /// отображается в `--force`, а отказывает и называет его: молчаливое отображение дало бы
-/// согласие на уничтожение, о котором не просили.
+/// согласие на уничтожение, о котором не просили. Сочетание, где режим спорит с `--force`,
+/// тоже отказывает и называет выбор: эскалации до замены каталога молча не бывает
+/// (решение владельца 05.10.2026, #191).
 fn dump_mode(args: &DumpArgs) -> Result<DumpModeRequest, UseCaseError> {
-    match args.mode {
-        None | Some(PreviousDumpMode::Incremental | PreviousDumpMode::Partial) => {}
-        Some(PreviousDumpMode::Full) => {
-            return Err(UseCaseError::new(
-                UseCaseErrorKind::Validation,
-                "`--mode full` is no longer accepted: run `pull --force` to replace the directory with the infobase state",
+    let refuse = |message: String| Err(UseCaseError::new(UseCaseErrorKind::Validation, message));
+    match (args.mode, args.discard_uncommitted) {
+        (Some(PreviousDumpMode::Full), _) => {
+            return refuse(format!(
+                "`--mode full` is gone: use `pull --force`; {PULL_FORCE_MEANS}"
             ));
         }
+        (Some(previous @ (PreviousDumpMode::Incremental | PreviousDumpMode::Partial)), true) => {
+            return refuse(format!(
+                "`--mode {}` contradicts `--force`: drop `--mode` for a full replacement ({PULL_FORCE_MEANS}), or drop `--force` for a dump over the source tree",
+                previous.as_str()
+            ));
+        }
+        (None | Some(PreviousDumpMode::Incremental | PreviousDumpMode::Partial), _) => {}
+    }
+    if !args.objects.is_empty() && args.discard_uncommitted {
+        return refuse(format!(
+            "`--object` contradicts `--force`: keep `--object` for a partial dump of the named objects, or keep `--force` alone ({PULL_FORCE_MEANS})"
+        ));
     }
     Ok(if !args.objects.is_empty() {
         DumpModeRequest::Partial
@@ -4878,8 +4896,9 @@ mod tests {
         assert_eq!(launch_error.kind(), UseCaseErrorKind::Validation);
     }
 
-    /// Прежний `--mode incremental|partial` значит то же, что без ключа, при любых других
-    /// ключах; `--mode full` отказывает и называет `pull --force`.
+    /// Прежний `--mode incremental|partial` без `--force` значит то же, что без ключа;
+    /// `--mode full` отказывает и говорит, что делает `pull --force`; режим, который спорит
+    /// с `--force`, отказывает и называет выбор — молчаливой эскалации до замены нет.
     #[test]
     fn a_previous_pull_mode_means_no_key_and_full_names_force() {
         let args = |mode: Option<PreviousDumpMode>, objects: &[&str], force: bool| DumpArgs {
@@ -4890,24 +4909,52 @@ mod tests {
             discard_uncommitted: force,
         };
         let request = |args: &DumpArgs| map_dump_request(args, false).expect("request");
+        let refusal = |args: &DumpArgs| {
+            let error = map_dump_request(args, false).expect_err("refused");
+            assert_eq!(error.kind(), UseCaseErrorKind::Validation, "{error}");
+            error.message().to_owned()
+        };
 
         for objects in [&[][..], &["Catalog:Items"][..]] {
+            let without = request(&args(None, objects, false));
+            for previous in [PreviousDumpMode::Incremental, PreviousDumpMode::Partial] {
+                assert_eq!(
+                    request(&args(Some(previous), objects, false)),
+                    without,
+                    "--mode {previous:?}, objects {objects:?}"
+                );
+                let message = refusal(&args(Some(previous), objects, true));
+                assert!(
+                    message.contains(&format!(
+                        "`--mode {}` contradicts `--force`",
+                        previous.as_str()
+                    )),
+                    "{message}"
+                );
+                assert!(
+                    message.contains("discards uncommitted changes"),
+                    "{message}"
+                );
+            }
             for force in [false, true] {
-                let without = request(&args(None, objects, force));
-                for previous in [PreviousDumpMode::Incremental, PreviousDumpMode::Partial] {
-                    assert_eq!(
-                        request(&args(Some(previous), objects, force)),
-                        without,
-                        "--mode {previous:?}, objects {objects:?}, force {force}"
-                    );
-                }
-                let error =
-                    map_dump_request(&args(Some(PreviousDumpMode::Full), objects, force), false)
-                        .expect_err("--mode full is refused");
-                assert_eq!(error.kind(), UseCaseErrorKind::Validation);
-                assert!(error.message().contains("`pull --force`"), "{error}");
+                let message = refusal(&args(Some(PreviousDumpMode::Full), objects, force));
+                assert!(
+                    message.contains("`--mode full` is gone: use `pull --force`"),
+                    "{message}"
+                );
+                assert!(
+                    message.contains(
+                        "full dump that replaces the source tree and discards uncommitted changes"
+                    ),
+                    "{message}"
+                );
             }
         }
+        let message = refusal(&args(None, &["Catalog:Items"], true));
+        assert!(
+            message.contains("`--object` contradicts `--force`"),
+            "{message}"
+        );
 
         assert_eq!(
             request(&args(None, &[], false)).mode,

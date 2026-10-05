@@ -325,10 +325,6 @@ fn cases(project: &Project) -> Vec<(Vec<String>, Vec<String>)> {
             vec!["pull", "--object", "Catalog:Items", "--dry-run"],
         ),
         (
-            vec!["pull", "--mode", "incremental", "--force", "--dry-run"],
-            vec!["pull", "--force", "--dry-run"],
-        ),
-        (
             vec!["test", "--no-build", "yaxunit", "all"],
             vec!["test", "--no-push", "yaxunit", "all"],
         ),
@@ -481,32 +477,110 @@ fn every_synonym_of_the_table_has_a_case() {
     }
 }
 
-fn assert_refused_with_force(project: &Project, args: &[&str]) {
+/// Отказ до платформы: `invalid_argument`, выход 2, метка `pull`, и текст содержит каждую
+/// из названных фраз.
+fn assert_refused(project: &Project, args: &[&str], phrases: &[&str]) {
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
     let output = run(project, &args);
     let answer = envelope(&args, &output);
     assert_eq!(output.status.code(), Some(2), "{args:?}: {answer}");
     assert_eq!(answer["ok"], false, "{answer}");
     assert_eq!(answer["command"], "pull", "{answer}");
-    assert_eq!(answer["error"]["kind"], "validation", "{answer}");
-    assert!(
-        answer["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("`pull --force`")),
-        "{args:?} must name `pull --force`: {answer}"
-    );
+    assert_eq!(answer["error"]["code"], "invalid_argument", "{answer}");
+    let message = answer["error"]["message"].as_str().unwrap_or_default();
+    for phrase in phrases {
+        assert!(
+            message.contains(phrase),
+            "{args:?} must say {phrase:?}: {answer}"
+        );
+    }
     assert!(
         !project.calls.exists(),
         "{args:?}: the platform must not be started"
     );
 }
 
+/// Что делает замена — так, чтобы последствие было видно без документации.
+const FORCE_MEANS: &str =
+    "`pull --force` is a full dump that replaces the source tree and discards uncommitted changes";
+
 /// `--mode full` не отображается в `--force`: молчаливое отображение дало бы согласие на
-/// уничтожение, о котором не просили. Отказ называет `pull --force` до запуска платформы.
+/// уничтожение, о котором не просили. Отказ называет `pull --force` и говорит, что он делает.
 #[test]
 fn mode_full_is_refused_and_names_pull_force() {
     let project = project();
-    assert_refused_with_force(&project, &["pull", "--mode", "full"]);
-    assert_refused_with_force(&project, &["dump", "--mode", "full", "--dry-run"]);
-    assert_refused_with_force(&project, &["pull", "main", "--mode", "full", "--force"]);
+    let gone = "`--mode full` is gone: use `pull --force`";
+    assert_refused(&project, &["pull", "--mode", "full"], &[gone, FORCE_MEANS]);
+    assert_refused(
+        &project,
+        &["dump", "--mode", "full", "--dry-run"],
+        &[gone, FORCE_MEANS],
+    );
+    assert_refused(
+        &project,
+        &["pull", "main", "--mode", "full", "--force"],
+        &[gone, FORCE_MEANS],
+    );
+}
+
+/// Прежний режим, который спорит с `--force`, не превращается молча в замену каталога:
+/// отказ до платформы называет оба выхода (решение владельца 05.10.2026, #191).
+#[test]
+fn a_mode_that_contradicts_force_is_refused_with_the_choice() {
+    let project = project();
+    for mode in ["incremental", "partial"] {
+        assert_refused(
+            &project,
+            &["pull", "--mode", mode, "--force", "--dry-run"],
+            &[
+                &format!("`--mode {mode}` contradicts `--force`"),
+                "drop `--mode`",
+                "drop `--force`",
+                FORCE_MEANS,
+            ],
+        );
+    }
+    assert_refused(
+        &project,
+        &["pull", "--object", "Catalog:Items", "--force", "--dry-run"],
+        &[
+            "`--object` contradicts `--force`",
+            "keep `--object`",
+            FORCE_MEANS,
+        ],
+    );
+    assert_refused(
+        &project,
+        &[
+            "pull",
+            "--mode",
+            "partial",
+            "--object",
+            "Catalog:Items",
+            "--force",
+        ],
+        &["`--mode partial` contradicts `--force`"],
+    );
+}
+
+/// Справка одна объясняет последствия: без ключей — инкрементальная выгрузка поверх
+/// каталога, `--force` — полная замена с потерей незафиксированного.
+#[test]
+fn pull_help_says_what_each_form_does() {
+    for flag in ["-h", "--help"] {
+        let output = v8_runner_command()
+            .args(["pull", flag])
+            .output()
+            .expect("run help");
+        assert!(output.status.success());
+        let help = String::from_utf8_lossy(&output.stdout);
+        for phrase in [
+            "Without keys: incremental dump",
+            "With --force: full dump that replaces the source tree",
+            "uncommitted changes and untracked files there are discarded",
+            "cannot be combined with --force",
+        ] {
+            assert!(help.contains(phrase), "{flag} must say {phrase:?}:\n{help}");
+        }
+    }
 }
