@@ -114,12 +114,13 @@ pub fn load_config_for_infobase_export(
     config_path: Option<&str>,
     workdir_override: Option<&str>,
     selector: &InfobaseSelector,
+    operation: crate::domain::capability::Operation,
 ) -> Result<LoadedConfig, ConfigLoadError> {
     load_config_with_mode(
         config_path,
         workdir_override,
         selector,
-        ConfigValidationMode::InfobaseExport,
+        ConfigValidationMode::InfobaseExport(operation),
     )
 }
 
@@ -170,7 +171,7 @@ enum ConfigValidationMode {
     Full,
     Preview,
     Planned,
-    InfobaseExport,
+    InfobaseExport(crate::domain::capability::Operation),
     PreparedTest,
     ToolsDownload,
     Launch,
@@ -272,7 +273,9 @@ fn build_config(
         ConfigValidationMode::Full => validate(&config)?,
         ConfigValidationMode::Preview => validate_read_only(&config)?,
         ConfigValidationMode::Planned => validate_planned(&config)?,
-        ConfigValidationMode::InfobaseExport => validate_infobase_export(&config)?,
+        ConfigValidationMode::InfobaseExport(operation) => {
+            validate_infobase_export(&config, operation)?
+        }
         ConfigValidationMode::PreparedTest => validate_prepared_test(&config)?,
         ConfigValidationMode::ToolsDownload => validate_tools_download_bootstrap(&config)?,
         ConfigValidationMode::Launch => validate_launch(&config)?,

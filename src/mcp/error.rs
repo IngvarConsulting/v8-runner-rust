@@ -142,3 +142,28 @@ impl From<McpBusinessErrorKind> for crate::command_envelope::ErrorKind {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{McpBusinessError, McpBusinessErrorKind, McpErrorCode};
+    use crate::platform::locator::{LocatorError, UtilityType};
+    use crate::support::error::AppError;
+    use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
+
+    /// У MCP нет рода `environment`: отсутствующая утилита отвечает `runtime_failure`, а не
+    /// `platform_failure` (INV.WIRE.A-MISSING-TOOL-IS-AN-ENVIRONMENT-FAILURE).
+    #[test]
+    fn a_missing_utility_answers_a_runtime_failure_over_mcp() {
+        let error = UseCaseError::from(AppError::from(LocatorError::NotFound {
+            utility: UtilityType::Ibcmd,
+            detail: None,
+        }));
+        assert_eq!(error.kind(), UseCaseErrorKind::Environment, "{error}");
+
+        let mcp = McpBusinessError::from_use_case(&error);
+
+        assert_eq!(mcp.code, McpErrorCode::RuntimeFailure);
+        assert_eq!(mcp.kind, McpBusinessErrorKind::Runtime);
+        assert_eq!(mcp.message, error.message());
+    }
+}

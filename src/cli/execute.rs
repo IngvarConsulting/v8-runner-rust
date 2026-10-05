@@ -34,8 +34,8 @@ use crate::domain::execution::{
 use crate::domain::infobase_export::{
     ConfigurationState, ConfigurationSubject, ExportConfigurationPackageRequest,
     ExportConfigurationPackageResult, ExportInfobaseSnapshotRequest, ExportInfobaseSnapshotResult,
-    InfobaseTransferPhase, RestoreInfobaseSnapshotRequest, RestoreInfobaseSnapshotResult,
-    RestoreTargetMode,
+    InfobaseExportArtifactKind, InfobaseTransferPhase, RestoreInfobaseSnapshotRequest,
+    RestoreInfobaseSnapshotResult, RestoreTargetMode,
 };
 use crate::domain::init::{InitResult, InitStep, InitStepStatus};
 use crate::domain::issue::{Issue, IssueSeverity};
@@ -85,6 +85,7 @@ use crate::use_cases::request::{
 };
 use crate::use_cases::result::{UseCaseError, UseCaseErrorKind};
 use crate::use_cases::run_tests;
+use crate::use_cases::source_inventory::SourceSetInventory;
 use crate::use_cases::tools_download;
 use crate::use_cases::transport::{dispatch_with_workspace_lock_policy, WorkspaceBusyPolicy};
 
@@ -410,16 +411,24 @@ pub fn command_name(command: &Command) -> CommandName {
     }
 }
 
-pub fn uses_infobase_export_config(command: &Command) -> bool {
-    matches!(
-        command,
-        Command::Infobase(InfobaseArgs {
-            command: InfobaseCommand::Configuration(crate::cli::args::InfobaseConfigurationArgs {
+/// Операция семейства переноса, которую выполняет команда, или `None`, если команда
+/// не из этого семейства. По ней настройки проверяют ключ `providers.*` только этой
+/// операции.
+pub fn infobase_transfer_operation(
+    command: &Command,
+) -> Option<crate::domain::capability::Operation> {
+    use crate::domain::capability::Operation;
+    match command {
+        Command::Infobase(InfobaseArgs { command }) => match command {
+            InfobaseCommand::Configuration(crate::cli::args::InfobaseConfigurationArgs {
                 command: InfobaseConfigurationCommand::Export(_),
-            }) | InfobaseCommand::Dump(_)
-                | InfobaseCommand::Restore(_),
-        })
-    )
+            }) => Some(Operation::ConfigurationExport),
+            InfobaseCommand::Dump(_) => Some(Operation::InfobaseDump),
+            InfobaseCommand::Restore(_) => Some(Operation::InfobaseRestore),
+            InfobaseCommand::Create => None,
+        },
+        _ => None,
+    }
 }
 
 fn execute_tools(
@@ -1107,6 +1116,9 @@ pub fn validate_infobase_request(args: &InfobaseArgs) -> Result<(), AppError> {
             unreachable!("infobase create is normalised into its own command in app::run")
         }
         InfobaseCommand::Configuration(configuration) => match &configuration.command {
+            // Предмет набора известен только по настройкам проекта: такой запрос проверяет
+            // `prepare_infobase_command`, когда настройки загружены.
+            InfobaseConfigurationCommand::Export(args) if args.set.is_some() => Ok(()),
             InfobaseConfigurationCommand::Export(args) => {
                 let request = map_infobase_configuration_export_request(args);
                 infobase_export::validate_configuration_request(&request)
@@ -1233,10 +1245,32 @@ pub fn prepare_infobase_command(
         }
         InfobaseCommand::Configuration(configuration) => match &configuration.command {
             InfobaseConfigurationCommand::Export(args) => {
-                let request = map_infobase_configuration_export_request(args);
+                let mut request = map_infobase_configuration_export_request(args);
                 let command = CommandName::InfobaseConfigurationExport;
-                infobase_export::validate_configuration_request(&request)
-                    .map_err(|error| render_pre_dispatch_error(presenter, command, error))?;
+                let resolved = match args.set.as_deref() {
+                    Some(name) => SourceSetInventory::new(config)
+                        .configuration_package(name, command)
+                        .map(|(_, extension)| {
+                            request.subject = ConfigurationSubject::of_extension(extension);
+                        }),
+                    None => Ok(()),
+                };
+                if let Err(error) = resolved
+                    .and_then(|()| infobase_export::validate_configuration_request(&request))
+                {
+                    let error = UseCaseError::from(error);
+                    let mut result = configuration_pre_dispatch_failure(
+                        &request,
+                        None,
+                        &error,
+                        InfobaseTransferPhase::Validation,
+                    );
+                    if dry_run {
+                        result.mark_preview_failure();
+                    }
+                    render_configuration_failure(command, result, &error, presenter);
+                    return Err(error);
+                }
                 match infobase_export::prepare_configuration_export(context, config, &request) {
                     Ok(provider) => {
                         Ok(PreparedInfobaseCommand::Configuration { request, provider })
@@ -1326,19 +1360,33 @@ fn infobase_command_name(args: &InfobaseArgs) -> CommandName {
     }
 }
 
+/// Запрос выгрузки пакета по ключам команды. Предмет, названный позиционным набором,
+/// здесь ещё не разрешён: его разрешает [`SourceSetInventory::configuration_package`],
+/// когда настройки загружены. До того ответ не называет предметом то, чего запрос не
+/// просил: форма требует предмет, и он следует суффиксу файла, который набор обязан
+/// подтвердить, — `.cfe` даёт расширение с именем набора, иначе основная конфигурация.
 fn map_infobase_configuration_export_request(
     args: &InfobaseConfigurationExportArgs,
 ) -> ExportConfigurationPackageRequest {
-    let state = match args.state.as_str() {
-        "working" => ConfigurationState::Working,
-        "database" => ConfigurationState::Database,
-        _ => unreachable!("clap validates configuration state"),
+    // Без ключа берётся рабочее состояние; `working` и `database` — прежние значения.
+    let state = match args.state.as_deref() {
+        None | Some("working") => ConfigurationState::Working,
+        Some("db" | "database") => ConfigurationState::Database,
+        Some(other) => unreachable!("clap validates configuration state, got {other}"),
     };
-    let subject = args
-        .extension
-        .as_ref()
-        .map(|name| ConfigurationSubject::Extension { name: name.clone() })
-        .unwrap_or(ConfigurationSubject::Main);
+    let output = Path::new(&args.output);
+    let names_an_extension_package = output
+        .extension()
+        .and_then(|suffix| suffix.to_str())
+        .is_some_and(|suffix| {
+            suffix.eq_ignore_ascii_case(InfobaseExportArtifactKind::Cfe.file_extension())
+        });
+    let extension = match args.set.as_deref() {
+        Some(set) if names_an_extension_package => Some(set),
+        Some(_) => None,
+        None => args.extension.as_deref(),
+    };
+    let subject = ConfigurationSubject::of_extension(extension);
     ExportConfigurationPackageRequest {
         state,
         subject,
@@ -2477,7 +2525,7 @@ fn map_build_request(args: &BuildArgs, dry_run: bool) -> BuildRequest {
     BuildRequest {
         dry_run,
         full_rebuild: args.full_rebuild,
-        source_set: args.source_set.clone(),
+        source_set: args.source_set.name().map(str::to_owned),
     }
 }
 
@@ -2781,7 +2829,15 @@ fn map_load_request(args: &LoadArgs, dry_run: bool) -> Result<LoadRequest, UseCa
                 ));
             }
         },
-        artifact_path: args.path.clone(),
+        artifact_path: args
+            .artifact_path()
+            .ok_or_else(|| {
+                UseCaseError::new(
+                    UseCaseErrorKind::Validation,
+                    "upload requires the package file",
+                )
+            })?
+            .to_owned(),
         settings_path: args.settings.clone(),
         vendor_name: args.vendor_name.clone(),
         extension: args.extension.clone(),
@@ -2792,7 +2848,7 @@ fn map_dump_request(args: &DumpArgs, dry_run: bool) -> Result<DumpRequest, UseCa
     Ok(DumpRequest {
         dry_run,
         mode: parse_required_dump_mode(&args.mode)?,
-        source_set: args.source_set.clone(),
+        source_set: args.source_set.name().map(str::to_owned),
         extension: args.extension.clone(),
         objects: args.objects.clone(),
         discard_uncommitted: args.discard_uncommitted,
@@ -2801,7 +2857,7 @@ fn map_dump_request(args: &DumpArgs, dry_run: bool) -> Result<DumpRequest, UseCa
 
 fn map_convert_request(args: &ConvertArgs, dry_run: bool) -> ConvertRequest {
     ConvertRequest {
-        scope: match args.source_set.as_deref() {
+        scope: match args.source_set.name() {
             Some(name) => ConvertScopeRequest::SourceSet {
                 name: name.to_owned(),
             },
@@ -2818,19 +2874,12 @@ fn map_artifacts_request_with_config(
     args: &ArtifactsArgs,
     dry_run: bool,
 ) -> Result<ArtifactsRequest, UseCaseError> {
-    let mode = match (args.source_set.as_deref(), args.extension.is_some()) {
+    let mode = match (args.source_set.name(), args.extension.is_some()) {
         (_, true) => ArtifactsModeRequest::ExtensionCfe,
         (Some(source_set_name), false) => {
-            let source_set = config
-                .source_sets
-                .iter()
-                .find(|source_set| source_set.name == source_set_name)
-                .ok_or_else(|| {
-                    UseCaseError::new(
-                        UseCaseErrorKind::Validation,
-                        format!("unknown source-set '{source_set_name}'"),
-                    )
-                })?;
+            let source_set = SourceSetInventory::new(config)
+                .named(source_set_name)
+                .map_err(UseCaseError::from)?;
             match source_set.purpose {
                 SourceSetPurpose::Configuration => ArtifactsModeRequest::ConfigurationCf,
                 SourceSetPurpose::Extension => ArtifactsModeRequest::ExtensionCfe,
@@ -2848,7 +2897,7 @@ fn map_artifacts_request_with_config(
         execution: ArtifactsRequest::default_execution(mode),
         mode,
         output_path: args.output.clone(),
-        source_set: args.source_set.clone(),
+        source_set: args.source_set.name().map(str::to_owned),
         extension: args.extension.clone(),
     })
 }
@@ -4313,8 +4362,9 @@ mod tests {
         ArtifactsArgs, BuildArgs, Command, DesignerConfigSyntaxArgs, DesignerModulesSyntaxArgs,
         DirectLaunchOptionsArgs, DumpArgs, ExtensionsArgs, InfobaseArgs, InfobaseCommand,
         InfobaseConfigurationArgs, InfobaseConfigurationCommand, InfobaseConfigurationExportArgs,
-        InfobaseDumpArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs, SyntaxArgs, SyntaxTarget,
-        TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope, TestVaArgs, TestYaxunitArgs,
+        InfobaseDumpArgs, LaunchArgs, LaunchOptionsArgs, LoadArgs, SourceSetArg, SyntaxArgs,
+        SyntaxTarget, TestArgs, TestLaunchOptionsArgs, TestRunner, TestScope, TestVaArgs,
+        TestYaxunitArgs,
     };
     use crate::cli::output::pre_dispatch_error_envelope;
     use crate::config::model::{
@@ -4573,7 +4623,7 @@ mod tests {
             map_build_request(
                 &BuildArgs {
                     full_rebuild: true,
-                    source_set: None,
+                    source_set: SourceSetArg::default(),
                 },
                 false,
             )
@@ -4596,7 +4646,7 @@ mod tests {
                 &DumpArgs {
                     discard_uncommitted: false,
                     mode: "incremental".to_owned(),
-                    source_set: Some("main".to_owned()),
+                    source_set: SourceSetArg::named("main"),
                     extension: Some("Ext".to_owned()),
                     objects: vec!["Catalog.Item".to_owned()],
                 },
@@ -4611,7 +4661,7 @@ mod tests {
                 &DumpArgs {
                     discard_uncommitted: false,
                     mode: "incremental".to_owned(),
-                    source_set: Some("main".to_owned()),
+                    source_set: SourceSetArg::named("main"),
                     extension: Some("Ext".to_owned()),
                     objects: vec!["Catalog.Item".to_owned()],
                 },
@@ -4736,7 +4786,8 @@ mod tests {
         );
         let load = map_load_request(
             &LoadArgs {
-                path: "dist/main.cf".to_owned(),
+                file: Some("dist/main.cf".to_owned()),
+                path: None,
                 mode: "merge".to_owned(),
                 settings: Some("merge.xml".to_owned()),
                 vendor_name: None,
@@ -4753,7 +4804,7 @@ mod tests {
             &sample_config(Path::new("/tmp/work")),
             &ArtifactsArgs {
                 output: "dist/ext.cfe".to_owned(),
-                source_set: Some("ext-sales".to_owned()),
+                source_set: SourceSetArg::named("ext-sales"),
                 extension: Some("SalesAddon".to_owned()),
             },
             false,
@@ -4770,7 +4821,7 @@ mod tests {
             &sample_config(Path::new("/tmp/work")),
             &ArtifactsArgs {
                 output: "dist/main.cf".to_owned(),
-                source_set: Some("main".to_owned()),
+                source_set: SourceSetArg::named("main"),
                 extension: Some("   ".to_owned()),
             },
             false,
@@ -4788,7 +4839,7 @@ mod tests {
             &DumpArgs {
                 discard_uncommitted: false,
                 mode: "garbage".to_owned(),
-                source_set: None,
+                source_set: SourceSetArg::default(),
                 extension: None,
                 objects: vec![],
             },
@@ -4818,7 +4869,8 @@ mod tests {
     fn rejects_invalid_load_mode_mapping() {
         let error = map_load_request(
             &LoadArgs {
-                path: "dist/main.cf".to_owned(),
+                file: Some("dist/main.cf".to_owned()),
+                path: None,
                 mode: "garbage".to_owned(),
                 settings: None,
                 vendor_name: None,
@@ -4922,13 +4974,14 @@ mod tests {
         assert_eq!(
             command_name(&Command::Build(BuildArgs {
                 full_rebuild: false,
-                source_set: None,
+                source_set: SourceSetArg::default(),
             })),
             CommandName::Build
         );
         assert_eq!(
             command_name(&Command::Load(LoadArgs {
-                path: "dist/main.cf".to_owned(),
+                file: Some("dist/main.cf".to_owned()),
+                path: None,
                 mode: "load".to_owned(),
                 settings: None,
                 vendor_name: None,
@@ -4939,7 +4992,7 @@ mod tests {
         assert_eq!(
             command_name(&Command::Artifacts(ArtifactsArgs {
                 output: "dist/main.cf".to_owned(),
-                source_set: None,
+                source_set: SourceSetArg::default(),
                 extension: None,
             })),
             CommandName::Artifacts
@@ -4995,7 +5048,7 @@ mod tests {
             &config,
             &Command::Build(BuildArgs {
                 full_rebuild: true,
-                source_set: None,
+                source_set: SourceSetArg::default(),
             }),
             None,
             &presenter,
@@ -5077,7 +5130,8 @@ mod tests {
                 command: InfobaseCommand::Configuration(InfobaseConfigurationArgs {
                     command: InfobaseConfigurationCommand::Export(
                         InfobaseConfigurationExportArgs {
-                            state: "working".to_owned(),
+                            set: None,
+                            state: None,
                             extension: None,
                             output: dir.path().join("main.cf").display().to_string(),
                         },
@@ -5188,7 +5242,7 @@ mod tests {
             &config,
             &Command::Build(BuildArgs {
                 full_rebuild: true,
-                source_set: None,
+                source_set: SourceSetArg::default(),
             }),
             None,
             &presenter,

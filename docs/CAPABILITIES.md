@@ -163,6 +163,12 @@ CLI help, доверяйте текущему коду и затем синхр�
 заполнятся `base_generation` и `local_generation`. Код `subject` таблица называет, но ни
 один отказ пока им не отвечает.
 
+Утилиты платформы или EDT нет в окружении либо найдена не та версия — род `environment`,
+код `environment_unavailable` и выход 2, найдена ли она цепочкой исполнителей или прямым
+поиском, как `1cedtcli` у `convert`. Прежде прямой поиск отвечал `platform_failure` с
+выходом 4; род `platform` теперь означает сбой самой платформы. У MCP такой отказ приходит
+как `runtime_failure`.
+
 Занятый рабочий каталог сегодня отвечает `workspace_busy` только у `download`,
 `infobase dump` и `clone`, а у `clone` — без шага `workspace lock`; остальные команды
 отвечают `runtime_failure` ([#295](https://github.com/IngvarConsulting/v8-runner-rust/issues/295)).
@@ -234,8 +240,11 @@ v8-runner --version
 ### `init`
 
 ```bash
-v8-runner init [--force] [--output <FILE>] [--connection <CONNECTION>] [--format <auto|designer|edt>]
+v8-runner init [--force] [--output <FILE>] [--infobase <CONNECTION>] [--format <auto|designer|edt>]
 ```
+
+- Базу называет ключ `--infobase` со строкой соединения; прежний `--connection` принимается
+  скрыто.
 
 - Не требует существующего `v8project.yaml`.
 - Пишет результат в текущий каталог или в `--output`.
@@ -258,17 +267,26 @@ v8-runner init [--force] [--output <FILE>] [--connection <CONNECTION>] [--format
 ### `clone`
 
 ```bash
-v8-runner clone --connection <CONNECTION> --platform-version <VERSION> [--project-dir <DIR>] [--source-dir <DIR>] [--user <USER>] [--password <PASSWORD>] [--platform-path <PATH>] [--force] [--dry-run]
+v8-runner clone --from <CONNECTION> --platform-version <VERSION> [--project-dir <DIR>] [--source-dir <DIR>] [--user <USER>] [--password <PASSWORD>] [--platform-path <PATH>] [--force] [--dry-run]
 ```
 
-- Работает до загрузки `v8project.yaml` и предназначен для пустого project directory.
+- Источник называет `--from`; прежний `--connection` принимается скрыто. Позиционного
+  адреса у `clone` нет.
+- Работает до загрузки `v8project.yaml` и пишет проект только в пустой каталог: пустым
+  считается каталог, где нет ничего, кроме `.git`. `workPath` нового проекта (`build`) не
+  в счёт, только пока в нём лишь файлы замка и каталог журналов `logs/` (его содержимое
+  не проверяется); любой другой файл или каталог в нём (например, старая выгрузка) — «не пуст». Непустой каталог — отказ `invalid_argument` (выход 2) до
+  записи чего-либо и до запуска платформы; превью отказывает так же. Отказ приходит после
+  замка: занятый `workPath` отвечает `workspace_busy` раньше. Уже существующий файл
+  проекта, местного слоя или каталог исходников по-прежнему отказывает ещё до замка.
+  `--force` снимает оба отказа.
 - Создаёт `v8project.yaml`, schema-modelined `v8project.local.yaml`, `.gitignore` с теми же
   шаблонами и по тем же правилам, что и `init` (`v8project.local.yaml`,
   `ConfigDumpInfo.xml`, `.dump-*.lock*`; файл — `<project-dir>/.gitignore`, существующий
   только дописывается), и
   `source-set main` типа `CONFIGURATION`.
 - Выгружает основную конфигурацию из указанной ИБ в `src/configuration` через Designer full dump.
-- `--connection` не должен содержать embedded credentials; используйте `--user` и `--password`.
+- `--from` не должен содержать embedded credentials; используйте `--user` и `--password`.
   Эти значения пишутся только в `v8project.local.yaml`.
 - Не обнаруживает и не выгружает расширения автоматически.
 - Замок `workPath` нового проекта (`build`) берётся до первого файла проекта: занятый каталог —
@@ -414,17 +432,20 @@ v8-runner extensions activate --name <NAME> --active <yes|no> [--dry-run]
 ### `push`
 
 ```bash
-v8-runner push [--source-set <NAME>] [--full] [--dry-run]
+v8-runner push [<SET>] [--full] [--dry-run]
 ```
 
-- Без `--source-set` обрабатывает все configured `source-set` в canonical order.
-- С `--source-set` project stage анализирует и строит только указанный `source-set`; неизвестное
-  имя отклоняется как validation error.
+- Позиционный аргумент — набор исходников из `v8project.yaml`, никогда не база: базу называет
+  `--infobase`. Прежний ключ `--source-set <NAME>` принимается скрыто.
+- Без набора обрабатывает все configured `source-set` в canonical order.
+- С набором project stage анализирует и строит только его; значение, которое набором не
+  является (в том числе имя объявленной базы или строка соединения), отклоняется как
+  validation error до запуска платформы.
 - Для `DESIGNER` выбирает incremental, partial или full path по изменённым файлам выбранного scope.
 - Опись `ConfigDumpInfo.xml` в каталоге `DESIGNER`-набора принадлежит одной базе и в git не хранится: если `ConfigDumpInfo.xml` в каталоге набора лежит в индексе git, команда отказывает до запуска платформы с кодом выхода 2 (`validation`), называет путь и рецепт `git rm --cached <путь> && git commit …`; превью (`--dry-run`) отказывает так же. Там, где git не отвечает, работа идёт молча.
 - Для `EDT` сначала анализирует и экспортирует выбранные EDT `source-set`, затем грузит generated
   Designer files выбранным backend.
-- После успешного project stage, включая scoped `--source-set`, подготавливает
+- После успешного project stage, включая выбранный набор, подготавливает
   `tools.client_mcp.extension`, если оно настроено: `source` загружается как extension из
   исходников, `.cfe` `artifact` загружается как extension с именем
   `tools.client_mcp.extension.name`. Под `--dry-run` подготовки не происходит: превью
@@ -432,8 +453,8 @@ v8-runner push [--source-set <NAME>] [--full] [--dry-run]
 - Для source-backed `tools.client_mcp.extension` использует отдельное состояние change detection
   под `workPath/hash-storages`: неизменённый source пропускает export/load, `--full`
   принудительно обновляет расширение.
-- `tools.client_mcp.extension` не является project `source-set`; `--source-set` выбирает только
-  project source-set.
+- `tools.client_mcp.extension` не является project `source-set`; позиционный набор выбирает
+  только project source-set.
 - Не является атомарной multi-source-set операцией: ранние успешные шаги не откатываются, если
   поздний шаг падает.
 
@@ -514,8 +535,14 @@ v8-runner check --project <PROJECT>... [--dry-run]
 ### `pull`
 
 ```bash
-v8-runner pull --mode <full|incremental|partial> [--source-set <NAME>] [--extension <EXTENSION>] [--object <TYPE:NAME>...] [--dry-run] [--force]
+v8-runner pull [<SET>] --mode <full|incremental|partial> [--extension <EXTENSION>] [--object <TYPE:NAME>...] [--dry-run] [--force]
 ```
+
+- Позиционный аргумент — набор исходников; набор расширения выгружает расширение с именем
+  набора, как `--extension`. Значение, которое набором не является, — validation error до
+  запуска платформы. Прежний ключ `--source-set` принимается скрыто.
+- Без набора, как и прежде, выгружается единственный набор конфигурации; выгрузка всех
+  наборов без аргумента пока не сделана — [#217](https://github.com/IngvarConsulting/v8-runner-rust/issues/217), [#344](https://github.com/IngvarConsulting/v8-runner-rust/issues/344).
 
 - `partial` требует хотя бы один `--object`.
 - Успешный полный `pull` в формате `DESIGNER` через Конфигуратор, `ibcmd` или агент
@@ -550,8 +577,12 @@ v8-runner pull --mode <full|incremental|partial> [--source-set <NAME>] [--extens
 ### `convert`
 
 ```bash
-v8-runner convert [--source-set <NAME>] [--output <DIR>] [--dry-run] [--force]
+v8-runner convert [<SET>] [--output <DIR>] [--dry-run] [--force]
 ```
+
+- Позиционный аргумент — набор исходников; без него конвертируются все наборы. Значение,
+  которое набором не является, — validation error. Прежний ключ `--source-set` принимается
+  скрыто.
 
 - CLI-only; не публикуется как MCP tool.
 - Перед заменой целевого каталога команда спрашивает git, что нельзя вернуть:
@@ -561,7 +592,7 @@ v8-runner convert [--source-set <NAME>] [--output <DIR>] [--dry-run] [--force]
   поведение прежнее и защиты нет.
 - Работает от текущего `v8project.yaml`, а не по arbitrary source/target paths.
 - Направление определяется из `format` (до [#236](https://github.com/IngvarConsulting/v8-runner-rust/issues/236)).
-- Позиционный набор или файл пакета вместо `--source-set` и ключ `--to xml|edt|package` — разрыв [#236](https://github.com/IngvarConsulting/v8-runner-rust/issues/236).
+- Файл пакета на месте позиционного аргумента и ключ `--to xml|edt|package` — разрыв [#236](https://github.com/IngvarConsulting/v8-runner-rust/issues/236).
 - Без `--output` публикует результат под `workPath/convert/out/<sourceSetName>/<designer|edt>/`.
 - `--output` задаёт только target root и зеркалит `source-set.path` относительно каталога primary config.
 - Публикация остаётся staged full replacement с overlap guardrails.
@@ -569,12 +600,23 @@ v8-runner convert [--source-set <NAME>] [--output <DIR>] [--dry-run] [--force]
 ### `download`
 
 ```bash
-v8-runner download --state <working|database> --output <FILE.cf> [--dry-run]
-v8-runner download --state <working|database> --extension <NAME> --output <FILE.cfe> [--dry-run]
+v8-runner download [<SET>] [--state db] --output <FILE.cf|FILE.cfe> [--dry-run]
+v8-runner download [--state db] --extension <NAME> --output <FILE.cfe> [--dry-run]
 ```
 
 - Сохраняет состояние конфигурации из ИБ, а не собирает пакет из project sources.
-- Без `--extension` экспортирует main configuration и требует `.cf`; с extension требует `.cfe`.
+- Без `--state` берёт рабочее состояние конфигурации, `--state db` — конфигурацию базы данных. В ответе
+  состояние называется как прежде: `working` и `database`; прежние значения ключа
+  `--state working|database` принимаются скрыто.
+- Позиционный аргумент — набор исходников: набор конфигурации берёт основную конфигурацию и
+  требует `.cf`, набор расширения — расширение с именем набора и требует `.cfe`. Набор внешних
+  файлов и значение, которое набором не является, — validation error до запуска платформы.
+- `--extension` называет расширение по имени в ИБ, без набора; вместе с позиционным набором не
+  принимается. Без набора и `--extension` экспортирует основную конфигурацию и требует `.cf`;
+  сохранение всех наборов без аргумента пока не сделано — [#364](https://github.com/IngvarConsulting/v8-runner-rust/issues/364).
+- Пока набор не разрешён (настройки не загрузились или набора нет), `subject` в ответе об
+  отказе следует суффиксу `--output`: `.cfe` — расширение с именем набора, иначе основная
+  конфигурация.
 - Умолчание — цепочка `designer` → `ibcmd`: runner берёт первого готового до spawn и кладёт
   в квитанцию `provider`, кого пропустил и почему. `providers.download`
   назначает одного исполнителя без отката.
@@ -617,6 +659,8 @@ v8-runner infobase dump --output <FILE.dt> [--dry-run]
 ```
 
 - Сохраняет полную ИБ с данными в переносимый DT-файл. DT не является резервной копией.
+- `--output` с расширением `.cf` или `.cfe` отклоняется до запуска платформы, и отказ называет
+  `download`: пакет конфигурации пишет она.
 - Умолчание — Designer. `ibcmd` для DT стоит в матрице experimental: в цепочку умолчаний не
   входит, а названный `providers.infobase.dump: ibcmd` отказывает при запуске — адаптера нет.
 - Если implemented provider есть, но binary/version/connection не готовы, возвращается
@@ -665,10 +709,12 @@ v8-runner infobase restore --input <FILE.dt> --create  [--dry-run]
 ### `upload`
 
 ```bash
-v8-runner upload --path <FILE> [--mode <load|combine>] [--settings <FILE>] [--extension <NAME>] [--dry-run]
+v8-runner upload <FILE> [--mode <load|combine>] [--settings <FILE>] [--extension <NAME>] [--dry-run]
 ```
 
-- Поддерживает `.cf` и `.cfe`.
+- Файл пакета — позиционный аргумент; прежний ключ `--path <FILE>` принимается скрыто.
+- Поддерживает `.cf` и `.cfe`. Файл `.dt` отклоняется до запуска платформы, и отказ называет
+  `infobase restore`: образ базы загружает она.
 - Работает только для `format=DESIGNER`; исполнитель — только Конфигуратор.
 - `.cfe` требует `--extension`.
 - `--mode combine` требует `--settings <FILE>`.
@@ -684,6 +730,13 @@ v8-runner upload --path <FILE> [--mode <load|combine>] [--settings <FILE>] [--ex
 - `not_established` не разрешает изменяющую операцию ни в одном режиме: ни
   загрузку, ни слияние. Сюда попадают отказ авторизации, недоступная ИБ и
   нечитаемый состав расширений — всё, что платформа сообщает ненулевым кодом.
+  Отказ несёт род `platform` (`platform_failure`, выход 4): запрос верен, не ответила
+  платформа. Прежде он отвечал `invalid_argument` с выходом 2.
+- Состав расширений спрашивают через `ibcmd`. Если `ibcmd` не найден или не той версии,
+  вопрос не задан: `compatibility_state=not_probed`, род `environment`
+  (`environment_unavailable`, выход 2). Неполная конфигурация подключения
+  (`infobase.dbms` у серверной базы) — род `validation` (`invalid_argument`, выход 2).
+  Изменений ни то, ни другое не разрешает.
 - `--mode combine` для конфигурации требует `--vendor-name <ИМЯ>`: без имени
   конфигурации поставщика платформа сравнение не выполняет, поэтому состояние
   остаётся `not_probed` и слияние отклоняется. `--mode load` имени не требует.
@@ -692,11 +745,16 @@ v8-runner upload --path <FILE> [--mode <load|combine>] [--settings <FILE>] [--ex
 ### `make` / `artifacts`
 
 ```bash
-v8-runner make --output <TARGET> [--source-set <NAME>] [--extension <NAME>] [--dry-run]
-v8-runner artifacts --output <TARGET> [--source-set <NAME>] [--extension <NAME>] [--dry-run]
+v8-runner make [<SET>] --output <TARGET> [--extension <NAME>] [--dry-run]
+v8-runner artifacts [<SET>] --output <TARGET> [--extension <NAME>] [--dry-run]
 ```
 
 - Это один use case с двумя CLI names.
+- Позиционный аргумент — набор исходников; набор расширения собирает расширение с именем
+  набора, `--extension` при наборе только сверяется с ним. Значение, которое набором не
+  является, — validation error. Прежний ключ `--source-set` принимается скрыто. Без набора,
+  как и прежде, собирается основная конфигурация; сборка всех наборов без аргумента пока не
+  сделана — [#364](https://github.com/IngvarConsulting/v8-runner-rust/issues/364).
 - `.cf` используется для основной конфигурации.
 - `.cfe` используется для extension export.
 - Каталог output используется для external `.epf` / `.erf` publication.

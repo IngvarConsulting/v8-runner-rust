@@ -6,10 +6,13 @@
 //! не готов никто, квитанция называет всех пропущенных, а отказ типизирован.
 //!
 //! Экспортное семейство пробует готовность глубже (строка соединения, файл базы) и
-//! держит свой перебор, но квитанцию отдаёт ту же.
+//! держит свой перебор, но утилиты исполнителя, причины пропуска и отказ берёт отсюда —
+//! квитанцию и род отказа отдаёт те же.
 
 use crate::config::model::{AppConfig, DesignerAgentMode};
-use crate::domain::capability::{Operation, Provider, ProviderReceipt, SkippedProvider};
+use crate::domain::capability::{
+    Operation, Provider, ProviderPlan, ProviderReceipt, SkippedProvider,
+};
 use crate::platform::locator::{UtilityLocation, UtilityType};
 use crate::platform::utilities::PlatformUtilities;
 use crate::support::error::AppError;
@@ -25,10 +28,11 @@ pub struct SelectedProvider {
     pub receipt: ProviderReceipt,
 }
 
-/// Утилиты, которыми исполнитель делает работу: `None` — адаптера в этой сборке
-/// нет, пустой список — исполнитель готов без утилит. Первая в списке становится
-/// `location` выбранного исполнителя.
-fn utilities_of(provider: Provider, config: &AppConfig) -> Option<Vec<UtilityType>> {
+/// Утилиты, которыми исполнитель делает работу: `None` — у исполнителя нет утилиты в
+/// этой сборке раннера, пустой список — исполнитель готов без утилит. Есть ли у него
+/// адаптер именно этой операции, здесь не решается: это ответ `domain::capability`. Первая
+/// в списке становится `location` выбранного исполнителя.
+pub(crate) fn utilities_of(provider: Provider, config: &AppConfig) -> Option<Vec<UtilityType>> {
     match provider {
         Provider::Designer => Some(vec![UtilityType::V8]),
         Provider::Ibcmd => Some(vec![UtilityType::Ibcmd]),
@@ -54,29 +58,18 @@ pub fn select(
 ) -> Result<SelectedProvider, (AppError, ProviderReceipt)> {
     let plan = config.provider_plan(operation);
     if plan.candidates().is_empty() {
-        let target = config.target_kind();
         return Err((
-            AppError::capability(format!(
-                "no executor implements {operation} on a {} target",
-                target.as_str()
-            )),
+            no_executor(config, operation),
             plan.receipt_for_nobody(Vec::new()),
         ));
     }
     let mut skipped: Vec<SkippedProvider> = Vec::new();
-    let mut had_an_adapter = false;
 
     for provider in plan.candidates() {
         let Some(needed) = utilities_of(provider, config) else {
-            skipped.push(SkippedProvider {
-                provider,
-                reason: format!(
-                    "no adapter for {provider} is implemented for {operation} in this build of the runner"
-                ),
-            });
+            skipped.push(no_adapter(provider, operation));
             continue;
         };
-        had_an_adapter = true;
         let mut located = Vec::with_capacity(needed.len());
         let mut not_ready = None;
         for utility in needed {
@@ -101,18 +94,49 @@ pub fn select(
         }
     }
 
+    let error = nobody_ready(config, &plan, &skipped);
+    Err((error, plan.receipt_for_nobody(skipped)))
+}
+
+/// Отказ, когда у операции на цели этого вида нет ни одного исполнителя.
+pub(crate) fn no_executor(config: &AppConfig, operation: Operation) -> AppError {
+    AppError::capability(format!(
+        "no executor implements {operation} on a {} target",
+        config.target_kind().as_str()
+    ))
+}
+
+/// Пропуск исполнителя, у которого в этой сборке нет адаптера для операции.
+pub(crate) fn no_adapter(provider: Provider, operation: Operation) -> SkippedProvider {
+    SkippedProvider {
+        provider,
+        reason: format!(
+            "no adapter for {provider} is implemented for {operation} in this build of the runner"
+        ),
+    }
+}
+
+/// Отказ, когда не готов никто: перечень пропущенных с причинами. Род — среда, если хоть
+/// у одного кандидата плана утилита в этой сборке есть, иначе — возможность.
+pub(crate) fn nobody_ready(
+    config: &AppConfig,
+    plan: &ProviderPlan,
+    skipped: &[SkippedProvider],
+) -> AppError {
     let reason = skipped
         .iter()
         .map(|entry| format!("{}: {}", entry.provider.as_str(), entry.reason))
         .collect::<Vec<_>>()
         .join("; ");
-    let receipt = plan.receipt_for_nobody(skipped);
-    let error = if had_an_adapter {
+    let had_an_adapter = plan
+        .candidates()
+        .into_iter()
+        .any(|provider| utilities_of(provider, config).is_some());
+    if had_an_adapter {
         AppError::EnvironmentUnavailable(reason)
     } else {
         AppError::capability(reason)
-    };
-    Err((error, receipt))
+    }
 }
 
 /// Форма ответа, которая несёт квитанцию о выборе исполнителя.

@@ -32,13 +32,8 @@ check:
   "subject": {
     "kind": "infobase"
   },
-  "provider": {
-    "selected": null,
-    "origin": {"kind": "default"},
-    "skipped": []
-  },
   "artifact_kind": "dt",
-  "input": "build/main.dt",
+  "input": "/home/dev/project/build/main.dt",
   "target_mode": "replace",
   "restored": false,
   "target_state": "unchanged",

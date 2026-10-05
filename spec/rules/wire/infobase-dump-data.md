@@ -31,10 +31,10 @@ check:
   "provider": {
     "selected": null,
     "origin": {"kind": "default"},
-    "skipped": [{"provider": "designer", "reason": "file infobase is not ready: 'build/ib/1Cv8.1CD' is missing or is not a file"}]
+    "skipped": [{"provider": "designer", "reason": "file infobase is not ready: '/home/dev/project/build/ib/1Cv8.1CD' is missing or is not a file"}]
   },
   "artifact_kind": "dt",
-  "output": "build/main.dt",
+  "output": "/home/dev/project/build/main.dt",
   "published": false,
   "target_state": "unchanged",
   "execution": {
@@ -42,7 +42,7 @@ check:
     "errors": [
       {
         "code": "environment_unavailable",
-        "message": "environment unavailable: no provider is ready"
+        "message": "environment unavailable: designer: file infobase is not ready: '/home/dev/project/build/ib/1Cv8.1CD' is missing or is not a file"
       }
     ]
   }
