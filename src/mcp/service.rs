@@ -709,7 +709,7 @@ fn test_adapter_business_error(
     ))
 }
 
-fn execution_context(
+pub(crate) fn execution_context(
     call_context: McpCallContext,
     command: CommandName,
 ) -> Result<ExecutionContext, McpInternalError> {

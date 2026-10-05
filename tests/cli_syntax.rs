@@ -640,3 +640,89 @@ fn a_previous_name_runs_only_the_modes_it_was_given() {
     assert!(!calls.contains("-EmptyHandlers"), "{calls}");
     assert!(!calls.contains("-ThinClient"), "{calls}");
 }
+
+/// Сценарий EDT CLI в режиме общей сессии: подсказка, `cd` и `validate`, на который отвечает
+/// `validate_handler` — путь журнала ему виден в `$out`.
+fn interactive_edt_script(validate_handler: &str) -> String {
+    format!(
+        "prompt() {{ printf '1C:EDT>'; }}\n\
+         cwd=\"\"\n\
+         prompt\n\
+         while IFS= read -r line; do\n\
+           eval \"set -- $line\"\n\
+           cmd=\"${{1:-}}\"\n\
+           if [ \"$#\" -gt 0 ]; then shift; fi\n\
+           case \"$cmd\" in\n\
+             cd)\n\
+               if [ \"$#\" -eq 0 ]; then printf '%s\\n' \"$cwd\"; else cwd=\"$1\"; fi\n\
+               prompt\n\
+               ;;\n\
+             validate)\n\
+               out=\"\"\n\
+               prev=\"\"\n\
+               for arg in \"$@\"; do\n\
+                 if [ \"$prev\" = \"--file\" ]; then out=\"$arg\"; fi\n\
+                 prev=\"$arg\"\n\
+               done\n\
+               {validate_handler}\n\
+               prompt\n\
+               ;;\n\
+             *)\n\
+               prompt\n\
+               ;;\n\
+           esac\n\
+         done\n"
+    )
+}
+
+/// В общей сессии EDT кода выхода нет, и командная строка читает вердикт так же, как сервер
+/// MCP: поток ошибок — сбой даже при замечаниях, вывод без замечаний — сбой, а `exit_code`
+/// равен `101` при замечаниях и `-1` при сбое.
+#[test]
+fn the_shared_edt_session_verdict_on_the_command_line_is_the_servers() {
+    let issue_line =
+        "printf 'ERROR\\tCatalogs.Items\\t1\\t2\\tUnusedVariables\\tunused variable\\n' > \"$out\"";
+    let cases = [
+        (
+            "printf 'unexpected stdout\\n'\n: > \"$out\"".to_owned(),
+            "tool_failed",
+            -1,
+        ),
+        (
+            format!("printf 'boom\\n' >&2\n{issue_line}"),
+            "tool_failed",
+            -1,
+        ),
+        (
+            format!("printf 'informational stdout\\n'\n{issue_line}"),
+            "issues_found",
+            101,
+        ),
+    ];
+    for (handler, status, exit_code) in cases {
+        let (_dir, config_path) = setup_edt_project(&interactive_edt_script(&handler));
+        let mut config = fs::read_to_string(&config_path).expect("config");
+        config.push_str("    interactive-mode: true\n    command_timeout_ms: 30000\n");
+        fs::write(&config_path, config).expect("config");
+
+        let output = v8_runner_command()
+            .args([
+                "--config",
+                &config_path.display().to_string(),
+                "--json-message",
+                "check",
+            ])
+            .output()
+            .expect("run command");
+
+        assert!(!output.status.success(), "{handler}: {output:?}");
+        let payload: Value = serde_json::from_slice(&output.stdout).expect("json");
+        assert_eq!(payload["error"]["code"], "runtime_failure", "{payload}");
+        assert_eq!(payload["data"]["check_name"], "edt", "{payload}");
+        assert_eq!(payload["data"]["status"], status, "{handler}: {payload}");
+        assert_eq!(
+            payload["data"]["exit_code"], exit_code,
+            "{handler}: {payload}"
+        );
+    }
+}

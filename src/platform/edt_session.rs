@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
@@ -344,6 +344,47 @@ impl EdtSessionManager {
             }
             other => other,
         }
+    }
+
+    /// Поднимает сессию, если живой нет, служебной командой перехода в рабочее пространство
+    /// со сроком запуска: запуск EDT не съедает предел запроса, который придёт следом. Ждёт,
+    /// как `execute_blocking`, — для сессии, которую держит сама команда.
+    pub(crate) fn start_blocking(
+        &self,
+        workspace: &Path,
+        startup_timeout: Duration,
+        cancellation: CancellationToken,
+    ) -> Result<(), EdtSessionError> {
+        if self.has_live_session() {
+            return Ok(());
+        }
+        self.execute_blocking(
+            EdtSessionRequest::service(
+                render_interactive_change_dir_command(workspace),
+                Instant::now() + startup_timeout,
+            )
+            .with_cancellation(cancellation),
+        )
+        .map(drop)
+    }
+
+    /// Исполняет запрос и ждёт его конца, не покидая поток: так ждёт хозяин сессии, которая
+    /// живёт дольше вызова. В отличие от `execute_blocking` запрос, брошенный отменой или
+    /// сроком, доводится до конца, а сессия не снимается — она обслуживает и чужие вызовы.
+    ///
+    /// Звать из потока блокирующих задач той среды Tokio, что держит сессию: среда ведёт
+    /// таймеры ожидания, а поток её исполнителей заблокировать нельзя.
+    pub(crate) fn execute_until_finished(
+        &self,
+        request: EdtSessionRequest,
+    ) -> Result<EdtSessionResponse, EdtSessionError> {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return Err(EdtSessionError::InternalFailure {
+                message: "shared EDT session wait needs the Tokio runtime that hosts the session"
+                    .to_owned(),
+            });
+        };
+        runtime.block_on(async { self.execute_observed(request).await.finished().await })
     }
 
     pub(crate) fn has_live_session(&self) -> bool {

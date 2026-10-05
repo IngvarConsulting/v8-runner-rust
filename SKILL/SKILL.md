@@ -103,6 +103,7 @@ v8-runner infobase create
 - Full `pull` refuses a target containing `workPath`, including symlink aliases. EDT export cache stays shared; per-base agent generation/version-file memory remains pending in #214.
 - Branch switch, rebase, large object moves, stale source-backed tool extension state, or suspicious incremental state: run `v8-runner push --full`.
 - Configuration check: run `v8-runner check`. The project `format` picks the branch — `/CheckConfig` for DESIGNER, EDT validation for EDT — and a key the branch does not execute is refused. With no mode key the default profile runs; name modes to narrow it. One executor (Designer), no `providers` key. A project of external data processors and reports only is refused with `error.code: subject`. `--dry-run` stops after the utility is located and before the platform runs: no platform log directory is created, and the answer names `status: planned`, `provider_dispatched: false` and `exit_code: -1`.
+- EDT check with `interactive-mode: true` reads the shared session's verdict exactly as MCP `check_syntax_edt` does: any stderr or stdout without log issues is `tool_failed`, `exit_code` is `101` for issues and `-1` for a failure, and `tools.edt_cli.command_timeout_ms` bounds each project.
 - Behavior validation: run the relevant `v8-runner test ...` command; tests run `push` first unless the
   caller explicitly requests `--no-push` for an already prepared infobase.
 - Missing local YAxUnit, Vanessa Automation, or onec-client-mcp-devkit setup: run
